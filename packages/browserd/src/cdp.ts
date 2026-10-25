@@ -4,6 +4,9 @@ const MAX_TIMEOUT_MS = 10 * 60_000;
 const MAX_PENDING_COMMANDS = 4_096;
 const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
 const MAX_COMMAND_BYTES = 4 * 1024 * 1024;
+/** Bytes of a refused message read to tell which command or event it was:
+ * Chromium writes a response's id, and an event's method, first. */
+const REFUSED_MESSAGE_HEAD_BYTES = 256;
 
 export type CdpEvent = {
   method: string;
@@ -42,6 +45,35 @@ export class CdpTransportError extends Error {
   }
 }
 
+/**
+ * One response the connection would not accept: larger than its byte bound,
+ * or not a JSON object. Only the command it answers fails; the connection
+ * and every other command and target carry on.
+ */
+export class CdpResponseRefusedError extends Error {
+  constructor(
+    readonly method: string,
+    readonly reason: "too_large" | "invalid",
+    readonly bytes: number,
+  ) {
+    super(
+      reason === "too_large"
+        ? `CDP ${method} response of ${bytes} bytes is larger than the ${MAX_MESSAGE_BYTES}-byte message bound`
+        : `CDP ${method} returned a response that is not valid JSON`,
+    );
+    this.name = "CdpResponseRefusedError";
+  }
+}
+
+/** A message the connection dropped without failing: an event (or a late
+ * response) that was too large or not valid JSON. */
+export type CdpDroppedMessage = {
+  /** The event's method, or null for a response or an unrecognizable message. */
+  method: string | null;
+  reason: "too_large" | "invalid";
+  bytes: number;
+};
+
 export class CdpCommandTimeoutError extends CdpTransportError {
   constructor(
     readonly method: string,
@@ -79,6 +111,9 @@ export class CdpConnection {
   private messageTail: Promise<void> = Promise.resolve();
   private failure: CdpTransportError | null = null;
   private readonly disconnectListeners = new Set<() => void>();
+  private readonly droppedListeners = new Set<(message: CdpDroppedMessage) => void>();
+  /** Messages dropped since the connection opened; see CdpDroppedMessage. */
+  droppedMessageCount = 0;
 
   private constructor(private readonly socket: WebSocket) {
     socket.binaryType = "arraybuffer";
@@ -274,6 +309,14 @@ export class CdpConnection {
     };
   }
 
+  /** Called for every message the connection drops instead of failing. */
+  onDroppedMessage(listener: (message: CdpDroppedMessage) => void): () => void {
+    this.droppedListeners.add(listener);
+    return () => {
+      this.droppedListeners.delete(listener);
+    };
+  }
+
   close(): void {
     if (
       this.socket.readyState === WebSocket.OPEN ||
@@ -285,17 +328,36 @@ export class CdpConnection {
   }
 
   private async acceptMessage(data: string | ArrayBuffer | Blob): Promise<void> {
+    // One message the connection cannot take (a whole accessibility tree of
+    // a very large page, a console message logging megabytes) must not end
+    // the connection, which carries every tab: it fails only the command it
+    // answers, or is dropped and counted when it is an event.
+    const bytes =
+      typeof data === "string"
+        ? Buffer.byteLength(data)
+        : data instanceof ArrayBuffer
+          ? data.byteLength
+          : data.size;
+    if (bytes > MAX_MESSAGE_BYTES) {
+      this.refuse(await messageHead(data), "too_large", bytes);
+      return;
+    }
     const text =
       typeof data === "string"
         ? data
         : data instanceof ArrayBuffer
           ? Buffer.from(data).toString("utf8")
           : await data.text();
-    if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) {
-      throw new Error("oversized CDP message");
+    let message: unknown;
+    try {
+      message = JSON.parse(text);
+    } catch {
+      message = null;
     }
-    const message: unknown = JSON.parse(text);
-    if (!isRecord(message)) throw new Error("invalid CDP message");
+    if (!isRecord(message)) {
+      this.refuse(text.slice(0, REFUSED_MESSAGE_HEAD_BYTES), "invalid", bytes);
+      return;
+    }
     if (typeof message.id === "number") {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -346,6 +408,26 @@ export class CdpConnection {
     }
   }
 
+  /** Fail the one command a refused message answers, or drop the event. */
+  private refuse(head: string, reason: "too_large" | "invalid", bytes: number): void {
+    const id = /^\s*\{\s*"id"\s*:\s*(\d{1,15})\s*[,}]/u.exec(head);
+    const pending = id ? this.pending.get(Number(id[1])) : undefined;
+    if (id && pending) {
+      this.settlePending(Number(id[1]));
+      pending.reject(new CdpResponseRefusedError(pending.method, reason, bytes));
+      return;
+    }
+    const method = id ? null : (/"method"\s*:\s*"([A-Za-z0-9_.]{1,128})"/u.exec(head)?.[1] ?? null);
+    this.droppedMessageCount += 1;
+    for (const listener of this.droppedListeners) {
+      try {
+        listener({ method, reason, bytes });
+      } catch {
+        // Observers cannot corrupt protocol dispatch.
+      }
+    }
+  }
+
   private settlePending(id: number): void {
     const pending = this.pending.get(id);
     if (!pending) return;
@@ -362,6 +444,7 @@ export class CdpConnection {
       pending.reject(error);
     }
     this.listeners.clear();
+    this.droppedListeners.clear();
     for (const listener of this.disconnectListeners) {
       try {
         listener();
@@ -415,4 +498,14 @@ function boundedMessage(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function messageHead(data: string | ArrayBuffer | Blob): Promise<string> {
+  if (typeof data === "string") return data.slice(0, REFUSED_MESSAGE_HEAD_BYTES);
+  if (data instanceof ArrayBuffer) {
+    return Buffer.from(data, 0, Math.min(data.byteLength, REFUSED_MESSAGE_HEAD_BYTES)).toString(
+      "utf8",
+    );
+  }
+  return await data.slice(0, REFUSED_MESSAGE_HEAD_BYTES).text();
 }

@@ -65,6 +65,7 @@ import {
 } from "./network-idle";
 import {
   accessibilityContainer,
+  CdpAccessibilityTreeTooLargeError,
   namespaceCdpAccessibilityFrame,
   normalizeCdpAccessibilityTree,
   type CdpAccessibilityEntry,
@@ -75,8 +76,10 @@ import {
   CdpCommandTimeoutError,
   CdpConnection,
   CdpProtocolError,
+  CdpResponseRefusedError,
   CdpSessionDetachedError,
   CdpTransportError,
+  type CdpDroppedMessage,
   type CdpEvent,
 } from "./cdp";
 import {
@@ -235,6 +238,24 @@ const SCREENSHOT_DOCUMENT_ATTEMPTS = 3;
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
+/**
+ * A page whose whole accessibility tree is too large for one observation
+ * (or for one CDP message) is read node by node within this budget instead,
+ * starting from the root and from what is on screen (see
+ * boundedAccessibilityFrame). It stays within the semantic-node bound.
+ */
+export const BOUNDED_ACCESSIBILITY_NODES = 8_000;
+/** Children read per node in a bounded read: a long list keeps a window
+ * around its on-screen part. */
+export const BOUNDED_ACCESSIBILITY_CHILDREN = 100;
+/** Elements above which a document is read bounded from its first read: its
+ * accessibility tree (about 1.5 to 2 nodes per element) would be larger than
+ * the observation's input bound. */
+export const BOUNDED_ACCESSIBILITY_PREFLIGHT_ELEMENTS = 25_000;
+/** Child reads a bounded read keeps in flight at once. */
+const BOUNDED_ACCESSIBILITY_CONCURRENCY = 128;
+/** Viewport points whose elements anchor a bounded read on what is visible. */
+const BOUNDED_ACCESSIBILITY_ANCHOR_GRID = { columns: 7, rows: 9 } as const;
 /** Pages whose last accessibility read had at most this many nodes count as
  * cheap to rebuild (about 25 ms for a rebuilt read of 1,000 nodes). */
 export const ACCESSIBILITY_CHEAP_REBUILD_NODES = 1_000;
@@ -436,6 +457,7 @@ export type BrowserExternalAuthDispatchResult = {
 
 export type BrowserCdpConnection = {
   onDisconnect?: (listener: () => void) => () => void;
+  onDroppedMessage?: (listener: (message: CdpDroppedMessage) => void) => () => void;
   /** Throws a definite error for a page this transport can never control. */
   assertNavigable?: (url: string) => void;
   send<T = Record<string, unknown>>(
@@ -542,6 +564,11 @@ type TargetState = {
   accessibilityRebuiltAt: number;
   accessibilityNodeCount: number | null;
   accessibilityRebuildDue: boolean;
+  /** The tab's whole tree was too large to read at once, so reads are
+   * bounded until a bounded read finds the whole tree within its budget. */
+  accessibilityBounded: boolean;
+  /** Whether this document's size was checked before its first read. */
+  accessibilitySized: boolean;
   dialog: BrowserDialog | null;
   /** Hit-target guards a JavaScript dialog kept from being read back. Page
    * scripts are paused under the dialog, so they are removed once it closes. */
@@ -2623,6 +2650,19 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       const connection = await this.connect(result.cdpUrl);
       this.connectionEndpoint = result.cdpUrl;
+      connection.onDroppedMessage?.((message) => {
+        // Counted and named, never its content: an event the connection could
+        // not take is lost, but the connection and its tabs carry on.
+        console.error(
+          JSON.stringify({
+            service: "opengeni-browserd",
+            event: "cdp_message_dropped",
+            ...(message.method ? { method: message.method } : {}),
+            reason: message.reason,
+            bytes: message.bytes,
+          }),
+        );
+      });
       if (this.runner.reattachedOwnedProcess) {
         try {
           await assertOwnedCdpProcess(connection, this.runner.reattachedOwnedProcess);
@@ -3221,6 +3261,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       accessibilityRebuiltAt: 0,
       accessibilityNodeCount: null,
       accessibilityRebuildDue: true,
+      accessibilityBounded: false,
+      accessibilitySized: false,
       dialog: null,
       diagnostics: {
         consoleErrorCount: 0,
@@ -3762,6 +3804,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     pageFrames: readonly MainFrame[],
     pageNodes: readonly CdpAxNode[],
     rebuild: boolean,
+    budget: AccessibilityBudget | null = null,
   ): Promise<CdpAxNode[]> {
     const connection = await this.ensureConnection();
     const known = [...pageNodes];
@@ -3795,7 +3838,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
           if (!ownerNode || typeof ownerNode.nodeId !== "string") continue;
           if (rebuild) await this.rebuildAccessibility(oopif.sessionId);
-          const nodes = await this.collectAccessibilityFrames(oopif.sessionId, frames);
+          const nodes = await this.collectAccessibilityFrames(oopif.sessionId, frames, budget);
           const ids = new Set(nodes.map((node) => node.nodeId));
           const origin = frameOrigin(frames[0]?.url);
           for (const node of nodes) {
@@ -3812,6 +3855,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           merged.push(...nodes);
         } catch (error) {
           if (error instanceof CdpTransportError) throw error;
+          // A frame too large to read whole makes the whole read bounded.
+          if (error instanceof CdpResponseRefusedError && !budget) throw error;
         }
       }
     }
@@ -4276,6 +4321,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         kind: "snapshot",
         roots: accessibility.roots,
         nodeCount: accessibility.nodeCount,
+        ...(accessibility.incomplete ? { incomplete: accessibility.incomplete } : {}),
       },
       screenshot: null,
       viewport,
@@ -4400,6 +4446,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         firstReadOfCall: state.accessibilityRebuildDue,
         msSinceRebuild: Date.now() - state.accessibilityRebuiltAt,
       });
+    let rebuildPending = rebuilding;
+    let switchedToBounded = false;
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
       // The snapshot carries the current document's generation, so it must be
@@ -4411,22 +4459,76 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.adoptMainFrame(state, main);
         continue;
       }
-      if (rebuilding) await this.rebuildAccessibility(state.sessionId);
+      if (rebuildPending) await this.rebuildAccessibility(state.sessionId);
+      rebuildPending = false;
       state.accessibilityRebuildDue = false;
-      const nodes = await this.collectAccessibilityFrames(state.sessionId, before);
-      if (state.oopifs.size > 0)
-        nodes.push(...(await this.oopifAccessibility(state, before, nodes, rebuilding)));
+      // A tree too large to read whole (one CDP message, or one observation)
+      // is read again within a node budget; the tab stays bounded until a
+      // bounded read finds the whole tree within it.
+      if (!state.accessibilitySized && this.engine !== "lightpanda") {
+        // Before a document's first read, a page whose element count says its
+        // whole tree could not be read at once is read bounded from the start,
+        // rather than after Chromium serialized the whole tree in vain.
+        state.accessibilitySized = true;
+        const elements = await this.pageElementCount(state);
+        if (elements !== null && elements > BOUNDED_ACCESSIBILITY_PREFLIGHT_ELEMENTS)
+          state.accessibilityBounded = true;
+      }
+      const budget =
+        state.accessibilityBounded && this.engine !== "lightpanda"
+          ? await this.boundedAccessibilityBudget(state)
+          : null;
+      const toBounded = (error: unknown): boolean => {
+        if (
+          budget !== null ||
+          switchedToBounded ||
+          this.engine === "lightpanda" ||
+          !(
+            error instanceof CdpResponseRefusedError ||
+            error instanceof CdpAccessibilityTreeTooLargeError
+          )
+        )
+          return false;
+        state.accessibilityBounded = true;
+        switchedToBounded = true;
+        return true;
+      };
+      let nodes: CdpAxNode[];
+      try {
+        nodes = await this.collectAccessibilityFrames(state.sessionId, before, budget);
+        if (state.oopifs.size > 0)
+          nodes.push(...(await this.oopifAccessibility(state, before, nodes, rebuilding, budget)));
+      } catch (error) {
+        if (toBounded(error)) {
+          // The switch is not a retry for a moving page: keep its attempts.
+          attempt -= 1;
+          continue;
+        }
+        throw error;
+      }
       const after = flattenFrameTree(await this.frameTree(state.sessionId));
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
         continue;
       }
-      const accessibility = normalizeCdpAccessibilityTree({
-        nodes,
-        controllerGeneration: this.controllerGeneration,
-        targetId: state.targetId,
-        documentGeneration: state.documentGeneration,
-      });
+      let accessibility: CdpAccessibilitySnapshot;
+      try {
+        accessibility = normalizeCdpAccessibilityTree({
+          nodes,
+          controllerGeneration: this.controllerGeneration,
+          targetId: state.targetId,
+          documentGeneration: state.documentGeneration,
+          ...(budget ? { unreadCount: budget.unread } : {}),
+        });
+      } catch (error) {
+        if (toBounded(error)) {
+          // The switch is not a retry for a moving page: keep its attempts.
+          attempt -= 1;
+          continue;
+        }
+        throw error;
+      }
       this.assertCurrentTargetState(state);
+      if (budget) state.accessibilityBounded = budget.unread > 0;
       state.accessibility = accessibility;
       state.accessibilityNodeCount = nodes.length;
       if (rebuilding) state.accessibilityRebuiltAt = Date.now();
@@ -4456,7 +4558,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async collectAccessibilityFrames(
     sessionId: string,
     frames: readonly MainFrame[],
+    budget: AccessibilityBudget | null = null,
   ): Promise<CdpAxNode[]> {
+    if (budget) {
+      // One shared budget, so frames are read in order: the outer page first.
+      const nodes: CdpAxNode[] = [];
+      for (const [index, frame] of frames.entries()) {
+        if (budget.remaining <= 0) break;
+        try {
+          nodes.push(...(await this.boundedAccessibilityFrame(sessionId, frame, budget)));
+        } catch (error) {
+          // A child frame that went away is left out; the frame-tree check
+          // after the read starts over if the page itself changed.
+          if (index === 0 || !(error instanceof CdpProtocolError)) throw error;
+        }
+      }
+      return nodes;
+    }
     const nodes: CdpAxNode[] = [];
     for (let offset = 0; offset < frames.length; offset += ACCESSIBILITY_FRAME_CONCURRENCY) {
       const batch = frames.slice(offset, offset + ACCESSIBILITY_FRAME_CONCURRENCY);
@@ -4501,6 +4619,263 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     );
   }
 
+  /** The main document's element count (its light DOM), or null when the
+   * page does not answer. */
+  private async pageElementCount(state: TargetState): Promise<number | null> {
+    try {
+      const connection = await this.ensureConnection();
+      const world = await connection.send<{ executionContextId?: unknown }>(
+        "Page.createIsolatedWorld",
+        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+        { sessionId: state.sessionId, timeoutMs: 2_000 },
+      );
+      if (typeof world.executionContextId !== "number") return null;
+      const counted = await connection.send<{ result?: { value?: unknown } }>(
+        "Runtime.evaluate",
+        {
+          contextId: world.executionContextId,
+          expression: 'document.getElementsByTagName("*").length',
+          returnByValue: true,
+        },
+        { sessionId: state.sessionId, timeoutMs: 2_000 },
+      );
+      const value = counted.result?.value;
+      return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+    } catch (error) {
+      if (error instanceof CdpTransportError && !(error instanceof CdpCommandTimeoutError))
+        throw error;
+      return null;
+    }
+  }
+
+  /**
+   * A tab's budget for one bounded read, anchored on what is on screen: the
+   * accessibility nodes of the elements under a grid of viewport points, and
+   * their ancestors. A long list then keeps the part the viewport shows, so
+   * scrolling brings other parts into the outline.
+   */
+  private async boundedAccessibilityBudget(state: TargetState): Promise<AccessibilityBudget> {
+    const budget: AccessibilityBudget = {
+      remaining: BOUNDED_ACCESSIBILITY_NODES,
+      unread: 0,
+      anchors: new Set(),
+      anchorFrameId: state.frame.id,
+    };
+    const connection = await this.ensureConnection();
+    const sessionId = state.sessionId;
+    const objectGroup = `opengeni-ax-anchors-${this.createId()}`;
+    try {
+      const world = await connection.send<{ executionContextId?: unknown }>(
+        "Page.createIsolatedWorld",
+        { frameId: state.frame.id, worldName: "opengeni-dom-read" },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      if (typeof world.executionContextId !== "number") return budget;
+      const { columns, rows } = BOUNDED_ACCESSIBILITY_ANCHOR_GRID;
+      const evaluated = await connection.send<{ result?: { objectId?: unknown } }>(
+        "Runtime.evaluate",
+        {
+          contextId: world.executionContextId,
+          objectGroup,
+          expression: `(() => {
+            const found = new Set();
+            for (let y = 1; y <= ${rows}; y++)
+              for (let x = 1; x <= ${columns}; x++) {
+                const element = document.elementFromPoint(
+                  (innerWidth * (x - 0.5)) / ${columns}, (innerHeight * (y - 0.5)) / ${rows});
+                if (element) found.add(element);
+              }
+            return [...found];
+          })()`,
+        },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      const objectId = evaluated.result?.objectId;
+      if (typeof objectId !== "string") return budget;
+      const properties = await connection.send<{ result?: unknown }>(
+        "Runtime.getProperties",
+        { objectId, ownProperties: true },
+        { sessionId, timeoutMs: 2_000 },
+      );
+      const elements = (Array.isArray(properties.result) ? properties.result : []).flatMap(
+        (property: unknown) =>
+          isRecord(property) &&
+          typeof property.name === "string" &&
+          /^\d+$/u.test(property.name) &&
+          isRecord(property.value) &&
+          typeof property.value.objectId === "string"
+            ? [property.value.objectId]
+            : [],
+      );
+      const chains = await Promise.allSettled(
+        elements.map(async (elementId) => {
+          const described = await connection.send<{ node?: unknown }>(
+            "DOM.describeNode",
+            { objectId: elementId },
+            { sessionId, timeoutMs: 2_000 },
+          );
+          const backendNodeId = isRecord(described.node) ? described.node.backendNodeId : null;
+          if (typeof backendNodeId !== "number") return [];
+          const chain = await connection.send<{ nodes?: unknown }>(
+            "Accessibility.getAXNodeAndAncestors",
+            { backendNodeId },
+            { sessionId, timeoutMs: 2_000 },
+          );
+          return Array.isArray(chain.nodes) ? chain.nodes : [];
+        }),
+      );
+      for (const chain of chains) {
+        if (chain.status !== "fulfilled") continue;
+        for (const node of chain.value) {
+          if (isRecord(node) && typeof node.nodeId === "string") budget.anchors.add(node.nodeId);
+        }
+      }
+    } catch (error) {
+      // Without anchors the read still covers the page from its root.
+      if (error instanceof CdpTransportError && !(error instanceof CdpCommandTimeoutError))
+        throw error;
+    } finally {
+      void connection
+        .send("Runtime.releaseObjectGroup", { objectGroup }, { sessionId })
+        .catch(() => undefined);
+    }
+    return budget;
+  }
+
+  /**
+   * One frame's accessibility tree read within a node budget, for a page
+   * whose whole tree is too large to read at once. Nodes are read level by
+   * level from the root, anchored nodes first, and a node with more than
+   * BOUNDED_ACCESSIBILITY_CHILDREN children keeps a window of them around its
+   * first anchored child (or its first ones). Every child left out, and every
+   * child of the last level read, counts as unread.
+   */
+  private async boundedAccessibilityFrame(
+    sessionId: string,
+    frame: MainFrame,
+    budget: AccessibilityBudget,
+  ): Promise<CdpAxNode[]> {
+    const connection = await this.ensureConnection();
+    const anchors = frame.id === budget.anchorFrameId ? budget.anchors : new Set<string>();
+    const rootResponse = await connection.send<{ node?: unknown }>(
+      "Accessibility.getRootAXNode",
+      { frameId: frame.id },
+      { sessionId },
+    );
+    const root = rootResponse.node;
+    if (!isRecord(root) || typeof root.nodeId !== "string") {
+      throw new Error("CDP returned an invalid accessibility root");
+    }
+    const read = new Map<string, CdpAxNode>([[root.nodeId, root as CdpAxNode]]);
+    budget.remaining -= 1;
+    const childCount = (node: CdpAxNode) =>
+      Array.isArray(node.childIds) ? node.childIds.length : 0;
+    let level: CdpAxNode[] = [root as CdpAxNode];
+    while (level.length > 0) {
+      const expand = level
+        .filter((node) => childCount(node) > 0)
+        .sort(
+          (a, b) => Number(anchors.has(String(b.nodeId))) - Number(anchors.has(String(a.nodeId))),
+        );
+      const next: CdpAxNode[] = [];
+      for (let offset = 0; offset < expand.length; offset += BOUNDED_ACCESSIBILITY_CONCURRENCY) {
+        const batch = expand.slice(offset, offset + BOUNDED_ACCESSIBILITY_CONCURRENCY);
+        if (budget.remaining <= 0) {
+          for (const node of batch) budget.unread += childCount(node);
+          continue;
+        }
+        const results = await Promise.allSettled(
+          batch.map((node) => this.boundedAccessibilityChildren(sessionId, frame, node, anchors)),
+        );
+        for (const [index, result] of results.entries()) {
+          const parent = batch[index]!;
+          if (result.status === "rejected") {
+            if (result.reason instanceof CdpTransportError) throw result.reason;
+            // Children gone with a changing page: left unread.
+            budget.unread += childCount(parent);
+            continue;
+          }
+          const children = result.value;
+          const kept = boundedChildWindow(children, anchors);
+          budget.unread += Math.max(childCount(parent), children.length) - kept.length;
+          for (const child of kept) {
+            if (read.has(String(child.nodeId))) continue;
+            if (budget.remaining <= 0) {
+              budget.unread += 1 + childCount(child);
+              continue;
+            }
+            budget.remaining -= 1;
+            read.set(String(child.nodeId), child);
+            next.push(child);
+          }
+        }
+      }
+      level = next;
+    }
+    return namespaceCdpAccessibilityFrame(
+      frame.id,
+      [...read.values()],
+      `${frame.id}\0${frame.loaderId}`,
+    );
+  }
+
+  /** A node's direct children for a bounded read. */
+  private async boundedAccessibilityChildren(
+    sessionId: string,
+    frame: MainFrame,
+    parent: CdpAxNode,
+    anchors: ReadonlySet<string>,
+  ): Promise<CdpAxNode[]> {
+    const connection = await this.ensureConnection();
+    const direct = Array.isArray(parent.childIds) ? parent.childIds.map(String) : [];
+    let response: { nodes?: unknown };
+    try {
+      response = await connection.send<{ nodes?: unknown }>(
+        "Accessibility.getChildAXNodes",
+        { id: parent.nodeId, frameId: frame.id },
+        { sessionId },
+      );
+    } catch (error) {
+      if (!(error instanceof CdpResponseRefusedError)) throw error;
+      // Children too large for one message (very long names, or an ignored
+      // child with every node under it): read the window's children one by
+      // one. DOM-backed accessibility node ids are DOM node ids.
+      const window = boundedChildWindow(
+        direct.map((nodeId) => ({ nodeId })),
+        anchors,
+      );
+      const read = await Promise.allSettled(
+        window.map(async ({ nodeId }) => {
+          const backendNodeId = Number(nodeId);
+          if (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0) return [];
+          const partial = await connection.send<{ nodes?: unknown }>(
+            "Accessibility.getPartialAXTree",
+            { backendNodeId, fetchRelatives: false },
+            { sessionId },
+          );
+          return (Array.isArray(partial.nodes) ? partial.nodes : []).filter(
+            (node): node is CdpAxNode => isRecord(node) && node.nodeId === nodeId,
+          );
+        }),
+      );
+      return read.flatMap((result) => {
+        if (result.status === "fulfilled") return result.value;
+        if (result.reason instanceof CdpTransportError) throw result.reason;
+        return [];
+      });
+    }
+    // Chromium also returns the descendants under an ignored child (a table's
+    // ignored row group with every row); only direct children are windowed,
+    // the rest are read when their own parent is.
+    const directIds = new Set(direct);
+    return (Array.isArray(response.nodes) ? response.nodes : []).filter(
+      (node): node is CdpAxNode =>
+        isRecord(node) &&
+        typeof node.nodeId === "string" &&
+        (directIds.size > 0 ? directIds.has(node.nodeId) : node.parentId === parent.nodeId),
+    );
+  }
+
   private async refreshFrame(state: TargetState, timeoutMs?: number): Promise<void> {
     const frame = await this.mainFrame(state.sessionId, timeoutMs);
     this.assertCurrentTargetState(state);
@@ -4536,6 +4911,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       frame.id,
     );
     state.accessibility = null;
+    // A new document is sized afresh (see refreshAccessibility).
+    state.accessibilityBounded = false;
+    state.accessibilitySized = false;
     if (!state.committedLoaders.includes(frame.loaderId)) {
       state.committedLoaders.push(frame.loaderId);
       if (state.committedLoaders.length > COMMITTED_LOADER_HISTORY) state.committedLoaders.shift();
@@ -8581,6 +8959,36 @@ const TAB_NOT_RESPONDING_MESSAGE =
 /** A page-scoped command deadline means this tab stopped answering, not that
  * the browser or its transport was lost. Waiting again cannot help until the
  * tab is reloaded or replaced, so the diagnosis is definite and not retryable. */
+/** The budget of one bounded accessibility read, shared by its frames. */
+type AccessibilityBudget = {
+  remaining: number;
+  /** Nodes known to exist but left unread. */
+  unread: number;
+  /** Accessibility node ids on the path to what is on screen. */
+  anchors: Set<string>;
+  /** The frame whose node ids `anchors` holds. */
+  anchorFrameId: string;
+};
+
+/** The children a bounded read keeps: all of them, or a window of
+ * BOUNDED_ACCESSIBILITY_CHILDREN around the first anchored one (a quarter
+ * before it), or else the first ones. */
+export function boundedChildWindow<Node extends { nodeId?: unknown }>(
+  children: readonly Node[],
+  anchors: ReadonlySet<string>,
+): Node[] {
+  if (children.length <= BOUNDED_ACCESSIBILITY_CHILDREN) return [...children];
+  const anchored = children.findIndex((child) => anchors.has(String(child.nodeId)));
+  const start =
+    anchored < 0
+      ? 0
+      : Math.min(
+          Math.max(0, anchored - Math.floor(BOUNDED_ACCESSIBILITY_CHILDREN / 4)),
+          children.length - BOUNDED_ACCESSIBILITY_CHILDREN,
+        );
+  return children.slice(start, start + BOUNDED_ACCESSIBILITY_CHILDREN);
+}
+
 function tabNotRespondingError(cause: CdpCommandTimeoutError): InteractionControllerError {
   const failure = new InteractionControllerError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
   failure.cause = cause;

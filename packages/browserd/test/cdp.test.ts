@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { CdpCommandTimeoutError, CdpConnection, CdpProtocolError } from "../src";
+import {
+  CdpCommandTimeoutError,
+  CdpConnection,
+  CdpProtocolError,
+  CdpResponseRefusedError,
+  type CdpDroppedMessage,
+} from "../src";
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 
@@ -8,6 +14,75 @@ afterEach(() => {
 });
 
 describe("CdpConnection", () => {
+  test("one oversized or unreadable message fails only its own command, or is dropped as an event", async () => {
+    const huge = "x".repeat(33 * 1024 * 1024);
+    let emit: (raw: string) => void = () => {
+      throw new Error("socket not ready");
+    };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request, instance) {
+        if (instance.upgrade(request)) return;
+        return new Response(null, { status: 426 });
+      },
+      websocket: {
+        maxPayloadLength: 64 * 1024 * 1024,
+        backpressureLimit: 256 * 1024 * 1024,
+        open(socket) {
+          emit = (raw) => {
+            socket.send(raw);
+          };
+        },
+        message(socket, raw) {
+          const { id, method } = JSON.parse(String(raw)) as { id: number; method: string };
+          // Chromium writes a response's id first and its session id last.
+          if (method === "Accessibility.getFullAXTree")
+            socket.send(`{"id":${id},"result":{"nodes":["${huge}"]},"sessionId":"tab"}`);
+          else if (method === "Page.broken") socket.send(`{"id":${id},"result":{"truncated`);
+          else socket.send(JSON.stringify({ id, result: { method } }));
+        },
+      },
+    });
+    servers.push(server);
+    const connection = await CdpConnection.connect(`ws://127.0.0.1:${server.port}/devtools`);
+    const dropped: CdpDroppedMessage[] = [];
+    connection.onDroppedMessage((message) => dropped.push(message));
+    const events: unknown[] = [];
+    connection.on("Page.loadEventFired", (event) => events.push(event.params));
+    try {
+      const [tree, sibling, broken] = await Promise.allSettled([
+        connection.send("Accessibility.getFullAXTree", {}, { sessionId: "tab" }),
+        connection.send("Page.getFrameTree", {}, { sessionId: "other" }),
+        connection.send("Page.broken"),
+      ]);
+      expect(tree.status).toBe("rejected");
+      const refused = (tree as PromiseRejectedResult).reason as CdpResponseRefusedError;
+      expect(refused).toBeInstanceOf(CdpResponseRefusedError);
+      expect(refused).toMatchObject({ method: "Accessibility.getFullAXTree", reason: "too_large" });
+      expect(refused.bytes).toBeGreaterThan(32 * 1024 * 1024);
+      expect(sibling).toEqual({ status: "fulfilled", value: { method: "Page.getFrameTree" } });
+      expect((broken as PromiseRejectedResult).reason).toMatchObject({
+        name: "CdpResponseRefusedError",
+        method: "Page.broken",
+        reason: "invalid",
+      });
+
+      emit(`{"method":"Runtime.consoleAPICalled","params":{"args":["${huge}"]},"sessionId":"tab"}`);
+      emit("not json");
+      emit(JSON.stringify({ method: "Page.loadEventFired", params: { timestamp: 1 } }));
+      // The connection still serves commands and events afterwards.
+      expect(await connection.send("Page.enable")).toEqual({ method: "Page.enable" });
+      expect(events).toEqual([{ timestamp: 1 }]);
+      expect(dropped).toEqual([
+        { method: "Runtime.consoleAPICalled", reason: "too_large", bytes: expect.any(Number) },
+        { method: null, reason: "invalid", bytes: 8 },
+      ]);
+      expect(connection.droppedMessageCount).toBe(2);
+    } finally {
+      connection.close();
+    }
+  }, 60_000);
+
   test("detaching a target settles its event waits without cancelling sibling or browser events", async () => {
     let emit: (message: unknown) => void = () => {
       throw new Error("socket not ready");

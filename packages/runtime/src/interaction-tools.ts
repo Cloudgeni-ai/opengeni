@@ -216,6 +216,10 @@ const BrowserAgentView = z
       .optional(),
     removedRefCount: z.number().int().positive().optional(),
     clippedFieldCount: z.number().int().positive().optional(),
+    /** The page was too large to read whole: at least this many elements
+     * were left unread (the outline keeps its structure and what is on
+     * screen). */
+    unreadNodeCount: z.number().int().positive().optional(),
   })
   .strict();
 /** A tab as the model needs it: identity, page, selection and the generations
@@ -5328,6 +5332,8 @@ function projectBrowserObservation(
       ? omittedBrowserRegions(ranked, new Set(projected.nodes.map((node) => node.ref)))
       : [];
   const removedRefCount = semantic?.kind === "diff" ? semantic.removedRefs.length : 0;
+  const unreadNodeCount =
+    semantic?.kind === "snapshot" && semantic.incomplete ? semantic.incomplete.unreadCount : 0;
   const viewport = observation.viewport;
   const diagnostics = observation.diagnostics;
   const hasDiagnostics =
@@ -5366,6 +5372,7 @@ function projectBrowserObservation(
       ...(projected.clippedFieldCount > 0
         ? { clippedFieldCount: projected.clippedFieldCount }
         : {}),
+      ...(unreadNodeCount > 0 ? { unreadNodeCount } : {}),
     },
   };
 }
