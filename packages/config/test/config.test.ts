@@ -111,7 +111,7 @@ describe("recording transcription settings", () => {
     ).toThrow("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set");
     expect(() =>
       withEnv({ OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT: "acme/model" }, () => getSettings()),
-    ).toThrow("must name elevenlabs or azure-speech");
+    ).toThrow("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT must name one of");
     expect(
       withEnv(
         {
