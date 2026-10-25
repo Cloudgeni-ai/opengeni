@@ -62,7 +62,7 @@
     },
     {
       "path": ".github/workflows/main-approval-superseded.yml",
-      "sha256": "6935fec912d1a238fb2bef0ed3ef803035a11051e45ef685ec08d5bbf44f1c41"
+      "sha256": "fa1158683ffa1ab4586ae719aac14e03ff9f63de6b5f271a1d4a4c013bb231a9"
     },
     {
       "path": ".github/workflows/merge-content.yml",
@@ -1400,8 +1400,8 @@
     {
       "workflow": ".github/workflows/main-approval-superseded.yml",
       "job": "superseded",
-      "step": "Cancel superseded parked main CI runs",
-      "sha256": "dfb80611efc20aca5e41c99c6495a4d828c15ea737f806f78397f761a297ab95"
+      "step": "Cancel superseded parked or not-started main CI runs",
+      "sha256": "4a022b1dff8b3faa34098ada685557dd77bd17e4bfe55ffcbfce6ff8a5e643d8"
     },
     {
       "workflow": ".github/workflows/merge-content.yml",
