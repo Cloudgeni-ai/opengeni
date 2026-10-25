@@ -83,6 +83,9 @@ async function buildSuperGrokTurn(
       defaultModelId: "xai/grok-imagine-video",
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
+      async (_db, input) => input.governance,
+    ),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
   );
   const options: Array<BuildAgentOptions | undefined> = [];

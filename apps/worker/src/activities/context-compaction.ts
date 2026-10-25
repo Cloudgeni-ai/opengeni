@@ -76,13 +76,23 @@ export type CompactionSummarizer = ((
   estimatePrefixTokens?: () => number;
   /** Exact provider wire size, with the same projection as the checkpoint call. */
   measureInputBytes?: (settings: Settings, input: CompactionItem[]) => Promise<number>;
+  /**
+   * The exact history of the ordinary request withheld at this model boundary
+   * because compaction became due. When it fits, the checkpoint sends it
+   * unchanged plus its prompt, so the request extends the previous ordinary
+   * request byte for byte and reads its warm prompt cache.
+   */
+  withheldWireHistory?: () => CompactionItem[] | undefined;
 };
 
 /** Returns the opaque Codex remote compaction v2 item. */
-export type RemoteCompactionV2Requester = (
+export type RemoteCompactionV2Requester = ((
   settings: Settings,
   input: CompactionItem[],
-) => Promise<CompactionItem>;
+) => Promise<CompactionItem>) & {
+  /** Same contract as {@link CompactionSummarizer.withheldWireHistory}. */
+  withheldWireHistory?: () => CompactionItem[] | undefined;
+};
 
 /**
  * Present only when compaction read the bounded recovery view of an active
@@ -450,8 +460,12 @@ async function compactContextRemoteV2(
   let providerCalls = 1;
   let rewrittenToolOutputs = 0;
   let compactionItem: CompactionItem;
+  // The withheld ordinary request is what the provider last cached (plus this
+  // step's results); re-projecting durable items would diverge from it.
+  const taken = options.requestRemoteCompactionV2.withheldWireHistory?.();
+  const exact = taken && withheldHistoryCovers(taken, canonicalItems) ? taken : undefined;
   try {
-    compactionItem = await options.requestRemoteCompactionV2(settings, items);
+    compactionItem = await options.requestRemoteCompactionV2(settings, exact ?? items);
   } catch (error) {
     if (!isExactContextLengthExceeded(error)) throw error;
     const retry = projectRemoteCompactionOverflowRetryInput(items);
@@ -520,6 +534,33 @@ async function compactContextRemoteV2(
   };
 }
 
+/**
+ * The withheld ordinary request may stand in for the durable history only when
+ * it covers it: every tool result and every user message the checkpoint will
+ * mark as summarized must be in the request the summarizer reads. The ordinary
+ * projection only adds request-local items (tool disclosures) and rewrites
+ * contents in place, so anything durable it lacks arrived after the request was
+ * prepared. The caller then falls back to projecting durable history.
+ */
+export function withheldHistoryCovers(
+  withheld: readonly CompactionItem[],
+  canonical: readonly CompactionItem[],
+): boolean {
+  const resultCallIds = (items: readonly CompactionItem[]) =>
+    new Set(
+      items.flatMap((item) =>
+        item.type === "function_call_result" && typeof item.callId === "string"
+          ? [item.callId]
+          : [],
+      ),
+    );
+  const userMessages = (items: readonly CompactionItem[]) =>
+    items.filter((item) => item.type === "message" && item.role === "user").length;
+  const covered = resultCallIds(withheld);
+  for (const callId of resultCallIds(canonical)) if (!covered.has(callId)) return false;
+  return userMessages(withheld) >= userMessages(canonical);
+}
+
 async function compactContextPortable(
   db: Database,
   settings: Settings,
@@ -563,17 +604,27 @@ async function compactContextPortable(
       buildCompactionPromptInput(
         omitOpaqueArtifactsFromPortableCompactionHistory(await projectForWire(prefix)),
       );
-    const cut = await fitCompactionPrefix(
-      canonicalItems,
-      async (prefix) => {
-        const projected = await prepare(prefix);
-        return (
-          estimateTokens(projected) <= budget &&
-          (await summarize.measureInputBytes!(settings, projected)) <= maxBytes
+    const fits = async (projected: CompactionItem[]) =>
+      estimateTokens(projected) <= budget &&
+      (await summarize.measureInputBytes!(settings, projected)) <= maxBytes;
+    // Prefer the exact ordinary request withheld at this boundary: it covers
+    // the whole durable history and extends the previous request byte for
+    // byte. Size recovery and oversized histories still cut a fitting prefix.
+    // Always consume it, so a later compaction never sees a stale request.
+    const taken = summarize.withheldWireHistory?.();
+    const withheld =
+      !options.requestSizeRecovery && taken && withheldHistoryCovers(taken, canonicalItems)
+        ? taken
+        : undefined;
+    const exact = withheld ? buildCompactionPromptInput(withheld) : undefined;
+    const exactFits = exact ? await fits(exact) : false;
+    const cut = exactFits
+      ? canonicalItems.length
+      : await fitCompactionPrefix(
+          canonicalItems,
+          async (prefix) => fits(await prepare(prefix)),
+          Boolean(options.requestSizeRecovery),
         );
-      },
-      Boolean(options.requestSizeRecovery),
-    );
     if (cut === null)
       throw new EmptyCompactionSummaryError({
         stage: "portable_byte_budget",
@@ -581,7 +632,7 @@ async function compactContextPortable(
       });
     summarizedItems = canonicalItems.slice(0, cut);
     deferredItems = canonicalItems.slice(cut);
-    const projected = await prepare(summarizedItems);
+    const projected = exactFits && exact ? exact : await prepare(summarizedItems);
     summarized = {
       summaryBody: await summarize(settings, projected),
       preparation: {

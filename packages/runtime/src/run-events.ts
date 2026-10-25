@@ -16,6 +16,7 @@ import {
   RequestHumanInputToolInput,
   normalizeSecretQuestion,
   canonicalSkillReviewQuestion,
+  parsePromptCacheObservation,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   type AssistantMessagePhase,
@@ -284,6 +285,13 @@ export type ModelResponseUsage = {
   serviceTier?: string;
   /** Provider-run web searches billed for this response, when the provider reports them. */
   webSearchRequests?: number;
+  /**
+   * Signed thinking blocks the provider dropped from the request before
+   * inference, by reason. A drop changes the effective prompt prefix, so it
+   * explains a prompt-cache miss even when the sent bytes extend the
+   * previous request.
+   */
+  thinkingBlocksDropped?: Record<string, number>;
   gatewayBilling?: {
     finalProvider: string;
     inferenceCostUsd: string;
@@ -710,13 +718,21 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
   const serviceTier = modelResponseServiceTierFromResponse(response);
   const gatewayBilling = gatewayBillingFromResponse(response);
   const webSearchRequests = webSearchRequestsFromResponse(response);
+  const thinkingBlocksDropped = thinkingBlocksDroppedFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
     ...(serviceTier ? { serviceTier } : {}),
     ...(gatewayBilling ? { gatewayBilling } : {}),
     ...(webSearchRequests ? { webSearchRequests } : {}),
+    ...(thinkingBlocksDropped ? { thinkingBlocksDropped } : {}),
     usage,
   };
+}
+
+function thinkingBlocksDroppedFromResponse(response: unknown): Record<string, number> | undefined {
+  const value = (response as { providerData?: { anthropic?: { thinkingBlocksDropped?: unknown } } })
+    ?.providerData?.anthropic?.thinkingBlocksDropped;
+  return parsePromptCacheObservation({ thinkingBlocksDropped: value })?.thinkingBlocksDropped;
 }
 
 /** Claude reports its billed server-side searches; the transport keeps the count. */

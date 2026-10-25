@@ -22873,6 +22873,8 @@ export * from "./session-mcp-tool-permissions";
 export * from "./mcp-catalog-limits";
 export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
+export * from "./workspace-governance-context";
+export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";
 export { toolPolicyActionName, executableToolSchema } from "./tool-policy";

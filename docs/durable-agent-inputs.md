@@ -482,6 +482,12 @@ requirement and a prompt-cache cost requirement: deleting the batch on the next
 call would shift the prefix and force the provider to ingest the conversation
 again.
 
+The same invariant covers the system prompt and tools: anything that can change
+between turns of one session (workspace governance, the Skill catalog) is a
+durable history item rather than system-prompt text. Per-call diagnostics in
+`model_call_facts.prompt_cache_diagnostics` classify every warm-cache miss; see
+`docs/context-compaction.md`, "Prompt-cache stability".
+
 Migration `0135_durable_machine_input_batches.sql` performs the one-way cutover.
 It reconstructs model history for delivered legacy rows, returns old deferred
 rows to canonical pending state, collapses duplicate pending Agent Steers to the

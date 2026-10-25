@@ -1,5 +1,16 @@
 # Modular prompt changelog
 
+Prompt-cache stability. Workspace governance (instruction policies, learning
+settings, organization profile) no longer composes into the system prompt: it
+differs by who starts a turn and changes when a policy is edited, and every
+change rewrote the start of every later request, so the whole cached history
+was written again. The worker now writes the same rendered text as a durable
+developer history item before the turn that first sees a new value; recovery
+attempts reuse it and a later change appends a replacement. Its lead sentence
+now says governance applies "for this turn" and that "Later activations apply
+from a later turn", instead of naming the exact accepted attempt. Both
+compositions change identically, so the modular-versus-legacy diff is unchanged.
+
 Turns that search the web now open with a few words before the first
 search. The Progress updates guidance adds one sentence after "Skip the opening
 update when you expect to answer within about 20 seconds": "Web searches take

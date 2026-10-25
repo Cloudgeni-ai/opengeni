@@ -61,6 +61,7 @@ import {
   recordModelTransportStarted,
 } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
+import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
@@ -760,6 +761,7 @@ export function instrumentedModelFetch(
     // this process can place request bytes on the network.
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
+    observePromptCacheRequestBody(init?.body);
     const started = performance.now();
     // A request whose bearer a subscription core leased is admitted by its
     // custody as the last awaited step before the fetch, then settled from

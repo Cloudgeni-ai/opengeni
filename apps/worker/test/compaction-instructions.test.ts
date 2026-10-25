@@ -3,7 +3,6 @@ import { DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
 import { allAgentCapabilities, noneAgentCapabilities } from "@opengeni/contracts";
 import {
   appendSessionInstructions,
-  appendWorkspaceGovernance,
   appendWorkspaceMemory,
   composeAgentInstructions,
   inspectPersistentAgentInstructions,
@@ -30,22 +29,18 @@ function agentConfig(overrides: Partial<ResolvedAgentConfig> = {}): ResolvedAgen
 const context = {
   workspaceAgentInstructions: "You are Acme Assistant. {{core}}",
   workspaceAgentIdentity: "You are Acme Assistant.",
-  workspaceGovernance: "GOVERNANCE",
   structuredWorkspacePolicyActive: true,
   workspaceMemory: "MEMORY",
   rig: { name: "python", version: 2 },
 };
 
 describe("standalone compaction instructions (AC16)", () => {
-  test("a legacy session keeps the historical composition byte-for-byte", () => {
+  test("a legacy session keeps the turn composition byte-for-byte", () => {
     const session = { agent: null, instructions: "SESSION", resources: [] };
     expect(standaloneCompactionInstructions({ settings, session, ...context })).toBe(
       appendWorkspaceMemory(
         appendSessionInstructions(
-          appendWorkspaceGovernance(
-            composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig),
-            "GOVERNANCE",
-          ),
+          composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig),
           "SESSION",
         ),
         "MEMORY",
@@ -64,7 +59,6 @@ describe("standalone compaction instructions (AC16)", () => {
     const turn = inspectPersistentAgentInstructions(settings, {
       agentConfig: config,
       workspaceAgentIdentity: context.workspaceAgentIdentity,
-      workspaceGovernance: "GOVERNANCE",
       workspaceMemory: "MEMORY",
       sessionInstructions: "SESSION",
       rig: context.rig,
@@ -74,6 +68,7 @@ describe("standalone compaction instructions (AC16)", () => {
     expect(instructions).toContain("# Goals");
     expect(instructions).toContain("# Links and rendering");
     expect(instructions).not.toContain("knowledge_search");
-    expect(instructions).toContain("GOVERNANCE");
+    // Governance is a durable history item, never part of the system prompt.
+    expect(instructions).not.toContain("governance");
   });
 });
