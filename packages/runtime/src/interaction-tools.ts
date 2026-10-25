@@ -1298,6 +1298,44 @@ export function createInteractionAttemptToolDefinitions(
       }
     },
   });
+  /** An explicit session id that names no session is nearly always mistyped
+   * or partly copied: list the open sessions of that kind this chat may use. */
+  const explainMissingSession = async (
+    error: unknown,
+    kind: InteractionSessionKind,
+    requestedId: string | undefined,
+  ): Promise<unknown> => {
+    if (requestedId === undefined || !isMissingSessionError(error, kind)) return error;
+    const open = await ownOpenSessions(kind).catch(() => null);
+    return open === null ? error : missingSessionError(error, kind, open);
+  };
+  /** This chat's open sessions of one kind on its current placement, most
+   * recently used first: the ones browser and computer tools reuse. */
+  const ownOpenSessions = async (
+    kind: InteractionSessionKind,
+  ): Promise<Array<{ id: string; name: string }>> => {
+    const listed =
+      kind === "BrowserSession"
+        ? input.transport
+            .listBrowserSessions(input.workspaceId, {
+              associatedSessionId: input.sessionId,
+              includeTerminal: false,
+            })
+            .then(({ sessions }) => sessions)
+        : input.transport
+            .listComputerSessions(input.workspaceId, {
+              associatedSessionId: input.sessionId,
+              includeTerminal: false,
+            })
+            .then(({ sessions }) => sessions);
+    return (await onCurrentPlacement<SessionListing>(listed))
+      .filter(
+        (session) =>
+          !MISSING_SESSION_HINT_EXCLUDED_LIFECYCLES.has(session.lifecycle) &&
+          session.associations.some((association) => association.sessionId === input.sessionId),
+      )
+      .sort((left, right) => right.lastUsedAt.localeCompare(left.lastUsedAt));
+  };
   /** Run one call on the requested or current computer and remember it on
    * success. */
   const onComputer = async <T>(
@@ -1311,7 +1349,7 @@ export function createInteractionAttemptToolDefinitions(
       return output;
     } catch (error) {
       if (isGoneBrowserError(error)) currentComputer.failed(computer, goneComputerPart(error));
-      throw error;
+      throw await explainMissingSession(error, "ComputerSession", computerSessionId);
     }
   };
   /** Run one call on the requested or current window and remember, on
@@ -1331,7 +1369,7 @@ export function createInteractionAttemptToolDefinitions(
       return output;
     } catch (error) {
       if (isGoneBrowserError(error)) currentComputer.failed(window, goneComputerPart(error));
-      throw error;
+      throw await explainMissingSession(error, "ComputerSession", value.computerSessionId);
     }
   };
   // Every call notes the event count when it starts. A browser resumed after
@@ -1530,7 +1568,9 @@ export function createInteractionAttemptToolDefinitions(
       if (tab && isGoneBrowserTabError(error))
         currentTab.forgetTarget(tab.browserSessionId, tab.targetId);
       else if (tab && isGoneBrowserError(error)) currentTab.failed(tab);
-      if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) throw error;
+      if (!isBrowserNotRunningError(error) || resumeFailures.has(error as Error)) {
+        throw await explainMissingSession(error, "BrowserSession", value.browserSessionId);
+      }
       const browser = tab ?? (await currentTab.session(value.browserSessionId));
       const resumed = await resumePausedBrowser(
         browser.browserSessionId,
@@ -1576,7 +1616,9 @@ export function createInteractionAttemptToolDefinitions(
       if (value.targetId !== undefined && isGoneBrowserTabError(error)) {
         currentTab.forgetTarget(browser.browserSessionId, value.targetId);
       } else if (isGoneBrowserError(error)) currentTab.failed(browser);
-      if (!isBrowserNotRunningError(error)) throw error;
+      if (!isBrowserNotRunningError(error)) {
+        throw await explainMissingSession(error, "BrowserSession", value.browserSessionId);
+      }
       const resumed = await resumePausedBrowser(
         browser.browserSessionId,
         context.operationId,
@@ -2940,9 +2982,14 @@ export function createInteractionAttemptToolDefinitions(
             // ended ComputerSession, a missing permission, invalid
             // arguments): a definite failure the model can act on, not an
             // operation of unknown outcome or a failure worth retrying.
-            const refused = refusedNativeCallResult(error);
+            const explained = await explainMissingSession(
+              error,
+              "ComputerSession",
+              z.string().uuid().optional().parse(computerSessionId),
+            );
+            const refused = refusedNativeCallResult(explained);
             if (refused) return refused;
-            throw error;
+            throw explained;
           }
           const receipt = boundComputerNativeReceipt(ComputerNativeReceipt.parse(response));
           const evidence = {
@@ -5116,6 +5163,78 @@ function browserToolImageContent(
 /** The remembered browser or tab no longer exists. */
 function isGoneBrowserError(error: unknown): boolean {
   return error instanceof OpenGeniApiError && (error.status === 404 || error.status === 410);
+}
+
+type InteractionSessionKind = "BrowserSession" | "ComputerSession";
+
+type SessionListing = {
+  id: string;
+  name: string;
+  lifecycle: string;
+  lastUsedAt: string;
+  placement: z.infer<typeof InteractionPlacement>;
+  associations: Array<{ sessionId: string }>;
+};
+
+/** Sessions a missing-id hint never offers: they cannot run work as they are. */
+const MISSING_SESSION_HINT_EXCLUDED_LIFECYCLES: ReadonlySet<string> = new Set([
+  "ending",
+  "ended",
+  "failed",
+  "lost",
+  "repair_required",
+]);
+
+/** The most open sessions a missing-id hint lists. */
+const MISSING_SESSION_HINT_LIMIT = 5;
+
+/** The API found no session of this kind with the requested id. */
+function isMissingSessionError(
+  error: unknown,
+  kind: InteractionSessionKind,
+): error is OpenGeniApiError {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 404 &&
+    new RegExp(`(?:^|: )${kind} not found\\b`, "u").test(error.message)
+  );
+}
+
+/** The API's refusal for a missing session id, followed by the open sessions
+ * of that kind this chat may use, so a mistyped id is corrected in one step.
+ * Apart from the listed ids and names, the text is fixed. */
+function missingSessionError(
+  error: OpenGeniApiError,
+  kind: InteractionSessionKind,
+  open: ReadonlyArray<{ id: string; name: string }>,
+): OpenGeniApiError {
+  const listed = open.slice(0, MISSING_SESSION_HINT_LIMIT);
+  const opener = kind === "BrowserSession" ? "browser_open" : "computer_open";
+  const parameter = kind === "BrowserSession" ? "browserSessionId" : "computerSessionId";
+  const hint =
+    listed.length === 0
+      ? `This chat has no open ${kind}; call ${opener} to start one.`
+      : `This chat's open ${kind}s, most recently used first: ${listed
+          .map((session) => `${session.id} ${JSON.stringify(sessionHintLabel(session.name))}`)
+          .join(", ")}. Use one of these ids, or omit ${parameter} to use the one you used last.`;
+  const reference = error.correlationId ? ` Reference: ${error.correlationId}.` : "";
+  const refusal =
+    reference && error.message.endsWith(reference)
+      ? error.message.slice(0, -reference.length)
+      : error.message;
+  return new OpenGeniApiError(error.status, error.body, {
+    code: error.code,
+    retryable: false,
+    outcomeUnknown: false,
+    correlationId: error.correlationId,
+    displayMessage: `${refusal}${/[.!?]$/u.test(refusal) ? "" : "."} ${hint}`,
+  });
+}
+
+/** A session's name as a short one-line label. */
+function sessionHintLabel(name: string): string {
+  const line = name.replace(/\s+/gu, " ").trim();
+  return line.length <= 60 ? line : `${line.slice(0, 59)}…`;
 }
 
 /** The named tab no longer exists, while its browser does: the controller's
