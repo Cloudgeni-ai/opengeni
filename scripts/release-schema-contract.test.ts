@@ -2340,6 +2340,9 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0970_image_generation_credit_hold_index.sql",
+      "0969_image_generation_credit_funding_validate.sql",
+      "0968_image_generation_credit_funding.sql",
       "0967_vault_item_types_validate.sql",
       "0966_provider_vault_archived_items.sql",
       "0965_organization_azure_openai_entra_auth.sql",

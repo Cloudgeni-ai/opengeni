@@ -876,6 +876,19 @@ const SettingsSchema = z.object({
   vercelAiGatewayApiKey: z.string().optional(),
   /** Image adapter route; native hosted providers ignore this model. */
   imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
+  // Offer image generation on Opengeni credits through the deployment's
+  // Gateway key when no turn-native, subscription or workspace route applies.
+  // On by default once the Gateway key and a price exist; false turns it off.
+  imageGenerationOpengeniCreditsEnabled: EnvBoolean.default(true),
+  // Opengeni's customer price for one credit-funded generated image. Unset uses
+  // the reviewed price of `imageGenerationModel`; a model without one is never
+  // offered on Opengeni credits. The operation freezes the price before dispatch.
+  imageGenerationCreditMicrosPerImage: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .optional(),
   /** Durable video generation uses the workspace-owned Gateway credential. */
   videoGenerationPollIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
   videoGenerationRecoveryDeadlineMs: z.coerce
@@ -5352,6 +5365,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
+    imageGenerationOpengeniCreditsEnabled: optional(
+      "OPENGENI_IMAGE_GENERATION_OPENGENI_CREDITS_ENABLED",
+    ),
+    imageGenerationCreditMicrosPerImage: optional(
+      "OPENGENI_IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE",
+    ),
     videoGenerationPollIntervalMs: optional("OPENGENI_VIDEO_GENERATION_POLL_INTERVAL_MS"),
     videoGenerationRecoveryDeadlineMs: optional("OPENGENI_VIDEO_GENERATION_RECOVERY_DEADLINE_MS"),
     videoGenerationReferenceUrlTtlSeconds: optional(
@@ -9983,6 +10002,32 @@ export function calculateVideoGenerationCreditCostMicros(
     throw new Error("Video generation credit price exceeds the supported range");
   }
   return cost;
+}
+
+/**
+ * Reviewed Opengeni customer prices (USD micros per generated image) for
+ * Gateway image models. GPT Image 2 is token-billed by its provider; this
+ * covers a high-quality 1024x1024 output plus its prompt and a few references.
+ */
+export const IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE: Readonly<Record<string, number>> =
+  Object.freeze({
+    "openai/gpt-image-2": 250_000,
+  });
+
+/**
+ * Exact Opengeni product price of one credit-funded image from the configured
+ * image model, frozen before the provider request starts. Null means the model
+ * has no price, so it must not be offered on Opengeni credits.
+ */
+export function imageGenerationCreditCostMicros(
+  settings: Pick<Settings, "imageGenerationModel" | "imageGenerationCreditMicrosPerImage">,
+): number | null {
+  if (settings.imageGenerationCreditMicrosPerImage !== undefined) {
+    return settings.imageGenerationCreditMicrosPerImage;
+  }
+  return Object.hasOwn(IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE, settings.imageGenerationModel)
+    ? IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE[settings.imageGenerationModel]!
+    : null;
 }
 
 export function configuredAllowedReasoningEfforts(

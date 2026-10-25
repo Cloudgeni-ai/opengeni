@@ -232,6 +232,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiBaseUrl: undefined,
     openaiModel: "scripted-model",
     imageGenerationModel: "openai/gpt-image-2",
+    imageGenerationOpengeniCreditsEnabled: true,
     videoGenerationPollIntervalMs: 5_000,
     videoGenerationRecoveryDeadlineMs: 2 * 60 * 60_000,
     videoGenerationReferenceUrlTtlSeconds: 60 * 60,
