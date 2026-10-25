@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::image::{Generation, Images, Meta};
+use super::{Job, blocking};
+use crate::image::{Generation, Images, Meta, Verified};
 use crate::layout::Paths;
-use compute_engine::{EngineError, ErrorKind};
+use crate::store::Store;
+use compute_engine::{Engine, EngineError, ErrorKind};
 
 #[cfg(target_os = "linux")]
 use crate::paging::Paging;
@@ -100,6 +102,44 @@ pub(crate) fn record_base(paths: &Paths, process: &str, image: Option<&Meta>) ->
 /// Blocking.
 pub(crate) fn withdraw_base(paths: &Paths) -> io::Result<()> {
     crate::layout::remove_if_present(&base_record(paths))
+}
+
+/// Forgets what a live VM's memory is based on, so its next save holds
+/// every page, and withdraws the record of it, so an agent that restarts
+/// does not go by it either.
+pub(super) async fn lose_base(paths: &Paths, base: &mut Base) {
+    *base = Base::Unknown;
+    let paths = paths.clone();
+    let dir = paths.dir.clone();
+    if let Err(error) = blocking(move || withdraw_base(&paths))
+        .await
+        .and_then(|withdrawn| withdrawn)
+    {
+        tracing::warn!(dir = %dir.display(), %error, "memory base record not withdrawn");
+    }
+}
+
+impl<E: Engine, S: Store> Job<E, S> {
+    /// Records what the memory of `vm`, just started from `image` or booted
+    /// fresh if `None`, is based on, for an agent that restarts while it
+    /// runs (see [`record_base`]). Without it, that agent's first save of
+    /// the VM holds every page.
+    pub(super) async fn record_started(&self, vm: &E::Vm, image: Option<&Verified>) {
+        let process = match self.engine.process_identity(vm) {
+            Ok(process) => process,
+            Err(error) => {
+                tracing::debug!(id = %self.id, %error, "the VM's process is not named");
+                return;
+            }
+        };
+        let (paths, meta) = (self.paths.clone(), image.map(|image| image.meta().clone()));
+        if let Err(error) = blocking(move || record_base(&paths, &process, meta.as_ref()))
+            .await
+            .and_then(|recorded| recorded)
+        {
+            tracing::warn!(id = %self.id, %error, "memory base not recorded");
+        }
+    }
 }
 
 /// What the memory of a VM found running after an agent restart is based

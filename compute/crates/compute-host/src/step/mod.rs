@@ -74,7 +74,7 @@ pub(crate) use files::{
     clear_checkpoint, clear_local, images_of, mark_archived, paged, recover_images, take_written,
 };
 pub(crate) use live::{Base, DiskWatch, LiveMemory, Reconnected, recorded_base};
-use live::{record_base, withdraw_base};
+use live::{lose_base, record_base, withdraw_base};
 
 /// A VM process the host owns.
 #[derive(Debug)]
@@ -270,21 +270,6 @@ async fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) 
     tokio::task::spawn_blocking(work)
         .await
         .map_err(io::Error::other)
-}
-
-/// Forgets what a live VM's memory is based on, so its next save holds
-/// every page, and withdraws the record of it, so an agent that restarts
-/// does not go by it either.
-async fn lose_base(paths: &Paths, base: &mut Base) {
-    *base = Base::Unknown;
-    let paths = paths.clone();
-    let dir = paths.dir.clone();
-    if let Err(error) = blocking(move || withdraw_base(&paths))
-        .await
-        .and_then(|withdrawn| withdrawn)
-    {
-        tracing::warn!(dir = %dir.display(), %error, "memory base record not withdrawn");
-    }
 }
 
 impl<E: Engine, S: Store> Job<E, S> {
@@ -1250,27 +1235,6 @@ impl<E: Engine, S: Store> Job<E, S> {
         };
         if let Err(error) = held {
             tracing::warn!(id = %self.id, %error, "disk watch not kept beyond this agent; a later one will not save this VM");
-        }
-    }
-
-    /// Records what the memory of `vm`, just started from `image` or booted
-    /// fresh if `None`, is based on, for an agent that restarts while it
-    /// runs (see [`record_base`]). Without it, that agent's first save of
-    /// the VM holds every page.
-    async fn record_started(&self, vm: &E::Vm, image: Option<&Verified>) {
-        let process = match self.engine.process_identity(vm) {
-            Ok(process) => process,
-            Err(error) => {
-                tracing::debug!(id = %self.id, %error, "the VM's process is not named");
-                return;
-            }
-        };
-        let (paths, meta) = (self.paths.clone(), image.map(|image| image.meta().clone()));
-        if let Err(error) = blocking(move || record_base(&paths, &process, meta.as_ref()))
-            .await
-            .and_then(|recorded| recorded)
-        {
-            tracing::warn!(id = %self.id, %error, "memory base not recorded");
         }
     }
 
