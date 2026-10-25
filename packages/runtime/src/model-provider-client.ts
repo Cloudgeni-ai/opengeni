@@ -130,13 +130,9 @@ export function buildOpenAIClientFromSettings(
             source: "managed_identity",
             clientId: settings.azureClientId,
           })
-        : settings.azureOpenaiAuthMode === "workload_identity"
-          ? sharedAzureEntraAccessTokenSource({
-              tenantId: settings.azureTenantId!,
-              clientId: settings.azureClientId!,
-              federatedTokenFile: settings.azureFederatedTokenFile!,
-              authorityHost: settings.azureAuthorityHost,
-            })
+        : settings.azureOpenaiAuthMode === "workload_identity" ||
+            settings.azureOpenaiAuthMode === "deployment_identity"
+          ? sharedAzureEntraAccessTokenSource(deploymentAzureEntraCredential(settings)!)
           : null;
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
     return new ReplayableJsonOpenAI(
@@ -341,6 +337,9 @@ function providerClientCacheKey(
                   clientId: settings.azureClientId,
                   federatedTokenFile: settings.azureFederatedTokenFile,
                   authorityHost: settings.azureAuthorityHost,
+                  clientSecretDigest: settings.azureClientSecret
+                    ? createHash("sha256").update(settings.azureClientSecret).digest("hex")
+                    : null,
                 },
               }
             : null,

@@ -16,24 +16,32 @@ const workload = {
   AZURE_CLIENT_ID: "client",
   AZURE_FEDERATED_TOKEN_FILE: "/projected/token",
 };
+const clientSecret = {
+  OPENGENI_AZURE_OPENAI_AUTH_MODE: "deployment_identity",
+  AZURE_TENANT_ID: "tenant",
+  AZURE_CLIENT_ID: "client",
+  AZURE_CLIENT_SECRET: "fake-client-secret",
+};
 
-test.each([workload, { OPENGENI_AZURE_OPENAI_AUTH_MODE: "managed_identity" }])(
-  "identity authentication keeps built-in models and reasoning without a key: %j",
-  (identity) => {
-    const settings = getSettings({ ...base, ...identity });
-    const provider = configuredProviders(settings)[0]!;
-    expect(provider.apiKey).toBeUndefined();
-    expect(provider.credentialSource).toEqual({ kind: "deployment", mechanism: "azure_ad_bearer" });
-    expect(settings.azureOpenaiDeploymentIdentityEnabled).toBe(false);
-    const models = configuredModels(settings).filter((model) => model.providerId === provider.id);
-    expect(models.map((model) => model.id)).toEqual(["reasoning-deployment", "small-deployment"]);
-    for (const model of models) {
-      expect(model.capabilities.reasoning.runnable).toBe(true);
-      expect(model.capabilities.reasoning.defaultEffort).toBe("high");
-      expect(model.capabilities.reasoning.efforts).toEqual(["low", "medium", "high"]);
-    }
-  },
-);
+test.each([
+  workload,
+  clientSecret,
+  { ...workload, OPENGENI_AZURE_OPENAI_AUTH_MODE: "deployment_identity" },
+  { OPENGENI_AZURE_OPENAI_AUTH_MODE: "managed_identity" },
+])("identity authentication keeps built-in models and reasoning without a key: %j", (identity) => {
+  const settings = getSettings({ ...base, ...identity });
+  const provider = configuredProviders(settings)[0]!;
+  expect(provider.apiKey).toBeUndefined();
+  expect(provider.credentialSource).toEqual({ kind: "deployment", mechanism: "azure_ad_bearer" });
+  expect(settings.azureOpenaiDeploymentIdentityEnabled).toBe(false);
+  const models = configuredModels(settings).filter((model) => model.providerId === provider.id);
+  expect(models.map((model) => model.id)).toEqual(["reasoning-deployment", "small-deployment"]);
+  for (const model of models) {
+    expect(model.capabilities.reasoning.runnable).toBe(true);
+    expect(model.capabilities.reasoning.defaultEffort).toBe("high");
+    expect(model.capabilities.reasoning.efforts).toEqual(["low", "medium", "high"]);
+  }
+});
 
 test.each(["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_FEDERATED_TOKEN_FILE"])(
   "workload identity rejects missing %s at startup",
@@ -44,7 +52,7 @@ test.each(["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_FEDERATED_TOKEN_FILE"])(
   },
 );
 
-test.each(["workload_identity", "managed_identity"])(
+test.each(["deployment_identity", "workload_identity", "managed_identity"])(
   "%s rejects ambiguous static credentials",
   (mode) => {
     for (const key of ["OPENGENI_AZURE_OPENAI_API_KEY", "OPENGENI_AZURE_OPENAI_AD_TOKEN"]) {
@@ -59,6 +67,21 @@ test.each(["workload_identity", "managed_identity"])(
     }
   },
 );
+
+test.each(["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"])(
+  "client-secret deployment identity rejects missing %s at startup",
+  (missing) => {
+    expect(() => getSettings({ ...base, ...clientSecret, [missing]: undefined })).toThrow(
+      /deployment_identity needs/u,
+    );
+  },
+);
+
+test("workload-only mode still requires a token file even when a client secret is configured", () => {
+  expect(() =>
+    getSettings({ ...base, ...clientSecret, OPENGENI_AZURE_OPENAI_AUTH_MODE: "workload_identity" }),
+  ).toThrow(/workload_identity needs/u);
+});
 
 test("static authentication remains the default, and identity mode is explicit", () => {
   expect(() => getSettings(base)).toThrow(/API key or AD token/u);
