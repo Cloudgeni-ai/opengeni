@@ -9447,13 +9447,17 @@ const SCROLL_FROM_FUNCTION = `function(start, page, deltaX, deltaY) {
     };
     const first = page ? root : start;
     if (scrollable(first, axis) && tryScroll(first)) return true;
+    let chainCanScroll = canScroll(first, axis);
     // Panels are a fallback for boxes that cannot scroll at all on this axis,
     // never for one that is at its end: that refusal is how an agent knows
-    // it reached the end.
-    if (!canScroll(first, axis))
-      for (const element of underCentre())
-        if (panel(element, axis) && tryScroll(element)) return true;
-    let chainCanScroll = canScroll(first, axis);
+    // it reached the end. A panel under the centre that is at its end counts
+    // the same way, so it is not skipped for another panel elsewhere.
+    if (!chainCanScroll)
+      for (const element of underCentre()) {
+        if (!panel(element, axis)) continue;
+        chainCanScroll = true;
+        if (tryScroll(element)) return true;
+      }
     if (!page) {
       for (let element = parentOf(start); element; element = element === root ? null : parentOf(element)) {
         if (!scrollable(element, axis)) continue;

@@ -191,8 +191,18 @@ e2e(
       expect(page.state).toBe("completed");
       expect(await positions()).toEqual([200, 0, 0, 300, 0]);
 
-      // Once nothing inside the region can move further, it refuses again.
+      // With that panel at its end, a page scroll refuses instead of moving
+      // another panel elsewhere on the page.
       await evaluate("panel.scrollTop = panel.scrollHeight");
+      const panelEnd = await evaluate("panel.scrollTop");
+      const pageEnd = await controller.run(
+        command(after, { type: "scroll", deltaX: 0, deltaY: 200 }),
+      );
+      expect(pageEnd.state).toBe("failed");
+      expect(pageEnd.error?.code).toBe("invalid_action");
+      expect(await positions()).toEqual([panelEnd, 0, 0, 300, 0]);
+
+      // Once nothing inside the region can move further, it refuses again.
       const bottom = await controller.run(
         command(after, { type: "scroll", locator: details, deltaX: 0, deltaY: 400 }),
       );
