@@ -1,4 +1,4 @@
-import { TranscriptionServiceError } from "@opengeni/core";
+import { TranscriptionServiceError } from "../transcription";
 import { createFfmpegTranscriptionSegmenter, TranscriptionSegmenterError } from "./segmenter";
 import { wavDurationSeconds } from "./wav-duration";
 

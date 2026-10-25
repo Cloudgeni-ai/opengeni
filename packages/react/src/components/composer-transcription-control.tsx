@@ -21,7 +21,8 @@ import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useState, type MouseEvent, type ReactElement } from "react";
 import { cn } from "../lib/cn";
 import { useComposerFooterSignal } from "../lib/composer-footer-signals";
-import { useVoiceInput } from "../hooks/use-voice-input";
+import { useVoiceInput, type VoiceInputRecordingsClient } from "../hooks/use-voice-input";
+import type { RecorderPlatform } from "@opengeni/sdk/recordings";
 import type { VoiceRecordingStore } from "../voice-recording-store";
 import { useChatComposer } from "./composer";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./tooltip";
@@ -108,7 +109,15 @@ const defaultMessages = (t: OpenGeniText): ComposerTranscriptionMessages => ({
 });
 
 export type ComposerTranscriptionControlProps = {
-  client?: Pick<OpenGeniClient, "transcribeAudio"> | null | undefined;
+  /** The SDK client. With `requestJson`, dictations are kept as recordings until heard. */
+  client?:
+    | (Pick<OpenGeniClient, "transcribeAudio"> & Partial<Pick<OpenGeniClient, "requestJson">>)
+    | null
+    | undefined;
+  /** A recordings client, such as a host proxy. Built from `client` otherwise. */
+  recordings?: Partial<VoiceInputRecordingsClient> | undefined;
+  /** How this device records; the browser's by default. */
+  platform?: RecorderPlatform | undefined;
   workspaceId?: string | undefined;
   capability?: ClientVoiceInputConfig | null | undefined;
   workspaceEnabled?: boolean | undefined;
@@ -122,9 +131,9 @@ export type ComposerTranscriptionControlProps = {
   onDiagnostic?: unknown;
   messages?: Partial<ComposerTranscriptionMessages> | undefined;
   className?: string | undefined;
-  /** Test/embed seam. Production defaults to origin-scoped IndexedDB. */
+  /** @deprecated Dictations are kept by the shared recording store; ignored. */
   createRecordingStore?: (() => VoiceRecordingStore) | undefined;
-  /** Test/embed seam. Production acquires a coordinated browser-document owner lease. */
+  /** @deprecated Recordings are claimed with Web Locks; ignored. */
   createOwnerId?: (() => string) | undefined;
   /** Hide while realtime voice owns the mic — collapses with a layout-friendly exit. */
   suppressed?: boolean | undefined;
@@ -144,8 +153,8 @@ export function ComposerTranscriptionControl({
   workspaceEnabled = false,
   messages: overrides,
   className,
-  createRecordingStore,
-  createOwnerId,
+  recordings,
+  platform,
   suppressed = false,
 }: ComposerTranscriptionControlProps) {
   const t = useOpenGeniText();
@@ -160,8 +169,8 @@ export function ComposerTranscriptionControl({
     setValue: composer.setValue,
     focusInput: composer.focusInput,
     disabled: composer.disabled,
-    createRecordingStore,
-    createOwnerId,
+    recordings,
+    platform,
   });
   const { status } = transcription;
   const retrying = status === "retrying";

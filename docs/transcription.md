@@ -9,14 +9,30 @@ message by itself.
 - The ordinary composer presents **one microphone control** and **one editable
   draft**. Recording chrome exposes separate **Cancel** and **Stop** actions;
   provider preference is chosen in workspace settings; model, credentials, and region remain server-private.
-- The browser writes five-second `MediaRecorder` chunks and SHA-256 integrity
-  metadata to IndexedDB before reporting the audio locally saved. Stop waits for
-  pending writes, finalizes automatically, and appends the resulting text to the
-  draft. Ordinary Send remains a separate user action.
-- New servers and SDK clients use the resumable server path advertised by
-  `ClientConfig.voiceInput.resumable`. Older clients or deployments without that
-  capability retain the existing one-shot multipart path and its 25 MiB / 600
-  second client maximum.
+- Each dictation is a recording with `purpose: "dictation"` (see
+  [recordings.md](recordings.md#dictation)). The client saves one-second chunks
+  on the device, uploads them straight to storage while the person speaks, and
+  finalizes on Stop. The worker transcribes it with the workspace's voice input
+  in pieces of at most 50 seconds and bills each piece as voice input. The
+  client inserts the text into the draft and deletes the dictation; Send
+  remains a separate user action. The worker deletes any dictation still kept
+  a day after it is heard.
+- `ClientConfig.voiceInput.resumable` advertises that the deployment can keep
+  dictations (object storage, ffmpeg and a voice input provider are ready).
+  Without it, or for a client with only `transcribeAudio`, dictation records in
+  memory and uses the one-shot multipart path with its 25 MiB / 600 second
+  client maximum.
+- Closing the tab, killing the phone app, losing the connection or a failed
+  transcription keeps the dictation. The next composer that opens in the
+  workspace lists `purpose=dictation` recordings and offers the text; a failed
+  one can be heard again with a new transcript version. Cancel or Escape keeps
+  anything longer than three seconds. Taking the text deletes the dictation
+  first, so two tabs never insert it twice.
+
+The rest of this section and the next ones describe the deprecated
+`transcription-recordings` routes, kept for older clients until their sunset on
+January 26, 2027.
+
 - The resumable default is two hours, 512 MiB total, 8 MiB per browser chunk, and
   24-hour server retention. Contract hard limits permit at most eight hours,
   512 MiB, and 1,000 normalized provider segments.
@@ -46,6 +62,18 @@ message by itself.
   excluded from logs and client capability configuration.
 
 ## Trust boundary and data flow
+
+```text
+Device recorder (1s chunks, IndexedDB or the phone's files)
+  -> POST /v1/workspaces/:workspaceId/recordings { purpose: "dictation" }
+  -> presigned PUTs straight to object storage, then finalize
+  -> worker: ffmpeg pieces of <= 50 s -> workspace voice input provider
+  -> transcript version (billed per piece to the dictating person)
+  -> client reads the text, deletes the dictation, edits the draft
+  -> ordinary user Send
+```
+
+The deprecated resumable routes:
 
 ```text
 Browser MediaRecorder (5s chunks)
@@ -267,9 +295,10 @@ available independently when a provider is ready.
 | Runtime configuration | `packages/config/src/index.ts`, `.env.example` |
 | Service and segmenter ports | `packages/core/src/transcription.ts` |
 | FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/drizzle/0170_resumable_transcription_recordings.sql`, `packages/db/src/transcription-recordings.ts` |
-| API routes and ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `apps/api/src/transcription/segmenter.ts` |
+| Deprecated API routes and the ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `packages/core/src/transcription-service/segmenter.ts` |
 | SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
-| React capture/recovery/handoff | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
+| Dictation recordings (API, worker) | `apps/api/src/routes/recordings.ts`, `apps/worker/src/activities/recordings.ts` |
+| Web and phone dictation | `packages/react/src/hooks/use-voice-input.ts`, `packages/react-native/src/recordings/dictation.ts` |
 | Global provider-object reaper | `apps/worker/src/activities/file-upload-reaper.ts` |
 | Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `packages/react/src/app/components/transcription-settings.tsx` |
 

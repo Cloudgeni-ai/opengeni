@@ -7,7 +7,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
-import { createTranscriptionService } from "../src/transcription/service";
+import { createTranscriptionService } from "@opengeni/core/transcription-service";
 
 let shared: SharedTestDatabase;
 let client: DbClient;

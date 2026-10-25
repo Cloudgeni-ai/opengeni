@@ -3,7 +3,7 @@ import {
   type VoiceInputPricing,
   type VoiceInputUsage,
 } from "@opengeni/config";
-import { type TranscriptionProvider, TranscriptionServiceError } from "@opengeni/core";
+import { type TranscriptionProvider, TranscriptionServiceError } from "../../transcription";
 
 export function createOpenAiTranscriptionProvider(input: {
   apiKey: string;

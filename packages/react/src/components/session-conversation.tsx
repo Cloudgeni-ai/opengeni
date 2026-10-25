@@ -1048,7 +1048,8 @@ export function useComposerTranscription(
     () =>
       supported
         ? {
-            client: reader as Pick<OpenGeniClient, "transcribeAudio">,
+            client: reader as Pick<OpenGeniClient, "transcribeAudio"> &
+              Partial<Pick<OpenGeniClient, "requestJson">>,
             workspaceId,
             capability,
             workspaceEnabled:

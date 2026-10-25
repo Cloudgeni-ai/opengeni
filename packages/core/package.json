@@ -37,6 +37,10 @@
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
+    },
+    "./transcription-service": {
+      "types": "./src/transcription-service/index.ts",
+      "default": "./src/transcription-service/index.ts"
     }
   },
   "publishConfig": {
@@ -64,6 +68,7 @@
     "@opengeni/storage": "workspace:*",
     "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/vaults": "workspace:*",
+    "@opengeni/xai-subscription": "workspace:*",
     "hono": "^4.12.18",
     "zod": "^4.2.1"
   },

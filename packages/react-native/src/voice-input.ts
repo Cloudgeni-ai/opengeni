@@ -55,6 +55,10 @@ export interface NativeVoiceInput {
   maxDurationSeconds: number | null;
   /** A finished recording is kept on the device after a failed transcription. */
   hasSavedRecording: boolean;
+  /** A kept dictation's text, ready to insert; absent or null otherwise. */
+  savedTranscript?: string | null;
+  /** Put the kept dictation's text into the draft. */
+  insertSaved?(): void;
   start(): void;
   /** Stop, transcribe and append the text to the draft. */
   stop(): void;

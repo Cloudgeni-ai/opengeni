@@ -5,7 +5,7 @@ import {
   type TranscriptionAvailabilityContext,
   type TranscriptionProvider,
   TranscriptionServiceError,
-} from "@opengeni/core";
+} from "../../transcription";
 import {
   acquireSubscriptionCoreCodexOperationLease,
   buildSubscriptionCoreCodexConnectionTokenResolver,

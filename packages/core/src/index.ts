@@ -80,6 +80,7 @@ export {
 } from "./managed-session";
 export * from "./transcription";
 export * from "./recording-transcription";
+export * from "./xai-operation-availability";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
 export * from "./goal-admission";

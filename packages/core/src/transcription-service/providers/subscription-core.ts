@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import { TranscriptionServiceError } from "@opengeni/core";
+import { TranscriptionServiceError } from "../../transcription";
 import {
   subscriptionCoreOperationConnections,
   type Database,

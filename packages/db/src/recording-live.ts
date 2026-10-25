@@ -60,6 +60,9 @@ export async function startRecordingLiveTrack(
 ): Promise<{ language: string | null }> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const recording = await lockOwnRecording(tx, input);
+    if (recording.purpose !== "meeting") {
+      throw new RecordingConflictError("Only a meeting has a live transcript", "not_a_meeting");
+    }
     if (recording.state !== "capturing") {
       throw new RecordingConflictError(
         "A live transcript can only start while recording",

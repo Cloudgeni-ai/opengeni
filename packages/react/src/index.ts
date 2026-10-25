@@ -130,6 +130,7 @@ export type {
   UseVoiceInputOptions,
   UseVoiceInputResult,
   VoiceInputStatus,
+  VoiceInputRecordingsClient,
 } from "./hooks/use-voice-input";
 export {
   IndexedDbVoiceRecordingStore,

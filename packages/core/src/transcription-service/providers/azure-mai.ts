@@ -1,5 +1,5 @@
 import type { VoiceInputPricing } from "@opengeni/config";
-import type { TranscriptionProvider } from "@opengeni/core";
+import type { TranscriptionProvider } from "../../transcription";
 import { createFfmpegAudioNormalizer } from "../normalize";
 import { fetchError, responseError } from "./openai";
 

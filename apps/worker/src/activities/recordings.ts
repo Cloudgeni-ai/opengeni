@@ -9,12 +9,22 @@ import {
   recordingDiarizationKind,
   recordingSpeakerLabels,
   RecordingTranscriptionError,
+  TranscriptionBillingRefusedError,
+  TranscriptionServiceError,
   type RecordingDiarizerResult,
   type RecordingDiarizer,
   type RecordingTranscribedWord,
   type RecordingTranscriptionProviderRegistry,
   type RecordingTrackWords,
+  type TranscriptionSegmenter,
+  type TranscriptionService,
 } from "@opengeni/core";
+import {
+  createFfmpegTranscriptionSegmenter,
+  createTranscriptionService,
+  TranscriptionSegmenterError,
+  wavDurationSeconds,
+} from "@opengeni/core/transcription-service";
 import {
   beginRecordingAudioExpiry,
   claimRecordingTranscriptVersion,
@@ -22,6 +32,7 @@ import {
   completeRecordingTranscriptVersion,
   failRecordingTranscriptVersion,
   getRecordingTrackPreparedObject,
+  getRecording,
   getWorkspace,
   listDeletingRecordingObjectKeys,
   listDueRecordingRetention,
@@ -38,7 +49,13 @@ import {
   type RecordingSpeakerVoice,
   type StalledRecordingWork,
 } from "@opengeni/db";
-import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
+import {
+  resolveWorkspaceRecordingSettings,
+  resolveWorkspaceVoiceInputEnabled,
+  DICTATION_RETENTION_MILLISECONDS,
+  TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  WorkspaceVoiceInputSettings,
+} from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import type { ObjectStorage } from "@opengeni/storage";
 import { createHash } from "node:crypto";
@@ -66,10 +83,17 @@ export type RecordingTranscriptInput = RecordingWorkInput & {
   processingOwner: string;
 };
 
-export type RecordingTranscriptOutcome =
+export type RecordingTranscriptOutcome = (
   | { outcome: "complete" }
   | { outcome: "failed"; errorCode: string }
-  | { outcome: "skipped" };
+  | { outcome: "skipped" }
+) & {
+  /**
+   * A dictation is deleted this long after its transcript settles, when its
+   * owner hasn't already taken the text and deleted it.
+   */
+  expireAfterMilliseconds?: number;
+};
 
 /** A version lease outlives the longest provider call; retries reclaim it by owner. */
 const TRANSCRIPT_LEASE_SECONDS = 3 * 60 * 60;
@@ -85,6 +109,13 @@ export type RecordingActivityOptions = {
   cancellationSignal?: () => AbortSignal | undefined;
   /** Our own diarizer; defaults to the configured CPU speaker models, if any. */
   diarizer?: (settings: Settings) => RecordingDiarizer | null;
+  /**
+   * The voice input service that transcribes dictations; defaults to the
+   * deployment's configured voice input providers, with credit billing.
+   */
+  dictationTranscription?: (settings: Settings, db: Database) => TranscriptionService;
+  /** Cuts a dictation into provider-sized WAV pieces; defaults to ffmpeg. */
+  dictationSegmenter?: (settings: Settings) => TranscriptionSegmenter;
 };
 
 /** The workspace's own key for the provider, else its organization's. */
@@ -148,6 +179,25 @@ export function createRecordingActivities(
     }
     return defaultDiarizer.diarizer;
   };
+  let defaultDictation: {
+    settings: Settings;
+    service: TranscriptionService;
+    segmenter: TranscriptionSegmenter;
+  } | null = null;
+  const dictationFor = (settings: Settings, db: Database) => {
+    if (defaultDictation?.settings !== settings) {
+      defaultDictation = {
+        settings,
+        service: options.dictationTranscription
+          ? options.dictationTranscription(settings, db)
+          : createTranscriptionService({ settings, db }),
+        segmenter: options.dictationSegmenter
+          ? options.dictationSegmenter(settings)
+          : createFfmpegTranscriptionSegmenter({ ffmpegPath: settings.voiceInputFfmpegPath }),
+      };
+    }
+    return defaultDictation;
+  };
   const heartbeat = (details?: unknown) => {
     if (options.heartbeat) options.heartbeat(details);
     else activityContext()?.heartbeat(details);
@@ -175,6 +225,11 @@ export function createRecordingActivities(
       leaseSeconds: TRANSCRIPT_LEASE_SECONDS,
     });
     if (!job) return { outcome: "skipped" };
+    // A dictation is kept only long enough for its owner to take the text.
+    const expiry =
+      job.recording.purpose === "dictation"
+        ? { expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS }
+        : {};
     const fail = async (
       errorCode: string,
       cause?: unknown,
@@ -195,10 +250,13 @@ export function createRecordingActivities(
         model: job.version.model,
         ...(cause instanceof Error ? { error: cause.message.slice(0, 1_000) } : {}),
       });
-      return { outcome: "failed", errorCode };
+      return { outcome: "failed", errorCode, ...expiry };
     };
     try {
       if (!objectStorage) throw new PermanentRecordingFailure("storage_unavailable");
+      if (job.recording.purpose === "dictation") {
+        return await transcribeDictation(objectStorage, job);
+      }
       const found = findRecordingTranscriptionModel(
         registry,
         job.version.providerId,
@@ -373,7 +431,132 @@ export function createRecordingActivities(
         if (!error.retryable) return await fail(`provider_${error.code}`, error);
         throw ApplicationFailure.retryable(error.message, `provider_${error.code}`);
       }
+      // A dictation's voice input refused to bill it: nothing was sent, and
+      // retrying won't change the answer until the payer's credits do.
+      if (error instanceof TranscriptionBillingRefusedError) return await fail(error.code, error);
+      if (error instanceof TranscriptionServiceError) {
+        if (!error.retryable) return await fail(`voice_${error.code}`, error);
+        throw ApplicationFailure.retryable(error.message, `voice_${error.code}`);
+      }
+      if (error instanceof TranscriptionSegmenterError) {
+        if (!error.retryable) return await fail(error.code, error);
+        throw ApplicationFailure.retryable(error.message, error.code);
+      }
       throw error;
+    }
+
+    /**
+     * A dictation is transcribed by the workspace's voice input, as plain text
+     * without speakers: its one track is prepared like a meeting's, cut into
+     * provider-sized WAV pieces, and each piece is heard and billed once.
+     */
+    async function transcribeDictation(
+      storage: ObjectStorage,
+      claimed: NonNullable<typeof job>,
+    ): Promise<RecordingTranscriptOutcome> {
+      const workspace = await getWorkspace(db, input.workspaceId);
+      if (resolveWorkspaceVoiceInputEnabled(workspace?.settings) === false) {
+        throw new PermanentRecordingFailure("policy_blocked");
+      }
+      const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
+      const { service, segmenter } = dictationFor(settings, db);
+      const track = claimed.recording.tracks[0];
+      const chunks = claimed.chunks.filter((chunk) => chunk.trackNumber === track?.trackNumber);
+      const signal = cancellation();
+      const segments: Array<{
+        startMilliseconds: number;
+        endMilliseconds: number;
+        trackNumber: number;
+        speakerLabel: string | null;
+        text: string;
+        words: never[];
+      }> = [];
+      const languages = new Set<string>();
+      let audioMilliseconds = 0;
+      let creditCostMicros = 0;
+      if (track && chunks.length > 0) {
+        const offsetMilliseconds = Math.min(...chunks.map((chunk) => chunk.startMilliseconds));
+        const audio = await preparedTrackAudio({
+          db,
+          objectStorage: storage,
+          settings,
+          actor: actor,
+          recordingId: input.recordingId,
+          trackNumber: track.trackNumber,
+          mimeType: track.mimeType,
+          chunks,
+          offsetMilliseconds,
+          knownDurationMilliseconds: Math.max(0, track.durationMilliseconds - offsetMilliseconds),
+          signal,
+        });
+        if (!(await segmenter.available())) throw new PermanentRecordingFailure("unavailable");
+        const providerSegmentSeconds = Math.min(
+          TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+          service.limits().maxDurationSeconds,
+        );
+        const pinned = claimed.version.providerId !== "host" ? claimed.version.providerId : null;
+        const attribution = claimed.creditAttribution ?? { kind: "unknown" as const };
+        heartbeat({ phase: "transcribing", trackNumber: track.trackNumber });
+        for await (const piece of segmenter.segment({
+          sourceMimeType: audio.mimeType,
+          totalDurationMilliseconds: Math.max(1, Math.round(audio.durationMilliseconds)),
+          providerSegmentSeconds,
+          chunks: (async function* () {
+            yield audio.bytes;
+          })(),
+          signal,
+        })) {
+          const trustedSeconds = wavDurationSeconds(piece.bytes) ?? undefined;
+          const result = await withHeartbeat(() =>
+            service.transcribe({
+              workspaceId: input.workspaceId,
+              accountId: input.accountId,
+              subjectId: input.ownerSubjectId,
+              audio: piece.bytes,
+              mimeType: piece.mimeType,
+              durationSeconds: piece.durationMilliseconds / 1_000,
+              requestId: `${input.versionId}:${piece.segmentNumber}`,
+              ...(signal ? { signal } : {}),
+              preferredProvider: pinned ?? voiceInput?.preferredProvider,
+              fallbackEnabled: voiceInput?.fallbackEnabled,
+              billing: {
+                // One settlement per piece of this version, however many
+                // attempts the activity takes: a retry that hears it again
+                // settles the same unit, so the payer is billed once.
+                sourceId: `${input.recordingId}:${input.versionId}:${piece.segmentNumber}`,
+                attribution,
+                trustedDurationSeconds: trustedSeconds,
+              },
+            }),
+          );
+          creditCostMicros += result.creditCostMicros ?? 0;
+          for (const language of result.languages ?? []) languages.add(language);
+          audioMilliseconds += piece.durationMilliseconds;
+          const text = result.text.trim();
+          if (!text) continue;
+          const startMilliseconds = offsetMilliseconds + piece.startMilliseconds;
+          segments.push({
+            startMilliseconds,
+            endMilliseconds: startMilliseconds + piece.durationMilliseconds,
+            trackNumber: track.trackNumber,
+            speakerLabel: null,
+            text,
+            words: [],
+          });
+        }
+      }
+      const completed = await completeRecordingTranscriptVersion(db, {
+        ...actor,
+        versionId: input.versionId,
+        processingOwner: input.processingOwner,
+        languages: [...languages],
+        diarized: false,
+        diarization: "none",
+        costUsdMicros: creditCostMicros > 0 ? creditCostMicros : null,
+        audioMilliseconds,
+        segments,
+      });
+      return completed ? { outcome: "complete", ...expiry } : { outcome: "skipped" };
     }
 
     async function withHeartbeat<T>(work: () => Promise<T>): Promise<T> {
@@ -475,7 +658,7 @@ export function createRecordingActivities(
   /** Retries ran out on a retryable failure: fail the version with its last cause. */
   async function failRecordingTranscript(
     input: RecordingTranscriptInput & { errorCode: string; errorMessage?: string },
-  ): Promise<void> {
+  ): Promise<{ expireAfterMilliseconds?: number }> {
     const { db, observability } = await services();
     observability.warn("recording transcript failed after retries", {
       workspaceId: input.workspaceId,
@@ -493,6 +676,34 @@ export function createRecordingActivities(
     }).catch((error: unknown) => {
       if (!(error instanceof RecordingNotFoundError)) throw error;
     });
+    const recording = await getRecording(db, {
+      workspaceId: input.workspaceId,
+      subjectId: input.ownerSubjectId,
+      recordingId: input.recordingId,
+    }).catch(() => null);
+    return recording?.purpose === "dictation"
+      ? { expireAfterMilliseconds: DICTATION_RETENTION_MILLISECONDS }
+      : {};
+  }
+
+  /**
+   * A dictation's day is up: delete it as its owner would, unless it is
+   * already gone. Only dictations; anything else is left alone.
+   */
+  async function expireDictation(
+    input: RecordingWorkInput,
+  ): Promise<{ deleted: number; purged: boolean }> {
+    const { db } = await services();
+    const actor = { workspaceId: input.workspaceId, subjectId: input.ownerSubjectId };
+    try {
+      const recording = await getRecording(db, { ...actor, recordingId: input.recordingId });
+      if (recording.purpose !== "dictation") return { deleted: 0, purged: false };
+      await markRecordingDeleting(db, { ...actor, recordingId: input.recordingId });
+    } catch (error) {
+      if (error instanceof RecordingNotFoundError) return { deleted: 0, purged: false };
+      throw error;
+    }
+    return await deleteRecordingMedia(input);
   }
 
   /**
@@ -618,6 +829,7 @@ export function createRecordingActivities(
     transcribeRecordingVersion,
     failRecordingTranscript,
     deleteRecordingMedia,
+    expireDictation,
     recoverRecordingWorkflows,
     applyRecordingRetention,
   };

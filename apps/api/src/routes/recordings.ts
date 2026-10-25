@@ -6,14 +6,17 @@ import {
   CreateRecordingRequest,
   CreateRecordingTranscriptRequest,
   CreateRecordingUploadsRequest,
+  RecordingCapturePurpose,
   FinalizeRecordingRequest,
   RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
+  resolveWorkspaceVoiceInputEnabled,
   resolveWorkspaceRecordingSettings,
   SaveRecordingNoteRequest,
   UpdateRecordingRequest,
   UpdateRecordingSegmentsRequest,
   UpdateRecordingSpeakersRequest,
+  WorkspaceVoiceInputSettings,
   type Recording,
   type RecordingChunkUpload,
   type RecordingLiveSession,
@@ -64,6 +67,7 @@ import {
   updateRecording,
   updateRecordingSegments,
   updateRecordingSpeakers,
+  type CreditDebitAttribution,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
@@ -71,6 +75,7 @@ import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import { elevenLabsKeyAvailable, loadElevenLabsApiKey } from "../realtime-websocket";
+import { creditDebitAttributionForGrant } from "../access-grant-rls";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
 const PLAYBACK_URL_SECONDS = 60 * 60;
@@ -119,7 +124,13 @@ export function registerRecordingRoutes(
   async function actorFor(c: Context, permission: "sessions:read" | "sessions:create") {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const grant = await requireAccessGrant(c, deps, workspaceId, permission);
-    return { workspaceId, subjectId: grant.subjectId, accountId: grant.accountId };
+    return {
+      workspaceId,
+      subjectId: grant.subjectId,
+      accountId: grant.accountId,
+      /** Who a deployment-funded transcript this request asks for is billed to. */
+      creditAttribution: creditDebitAttributionForGrant(grant),
+    };
   }
 
   function recordingIdParam(c: Context): string {
@@ -171,6 +182,72 @@ export function registerRecordingRoutes(
       providerId,
       model: found.spec.model,
       options: { ...rest, ...(diarizer ? { diarizer } : {}) },
+    };
+  }
+
+  /**
+   * A dictation is transcribed by the workspace's voice input: its preferred
+   * provider, else the first ready one, as text without speakers. The worker
+   * may still fall over to another provider that refused before hearing it.
+   */
+  async function dictationChoice(actor: {
+    workspaceId: string;
+    subjectId: string;
+  }): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
+    const voiceInput = await dictationPolicy(actor.workspaceId);
+    const service = deps.transcription!;
+    const providerId = service.selectProvider
+      ? await service.selectProvider({
+          workspaceId: actor.workspaceId,
+          subjectId: actor.subjectId,
+          preferredProvider: voiceInput?.preferredProvider,
+          fallbackEnabled: voiceInput?.fallbackEnabled,
+        })
+      : "host";
+    if (!providerId) throw dictationUnavailable();
+    // The provider decides its model; versions record which provider heard it.
+    return { providerId, model: "voice-input", options: {} };
+  }
+
+  /** The workspace's voice input settings, refusing when voice input can't run. */
+  async function dictationPolicy(workspaceId: string) {
+    const workspace = await getWorkspace(db, workspaceId);
+    if (resolveWorkspaceVoiceInputEnabled(workspace?.settings) === false) {
+      throw new ApiHttpError(403, {
+        code: "forbidden",
+        message: "Voice input is turned off for this workspace.",
+        retryable: false,
+        details: { code: "policy_blocked" },
+      });
+    }
+    if (!deps.transcription || !(await deps.transcription.available({ workspaceId }))) {
+      throw dictationUnavailable();
+    }
+    return WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;
+  }
+
+  function dictationUnavailable(): ApiHttpError {
+    return new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: "Voice input isn't available on this deployment right now.",
+      retryable: true,
+      details: { code: "unavailable" },
+    });
+  }
+
+  /** The transcription a recording's next version uses, with who it is billed to. */
+  async function versionChoice(
+    actor: { workspaceId: string; subjectId: string; creditAttribution: CreditDebitAttribution },
+    recording: Recording,
+    requested: RecordingTranscriptionRequest,
+  ) {
+    const choice =
+      recording.purpose === "dictation"
+        ? await dictationChoice(actor)
+        : await transcriptionChoice(actor.workspaceId, requested);
+    return {
+      ...choice,
+      creditAttribution: actor.creditAttribution,
     };
   }
 
@@ -239,6 +316,9 @@ export function registerRecordingRoutes(
     const query = c.req.query("query")?.slice(0, 200);
     const externalRef = c.req.query("externalRef")?.slice(0, 512);
     const person = c.req.query("person")?.slice(0, 200);
+    // Dictations are private, so listing them shows the caller's own.
+    const purpose = RecordingCapturePurpose.safeParse(c.req.query("purpose") ?? "meeting");
+    if (!purpose.success) throw invalid("purpose must be meeting or dictation");
     const instant = (name: string): Date | undefined => {
       const value = c.req.query(name);
       if (!value) return undefined;
@@ -255,6 +335,7 @@ export function registerRecordingRoutes(
         startedFrom: instant("startedFrom"),
         startedTo: instant("startedTo"),
         externalRef: externalRef || undefined,
+        purpose: purpose.data,
         before,
         limit: Number.isFinite(limit) ? limit : 50,
       }),
@@ -264,6 +345,37 @@ export function registerRecordingRoutes(
   app.post(base, async (c) => {
     const actor = await actorFor(c, "sessions:create");
     const body = await parseRequestJson(c, CreateRecordingRequest);
+    if (body.purpose === "dictation") {
+      // Dictation is typing by voice: the workspace's voice input decides
+      // whether and how it is heard, and only its owner ever sees it.
+      await dictationPolicy(actor.workspaceId);
+      if (body.tracks.length !== 1 || body.tracks[0]!.source !== "microphone") {
+        throw invalid("A dictation has exactly one microphone track");
+      }
+      if (body.transcription) throw invalid("A dictation uses the workspace's voice input model");
+      const result = await guard(() =>
+        createRecording(db, {
+          ...actor,
+          purpose: "dictation",
+          recordingId: body.recordingId,
+          title: body.title ?? "Dictation",
+          visibility: "private",
+          startedAt: body.startedAt ? new Date(body.startedAt) : undefined,
+          externalRef: body.externalRef,
+          metadata: body.metadata,
+          tracks: body.tracks,
+        }),
+      );
+      if (result.recording.purpose !== "dictation") {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "This recording id is already a meeting.",
+          retryable: false,
+          details: { code: "purpose_mismatch" },
+        });
+      }
+      return c.json(result.recording, result.created ? 201 : 200);
+    }
     const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
     if (body.transcription) await transcriptionChoice(actor.workspaceId, body.transcription);
@@ -288,6 +400,14 @@ export function registerRecordingRoutes(
         transcription,
       }),
     );
+    if (result.recording.purpose !== "meeting") {
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message: "This recording id is already a dictation.",
+        retryable: false,
+        details: { code: "purpose_mismatch" },
+      });
+    }
     return c.json(result.recording, result.created ? 201 : 200);
   });
 
@@ -435,7 +555,7 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, FinalizeRecordingRequest);
     const current = await guard(() => getRecording(db, { ...actor, recordingId }));
-    const transcription = await transcriptionChoice(actor.workspaceId, current.transcription);
+    const transcription = await versionChoice(actor, current, current.transcription);
     const result = await guard(() =>
       finalizeRecording(db, {
         ...actor,
@@ -466,8 +586,12 @@ export function registerRecordingRoutes(
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingTranscriptRequest);
     const recording = await guard(() => getRecording(db, { ...actor, recordingId }));
-    const transcription = await transcriptionChoice(
-      actor.workspaceId,
+    if (recording.purpose === "dictation" && body.transcription) {
+      throw invalid("A dictation uses the workspace's voice input model");
+    }
+    const transcription = await versionChoice(
+      actor,
+      recording,
       body.transcription ?? recording.transcription,
     );
     const version = await guard(() =>
