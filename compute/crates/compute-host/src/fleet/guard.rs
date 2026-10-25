@@ -293,7 +293,7 @@ fn step_once(
     if let Some(action) = step.action {
         let result = match action {
             GuardAction::Freeze => cgroup.set_frozen(true),
-            GuardAction::Kill => cgroup.kill_all(),
+            GuardAction::Kill => kill_running(cgroup),
             GuardAction::Thaw => cgroup.set_frozen(false),
         };
         if *last != Some(action) {
@@ -313,6 +313,30 @@ fn step_once(
     saying.say(stopped);
     *last = step.action;
     step.feed
+}
+
+/// Kills the VMs that still run: every group inside the VMs' cgroup that
+/// is neither frozen nor empty. A VM that froze stays frozen, to run on if
+/// the lease is renewed: one VM ending while frozen (deleted, or its
+/// process killed) reads as not frozen, and so makes the whole cgroup
+/// read so, until its memory is released, and that must not end the
+/// others. Every process goes if any sits in the cgroup itself, or what
+/// is inside cannot be read.
+fn kill_running(cgroup: &Cgroup) -> std::io::Result<()> {
+    let children = match (cgroup.processes(), cgroup.children()) {
+        (Ok(own), Ok(children)) if own.is_empty() => children,
+        _ => return cgroup.kill_all(),
+    };
+    let mut result = Ok(());
+    for child in children {
+        let stopped = child
+            .freezer()
+            .is_ok_and(|state| state.frozen || state.empty);
+        if !stopped && let Err(error) = child.kill_all() {
+            result = Err(error);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -437,6 +461,53 @@ mod tests {
             suspending: dir.join("suspending"),
             watchdog,
         }
+    }
+
+    /// Past the deadline the guard kills only the VMs that still run. One
+    /// that is ending while frozen (deleted, or its process killed) reads
+    /// as not frozen until its memory is released, and so makes the whole
+    /// cgroup read so: the frozen ones stay frozen all the same, to run on
+    /// if the lease is renewed.
+    #[test]
+    fn past_the_deadline_only_the_vms_still_running_are_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = dir.path().join("vms");
+        let mut config = config(dir.path(), None);
+        config.cgroup = group.clone();
+        LeaseFile {
+            host: Some(1),
+            epoch: Some(1),
+            deadline_ns: 1,
+            seq: 1,
+        }
+        .write(&config.lease_file)
+        .unwrap();
+        let set = |path: &Path, freeze: &str, events: &str| {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("cgroup.freeze"), freeze).unwrap();
+            std::fs::write(path.join("cgroup.events"), events).unwrap();
+            std::fs::write(path.join("cgroup.procs"), "").unwrap();
+        };
+        set(&group, "1", "populated 1\nfrozen 0\n");
+        set(&group.join("ending"), "0", "populated 1\nfrozen 0\n");
+        set(&group.join("frozen"), "0", "populated 1\nfrozen 1\n");
+        set(&group.join("gone"), "0", "populated 0\nfrozen 1\n");
+        let killed = |path: &Path| path.join("cgroup.kill").exists();
+        let (guard, cgroup) = (Guard::new(), Cgroup::at(&group));
+        let mut saying = Saying::new(Freezes::beside(&config.lock));
+        let mut last = None;
+        let feed = step_once(&guard, &cgroup, &config, &mut last, &mut saying);
+        assert_eq!(last, Some(GuardAction::Kill));
+        assert!(!feed, "not every VM is known to be stopped yet");
+        assert!(killed(&group.join("ending")), "the one still running");
+        assert!(!killed(&group.join("frozen")), "a frozen VM stays frozen");
+        assert!(!killed(&group.join("gone")));
+        assert!(!killed(&group));
+
+        // A process in the VMs' cgroup itself: everything goes.
+        std::fs::write(group.join("cgroup.procs"), "4242\n").unwrap();
+        assert!(!step_once(&guard, &cgroup, &config, &mut last, &mut saying));
+        assert!(killed(&group));
     }
 
     /// A guard whose watchdog cannot be armed exits without ever looking

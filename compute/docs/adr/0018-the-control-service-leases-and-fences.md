@@ -83,8 +83,15 @@ can be built and tested.
   what an earlier step asked for: from a second before the deadline it
   asks for the cgroup that holds every VM to freeze until `cgroup.events`
   reports `frozen 1`; from the deadline, until the VMs are frozen or gone
-  (`populated 0`), it writes `cgroup.kill` on every step; while the
-  deadline is further off it thaws a freeze it finds. So a guard that
+  (`populated 0`), it writes `cgroup.kill` on every step into each VM's
+  own group that is neither, and leaves the frozen ones frozen (a VM
+  ending while frozen, deleted or killed, reads `frozen 0` until its
+  memory is released, which is long enough for a step to see; killing
+  every VM for it would end every program on a host whose lease is only
+  late); while the deadline is further off it thaws a freeze it finds. A
+  frozen VMM cannot answer, so time its group spends frozen does not
+  count toward a request's deadline, and a step under way when the
+  freeze came finishes after the thaw instead of failing. So a guard that
   restarts after one that froze the VMs and died thaws them once the
   lease is renewed, and goes on freezing if it is not. The guard also
   holds the kernel watchdog (`softdog` with `nowayout`, W = 3 s), and feeds
