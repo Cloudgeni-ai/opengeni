@@ -1316,10 +1316,25 @@ export function createInteractionAttemptToolDefinitions(
     error: unknown,
     kind: InteractionSessionKind,
     requestedId: string | undefined,
+    use: MissingSessionUse = "current",
   ): Promise<unknown> => {
     if (requestedId === undefined || !isMissingSessionError(error, kind)) return error;
     const open = await ownOpenSessions(kind).catch(() => null);
-    return open === null ? error : missingSessionError(error, kind, open);
+    return open === null ? error : missingSessionError(error, kind, open, use);
+  };
+  /** Run a call that names a session directly, answering a missing id with
+   * the open sessions of that kind this chat may use. */
+  const withSessionHint = async <T>(
+    kind: InteractionSessionKind,
+    requestedId: string | undefined,
+    use: MissingSessionUse,
+    run: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await run();
+    } catch (error) {
+      throw await explainMissingSession(error, kind, requestedId, use);
+    }
   };
   /** This chat's open sessions of one kind on its current placement, most
    * recently used first: the ones browser and computer tools reuse. */
@@ -1810,13 +1825,25 @@ export function createInteractionAttemptToolDefinitions(
       return browserOpenText(output);
     },
     execute: async (value, context) => {
-      const opened = await openBrowser(
-        input.transport,
-        input.workspaceId,
-        input.sessionId,
-        value,
-        context,
-        extension.installUrl,
+      const opened = await withSessionHint(
+        "BrowserSession",
+        value.browserSessionId,
+        "open",
+        async () =>
+          await withSessionHint(
+            "ComputerSession",
+            value.linkedComputerSessionId,
+            "required",
+            async () =>
+              await openBrowser(
+                input.transport,
+                input.workspaceId,
+                input.sessionId,
+                value,
+                context,
+                extension.installUrl,
+              ),
+          ),
       );
       const openedTargetId =
         opened.observation?.target.id ??
@@ -2186,7 +2213,13 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: true,
     idempotent: true,
     execute: async (value) =>
-      await input.transport.readBrowserClipboard(input.workspaceId, value.browserSessionId),
+      await withSessionHint(
+        "BrowserSession",
+        value.browserSessionId,
+        "required",
+        async () =>
+          await input.transport.readBrowserClipboard(input.workspaceId, value.browserSessionId),
+      ),
   });
 
   add({
@@ -2229,35 +2262,38 @@ export function createInteractionAttemptToolDefinitions(
     output: z.union([BrowserDownloadListResponse, BrowserDownload]),
     readOnly: true,
     idempotent: true,
-    execute: async (value) => {
-      if (value.operation === "get") {
-        const download = await input.transport.getBrowserDownload(
+    execute: async (value) =>
+      await withSessionHint("BrowserSession", value.browserSessionId, "required", async () => {
+        if (value.operation === "get") {
+          const download = await input.transport.getBrowserDownload(
+            input.workspaceId,
+            value.browserSessionId,
+            value.downloadId!,
+          );
+          if (
+            download.browserSessionId !== value.browserSessionId ||
+            download.id !== value.downloadId
+          ) {
+            throw new Error("Browser download belongs to another resource");
+          }
+          return download;
+        }
+        const response = await input.transport.listBrowserDownloads(
           input.workspaceId,
           value.browserSessionId,
-          value.downloadId!,
         );
+        // Downloads kept from before a suspension keep the controller generation
+        // that fetched them, so only the browser binding must match.
         if (
-          download.browserSessionId !== value.browserSessionId ||
-          download.id !== value.downloadId
+          response.browserSessionId !== value.browserSessionId ||
+          response.downloads.some(
+            (download) => download.browserSessionId !== value.browserSessionId,
+          )
         ) {
-          throw new Error("Browser download belongs to another resource");
+          throw new Error("Browser downloads belong to another session binding");
         }
-        return download;
-      }
-      const response = await input.transport.listBrowserDownloads(
-        input.workspaceId,
-        value.browserSessionId,
-      );
-      // Downloads kept from before a suspension keep the controller generation
-      // that fetched them, so only the browser binding must match.
-      if (
-        response.browserSessionId !== value.browserSessionId ||
-        response.downloads.some((download) => download.browserSessionId !== value.browserSessionId)
-      ) {
-        throw new Error("Browser downloads belong to another session binding");
-      }
-      return response;
-    },
+        return response;
+      }),
   });
 
   add({
@@ -2270,27 +2306,28 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserDownloadSaveResponse,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) => {
-      const response = await input.transport.saveBrowserDownload(
-        input.workspaceId,
-        value.browserSessionId,
-        value.downloadId,
-        {
-          operationId: context.operationId,
-          destinationPath: value.destinationPath,
-          overwrite: value.overwrite,
-        },
-      );
-      if (
-        response.download.browserSessionId !== value.browserSessionId ||
-        response.download.id !== value.downloadId ||
-        response.operationId !== context.operationId ||
-        response.destinationPath !== value.destinationPath
-      ) {
-        throw new Error("Browser download save returned another operation binding");
-      }
-      return response;
-    },
+    execute: async (value, context) =>
+      await withSessionHint("BrowserSession", value.browserSessionId, "required", async () => {
+        const response = await input.transport.saveBrowserDownload(
+          input.workspaceId,
+          value.browserSessionId,
+          value.downloadId,
+          {
+            operationId: context.operationId,
+            destinationPath: value.destinationPath,
+            overwrite: value.overwrite,
+          },
+        );
+        if (
+          response.download.browserSessionId !== value.browserSessionId ||
+          response.download.id !== value.downloadId ||
+          response.operationId !== context.operationId ||
+          response.destinationPath !== value.destinationPath
+        ) {
+          throw new Error("Browser download save returned another operation binding");
+        }
+        return response;
+      }),
   });
 
   add({
@@ -2323,15 +2360,21 @@ export function createInteractionAttemptToolDefinitions(
         );
       }
       const browser = await currentTab.session(value.browserSessionId);
-      const response = await saveBrowserRecording.call(
-        input.transport,
-        input.workspaceId,
-        browser.browserSessionId,
-        value.recordingId!,
-        {
-          operationId: context.operationId,
-          ...(value.destinationPath ? { destinationPath: value.destinationPath } : {}),
-        },
+      const response = await withSessionHint(
+        "BrowserSession",
+        value.browserSessionId,
+        "current",
+        async () =>
+          await saveBrowserRecording.call(
+            input.transport,
+            input.workspaceId,
+            browser.browserSessionId,
+            value.recordingId!,
+            {
+              operationId: context.operationId,
+              ...(value.destinationPath ? { destinationPath: value.destinationPath } : {}),
+            },
+          ),
       );
       if (response.recording.recordingId !== value.recordingId) {
         throw new Error("Browser recording save returned another recording");
@@ -2547,12 +2590,18 @@ export function createInteractionAttemptToolDefinitions(
     readOnly: false,
     idempotent: true,
     execute: async (value, context) =>
-      await input.transport.publishBrowserRevision(input.workspaceId, value.browserSessionId, {
-        operationId: context.operationId,
-        identityId: value.identityId,
-        expectedHeadGeneration: value.expectedHeadGeneration,
-        ...(value.advanceDefault !== undefined ? { advanceDefault: value.advanceDefault } : {}),
-      }),
+      await withSessionHint(
+        "BrowserSession",
+        value.browserSessionId,
+        "required",
+        async () =>
+          await input.transport.publishBrowserRevision(input.workspaceId, value.browserSessionId, {
+            operationId: context.operationId,
+            identityId: value.identityId,
+            expectedHeadGeneration: value.expectedHeadGeneration,
+            ...(value.advanceDefault !== undefined ? { advanceDefault: value.advanceDefault } : {}),
+          }),
+      ),
   });
 
   add({
@@ -2565,29 +2614,30 @@ export function createInteractionAttemptToolDefinitions(
     output: BrowserSessionMutationResponse,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) => {
-      const request = { operationId: context.operationId };
-      if (value.action === "suspend") {
-        return await input.transport.suspendBrowserSession(
+    execute: async (value, context) =>
+      await withSessionHint("BrowserSession", value.browserSessionId, "required", async () => {
+        const request = { operationId: context.operationId };
+        if (value.action === "suspend") {
+          return await input.transport.suspendBrowserSession(
+            input.workspaceId,
+            value.browserSessionId,
+            request,
+          );
+        }
+        if (value.action === "resume") {
+          return await input.transport.resumeBrowserSession(
+            input.workspaceId,
+            value.browserSessionId,
+            request,
+          );
+        }
+        currentTab.forgetSession(value.browserSessionId);
+        return await input.transport.endBrowserSession(
           input.workspaceId,
           value.browserSessionId,
           request,
         );
-      }
-      if (value.action === "resume") {
-        return await input.transport.resumeBrowserSession(
-          input.workspaceId,
-          value.browserSessionId,
-          request,
-        );
-      }
-      currentTab.forgetSession(value.browserSessionId);
-      return await input.transport.endBrowserSession(
-        input.workspaceId,
-        value.browserSessionId,
-        request,
-      );
-    },
+      }),
   });
 
   add({
@@ -2614,12 +2664,12 @@ export function createInteractionAttemptToolDefinitions(
       return `${opened}\n${computerActionText(launch)}`;
     },
     execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
-      const opened = await openComputer(
-        input.transport,
-        input.workspaceId,
-        input.sessionId,
-        value,
-        context,
+      const opened = await withSessionHint(
+        "ComputerSession",
+        value.computerSessionId,
+        "open",
+        async () =>
+          await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
       );
       currentComputer.use(opened.session.id);
       // The computer is already open. A failed launch or capture must not turn
@@ -2969,15 +3019,16 @@ export function createInteractionAttemptToolDefinitions(
     output: ComputerSessionMutationResponse,
     readOnly: false,
     idempotent: true,
-    execute: async (value, context) => {
-      const ended = await input.transport.endComputerSession(
-        input.workspaceId,
-        value.computerSessionId,
-        { operationId: context.operationId },
-      );
-      currentComputer.forgetSession(value.computerSessionId);
-      return ended;
-    },
+    execute: async (value, context) =>
+      await withSessionHint("ComputerSession", value.computerSessionId, "required", async () => {
+        const ended = await input.transport.endComputerSession(
+          input.workspaceId,
+          value.computerSessionId,
+          { operationId: context.operationId },
+        );
+        currentComputer.forgetSession(value.computerSessionId);
+        return ended;
+      }),
   });
 
   if (
@@ -5451,6 +5502,12 @@ const MISSING_SESSION_HINT_EXCLUDED_LIFECYCLES: ReadonlySet<string> = new Set([
   "repair_required",
 ]);
 
+/** How the call that named a missing session can carry on without it:
+ * - current: omitting the id uses the session this chat used last;
+ * - required: the call needs an id, so only the listed ones help;
+ * - open: omitting the id opens or reuses a session. */
+type MissingSessionUse = "current" | "required" | "open";
+
 /** The most open sessions a missing-id hint lists. */
 const MISSING_SESSION_HINT_LIMIT = 5;
 
@@ -5473,16 +5530,25 @@ function missingSessionError(
   error: OpenGeniApiError,
   kind: InteractionSessionKind,
   open: ReadonlyArray<{ id: string; name: string }>,
+  use: MissingSessionUse,
 ): OpenGeniApiError {
   const listed = open.slice(0, MISSING_SESSION_HINT_LIMIT);
   const opener = kind === "BrowserSession" ? "browser_open" : "computer_open";
   const parameter = kind === "BrowserSession" ? "browserSessionId" : "computerSessionId";
+  const instead =
+    use === "current"
+      ? `, or omit ${parameter} to use the one you used last`
+      : use === "open"
+        ? `, or omit ${parameter} to open or reuse one`
+        : "";
   const hint =
     listed.length === 0
-      ? `This chat has no open ${kind}; call ${opener} to start one.`
+      ? use === "open"
+        ? `This chat has no open ${kind}; omit ${parameter} to open one.`
+        : `This chat has no open ${kind}; call ${opener} to start one.`
       : `This chat's open ${kind}s, most recently used first: ${listed
           .map((session) => `${session.id} ${JSON.stringify(sessionHintLabel(session.name))}`)
-          .join(", ")}. Use one of these ids, or omit ${parameter} to use the one you used last.`;
+          .join(", ")}. Use one of these ids${instead}.`;
   const reference = error.correlationId ? ` Reference: ${error.correlationId}.` : "";
   const refusal =
     reference && error.message.endsWith(reference)
@@ -5499,8 +5565,10 @@ function missingSessionError(
 
 /** A session's name as a short one-line label. */
 function sessionHintLabel(name: string): string {
-  const line = name.replace(/\s+/gu, " ").trim();
-  return line.length <= 60 ? line : `${line.slice(0, 59)}…`;
+  // Cut by code point, so a cut never splits an emoji or other astral
+  // character into a lone surrogate.
+  const characters = Array.from(name.replace(/\s+/gu, " ").trim());
+  return characters.length <= 60 ? characters.join("") : `${characters.slice(0, 59).join("")}…`;
 }
 
 /** The named tab no longer exists, while its browser does: the controller's

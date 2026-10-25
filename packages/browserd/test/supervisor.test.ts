@@ -3280,6 +3280,8 @@ describe("same-working-directory controller restart", () => {
       processState: "live" as "live" | "exited",
       drivers: 0,
       noted: [] as Array<{ instance: number; relaunched: BrowserRelaunchedTabs }>,
+      /** Launches still to fail as their browser starts. */
+      failingStarts: 0,
     };
     const open = () =>
       BrowserSupervisor.open({
@@ -3300,6 +3302,11 @@ describe("same-working-directory controller restart", () => {
                 noteRelaunchedTabs: (instance, relaunched) =>
                   state.noted.push({ instance, relaunched }),
                 tabUrl: RELAUNCH_FIXTURE_URL,
+                start: () => {
+                  if (state.failingStarts === 0) return;
+                  state.failingStarts -= 1;
+                  throw new Error("browser failed to start");
+                },
               },
               state.drivers,
             ),
@@ -3313,6 +3320,54 @@ describe("same-working-directory controller restart", () => {
       });
     return { state, open };
   };
+
+  test("a launch that fails leaves the stopped-tabs record for its retry", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let clock = 1_000_000;
+      const { state, open } = await relaunchFixture(rootDirectory, () => clock);
+      const supervisor = await open();
+      try {
+        const created = await supervisor.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        const oldTab = created.observation.target.id;
+        clock += 61_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+        const record = join(
+          rootDirectory,
+          "sessions",
+          options.browserSessionId,
+          "stopped-browser-tabs.json",
+        );
+        state.failingStarts = 1;
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow();
+        // Still there for the retry, which explains the old tab.
+        expect(JSON.parse(await readFile(record, "utf8"))).toMatchObject({
+          reason: "idle_release",
+          tabs: [{ targetId: oldTab }],
+        });
+        expect(state.noted).toEqual([]);
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const [replacement] = await supervisor.listTargets(options);
+        expect(state.noted).toEqual([
+          {
+            instance: state.drivers,
+            relaunched: {
+              reason: "idle_release",
+              idleReleaseMinutes: 1,
+              tabs: [{ targetId: oldTab, replacementId: replacement!.id }],
+            },
+          },
+        ]);
+        await expect(readFile(record)).rejects.toThrow();
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
 
   test("a browser relaunched after its idle release learns which tab replaced each old one", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
@@ -3361,7 +3416,7 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
-  test("every launch takes the stopped-tabs record, and only a relaunch applies it", async () => {
+  test("every successful launch takes the stopped-tabs record, and only a relaunch applies it", async () => {
     const writeRecord = async (sessionDirectory: string) => {
       await mkdir(sessionDirectory, { recursive: true });
       await writeFile(
