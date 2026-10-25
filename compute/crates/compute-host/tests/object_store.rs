@@ -87,6 +87,7 @@ async fn a_sandbox_survives_a_round_trip_through_object_storage() {
             runtime: None,
         }),
         profile: None,
+        image: None,
     };
     let memory = saved.memory.as_ref().unwrap();
     let gib = 1 << 30;

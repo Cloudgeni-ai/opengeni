@@ -38,6 +38,7 @@ fn files(dir: &Path, memory: bool) -> SavedFiles {
             runtime: Some(RUNTIME.to_owned()),
         }),
         profile: None,
+        image: None,
     }
 }
 
@@ -408,6 +409,58 @@ async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
     // A changed base is hashed again, never trusted from before.
     sparse(&base, at(4, 500), &[(at(0, 1), b"SAME")]);
     assert!(store.fetch(sandbox, &into).await.is_err());
+}
+
+/// A host fetches disks over several images: each keeps its hashes, taken
+/// once per version of its file however fetches over them interleave, and
+/// an image that is gone keeps nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn seeds_are_kept_per_file_and_taken_once_per_version() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let [one, other] = ["one", "other"].map(|name| dir.path().join(name));
+    for path in [&one, &other] {
+        sparse(
+            path,
+            3 * CHUNK_BYTES,
+            &[(7, path.to_str().unwrap().as_bytes())],
+        );
+    }
+    let seeds = Seeds::default();
+    let hashed = Arc::new(AtomicUsize::new(0));
+    let get = |path: PathBuf| {
+        let hashed = Arc::clone(&hashed);
+        let seeds = &seeds;
+        async move {
+            seeds
+                .get(&path, move |path| {
+                    hashed.fetch_add(1, Ordering::SeqCst);
+                    Seed::compute(path)
+                })
+                .await
+        }
+    };
+    let (a, b) = tokio::join!(get(one.clone()), get(one.clone()));
+    let first = a.unwrap();
+    assert!(Arc::ptr_eq(&first, &b.unwrap()), "one hashing for both");
+    for path in [&other, &one, &other, &one] {
+        assert_eq!(get(path.clone()).await.unwrap().path, *path);
+    }
+    assert_eq!(hashed.load(Ordering::SeqCst), 2);
+
+    sparse(&one, 3 * CHUNK_BYTES, &[(9, b"changed")]);
+    let changed = get(one.clone()).await.unwrap();
+    assert_ne!(
+        changed.hashes, first.hashes,
+        "hashed again, never trusted from before"
+    );
+    assert_eq!(hashed.load(Ordering::SeqCst), 3);
+
+    fs::remove_file(&other).unwrap();
+    assert!(get(other.clone()).await.is_none());
+    assert_eq!(hashed.load(Ordering::SeqCst), 3);
+    let held: Vec<PathBuf> = seeds.by_path.lock().unwrap().keys().cloned().collect();
+    assert_eq!(held, [one]);
 }
 
 /// Rebuilds a memory file from a remote image's manifest, as lazy wake
@@ -943,4 +996,320 @@ async fn a_stored_copy_of_another_version_is_refused() {
             "version {version}"
         );
     }
+}
+
+/// An in-memory store that counts the chunks it is asked for (reads, and
+/// the presence checks that read them) and given.
+#[derive(Debug, Default)]
+struct Counted {
+    inner: InMemory,
+    reads: std::sync::atomic::AtomicUsize,
+    writes: std::sync::atomic::AtomicUsize,
+}
+
+impl Counted {
+    /// Chunk reads and writes since the last call.
+    fn take(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::SeqCst;
+        (self.reads.swap(0, SeqCst), self.writes.swap(0, SeqCst))
+    }
+}
+
+fn is_chunk(location: &ObjectPath) -> bool {
+    location.as_ref().contains("/chunks/")
+}
+
+impl std::fmt::Display for Counted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("counted")
+    }
+}
+
+#[async_trait::async_trait]
+impl ObjectStore for Counted {
+    async fn put_opts(
+        &self,
+        location: &ObjectPath,
+        payload: object_store::PutPayload,
+        opts: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        if is_chunk(location) {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.put_opts(location, payload, opts).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        location: &ObjectPath,
+        opts: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.inner.put_multipart_opts(location, opts).await
+    }
+
+    async fn get_opts(
+        &self,
+        location: &ObjectPath,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        if is_chunk(location) {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.get_opts(location, options).await
+    }
+
+    async fn delete(&self, location: &ObjectPath) -> object_store::Result<()> {
+        self.inner.delete(location).await
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&ObjectPath>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.inner.list_with_delimiter(prefix).await
+    }
+
+    async fn copy(&self, from: &ObjectPath, to: &ObjectPath) -> object_store::Result<()> {
+        self.inner.copy(from, to).await
+    }
+
+    async fn copy_if_not_exists(
+        &self,
+        from: &ObjectPath,
+        to: &ObjectPath,
+    ) -> object_store::Result<()> {
+        self.inner.copy_if_not_exists(from, to).await
+    }
+}
+
+/// The offset of byte `within` of chunk `chunk`.
+fn at_chunk(chunk: u64, within: u64) -> u64 {
+    chunk * CHUNK_BYTES + within
+}
+
+/// An image of four chunks of data, stored, and a store counting what it
+/// is asked.
+async fn stored_image(dir: &Path) -> (PathBuf, ImageId, Arc<Counted>, Chunked) {
+    let path = dir.join("image");
+    sparse(
+        &path,
+        at_chunk(4, 0),
+        &[
+            (at_chunk(0, 1), b"boot"),
+            (at_chunk(1, 2), b"libs"),
+            (at_chunk(2, 3), b"etc"),
+            (at_chunk(3, 4), b"usr"),
+        ],
+    );
+    let backend = Arc::new(Counted::default());
+    let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+    let image = store.put_rootfs(&path).await.unwrap();
+    backend.take();
+    (path, image, backend, store)
+}
+
+/// The files of a sandbox whose disk was made from `image` at `path`, as
+/// `name`, then had `writes` made to it.
+fn made_from(
+    dir: &Path,
+    path: &Path,
+    image: ImageId,
+    name: &str,
+    writes: &[(u64, &[u8])],
+) -> SavedFiles {
+    let disk = dir.join(name);
+    fs::copy(path, &disk).unwrap();
+    let file = fs::OpenOptions::new().write(true).open(&disk).unwrap();
+    for (at, bytes) in writes {
+        std::os::unix::fs::FileExt::write_all_at(&file, bytes, *at).unwrap();
+    }
+    SavedFiles {
+        disk: crate::store::JailedFile::new(disk),
+        memory: None,
+        profile: None,
+        image: Some(image),
+    }
+}
+
+async fn archived(store: &Chunked, sandbox: Id, files: &SavedFiles) -> Receipt {
+    store
+        .archive(sandbox, save(), files, &CancellationToken::new())
+        .await
+        .unwrap()
+        .stored()
+        .unwrap()
+}
+
+/// A disk made from a stored image is archived over it: even its first
+/// copy uploads only the chunks the sandbox changed and names the image's
+/// for the rest. The image is checked once for every sandbox made from it,
+/// and a copy this host stored is reused without asking the store about
+/// each chunk; a host that confirmed nothing yet asks.
+#[tokio::test]
+async fn a_disk_made_from_a_stored_image_stores_only_what_it_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, image, backend, store) = stored_image(dir.path()).await;
+
+    let a = id("00000000000000000000000000000a01");
+    let a_files = made_from(dir.path(), &path, image, "a", &[(at_chunk(1, 2), b"LIBS")]);
+    archived(&store, a, &a_files).await;
+    // The image's four chunks checked, and the one changed chunk uploaded
+    // (and read back).
+    assert_eq!(backend.take(), (4 + 1, 1));
+
+    // Another sandbox of the same image: the image is not checked again.
+    let b = id("00000000000000000000000000000b01");
+    let b_files = made_from(dir.path(), &path, image, "b", &[(at_chunk(2, 3), b"ETC")]);
+    archived(&store, b, &b_files).await;
+    assert_eq!(backend.take(), (1, 1));
+
+    // The first again, after another change: only that chunk is stored,
+    // and nothing it reuses is asked about.
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(a_files.disk.path())
+        .unwrap();
+    std::os::unix::fs::FileExt::write_all_at(&file, b"USR", at_chunk(3, 4)).unwrap();
+    let receipt = archived(&store, a, &a_files).await;
+    assert_eq!(backend.take(), (1, 1));
+    // Nothing changed: nothing is asked or stored.
+    archived(&store, a, &a_files).await;
+    assert_eq!(backend.take(), (0, 0));
+    let receipt_again = archived(&store, a, &a_files).await;
+    assert_eq!(receipt, receipt_again, "the same copy");
+
+    // It comes back byte for byte, over the image or without it.
+    for seed in [Some(path.clone()), None] {
+        let restored = tempfile::tempdir().unwrap();
+        let mut into = into(restored.path(), false);
+        into.seed = seed;
+        store.fetch(a, &into).await.unwrap();
+        assert_eq!(
+            fs::read(a_files.disk.path()).unwrap(),
+            fs::read(&into.disk).unwrap()
+        );
+    }
+    assert!(store.verify(a, &receipt).await.unwrap());
+    backend.take();
+
+    // A host that confirmed nothing (another one, or this one restarted)
+    // checks the image, and asks about the two chunks of the copy the image
+    // does not hold.
+    let fresh = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+    archived(&fresh, a, &a_files).await;
+    assert_eq!(backend.take(), (4 + 2, 0));
+}
+
+/// What an archive reuses rests on a copy this host confirmed within a
+/// day. After a day, or once a verification finds a chunk gone, it asks
+/// about every chunk it reuses again, and stores again what is gone.
+#[tokio::test]
+async fn reused_chunks_are_asked_about_again_after_a_day_or_a_failed_verification() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let saved = files(dir.path(), false);
+    sparse(
+        saved.disk.path(),
+        at_chunk(3, 0),
+        &[
+            (at_chunk(0, 1), b"one"),
+            (at_chunk(1, 2), b"two"),
+            (at_chunk(2, 3), b"six"),
+        ],
+    );
+    let later = Arc::new(AtomicU64::new(0));
+    let clock = {
+        let later = Arc::clone(&later);
+        let start = SystemTime::now();
+        compute_storage::fresh::Clock::from_fn(move || {
+            start + Duration::from_secs(later.load(Ordering::SeqCst))
+        })
+    };
+    let backend = Arc::new(Counted::default());
+    let store =
+        Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")).with_clock(clock));
+    let sandbox = id("00000000000000000000000000000c01");
+    archived(&store, sandbox, &saved).await;
+    assert_eq!(backend.take(), (3, 3), "stored and read back");
+    archived(&store, sandbox, &saved).await;
+    assert_eq!(backend.take(), (0, 0));
+
+    // A day on, every chunk reused is asked about once.
+    later.store(25 * 3_600, Ordering::SeqCst);
+    archived(&store, sandbox, &saved).await;
+    assert_eq!(backend.take(), (3, 0));
+    archived(&store, sandbox, &saved).await;
+    assert_eq!(backend.take(), (0, 0));
+
+    // A chunk lost meanwhile goes unnoticed by archives until a
+    // verification finds it; the archive after that stores it again.
+    let lost = EncodedChunk::encode(
+        &{
+            let mut plain = vec![0; usize::try_from(CHUNK_BYTES).unwrap()];
+            plain[2..5].copy_from_slice(b"two");
+            plain
+        },
+        ZSTD_LEVEL,
+    )
+    .unwrap();
+    backend
+        .inner
+        .delete(&ObjectPath::from(format!("t/{}", lost.object_key())))
+        .await
+        .unwrap();
+    let blind = archived(&store, sandbox, &saved).await;
+    assert_eq!(backend.take(), (0, 0));
+    assert!(!store.verify(sandbox, &blind).await.unwrap());
+    backend.take();
+    let repaired = archived(&store, sandbox, &saved).await;
+    assert_eq!(backend.take(), (3 + 1, 1), "asked, stored and read back");
+    assert!(store.verify(sandbox, &repaired).await.unwrap());
+}
+
+/// A chunk an image lost is stored again from a sandbox's disk once a
+/// verification of the sandbox finds it gone: the image is checked anew,
+/// found incomplete and no longer reused.
+#[tokio::test]
+async fn a_chunk_an_image_lost_is_stored_again_once_a_verification_finds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, image, backend, store) = stored_image(dir.path()).await;
+    let a = id("00000000000000000000000000000d01");
+    let a_files = made_from(dir.path(), &path, image, "a", &[(at_chunk(1, 2), b"LIBS")]);
+    let first = archived(&store, a, &a_files).await;
+    assert!(store.verify(a, &first).await.unwrap());
+
+    let boot = EncodedChunk::encode(
+        &{
+            let mut plain = vec![0; usize::try_from(CHUNK_BYTES).unwrap()];
+            plain[1..5].copy_from_slice(b"boot");
+            plain
+        },
+        ZSTD_LEVEL,
+    )
+    .unwrap();
+    let key = ObjectPath::from(format!("t/{}", boot.object_key()));
+    backend.inner.delete(&key).await.unwrap();
+    assert!(!store.verify(a, &first).await.unwrap());
+    backend.take();
+
+    let repaired = archived(&store, a, &a_files).await;
+    let (_, writes) = backend.take();
+    assert_eq!(writes, 1, "the lost chunk, stored again");
+    backend.inner.head(&key).await.unwrap();
+    assert!(store.verify(a, &repaired).await.unwrap());
+    backend.take();
+
+    // The image is whole again, so it is reused again.
+    let b = id("00000000000000000000000000000d02");
+    let b_files = made_from(dir.path(), &path, image, "b", &[]);
+    archived(&store, b, &b_files).await;
+    assert_eq!(backend.take(), (4, 0));
 }

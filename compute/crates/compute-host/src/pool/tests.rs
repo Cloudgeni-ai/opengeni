@@ -239,7 +239,8 @@ async fn a_stored_image_is_named_by_its_id_and_never_read() {
         blake3::hash(b"an image").to_hex().as_str()
     );
 
-    // A create marks it used, which changes its metadata.
+    // A create marks it used, on a mark of its own: the image's file is
+    // left as it was, and its inputs still come from its id.
     let modified = || {
         fs::metadata(rootfs.path(image))
             .unwrap()
@@ -249,7 +250,7 @@ async fn a_stored_image_is_named_by_its_id_and_never_read() {
     let unused = modified();
     std::thread::sleep(Duration::from_millis(20));
     drop(rootfs.hold(image).await.unwrap());
-    assert_ne!(modified(), unused);
+    assert_eq!(modified(), unused);
     assert_eq!(sources.inputs(stored).unwrap(), before);
     assert!(!sources.hashes.knows(&rootfs.path(image)), "never read");
 }
