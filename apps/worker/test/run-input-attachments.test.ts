@@ -17,6 +17,7 @@ import {
   providerRecoveryResult,
 } from "../src/activities/agent-turn/errors";
 import {
+  ATTACHED_FILES_GUIDANCE,
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
   RetainedAttachmentTransportLimitError,
   RetainedAttachmentUnavailableError,
@@ -625,7 +626,8 @@ describe("turnInput attachment projection", () => {
         kind: "message",
         internalContext:
           "Attached files are available in the sandbox:\n" +
-          `- diagram.png (image/png, 5 bytes): .opengeni/files/${image.id}/diagram.png`,
+          `- diagram.png (image/png, 5 bytes): .opengeni/files/${image.id}/diagram.png` +
+          `\n${ATTACHED_FILES_GUIDANCE}`,
         historyItems: [
           {
             type: "message",

@@ -31,7 +31,6 @@ export const ALL_RESOURCES: AgentPromptResources = {
   connectedMachine: true,
   repositories: true,
   gitCredentials: true,
-  attachments: true,
   secretReferences: true,
   workspaceEnvironment: {
     name: "prod",

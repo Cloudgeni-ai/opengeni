@@ -123,6 +123,7 @@ import {
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   RequestHumanInteractionToolInput,
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FILE_RESOURCE_MOUNT_ROOT,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
@@ -2585,8 +2586,10 @@ function gitBindingDiscoveryApplies(
 }
 
 /**
- * Resource facts for modular module selection. Every input is a session- or
- * turn-level fact, so the composed prefix changes only when they change.
+ * Resource facts for modular module selection. Every output is a session-level
+ * fact, so the composed prefix changes only when they change. Per-turn file
+ * attachments deliberately select nothing here: a turn with a file must share
+ * the cached instructions of a turn without one.
  */
 export function agentPromptResourcesFor(
   settings: Settings,
@@ -2594,7 +2597,6 @@ export function agentPromptResourcesFor(
   options: Pick<
     BuildAgentOptions,
     | "activeSandboxBackend"
-    | "fileResourceDownloads"
     | "gitCredentialBindings"
     | "gitTokenSeed"
     | "gitTokenSeeds"
@@ -2617,10 +2619,6 @@ export function agentPromptResourcesFor(
       (Boolean(options.gitTokenSeed) ||
         gitTokenSeeds.length > 0 ||
         (options.gitCredentialBindings?.length ?? 0) > 0),
-    attachments:
-      (managedSandbox || connectedMachine) &&
-      (resources.some((resource) => resource.kind === "file") ||
-        (options.fileResourceDownloads?.length ?? 0) > 0),
     ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
     ...(options.rig ? { rig: options.rig } : {}),
     ...(options.secrets?.referencesEnabled ? { secretReferences: true } : {}),
@@ -3383,6 +3381,8 @@ export function buildOpenGeniAgent(
           }
         : undefined,
     ),
+    instructionManifest: (manifest: Manifest) =>
+      manifestWithoutFileResourceEntries(manifest, resources),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.authorizeAttemptExecution
@@ -11234,6 +11234,33 @@ export function buildManifest(
       Object.entries(environment).filter(([name]) => keepEnvironmentName(name)),
     ),
   });
+}
+
+/**
+ * The manifest the SDK renders into the system instructions (remote mount
+ * policy and filesystem layout): the runtime manifest without file resource
+ * entries. Files are attached per turn, so listing them there would change the
+ * cached instruction prefix on every turn with a file. The session still
+ * materializes the full manifest, and the turn's attachment notice at the end
+ * of the input tells the model where each file is and how to treat it. Entries
+ * under the default file root are dropped too, because a resumed sandbox's
+ * manifest state can still hold files attached on earlier turns.
+ */
+export function manifestWithoutFileResourceEntries(
+  manifest: Manifest,
+  resources: readonly ResourceRef[],
+): Manifest {
+  const filePaths = new Set(
+    resources.flatMap((resource) =>
+      resource.kind === "file" ? [resourceMountPath(resource)] : [],
+    ),
+  );
+  const fileRoot = `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/`;
+  const entries = Object.entries(manifest.entries).filter(
+    ([path]) => !filePaths.has(path) && !path.startsWith(fileRoot),
+  );
+  if (entries.length === Object.keys(manifest.entries).length) return manifest;
+  return new Manifest({ ...manifest, entries: Object.fromEntries(entries) });
 }
 
 export function repositoryWorkspaceSkillPathsOption(resources: readonly ResourceRef[]): {

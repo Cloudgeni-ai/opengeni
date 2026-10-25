@@ -6795,6 +6795,13 @@ export const FileListResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type FileListResponse = z.infer<typeof FileListResponse>;
 
+/**
+ * Largest file (raw bytes) the model may receive inline. Inline delivery needs
+ * a sha256 that pins the bytes, so an upload completed without a client digest
+ * gets a server-computed one up to this size.
+ */
+export const MAX_INLINE_MODEL_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
 export const CreateFileUploadRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /**

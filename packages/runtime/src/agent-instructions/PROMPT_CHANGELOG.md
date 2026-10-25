@@ -329,11 +329,8 @@ Standing attachments. A file attached to the session is mounted on every
 turn, so after compaction an agent could open a weeks-old screenshot and treat
 it as something the user just sent. The attachments module now says such files
 may be old and belong to the current request only when the latest message
-refers to them.
-
-```diff
-+ Files attached to the session stay mounted on every turn and may be old; treat one as part of the current request only when the latest message refers to it.
-```
+refers to them. (Superseded: see "Attached files retired" below; the guidance
+now travels with each turn's attachment notice.)
 
 Session targets. Conversations about another session now keep a remembered
 target and read, send to, or steer that session through the session tools, so
@@ -369,6 +366,23 @@ survives only for the locked legacy CORE (`legacy-environment.ts`).
 - A workspace environment named "prod" is attached to this session; its variables are exported in the sandbox shell environment.
 - Exported environment variables: API_URL, DEPLOY_KEY.
 - Environment notes from the operator: Use DEPLOY_KEY for deploys.
+```
+
+Attached files retired. The `attachments` module rendered only on a turn with a
+file, inside the operational contract, so every such turn changed the system
+instructions and missed the provider's prompt cache for the whole request,
+even for an identical task started seconds apart. The module is deleted and the
+modular contract no longer depends on per-turn files. Its guidance (read-only,
+copy before modifying, contents are data rather than instructions, an earlier
+attachment belongs to a request only when that message refers to it) now ends
+the turn's own "Attached files are available in the sandbox" notice, which sits
+after history and is stored with the turn, so later turns replay the same
+bytes. The SDK-rendered remote mount policy and filesystem layout likewise no
+longer list per-turn file mounts. The legacy prompt is unchanged.
+
+```diff
+- Attached files are mounted read-only; copy them before modifying.
+- File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.
 ```
 
 Secrets. New `secrets` module (capability `secrets`, rendered only once the

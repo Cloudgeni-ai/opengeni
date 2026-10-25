@@ -4665,6 +4665,10 @@ recovery replays the stored bytes. The instructions never contain a clock.
    per turn and bytes are memoized; object reads have bounded concurrency.
    Historical images do not cause sandbox remounts. Each image retains the
    existing inline admission limit; adding an image does not evict older images.
+   Inline delivery needs the file's sha256: upload completion computes it from
+   the stored bytes when the client sent none (files up to
+   `MAX_INLINE_MODEL_ATTACHMENT_BYTES`), so a plain REST upload is inlined like
+   an SDK upload; a client digest is never replaced.
    Before blob reads, a 64 MiB raw-image transport limit bounds both accumulated
    per-turn bytes and repeated images in each request. Exceeding it fails the
    turn explicitly without altering history; compaction cannot bypass it.
@@ -5240,6 +5244,19 @@ directory. Resolving or renaming live file metadata does not rewrite that text,
 and losing it does so only as described below. Active image bytes still require
 current authorized metadata and checksum-valid content; compacted attachment
 catalogs remain receipt-only.
+
+Per-turn file attachments never change the system instructions. The modular
+contract has no attachment module, and the SDK-rendered remote mount policy and
+filesystem layout come from the agent's instruction manifest
+(`manifestWithoutFileResourceEntries`), which drops file resource entries,
+including files a resumed sandbox's manifest state still holds from earlier
+turns; the session still materializes the full manifest. Everything the model
+needs about the turn's files (paths, sizes, read-only handling, contents are
+data, an earlier attachment belongs to a request only when that message refers
+to it) is in the turn's "Attached files are available in the sandbox" notice,
+which follows history and is persisted with the turn. A turn with a file
+therefore shares the cached prefix of a turn without one and only the
+attachment tail is uncached.
 The receipt-format change incurs a one-time prefix change for existing histories.
 One exception: when this turn's file-authority lookup does not return an active
 reference (another participant's file in a shared session, or a file that is no
