@@ -1338,6 +1338,9 @@ const SettingsSchema = z.object({
   azureOpenaiApiVersion: z.string().optional(),
   azureOpenaiApiKey: z.string().optional(),
   azureOpenaiAdToken: z.string().optional(),
+  azureOpenaiAuthMode: z
+    .enum(["static", "workload_identity", "managed_identity"])
+    .default("static"),
   /**
    * Let organization admins connect Azure OpenAI as this deployment's own
    * Microsoft Entra identity instead of a key or their own app. Off by
@@ -5592,6 +5595,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     azureOpenaiApiVersion: optional("OPENGENI_AZURE_OPENAI_API_VERSION"),
     azureOpenaiApiKey: optional("OPENGENI_AZURE_OPENAI_API_KEY"),
     azureOpenaiAdToken: optional("OPENGENI_AZURE_OPENAI_AD_TOKEN"),
+    azureOpenaiAuthMode: optional("OPENGENI_AZURE_OPENAI_AUTH_MODE"),
     azureOpenaiDeploymentIdentityEnabled: optional(
       "OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED",
     ),
@@ -7316,7 +7320,7 @@ function organizationDirectRegistryProvider(
       aliases: [],
       label: model.label?.trim() || model.upstreamModelId,
       capabilities: legacyModelCapabilities(settings, {
-        reasoningEffort: false,
+        reasoningEffort: provider === "azure_openai",
         hostedWebSearch: false,
       }),
       toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
@@ -11579,8 +11583,27 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (!settings.azureOpenaiBaseUrl && !settings.azureOpenaiApiVersion) {
       throw new Error("Azure OpenAI endpoint mode requires OPENGENI_AZURE_OPENAI_API_VERSION");
     }
-    if (!settings.azureOpenaiApiKey && !settings.azureOpenaiAdToken) {
+    if (
+      settings.azureOpenaiAuthMode === "static" &&
+      !settings.azureOpenaiApiKey &&
+      !settings.azureOpenaiAdToken
+    ) {
       throw new Error("Azure OpenAI requires an API key or AD token");
+    }
+  }
+  if (settings.azureOpenaiAuthMode !== "static") {
+    if (settings.azureOpenaiApiKey || settings.azureOpenaiAdToken) {
+      throw new Error(
+        "Azure OpenAI identity authentication cannot be combined with an API key or AD token",
+      );
+    }
+    if (
+      settings.azureOpenaiAuthMode === "workload_identity" &&
+      !(settings.azureTenantId && settings.azureClientId && settings.azureFederatedTokenFile)
+    ) {
+      throw new Error(
+        "Azure OpenAI workload_identity needs AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_FEDERATED_TOKEN_FILE",
+      );
     }
   }
   if (settings.azureOpenaiDeploymentIdentityEnabled && !deploymentAzureEntraCredential(settings)) {
