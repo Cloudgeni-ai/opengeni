@@ -9,9 +9,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::image::Generation;
+use serde::{Deserialize, Serialize};
+
+use super::{Job, blocking};
+use crate::image::{Generation, Images, Meta, Verified};
 use crate::layout::Paths;
-use compute_engine::{EngineError, ErrorKind};
+use crate::store::Store;
+use compute_engine::{Engine, EngineError, ErrorKind};
 
 #[cfg(target_os = "linux")]
 use crate::paging::Paging;
@@ -27,6 +31,160 @@ pub(crate) enum Base {
     /// Unknown, for example after a failed snapshot or merge: the next
     /// snapshot must hold every page.
     Unknown,
+}
+
+/// The record of a live VM's [`Base`], kept so an agent that restarts
+/// while the VM runs can go on saving only what changed, rather than
+/// every page. It sits in the host-only sandbox directory.
+///
+/// Which pages a VM changed lives only in its VMM process, and each
+/// snapshot resets it. So the record names the process
+/// ([`compute_engine::Engine::process_identity`]) and, for an image, the
+/// hashes that tell that image's content apart from any other's. It is
+/// written only once what it says is true: after a VM starts, and after
+/// an image is published. It is withdrawn before anything makes it false:
+/// before every snapshot, which resets the VMM's record of changed pages,
+/// and before the images are deleted. A record that is missing,
+/// unreadable, about another process, or about an image that is gone,
+/// changed, or not wholly on local disk leaves the base unknown.
+///
+/// It never needs to be durable: it is only ever used beside the live
+/// process it names, which no host crash leaves running, and the name
+/// includes the boot, so a record a crash left behind names no process.
+/// It is replaced by rename, so an agent that stops part-way never leaves
+/// half of one.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+// Strict: a damaged field name must not pass as a missing optional one.
+#[serde(deny_unknown_fields)]
+struct BaseRecord {
+    /// The VMM process the record is about.
+    process: String,
+    /// The image the VM's memory is based on; `None` for a VM booted
+    /// fresh, whose memory was all zeros. Required, `null` included: a
+    /// record that lost the field must not read as zeros, or a save would
+    /// drop every page the VM did not change since its image.
+    #[serde(deserialize_with = "Option::deserialize")]
+    image: Option<RecordedImage>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedImage {
+    generation: Generation,
+    state_hash: String,
+    chunks_hash: String,
+}
+
+/// Where a live VM's [`BaseRecord`] is kept.
+pub(crate) fn base_record(paths: &Paths) -> PathBuf {
+    paths.dir.join("memory-base.json")
+}
+
+/// Records that the memory of the VM whose process is `process` is
+/// based on `image`, or on zeros if `None`; see [`BaseRecord`]. Blocking.
+pub(crate) fn record_base(paths: &Paths, process: &str, image: Option<&Meta>) -> io::Result<()> {
+    let record = BaseRecord {
+        process: process.to_owned(),
+        image: image.map(|meta| RecordedImage {
+            generation: meta.generation,
+            state_hash: meta.state_hash.clone(),
+            chunks_hash: meta.chunks_hash.clone(),
+        }),
+    };
+    let bytes = serde_json::to_vec(&record).map_err(io::Error::other)?;
+    let path = base_record(paths);
+    let staging = path.with_extension("staging");
+    fs::write(&staging, bytes)?;
+    fs::rename(&staging, &path)
+}
+
+/// Withdraws the record of the VM's base before anything makes it false.
+/// Blocking.
+pub(crate) fn withdraw_base(paths: &Paths) -> io::Result<()> {
+    crate::layout::remove_if_present(&base_record(paths))
+}
+
+/// Forgets what a live VM's memory is based on, so its next save holds
+/// every page, and withdraws the record of it, so an agent that restarts
+/// does not go by it either.
+pub(super) async fn lose_base(paths: &Paths, base: &mut Base) {
+    *base = Base::Unknown;
+    let paths = paths.clone();
+    let dir = paths.dir.clone();
+    if let Err(error) = blocking(move || withdraw_base(&paths))
+        .await
+        .and_then(|withdrawn| withdrawn)
+    {
+        tracing::warn!(dir = %dir.display(), %error, "memory base record not withdrawn");
+    }
+}
+
+impl<E: Engine, S: Store> Job<E, S> {
+    /// Records what the memory of `vm`, just started from `image` or booted
+    /// fresh if `None`, is based on, for an agent that restarts while it
+    /// runs (see [`record_base`]). Without it, that agent's first save of
+    /// the VM holds every page.
+    pub(super) async fn record_started(&self, vm: &E::Vm, image: Option<&Verified>) {
+        let process = match self.engine.process_identity(vm) {
+            Ok(process) => process,
+            Err(error) => {
+                tracing::debug!(id = %self.id, %error, "the VM's process is not named");
+                return;
+            }
+        };
+        let (paths, meta) = (self.paths.clone(), image.map(|image| image.meta().clone()));
+        if let Err(error) = blocking(move || record_base(&paths, &process, meta.as_ref()))
+            .await
+            .and_then(|recorded| recorded)
+        {
+            tracing::warn!(id = %self.id, %error, "memory base not recorded");
+        }
+    }
+}
+
+/// What the memory of a VM found running after an agent restart is based
+/// on, as its record says, if the record is about `process`, the VM's
+/// own, and its image is still the same and wholly in `images` on local
+/// disk; otherwise unknown. Reads the image's description, state and
+/// chunk map. Blocking.
+pub(crate) fn recorded_base(paths: &Paths, process: Option<&str>, images: &Images) -> Base {
+    let path = base_record(paths);
+    let record = match fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<BaseRecord>(&bytes) {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "unreadable memory base record");
+                return Base::Unknown;
+            }
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Base::Unknown,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "memory base record not read");
+            return Base::Unknown;
+        }
+    };
+    if process != Some(record.process.as_str()) {
+        return Base::Unknown;
+    }
+    let Some(recorded) = record.image else {
+        return Base::Zero;
+    };
+    match images.verify(recorded.generation, crate::image::Depth::Light) {
+        // An image still filled from object storage may miss pages a diff
+        // would be merged over.
+        Ok(image)
+            if !image.meta().remote
+                && image.meta().state_hash == recorded.state_hash
+                && image.meta().chunks_hash == recorded.chunks_hash =>
+        {
+            Base::Image(recorded.generation)
+        }
+        Ok(_) => Base::Unknown,
+        Err(suspect) => {
+            tracing::debug!(generation = %recorded.generation, %suspect, "the recorded memory base is not usable");
+            Base::Unknown
+        }
+    }
 }
 
 /// What a live VM's saved state depends on: what backs its memory, and the
@@ -52,11 +210,11 @@ impl LiveMemory {
         }
     }
 
-    /// A VM found running after an agent restart: what its memory is based
-    /// on is unknown.
-    pub fn adopted(disk: DiskWatch) -> Self {
+    /// A VM found running after an agent restart, whose memory is based on
+    /// `base` as far as its record shows ([`recorded_base`]).
+    pub fn adopted(disk: DiskWatch, base: Base) -> Self {
         Self {
-            base: Base::Unknown,
+            base,
             #[cfg(target_os = "linux")]
             paging: None,
             disk: Arc::new(disk),
@@ -64,12 +222,13 @@ impl LiveMemory {
     }
 
     /// A VM found running after an agent restart whose pager the agent
-    /// reconnected to: what its memory is based on is unknown.
-    pub fn reconnected(disk: DiskWatch, pager: Reconnected) -> Self {
+    /// reconnected to, whose memory is based on `base` as far as its record
+    /// shows ([`recorded_base`]).
+    pub fn reconnected(disk: DiskWatch, pager: Reconnected, base: Base) -> Self {
         #[cfg(not(target_os = "linux"))]
         let Reconnected {} = pager;
         Self {
-            base: Base::Unknown,
+            base,
             #[cfg(target_os = "linux")]
             paging: Some(pager.paging),
             disk: Arc::new(disk),
@@ -338,4 +497,121 @@ impl DiskWatch {
 /// Present while the host checks a VM's disk, or after a check failed.
 pub(super) fn check_marker(paths: &Paths) -> PathBuf {
     paths.dir.join("disk-check")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image::{ChunkMap, Parts, Verified};
+
+    const LEN: u64 = 1 << 20;
+
+    struct Sandbox {
+        _root: tempfile::TempDir,
+        paths: Paths,
+        images: Images,
+    }
+
+    fn sandbox() -> Sandbox {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::at(root.path().join("sandbox"));
+        fs::create_dir_all(&paths.dir).unwrap();
+        let images = Images::new(paths.dir.join("images"));
+        Sandbox {
+            _root: root,
+            paths,
+            images,
+        }
+    }
+
+    impl Sandbox {
+        /// Publishes a whole image whose state is `state`.
+        fn publish(&self, state: &[u8]) -> Verified {
+            let (state_file, memory) =
+                (self.paths.dir.join("state"), self.paths.dir.join("memory"));
+            fs::write(&state_file, state).unwrap();
+            fs::File::create(&memory).unwrap().set_len(LEN).unwrap();
+            self.images
+                .publish(Parts::Whole {
+                    state: &state_file,
+                    memory: &memory,
+                    len: LEN,
+                })
+                .unwrap()
+        }
+
+        fn base(&self, process: Option<&str>) -> Base {
+            recorded_base(&self.paths, process, &self.images)
+        }
+    }
+
+    #[test]
+    fn a_base_is_trusted_only_beside_the_process_it_names() {
+        let sandbox = sandbox();
+        let image = sandbox.publish(b"one");
+        record_base(&sandbox.paths, "vmm-1", Some(image.meta())).unwrap();
+        assert_eq!(sandbox.base(Some("vmm-1")), Base::Image(image.generation()));
+        assert_eq!(sandbox.base(Some("vmm-2")), Base::Unknown);
+        assert_eq!(sandbox.base(None), Base::Unknown, "an unnamed process");
+        record_base(&sandbox.paths, "vmm-2", None).unwrap();
+        assert_eq!(sandbox.base(Some("vmm-2")), Base::Zero);
+        assert_eq!(sandbox.base(Some("vmm-1")), Base::Unknown);
+    }
+
+    #[test]
+    fn a_base_is_not_trusted_once_its_image_is_gone_or_another_has_its_number() {
+        let sandbox = sandbox();
+        let image = sandbox.publish(b"one");
+        record_base(&sandbox.paths, "vmm", Some(image.meta())).unwrap();
+        sandbox.images.clear().unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "a missing image");
+        // With every image gone, numbers start again.
+        let other = sandbox.publish(b"two");
+        assert_eq!(other.generation(), image.generation());
+        assert_eq!(
+            sandbox.base(Some("vmm")),
+            Base::Unknown,
+            "another image under the same number"
+        );
+    }
+
+    #[test]
+    fn a_base_still_filled_from_the_store_is_not_trusted() {
+        let sandbox = sandbox();
+        let state = sandbox.paths.dir.join("state");
+        fs::write(&state, b"remote").unwrap();
+        let image = sandbox
+            .images
+            .publish(Parts::Remote {
+                state: &state,
+                memory_len: LEN,
+                chunks: ChunkMap::zeros(LEN),
+                manifest: b"{}",
+                prefilled: None,
+            })
+            .unwrap();
+        record_base(&sandbox.paths, "vmm", Some(image.meta())).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown);
+    }
+
+    #[test]
+    fn a_withdrawn_or_unreadable_record_leaves_the_base_unknown() {
+        let sandbox = sandbox();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "no record");
+        record_base(&sandbox.paths, "vmm", None).unwrap();
+        withdraw_base(&sandbox.paths).unwrap();
+        withdraw_base(&sandbox.paths).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "withdrawn");
+        let path = base_record(&sandbox.paths);
+        fs::write(&path, b"{\"process\":\"vmm\",").unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "cut short");
+        fs::write(&path, br#"{"process":"vmm","image":null,"imagee":null}"#).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "a damaged field");
+        // Read as zeros, a record without its image would have a save drop
+        // every page the VM kept from that image.
+        fs::write(&path, br#"{"process":"vmm"}"#).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Unknown, "no image field");
+        fs::write(&path, br#"{"process":"vmm","image":null}"#).unwrap();
+        assert_eq!(sandbox.base(Some("vmm")), Base::Zero);
+    }
 }

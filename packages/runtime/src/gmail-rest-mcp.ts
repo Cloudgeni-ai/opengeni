@@ -17,6 +17,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import PostalMime, { addressParser, decodeWords } from "postal-mime";
 import { isRoutingMutationOutcomeUnknownError } from "./sandbox/routing/routing-session";
 import { connectorAttachmentFileName } from "./connector-attachments";
+import { projectGmailToolResultForModel } from "./gmail-model-projection";
 import {
   GMAIL_EXTRA_TOOLS,
   GMAIL_EXTRA_MUTATIONS,
@@ -642,6 +643,14 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
       samples: samples.filter((sample) => sample !== null),
       ...(labels.length > 0 ? { selectionLabels: labels } : {}),
     };
+  }
+
+  projectModelToolResult(
+    toolName: string,
+    result: import("@opengeni/contracts").AttemptToolResult,
+    budget: { readonly maxTextBytes: number },
+  ): import("@opengeni/contracts").AttemptToolResult {
+    return projectGmailToolResultForModel(toolName, result, budget);
   }
 
   async callTool(toolName: string, args: Record<string, unknown> | null): Promise<any> {

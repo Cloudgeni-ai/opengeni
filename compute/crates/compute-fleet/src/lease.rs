@@ -24,7 +24,7 @@
 
 use core::fmt;
 use core::time::Duration;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use compute_core::At;
 
@@ -505,6 +505,24 @@ impl Expiry {
         self.seen.remove(&host);
     }
 
+    /// Notes a read of every host not given up on, at `now`: each listed
+    /// host as [`Expiry::observe`], and each host not listed, lost or gone
+    /// whether or not this watcher saw that happen, is no longer watched.
+    pub fn observe_all(&mut self, renewals: impl IntoIterator<Item = (HostId, u64)>, now: At) {
+        let mut listed = BTreeSet::new();
+        for (host, count) in renewals {
+            self.observe(host, count, now);
+            listed.insert(host);
+        }
+        self.seen.retain(|host, _| listed.contains(host));
+    }
+
+    /// Whether `host` is watched.
+    #[must_use]
+    pub fn watches(&self, host: HostId) -> bool {
+        self.seen.contains_key(&host)
+    }
+
     /// Hosts lost at `now`, each with the renewal count to make marking it
     /// lost conditional on: a renewal accepted meanwhile saves it.
     pub fn expired(&self, now: At) -> impl Iterator<Item = (HostId, u64)> + '_ {
@@ -776,5 +794,20 @@ mod tests {
         let mut fresh = Expiry::new(T);
         fresh.observe(b, 4, at(25_000));
         assert_eq!(fresh.expired(at(39_999)).count(), 0);
+    }
+
+    #[test]
+    fn a_complete_read_stops_watching_the_hosts_it_does_not_list() {
+        let mut expiry = Expiry::new(T);
+        let (a, b) = (HostId(1), HostId(2));
+        expiry.observe_all([(a, 7), (b, 3)], at(0));
+        // a is given up on unseen by this watcher: the next read lacks it.
+        expiry.observe_all([(b, 3)], at(10_000));
+        assert!(!expiry.watches(a));
+        assert!(expiry.watches(b));
+        assert_eq!(expiry.expired(at(60_000)).collect::<Vec<_>>(), vec![(b, 3)]);
+        // Listed again (registered afresh), it is watched from then.
+        expiry.observe_all([(a, 1), (b, 4)], at(60_000));
+        assert_eq!(expiry.expired(at(74_999)).count(), 0);
     }
 }

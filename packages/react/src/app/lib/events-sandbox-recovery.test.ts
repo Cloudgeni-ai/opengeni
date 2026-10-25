@@ -27,6 +27,30 @@ test("same-turn typed provisioning evidence survives failure summarization", () 
   );
 });
 
+test("an untyped same-turn provisioning failure is a sandbox that didn't start", () => {
+  const failedStart = event(1, "sandbox.operation.failed", {
+    name: "sandbox.provision",
+    error: "agent too old",
+    failureCategory: "unknown",
+  });
+  const summary = summarizeSessionFailure([failedStart, failure], "failed");
+  expect(summary.sandboxStartFailed).toBe(true);
+  expect(summary.structuralSandboxFailure).toBeUndefined();
+  // An expected lifecycle wait, another turn's start, or a later successful
+  // start is no failed start.
+  for (const events of [
+    [{ ...failedStart, payload: { name: "sandbox.provision", expectedTransition: true } }, failure],
+    [{ ...failedStart, turnId: "older-turn" }, failure],
+    [
+      failedStart,
+      event(2, "sandbox.operation.completed", { name: "sandbox.provision" }),
+      event(3, "turn.failed", { error: "Model failed" }),
+    ],
+  ]) {
+    expect(summarizeSessionFailure(events, "failed").sandboxStartFailed).toBeUndefined();
+  }
+});
+
 test("unrelated, superseded, duplicated and historical provisioning failures do not classify a new failure", () => {
   for (const older of [
     { ...provision, turnId: "older-turn" },

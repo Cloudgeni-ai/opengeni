@@ -6,7 +6,7 @@ import {
   useContext,
   useEffect,
   useState,
-  type ComponentProps,
+  type ComponentPropsWithoutRef,
   type ReactNode,
 } from "react";
 
@@ -162,7 +162,7 @@ export function accountReachLabel(
 export function ModelsFormPage({
   backLabel,
   ...props
-}: Omit<ComponentProps<typeof FlushFormPage>, "backLabel"> & {
+}: Omit<ComponentPropsWithoutRef<typeof FlushFormPage>, "backLabel"> & {
   backLabel?: string | undefined;
 }) {
   const listLabel = useModelsListLabel();

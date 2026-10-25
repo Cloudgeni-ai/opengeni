@@ -3,7 +3,7 @@ import { TranscriptionServiceError } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../src/codex-realtime";
-import { createCodexSubscriptionTranscriptionProvider } from "../src/transcription/providers/codex-subscription";
+import { createCodexSubscriptionTranscriptionProvider } from "@opengeni/core/transcription-service";
 
 // Transcription and realtime for an organization with a Codex cutover row.
 // Every legacy Codex accessor is poisoned: a core or maintenance path that
@@ -89,13 +89,10 @@ function deferred<T>() {
 
 const audio = new Uint8Array([1, 2, 3]);
 const request = {
-  audio,
-  mimeType: "audio/wav",
-  filename: "a.wav",
-  workspaceId: WS,
-  accountId: ACCOUNT,
-  subjectId: "user:caller",
-  requestId: "request-1",
+  audio: { bytes: audio, mimeType: "audio/wav", fileName: "a.wav" },
+  model: "chatgpt-dictation",
+  diarize: false,
+  scope: { workspaceId: WS, accountId: ACCOUNT, subjectId: "user:caller", requestId: "request-1" },
 };
 
 describe("Codex transcription on the shared core", () => {
@@ -121,7 +118,10 @@ describe("Codex transcription on the shared core", () => {
         accountId: ACCOUNT,
       } as never),
     ).toBe(true);
-    expect(await provider.transcribe(request)).toEqual({ text: "hello", languages: ["en"] });
+    expect(await provider.transcribe(request, null)).toMatchObject({
+      text: "hello",
+      languages: ["en"],
+    });
     expect(seen).toEqual(["Bearer core-access"]);
     const scope = {
       kind: "workspace",
@@ -161,7 +161,7 @@ describe("Codex transcription on the shared core", () => {
         return new Response("unauthorized", { status: 401 });
       }) as never,
     });
-    const failure = await provider.transcribe(request).catch((error: unknown) => error);
+    const failure = await provider.transcribe(request, null).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(TranscriptionServiceError);
     expect((failure as TranscriptionServiceError).fallbackSafe).toBe(false);
     // One forced refresh and retry, as on the legacy path; then final.
@@ -191,7 +191,7 @@ describe("Codex transcription on the shared core", () => {
         return response;
       }) as typeof fetch,
     });
-    const result = provider.transcribe(request);
+    const result = provider.transcribe(request, null);
     await started.promise;
     // The persisted source disappears; already-dispatched response is owned.
     mock("renewSubscriptionCoreCodexOperationLease", async () => null);
@@ -203,7 +203,7 @@ describe("Codex transcription on the shared core", () => {
     expect(settled.mock.calls).toHaveLength(0);
     body.enqueue(new TextEncoder().encode('"language":"en"}'));
     body.close();
-    expect(await result).toEqual({ text: "complete audio", languages: ["en"] });
+    expect(await result).toMatchObject({ text: "complete audio", languages: ["en"] });
     expect(settled.mock.calls[0]?.[2]).toMatchObject({ outcome: "response_received" });
     expect(released.mock.calls).toHaveLength(1);
   });
@@ -229,7 +229,7 @@ describe("Codex transcription on the shared core", () => {
         return new Response("expired", { status: 401 });
       }) as typeof fetch,
     });
-    const failure = await provider.transcribe(request).catch((error: unknown) => error);
+    const failure = await provider.transcribe(request, null).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(TranscriptionServiceError);
     expect((failure as TranscriptionServiceError).fallbackSafe).toBe(false);
     expect(calls).toBe(1);
@@ -259,7 +259,7 @@ describe("Codex transcription on the shared core", () => {
         );
       }) as typeof fetch,
     });
-    const failure = await provider.transcribe(request).catch((error: unknown) => error);
+    const failure = await provider.transcribe(request, null).catch((error: unknown) => error);
     expect((failure as TranscriptionServiceError).fallbackSafe).toBe(false);
     expect(calls).toBe(1);
     expect(reserved.mock.calls).toHaveLength(1);
@@ -271,7 +271,7 @@ describe("Codex transcription on the shared core", () => {
     cutover("maintenance");
     const provider = createCodexSubscriptionTranscriptionProvider({ settings, db });
     expect(await provider.available({ workspaceId: WS, accountId: ACCOUNT } as never)).toBe(false);
-    const failure = await provider.transcribe(request).catch((error: unknown) => error);
+    const failure = await provider.transcribe(request, null).catch((error: unknown) => error);
     expect((failure as TranscriptionServiceError).fallbackSafe).toBe(false);
   });
 });

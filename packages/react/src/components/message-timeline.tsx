@@ -80,6 +80,7 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import { inertProps } from "../lib/inert";
 import {
   MessageSenderContext,
   MessageSenderSlot,
@@ -93,8 +94,7 @@ import {
   type OlderHistoryLoadReceipt,
   type OlderHistoryLoader,
 } from "../older-history";
-import { Markdown, type MarkdownProps } from "./markdown";
-import { linkifyText } from "./linkified-text";
+import { InlineMarkdown, Markdown, type MarkdownProps } from "./markdown";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
@@ -3358,7 +3358,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
           noteFolded !== undefined && group.kind === "item" ? group.item.id : undefined
         }
         aria-hidden={noteFolded || undefined}
-        inert={noteFolded || undefined}
+        {...inertProps(noteFolded)}
         className={
           noteFolded ? "-mt-5 h-0 overflow-hidden opacity-0 [overflow-anchor:none]" : undefined
         }
@@ -3595,6 +3595,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               )}
               outcome={group.outcome}
               failureText={group.failureText}
+              failureDetail={group.failureDetail}
               foldKey={group.id}
               defaultOpen={readableWorkDefaultOpen(group)}
               unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
@@ -3750,6 +3751,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={group.items}
           outcome={group.outcome}
           failureText={group.failureText}
+          failureDetail={group.failureDetail}
           defaultOpen={
             group.outcome === "failed" ||
             containsPresentedImage ||
@@ -3824,6 +3826,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={activityItems}
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
+          failureDetail={insideTurn ? undefined : group.failureDetail}
           durationMs={durationMs}
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
@@ -4547,7 +4550,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                       <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                     ) : null}
                     {!question.label && multipleQuestions ? " " : null}
-                    {linkifyText(question.prompt)}
+                    <InlineMarkdown>{question.prompt}</InlineMarkdown>
                   </p>
                 </div>
               ))
@@ -4652,7 +4655,7 @@ function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
                 {!question.label && multipleQuestions ? (
                   <span className="mr-1.5 tabular-nums">{index + 1}.</span>
                 ) : null}
-                {linkifyText(question.prompt)}
+                <InlineMarkdown>{question.prompt}</InlineMarkdown>
               </p>
             </div>
           ))}
@@ -5439,14 +5442,17 @@ function withSlot(text: string, node: ReactNode): ReactNode {
  * without it, a pre-minted authorization link is offered, or the card stays
  * informative. Recovery never claims to resume/replay the failed tool call.
  */
-function AuthNeededRow({
+export function AuthNeededRow({
   item,
   onReconnect,
   resolveProviderLogo,
+  setupUnavailable = false,
 }: {
   item: AuthNeededItem;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  /** This person cannot set the capability up from here; say so instead of offering a review. */
+  setupUnavailable?: boolean | undefined;
 }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
@@ -5579,13 +5585,15 @@ function AuthNeededRow({
       </div>
       {!unavailable ? (
         <p className="px-1 text-og-xs text-og-fg-subtle">
-          {recommendation
-            ? t("messageTimeline.noAccessHasBeenGranted")
-            : t(
-                missing
-                  ? "messageTimeline.toolCallNotReplayedAfterConnecting"
-                  : "messageTimeline.toolCallNotReplayedAfterReconnecting",
-              )}
+          {recommendation && setupUnavailable
+            ? t("messageTimeline.setupUnavailableHere", { provider })
+            : recommendation
+              ? t("messageTimeline.noAccessHasBeenGranted")
+              : t(
+                  missing
+                    ? "messageTimeline.toolCallNotReplayedAfterConnecting"
+                    : "messageTimeline.toolCallNotReplayedAfterReconnecting",
+                )}
         </p>
       ) : null}
       {failed ? (

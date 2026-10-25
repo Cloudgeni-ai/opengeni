@@ -10,6 +10,7 @@ import {
   BrowserExternalAuthCommand,
   BrowserExternalAuthResult,
   BrowserIdentity,
+  BrowserLocator,
   BrowserObservation,
   BrowserRevision,
   BrowserRevisionMaterialization,
@@ -88,6 +89,19 @@ function observation() {
 }
 
 describe("interaction contracts", () => {
+  test("browser role, label and text locators all take exact", () => {
+    for (const locator of [
+      { kind: "role", role: "menuitem", name: "Delete", exact: true },
+      { kind: "label", text: "Email", exact: true },
+      { kind: "text", text: "Delete", exact: true },
+    ]) {
+      expect(BrowserLocator.parse(locator)).toEqual(locator as BrowserLocator);
+    }
+    expect(BrowserLocator.safeParse({ kind: "css", selector: "a", exact: true }).success).toBe(
+      false,
+    );
+  });
+
   test("preserves optional background input capability without changing native defaults", () => {
     const native = {
       semanticObservation: true,

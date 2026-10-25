@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import type { Settings } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
@@ -13,6 +14,10 @@ const ADMIN = "user:organization-admin";
 const KEY = "azure-org-secret-key-value";
 const ENDPOINT = "https://contoso.openai.azure.com/openai/v1";
 const BASE = `/v1/organizations/${ORGANIZATION}/model-providers`;
+// Fake Microsoft Entra ID app registration; never a real tenant.
+const TENANT = "11111111-2222-4333-8444-555555555555";
+const CLIENT = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+const CLIENT_SECRET = "fake-entra-client-secret-value";
 
 const browser = {
   "content-type": "application/json",
@@ -26,6 +31,7 @@ function connection(overrides: Partial<opengeniDb.OrganizationModelProviderConne
     status: "active" as const,
     version: 1,
     endpoint: ENDPOINT,
+    authMethod: "api_key" as opengeniDb.OrganizationModelProviderAuthMethod,
     createdAt: new Date("2026-10-17T00:00:00.000Z"),
     updatedAt: new Date("2026-10-17T00:00:00.000Z"),
     ...overrides,
@@ -45,16 +51,65 @@ describe("organization Azure OpenAI provider routes", () => {
   >;
   let upstream: Array<{ url: string; headers: Headers; body: Record<string, unknown> }>;
   let upstreamStatus: number;
+  let tokenRequests: Array<{ url: string; body: URLSearchParams }>;
+  let tokenStatus: number;
   let app: Hono;
+
+  function mount(overrides: Partial<Settings> = {}) {
+    const settings = testSettings({
+      productAccessMode: "managed",
+      publicBaseUrl: "https://opengeni.test",
+      environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64"),
+      ...overrides,
+    });
+    app = new Hono();
+    app.onError((error) => {
+      if (error instanceof HTTPException) return error.getResponse();
+      throw error;
+    });
+    registerOrganizationModelProviderRoutes(app, {
+      db: {} as opengeniDb.Database,
+      settings,
+      directModelFetch: (async (url: string, init: RequestInit) => {
+        if (url.startsWith("https://login.microsoftonline.com/")) {
+          tokenRequests.push({ url, body: new URLSearchParams(String(init.body)) });
+          return tokenStatus === 200
+            ? Response.json({ access_token: "fake-entra-access-token", expires_in: 3600 })
+            : Response.json(
+                {
+                  error: "invalid_client",
+                  error_description: `AADSTS7000215: Invalid client secret ${CLIENT_SECRET}`,
+                  error_codes: [7000215],
+                },
+                { status: tokenStatus },
+              );
+        }
+        upstream.push({
+          url,
+          headers: new Headers(init.headers),
+          body: JSON.parse(init.body as string),
+        });
+        return upstreamStatus === 200
+          ? Response.json({ status: "completed" })
+          : Response.json(
+              { error: { message: `upstream detail ${KEY}` } },
+              { status: upstreamStatus },
+            );
+      }) as typeof fetch,
+    } as unknown as ApiRouteDeps);
+  }
 
   beforeEach(() => {
     upstream = [];
     upstreamStatus = 200;
+    tokenRequests = [];
+    tokenStatus = 200;
     upsert = spyOn(opengeniDb, "upsertOrganizationModelProviderConnection").mockImplementation(
       async (_db, input) =>
         connection({
           providerKind: input.providerKind,
           endpoint: input.endpoint ?? null,
+          authMethod: input.authMethod ?? "api_key",
         }),
     );
     create = spyOn(opengeniDb, "createOrganizationModelProviderCustomModel").mockImplementation(
@@ -83,33 +138,7 @@ describe("organization Azure OpenAI provider routes", () => {
         browserSessionHash: "hash",
       } as never),
     );
-    const settings = testSettings({
-      productAccessMode: "managed",
-      publicBaseUrl: "https://opengeni.test",
-      environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64"),
-    });
-    app = new Hono();
-    app.onError((error) => {
-      if (error instanceof HTTPException) return error.getResponse();
-      throw error;
-    });
-    registerOrganizationModelProviderRoutes(app, {
-      db: {} as opengeniDb.Database,
-      settings,
-      directModelFetch: (async (url: string, init: RequestInit) => {
-        upstream.push({
-          url,
-          headers: new Headers(init.headers),
-          body: JSON.parse(init.body as string),
-        });
-        return upstreamStatus === 200
-          ? Response.json({ status: "completed" })
-          : Response.json(
-              { error: { message: `upstream detail ${KEY}` } },
-              { status: upstreamStatus },
-            );
-      }) as typeof fetch,
-    } as unknown as ApiRouteDeps);
+    mount();
   });
 
   afterEach(() => {
@@ -230,5 +259,135 @@ describe("organization Azure OpenAI provider routes", () => {
     });
     expect(response.status).toBe(403);
     expect(upsert).not.toHaveBeenCalled();
+  });
+
+  const entraApp = {
+    method: "entra_client_secret",
+    tenantId: TENANT,
+    clientId: CLIENT,
+    clientSecret: CLIENT_SECRET,
+  };
+
+  test("an Entra app connection signs in once, stores the secret encrypted and never returns it", async () => {
+    const saved = await put("azure_openai", { authentication: entraApp, endpoint: ENDPOINT });
+    expect(saved.status).toBe(200);
+    const text = await saved.text();
+    expect(text).not.toContain(CLIENT_SECRET);
+    expect(JSON.parse(text)).toMatchObject({
+      providerKind: "azure_openai",
+      endpoint: ENDPOINT,
+      authMethod: "entra_client_secret",
+    });
+    expect(tokenRequests).toHaveLength(1);
+    expect(tokenRequests[0]!.url).toBe(
+      `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`,
+    );
+    expect(tokenRequests[0]!.body.get("client_id")).toBe(CLIENT);
+    expect(tokenRequests[0]!.body.get("scope")).toBe(
+      "https://cognitiveservices.azure.com/.default",
+    );
+    const input = upsert.mock.calls.at(-1)![1];
+    expect(input.authMethod).toBe("entra_client_secret");
+    expect(input.credentialEncrypted).not.toContain(CLIENT_SECRET);
+    expect(input.credentialEncrypted).not.toContain(CLIENT);
+    // The stored document decrypts back to exactly this app.
+    const key = Buffer.alloc(32, 9);
+    expect(JSON.parse(opengeniDb.decryptEnvironmentValue(key, input.credentialEncrypted))).toEqual({
+      version: 1,
+      tenantId: TENANT,
+      clientId: CLIENT,
+      clientSecret: CLIENT_SECRET,
+    });
+    expect(upstream).toHaveLength(0);
+  });
+
+  test("a refused Entra app is a safe 422 and saves nothing", async () => {
+    tokenStatus = 401;
+    const response = await put("azure_openai", { authentication: entraApp, endpoint: ENDPOINT });
+    expect(response.status).toBe(422);
+    const text = await response.text();
+    expect(text).toContain("didn’t accept this app");
+    expect(text).not.toContain(CLIENT_SECRET);
+    expect(text).not.toContain("AADSTS");
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  test("a key and an Entra sign-in together, or Entra for another provider, are refused", async () => {
+    expect(
+      (await put("azure_openai", { apiKey: KEY, authentication: entraApp, endpoint: ENDPOINT }))
+        .status,
+    ).toBe(422);
+    expect((await put("azure_openai", { endpoint: ENDPOINT })).status).toBe(422);
+    expect((await put("openai", { authentication: entraApp })).status).toBe(422);
+    expect(
+      (
+        await put("azure_openai", {
+          authentication: { ...entraApp, clientId: "not-an-application-id" },
+          endpoint: ENDPOINT,
+        })
+      ).status,
+    ).toBe(422);
+    expect(tokenRequests).toHaveLength(0);
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  test("no organization can claim the deployment identity unless the operator offers it", async () => {
+    const deploymentIdentity = {
+      azureTenantId: "99999999-8888-4777-8666-555555555555",
+      azureClientId: "44444444-3333-4222-8111-000000000000",
+      azureClientSecret: "fake-deployment-secret",
+    };
+    // Configured but not offered, then offered but not configured: both refused.
+    for (const overrides of [
+      deploymentIdentity,
+      { azureOpenaiDeploymentIdentityEnabled: true },
+    ] satisfies Partial<Settings>[]) {
+      mount(overrides);
+      const refused = await put("azure_openai", {
+        authentication: { method: "entra_deployment_identity" },
+        endpoint: ENDPOINT,
+      });
+      expect(refused.status).toBe(422);
+      expect(await refused.text()).toContain("doesn’t offer its own identity");
+    }
+    expect(tokenRequests).toHaveLength(0);
+    expect(upsert).not.toHaveBeenCalled();
+
+    mount({ ...deploymentIdentity, azureOpenaiDeploymentIdentityEnabled: true });
+    const saved = await put("azure_openai", {
+      authentication: { method: "entra_deployment_identity" },
+      endpoint: ENDPOINT,
+    });
+    expect(saved.status).toBe(200);
+    expect(await saved.json()).toMatchObject({ authMethod: "entra_deployment_identity" });
+    expect(tokenRequests[0]!.body.get("client_id")).toBe(deploymentIdentity.azureClientId);
+    const input = upsert.mock.calls.at(-1)![1];
+    expect(input.authMethod).toBe("entra_deployment_identity");
+    expect(
+      opengeniDb.decryptEnvironmentValue(Buffer.alloc(32, 9), input.credentialEncrypted),
+    ).not.toContain(deploymentIdentity.azureClientSecret);
+  });
+
+  test("a deployment is verified with an Entra bearer token, never an api-key", async () => {
+    credential.mockResolvedValue({
+      azureEntra: {
+        source: "client_secret",
+        tenantId: TENANT,
+        clientId: CLIENT,
+        clientSecret: CLIENT_SECRET,
+      },
+      endpoint: ENDPOINT,
+    });
+    const response = await addDeployment("gpt-6.1-sol");
+    expect(response.status).toBe(201);
+    expect(tokenRequests).toHaveLength(1);
+    expect(upstream).toHaveLength(1);
+    expect(upstream[0]!.headers.get("authorization")).toBe("Bearer fake-entra-access-token");
+    expect(upstream[0]!.headers.get("api-key")).toBeNull();
+
+    upstreamStatus = 403;
+    const refused = await addDeployment("gpt-6.1-luna");
+    expect(refused.status).toBe(422);
+    expect(await refused.text()).toContain("Cognitive Services OpenAI User");
   });
 });

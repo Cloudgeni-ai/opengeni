@@ -46,6 +46,9 @@ struct Compute {
     fail_resets: AtomicBool,
     /// Operations stay running while set.
     hold_operations: AtomicBool,
+    /// How long the next read of an instance takes, by name, if not at
+    /// once: it answers with the status the instance had when asked.
+    slow_reads: Mutex<HashMap<String, Duration>>,
 }
 
 impl Compute {
@@ -105,7 +108,12 @@ async fn group_action(
 }
 
 async fn instance(State(compute): State<Arc<Compute>>, Path(name): Path<String>) -> Response {
-    match compute.instances.lock().unwrap().get(&name) {
+    let status = compute.instances.lock().unwrap().get(&name).cloned();
+    let slow = compute.slow_reads.lock().unwrap().remove(&name);
+    if let Some(slow) = slow {
+        tokio::time::sleep(slow).await;
+    }
+    match status {
         Some(status) => Json(json!({ "name": name, "status": status })).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -193,6 +201,23 @@ async fn fleet_with(
     instances: &[(&str, &str)],
     setup: impl FnOnce(&Compute),
 ) -> (Fleet, Arc<Compute>) {
+    fleet_full(instances, setup, Duration::ZERO).await
+}
+
+/// [`fleet`], whose leader waits up to `give_up_after` for a silent host
+/// holding sandboxes.
+async fn fleet_giving_up_after(
+    instances: &[(&str, &str)],
+    give_up_after: Duration,
+) -> (Fleet, Arc<Compute>) {
+    fleet_full(instances, |_| {}, give_up_after).await
+}
+
+async fn fleet_full(
+    instances: &[(&str, &str)],
+    setup: impl FnOnce(&Compute),
+    give_up_after: Duration,
+) -> (Fleet, Arc<Compute>) {
     let compute = Arc::new(Compute::default());
     compute
         .target_size
@@ -217,7 +242,11 @@ async fn fleet_with(
         every: Duration::from_millis(200),
         boot_within: BOOT_WITHIN,
     };
-    (Fleet::start_with(Some(scaling), |_| {}).await, compute)
+    let fleet = Fleet::start_with(Some(scaling), |settings| {
+        settings.give_up_after = give_up_after;
+    })
+    .await;
+    (fleet, compute)
 }
 
 /// Whether the fleet still counts on `host`.
@@ -331,6 +360,105 @@ async fn a_lapsed_host_of_the_group_is_reset_before_it_is_given_up_on() {
         "a reset host boots by itself: {:?}",
         compute.asked()
     );
+}
+
+/// A silent host may still be waited for, but it runs no VM once its term
+/// has passed: new sandboxes go to the hosts that renew, not to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_sandboxes_pass_over_a_silent_host_that_is_waited_for() {
+    let (fleet, compute) = fleet_giving_up_after(
+        &[("hosts-a1b2", "RUNNING"), ("hosts-c3d4", "RUNNING")],
+        Duration::from_secs(60),
+    )
+    .await;
+    let silent = fleet.host("hosts-a1b2").await;
+    let renewing = fleet.host("hosts-c3d4").await;
+    holding_one(&silent).await;
+    silent.renewing(false);
+    tokio::time::sleep(fleet.terms.term + Duration::from_secs(1)).await;
+    for _ in 0..6 {
+        let sandbox = fleet.create(json!({})).await;
+        let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+        assert_eq!(row["host"], "hosts-c3d4", "{row}");
+    }
+    assert!(
+        counted(&fleet, &silent).await,
+        "given up on while waited for"
+    );
+    assert!(counted(&fleet, &renewing).await);
+    assert!(!reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+}
+
+/// Asking the cloud about one silent host's instance holds up nothing
+/// else: another host that lapses meanwhile, holding no sandbox, is reset
+/// and given up on as soon as its lease allows, however slow the answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_answer_about_one_silent_host_holds_up_no_other() {
+    let (fleet, compute) = fleet_giving_up_after(
+        &[("hosts-a1b2", "RUNNING"), ("hosts-c3d4", "RUNNING")],
+        Duration::from_secs(60),
+    )
+    .await;
+    compute
+        .slow_reads
+        .lock()
+        .unwrap()
+        .insert("hosts-a1b2".into(), Duration::from_secs(20));
+    let waited_for = fleet.host("hosts-a1b2").await;
+    let empty = fleet.host("hosts-c3d4").await;
+    holding_one(&waited_for).await;
+    waited_for.renewing(false);
+    // The waited-for host lapses first, and its read starts and hangs.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    empty.renewing(false);
+    until(
+        past_lapse(&fleet) + Duration::from_secs(2),
+        "the empty host is reset and given up on",
+        async || reset(&compute, "hosts-c3d4") && !counted(&fleet, &empty).await,
+    )
+    .await;
+    assert!(
+        counted(&fleet, &waited_for).await,
+        "given up on while waited for"
+    );
+    assert!(!reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+}
+
+/// An answer asked for in an earlier silence says nothing of a later one:
+/// an instance found stopped before its host came back and renewed does
+/// not end the wait once the host falls silent again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_from_an_earlier_silence_does_not_end_a_later_wait() {
+    let (fleet, compute) =
+        fleet_giving_up_after(&[("hosts-a1b2", "RUNNING")], Duration::from_secs(60)).await;
+    let host = fleet.host("hosts-a1b2").await;
+    holding_one(&host).await;
+    let set = |status: &str| {
+        compute
+            .instances
+            .lock()
+            .unwrap()
+            .insert("hosts-a1b2".into(), status.into());
+    };
+    // The first silence's read finds the instance stopped, and answers
+    // late.
+    compute
+        .slow_reads
+        .lock()
+        .unwrap()
+        .insert("hosts-a1b2".into(), Duration::from_secs(9));
+    set("TERMINATED");
+    host.renewing(false);
+    tokio::time::sleep(past_lapse(&fleet)).await;
+    // The host comes back and renews, then falls silent again, running.
+    set("RUNNING");
+    host.renewing(true);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    host.renewing(false);
+    // Past the late answer, inside the new wait.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    assert!(!reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+    assert!(counted(&fleet, &host).await, "given up on while waited for");
 }
 
 /// An instance on its way to running, as when it resumes from a suspend
@@ -634,6 +762,130 @@ async fn a_host_outside_the_group_is_given_up_on_without_a_fence() {
         !counted(&fleet, &host).await
     })
     .await;
+    assert!(
+        !compute
+            .asked()
+            .iter()
+            .any(|asked| asked.contains("other-1")),
+        "{:?}",
+        compute.asked()
+    );
+}
+
+/// Has `host` report one sandbox from its next renewal, and waits until the
+/// fleet has seen it.
+async fn holding_one(host: &FakeHost) {
+    host.set_capacity(Capacity {
+        sandboxes: 1,
+        ..roomy()
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+/// Whether the leader asked the cloud to reset instance `name`.
+fn reset(compute: &Compute, name: &str) -> bool {
+    compute.asked().contains(&format!("reset {name}"))
+}
+
+/// A host cut off only by the network still holds its sandboxes, frozen,
+/// and runs them on once it renews again: while it holds sandboxes and its
+/// instance runs, the leader waits for it, neither resetting it nor giving
+/// up on it, and it comes back with its sandboxes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_host_holding_sandboxes_is_waited_for_and_comes_back_with_them() {
+    let (fleet, compute) =
+        fleet_giving_up_after(&[("hosts-a1b2", "RUNNING")], Duration::from_secs(60)).await;
+    let host = fleet.host("hosts-a1b2").await;
+    let sandbox = fleet.create(json!({})).await;
+    holding_one(&host).await;
+    host.renewing(false);
+    tokio::time::sleep(past_lapse(&fleet) + Duration::from_secs(2)).await;
+    assert!(!reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+    assert!(counted(&fleet, &host).await, "given up on while waited for");
+
+    host.renewing(true);
+    tokio::time::sleep(past_lapse(&fleet)).await;
+    assert!(!reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+    assert!(counted(&fleet, &host).await);
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+    assert_eq!(row["host"], "hosts-a1b2", "{row}");
+}
+
+/// The wait ends `give_up_after` from the host's last renewal: then it is
+/// reset and given up on as any lapsed host of the group is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_host_holding_sandboxes_is_reset_and_given_up_on_once_the_wait_ends() {
+    let terms = super::support::terms();
+    let lapse = terms.term + terms.margin;
+    let give_up_after = lapse + Duration::from_secs(3);
+    let (fleet, compute) = fleet_giving_up_after(&[("hosts-a1b2", "RUNNING")], give_up_after).await;
+    let host = fleet.host("hosts-a1b2").await;
+    holding_one(&host).await;
+    host.renewing(false);
+    tokio::time::sleep(lapse + Duration::from_secs(1)).await;
+    assert!(!reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+    assert!(counted(&fleet, &host).await);
+    until(
+        Duration::from_secs(6),
+        "the host is reset and given up on",
+        async || reset(&compute, "hosts-a1b2") && !counted(&fleet, &host).await,
+    )
+    .await;
+}
+
+/// A silent host whose instance its group finds stopped holds nothing to
+/// wait for: it is given up on, and started again, as soon as its lease
+/// allows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_host_whose_instance_stopped_is_given_up_on_without_waiting() {
+    let (fleet, compute) =
+        fleet_giving_up_after(&[("hosts-a1b2", "RUNNING")], Duration::from_secs(60)).await;
+    let host = fleet.host("hosts-a1b2").await;
+    holding_one(&host).await;
+    host.renewing(false);
+    compute
+        .instances
+        .lock()
+        .unwrap()
+        .insert("hosts-a1b2".into(), "TERMINATED".into());
+    until(past_lapse(&fleet), "the host is given up on", async || {
+        !counted(&fleet, &host).await
+    })
+    .await;
+    until(Duration::from_secs(5), "it is started", async || {
+        compute.asked().contains(&"start hosts-a1b2".to_owned())
+    })
+    .await;
+}
+
+/// A silent host that holds no sandbox has nothing to keep: it is reset and
+/// given up on as soon as its lease allows, however long the leader would
+/// wait for one that holds some.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_host_holding_no_sandbox_is_given_up_on_without_waiting() {
+    let (fleet, compute) =
+        fleet_giving_up_after(&[("hosts-a1b2", "RUNNING")], Duration::from_secs(60)).await;
+    let host = fleet.host("hosts-a1b2").await;
+    host.renewing(false);
+    until(
+        past_lapse(&fleet) + Duration::from_secs(2),
+        "the host is reset and given up on",
+        async || reset(&compute, "hosts-a1b2") && !counted(&fleet, &host).await,
+    )
+    .await;
+}
+
+/// A host outside the group holding sandboxes is waited for too: nothing
+/// says whether its machine still runs them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_host_outside_the_group_holding_sandboxes_is_waited_for() {
+    let (fleet, compute) =
+        fleet_giving_up_after(&[("hosts-a1b2", "RUNNING")], Duration::from_secs(60)).await;
+    let host = fleet.host("other-1.example").await;
+    holding_one(&host).await;
+    host.renewing(false);
+    tokio::time::sleep(past_lapse(&fleet) + Duration::from_secs(2)).await;
+    assert!(counted(&fleet, &host).await, "given up on while waited for");
     assert!(
         !compute
             .asked()

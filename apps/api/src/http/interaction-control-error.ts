@@ -4,11 +4,49 @@ import {
   type ErrorCode,
   type InteractionControlFailureCode,
 } from "@opengeni/contracts";
-import { BrowserControlRequestError, SelfhostedControlError } from "@opengeni/runtime/sandbox";
+import {
+  BrowserControlActionDeadlineError,
+  BrowserControlRequestError,
+  SelfhostedControlError,
+} from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "./api-error";
 
 export type InteractionControlSurface = "browser" | "computer";
+
+/** `details.code` of the 504 for an action that outlived its own deadline. */
+export const INTERACTION_ACTION_DEADLINE_ERROR_DETAIL_CODE = "INTERACTION_ACTION_DEADLINE_EXCEEDED";
+
+/**
+ * A browser or computer action request outlived the deadline derived from its
+ * own declared waits. Nothing is unavailable: the controller may still be
+ * running the action, so say exactly that instead of the generic "temporarily
+ * unavailable — retry" every 5xx becomes, and mark the outcome unknown.
+ */
+export function interactionActionDeadlineApiError(error: unknown): ApiHttpError | null {
+  const deadline =
+    error instanceof BrowserControlActionDeadlineError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof BrowserControlActionDeadlineError
+        ? error.cause
+        : null;
+  if (!deadline) return null;
+  const seconds = Math.ceil(deadline.deadlineMs / 1_000);
+  const message =
+    deadline.surface === "browser"
+      ? `The browser action did not finish within its ${seconds}-second limit and may still be running in the browser. Check the page before doing anything again; do not repeat the action automatically.`
+      : `The computer action did not finish within its ${seconds}-second limit and may still be running on the computer. Check the window before doing anything again; do not repeat the action automatically.`;
+  return new ApiHttpError(504, {
+    code: "action_timeout",
+    message,
+    retryable: false,
+    outcomeUnknown: true,
+    details: {
+      code: INTERACTION_ACTION_DEADLINE_ERROR_DETAIL_CODE,
+      deadlineMs: deadline.deadlineMs,
+    },
+  });
+}
 
 /**
  * Agents released before the dedicated `capacity_exhausted` code report a full

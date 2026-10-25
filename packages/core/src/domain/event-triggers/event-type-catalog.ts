@@ -71,6 +71,8 @@ function descriptor(entry: CatalogEntry): EventTypeDescriptor {
     argumentsSchema: null,
     available: true,
     unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
   };
 }
 

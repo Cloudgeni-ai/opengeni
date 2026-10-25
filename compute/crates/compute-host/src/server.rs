@@ -21,6 +21,7 @@ use tokio::time::{Instant, sleep_until};
 use crate::agent::{Handle, HostError, Lease};
 use crate::observe::served::{Ended, Served};
 use crate::protocol::{ErrorCode, Id, Reply, Request, step_name};
+use crate::rootfs::{PrepareError, Progress};
 use crate::store::OwnerEpoch;
 
 /// Bytes relayed per read, each way.
@@ -160,9 +161,11 @@ async fn respond(
                 .adopt(id, config, OwnerEpoch(owner_epoch), !whole)
                 .await,
         ),
-        Request::HandOff { id, owner_epoch } => {
-            done(handle.hand_off(id, OwnerEpoch(owner_epoch)).await)
-        }
+        Request::HandOff {
+            id,
+            owner_epoch,
+            awake,
+        } => done(handle.hand_off(id, OwnerEpoch(owner_epoch), awake).await),
         Request::Remove { id, generation } => done(handle.remove(id, generation).await),
         Request::Touch {
             id,
@@ -216,6 +219,21 @@ async fn respond(
         Request::Status => match handle.status().await {
             Ok(status) => Reply::Status(Box::new(status)),
             Err(error) => error_reply(&error),
+        },
+        Request::Prepare { image } => match handle.prepare(&image) {
+            Ok(Progress::Preparing) => Reply::Preparing,
+            Ok(Progress::Prepared(prepared)) => Reply::Prepared {
+                image: prepared.image,
+                digest: prepared.digest,
+            },
+            Err(error) => Reply::Error {
+                message: error.to_string(),
+                code: match error {
+                    PrepareError::Invalid(_) => ErrorCode::Invalid,
+                    PrepareError::Unavailable(_) => ErrorCode::Unavailable,
+                    PrepareError::Failed { .. } => ErrorCode::Internal,
+                },
+            },
         },
         Request::Connect { .. } => unreachable!("connections are relayed before this"),
     })

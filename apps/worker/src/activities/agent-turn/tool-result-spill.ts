@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { posix as posixPath } from "node:path";
 import {
   TOOL_RESULT_SPILL_MEDIA_TYPE,
   TOOL_RESULT_SPILL_MOUNT_PATH,
+  sandboxShellPath,
   toolResultSpillFilename,
   toolResultSpillSandboxPath,
   type AttemptToolResult as AttemptToolResultValue,
@@ -34,6 +36,14 @@ const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
 
 export type ToolResultSpillReceipt = ToolResultSpilledReceipt;
 
+/**
+ * Where the spilled copy is for the shell of this attempt:
+ * - `materialized`: copied into the live sandbox;
+ * - `deferred`: this attempt has a sandbox route but no live sandbox yet;
+ * - `unavailable`: no shell has it (no sandbox route, or the copy failed).
+ */
+type SpillMaterialization = "materialized" | "deferred" | "unavailable";
+
 export type ToolResultSpillDeps = {
   db: Database;
   objectStorage: ObjectStorage | null;
@@ -51,6 +61,12 @@ export type ToolResultSpillDeps = {
   getSetupBoxSession: () => unknown;
   getSdkOwnedSandboxSession: () => unknown;
   getSandboxGroupId: () => string | null;
+  /**
+   * The turn's lazy sandbox boundary, when the attempt has one. A spill that
+   * finds no live sandbox joins it (as a shell command would), so the receipt
+   * names a path only once the copy is really there.
+   */
+  getTurnSandboxProvisioner: () => { get(): Promise<unknown> } | null;
   runWorkspaceMutation: <T>(
     sandbox: ResumedTurnSandbox,
     operation: string,
@@ -108,20 +124,64 @@ export class ToolResultSpill {
       }
       file = await completeFileUpload(this.deps.db, this.deps.workspaceId, identity.uploadId);
     }
-    const materialized = await this.materializeFile(file);
-    const receipt: ToolResultSpillReceipt = {
+    // Registered first so a sandbox start this spill triggers copies it too.
+    this.receiptsCreatedThisTurn.set(file.id, {
       type: "tool_result_spilled",
-      sandboxPath: materialized ? intendedSandboxPath : null,
+      sandboxPath: intendedSandboxPath,
       fileId: file.id,
       byteSize: file.sizeBytes,
       mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
-    };
-    this.receiptsCreatedThisTurn.set(file.id, {
-      ...receipt,
-      sandboxPath: intendedSandboxPath,
     });
-    return spilledModelToolResult(receipt);
+    let materialization = await this.materializeFile(file);
+    if (materialization === "deferred") {
+      materialization = await this.materializeAfterSandboxStart(file);
+    }
+    return spilledModelToolResult({
+      type: "tool_result_spilled",
+      sandboxPath: materialization === "materialized" ? this.placedShellPath(filename) : null,
+      fileId: file.id,
+      byteSize: file.sizeBytes,
+      mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
+    });
   };
+
+  /**
+   * The only model-readable copy of an oversized result is the sandbox file,
+   * so a spill joins the turn's lazy sandbox instead of promising a later copy
+   * that may never happen (no sandbox in this turn, or a failed copy). Without
+   * a lazy boundary (the SDK-owned session appears only with the first shell
+   * command) the receipt says `null`.
+   */
+  private async materializeAfterSandboxStart(file: FileAsset): Promise<SpillMaterialization> {
+    const provisioner = this.deps.getTurnSandboxProvisioner();
+    if (!provisioner) return "unavailable";
+    try {
+      await provisioner.get();
+    } catch (error) {
+      this.deps.observability.warn("Tool result spill could not start the turn sandbox", {
+        errorClass: error instanceof Error ? error.name : "UnknownError",
+        errorCode: "worker_operation_failed",
+        origin: "worker",
+      });
+      return "unavailable";
+    }
+    // The start already copied it (`materializeDeferred`); this is a cache hit
+    // or a retry of a failed copy.
+    return (await this.materializeFile(file)) === "materialized" ? "materialized" : "unavailable";
+  }
+
+  /** The copy's absolute path in the placement it was just written to, so the
+   * shell opens it from any working directory. A placement whose root is not
+   * an absolute POSIX path keeps the cwd-relative form. */
+  private placedShellPath(filename: string): string {
+    const setupBoxSession = this.deps.getResolvedSandbox() ? this.deps.getSetupBoxSession() : null;
+    const session = setupBoxSession ?? this.deps.getSdkOwnedSandboxSession();
+    const root = (session as { state?: { manifest?: { root?: unknown } } } | null)?.state?.manifest
+      ?.root;
+    return typeof root === "string" && posixPath.isAbsolute(root)
+      ? posixPath.join(root, TOOL_RESULT_SPILL_MOUNT_PATH, filename)
+      : sandboxShellPath(toolResultSpillSandboxPath(filename));
+  }
 
   materializeDeferred = async (): Promise<void> => {
     for (const receipt of this.receiptsCreatedThisTurn.values()) {
@@ -130,26 +190,30 @@ export class ToolResultSpill {
     }
   };
 
-  private async materializeFile(file: FileAsset): Promise<boolean> {
-    if (this.deps.getSandboxFileDownloadBackend() === "none") return false;
+  private async materializeFile(file: FileAsset): Promise<SpillMaterialization> {
+    if (this.deps.getSandboxFileDownloadBackend() === "none") return "unavailable";
     try {
       const sandbox = this.deps.getResolvedSandbox();
       const setupBoxSession = this.deps.getSetupBoxSession();
       if (sandbox && setupBoxSession) {
-        return await this.materializeInSandbox(file, sandbox, setupBoxSession);
+        return (await this.materializeInSandbox(file, sandbox, setupBoxSession))
+          ? "materialized"
+          : "unavailable";
       }
       const sdkOwned = this.deps.getSdkOwnedSandboxSession();
       if (sdkOwned) {
-        return await this.writeDownload(sdkOwned, await this.prepareDownload(file));
+        return (await this.writeDownload(sdkOwned, await this.prepareDownload(file)))
+          ? "materialized"
+          : "unavailable";
       }
-      return false;
+      return "deferred";
     } catch (error) {
-      this.deps.observability.warn("Tool result spill sandbox materialization deferred", {
+      this.deps.observability.warn("Tool result spill sandbox materialization failed", {
         errorClass: error instanceof Error ? error.name : "UnknownError",
         errorCode: "worker_operation_failed",
         origin: "worker",
       });
-      return false;
+      return "unavailable";
     }
   }
 

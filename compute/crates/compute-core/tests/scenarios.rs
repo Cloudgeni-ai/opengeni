@@ -993,6 +993,80 @@ fn a_sleep_request_waits_for_holds_and_a_touch_cancels_it() {
 }
 
 #[test]
+fn letting_go_ends_every_hold_so_a_sleep_request_goes_ahead_at_once() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, State::RUNNING, SleepPolicy::NEVER);
+    for hold in [HoldId(1), HoldId(2)] {
+        rig.send(Input::Hold {
+            sandbox: SandboxId(1),
+            hold,
+            until: None,
+            priority: Priority::Interactive,
+        });
+    }
+    let sleep = Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Archived,
+    };
+    assert_eq!(rig.send(sleep), [], "held: nothing yet");
+    let (step, op) = only_start(&rig.send(Input::LetGo {
+        sandbox: SandboxId(1),
+    }));
+    assert_eq!(step, Step::Pause);
+    assert_eq!(rig.host.sandbox(SandboxId(1)).unwrap().holds, 0);
+    // A hold released afterwards, already ended, changes nothing.
+    assert_eq!(
+        rig.send(Input::Release {
+            sandbox: SandboxId(1),
+            hold: HoldId(2),
+        }),
+        []
+    );
+    let mut steps = vec![step];
+    let mut actions = rig.finish(1, op, Outcome::Done);
+    while let [(_, step, op)] = started(&actions)[..] {
+        steps.push(step);
+        actions = rig.finish(1, op, Outcome::Done);
+    }
+    assert_eq!(steps, [Step::Pause, Step::Save, Step::Drop, Step::Archive]);
+    assert_eq!(rig.state(1).level, Level::Archived);
+    assert!(rig.state(1).memory_saved, "its memory goes with it");
+}
+
+#[test]
+fn letting_go_ends_a_wake_still_retrying_so_a_sleep_request_goes_ahead() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, paused(Durability::Volatile), SleepPolicy::NEVER);
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Resume);
+    // The resume is refused for now: the wake waits to try again.
+    rig.finish(1, op, Outcome::Failed(Failure::Transient));
+    assert!(rig.host.sandbox(SandboxId(1)).unwrap().wants_awake);
+    rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Archived,
+    });
+    rig.send(Input::LetGo {
+        sandbox: SandboxId(1),
+    });
+    let view = rig.host.sandbox(SandboxId(1)).unwrap();
+    assert!(!view.wants_awake, "nothing wants it awake any more");
+    assert_eq!(view.requested, Level::Archived);
+    // Once the backoff ends it saves the paused VM instead of resuming it.
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Save);
+    let mut steps = vec![step];
+    let mut actions = rig.finish(1, op, Outcome::Done);
+    while let [(_, step, op)] = started(&actions)[..] {
+        steps.push(step);
+        actions = rig.finish(1, op, Outcome::Done);
+    }
+    assert_eq!(steps, [Step::Save, Step::Drop, Step::Archive]);
+    assert_eq!(rig.state(1).level, Level::Archived);
+    assert!(rig.state(1).memory_saved, "its programs go with it");
+}
+
+#[test]
 fn work_inside_a_running_sandbox_keeps_it_awake_but_never_wakes_it() {
     let mut rig = Rig::new(HostPolicy::default());
     rig.add(1, State::RUNNING, recommended());

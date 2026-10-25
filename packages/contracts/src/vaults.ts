@@ -26,10 +26,209 @@ export const VaultSyncStatus = /* @__PURE__ */ defineSchema(() =>
   z.enum(["ok", "syncing", "error", "auth_expired", "rate_limited"]),
 );
 export type VaultSyncStatus = z.infer<typeof VaultSyncStatus>;
+/**
+ * The kind of item, which decides its standard fields and its primary field.
+ * Each provider item maps to one type; anything more specific (a database
+ * login, a bank account, a passport) is its `category` (see
+ * `VAULT_ITEM_CATEGORIES`), so an item keeps both when it moves between
+ * providers.
+ */
 export const VaultItemType = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["login", "api_key", "note", "file", "passkey"]),
+  z.enum(["login", "api_key", "note", "file", "passkey", "card", "identity", "ssh_key"]),
 );
 export type VaultItemType = z.infer<typeof VaultItemType>;
+
+/** The item types that exist; `createItemTypes` lists at most all of them. */
+export const VAULT_ITEM_TYPE_COUNT = 8;
+
+/**
+ * A provider-specific kind of item, as a lower-case snake_case token. Known
+ * categories use the names in `VAULT_ITEM_CATEGORIES`; a provider category
+ * Opengeni does not know is kept as the snake_case form of its own name.
+ */
+export const VAULT_ITEM_CATEGORY_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+export const VaultItemCategory = /* @__PURE__ */ defineSchema(() =>
+  z.string().regex(VAULT_ITEM_CATEGORY_PATTERN, "a lower-case snake_case category"),
+);
+export type VaultItemCategory = z.infer<typeof VaultItemCategory>;
+
+/**
+ * Categories with a shared meaning across providers, and the item type each
+ * belongs to. An item with no category is the plain form of its type.
+ */
+export const VAULT_ITEM_CATEGORIES = {
+  password: "api_key",
+  database: "api_key",
+  server: "api_key",
+  wifi: "api_key",
+  email_account: "api_key",
+  software_license: "api_key",
+  crypto_wallet: "api_key",
+  bank_account: "note",
+  membership: "note",
+  passport: "note",
+  driver_license: "note",
+  outdoor_license: "note",
+  reward_program: "note",
+  national_id: "note",
+  medical_record: "note",
+  health_insurance: "note",
+  birth_certificate: "note",
+  email_alias: "note",
+  address: "identity",
+  person: "identity",
+  photo: "file",
+} as const satisfies Record<string, VaultItemType>;
+export type KnownVaultItemCategory = keyof typeof VAULT_ITEM_CATEGORIES;
+
+/**
+ * The category token for a provider's own category or record-type name:
+ * "BankAccount", "bank account" and "bankAccount" all become "bank_account".
+ * Null when nothing usable remains.
+ */
+export function vaultItemCategoryToken(raw: string): string | null {
+  const token = raw
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^[^a-z]+/, "")
+    .slice(0, 64)
+    .replace(/_+$/, "");
+  return VAULT_ITEM_CATEGORY_PATTERN.test(token) ? token : null;
+}
+
+/**
+ * The standard fields of each type, in display order, as Opengeni names them
+ * in every vault. Providers store them in their own built-in slots; any other
+ * field is kept as a custom field under its own name.
+ */
+export const VAULT_ITEM_TYPE_FIELDS: Readonly<
+  Record<VaultItemType, ReadonlyArray<{ name: string; kind: "text" | "concealed" | "totp" }>>
+> = {
+  login: [
+    { name: "username", kind: "text" },
+    { name: "password", kind: "concealed" },
+    { name: "one-time password", kind: "totp" },
+  ],
+  api_key: [{ name: "value", kind: "concealed" }],
+  note: [{ name: "note", kind: "concealed" }],
+  file: [],
+  passkey: [],
+  card: [
+    { name: "cardholder name", kind: "text" },
+    { name: "brand", kind: "text" },
+    { name: "number", kind: "concealed" },
+    { name: "expiry month", kind: "text" },
+    { name: "expiry year", kind: "text" },
+    { name: "security code", kind: "concealed" },
+  ],
+  identity: [
+    { name: "title", kind: "text" },
+    { name: "first name", kind: "text" },
+    { name: "middle name", kind: "text" },
+    { name: "last name", kind: "text" },
+    { name: "username", kind: "text" },
+    { name: "company", kind: "text" },
+    { name: "email", kind: "text" },
+    { name: "phone", kind: "text" },
+    { name: "address 1", kind: "text" },
+    { name: "address 2", kind: "text" },
+    { name: "address 3", kind: "text" },
+    { name: "city", kind: "text" },
+    { name: "state", kind: "text" },
+    { name: "postal code", kind: "text" },
+    { name: "country", kind: "text" },
+    { name: "national ID number", kind: "concealed" },
+    { name: "passport number", kind: "concealed" },
+    { name: "license number", kind: "concealed" },
+  ],
+  ssh_key: [
+    { name: "private key", kind: "concealed" },
+    { name: "public key", kind: "text" },
+    { name: "fingerprint", kind: "text" },
+  ],
+};
+
+/**
+ * A freshly generated SSH key pair for an `ssh_key` item's "private key"
+ * field. Opengeni writes the private key in OpenSSH format and fills in the
+ * "public key" and "fingerprint" fields; the private key never leaves the
+ * vault.
+ */
+export const GenerateSshKeySpec = /* @__PURE__ */ defineSchema(() =>
+  z.object({ algorithm: z.enum(["ed25519", "rsa4096"]).default("ed25519") }).strict(),
+);
+export type GenerateSshKeySpec = z.infer<typeof GenerateSshKeySpec>;
+
+/**
+ * Other names password managers give a type's standard fields (1Password's
+ * "verification number" is Bitwarden's "security code"). A write stores a
+ * field under any of these names in the provider's own slot, and a reference
+ * that names one of them still resolves when the item names it another way.
+ */
+export const VAULT_FIELD_NAME_SYNONYMS: Readonly<
+  Partial<Record<VaultItemType, Readonly<Record<string, readonly string[]>>>>
+> = {
+  card: {
+    "cardholder name": ["cardholder", "name on card"],
+    brand: ["type", "card type"],
+    number: ["card number"],
+    "security code": ["verification number", "cvv", "cvc", "cvv2", "csc"],
+    "expiry month": ["exp month", "expiration month"],
+    "expiry year": ["exp year", "expiration year"],
+  },
+  identity: {
+    "first name": ["firstname", "given name"],
+    "middle name": ["initial", "middle initial"],
+    "last name": ["lastname", "surname", "family name"],
+    email: ["email address"],
+    phone: ["phone number", "default phone"],
+    "address 1": ["address", "street address"],
+    "postal code": ["zip", "zip code", "postcode"],
+    "national ID number": ["ssn", "social security number"],
+  },
+  ssh_key: {},
+};
+
+function fieldNameKey(name: string): string {
+  return name.normalize("NFC").trim().toLowerCase();
+}
+
+/**
+ * The standard field a field name stands for in an item of this type, as
+ * Opengeni names it ("cvv" is a card's "security code"), or null for a
+ * custom field.
+ */
+export function standardVaultFieldName(type: VaultItemType, name: string): string | null {
+  const key = fieldNameKey(name);
+  const standard = VAULT_ITEM_TYPE_FIELDS[type].find((field) => fieldNameKey(field.name) === key);
+  if (standard) return standard.name;
+  for (const [canonical, synonyms] of Object.entries(VAULT_FIELD_NAME_SYNONYMS[type] ?? {})) {
+    if (synonyms.some((synonym) => fieldNameKey(synonym) === key)) return canonical;
+  }
+  return null;
+}
+
+/**
+ * Every other name a reference's field name may have in another password
+ * manager, across all types: a group's names when it belongs to one, else
+ * nothing. Used only when the exact name finds no field.
+ */
+export function vaultFieldNameAlternatives(name: string): string[] {
+  const key = fieldNameKey(name);
+  const out = new Set<string>();
+  for (const table of Object.values(VAULT_FIELD_NAME_SYNONYMS)) {
+    for (const [canonical, synonyms] of Object.entries(table ?? {})) {
+      const group = [canonical, ...synonyms];
+      if (!group.some((entry) => fieldNameKey(entry) === key)) continue;
+      for (const entry of group) if (fieldNameKey(entry) !== key) out.add(entry);
+    }
+  }
+  return [...out];
+}
 export const VaultFieldKind = /* @__PURE__ */ defineSchema(() =>
   z.enum(["text", "concealed", "totp", "file"]),
 );
@@ -39,7 +238,7 @@ export type VaultFieldKind = z.infer<typeof VaultFieldKind>;
 export const VaultProviderOperations = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      createItemTypes: z.array(VaultItemType).max(5),
+      createItemTypes: z.array(VaultItemType).max(VAULT_ITEM_TYPE_COUNT),
       updateItem: primitives.boolean,
       removeField: primitives.boolean,
       archiveItem: primitives.boolean,
@@ -57,6 +256,20 @@ export const VaultProviderOperations = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type VaultProviderOperations = z.infer<typeof VaultProviderOperations>;
+
+const ARCHIVE_KIND_STRENGTH = { archive: 2, trash: 1, none: 0 } as const;
+
+/**
+ * The weaker of two archive kinds: an archive (hidden, restorable as is) is
+ * stronger than a trash (restorable until emptied), which is stronger than
+ * none. A vault may narrow its adapter's archive to a trash, never widen it.
+ */
+export function weakerArchiveKind(
+  left: VaultProviderOperations["archiveKind"],
+  right: VaultProviderOperations["archiveKind"],
+): VaultProviderOperations["archiveKind"] {
+  return ARCHIVE_KIND_STRENGTH[left] <= ARCHIVE_KIND_STRENGTH[right] ? left : right;
+}
 
 /** A successful mirror check does not prove a customer's upstream cache is current. */
 export const VaultProviderFreshness = /* @__PURE__ */ defineSchema(() =>
@@ -107,13 +320,19 @@ export const DEFAULT_VAULT_NAMES = {
   task: "Task",
 } as const;
 
-/** Default primary field per item type (§10B.2); passkeys have none. */
+/**
+ * Default primary field per item type (§10B.2); passkeys have none, and an
+ * identity's primary is its first concealed field.
+ */
 export const VAULT_DEFAULT_PRIMARY_FIELD: Readonly<Record<VaultItemType, string | null>> = {
   login: "password",
   api_key: "value",
   note: "note",
   file: "file",
   passkey: null,
+  card: "number",
+  identity: null,
+  ssh_key: "private key",
 };
 
 /** Fixed passkey fields (D20). `privateKey` is concealed; the rest are text. */
@@ -241,6 +460,8 @@ export const VaultItemSummary = /* @__PURE__ */ defineSchema(() =>
     id: primitives.uuid,
     vaultId: primitives.uuid,
     type: VaultItemType,
+    /** Provider-specific kind of item (`VAULT_ITEM_CATEGORIES`); null for the plain type. */
+    category: primitives.nullableString,
     name: primitives.string,
     websites: z.array(primitives.string),
     /** Native username text field or the connected provider's display hint. */
@@ -352,6 +573,7 @@ export type DeleteVaultRequest = z.infer<typeof DeleteVaultRequest>;
 const VALUE_SOURCE_KEYS = [
   "value",
   "generate",
+  "generateKey",
   "fromReference",
   "fileBase64",
   "restoreVersion",
@@ -374,6 +596,7 @@ export const VaultFieldInput = /* @__PURE__ */ defineSchema(() =>
       kind: VaultFieldKind.optional(),
       value: z.string().optional(),
       generate: GeneratePasswordSpec.optional(),
+      generateKey: GenerateSshKeySpec.optional(),
       fromReference: primitives.string.max(VAULT_LIMITS.referenceMaxChars).optional(),
       fileBase64: z.string().optional(),
       fileName: z.string().max(255).optional(),
@@ -383,7 +606,7 @@ export const VaultFieldInput = /* @__PURE__ */ defineSchema(() =>
     .strict()
     .refine(
       exactlyOneValueSource,
-      "exactly one of value|generate|fromReference|fileBase64|restoreVersion|remove",
+      "exactly one of value|generate|generateKey|fromReference|fileBase64|restoreVersion|remove",
     ),
 );
 export type VaultFieldInput = z.infer<typeof VaultFieldInput>;
@@ -392,6 +615,7 @@ const CreateVaultItemShape = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       type: VaultItemType,
+      category: VaultItemCategory.nullable().optional(),
       name: VaultName,
       websites: z
         .array(primitives.string.max(VAULT_LIMITS.websiteMaxChars))
@@ -448,11 +672,14 @@ export const RestoreVaultFieldVersionRequest = /* @__PURE__ */ defineSchema(() =
 );
 export type RestoreVaultFieldVersionRequest = z.infer<typeof RestoreVaultFieldVersionRequest>;
 
+const QUERY_TRUE = new Set(["true", "1", "yes"]);
+const QUERY_FALSE = new Set(["false", "0", "no"]);
 const QueryBoolean = /* @__PURE__ */ defineSchema(() =>
-  z.preprocess(
-    (value) => (value === "true" ? true : value === "false" ? false : value),
-    primitives.boolean,
-  ),
+  z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    const normalized = value.trim().toLowerCase();
+    return QUERY_TRUE.has(normalized) ? true : QUERY_FALSE.has(normalized) ? false : value;
+  }, primitives.boolean),
 );
 const QueryInt = /* @__PURE__ */ defineSchema(() =>
   z.preprocess(
@@ -461,7 +688,11 @@ const QueryInt = /* @__PURE__ */ defineSchema(() =>
   ),
 );
 
-/** Query strings are accepted as strings too ("true", "50"). */
+/**
+ * Query strings are accepted as strings too ("true", "1", "50"). Archived
+ * items are left out unless `includeArchived` is set; a connected vault's
+ * archived items are the ones its connected account archived.
+ */
 export const ListVaultItemsQuery = /* @__PURE__ */ defineSchema(() =>
   z.object({
     q: z.string().max(200).optional(),
@@ -762,6 +993,12 @@ export const VaultErrorCode = /* @__PURE__ */ defineSchema(() =>
     "vault_item_name_conflict",
     "vault_limit_reached",
     "vault_read_only",
+    /**
+     * A writable connected vault cannot do this one thing (an item type, a
+     * file, a one-time password or an operation its provider does not
+     * offer). Unlike `vault_read_only`, other writes still work.
+     */
+    "vault_operation_unsupported",
     "vault_generation_conflict",
     "vault_permission_denied",
     /** A session's vault policy reaches outside its parent's effective vaults (AX-2). */
@@ -811,6 +1048,7 @@ export const VAULT_ERROR_HTTP_STATUS: Readonly<Record<VaultErrorCode, number>> =
   secret_search_cursor_invalid: 422,
   vault_policy_outside_parent: 422,
   vault_read_only: 403,
+  vault_operation_unsupported: 422,
   vault_permission_denied: 403,
   vault_reveal_requires_human: 403,
   human_auth_required: 403,
@@ -874,6 +1112,7 @@ export const SecretSearchResult = /* @__PURE__ */ defineSchema(() =>
       id: primitives.uuid,
       name: primitives.string,
       type: VaultItemType,
+      category: primitives.nullableString,
       websites: z.array(primitives.string),
       username: primitives.nullableString,
       hasTotp: primitives.boolean,
@@ -927,11 +1166,16 @@ export const SecretSaveFieldInput = /* @__PURE__ */ defineSchema(() =>
       kind: VaultFieldKind.optional(),
       value: z.string().optional(),
       generate: GeneratePasswordSpec.optional(),
+      /** An `ssh_key` item's "private key" only: a new key pair. */
+      generateKey: GenerateSshKeySpec.optional(),
       fromReference: primitives.string.max(VAULT_LIMITS.referenceMaxChars).optional(),
       restoreVersion: z.number().int().optional(),
     })
     .strict()
-    .refine(exactlyOneValueSource, "exactly one of value|generate|fromReference|restoreVersion"),
+    .refine(
+      exactlyOneValueSource,
+      "exactly one of value|generate|generateKey|fromReference|restoreVersion",
+    ),
 );
 export type SecretSaveFieldInput = z.infer<typeof SecretSaveFieldInput>;
 
@@ -943,6 +1187,8 @@ export const SecretSaveInput = /* @__PURE__ */ defineSchema(() =>
       vault: z.string().max(200).optional(),
       saveTo: SECRET_SAVE_TO.optional(),
       type: VaultItemType.default("login"),
+      /** A more specific kind of item, such as "database" or "bank_account". */
+      category: VaultItemCategory.nullable().optional(),
       websites: z
         .array(primitives.string.max(VAULT_LIMITS.websiteMaxChars))
         .max(VAULT_LIMITS.websitesPerItem)

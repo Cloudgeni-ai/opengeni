@@ -15,6 +15,7 @@ import {
   MAX_EVENT_RUNS_PER_HOUR,
 } from "@opengeni/contracts/event-triggers";
 import type {
+  AutomationTemplateEventSource,
   EventCondition,
   EventConditionOperator,
   EventSource,
@@ -56,6 +57,12 @@ export interface EventTriggerDraft {
   includeOwnEvents: boolean;
   /** MCP subscription arguments as JSON text; empty for none. */
   argumentsText: string;
+  /**
+   * The kind of source a template asked this trigger to listen on, while the
+   * person has none of that kind yet. Picking one of that kind keeps the
+   * template's events; the editor offers to add one.
+   */
+  templateSource?: AutomationTemplateEventSource | undefined;
 }
 
 /** An automation's event triggers and their run policy while they are edited. */

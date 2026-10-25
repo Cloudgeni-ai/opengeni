@@ -871,8 +871,8 @@ export type BrowserLocator =
       name?: string | undefined;
       exact?: boolean | undefined;
     }
-  | { kind: "label"; text: string }
-  | { kind: "text"; text: string }
+  | { kind: "label"; text: string; exact?: boolean | undefined }
+  | { kind: "text"; text: string; exact?: boolean | undefined }
   | { kind: "placeholder"; text: string }
   | { kind: "test_id"; value: string }
   | { kind: "css"; selector: string };
@@ -1193,6 +1193,15 @@ export type BrowserActionReceipt = {
   error: InteractionError | null;
   /** Elements the action's locators resolved to, in dispatch order. */
   targets?: BrowserActionResolvedTarget[] | undefined;
+  /** Per-action notes, such as a network_idle wait that ended on a page whose
+   * network kept busy; `message` says what happened in plain words. */
+  notes?: BrowserActionNote[] | undefined;
+};
+
+export type BrowserActionNote = {
+  actionIndex: number;
+  kind: "network_busy";
+  message: string;
 };
 
 export type BrowserActionResolvedTarget = {
@@ -1781,6 +1790,7 @@ export interface InteractionTransport {
     computerSessionId: string,
     targetId: string,
     options?: OpenGeniRequestOptions,
+    captureOptions?: ComputerScreenshotOptions,
   ): Promise<ComputerFrame>;
   callNativeComputerTool?(
     workspaceId: string,
@@ -2676,8 +2686,18 @@ export class ComputerSessionResource {
     return await this.transport.observeComputerTarget(this.workspaceId, this.id, targetId, options);
   }
 
-  async capture(targetId: string, options: OpenGeniRequestOptions = {}): Promise<ComputerFrame> {
-    return await this.transport.captureComputerTarget(this.workspaceId, this.id, targetId, options);
+  async capture(
+    targetId: string,
+    options: OpenGeniRequestOptions = {},
+    captureOptions: ComputerScreenshotOptions = {},
+  ): Promise<ComputerFrame> {
+    return await this.transport.captureComputerTarget(
+      this.workspaceId,
+      this.id,
+      targetId,
+      options,
+      captureOptions,
+    );
   }
 
   async callNativeTool(
@@ -2823,9 +2843,32 @@ export type ComputerFrameMetadata = {
   height: number;
   capturedAt: string;
   sha256: string;
+  /** On a zoomed frame: the rectangle it shows, in the pixels of the
+   *  `regionFrame` screenshot it was measured on. Its own pixels are
+   *  `width`x`height`. */
+  region?: ComputerFrameRegion;
+  /** On a zoomed frame: the size of the screenshot `region` is measured in. */
+  regionFrame?: ComputerFrameSize;
 };
 
 export type ComputerFrame = ComputerFrameMetadata & { data: Uint8Array };
+
+/** A rectangle in the pixels of a screenshot of a target. */
+export type ComputerFrameRegion = { x: number; y: number; width: number; height: number };
+
+/** The pixel size of a screenshot of a target. */
+export type ComputerFrameSize = { width: number; height: number };
+
+export type ComputerScreenshotOptions = {
+  /** Zoom: capture only this rectangle of a screenshot of the target, at up to
+   *  the target's full resolution. The result is its own frame; pointer
+   *  actions on it use its pixels. A server without zoom ignores it and
+   *  returns the regular screenshot, whose metadata then has no `region`. */
+  region?: ComputerFrameRegion;
+  /** The size of the screenshot `region` was measured on. Defaults to the
+   *  regular screenshot (the target fitted within 1024x768). */
+  regionFrame?: ComputerFrameSize;
+};
 
 export type BrowserFrameStreamOptions = InteractionFrameStreamOptions;
 
@@ -3058,6 +3101,8 @@ export function parseComputerFrameMetadata(value: unknown): ComputerFrameMetadat
     "height",
     "capturedAt",
     "sha256",
+    "region",
+    "regionFrame",
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     throw new Error("computer frame metadata contains unknown fields");
@@ -3104,7 +3149,34 @@ export function parseComputerFrameMetadata(value: unknown): ComputerFrameMetadat
   if (!/^[0-9a-f]{64}$/u.test(metadata.sha256)) {
     throw new Error("computer frame digest is invalid");
   }
+  if (metadata.region !== undefined && !isComputerFrameRegion(metadata.region)) {
+    throw new Error("computer frame region is invalid");
+  }
+  if (metadata.regionFrame !== undefined && !isComputerFrameSize(metadata.regionFrame)) {
+    throw new Error("computer frame region size is invalid");
+  }
   return metadata;
+}
+
+function isComputerFrameSize(value: unknown): value is ComputerFrameSize {
+  if (!isRecord(value)) return false;
+  return (
+    Object.keys(value).length === 2 &&
+    (["width", "height"] as const).every(
+      (key) => typeof value[key] === "number" && Number.isSafeInteger(value[key]) && value[key] > 0,
+    )
+  );
+}
+
+function isComputerFrameRegion(value: unknown): value is ComputerFrameRegion {
+  if (!isRecord(value)) return false;
+  const keys = Object.keys(value);
+  return (
+    keys.length === 4 &&
+    (["x", "y", "width", "height"] as const).every(
+      (key) => typeof value[key] === "number" && Number.isFinite(value[key]) && value[key] >= 0,
+    )
+  );
 }
 
 export function decodeComputerFrameMetadataHeader(value: string): ComputerFrameMetadata {

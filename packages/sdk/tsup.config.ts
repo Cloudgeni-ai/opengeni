@@ -85,5 +85,6 @@ export default defineConfig({
     "@opengeni/contracts/model-display",
     "@opengeni/contracts/secret-use-approval-question",
     "@opengeni/contracts/tool-review-presentation",
+    "@opengeni/contracts/message-time-zone",
   ],
 });

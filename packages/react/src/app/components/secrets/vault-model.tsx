@@ -136,13 +136,45 @@ export const ITEM_TYPE_LABEL: Record<VaultItemType, string> = {
   note: "Note",
   file: "File",
   passkey: "Passkey",
+  card: "Card",
+  identity: "Identity",
+  ssh_key: "SSH key",
 };
+
+/** The type as a word inside a sentence: "a login", "an API key", "an SSH key". */
+export function itemTypeNoun(type: VaultItemType): string {
+  return type === "api_key" || type === "ssh_key"
+    ? ITEM_TYPE_LABEL[type]
+    : ITEM_TYPE_LABEL[type].toLowerCase();
+}
+
+const CATEGORY_LABEL: Partial<Record<string, string>> = {
+  wifi: "Wi-Fi",
+  driver_license: "Driver's license",
+  national_id: "National ID",
+};
+
+/** A provider category ("bank_account") as a label ("Bank account"). */
+export function itemCategoryLabel(category: string): string {
+  const known = CATEGORY_LABEL[category];
+  if (known) return known;
+  const words = category.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/** What an item is, most specific first: its category ("Database") or its type ("API key"). */
+export function itemKindLabel(item: { type: VaultItemType; category?: string | null }): string {
+  return item.category ? itemCategoryLabel(item.category) : ITEM_TYPE_LABEL[item.type];
+}
 
 export const ITEM_TYPE_FILTERS: { value: "all" | VaultItemType; label: string }[] = [
   { value: "all", label: "All types" },
   { value: "login", label: "Logins" },
   { value: "api_key", label: "API keys" },
   { value: "note", label: "Notes" },
+  { value: "card", label: "Cards" },
+  { value: "identity", label: "Identities" },
+  { value: "ssh_key", label: "SSH keys" },
   { value: "file", label: "Files" },
   { value: "passkey", label: "Passkeys" },
 ];
@@ -271,6 +303,8 @@ function providerCopy(code: VaultErrorCode, home: string | null): string | undef
       return home
         ? `This vault is read-only. Change it in ${where} or link it as Read & write.`
         : "This vault is read-only. Link it as Read & write to save to it.";
+    case "vault_operation_unsupported":
+      return `${Where} can't do this here, though other changes still work. Use a workspace vault for it, or change it in ${where} itself.`;
     case "provider_auth_invalid":
       return `${Where} didn't accept the saved access. Reconnect it to keep using its vaults.`;
     case "provider_auth_expired":

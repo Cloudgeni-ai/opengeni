@@ -5,6 +5,13 @@ import {
   type VaultFieldKind,
   type VaultItemType,
 } from "./contract";
+import {
+  type ItemTypeMarker,
+  decodeItemTypeMarker,
+  isItemTypeMarkerName,
+  sshPublicKeyFingerprint,
+  sshPublicKeyFromPrivateKey,
+} from "@opengeni/vaults";
 import { safeFieldName, safeSecretName, uniqueName } from "./naming";
 import type { Attachment, ExtraField, Item, ItemContentVariant, Section } from "./schema";
 
@@ -23,6 +30,88 @@ export const LOGIN_FIELD_IDS = {
   totp: "login.totp",
 } as const;
 export const TOTP_FIELD_NAME = "one-time password";
+export const CARD_FIELD_IDS = {
+  cardholderName: "card.cardholder_name",
+  brand: "card.card_type",
+  number: "card.number",
+  securityCode: "card.verification_number",
+  expiryMonth: "card.expiration_date:month",
+  expiryYear: "card.expiration_date:year",
+  expiration: "card.expiration_date",
+  pin: "card.pin",
+} as const;
+export const SSH_FIELD_IDS = {
+  privateKey: "ssh.private_key",
+  publicKey: "ssh.public_key",
+  /** Not stored by Proton: derived from the public key on every read. */
+  fingerprint: "ssh.fingerprint",
+} as const;
+
+/**
+ * Proton identity keys that are a standard Opengeni identity field, by that
+ * field's name. Every other key keeps its own name with spaces ("full name",
+ * "work email"), and the Opengeni fields with no Proton slot ("title",
+ * "username", "address 2", "address 3") cannot be stored.
+ */
+export const IDENTITY_STANDARD_KEYS: Readonly<Record<string, string>> = {
+  "first name": "first_name",
+  "middle name": "middle_name",
+  "last name": "last_name",
+  company: "company",
+  email: "email",
+  phone: "phone_number",
+  "address 1": "street_address",
+  city: "city",
+  state: "state_or_province",
+  "postal code": "zip_or_postal_code",
+  country: "country_or_region",
+  "national ID number": "social_security_number",
+  "passport number": "passport_number",
+  "license number": "license_number",
+};
+const IDENTITY_NAME_FOR_KEY = new Map(
+  Object.entries(IDENTITY_STANDARD_KEYS).map(([name, key]) => [key, name]),
+);
+/** Every scalar key `item create identity` takes (pass-cli 2.4.2 IdentityTemplate). */
+export const IDENTITY_KEYS: ReadonlySet<string> = new Set([
+  "full_name",
+  "email",
+  "phone_number",
+  "first_name",
+  "middle_name",
+  "last_name",
+  "birthdate",
+  "gender",
+  "organization",
+  "street_address",
+  "zip_or_postal_code",
+  "city",
+  "state_or_province",
+  "country_or_region",
+  "floor",
+  "county",
+  "social_security_number",
+  "passport_number",
+  "license_number",
+  "website",
+  "x_handle",
+  "second_phone_number",
+  "linkedin",
+  "reddit",
+  "facebook",
+  "yahoo",
+  "instagram",
+  "company",
+  "job_title",
+  "personal_website",
+  "work_phone_number",
+  "work_email",
+]);
+
+/** The Opengeni field name of a Proton identity key. */
+export function identityFieldName(key: string): string {
+  return IDENTITY_NAME_FOR_KEY.get(key) ?? key.replace(/_/g, " ");
+}
 
 export type MappedValue =
   | { type: "text"; value: string }
@@ -42,6 +131,8 @@ const IDENTITY_CONCEALED = new Set(["social_security_number", "passport_number",
 
 class FieldCollector {
   readonly fields: MappedField[] = [];
+  /** The `opengeni.type` marker seen in the item's custom fields, if any. */
+  marker: ItemTypeMarker | null = null;
   private readonly names = new Set<string>();
   private readonly ids = new Map<string, number>();
 
@@ -55,6 +146,11 @@ class FieldCollector {
 
   extra(prefix: string, field: ExtraField) {
     const content = field.content;
+    if (isItemTypeMarkerName(field.name)) {
+      // The marker carries the type and category; it is never a field itself.
+      if ("Text" in content) this.marker ??= decodeItemTypeMarker(content.Text);
+      return;
+    }
     const id = `${prefix}${field.name}`;
     if ("Text" in content) this.add(id, field.name, "text", { type: "text", value: content.Text });
     else if ("Hidden" in content) {
@@ -85,32 +181,31 @@ function variantName(content: ItemContentVariant): string {
   return Object.keys(content)[0] ?? "Note";
 }
 
-export function itemTypeForVariant(variant: string): VaultItemType {
+/** The Opengeni type and category of a Proton item content variant. */
+export function itemKindForVariant(variant: string): ItemTypeMarker {
   switch (variant) {
     case "Login":
-      return "login";
+      return { type: "login", category: null };
     case "Note":
-      return "note";
-    case "Custom":
+      return { type: "note", category: null };
+    case "CreditCard":
+      return { type: "card", category: null };
+    case "Identity":
+      return { type: "identity", category: null };
     case "SshKey":
-      return "api_key";
+      return { type: "ssh_key", category: null };
+    case "Wifi":
+      return { type: "api_key", category: "wifi" };
+    case "Alias":
+      return { type: "note", category: "email_alias" };
+    case "Custom":
     default:
-      // Alias, CreditCard, Identity, Wifi: generic fields, shown as notes.
-      return "note";
+      return { type: "api_key", category: null };
   }
 }
 
-/** Proton summary `item_type` (snake case) to an Opengeni item type. */
-export function itemTypeForSummary(itemType: string): VaultItemType {
-  switch (itemType) {
-    case "login":
-      return "login";
-    case "custom":
-    case "ssh_key":
-      return "api_key";
-    default:
-      return "note";
-  }
+export function itemTypeForVariant(variant: string): VaultItemType {
+  return itemKindForVariant(variant).type;
 }
 
 /** `YYYY-MM-DDTHH:MM:SS` (UTC under TZ=UTC) to an ISO instant. */
@@ -131,8 +226,9 @@ function identityFields(collector: FieldCollector, identity: Record<string, unkn
   for (const [key, value] of Object.entries(identity)) {
     if (typeof value === "string") {
       if (!value) continue;
-      if (IDENTITY_CONCEALED.has(key)) concealedText(collector, `identity.${key}`, key, value);
-      else plainText(collector, `identity.${key}`, key, value);
+      const name = identityFieldName(key);
+      if (IDENTITY_CONCEALED.has(key)) concealedText(collector, `identity.${key}`, name, value);
+      else plainText(collector, `identity.${key}`, name, value);
       continue;
     }
     if (!Array.isArray(value)) continue;
@@ -193,25 +289,45 @@ export function mapItem(item: Item, attachments: readonly Attachment[] = []): Ma
       }
       websites.push(...login.urls.filter((url) => url.trim().length > 0));
     } else if ("SshKey" in content) {
-      concealedText(collector, "ssh.private_key", "private key", content.SshKey.private_key);
-      plainText(collector, "ssh.public_key", "public key", content.SshKey.public_key);
-      collector.sections(content.SshKey.sections);
+      const ssh = content.SshKey;
+      concealedText(collector, SSH_FIELD_IDS.privateKey, "private key", ssh.private_key);
+      const publicKey =
+        ssh.public_key || sshPublicKeyFromPrivateKey(ssh.private_key)?.publicKey || "";
+      plainText(collector, SSH_FIELD_IDS.publicKey, "public key", publicKey);
+      const fingerprint = publicKey ? sshPublicKeyFingerprint(publicKey) : null;
+      if (fingerprint) plainText(collector, SSH_FIELD_IDS.fingerprint, "fingerprint", fingerprint);
+      collector.sections(ssh.sections);
     } else if ("Wifi" in content) {
       plainText(collector, "wifi.ssid", "ssid", content.Wifi.ssid);
       concealedText(collector, "wifi.password", "password", content.Wifi.password);
       collector.sections(content.Wifi.sections);
     } else if ("CreditCard" in content) {
       const card = content.CreditCard;
-      plainText(collector, "card.cardholder_name", "cardholder name", card.cardholder_name);
-      concealedText(collector, "card.number", "number", card.number);
+      plainText(collector, CARD_FIELD_IDS.cardholderName, "cardholder name", card.cardholder_name);
+      if (
+        typeof card.card_type === "string" &&
+        card.card_type &&
+        card.card_type !== "Unspecified"
+      ) {
+        plainText(collector, CARD_FIELD_IDS.brand, "brand", card.card_type);
+      }
+      concealedText(collector, CARD_FIELD_IDS.number, "number", card.number);
+      // Proton keeps the expiry as one "YYYY-MM" value; it reads as the two
+      // standard fields, or as one field when it is in another shape.
+      const expiry = /^(\d{4})-(\d{1,2})$/.exec(card.expiration_date.trim());
+      if (expiry) {
+        plainText(collector, CARD_FIELD_IDS.expiryMonth, "expiry month", String(Number(expiry[2])));
+        plainText(collector, CARD_FIELD_IDS.expiryYear, "expiry year", expiry[1]!);
+      } else if (card.expiration_date) {
+        plainText(collector, CARD_FIELD_IDS.expiration, "expiration date", card.expiration_date);
+      }
       concealedText(
         collector,
-        "card.verification_number",
-        "verification number",
+        CARD_FIELD_IDS.securityCode,
+        "security code",
         card.verification_number,
       );
-      plainText(collector, "card.expiration_date", "expiration date", card.expiration_date);
-      if (card.pin) concealedText(collector, "card.pin", "PIN", card.pin);
+      if (card.pin) concealedText(collector, CARD_FIELD_IDS.pin, "PIN", card.pin);
     } else if ("Identity" in content) {
       identityFields(collector, content.Identity);
     } else if ("Custom" in content) {
@@ -220,7 +336,9 @@ export function mapItem(item: Item, attachments: readonly Attachment[] = []): Ma
   }
 
   const note = item.content.note;
-  if (variant === "Note" || note) {
+  // A custom item marked as a note (a note with a category) shows its note
+  // even when empty, like a plain note.
+  if (variant === "Note" || note || collector.marker?.type === "note") {
     collector.add(NOTE_FIELD_ID, "note", "concealed", { type: "text", value: note });
   }
   for (const field of item.content.extra_fields) collector.extra("x:", field);
@@ -231,10 +349,15 @@ export function mapItem(item: Item, attachments: readonly Attachment[] = []): Ma
     });
   }
 
+  // Only a custom item carries a marker (see `planCreate`); on other kinds
+  // Proton's own type decides.
+  const itemKind =
+    variant === "Custom" && collector.marker ? collector.marker : itemKindForVariant(variant);
   const meta: ProviderItemMeta = {
     externalItemId: item.id,
     name: safeSecretName(item.content.title, item.id),
-    type: itemTypeForVariant(variant),
+    type: itemKind.type,
+    category: itemKind.category,
     username: providerUsernameHint(
       typeof content === "object" && "Login" in content ? content.Login.username : null,
     ),

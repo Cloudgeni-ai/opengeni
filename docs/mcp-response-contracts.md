@@ -230,7 +230,7 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | First-party: `sandbox_provision` | Action output | Essential provisioning or human enrollment result |
 | First-party: `github_connect_link` | Action output | Essential short-lived browser/configuration result |
 | First-party: `github_token` | Action output | Essential short-lived credential result; callers must handle it as a secret |
-| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the exact executor result; Codemode adds no proxy/raw-transfer adaptation. Model-only projections (the 1 MiB spill and compact Knowledge discovery) never apply to Codemode |
+| Codemode catalog tools (dynamic selected tool names) | Exact prepared-tool output | Preserve the exact executor result; Codemode adds no proxy/raw-transfer adaptation. Model-only projections (the 1 MiB spill, compact Knowledge discovery and compact Gmail mail cards) never apply to Codemode |
 
 Reads, lists, and action outputs are not converted into receipts: their result
 contains information the caller did not already provide. This work removes

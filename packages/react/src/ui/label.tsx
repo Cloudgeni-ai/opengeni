@@ -3,7 +3,10 @@ import { Label as LabelPrimitive } from "radix-ui";
 
 import { cn } from "../lib/cn";
 
-function Label({ className, ...props }: React.ComponentProps<typeof LabelPrimitive.Root>) {
+const Label = /* @__PURE__ */ React.forwardRef<
+  React.ComponentRef<typeof LabelPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof LabelPrimitive.Root>
+>(function Label({ className, ...props }, ref) {
   return (
     <LabelPrimitive.Root
       data-slot="label"
@@ -11,9 +14,10 @@ function Label({ className, ...props }: React.ComponentProps<typeof LabelPrimiti
         "flex items-center gap-2 text-sm leading-none font-medium select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50",
         className,
       )}
+      ref={ref}
       {...props}
     />
   );
-}
+});
 
 export { Label };

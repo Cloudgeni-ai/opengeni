@@ -1,4 +1,4 @@
-import { WebhookIcon, WorkflowIcon } from "lucide-react";
+import { Building2Icon, WebhookIcon, WorkflowIcon } from "lucide-react";
 
 import type { CapabilityCatalogItem, EventSource } from "@opengeni/sdk";
 
@@ -48,12 +48,13 @@ export function eventSourceLogoResolver(
 const GLYPH: Partial<Record<EventSourceChoice, typeof WebhookIcon>> = {
   webhook: WebhookIcon,
   mcp: WorkflowIcon,
+  workspace: Building2Icon,
 };
 
 /**
  * The tile for a source: its app's logo when the host resolves one, a webhook
- * or MCP glyph for those kinds, otherwise the app's monogram ("G" for a
- * GitHub source, whatever the source is named).
+ * MCP or workspace glyph for those kinds, otherwise the app's monogram ("G"
+ * for a GitHub source, whatever the source is named).
  */
 export function EventSourceTile({
   source,

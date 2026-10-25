@@ -19,6 +19,30 @@ header-only credential rotation, and accepted host-delegation use are unchanged.
 Do not present this setting as a universal outbound-network or tool-execution
 allowlist.
 
+## Members turning integrations on for their own accounts
+
+`personalIntegrationSetup` decides who may turn on a reviewed catalog OAuth
+integration for personal accounts (each person signs in to their own account):
+
+- `members` (the default): anyone holding `connections:personal`, which every
+  workspace Member has through `connections:write` and which embedded per-user
+  workspaces get by default. It covers only a reviewed catalog integration
+  (built in, deployment configured, or a verified registry entry) that signs
+  each person in with OAuth, only when it is not on yet, and only within the
+  rest of this policy. It never covers custom MCP servers, shared or workspace
+  connections, or removing or reconfiguring an integration.
+- `admins`: only people who manage integrations (`capabilities:manage`).
+
+Once on, the integration is visible to the workspace's other members as an
+optional integration that each of them must connect with their own account.
+Nobody gets access to anyone else's account. Workspace and organization admins
+are unaffected by this setting.
+
+The PUT request may omit `personalIntegrationSetup` to keep the stored value
+(older clients do); the response always reports the current value. Migration
+`0974_personal_integration_setup_policy.sql` adds the column and the optional
+request key.
+
 ## Server administration
 
 Use the full-access organization API key on the product backend, or a verified
@@ -33,7 +57,8 @@ The SDK subpath `@opengeni/sdk/organization-integration-policy` exports:
 - `getOrganizationIntegrationPolicy(client, organizationId)` — read mode,
   selected keys and current revision.
 - `updateOrganizationIntegrationPolicy(client, organizationId, request)` — submit
-  `mode`, `allowedIntegrationKeys`, `expectedRevision`, and a fresh `operationId`.
+  `mode`, `allowedIntegrationKeys`, `expectedRevision`, and a fresh `operationId`,
+  plus `personalIntegrationSetup` (`members` or `admins`) to change it.
 
 The corresponding routes are GET and PUT
 `/v1/organizations/:organizationId/integration-policy`, and GET its `/catalog`

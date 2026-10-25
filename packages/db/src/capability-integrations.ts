@@ -196,12 +196,23 @@ export type ApiIntegrationRuntime = {
   providerDomain: string;
   authScheme: Record<string, unknown>;
   connectionRef: McpServerConnectionRef | null;
+  /** The bound connection's status (`active`, `needs_reauth`, `revoked`, `error`); null without one. */
+  connectionStatus: string | null;
+  /** When the bound connection was last used (ISO time); null without one or before first use. */
+  connectionLastUsedAt: string | null;
   /** Live credential authority revision used to invalidate stale human approvals. */
   connectionAuthorityGeneration: number | null;
   allowedTools: string[];
   requireApproval: true | string[];
   revision: StoredApiIntegrationRevision;
 };
+
+/** Bound to an account that is signed in now; an expired or revoked one needs reconnecting. */
+export function apiIntegrationConnected(
+  integration: Pick<ApiIntegrationRuntime, "connectionRef" | "connectionStatus">,
+): boolean {
+  return integration.connectionRef !== null && integration.connectionStatus === "active";
+}
 
 export type ApiIntegrationOwner = {
   kind: "direct" | "plugin" | "migration";
@@ -1087,6 +1098,8 @@ export async function listInstalledApiIntegrationsInRlsContext(
       bindingConfig: schema.integrationFacetBindings.config,
       connectionId: schema.integrationFacetBindings.connectionId,
       connectionAuthorityGeneration: schema.connections.authorityGeneration,
+      connectionStatus: schema.connections.status,
+      connectionLastUsedAt: schema.connections.lastUsedAt,
       revision: schema.integrationSpecRevisions.spec,
     })
     .from(schema.integrationFacetBindings)
@@ -1247,6 +1260,11 @@ export async function listInstalledApiIntegrationsInRlsContext(
         providerDomain: row.providerDomain,
         authScheme: objectValue(row.authScheme),
         connectionRef,
+        connectionStatus: row.connectionId ? row.connectionStatus : null,
+        connectionLastUsedAt:
+          row.connectionId && row.connectionLastUsedAt
+            ? new Date(row.connectionLastUsedAt).toISOString()
+            : null,
         connectionAuthorityGeneration: row.connectionAuthorityGeneration,
         allowedTools,
         requireApproval,

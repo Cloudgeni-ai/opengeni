@@ -1,6 +1,11 @@
 import { ArrowLeftIcon } from "lucide-react";
 import { Dialog } from "radix-ui";
-import type { ComponentPropsWithRef, ReactNode } from "react";
+import {
+  forwardRef,
+  type ComponentPropsWithoutRef,
+  type ComponentRef,
+  type ReactNode,
+} from "react";
 
 import { cn } from "../../../lib/cn";
 import { Button } from "../../../ui/button";
@@ -13,18 +18,18 @@ const DialogContainedPortal = containedPortal(Dialog.Portal);
  * desktop app's window-control clearance, so Escape closes the innermost layer
  * and focus returns to where it came from.
  */
-export function ArtifactFullWindowDialog({
-  onClose,
-  children,
-  ...content
-}: {
-  onClose: () => void;
-  children: ReactNode;
-} & Omit<ComponentPropsWithRef<typeof Dialog.Content>, "children" | "className">) {
+export const ArtifactFullWindowDialog = /* @__PURE__ */ forwardRef<
+  ComponentRef<typeof Dialog.Content>,
+  {
+    onClose: () => void;
+    children: ReactNode;
+  } & Omit<ComponentPropsWithoutRef<typeof Dialog.Content>, "children" | "className">
+>(function ArtifactFullWindowDialog({ onClose, children, ...content }, ref) {
   return (
     <Dialog.Root open onOpenChange={(open) => !open && onClose()}>
       <DialogContainedPortal>
         <Dialog.Content
+          ref={ref}
           data-artifact-fullscreen
           aria-describedby={undefined}
           {...content}
@@ -35,7 +40,7 @@ export function ArtifactFullWindowDialog({
       </DialogContainedPortal>
     </Dialog.Root>
   );
-}
+});
 
 /** The single bar across the top of a full-window artifact; it also drags the desktop window. */
 export function ArtifactFullWindowBar({

@@ -109,13 +109,89 @@ Full access; SDK
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
 `deleteOrganizationMcpConnection`). Migration `0601` is rolling.
 
+### App actions in chat
+
+In a chat a person started themselves, the agent can do what that person could
+do in the app's pages and settings: invite people, share the chat, check their
+plan, credits and usage, change workspace and organization settings, and the
+rest of the organization MCP server's catalog. It runs as that person, with
+exactly their access, and each change waits for them to confirm it in the chat.
+
+- The session's agent has `admin_actions_search`, `admin_action_describe` and
+  `admin_action_call`. They are ordinary, selectable session tools, selected by
+  default, and listed only in a top-level session a person started (never in a
+  child or service session). Their descriptions never change with the
+  session's access. A host that embeds Opengeni turns them off by leaving them
+  out of its tool selection.
+- Each call resolves, live, as whom it runs. With full access (below): the
+  person who gave it, as before. Otherwise: the person who sent this turn's
+  message. Scheduled, goal, inbox and other turns nobody sent run nothing, and
+  neither do API-key and service turns, or child and service sessions.
+- When the API accepts a person's message it freezes, with that turn, what the
+  message may do (`session_turn_app_action_grants`): who sent it, whether they
+  can confirm changes from where they sent it, and the most it may do, which
+  is the request's own workspace and organization grant at that moment. Every
+  call is capped by that and by the chat's workspace, and each route still
+  checks the person's live access. A turn without one runs nothing.
+- Only someone signed in to the app itself (the managed sign-in session, or
+  the local single-user session) can confirm changes. Every other accepted
+  person sign-in is delegated: an embed's host-issued token, an external user,
+  or another integration's person token. There someone else vouches for who
+  the person is, so the route only reads, capped by that token.
+  `OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES=true` gives all delegated
+  sign-ins the same card (not only embeds), so a deployment sets it only when
+  every issuer of such tokens maps each user to the right member; the cap
+  stays.
+- Reads (`GET`, `HEAD` and the catalog's read-only `POST`s) run at once: they
+  show only what the person already sees in the app. That includes things the
+  person can open there anyway, such as exports and the events of other chats
+  shared with them, now in this chat's transcript and sent to its model.
+- A change shows the person the ordinary in-chat approval card with a plain
+  question that names the target ("Invite anna@example.com to your
+  organization as an admin?"), one line of the key values, Allow and Cancel,
+  and the raw call behind Details. It runs only if they allow it. The worker
+  asks; the API enforces it: it runs a change only when this attempt is
+  executing exactly those arguments, approved by that same person. An Allow
+  from anyone else in the chat doesn't count, and neither does one sent
+  through an API key, a chat integration (such as a Slack button) or an embed
+  that has not opted in: the approval records who decided and whether they
+  were signed in to the app itself, fixed with the decision like the rest of
+  it, and only such a decision confirms. The
+  card's one-line summary hides secret-looking values (fields named as
+  passwords, codes, tokens, keys or other secrets; DSNs; the sign-in part,
+  query and random-looking path segments of any URL, and the whole path for
+  webhook hosts such as Slack, Discord and Zapier, also inside free text;
+  connection-string passwords; bearer credentials; bare tokens of a
+  well-known shape such as API keys, GitHub, Slack and AWS tokens and JWTs).
+  Without full access the action
+  is capped to the chat's workspace, so steps that widen an agent's access
+  (agent sign-ins, connected agents, full access, personal keys) stay refused.
+- Calls that create, show, copy or rotate a key, password, token or other
+  secret (API and personal keys, webhook and event-source secrets, enrollment
+  tokens, device sign-in codes, vaults, credential providers) never run this
+  way, and neither does a call whose body carries one (credential headers for
+  a chat's MCP servers, a connection's credential bundle): one click would
+  put a lasting secret into the conversation and the model provider's logs.
+  The same action without a secret in the body (creating a chat without MCP
+  headers) runs normally. The person does the rest in the app, or gives the
+  session full access. Secret fields are marked where the contracts define
+  them (`secretValue(...)` from `@opengeni/contracts`), with secret-sounding
+  field names as a backstop; the catalog generator records them as
+  `secretFields` on each entry, and a test fails when the catalog drifts or
+  when an open map of strings in an action schema is neither marked nor
+  listed as plain with its reason.
+- An owner or admin can turn this off for the organization: Organization
+  settings > Security & data > Agents, "Actions in chat" (on by default;
+  `chatActionsAllowed` on `/v1/organizations/:id/agent-admin-access`). Calls
+  then refuse with that reason; the tool list stays the same.
+
 ### Full access for agent sessions
 
-Any member can let a session they started reach the same organization
-actions as themselves, without connecting an outside client. The API calls it
-admin access; the app calls it full access. The agent can do exactly what
-that person can do in the app: a member's workspaces and their settings, or
-everything an owner or admin manages.
+Any member can let a session they started run the same actions without asking
+first, without connecting an outside client. The API calls it admin access;
+the app calls it full access. The agent can do exactly what that person can do
+in the app: a member's workspaces and their settings, or everything an owner
+or admin manages.
 
 - The organization allows it first: Organization settings > Security & data >
   Agents, "Full access for agent sessions" (off by default;
@@ -132,13 +208,12 @@ everything an owner or admin manages.
   The granter or any owner or admin can turn it off from the shield beside
   the title or the same menu (`DELETE`; `GET` returns the state and what the
   viewer may do).
-- While it is on, the session's agent sees `admin_actions_search`,
-  `admin_action_describe` and `admin_action_call`. They are never part of a
-  tool selection or default: the session's Opengeni MCP server lists them only
-  while access is in effect, and every call checks again, so turning it off,
-  the organization turning it off, or the granter leaving the session's
-  workspace (or losing the owner or admin role that gave them access to it)
-  applies to the very next call.
+- While it is on, the app-action tools are listed whatever the session's tool
+  selection, changes run without a confirmation, in any workspace the granter
+  can use, and every call checks again, so turning it off, the organization
+  turning it off, or the granter leaving the session's workspace (or losing
+  the owner or admin role that gave them access to it) applies to the very
+  next call.
 - They cover exactly the organization MCP server's catalog and run each
   action in process as the granter, capped by the granter's own live access
   (a member's 403s stay 403s), under the same rules (`browserOnly` actions and browser-bound provider OAuth
@@ -164,7 +239,7 @@ everything an owner or admin manages.
   workspace's chats adds how a chat in another workspace is reached, without
   saying whether this one exists anywhere.
 
-Migration `0692` is rolling.
+Migrations `0692` and `0971` are rolling.
 
 The public OAuth authorization server is deliberately narrow: public dynamic
 client registration, authorization-code grant with mandatory PKCE S256, exact

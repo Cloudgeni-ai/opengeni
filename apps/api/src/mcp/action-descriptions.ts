@@ -1,4 +1,4 @@
-import type { ActionCatalogEntry } from "./action-catalog-types";
+import type { ActionCatalogEntry } from "@opengeni/contracts/app-actions";
 
 /*
  * Plain-language descriptions for catalog actions, so an agent searching the
@@ -24,6 +24,12 @@ const PROVIDERS: Record<string, string> = {
 };
 
 const RULES: Rule[] = [
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/sessions$/,
+    text: () =>
+      'List chats. For browsing or scanning, send query {"view":"page","projection":"summary","limit":50}: compact session records without repeated effectiveTools or full agent configuration. Continue with the returned nextCursor as query.cursor, keeping the same filters. Use getSession for one chat\'s full details; omit projection only when you need full session records for the whole page.',
+  },
   {
     method: "GET",
     pattern: /\/vault-providers\/connections$/,

@@ -8530,6 +8530,7 @@ describe("clean session control plane", () => {
       sessionId: session.id,
       subjectId: approver,
       payload: { approvalId: askCall.approvalId, decision: "approve" },
+      decidedBySignedInPerson: true,
       clientEventId: crypto.randomUUID(),
     });
     if (acceptedAsk.action !== "accepted") throw new Error("connector Ask was not accepted");
@@ -8699,6 +8700,8 @@ describe("clean session control plane", () => {
       status: "completed",
       decision: "approve",
       decisionBySubjectId: approver,
+      decisionByKind: "human",
+      decisionBySignedInPerson: true,
       initiatorKind: firstIdentity.initiator.kind,
       initiatorSubjectId: firstIdentity.initiator.subjectId,
       creationAttemptId: firstAttemptId,
@@ -8717,6 +8720,7 @@ describe("clean session control plane", () => {
       status: "rejected",
       decision: "reject",
       decisionBySubjectId: approver,
+      decisionBySignedInPerson: false,
       initiatorSubjectId: firstIdentity.initiator.subjectId,
     });
     const connectorAuditActions = evidence.audits

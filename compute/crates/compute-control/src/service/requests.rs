@@ -116,6 +116,18 @@ impl<S: Store> Service<S> {
             .prune_requests(now_ms().saturating_sub(keep_ms))
             .await?)
     }
+
+    /// Forgets hosts given up on at least `keep_ms` ago. Answers how many.
+    ///
+    /// # Errors
+    ///
+    /// When the store fails.
+    pub async fn prune_hosts(&self, keep_ms: u64) -> Result<u64, Failure> {
+        Ok(self
+            .store
+            .prune_hosts(now_ms().saturating_sub(keep_ms))
+            .await?)
+    }
 }
 
 #[cfg(test)]

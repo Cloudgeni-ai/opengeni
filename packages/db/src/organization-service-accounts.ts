@@ -1,3 +1,4 @@
+import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   Permission,
@@ -51,7 +52,8 @@ function permissionAllowedByStoredKey(
   mode: KeyRow["permissionMode"],
   permission: Permission,
 ): boolean {
-  if (permissions.includes(permission)) return true;
+  // `connections:write` includes `connections:personal`, as enforcement does.
+  if (permissionSetCovers(permissions, permission)) return true;
   // Legacy keys: workspace:admin implies workspace work, never organization
   // authority, member management or secret values. Converting never widens.
   return (

@@ -171,6 +171,19 @@ delivers them coalesced, `session_wait` reports them without ending the wait
 (`ownPendingImmediateUpdates` vs `ownPendingDeferredUpdateKinds`), and they
 never resume a goal by themselves.
 
+`secret_use_approval_decided` (immediate) is the person's answer to Opengeni's
+own approval card for a blocked secret use (see
+[Approval for each use](secrets.md#approval-for-each-use)). The answer
+transaction marks the card answered, records the grant or denial, and inserts
+this update (dedupe `secret-use-approval-decided:<request>`, `action_required`
+when allowed, `info` when denied). Its summary tells the agent to retry the
+blocked call, or not to; its payload names the decision, the item and field
+names, surface, tool and destination, never values or subject ids. A worker
+from before this kind marks such a row `failed` with
+`system.update.cancelled{reason: "unrecognized_kind"}`, so during a rollout an
+answer claimed by an old worker still records the grant but does not tell the
+agent.
+
 A child session reports its lifecycle to its parent through typed notices, each
 produced inside the child's own lifecycle transaction as one dedupe-keyed
 `session_system_update_outbox` row (the worker delivers it; the reaper retries a
@@ -468,6 +481,12 @@ tool calls, later turns, and attempt recovery. This is both a causality
 requirement and a prompt-cache cost requirement: deleting the batch on the next
 call would shift the prefix and force the provider to ingest the conversation
 again.
+
+The same invariant covers the system prompt and tools: anything that can change
+between turns of one session (workspace governance, the Skill catalog) is a
+durable history item rather than system-prompt text. Per-call diagnostics in
+`model_call_facts.prompt_cache_diagnostics` classify every warm-cache miss; see
+`docs/context-compaction.md`, "Prompt-cache stability".
 
 Migration `0135_durable_machine_input_batches.sql` performs the one-way cutover.
 It reconstructs model history for delivered legacy rows, returns old deferred

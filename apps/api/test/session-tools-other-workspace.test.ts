@@ -234,13 +234,18 @@ describe("session tools on a chat in another workspace", () => {
         firstPartyMcpTools: [...SESSION_TOOLS],
       },
     };
-    // As the API builds it: the dispatch only while the session has full access.
+    // As the API builds it for a chat a person started: app actions always,
+    // with the live full-access fact. Without full access the chat still acts
+    // for its sender in this workspace, but never reaches another one.
+    const appActions = (fullAccess: boolean) => ({
+      access: { origin, dispatch: async (request: Request) => await app.fetch(request) },
+      startedByPerson: true,
+      fullAccess,
+    });
     const withFullAccess = () =>
-      buildOpenGeniMcpServer(deps, agent, {
-        sessionAdminAccess: { origin, dispatch: async (request) => await app.fetch(request) },
-      });
+      buildOpenGeniMcpServer(deps, agent, { appActions: appActions(true) });
     const withoutFullAccess = () =>
-      buildOpenGeniMcpServer(deps, agent, { sessionAdminAccess: null });
+      buildOpenGeniMcpServer(deps, agent, { appActions: appActions(false) });
 
     // Every session tool offers workspaceId, with or without full access.
     for (const name of SESSION_TOOLS.filter((tool) => tool !== "sessions_list")) {
@@ -358,6 +363,13 @@ describe("session tools on a chat in another workspace", () => {
     >`select initiator_subject_id, source from session_turns
       where session_id = ${target}`;
     expect(turns).toEqual([{ initiator_subject_id: subjectId, source: "api" }]);
+    // It wasn't sent from the app's own sign-in, so the turn it starts there
+    // can never confirm app-action changes in that chat.
+    const turnGrants = await shared.admin<Array<{ changes: string }>>`
+      select g.changes from session_turn_app_action_grants g
+      join session_turns t on t.id = g.turn_id
+      where t.session_id = ${target}`;
+    expect(turnGrants.filter((grant) => grant.changes === "confirm")).toEqual([]);
     // Retrying with the same key replays, never duplicates.
     const replayed = await call(withFullAccess(), "session_send_message", {
       sessionId: target,
@@ -443,5 +455,22 @@ describe("session tools on a chat in another workspace", () => {
     });
     expect(ended.isError).toBe(true);
     expect(ended.text).toContain("no longer has full access");
+
+    // Without full access the chat still acts for the person who sent its
+    // message, but only in this workspace: a read here runs, the same read in
+    // the other workspace is refused, and session tools stay out of it.
+    const readHere = await call(withFullAccess(), "admin_action_call", {
+      id: "listWorkspaceMembers",
+      pathParameters: { workspaceId: home },
+      query: {},
+    });
+    expect(readHere.isError, readHere.text).toBe(false);
+    expect(JSON.parse(readHere.text)).toMatchObject({ status: 200 });
+    const readThere = await call(withFullAccess(), "admin_action_call", {
+      id: "listWorkspaceMembers",
+      pathParameters: { workspaceId: other },
+      query: {},
+    });
+    expect(JSON.parse(readThere.text).status, readThere.text).toBeGreaterThanOrEqual(400);
   }, 180_000);
 });

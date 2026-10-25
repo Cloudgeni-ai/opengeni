@@ -10,9 +10,12 @@ import {
   SessionMcpToolPermissionsResponse,
   UpdateSessionMcpToolPermissionsRequest,
 } from "@opengeni/contracts";
+import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
 import {
   ConnectorConnectionRequiredError,
+  hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   getConnectorToolPermissions,
@@ -221,11 +224,24 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/capabilities/:capabilityId/enable", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    // Integration admins enable anything. The personal setup permission turns
+    // a reviewed OAuth integration on for personal accounts, create-only.
+    const personalSetup = !hasPermission(
+      grant.permissions,
+      "capabilities:manage",
+      grant.permissionMode,
+    );
+    if (
+      personalSetup &&
+      !hasPermission(grant.permissions, PERSONAL_INTEGRATION_SETUP_PERMISSION, grant.permissionMode)
+    )
+      throw new HTTPException(403, { message: "missing permission: capabilities:manage" });
     const payload = await parseRequestJson(c, EnableCapabilityRequest);
     const installation = await enableCapability({
       db,
       grant,
+      ...(personalSetup ? { personalSetup: true } : {}),
       accountId: grant.accountId,
       workspaceId,
       settings,

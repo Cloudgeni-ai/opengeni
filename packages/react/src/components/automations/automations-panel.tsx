@@ -8,16 +8,27 @@
  * Runs inherit their access: an automation in a chat runs with that chat's
  * settings, and one that starts a new chat each run follows the workspace's
  * defaults with its owner's access, like a new chat.
+ *
+ * New automations can start from a template: the host's own, and the ones
+ * people saved in the workspace. A template only fills the form.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { CalendarClockIcon, ChevronLeftIcon, PlayIcon, PlusIcon, ZapIcon } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  BookmarkPlusIcon,
+  CalendarClockIcon,
+  ChevronLeftIcon,
+  PlayIcon,
+  PlusIcon,
+  ZapIcon,
+} from "lucide-react";
 
 import type {
   EventSource,
-  EventTypeDescriptor,
   OpenGeniClient,
+  ReadyEventSource,
   ScheduledTask,
   ScheduledTaskRun,
+  WorkspaceAutomationTemplate,
 } from "@opengeni/sdk";
 
 import { useOpenGeniText } from "../../messages/runtime";
@@ -58,16 +69,17 @@ import {
   viewerTimeZone,
   type AutomationDraft,
 } from "./automation-model";
+import {
+  automationDraftFromTemplate,
+  automationTemplateFromTask,
+  automationTemplateOfSaved,
+  automationTemplatesFor,
+  type AutomationTemplate,
+} from "./automation-template-model";
+import { AutomationTemplateDialog, AutomationTemplateList } from "./automation-template-parts";
+import { useEventSourceStandIns, type AutomationEventServer } from "./event-source-stand-ins";
 import type { EventSourceLogoResolver } from "./event-source-tile";
 import { EventTriggerSummary } from "./event-trigger-summary";
-
-/** An MCP server whose events people can pick without adding a source first. */
-export interface AutomationEventServer {
-  /** The MCP server id as configured for the workspace. */
-  serverId: string;
-  /** Its name in the source picker. Default: the server id. */
-  name?: string | undefined;
-}
 
 export interface AutomationsPanelProps {
   client: OpenGeniClient;
@@ -83,13 +95,30 @@ export interface AutomationsPanelProps {
   /** Offer event triggers. Default: whenever this server runs them. */
   eventTriggers?: boolean | undefined;
   /**
-   * MCP servers whose events people can pick right away, such as the host's
-   * own. The person's event source for a server is added the first time they
+   * MCP servers to offer by name, such as the host's own. Servers the person
+   * is signed in to that offer events, and their Gmail accounts, are offered
+   * without this. The person's source for one is added the first time they
    * pick it.
    */
   eventServers?: readonly AutomationEventServer[] | undefined;
+  /**
+   * Offer this workspace's own events, such as a meeting's transcript being
+   * ready. The person's source for them is added the first time they pick it.
+   * Default false.
+   */
+  workspaceEvents?: boolean | undefined;
   /** Arguments new MCP subscriptions start with, such as `{ projectId }`. */
   argumentDefaults?: Readonly<Record<string, unknown>> | undefined;
+  /**
+   * Templates a new automation can start from, such as some of
+   * `builtinAutomationTemplates(t)` or the host's own. Default none.
+   */
+  templates?: readonly AutomationTemplate[] | undefined;
+  /**
+   * Offer the templates people saved in this workspace, and saving an
+   * automation as one. Default true.
+   */
+  workspaceTemplates?: boolean | undefined;
   /** Brand logos for event sources, from the host's connector catalog. */
   sourceLogo?: EventSourceLogoResolver | undefined;
   /** Opens the chat a run happened in. Without it, runs don't link anywhere. */
@@ -100,32 +129,16 @@ export interface AutomationsPanelProps {
 type View =
   | { kind: "list" }
   | { kind: "detail"; taskId: string }
-  | { kind: "form"; taskId: string | null };
+  /** Pick a template or start from scratch. */
+  | { kind: "new" }
+  | { kind: "form"; taskId: string | null; template?: AutomationTemplate | undefined };
 
 type Notice = { tone: "info" | "error"; text: string } | null;
 
-const SERVER_SOURCE_PREFIX = "mcp-server:";
-
-/** A server's place in the source picker until the person's source for it exists. */
-function serverSource(server: AutomationEventServer, workspaceId: string): EventSource {
-  return {
-    id: `${SERVER_SOURCE_PREFIX}${server.serverId}`,
-    workspaceId,
-    kind: "mcp",
-    adapter: null,
-    name: server.name ?? server.serverId,
-    ownerSubjectId: null,
-    visibility: "private",
-    status: "active",
-    statusReason: null,
-    webhookUrl: null,
-    awaitingSigningSecret: false,
-    mcp: { serverId: server.serverId, connectionId: null },
-    lastDeliveryAt: null,
-    createdAt: "",
-    updatedAt: "",
-  };
-}
+type TemplateDialog =
+  | { mode: "save"; task: ScheduledTask }
+  | { mode: "rename"; template: WorkspaceAutomationTemplate }
+  | null;
 
 function newTriggerId(): string | undefined {
   return globalThis.crypto?.randomUUID?.();
@@ -138,7 +151,10 @@ export function AutomationsPanel({
   title: titleProp,
   eventTriggers: eventTriggersProp,
   eventServers,
+  workspaceEvents = false,
   argumentDefaults,
+  templates: hostTemplates,
+  workspaceTemplates = true,
   sourceLogo,
   onOpenSession,
   className,
@@ -213,49 +229,112 @@ export function AutomationsPanel({
   }, [client, workspaceId, eventTriggersProp, sourcesAttempt]);
   const eventTriggers = eventTriggersProp !== false && eventsRun === true;
 
-  // The host's MCP servers without a source yet stand in for one until picked.
-  const ensured = useRef(new Map<string, Promise<EventSource>>());
-  const formSources = useMemo(() => {
-    if (!sources) return undefined;
-    const missing = (eventServers ?? []).filter(
-      (server) =>
-        !sources.some(
-          (source) => source.kind === "mcp" && source.mcp?.serverId === server.serverId,
-        ),
+  // What the person can use without setting it up; it can take a moment to learn.
+  const [readySources, setReadySources] = useState<ReadyEventSource[] | undefined>(undefined);
+  useEffect(() => {
+    if (!eventTriggers) return;
+    let live = true;
+    client.listReadyEventSources(workspaceId).then(
+      (list) => {
+        if (live) setReadySources(list);
+      },
+      () => {
+        // Without the list, the sources the person has are still offered.
+        if (live) setReadySources((current) => current ?? []);
+      },
     );
-    return [...sources, ...missing.map((server) => serverSource(server, workspaceId))];
-  }, [eventServers, sources, workspaceId]);
-  const realSource = useCallback(
-    (sourceId: string): Promise<string> => {
-      if (!sourceId.startsWith(SERVER_SOURCE_PREFIX)) return Promise.resolve(sourceId);
-      const serverId = sourceId.slice(SERVER_SOURCE_PREFIX.length);
-      let pending = ensured.current.get(serverId);
-      if (!pending) {
-        const name = eventServers?.find((server) => server.serverId === serverId)?.name;
-        pending = client
-          .createEventSource(workspaceId, { kind: "mcp", serverId, ...(name ? { name } : {}) })
-          .then((created) => created.source);
-        ensured.current.set(serverId, pending);
-        pending.catch(() => ensured.current.delete(serverId));
-      }
-      return pending.then((source) => source.id);
-    },
-    [client, eventServers, workspaceId],
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId, eventTriggers, sourcesAttempt]);
+
+  // Sources that need no setting up stand in for the person's own until picked.
+  const standIns = useEventSourceStandIns({
+    client,
+    workspaceId,
+    sources,
+    readySources,
+    eventServers,
+    workspaceEvents,
+  });
+  const formSources = standIns.sources;
+
+  /* Templates: the host's own, then the ones saved in this workspace. */
+  const [savedTemplates, setSavedTemplates] = useState<WorkspaceAutomationTemplate[] | undefined>(
+    undefined,
   );
-  const loadEventTypes = useCallback(
-    async (sourceId: string): Promise<EventTypeDescriptor[]> =>
-      client.listEventSourceTypes(workspaceId, await realSource(sourceId)),
-    [client, realSource, workspaceId],
-  );
-  /** The draft with every stand-in source replaced by the person's own. */
-  const withRealSources = async (draft: AutomationDraft): Promise<AutomationDraft> => {
-    const triggers = await Promise.all(
-      draft.events.triggers.map(async (trigger) => ({
-        ...trigger,
-        sourceId: await realSource(trigger.sourceId),
-      })),
+  /** This server keeps workspace templates; false on one that doesn't. */
+  const [templatesKept, setTemplatesKept] = useState(false);
+  useEffect(() => {
+    if (!workspaceTemplates) return;
+    let live = true;
+    client.listAutomationTemplates(workspaceId).then(
+      (list) => {
+        if (!live) return;
+        setSavedTemplates(list);
+        setTemplatesKept(true);
+      },
+      (error: unknown) => {
+        if (!live) return;
+        // An older server has none; anything else still lets people save one.
+        setTemplatesKept(apiErrorFacts(error).status !== 404);
+        setSavedTemplates((current) => current ?? []);
+      },
     );
-    return { ...draft, events: { ...draft.events, triggers } };
+    return () => {
+      live = false;
+    };
+  }, [client, workspaceId, workspaceTemplates]);
+  const offerSaved = workspaceTemplates && templatesKept;
+  const fits = { eventTriggers, workspaceEvents };
+  const offered = automationTemplatesFor(hostTemplates ?? [], fits);
+  const savedOffered = offerSaved
+    ? automationTemplatesFor((savedTemplates ?? []).map(automationTemplateOfSaved), fits)
+    : [];
+  const hasTemplates = offered.length > 0 || savedOffered.length > 0;
+  const startNew = () => go(hasTemplates ? { kind: "new" } : { kind: "form", taskId: null });
+  const [templateDialog, setTemplateDialog] = useState<TemplateDialog>(null);
+  const [deletingTemplate, setDeletingTemplate] = useState<WorkspaceAutomationTemplate | null>(
+    null,
+  );
+  const saveTemplate = async (values: { name: string; description: string }) => {
+    if (!templateDialog) return;
+    if (templateDialog.mode === "save") {
+      const created = await client.createAutomationTemplate(
+        workspaceId,
+        automationTemplateFromTask(t, templateDialog.task, sources ?? [], {
+          ...values,
+          now: new Date(),
+        }),
+      );
+      setSavedTemplates((current) => [...(current ?? []), created]);
+      setNotice({
+        tone: "info",
+        text: t("automations.panel.templateSaved", { name: created.name }),
+      });
+      return;
+    }
+    const renamed = await client.updateAutomationTemplate(
+      workspaceId,
+      templateDialog.template.id,
+      values,
+    );
+    setSavedTemplates((current) =>
+      current?.map((entry) => (entry.id === renamed.id ? renamed : entry)),
+    );
+  };
+  const removeTemplate = async (template: WorkspaceAutomationTemplate): Promise<boolean> => {
+    try {
+      await client.deleteAutomationTemplate(workspaceId, template.id);
+      setSavedTemplates((current) => current?.filter((entry) => entry.id !== template.id));
+      return true;
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: t("automations.panel.actionFailed", { reason: errorSentence(error) }).trim(),
+      });
+      return false;
+    }
   };
 
   /* Actions. */
@@ -309,7 +388,7 @@ export function AutomationsPanel({
     }
   };
   const save = async (task: ScheduledTask | null, draft: AutomationDraft) => {
-    const ready = await withRealSources(draft);
+    const ready = { ...draft, events: await standIns.realEvents(draft.events) };
     const saved = task
       ? await client.updateScheduledTask(workspaceId, task.id, {
           expectedExecutionDigest: task.executionDigest,
@@ -325,8 +404,7 @@ export function AutomationsPanel({
           ),
         );
     upsert(saved);
-    if (draft.events.triggers.some((trigger) => trigger.sourceId.startsWith(SERVER_SOURCE_PREFIX)))
-      setSourcesAttempt((value) => value + 1);
+    if (standIns.usesStandIn(draft.events)) setSourcesAttempt((value) => value + 1);
     go({ kind: "detail", taskId: saved.id });
   };
 
@@ -338,13 +416,34 @@ export function AutomationsPanel({
       <DropdownMenuItem onSelect={() => go({ kind: "form", taskId: task.id })}>
         {t("automations.panel.edit")}
       </DropdownMenuItem>
+      {offerSaved ? (
+        <DropdownMenuItem onSelect={() => setTemplateDialog({ mode: "save", task })}>
+          {t("automations.panel.saveAsTemplate")}
+        </DropdownMenuItem>
+      ) : null}
       <DropdownMenuItem variant="destructive" onSelect={() => setDeleting(task)}>
         {t("automations.panel.delete")}
       </DropdownMenuItem>
     </>
   );
+  const templateMenu = (template: AutomationTemplate) => {
+    const entry = savedTemplates?.find((candidate) => candidate.id === template.id);
+    if (entry?.viewerAccess !== "manage") return undefined;
+    return (
+      <>
+        <DropdownMenuItem onSelect={() => setTemplateDialog({ mode: "rename", template: entry })}>
+          {t("automations.panel.rename")}
+        </DropdownMenuItem>
+        <DropdownMenuItem variant="destructive" onSelect={() => setDeletingTemplate(entry)}>
+          {t("automations.panel.delete")}
+        </DropdownMenuItem>
+      </>
+    );
+  };
   const viewed =
-    view.kind === "list" ? null : (tasks?.find((task) => task.id === view.taskId) ?? null);
+    view.kind === "detail" || view.kind === "form"
+      ? (tasks?.find((task) => task.id === view.taskId) ?? null)
+      : null;
   // A live region that stays mounted in the list and on an automation's page,
   // so what an action says is announced where it was done.
   const noticeLine = (
@@ -360,22 +459,75 @@ export function AutomationsPanel({
   );
 
   let body: ReactNode;
-  if (view.kind === "form") {
+  if (view.kind === "new") {
+    body = (
+      <div className="flex min-w-0 flex-col gap-4">
+        <BackButton onClick={() => go({ kind: "list" })} />
+        <h3 className="m-0 text-base leading-6 font-semibold text-fg">
+          {t("automations.form.newTitle")}
+        </h3>
+        {noticeLine}
+        <RowList label={t("automations.panel.fromScratch")} variant="catalog">
+          <ListRow
+            leading={<LogoTile name={t("automations.panel.fromScratch")} icon={<PlusIcon />} />}
+            title={t("automations.panel.fromScratch")}
+            description={t("automations.panel.fromScratchDescription")}
+            onOpen={() => go({ kind: "form", taskId: null })}
+          />
+        </RowList>
+        {offered.length > 0 ? (
+          <TemplateSection heading={t("automations.panel.templates")}>
+            <AutomationTemplateList
+              label={t("automations.panel.templates")}
+              templates={offered}
+              sourceLogo={sourceLogo}
+              onUse={(template) => go({ kind: "form", taskId: null, template })}
+              now={now}
+            />
+          </TemplateSection>
+        ) : null}
+        {savedOffered.length > 0 ? (
+          <TemplateSection heading={t("automations.panel.savedTemplates")}>
+            <AutomationTemplateList
+              label={t("automations.panel.savedTemplates")}
+              templates={savedOffered}
+              sourceLogo={sourceLogo}
+              onUse={(template) => go({ kind: "form", taskId: null, template })}
+              menu={templateMenu}
+              menuLabel={(template) => t("automations.panel.templateMenu", { name: template.name })}
+              now={now}
+            />
+          </TemplateSection>
+        ) : null}
+      </div>
+    );
+  } else if (view.kind === "form") {
     const task = view.taskId ? viewed : null;
+    const template = task ? undefined : view.template;
     body = (
       <div className="flex min-w-0 flex-col gap-4">
         <BackButton
-          onClick={() => go(task ? { kind: "detail", taskId: task.id } : { kind: "list" })}
+          onClick={() =>
+            go(
+              task
+                ? { kind: "detail", taskId: task.id }
+                : hasTemplates
+                  ? { kind: "new" }
+                  : { kind: "list" },
+            )
+          }
         />
         <h3 className="m-0 text-base leading-6 font-semibold text-fg">
           {task ? t("automations.form.editTitle") : t("automations.form.newTitle")}
         </h3>
         <AutomationForm
-          key={task?.id ?? "new"}
+          key={task?.id ?? `new:${template?.id ?? ""}`}
           initial={
             task
               ? automationDraftFrom(task)
-              : newAutomationDraft(eventTriggers ? { cadence: null } : {})
+              : template
+                ? automationDraftFromTemplate(template, { sources: formSources })
+                : newAutomationDraft(eventTriggers ? { cadence: null } : {})
           }
           editing={Boolean(task)}
           destination={
@@ -389,7 +541,7 @@ export function AutomationsPanel({
           }
           eventTriggers={eventTriggers || hasEventTriggers(task ?? {})}
           sources={formSources}
-          loadEventTypes={loadEventTypes}
+          loadEventTypes={standIns.loadEventTypes}
           sourceLogo={sourceLogo}
           argumentDefaults={argumentDefaults}
           onSubmit={(draft) => save(task, draft)}
@@ -415,6 +567,9 @@ export function AutomationsPanel({
         onSetOn={(on) => void setOn(viewed, on)}
         onRunNow={() => void runNow(viewed)}
         onEdit={() => go({ kind: "form", taskId: viewed.id })}
+        onSaveAsTemplate={
+          offerSaved ? () => setTemplateDialog({ mode: "save", task: viewed }) : undefined
+        }
         onDelete={() => setDeleting(viewed)}
         notice={noticeLine}
       />
@@ -454,7 +609,7 @@ export function AutomationsPanel({
           sessionId ? t("automations.panel.descriptionChat") : t("automations.panel.description")
         }
         action={
-          <Button type="button" size="sm" onClick={() => go({ kind: "form", taskId: null })}>
+          <Button type="button" size="sm" onClick={startNew}>
             <PlusIcon aria-hidden="true" />
             {t("automations.panel.new")}
           </Button>
@@ -538,12 +693,7 @@ export function AutomationsPanel({
                 ) : null}
               </div>
               {(tasks?.length ?? 0) > 0 ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => go({ kind: "form", taskId: null })}
-                  className="pointer-coarse:h-11"
-                >
+                <Button type="button" size="sm" onClick={startNew} className="pointer-coarse:h-11">
                   <PlusIcon aria-hidden="true" />
                   {t("automations.panel.new")}
                 </Button>
@@ -564,6 +714,36 @@ export function AutomationsPanel({
             cancelLabel={t("automations.form.cancel")}
             onConfirm={() => (deleting ? remove(deleting) : true)}
           />
+          <ConfirmDialog
+            open={deletingTemplate !== null}
+            onOpenChange={(open) => {
+              if (!open) setDeletingTemplate(null);
+            }}
+            title={t("automations.panel.templateDeleteTitle", {
+              name: deletingTemplate?.name ?? "",
+            })}
+            description={t("automations.panel.templateDeleteBody")}
+            confirmLabel={t("automations.panel.templateDeleteConfirm")}
+            pendingLabel={t("automations.panel.deleting")}
+            cancelLabel={t("automations.form.cancel")}
+            onConfirm={() => (deletingTemplate ? removeTemplate(deletingTemplate) : true)}
+          />
+          <AutomationTemplateDialog
+            open={templateDialog !== null}
+            onOpenChange={(open) => {
+              if (!open) setTemplateDialog(null);
+            }}
+            mode={templateDialog?.mode ?? "save"}
+            initial={
+              templateDialog?.mode === "rename"
+                ? {
+                    name: templateDialog.template.name,
+                    description: templateDialog.template.description,
+                  }
+                : { name: templateDialog?.task.name ?? "", description: "" }
+            }
+            onSubmit={saveTemplate}
+          />
         </StandaloneOverlayRoot>
       </section>
     </TooltipProvider>
@@ -583,6 +763,16 @@ function BackButton({ onClick }: { onClick: () => void }) {
       <ChevronLeftIcon aria-hidden="true" />
       {t("automations.panel.back")}
     </Button>
+  );
+}
+
+/** A titled group on the New automation page. */
+function TemplateSection({ heading, children }: { heading: string; children: ReactNode }) {
+  return (
+    <section className="flex min-w-0 flex-col gap-1.5">
+      <h4 className="m-0 text-xs leading-4.5 font-medium text-fg-muted">{heading}</h4>
+      {children}
+    </section>
   );
 }
 
@@ -633,6 +823,7 @@ function AutomationDetail({
   onSetOn,
   onRunNow,
   onEdit,
+  onSaveAsTemplate,
   onDelete,
   notice,
 }: {
@@ -651,6 +842,8 @@ function AutomationDetail({
   onSetOn: (on: boolean) => void;
   onRunNow: () => void;
   onEdit: () => void;
+  /** Offered where the workspace keeps templates. */
+  onSaveAsTemplate: (() => void) | undefined;
   onDelete: () => void;
   /** What the last action here said. */
   notice: ReactNode;
@@ -692,6 +885,12 @@ function AutomationDetail({
           <Button type="button" variant="outline" size="sm" onClick={onEdit}>
             {t("automations.panel.edit")}
           </Button>
+          {onSaveAsTemplate ? (
+            <Button type="button" variant="outline" size="sm" onClick={onSaveAsTemplate}>
+              <BookmarkPlusIcon aria-hidden="true" />
+              {t("automations.panel.saveAsTemplate")}
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="ghost"

@@ -4,10 +4,11 @@ import type { Permission } from "./permissions";
 export type FirstPartyToolAuthorization = {
   sessionRequired?: true;
   /**
-   * Registered only while the session has admin access (live, per request),
-   * whatever its tool selection; the tool then acts as the person who gave it.
+   * Acts as a person: registered only in a session a person started
+   * themselves (not a child or service session) when selected, or whenever
+   * the session has full access. Never carried into a child's selection.
    */
-  adminAccessRequired?: true;
+  personSessionRequired?: true;
   allOf?: readonly Permission[];
   anyOf?: readonly Permission[];
 };
@@ -344,9 +345,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   project_reorder: { allOf: ["sessions:create"] },
   project_delete: { allOf: ["sessions:create"] },
   session_set_project: { allOf: ["sessions:control"] },
-  admin_actions_search: { sessionRequired: true, adminAccessRequired: true },
-  admin_action_describe: { sessionRequired: true, adminAccessRequired: true },
-  admin_action_call: { sessionRequired: true, adminAccessRequired: true },
+  admin_actions_search: { sessionRequired: true, personSessionRequired: true },
+  admin_action_describe: { sessionRequired: true, personSessionRequired: true },
+  admin_action_call: { sessionRequired: true, personSessionRequired: true },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 /**

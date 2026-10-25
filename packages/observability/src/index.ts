@@ -461,6 +461,10 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
   ["sandboxLeaseKey", /^slk_[0-9a-f]{32}$/],
   ["correlationId", /^[A-Za-z0-9._:-]{1,128}$/],
+  [
+    "writerKinds",
+    /^(?:tool_call|shell_session|pending_shell_start|remote_operation)(?:,(?:tool_call|shell_session|pending_shell_start|remote_operation)){0,3}$/,
+  ],
   // Rejected-request classification (apps/api/src/http/rejection-telemetry.ts):
   // the public ErrorEnvelope code enum, a catalog permission or typed detail
   // code, and a one-way message hash. Never message text or identifiers.
@@ -619,6 +623,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
 ]);
 
 const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
+  "action_timeout",
   "agent_command_wake_failed",
   "api_startup_failed",
   "api_uncaught_exception",

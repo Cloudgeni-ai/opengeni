@@ -3,6 +3,8 @@ import type {
   ListRecordingModelsResponse,
   Recording,
   RecordingLiveSegment,
+  RecordingNote,
+  RecordingNoteKind,
   RecordingPerson,
   RecordingVoiceprintConsent,
   RecordingSpeaker,
@@ -30,6 +32,9 @@ import { OpenGeniContext } from "../session-context";
 import { usePolledValue } from "./internal";
 
 const PROCESSING_POLL_MS = 3_000;
+// A meeting recorded on another device changes little until it ends, so pages
+// showing it read it less often, only to notice when the capture finishes.
+const CAPTURING_POLL_MS = 10_000;
 
 /**
  * Client surface of the recording hooks, as `OpenGeniRecordingsClient` provides
@@ -60,10 +65,16 @@ export type RecordingsClientLike = Pick<
   | "createRecordingLiveSession"
   | "appendRecordingLiveSegments"
   | "listRecordingLiveSegments"
+  | "listRecordingNotes"
+  | "saveRecordingNote"
 >;
 
-/** Refresh every few seconds while `active`, without an extra read when it turns on. */
-function useRefreshWhile(active: boolean, refresh: () => Promise<void>): void {
+/** Refresh every `intervalMs` while `active`, without an extra read when it turns on. */
+function useRefreshWhile(
+  active: boolean,
+  refresh: () => Promise<void>,
+  intervalMs: number = PROCESSING_POLL_MS,
+): void {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
   useEffect(() => {
@@ -75,14 +86,14 @@ function useRefreshWhile(active: boolean, refresh: () => Promise<void>): void {
         void refreshRef.current().finally(() => {
           if (!cancelled) tick();
         });
-      }, PROCESSING_POLL_MS);
+      }, intervalMs);
     };
     tick();
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [active]);
+  }, [active, intervalMs]);
 }
 
 export type RecordingsClientOverride = {
@@ -201,7 +212,14 @@ export type UseRecorderResult = RecorderSnapshot & {
   start: (
     overrides?: Pick<
       UseRecorderOptions,
-      "title" | "systemAudio" | "microphone" | "visibility" | "liveTranscript" | "transcription"
+      | "title"
+      | "systemAudio"
+      | "microphone"
+      | "visibility"
+      | "liveTranscript"
+      | "transcription"
+      | "externalRef"
+      | "metadata"
     >,
   ) => Promise<void>;
   pause: () => void;
@@ -323,7 +341,10 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
     void (async () => {
       // Save what a capture cut short left half-written, then finish everything.
       await platformRef.current.recover?.(store()).catch(() => undefined);
-      return await uploader().resume();
+      // Dictations are the composer's to finish; this hook finishes the rest.
+      return await uploader().resume({
+        only: (recording) => recording.create.purpose !== "dictation",
+      });
     })()
       .then((ids) => {
         if (cancelled) return;
@@ -453,7 +474,10 @@ function isProcessing(recording: Recording | null | undefined): boolean {
   return recording.state === "processing" || state === "queued" || state === "processing";
 }
 
-/** The recordings the signed-in person can see, newest first. Polls while any is processing. */
+/**
+ * The recordings the signed-in person can see, newest first. Polls while any is
+ * being transcribed, and less often while any is still being recorded.
+ */
 export function useRecordings(options: UseRecordingsOptions = {}): UseRecordingsResult {
   const { client, workspaceId } = useEmbeddedRecordings(
     options,
@@ -492,11 +516,13 @@ export function useRecordings(options: UseRecordingsOptions = {}): UseRecordings
       ...olderForThisList.recordings.filter((recording) => !seen.has(recording.id)),
     ];
   }, [state.data, olderForThisList]);
+  const anyProcessing = recordings.some(isProcessing);
   useRefreshWhile(
     options.pollIntervalMs === undefined &&
       (options.enabled ?? true) &&
-      recordings.some(isProcessing),
+      (anyProcessing || recordings.some((recording) => recording.state === "capturing")),
     state.refresh,
+    anyProcessing ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
   );
   const nextBefore = olderForThisList
     ? olderForThisList.nextBefore
@@ -553,7 +579,11 @@ export type UseRecordingResult = {
   remove: () => Promise<void>;
 };
 
-/** One recording with its transcript versions. Polls while it is being transcribed. */
+/**
+ * One recording with its transcript versions. Polls while it is being
+ * transcribed, and less often while it is still being recorded, here or on
+ * another device, so a page showing it notices when the recording ends.
+ */
 export function useRecording(
   recordingId: string | null,
   options: UseRecordingOptions = {},
@@ -581,7 +611,11 @@ export function useRecording(
   const nowProcessing =
     isProcessing(recording) ||
     versions.some((version) => version.state === "queued" || version.state === "processing");
-  useRefreshWhile(enabled && nowProcessing, state.refresh);
+  useRefreshWhile(
+    enabled && (nowProcessing || recording?.state === "capturing"),
+    state.refresh,
+    nowProcessing ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
+  );
   const refresh = state.refresh;
   const require = () => {
     if (!recordingId) throw new Error("No recording selected.");
@@ -958,6 +992,8 @@ export function useRecordingModels(
   models: ListRecordingModelsResponse["models"];
   liveModels: ListRecordingModelsResponse["models"];
   defaultModel: ListRecordingModelsResponse["default"] | null;
+  /** The deployment uses one model for every transcription; workspaces cannot pick. */
+  pinned: boolean;
   loading: boolean;
   error: Error | null;
 } {
@@ -978,7 +1014,82 @@ export function useRecordingModels(
     models,
     liveModels,
     defaultModel: state.data?.default ?? null,
+    pinned: state.data?.pinned === true,
     loading: state.loading,
     error: state.error,
+  };
+}
+
+// --- Notes -------------------------------------------------------------------
+
+/** How often an open meeting checks for notes someone else, or an agent, saved. */
+const NOTES_POLL_MS = 15_000;
+
+export type UseRecordingNotesOptions = RecordingsClientOverride & {
+  enabled?: boolean;
+  /** Check for notes saved elsewhere this often; default 15 seconds, 0 to never. */
+  pollIntervalMs?: number;
+};
+
+export type UseRecordingNotesResult = {
+  /** What people jotted down while the meeting was recorded. */
+  notepad: RecordingNote | null;
+  /** The written-up summary, decisions and action items. */
+  notes: RecordingNote | null;
+  loading: boolean;
+  error: Error | null;
+  refresh: () => Promise<void>;
+  /**
+   * Replace the notepad or the notes. The notes are saved against the revision
+   * this hook last read, so a newer save made elsewhere fails with 409
+   * `notes_changed` instead of being overwritten; the notepad, saved as people
+   * type, always wins.
+   */
+  save: (kind: RecordingNoteKind, body: string) => Promise<RecordingNote>;
+};
+
+/** A meeting's notepad and notes, kept fresh while it is open. */
+export function useRecordingNotes(
+  recordingId: string | null,
+  options: UseRecordingNotesOptions = {},
+): UseRecordingNotesResult {
+  const { client, workspaceId } = useEmbeddedRecordings(
+    options,
+    ["listRecordingNotes", "saveRecordingNote"],
+    "useRecordingNotes",
+  );
+  const load = useCallback(
+    async () =>
+      recordingId ? (await client.listRecordingNotes(workspaceId, recordingId)).notes : [],
+    [client, workspaceId, recordingId],
+  );
+  const pollIntervalMs = options.pollIntervalMs ?? NOTES_POLL_MS;
+  const state = usePolledValue(load, {
+    enabled: (options.enabled ?? true) && recordingId !== null,
+    ...(pollIntervalMs > 0 ? { pollIntervalMs } : {}),
+  });
+  const notes = state.data ?? [];
+  const notepad = notes.find((note) => note.kind === "notepad") ?? null;
+  const written = notes.find((note) => note.kind === "notes") ?? null;
+  const writtenRevision = written?.revision ?? 0;
+  const refresh = state.refresh;
+  return {
+    notepad,
+    notes: written,
+    loading: state.loading,
+    error: state.error,
+    refresh,
+    save: useCallback(
+      async (kind: RecordingNoteKind, body: string) => {
+        if (!recordingId) throw new Error("No recording selected.");
+        const saved = await client.saveRecordingNote(workspaceId, recordingId, kind, {
+          body,
+          ...(kind === "notes" ? { expectedRevision: writtenRevision } : {}),
+        });
+        await refresh();
+        return saved;
+      },
+      [client, workspaceId, recordingId, writtenRevision, refresh],
+    ),
   };
 }

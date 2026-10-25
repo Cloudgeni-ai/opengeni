@@ -8,7 +8,7 @@ import type { WorkspaceModelSelection } from "@opengeni/core";
 export const LIST_MODELS_TOOL_NAME = "list_models";
 
 export const LIST_MODELS_TOOL_DESCRIPTION =
-  "List the models this workspace can select right now, in picker order, with deployment-defined cost and optional guidance. This does not switch the current session model; use an ID with session_create or the human model picker.";
+  "List the models this workspace can select right now, in picker order, with deployment-defined cost and optional guidance. When the person asks for a different model for this chat (faster, smarter, cheaper), pick a sensible one from this list and switch the chat yourself with session_set_model instead of sending them to the model chooser. For a new session, pass an ID to session_create.";
 
 function safeLineField(value: string): string {
   return value

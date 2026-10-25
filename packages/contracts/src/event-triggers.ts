@@ -14,7 +14,18 @@ import { defineSchema } from "./define-schema";
  * embed these schemas.
  */
 
-export const EVENT_SOURCE_KINDS = ["webhook", "github", "slack", "gmail", "mcp"] as const;
+/**
+ * `workspace` is "This workspace": things that happen in Opengeni itself, such
+ * as a meeting's transcript becoming ready, as one person may see them.
+ */
+export const EVENT_SOURCE_KINDS = [
+  "webhook",
+  "github",
+  "slack",
+  "gmail",
+  "mcp",
+  "workspace",
+] as const;
 export const EventSourceKind = /* @__PURE__ */ defineSchema(() => z.enum(EVENT_SOURCE_KINDS));
 export type EventSourceKind = z.infer<typeof EventSourceKind>;
 
@@ -29,6 +40,64 @@ export const EventSourceStatus = /* @__PURE__ */ defineSchema(() =>
   z.enum(["active", "disabled", "blocked"]),
 );
 export type EventSourceStatus = z.infer<typeof EventSourceStatus>;
+
+/**
+ * Why an event source or trigger is not active, or why a source can't send
+ * an event type, as a code clients word in their own language. Each comes
+ * with the same reason as an English sentence (`statusReason`,
+ * `unavailableReason`) and, for some, what the app or server said
+ * (`…Detail`). The wire carries a plain string: a client reads a code it
+ * doesn't know, or none, as "show the sentence".
+ *
+ * - `turned_off`: someone turned it off.
+ * - `awaiting_secret`: a pasted Linear or Sentry webhook waits for its signing secret.
+ * - `reconnect`: the owner's connection to the app has to be signed in again.
+ * - `missing_permission`: the connection no longer allows reading what the events need.
+ * - `app_not_enabled`: the app isn't turned on for the connected account.
+ * - `account_changed`: the connection now signs in as another account (the detail names it).
+ * - `connector_removed`: the app or connector is no longer added to the workspace.
+ * - `host_sign_in`: the server signs in through the app that embeds Opengeni, which automations can't use.
+ * - `events_unsupported`: the server doesn't offer events.
+ * - `event_type_gone`: the server no longer offers this event type.
+ * - `forbidden`: the server won't let the owner's account receive these events with these settings.
+ * - `invalid_arguments`: the server rejected the trigger's subscription arguments.
+ * - `needs_public_address`: the server sends this type only to a public https address, which the deployment lacks.
+ * - `push_only`: the server sends this type only over a held-open connection, which isn't supported yet.
+ * - `delivery_mode_unsupported`: the server won't send this type in a way the deployment can receive.
+ * - `callback_unreachable`: the server can't reach the deployment's webhook address.
+ * - `not_answering`: the app or server hasn't answered for over an hour.
+ * - `github_event_not_subscribed`: the GitHub App isn't subscribed to the event (the detail names it).
+ * - `unavailable`: the source can't receive events for another reason.
+ */
+export const EVENT_STATUS_REASON_CODES = [
+  "turned_off",
+  "awaiting_secret",
+  "reconnect",
+  "missing_permission",
+  "app_not_enabled",
+  "account_changed",
+  "connector_removed",
+  "host_sign_in",
+  "events_unsupported",
+  "event_type_gone",
+  "forbidden",
+  "invalid_arguments",
+  "needs_public_address",
+  "push_only",
+  "delivery_mode_unsupported",
+  "callback_unreachable",
+  "not_answering",
+  "github_event_not_subscribed",
+  "unavailable",
+] as const;
+export type EventStatusReasonCode = (typeof EVENT_STATUS_REASON_CODES)[number];
+
+/** Whether `code` is one this version of the contract knows. */
+export function isEventStatusReasonCode(code: unknown): code is EventStatusReasonCode {
+  return (
+    typeof code === "string" && (EVENT_STATUS_REASON_CODES as readonly string[]).includes(code)
+  );
+}
 
 /** Who can use a source and see its events: only its owner, or the workspace. */
 export const EventSourceVisibility = /* @__PURE__ */ defineSchema(() =>
@@ -95,6 +164,13 @@ export const EventSource = /* @__PURE__ */ defineSchema(() =>
     status: EventSourceStatus,
     /** Why the source is blocked or disabled, in plain language. */
     statusReason: z.string().nullable(),
+    /**
+     * The same reason as a code (`EVENT_STATUS_REASON_CODES`) a client words
+     * in its own language; null when active or from an older server.
+     */
+    statusReasonCode: z.string().nullable().default(null),
+    /** What the app or server said about it, verbatim, when it said something. */
+    statusReasonDetail: z.string().nullable().default(null),
     /** The URL to paste into the sending app. Webhook sources only. */
     webhookUrl: z.string().nullable(),
     /**
@@ -159,6 +235,16 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
           name: EventSourceName.optional(),
         })
         .strict(),
+      z
+        .object({
+          /**
+           * The caller's own "This workspace" source. There is one per person,
+           * so creating it again returns the existing one.
+           */
+          kind: z.literal("workspace"),
+          name: EventSourceName.optional(),
+        })
+        .strict(),
     ])
     .superRefine((value, context) => {
       if (
@@ -212,6 +298,85 @@ export const ListEventSourcesResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({ sources: z.array(EventSource) }).strict(),
 );
 export type ListEventSourcesResponse = z.infer<typeof ListEventSourcesResponse>;
+
+/**
+ * Sources that need no setting up, named by a key until they are used: an
+ * MCP server the person is signed in to that offers events
+ * (`mcp-server:<serverId>`), a Gmail account they connected
+ * (`gmail:<connectionId>`), and "This workspace" (`workspace`). A trigger may
+ * name one by its key: the person's own source is added the first time it is
+ * used, and using the key again finds that same source.
+ */
+export const READY_EVENT_SOURCE_KINDS = ["mcp", "gmail", "workspace"] as const;
+export type ReadyEventSourceKind = (typeof READY_EVENT_SOURCE_KINDS)[number];
+
+/** What adds a ready source: the matching create request. */
+export type ReadyEventSourceRequest =
+  | { kind: "mcp"; serverId: string }
+  | { kind: "gmail"; connectionId: string }
+  | { kind: "workspace" };
+
+const MCP_SERVER_KEY_PREFIX = "mcp-server:";
+const GMAIL_KEY_PREFIX = "gmail:";
+const WORKSPACE_KEY = "workspace";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const SERVER_ID_MAX_LENGTH = 256;
+
+export function readyEventSourceKey(request: ReadyEventSourceRequest): string {
+  if (request.kind === "mcp") return `${MCP_SERVER_KEY_PREFIX}${request.serverId}`;
+  if (request.kind === "gmail") return `${GMAIL_KEY_PREFIX}${request.connectionId}`;
+  return WORKSPACE_KEY;
+}
+
+/** The source a key names, or null when it is not a ready source's key. */
+export function readyEventSourceRequest(key: string): ReadyEventSourceRequest | null {
+  if (key === WORKSPACE_KEY) return { kind: "workspace" };
+  if (key.startsWith(MCP_SERVER_KEY_PREFIX)) {
+    const serverId = key.slice(MCP_SERVER_KEY_PREFIX.length);
+    return serverId.length > 0 && serverId.length <= SERVER_ID_MAX_LENGTH
+      ? { kind: "mcp", serverId }
+      : null;
+  }
+  if (key.startsWith(GMAIL_KEY_PREFIX)) {
+    const connectionId = key.slice(GMAIL_KEY_PREFIX.length);
+    return UUID_PATTERN.test(connectionId) ? { kind: "gmail", connectionId } : null;
+  }
+  return null;
+}
+
+export const ReadyEventSource = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** Use it wherever a trigger names a source; see `readyEventSourceRequest`. */
+      key: z.string(),
+      kind: z.enum(READY_EVENT_SOURCE_KINDS),
+      name: z.string(),
+    })
+    .strict(),
+);
+export type ReadyEventSource = z.infer<typeof ReadyEventSource>;
+
+export const ListReadyEventSourcesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ sources: z.array(ReadyEventSource) }).strict(),
+);
+export type ListReadyEventSourcesResponse = z.infer<typeof ListReadyEventSourcesResponse>;
+
+/** A source's id, or a ready source's key. */
+export const EventSourceRef = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(MCP_SERVER_KEY_PREFIX.length + SERVER_ID_MAX_LENGTH)
+    .refine(
+      (ref) => UUID_PATTERN.test(ref) || readyEventSourceRequest(ref) !== null,
+      "Use an event source's id or a ready source's key",
+    ),
+);
+
+/** Whether a trigger's source names a ready source by its key rather than an id. */
+export function isReadyEventSourceKey(ref: string): boolean {
+  return !UUID_PATTERN.test(ref) && readyEventSourceRequest(ref) !== null;
+}
 
 /**
  * Who caused an event. `opengeni` marks Opengeni's own identities (its GitHub
@@ -399,7 +564,8 @@ export type EventCondition = z.infer<typeof EventCondition>;
 export const EventTriggerInput = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      sourceId: Uuid,
+      /** The source's id, or a ready source's key: the owner's source is added on first use. */
+      sourceId: EventSourceRef,
       /** Event types that fire the trigger. An MCP trigger names exactly one. */
       eventTypes: z.array(EventTypeName).min(1).max(EVENT_TRIGGER_TYPES_MAX),
       /** All conditions must hold. */
@@ -430,6 +596,10 @@ export const EventTrigger = /* @__PURE__ */ defineSchema(() =>
     arguments: z.record(z.string(), z.unknown()).nullable(),
     status: EventTriggerStatus,
     statusReason: z.string().nullable(),
+    /** The reason as a code a client words itself; see `EVENT_STATUS_REASON_CODES`. */
+    statusReasonCode: z.string().nullable().default(null),
+    /** What the source's server said about it, verbatim, when it said something. */
+    statusReasonDetail: z.string().nullable().default(null),
     createdAt: Timestamp,
     updatedAt: Timestamp,
   }),
@@ -438,32 +608,40 @@ export type EventTrigger = z.infer<typeof EventTrigger>;
 
 /**
  * What the automations that continue a chat are waiting for, as the chat list
- * and header show it: the soonest scheduled run and the first event that can
- * start a run. Only automations the reader can see contribute; a chat that
- * waits only on someone else's private automation has none.
+ * and header show it: the soonest scheduled run and the events that can start
+ * a run. Only automations the reader can see contribute; a chat that waits
+ * only on someone else's private automation has none.
  */
-export const SessionAutomationWaitSummary = /* @__PURE__ */ defineSchema(() =>
-  z
+export const SessionAutomationWaitSummary = /* @__PURE__ */ defineSchema(() => {
+  const waitEvent = z
+    .object({
+      source: z.object({ kind: EventSourceKind, name: z.string() }).strict().nullable(),
+      eventTypes: z.array(z.string()),
+    })
+    .strict();
+  return z
     .object({
       /** The soonest scheduled run into the chat, or null when none is ahead. */
       nextRunAt: z.string().datetime({ offset: true }).nullable(),
       /**
        * The first active event trigger that can start a run: its event types
-       * (empty for every event) and its source, null when the reader can't
-       * see the source. Null when no event can start a run.
+       * and its source, null when the reader can't see the source. Null when
+       * no event can start a run. `events` names them all.
        */
-      event: z
-        .object({
-          source: z.object({ kind: EventSourceKind, name: z.string() }).strict().nullable(),
-          eventTypes: z.array(z.string()),
-        })
-        .strict()
-        .nullable(),
+      event: waitEvent.nullable(),
+      /**
+       * Every event that can start a run, one entry per source in the order
+       * the automations were made: the event types its active triggers wait
+       * for (just `*` when one takes every event). Sources the reader can't
+       * see share one entry with a null source. Empty when no event can start
+       * a run; absent from servers that only send `event`.
+       */
+      events: z.array(waitEvent).optional(),
       /** How many automations can still start a run in the chat, this one included. */
       automations: z.number().int().positive(),
     })
-    .strict(),
-);
+    .strict();
+});
 export type SessionAutomationWaitSummary = z.infer<typeof SessionAutomationWaitSummary>;
 
 /** Event triggers and the event run policy of an automation. */
@@ -545,6 +723,10 @@ export const EventTypeDescriptor = /* @__PURE__ */ defineSchema(() =>
     /** False when Opengeni cannot receive this type from this source. */
     available: z.boolean(),
     unavailableReason: z.string().nullable(),
+    /** The reason as a code a client words itself; see `EVENT_STATUS_REASON_CODES`. */
+    unavailableReasonCode: z.string().nullable().default(null),
+    /** What the reason names, such as the GitHub App event to subscribe to. */
+    unavailableReasonDetail: z.string().nullable().default(null),
   }),
 );
 export type EventTypeDescriptor = z.infer<typeof EventTypeDescriptor>;

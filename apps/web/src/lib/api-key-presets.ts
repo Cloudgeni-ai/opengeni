@@ -91,6 +91,7 @@ export const WORKSPACE_KEY_PERMISSION_GROUPS: ReadonlyArray<{
     label: "Connections and code",
     permissions: [
       "connections:read",
+      "connections:personal",
       "connections:write",
       "capabilities:manage",
       "github:use",
@@ -146,6 +147,7 @@ const PERMISSION_LABELS: Record<string, string> = {
   "secrets:write": "Change secrets",
   "connections:read": "See connections",
   "connections:write": "Manage connections",
+  "connections:personal": "Connect their own accounts",
   "capabilities:manage": "Manage capabilities",
   "github:use": "Use GitHub",
   "github:manage": "Manage GitHub",

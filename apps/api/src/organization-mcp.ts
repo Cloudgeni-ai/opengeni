@@ -14,8 +14,12 @@ import {
 import { stampDelegatedHumanAuthorization } from "@opengeni/core";
 import { z } from "zod";
 
-import type { ActionCatalogEntry } from "./mcp/action-catalog-types";
-import { ACTION_CATALOG } from "./mcp/action-catalog.gen";
+import {
+  ACTION_CATALOG,
+  appActionChangesState,
+  findAppAction,
+  type ActionCatalogEntry,
+} from "@opengeni/contracts/app-actions";
 import { ACTION_REQUEST_SCHEMAS } from "./mcp/action-schema-imports.gen";
 import { actionDescription } from "./mcp/action-descriptions";
 
@@ -44,23 +48,6 @@ export type OrganizationMcpCaller =
       access: OrganizationAccessPolicy;
     }
   | { kind: "key"; authorization: string; accessKey: string | null };
-
-/**
- * Requests that only read but are sent as POST (a search query or a file path
- * in the body). Read only connections may run them; each route still checks
- * its own read permission.
- */
-export const READ_ONLY_POST_ACTIONS: ReadonlySet<string> = new Set([
-  "/v1/workspaces/:workspaceId/knowledge/search",
-  "/v1/workspaces/:workspaceId/knowledge/entries/search",
-  "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
-  "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
-  "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff",
-  "/v1/workspaces/:workspaceId/integrations/preview",
-  "/v1/workspaces/:workspaceId/plugins/preview",
-  "/v1/workspaces/:workspaceId/skills/preview",
-  "/v1/organizations/:organizationId/external-identities/lookup",
-]);
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const STREAM_READ_MS = 2_000;
@@ -211,13 +198,6 @@ export function buildOrganizationMcpServer(input: OrganizationActionContext): Se
   return server;
 }
 
-export function findAction(id: string): ActionCatalogEntry | undefined {
-  const trimmed = id.trim();
-  return ACTION_CATALOG.find(
-    (entry) => entry.id === trimmed || `${entry.method} ${entry.path}` === trimmed,
-  );
-}
-
 function words(value: string): string[] {
   return value
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -308,7 +288,7 @@ function schemaFor(name: string): unknown {
 
 /** The describe tool's answer for an action id, or why it can't be used. */
 export function describeActionResult(id: string): CallToolResult {
-  const entry = findAction(id);
+  const entry = findAppAction(id);
   if (!entry) return failure(`No action "${id}". Search for it first.`);
   if (entry.browserOnly) return browserOnly(entry);
   return json(describeAction(entry));
@@ -350,14 +330,13 @@ export async function runOrganizationAction(
   context: OrganizationActionContext,
   input: z.infer<typeof OrganizationActionCallInput>,
 ): Promise<{ response: Response } | { refused: CallToolResult }> {
-  const entry = findAction(input.id);
+  const entry = findAppAction(input.id);
   if (!entry) return { refused: failure(`No action "${input.id}". Search for it first.`) };
   if (entry.browserOnly) return { refused: browserOnly(entry) };
   const reads = entry.method === "GET" || entry.method === "HEAD";
   if (
     context.caller.kind === "person" &&
-    !reads &&
-    !READ_ONLY_POST_ACTIONS.has(entry.path) &&
+    appActionChangesState(entry) &&
     isReadOnlyPermissionSet(context.caller.access.permissions)
   ) {
     return { refused: failure("This connection is read only, so it can't change anything.") };

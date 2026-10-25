@@ -775,8 +775,12 @@ export async function handleAgentEventPayload(
   }
   // A live machine behind its promoted build is asked to update; the decision
   // reads only this enrollment, and a request never blocks heartbeat ingestion.
-  // A compute sandbox's agent is pinned by its image and never self-updates.
-  if (enrollment.kind !== "sandbox") agentUpdates?.consider(enrollment);
+  // A compute sandbox is one too: it keeps its disk for as long as it lives, so
+  // the agent its image carried would otherwise run for good. A sandbox only
+  // heartbeats while it runs, so one that sleeps updates when next woken. An
+  // agent from before compute self-update refuses with a non-retryable
+  // `update_unsupported`, asked once per promoted version.
+  agentUpdates?.consider(enrollment);
   if (heartbeat.attachedBrowserInventory) {
     try {
       await ingestAttachedBrowserInventory(db, {

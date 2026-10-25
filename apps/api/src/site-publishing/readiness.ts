@@ -128,6 +128,15 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
   const warnings: SitePublishWarning[] = [];
   const add = (warning: Omit<SitePublishWarning, "fix"> & { fix?: SitePublishWarning["fix"] }) =>
     warnings.push({ fix: null, ...warning });
+  // Public, yet no guests: a login-only deployment. Say so first, so a
+  // visitor's sign-in page is not mistaken for a broken link.
+  if (input.access === "public" && !input.guestsAllowed)
+    add({
+      code: "public_sign_in_required",
+      message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+      suggestion:
+        "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the Site or its link.",
+    });
   if (input.requestedTools > 0 || input.page?.workspaceTools)
     add({
       code: "workspace_tools_members_only",

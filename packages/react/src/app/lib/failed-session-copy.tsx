@@ -1,4 +1,5 @@
 import { t } from "./console-text";
+import { isDiagnosticFailureCode } from "../../lib/format";
 import { providerRecoverySubject } from "../../lib/provider-recovery";
 import type { SessionFailureSummary } from "./events";
 import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
@@ -96,6 +97,7 @@ const PROVIDER_ERROR: KnownFailure = {
 };
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
+const SANDBOX_START_FAILURE = "The sandbox didn’t start.";
 const EXECUTION_CONNECTION_FAILURE = "Opengeni lost contact with the execution environment.";
 const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
 const COMPACTION_FAILURE =
@@ -295,23 +297,25 @@ export function failedSessionCopy(
       ...(known === DAILY_LIMIT ? { dailyLimit: true as const } : {}),
     };
   }
-  // Unclassified preclaim text can also contain raw infrastructure diagnostics.
-  // Presentation only: transport text grants no retry or provider-loss proof.
-  // Preserve the complete diagnostic behind the existing Details disclosure.
+  // Unclassified text (and the few codes that record operator text) is a
+  // diagnostic, not copy for people: name the outcome and keep the complete
+  // diagnostic behind the existing Details disclosure. Presentation only:
+  // transport text grants no retry or provider-loss proof.
   if (
     !creditExhausted &&
     !failure.safetyRefusal &&
     !failure.structuralSandboxFailure &&
     !unavailableModel &&
-    (!code || code === "pre_claim_failure") &&
+    isDiagnosticFailureCode(code) &&
     !/(?:workspace|opengeni) credits/i.test(recorded ?? "")
   ) {
     const detail = diagnostic;
     return {
-      reason:
-        /\/modal\.task_command_router\.TaskCommandRouter\/\w+\s+(?:UNAVAILABLE|DEADLINE_EXCEEDED)/.test(
-          detail ?? "",
-        )
+      reason: failure.sandboxStartFailed
+        ? SANDBOX_START_FAILURE
+        : /\/modal\.task_command_router\.TaskCommandRouter\/\w+\s+(?:UNAVAILABLE|DEADLINE_EXCEEDED)/.test(
+              detail ?? "",
+            )
           ? EXECUTION_CONNECTION_FAILURE
           : UNKNOWN_FAILURE,
       unavailableModel: false,

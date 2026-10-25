@@ -502,13 +502,16 @@ const SettingsSchema = z.object({
     .string()
     .url()
     .default("https://github.com/Cloudgeni-ai/opengeni/releases"),
-  // Explicit operator-controlled promotion pointer for `/agent/latest/*`.
-  // Versioned agent releases are immutable; changing this setting promotes or
-  // rolls back the stable channel without moving or deleting a provider tag.
+  // Optional operator promotion pointer for `/agent/latest/*` and the stable
+  // update channel. Versioned agent releases are immutable; setting this pins,
+  // promotes or rolls back the stable channel without moving or deleting a
+  // provider tag. Unset, the API serves the agent release of its own source
+  // tree (agent/Cargo.toml), so the stable agent advances with the control
+  // plane instead of staying at whatever version a default once named.
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.54"),
+    .optional(),
   // Optional pin for the desktop app served by /desktop/latest/*. When unset,
   // the newest desktop-v release on the agent release repository is served.
   desktopStableVersion: z
@@ -601,6 +604,8 @@ const SettingsSchema = z.object({
   // Operator gate for unverified Gmail/Drive OAuth acquisition; sign-in and refresh are independent.
   googleConnectorSetupEnabled: EnvBoolean.default(true),
   googleDriveMcpEnabled: EnvBoolean.default(false),
+  // Google Calendar shares the Gmail OAuth client; enable once its consent screen lists the Calendar scopes.
+  googleCalendarEnabled: EnvBoolean.default(false),
   microsoftTeamsToolsEnabled: EnvBoolean.default(false),
   microsoftTeamsAllowedWorkspaceIds: z.preprocess(
     (value) =>
@@ -874,6 +879,19 @@ const SettingsSchema = z.object({
   vercelAiGatewayApiKey: z.string().optional(),
   /** Image adapter route; native hosted providers ignore this model. */
   imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
+  // Offer image generation on Opengeni credits through the deployment's
+  // Gateway key when no turn-native, subscription or workspace route applies.
+  // On by default once the Gateway key and a price exist; false turns it off.
+  imageGenerationOpengeniCreditsEnabled: EnvBoolean.default(true),
+  // Opengeni's customer price for one credit-funded generated image. Unset uses
+  // the reviewed price of `imageGenerationModel`; a model without one is never
+  // offered on Opengeni credits. The operation freezes the price before dispatch.
+  imageGenerationCreditMicrosPerImage: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .optional(),
   /** Durable video generation uses the workspace-owned Gateway credential. */
   videoGenerationPollIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
   videoGenerationRecoveryDeadlineMs: z.coerce
@@ -977,10 +995,60 @@ const SettingsSchema = z.object({
    */
   recordingSpeakersBinaryPath: z.string().trim().min(1).max(1024).optional(),
   recordingSpeakerModelsDir: z.string().trim().min(1).max(1024).optional(),
+  /**
+   * Place a text-only model's words on the audio ourselves (forced alignment
+   * with `alignment.onnx` from the speaker models directory), so models
+   * that return only text can serve meetings. The API and the worker both
+   * read it; the worker also needs the model.
+   */
+  recordingWordAlignment: EnvBoolean.default(false),
+  /**
+   * The deployment's own Azure Speech account for meeting transcripts
+   * (MAI-Transcribe), as its HTTPS origin. Audio is processed in the
+   * account's region. It authenticates with the account key when one is set,
+   * otherwise with Microsoft Entra ID through the standard AZURE_TENANT_ID and
+   * AZURE_CLIENT_ID plus AZURE_FEDERATED_TOKEN_FILE (a workload identity) or
+   * AZURE_CLIENT_SECRET.
+   */
+  recordingAzureSpeechEndpoint: z
+    .string()
+    .trim()
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      return url.protocol === "https:" && (url.pathname === "/" || url.pathname === "");
+    }, "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT must be the HTTPS origin of an Azure Speech account")
+    .optional(),
+  recordingAzureSpeechApiKey: z.string().trim().min(1).optional(),
+  /**
+   * The transcription model recordings use unless a workspace or request
+   * picks one, as `provider/model`. Defaults to Azure Speech when its
+   * account is configured, else ElevenLabs Scribe v2.
+   */
+  recordingTranscriptionDefault: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u, "Use provider/model, such as elevenlabs/scribe_v2")
+    .optional(),
+  /**
+   * One speech-to-text model for every use (meetings, dictation), as
+   * `provider/model`. Workspaces then cannot pick another, and nothing else
+   * hears the audio. Unset lets each workspace choose.
+   */
+  speechToTextPinned: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u,
+      "Use provider/model, such as azure-speech/MAI-Transcribe-2",
+    )
+    .optional(),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Connected subscription STT is preferred by default; operators can put
   // openai/azure-openai first explicitly.
-  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai.
+  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai,
+  // azure-speech (also azure-mai) and elevenlabs. Speech-to-text providers
+  // not named here follow in the deployment's own order.
   voiceInputProviderOrder: z
     .string()
     .default("supergrok-subscription,codex-subscription,openai,azure-openai"),
@@ -1270,6 +1338,25 @@ const SettingsSchema = z.object({
   azureOpenaiApiVersion: z.string().optional(),
   azureOpenaiApiKey: z.string().optional(),
   azureOpenaiAdToken: z.string().optional(),
+  azureOpenaiAuthMode: z
+    .enum(["static", "workload_identity", "managed_identity"])
+    .default("static"),
+  /**
+   * Let organization admins connect Azure OpenAI as this deployment's own
+   * Microsoft Entra identity instead of a key or their own app. Off by
+   * default: on a shared deployment every organization would sign in as the
+   * same identity, so only an operator whose identity may serve all of them
+   * turns it on. The identity is the standard AZURE_TENANT_ID and
+   * AZURE_CLIENT_ID, with AZURE_FEDERATED_TOKEN_FILE (a workload identity) or
+   * AZURE_CLIENT_SECRET.
+   */
+  azureOpenaiDeploymentIdentityEnabled: EnvBoolean.default(false), // OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED
+  /** Microsoft Entra ID application identity, as the Azure SDKs read it. */
+  azureTenantId: z.string().trim().min(1).optional(),
+  azureClientId: z.string().trim().min(1).optional(),
+  azureFederatedTokenFile: z.string().trim().min(1).optional(),
+  azureClientSecret: z.string().trim().min(1).optional(),
+  azureAuthorityHost: z.string().trim().url().optional(),
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
   dockerImage: z.string().default("opengeni-sandbox:local"),
@@ -1575,6 +1662,17 @@ const SettingsSchema = z.object({
   // EnvBoolean (NOT
   // z.coerce.boolean(), which coerces "false" -> true).
   agentOpStreamEnabled: EnvBoolean.default(true),
+  // In-chat app actions (admin_action_call without full access): a change
+  // waits for the person's confirmation in the chat, but only when they sent
+  // the message signed in to this app itself (its managed or local sign-in).
+  // Every other accepted person sign-in is delegated: an embed's host-issued
+  // token, an external user, or any other integration's person token. There
+  // someone else vouches for who the person is, so the route only reads.
+  // Turning this on lets every delegated sign-in confirm changes too (not only
+  // embeds); do it only when every issuer of such tokens maps each user to the
+  // right member. EnvBoolean (NOT z.coerce.boolean(), which coerces "false"
+  // -> true).
+  delegatedSignInAppActionChangesEnabled: EnvBoolean.default(false),
   // The HMAC secret the control plane signs the enrollment bearer credential with
   // (the `oge_` envelope the agent presents back to the control plane). Optional:
   // when ABSENT and sandboxSelfhostedEnabled is on, the poll route reports the
@@ -2333,6 +2431,16 @@ export type VoiceInputProviderId =
   | "codex-subscription"
   | "supergrok-subscription";
 
+/** Every speech-to-text provider a deployment can offer, for any use. */
+export const SPEECH_TO_TEXT_PROVIDER_IDS: readonly string[] = [
+  "openai",
+  "azure-openai",
+  "azure-speech",
+  "codex-subscription",
+  "supergrok-subscription",
+  "elevenlabs",
+];
+
 export type VoiceInputProviderConfig =
   | {
       id: "azure-mai";
@@ -2538,6 +2646,8 @@ function voiceInputProviderRegistryWithIssues(settings: Settings): {
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
+    // azure-speech is the shared name of the MAI provider.
+    .map((part) => (part === "azure-speech" ? "azure-mai" : part))
     .filter(
       (part): part is VoiceInputProviderId =>
         part === "openai" ||
@@ -3343,6 +3453,25 @@ const AnthropicProviderOptions = z.object({
   streamIdleTimeoutMs: z.number().int().positive().default(600000),
 });
 
+/**
+ * How an organization Azure OpenAI route signs in with Microsoft Entra ID
+ * instead of an `api-key`: the organization's own app registration and its
+ * client secret, or this deployment's identity (only when the operator
+ * enabled it). The runtime turns it into a bearer token per request.
+ */
+export const AzureEntraProviderCredential = z.discriminatedUnion("source", [
+  z
+    .object({
+      source: z.literal("client_secret"),
+      tenantId: z.string().min(1),
+      clientId: z.string().min(1),
+      clientSecret: z.string().min(1),
+    })
+    .strict(),
+  z.object({ source: z.literal("deployment_identity") }).strict(),
+]);
+export type AzureEntraProviderCredential = z.infer<typeof AzureEntraProviderCredential>;
+
 const RegistryProviderSchema = z
   .object({
     kind: RegistryProviderKind.default("api-key"),
@@ -3368,6 +3497,8 @@ const RegistryProviderSchema = z
     baseUrl: z.string().url(),
     apiKey: z.string().optional(), // inline key (pragmatic) ...
     apiKeyEnv: z.string().optional(), // ... OR name of the env var holding the key (preferred)
+    // Organization Azure OpenAI only: Microsoft Entra ID instead of a key.
+    azureEntra: AzureEntraProviderCredential.optional(),
     defaultQuery: z.record(z.string(), z.string()).optional(),
     defaultHeaders: z.record(z.string(), z.string()).optional(),
     publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
@@ -3379,6 +3510,22 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    if (provider.azureEntra !== undefined) {
+      if (provider.kind !== "direct-azure-organization") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["azureEntra"],
+          message: "only organization Azure OpenAI providers sign in with Microsoft Entra ID",
+        });
+      }
+      if (provider.apiKey !== undefined || provider.apiKeyEnv !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["azureEntra"],
+          message: "a provider signs in with Microsoft Entra ID or a key, not both",
+        });
+      }
+    }
     if (provider.kind !== "anonymous") {
       return;
     }
@@ -4008,6 +4155,8 @@ export interface ResolvedModelProvider {
   builtin: boolean;
   baseUrl?: string | undefined;
   apiKey?: string | undefined;
+  /** Organization Azure OpenAI signed in with Microsoft Entra ID instead of `apiKey`. */
+  azureEntra?: AzureEntraProviderCredential | undefined;
   defaultQuery?: Record<string, string> | undefined;
   defaultHeaders?: Record<string, string> | undefined;
   publicDefaultQueryNames?: string[] | undefined;
@@ -5207,6 +5356,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     googleConnectorSetupEnabled: optional("OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED"),
     googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
+    googleCalendarEnabled: optional("OPENGENI_GOOGLE_CALENDAR_ENABLED"),
     microsoftTeamsToolsEnabled: optional("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED"),
     microsoftTeamsAllowedWorkspaceIds: optional("OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS"),
     teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
@@ -5294,6 +5444,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
+    imageGenerationOpengeniCreditsEnabled: optional(
+      "OPENGENI_IMAGE_GENERATION_OPENGENI_CREDITS_ENABLED",
+    ),
+    imageGenerationCreditMicrosPerImage: optional(
+      "OPENGENI_IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE",
+    ),
     videoGenerationPollIntervalMs: optional("OPENGENI_VIDEO_GENERATION_POLL_INTERVAL_MS"),
     videoGenerationRecoveryDeadlineMs: optional("OPENGENI_VIDEO_GENERATION_RECOVERY_DEADLINE_MS"),
     videoGenerationReferenceUrlTtlSeconds: optional(
@@ -5333,6 +5489,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
     recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
+    recordingWordAlignment: optional("OPENGENI_RECORDING_WORD_ALIGNMENT"),
+    recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
+    recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
+    recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),
+    speechToTextPinned: optional("OPENGENI_SPEECH_TO_TEXT_PINNED"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),
@@ -5434,6 +5595,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     azureOpenaiApiVersion: optional("OPENGENI_AZURE_OPENAI_API_VERSION"),
     azureOpenaiApiKey: optional("OPENGENI_AZURE_OPENAI_API_KEY"),
     azureOpenaiAdToken: optional("OPENGENI_AZURE_OPENAI_AD_TOKEN"),
+    azureOpenaiAuthMode: optional("OPENGENI_AZURE_OPENAI_AUTH_MODE"),
+    azureOpenaiDeploymentIdentityEnabled: optional(
+      "OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED",
+    ),
+    azureTenantId: optional("AZURE_TENANT_ID"),
+    azureClientId: optional("AZURE_CLIENT_ID"),
+    azureFederatedTokenFile: optional("AZURE_FEDERATED_TOKEN_FILE"),
+    azureClientSecret: optional("AZURE_CLIENT_SECRET"),
+    azureAuthorityHost: optional("AZURE_AUTHORITY_HOST"),
     disableOpenaiTracing: optional("OPENGENI_DISABLE_OPENAI_TRACING"),
     sandboxBackend: optional("OPENGENI_SANDBOX_BACKEND"),
     dockerImage: optional("OPENGENI_DOCKER_IMAGE"),
@@ -5543,6 +5713,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxLazyProvisionEnabled: optional("OPENGENI_SANDBOX_LAZY_PROVISION"),
     sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
     agentOpStreamEnabled: optional("OPENGENI_AGENT_OP_STREAM_ENABLED"),
+    delegatedSignInAppActionChangesEnabled: optional(
+      "OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES",
+    ),
     enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
     selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
     selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
@@ -7125,6 +7298,7 @@ function organizationDirectRegistryProvider(
     endpoint?: string | null | undefined;
     models: readonly { upstreamModelId: string; label?: string | null }[];
     apiKey?: string;
+    azureEntra?: AzureEntraProviderCredential;
   },
 ): InternalRegistryProvider | null {
   const route = ORGANIZATION_DIRECT_ROUTES[provider];
@@ -7146,7 +7320,7 @@ function organizationDirectRegistryProvider(
       aliases: [],
       label: model.label?.trim() || model.upstreamModelId,
       capabilities: legacyModelCapabilities(settings, {
-        reasoningEffort: false,
+        reasoningEffort: provider === "azure_openai",
         hostedWebSearch: false,
       }),
       toolOutputTruncationTokens: settings.modelToolOutputTruncationTokens,
@@ -7161,6 +7335,7 @@ function organizationDirectRegistryProvider(
     wireProfile: route.wireProfile,
     baseUrl,
     ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    ...(input.azureEntra && provider === "azure_openai" ? { azureEntra: input.azureEntra } : {}),
     models,
   };
 }
@@ -7258,6 +7433,87 @@ export function withOrganizationAzureOpenAICredential(
   },
 ): Settings {
   return withOrganizationDirectCredential(settings, "azure_openai", apiKey, input);
+}
+
+/**
+ * Runtime overlay for an organization Azure OpenAI connection that signs in
+ * with Microsoft Entra ID. Deployment identity is installed only when the
+ * operator enabled it and configured the identity; otherwise the route keeps
+ * no credential and fails closed like a revoked connection.
+ */
+export function withOrganizationAzureOpenAIEntraCredential(
+  settings: Settings,
+  azureEntra: AzureEntraProviderCredential,
+  input: {
+    endpoint: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  const credential = AzureEntraProviderCredential.parse(azureEntra);
+  return withOrganizationDirectProvider(
+    settings,
+    "azure_openai",
+    organizationDirectRegistryProvider(settings, "azure_openai", {
+      ...input,
+      ...(credential.source === "client_secret" || azureOpenAIDeploymentIdentityAvailable(settings)
+        ? { azureEntra: credential }
+        : {}),
+    }),
+  );
+}
+
+/** The deployment's own Microsoft Entra identity, from the standard Azure SDK variables. */
+export function deploymentAzureEntraCredential(
+  settings: Pick<
+    Settings,
+    | "azureTenantId"
+    | "azureClientId"
+    | "azureFederatedTokenFile"
+    | "azureClientSecret"
+    | "azureAuthorityHost"
+  >,
+): {
+  tenantId: string;
+  clientId: string;
+  federatedTokenFile?: string;
+  clientSecret?: string;
+  authorityHost?: string;
+} | null {
+  if (
+    !settings.azureTenantId ||
+    !settings.azureClientId ||
+    !(settings.azureFederatedTokenFile || settings.azureClientSecret)
+  )
+    return null;
+  return {
+    tenantId: settings.azureTenantId,
+    clientId: settings.azureClientId,
+    ...(settings.azureFederatedTokenFile
+      ? { federatedTokenFile: settings.azureFederatedTokenFile }
+      : { clientSecret: settings.azureClientSecret! }),
+    ...(settings.azureAuthorityHost ? { authorityHost: settings.azureAuthorityHost } : {}),
+  };
+}
+
+/**
+ * Whether organizations may connect Azure OpenAI as this deployment's own
+ * identity: the operator turned it on and the identity is configured.
+ */
+export function azureOpenAIDeploymentIdentityAvailable(
+  settings: Pick<
+    Settings,
+    | "azureOpenaiDeploymentIdentityEnabled"
+    | "azureTenantId"
+    | "azureClientId"
+    | "azureFederatedTokenFile"
+    | "azureClientSecret"
+    | "azureAuthorityHost"
+  >,
+): boolean {
+  return (
+    settings.azureOpenaiDeploymentIdentityEnabled === true &&
+    deploymentAzureEntraCredential(settings) !== null
+  );
 }
 
 /** Secret-free organization Vercel AI Gateway catalog overlay. */
@@ -8131,6 +8387,7 @@ export function configuredProviders(
       builtin: false,
       baseUrl: provider.baseUrl,
       apiKey: resolveProviderApiKey(provider, source),
+      ...(provider.azureEntra ? { azureEntra: provider.azureEntra } : {}),
       defaultQuery: provider.defaultQuery,
       defaultHeaders: provider.defaultHeaders,
       publicDefaultQueryNames: provider.publicDefaultQueryNames,
@@ -9835,6 +10092,32 @@ export function calculateVideoGenerationCreditCostMicros(
   return cost;
 }
 
+/**
+ * Reviewed Opengeni customer prices (USD micros per generated image) for
+ * Gateway image models. GPT Image 2 is token-billed by its provider; this
+ * covers a high-quality 1024x1024 output plus its prompt and a few references.
+ */
+export const IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE: Readonly<Record<string, number>> =
+  Object.freeze({
+    "openai/gpt-image-2": 250_000,
+  });
+
+/**
+ * Exact Opengeni product price of one credit-funded image from the configured
+ * image model, frozen before the provider request starts. Null means the model
+ * has no price, so it must not be offered on Opengeni credits.
+ */
+export function imageGenerationCreditCostMicros(
+  settings: Pick<Settings, "imageGenerationModel" | "imageGenerationCreditMicrosPerImage">,
+): number | null {
+  if (settings.imageGenerationCreditMicrosPerImage !== undefined) {
+    return settings.imageGenerationCreditMicrosPerImage;
+  }
+  return Object.hasOwn(IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE, settings.imageGenerationModel)
+    ? IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE[settings.imageGenerationModel]!
+    : null;
+}
+
 export function configuredAllowedReasoningEfforts(
   settings: Settings,
 ): Array<z.infer<typeof ReasoningEffort>> {
@@ -10614,6 +10897,10 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // safe to cache / leave as-is.)
       cacheToolsList: false,
       setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
+      // App actions act as a person. The worker decides per call whether one
+      // waits for the person's confirmation in the chat (a change without full
+      // access) or runs at once (a read, or full access); the API enforces it.
+      requireApproval: ["admin_action_call"],
     },
     ...(hasFiles
       ? []
@@ -10865,6 +11152,38 @@ export function validateSitesDomain(
   }
 }
 
+/** A deployment's own transcription account must be usable, and the default must exist. */
+function validateRecordingTranscriptionSettings(settings: Settings): void {
+  if (
+    settings.recordingAzureSpeechEndpoint &&
+    !settings.recordingAzureSpeechApiKey &&
+    !deploymentAzureEntraCredential(settings)
+  ) {
+    throw new Error(
+      "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT needs OPENGENI_RECORDING_AZURE_SPEECH_API_KEY, or AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
+    );
+  }
+  for (const [env, value] of [
+    ["OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT", settings.recordingTranscriptionDefault],
+    ["OPENGENI_SPEECH_TO_TEXT_PINNED", settings.speechToTextPinned],
+  ] as const) {
+    const provider = value?.split("/")[0];
+    if (!provider) continue;
+    if (!SPEECH_TO_TEXT_PROVIDER_IDS.includes(provider)) {
+      throw new Error(`${env} must name one of ${SPEECH_TO_TEXT_PROVIDER_IDS.join(", ")}`);
+    }
+    if (
+      provider === "azure-speech" &&
+      !settings.recordingAzureSpeechEndpoint &&
+      !settings.voiceInputMaiEndpoint
+    ) {
+      throw new Error(
+        `${env} names azure-speech but OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set`,
+      );
+    }
+  }
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
@@ -10882,6 +11201,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
     );
   }
+  validateRecordingTranscriptionSettings(settings);
   const allowedFirstPartyMcpTools = new Set(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
   );
@@ -11263,9 +11583,33 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (!settings.azureOpenaiBaseUrl && !settings.azureOpenaiApiVersion) {
       throw new Error("Azure OpenAI endpoint mode requires OPENGENI_AZURE_OPENAI_API_VERSION");
     }
-    if (!settings.azureOpenaiApiKey && !settings.azureOpenaiAdToken) {
+    if (
+      settings.azureOpenaiAuthMode === "static" &&
+      !settings.azureOpenaiApiKey &&
+      !settings.azureOpenaiAdToken
+    ) {
       throw new Error("Azure OpenAI requires an API key or AD token");
     }
+  }
+  if (settings.azureOpenaiAuthMode !== "static") {
+    if (settings.azureOpenaiApiKey || settings.azureOpenaiAdToken) {
+      throw new Error(
+        "Azure OpenAI identity authentication cannot be combined with an API key or AD token",
+      );
+    }
+    if (
+      settings.azureOpenaiAuthMode === "workload_identity" &&
+      !(settings.azureTenantId && settings.azureClientId && settings.azureFederatedTokenFile)
+    ) {
+      throw new Error(
+        "Azure OpenAI workload_identity needs AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_FEDERATED_TOKEN_FILE",
+      );
+    }
+  }
+  if (settings.azureOpenaiDeploymentIdentityEnabled && !deploymentAzureEntraCredential(settings)) {
+    throw new Error(
+      "OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED needs AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
+    );
   }
   // The Modal token is a both-or-neither pair regardless of the active backend
   // (a half-configured token is always a misconfiguration). This is orthogonal

@@ -1,6 +1,6 @@
 ---
 name: opengeni-help
-description: Answer questions about Opengeni setup, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application's AI provider. No installation is needed for this bundled guide.
+description: Answer questions about Opengeni setup, using it on a phone or computer, doing settings for the person in chat, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application's AI provider. No installation is needed for this bundled guide.
 ---
 
 # Opengeni product help
@@ -8,6 +8,45 @@ description: Answer questions about Opengeni setup, product integration, SDK/API
 Use this guide when the user asks about Opengeni itself. Answer their latest
 question first, using the deployed service and installed SDK as contract evidence.
 This is product reference guidance, not the persona of a customer support bot.
+
+## Do it for them in the chat
+
+Whatever the person could do in the app's pages and settings, you can do for
+them here: never send them to a settings page or ask for a screenshot of one.
+
+- This chat's model: `list_models`, then `session_set_model` (omit `sessionId`
+  for this chat). Pick a sensible model for what they asked ("faster" means a
+  faster model or lower reasoning effort), then say which model it now uses,
+  that it applies from their next message, and how to switch back.
+- Everything else (invite people, share this chat, their plan, credits and
+  usage, workspace and organization defaults such as the default model):
+  `admin_actions_search`, `admin_action_describe`, then `admin_action_call`.
+  It runs as the person, with exactly their access. Reads answer at once. A
+  change shows them a short confirmation in the chat and runs only if they
+  allow it, unless they gave the session full access. Ask in one step; if they
+  decline, accept it.
+- Sharing with someone: the person must be in the workspace. Invite them to
+  the organization (with this workspace), or add an existing member to the
+  workspace, then share the chat with the workspace. Say what you did in plain
+  words.
+- Some steps stay with the person in the app: signing in, sign-in methods,
+  recovery, provider sign-in pages, giving an agent more access, and anything
+  that creates, shows or rotates a key, password, token or other secret. In a
+  chat opened through another product's embed, changes may be refused; say
+  they can make it in the app itself. An action refused with 403 is beyond
+  their own access; say so and who can do it.
+
+## Phone and computer
+
+- Phone: Opengeni has an app for iPhone and Android, where the deployment
+  offers it, with chats, notifications and dictation; organization and
+  security settings stay on the web. The web app also works in the phone's
+  browser, which offers "Open in app" when the app is installed.
+- Computer: the desktop app runs on macOS, Windows and Linux. Its downloads
+  are on the deployment at `/desktop/latest` (also linked from the web app's
+  account menu); on a Mac or Linux, `curl -fsSL <server>/desktop/install.sh | sh`
+  installs it, and on a Mac `brew install --cask cloudgeni-ai/tap/opengeni`.
+- Nothing needs installing to start: the web app works in any current browser.
 
 ## Fetch the official documentation
 
@@ -116,7 +155,7 @@ For questions about model providers, subscription accounts (Codex, Claude,
 SuperGrok), which workspaces and models an account serves, usage limits and
 resets, workspace Codex options, or Context & compaction, read
 `references/models-and-subscriptions.md`. It explains each setting in the
-interface's words and how an agent with admin access changes them safely.
+interface's words and how to change them for the person safely.
 
 ## Cost questions
 

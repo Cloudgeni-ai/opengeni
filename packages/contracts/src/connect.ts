@@ -1,5 +1,6 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
+import { secretValue } from "./secret-value";
 import { z } from "zod";
 import { IntegrationInstanceKey, IntegrationSource } from "./index";
 import { PreparedMcpSetup } from "./prepared-mcp-setup";
@@ -189,7 +190,7 @@ export const ConnectAdvance = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         type: z.literal("credentials"),
-        values: z.record(z.string().max(256), z.string().max(16_384)),
+        values: secretValue(z.record(z.string().max(256), z.string().max(16_384))),
       })
       .strict(),
     z.object({ type: z.literal("account"), accountId: opaqueId }).strict(),

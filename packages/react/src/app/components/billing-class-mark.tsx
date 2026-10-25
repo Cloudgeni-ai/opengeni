@@ -3,7 +3,7 @@ import {
   BillingClassMark as SharedBillingClassMark,
   type ModelPolicyPickerGroupPresentation,
 } from "../../components/model-policy-picker";
-import type { ComponentProps } from "react";
+import type { ComponentPropsWithoutRef } from "react";
 import { BrandMark } from "./brand-mark";
 
 /** First-party branding is explicit; embedded package defaults stay neutral. */
@@ -11,7 +11,7 @@ export const openGeniGroupPresentation: ModelPolicyPickerGroupPresentation = {
   opengeni_credits: { label: "Opengeni", icon: <BrandMark /> },
 };
 
-export function BillingClassMark(props: ComponentProps<typeof SharedBillingClassMark>) {
+export function BillingClassMark(props: ComponentPropsWithoutRef<typeof SharedBillingClassMark>) {
   return (
     <SharedBillingClassMark
       {...props}

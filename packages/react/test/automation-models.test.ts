@@ -19,6 +19,7 @@ import {
   eventSourceKindLabel,
   eventSourceProviderDomain,
   eventSourceStatusBadge,
+  eventStatusReasonText,
   eventSourceSubjectOfChoice,
   eventTriggersDraftFrom,
   eventTriggersInputFrom,
@@ -63,6 +64,8 @@ const savedEvents: ScheduledTaskEvents = {
       arguments: null,
       status: "active",
       statusReason: null,
+      statusReasonCode: null,
+      statusReasonDetail: null,
       createdAt: "2026-10-23T10:00:00.000Z",
       updatedAt: "2026-10-23T10:00:00.000Z",
     },
@@ -289,6 +292,8 @@ describe("event trigger words", () => {
         argumentsSchema: null,
         available: true,
         unavailableReason: null,
+        unavailableReasonCode: null,
+        unavailableReasonDetail: null,
       },
       {
         type: "issues.opened",
@@ -297,6 +302,8 @@ describe("event trigger words", () => {
         argumentsSchema: null,
         available: true,
         unavailableReason: null,
+        unavailableReasonCode: null,
+        unavailableReasonDetail: null,
       },
     ];
     const fields = eventConditionFieldSuggestions(t, ["pull_request.opened"], descriptors).map(
@@ -343,6 +350,85 @@ describe("event sources", () => {
     expect(eventSourceStatusBadge(t, { status: "disabled", statusReason: null })?.label).toBe(
       "Off",
     );
+  });
+
+  test("a held reason with a known code is worded here, naming the source", () => {
+    expect(
+      eventSourceStatusBadge(t, {
+        status: "blocked",
+        statusReason: "Reconnect Orders MCP to keep its events coming",
+        statusReasonCode: "reconnect",
+        statusReasonDetail: null,
+        name: "Orders",
+      })?.reason,
+    ).toBe("Reconnect Orders to keep its events coming.");
+    expect(
+      eventStatusReasonText(
+        t,
+        { text: "server sentence", code: "forbidden", detail: "Only admins may subscribe" },
+        "Orders",
+      ),
+    ).toBe(
+      "Orders doesn't let your account receive these events with these settings. It said: Only admins may subscribe",
+    );
+    expect(
+      eventStatusReasonText(t, {
+        text: "server sentence",
+        code: "github_event_not_subscribed",
+        detail: "pull_request",
+      }),
+    ).toBe(
+      "The GitHub App isn't subscribed to \"pull_request\" events. Turn them on in the App's Permissions & events settings.",
+    );
+    expect(eventStatusReasonText(t, { text: "Turned off", code: "turned_off" })).toBe(
+      "Turned off.",
+    );
+  });
+
+  test("a held reason shows the server's sentence when it can't be worded here", () => {
+    // A code from a newer server.
+    expect(
+      eventStatusReasonText(t, { text: "Orders is moving house", code: "moving_house" }, "Orders"),
+    ).toBe("Orders is moving house");
+    // An older server, with no code.
+    expect(eventStatusReasonText(t, { text: "Paste the secret.", code: null }, "Orders")).toBe(
+      "Paste the secret.",
+    );
+    // A reason that names the source, without a name to put in it.
+    expect(eventStatusReasonText(t, { text: "Reconnect Orders MCP", code: "reconnect" })).toBe(
+      "Reconnect Orders MCP",
+    );
+    // A reason that needs its detail, without one.
+    expect(
+      eventStatusReasonText(
+        t,
+        { text: "Signs in as someone else", code: "account_changed" },
+        "Gmail",
+      ),
+    ).toBe("Signs in as someone else");
+  });
+
+  test("a held reason speaks the host's language", () => {
+    const nb = createOpenGeniText({
+      locale: "nb",
+      productName: "Assistent",
+      messages: {
+        "automations.statusReason.callbackUnreachable":
+          "{source} når ikke webhook-adressen til {product}.",
+        "automations.statusReason.withDetail": "{reason} Svar: {detail}",
+      },
+    });
+    expect(
+      eventStatusReasonText(
+        nb,
+        {
+          text: "Orders can't reach Opengeni's webhook address (timeout)",
+          code: "callback_unreachable",
+          detail: "timeout",
+        },
+        "Orders",
+      ),
+    ).toBe("Orders når ikke webhook-adressen til Assistent. Svar: timeout");
   });
 
   test("only pasted Linear and Sentry webhooks explain where the URL and secret go", () => {

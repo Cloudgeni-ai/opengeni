@@ -25,6 +25,31 @@ const SMALL_RESPONSE_BYTES = 1_024 * 1_024;
 /** Bitwarden's device type for SDK clients. */
 const DEVICE_TYPE_SDK = "21";
 const CLIENT_NAME = "opengeni";
+/**
+ * The client version Opengeni declares in `Bitwarden-Client-Version`. Servers
+ * gate newer item types on it: without the header (or below 2024.12.0)
+ * Bitwarden and Vaultwarden leave SSH keys out of every sync, and Vaultwarden
+ * logs an error per request. Opengeni writes what a client of this version
+ * may write: it keeps per-item keys (2024.2.0) and every field it does not
+ * model, and it never creates item types newer than this version.
+ */
+export const BITWARDEN_CLIENT_VERSION = "2024.12.0";
+
+/** Headers every request to the API and identity hosts carries. */
+export const CLIENT_HEADERS = {
+  "device-type": DEVICE_TYPE_SDK,
+  "bitwarden-client-name": CLIENT_NAME,
+  "bitwarden-client-version": BITWARDEN_CLIENT_VERSION,
+} as const;
+
+/** The server features a provider decides on, from `{api}/config`. */
+export interface BitwardenServerConfig {
+  /** Bitwarden's own Archive (per person), as opposed to only the trash. */
+  archive: boolean;
+}
+
+/** Bitwarden's feature flag for the Archive (Vaultwarden 1.37 and Bitwarden 2026.2). */
+export const ARCHIVE_FEATURE_FLAG = "pm-19148-innovation-archive";
 
 export interface BitwardenEndpoints {
   /** The server address the person entered, normalized (no trailing slash). */
@@ -141,7 +166,11 @@ export class BitwardenHttp {
    */
   async exchange(
     url: string,
-    init: { method: string; headers: Record<string, string>; body?: string },
+    init: {
+      method: string;
+      headers: Record<string, string>;
+      body?: string | Uint8Array | FormData;
+    },
     options: RequestOptions,
   ): Promise<{ status: number; headers: Headers; body: Uint8Array }> {
     options.signal?.throwIfAborted();
@@ -158,7 +187,7 @@ export class BitwardenHttp {
       const response = await this.fetchImpl(url, {
         method: init.method,
         headers: init.headers,
-        ...(init.body === undefined ? {} : { body: init.body }),
+        ...(init.body === undefined ? {} : { body: init.body as BodyInit }),
         redirect: "manual",
         signal: controller.signal,
       });
@@ -199,7 +228,7 @@ export class BitwardenHttp {
     };
     const response = await this.exchange(
       `${normalized}/api/config`,
-      { method: "GET", headers: { accept: "application/json" } },
+      { method: "GET", headers: { accept: "application/json", ...CLIENT_HEADERS } },
       { signal: options.signal, what: "reading the server configuration" },
     );
     if (response.status === 404) return fallback;
@@ -265,8 +294,7 @@ export class BitwardenHttp {
         headers: {
           accept: "application/json",
           "content-type": "application/x-www-form-urlencoded; charset=utf-8",
-          "device-type": DEVICE_TYPE_SDK,
-          "bitwarden-client-name": CLIENT_NAME,
+          ...CLIENT_HEADERS,
         },
         body: body.toString(),
       },
@@ -310,11 +338,12 @@ export class BitwardenHttp {
   async api(
     endpoints: BitwardenEndpoints,
     accessToken: string,
-    method: "GET" | "POST" | "PUT",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     body: unknown,
     options: RequestOptions,
   ): Promise<{ status: number; headers: Headers; json: unknown }> {
+    const form = body instanceof FormData ? body : null;
     const response = await this.exchange(
       `${endpoints.apiUrl}${path}`,
       {
@@ -322,11 +351,13 @@ export class BitwardenHttp {
         headers: {
           accept: "application/json",
           authorization: `Bearer ${accessToken}`,
-          "device-type": DEVICE_TYPE_SDK,
-          "bitwarden-client-name": CLIENT_NAME,
-          ...(body === undefined ? {} : { "content-type": "application/json; charset=utf-8" }),
+          ...CLIENT_HEADERS,
+          // A form sets its own multipart boundary.
+          ...(body === undefined || form
+            ? {}
+            : { "content-type": "application/json; charset=utf-8" }),
         },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(form ? { body: form } : body === undefined ? {} : { body: JSON.stringify(body) }),
       },
       options,
     );
@@ -335,6 +366,61 @@ export class BitwardenHttp {
       headers: response.headers,
       json: response.body.length ? safeJson(response.body) : null,
     };
+  }
+
+  /**
+   * The server's features from `{api}/config` (public, no credentials). A
+   * server that does not answer it is treated as having none of them.
+   */
+  async serverConfig(
+    endpoints: BitwardenEndpoints,
+    signal?: AbortSignal,
+  ): Promise<BitwardenServerConfig> {
+    const response = await this.exchange(
+      `${endpoints.apiUrl}/config`,
+      { method: "GET", headers: { accept: "application/json", ...CLIENT_HEADERS } },
+      { signal, what: "reading the server configuration" },
+    );
+    if (response.status === 429)
+      throw rateLimited(response.headers, "reading the server configuration");
+    if (response.status < 200 || response.status >= 300) return { archive: false };
+    const config = record(safeJson(response.body));
+    const features = record(config?.featureStates);
+    return { archive: features?.[ARCHIVE_FEATURE_FLAG] === true };
+  }
+
+  /**
+   * Uploads an encrypted attachment body to the blob storage address a
+   * Bitwarden cloud server hands out (Azure, `fileUploadType` 1). The address
+   * carries its own short-lived signature; no Bitwarden credential is sent.
+   */
+  async uploadToBlob(url: string, body: Uint8Array, signal?: AbortSignal): Promise<void> {
+    let target: URL;
+    try {
+      target = new URL(url);
+    } catch {
+      throw new VaultProviderError("provider_unavailable", "Bitwarden returned no upload address");
+    }
+    if (target.protocol !== "https:") {
+      throw new VaultProviderError("provider_unavailable", "Bitwarden returned no upload address");
+    }
+    const response = await this.exchange(
+      target.toString(),
+      {
+        method: "PUT",
+        headers: {
+          "x-ms-blob-type": "BlockBlob",
+          "x-ms-version": "2020-04-08",
+          "x-ms-date": new Date(this.now()).toUTCString(),
+          "content-type": "application/octet-stream",
+        },
+        body,
+      },
+      { signal, write: true, what: "uploading the attachment" },
+    );
+    if (response.status < 200 || response.status >= 300) {
+      throw statusError(response.status, "uploading the attachment", true);
+    }
   }
 
   /** Downloads an attachment body from wherever the server stores it, without credentials. */

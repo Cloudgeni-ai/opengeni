@@ -16,7 +16,10 @@ import {
   getScheduledTaskCreatorPolicy,
   getSession,
   initializeSessionStartAtomically,
+  applySessionTurnSettlement,
   persistAttemptToolCatalog,
+  submitHumanPromptInTransaction,
+  withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
@@ -149,7 +152,11 @@ async function narrowedRootSession(
 }
 
 /** Claim a live attempt on the session's initial turn the way the worker does. */
-async function liveAttempt(grant: Grant, sessionId: string): Promise<Attempt> {
+async function liveAttempt(
+  grant: Grant,
+  sessionId: string,
+  initialTimeZone?: string,
+): Promise<Attempt> {
   const started = await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -157,6 +164,7 @@ async function liveAttempt(grant: Grant, sessionId: string): Promise<Attempt> {
     reasoningEffortFallback: "low",
     createdEventPayload: {},
     goal: null,
+    ...(initialTimeZone ? { initialTimeZone } : {}),
   });
   if (!started.turn) throw new Error("test session did not create an initial turn");
   const attemptId = crypto.randomUUID();
@@ -499,6 +507,145 @@ describe("agent-created scheduled tasks freeze the creator boundary (real Postgr
         "workspace:read",
       ],
       sessionPolicy: expect.objectContaining({}),
+    });
+  });
+
+  test("an agent's schedule without a zone uses the zone of the message that asked for it", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const tools: FirstPartyMcpToolName[] = ["scheduled_tasks_create", "scheduled_tasks_update"];
+    const permissions: Permission[] = [
+      "sessions:read",
+      "sessions:control",
+      "scheduled_tasks:manage",
+      "workspace:read",
+    ];
+    const zonedServer = async (initialTimeZone?: string) => {
+      const root = await narrowedRootSession(grant, tools, permissions);
+      const attempt = await liveAttempt(grant, root.id, initialTimeZone);
+      return buildOpenGeniMcpServer(routeDeps(), agentGrant(grant, attempt, tools));
+    };
+    const mondayAtNine = { type: "calendar", hour: 9, minute: 0, daysOfWeek: ["MONDAY"] };
+    const create = async (server: unknown, schedule: Record<string, unknown>) => {
+      const result = await callMcpTool(server, "scheduled_tasks_create", {
+        name: "Call the doctor",
+        schedule,
+        runMode: "new_session_per_run",
+        agentConfig: {
+          prompt: "Remind me to call the doctor",
+          resources: [],
+          tools: [],
+          metadata: {},
+        },
+      });
+      expect(result.isError, result.text).toBeFalsy();
+      const receipt = JSON.parse(result.text) as {
+        resource: { id: string };
+        facts?: Record<string, unknown>;
+      };
+      const [row] = await shared!.admin<{ schedule: Record<string, unknown> }[]>`
+        select schedule from scheduled_tasks where id = ${receipt.resource.id}`;
+      return { id: receipt.resource.id, facts: receipt.facts, schedule: row!.schedule };
+    };
+
+    const oslo = await zonedServer("Europe/Oslo");
+    const fromMessage = await create(oslo, mondayAtNine);
+    expect(fromMessage.schedule).toMatchObject({ ...mondayAtNine, timeZone: "Europe/Oslo" });
+    expect(fromMessage.facts).toMatchObject({
+      scheduleTimeZone: "Europe/Oslo",
+      scheduleTimeZoneSource: "message",
+    });
+
+    // A zone the agent names is kept as given, and nothing is reported.
+    const named = await create(oslo, { ...mondayAtNine, timeZone: "Asia/Tokyo" });
+    expect(named.schedule.timeZone).toBe("Asia/Tokyo");
+    expect(named.facts?.scheduleTimeZone).toBeUndefined();
+
+    // Moving a schedule to 10 keeps its own zone rather than the sender's.
+    const moved = await callMcpTool(oslo, "scheduled_tasks_update", {
+      id: named.id,
+      schedule: { ...mondayAtNine, hour: 10 },
+    });
+    expect(moved.isError, moved.text).toBeFalsy();
+    expect(JSON.parse(moved.text).facts).toMatchObject({
+      scheduleTimeZone: "Asia/Tokyo",
+      scheduleTimeZoneSource: "existing_schedule",
+    });
+    const [movedRow] = await shared!.admin<{ schedule: Record<string, unknown> }[]>`
+      select schedule from scheduled_tasks where id = ${named.id}`;
+    expect(movedRow!.schedule).toMatchObject({ hour: 10, timeZone: "Asia/Tokyo" });
+
+    // A turn without a zone (an API caller, a scheduled run) falls back to UTC.
+    const unzoned = await create(await zonedServer(), mondayAtNine);
+    expect(unzoned.schedule.timeZone).toBe("UTC");
+    expect(unzoned.facts).toMatchObject({ scheduleTimeZone: "UTC", scheduleTimeZoneSource: "utc" });
+
+    // A later turn no person's message started still uses the zone the
+    // person last wrote from in this chat.
+    const root = await narrowedRootSession(grant, tools, permissions);
+    const first = await liveAttempt(grant, root.id, "Europe/Oslo");
+    const [firstTurn] = await shared!.admin<{ trigger_event_id: string }[]>`
+      select trigger_event_id from session_turns where id = ${first.turnId}`;
+    const settled = await applySessionTurnSettlement(client.db, grant.workspaceId, {
+      sessionId: root.id,
+      turnId: first.turnId,
+      triggerEventId: firstTurn!.trigger_event_id,
+      attemptId: first.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed" as const, payload: { output: "Done." } }],
+    });
+    expect(settled.action).toBe("settled");
+    const service = "service:continuation";
+    await withWorkspaceSubjectSessionActivityRls(client.db, grant.workspaceId, service, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: root.id,
+          subjectId: service,
+          subjectLabel: "Continuation",
+          actor: { type: "service", subjectId: service, subjectLabel: "Continuation" },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "Keep going",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "api",
+        }),
+      ),
+    );
+    const attemptId = crypto.randomUUID();
+    const continued = await claimSessionWorkForAttempt(client.db, grant.workspaceId, {
+      sessionId: root.id,
+      workflowId: `session-${root.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (continued.action !== "claimed")
+      throw new Error(`continuation turn was not claimed: ${JSON.stringify(continued)}`);
+    expect(continued.turn.metadata.messageTimeZone).toBeUndefined();
+    const continuation = buildOpenGeniMcpServer(
+      routeDeps(),
+      agentGrant(
+        grant,
+        {
+          sessionId: root.id,
+          turnId: continued.turn.id,
+          attemptId,
+          executionGeneration: continued.turn.executionGeneration,
+        },
+        tools,
+      ),
+    );
+    const fromSession = await create(continuation, mondayAtNine);
+    expect(fromSession.schedule.timeZone).toBe("Europe/Oslo");
+    expect(fromSession.facts).toMatchObject({
+      scheduleTimeZone: "Europe/Oslo",
+      scheduleTimeZoneSource: "session",
     });
   });
 

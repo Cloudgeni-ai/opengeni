@@ -1,4 +1,4 @@
-import { isIntegrationDefinitionEnabled } from "@opengeni/capabilities";
+import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import {
@@ -22,9 +22,13 @@ import {
   type ConnectionMetadata,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
+  type OrganizationIntegrationPolicy,
   type McpServerConnectionRef,
   type McpPersonalConnectionDelegation,
   assertOrganizationIntegrationAllowed,
+  INTEGRATION_DEFINITION_CAPABILITY_PREFIX,
+  integrationDefinitionCapabilityId,
+  integrationDefinitionIdFromCapabilityId,
   type SocialConnection,
   ToolAuthNeededPayload,
   type UserSetupBlocker,
@@ -67,6 +71,7 @@ import {
   type InstalledSkillSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -253,10 +258,13 @@ export function applyGoogleConnectorSetupAvailability(
   const url = item.mcpUrl ?? item.endpointUrl;
   const drive = url === "https://drivemcp.googleapis.com/mcp/v1";
   const gmail = url === "https://gmailmcp.googleapis.com/mcp/v1";
+  const calendar = url === "https://calendarmcp.googleapis.com/mcp/v1";
   if (
     item.kind !== "mcp" ||
-    (!drive && !gmail) ||
-    (settings.googleConnectorSetupEnabled && (!drive || settings.googleDriveMcpEnabled))
+    (!drive && !gmail && !calendar) ||
+    (settings.googleConnectorSetupEnabled &&
+      (!drive || settings.googleDriveMcpEnabled) &&
+      (!calendar || settings.googleCalendarEnabled))
   )
     return item;
   return {
@@ -360,6 +368,12 @@ type EnableCapabilityInput = {
   workspaceId: string;
   settings: Settings;
   capabilityId: string;
+  /**
+   * The caller holds only the personal setup permission: turn a reviewed
+   * OAuth integration on for personal accounts if it is not on yet, and
+   * change nothing else. See {@link assertPersonalIntegrationSetupRequest}.
+   */
+  personalSetup?: boolean;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
   /** Server-owned receipt from a just-verified native Connect credential.
@@ -376,7 +390,51 @@ export async function enableCapability(
   input: EnableCapabilityInput,
 ): Promise<CapabilityInstallation> {
   const prepared = await prepareCapabilityEnable(input);
-  return prepared.commit(input.db);
+  const installation = await prepared.commit(input.db);
+  // Personal setup never turns back on what an admin turned off.
+  if (input.personalSetup && installation.status !== "active")
+    throw new HTTPException(409, {
+      message: "An admin turned this integration off; ask them to turn it back on",
+    });
+  return installation;
+}
+
+/**
+ * What the personal setup permission may enable: a reviewed catalog OAuth
+ * integration (never a custom MCP server or an API-key integration), for
+ * personal accounts only (each person signs in to their own account: no
+ * shared connection, credential headers, config or metadata).
+ */
+function assertPersonalIntegrationSetupRequest(
+  item: CapabilityCatalogItem,
+  payload: EnableCapabilityRequest,
+): void {
+  if (!isPersonalIntegrationSetupCandidate(item))
+    throw new HTTPException(403, { message: "Only an admin can turn on this integration" });
+  const ref = payload.connectionRef;
+  if (
+    !ref ||
+    ref.subjectScope !== "subject" ||
+    ref.kind !== "oauth2" ||
+    ref.connectionId ||
+    ref.authoritySource === "host" ||
+    ref.accountSelection ||
+    ref.selectedResources ||
+    Object.keys(payload.headers ?? {}).length > 0 ||
+    Object.keys(payload.config ?? {}).length > 0 ||
+    Object.keys(payload.metadata ?? {}).length > 0
+  )
+    throw new HTTPException(403, {
+      message:
+        "Without integration admin rights, an integration can only be turned on for personal accounts",
+    });
+}
+
+function assertPersonalIntegrationSetupAllowed(policy: OrganizationIntegrationPolicy): void {
+  if (policy.personalIntegrationSetup !== "members")
+    throw new HTTPException(403, {
+      message: "Your organization lets only admins turn on integrations",
+    });
 }
 
 /** Probe outside a durable Connect commit; persist the exact prepared settings
@@ -414,6 +472,11 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
     });
   }
+  if (input.personalSetup) {
+    assertPersonalIntegrationSetupRequest(item, input.payload);
+    // Create-only: an existing installation is returned unchanged.
+    input.payload.onlyIfUninstalled = true;
+  }
   let installationMetadata = input.payload.metadata;
   // Credential-header storage is written exclusively by this flow; strip the
   // reserved keys from caller-provided config so the stored shape stays
@@ -425,9 +488,11 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.connectionRef;
   if (item.kind === "mcp") {
     if (
-      ["https://gmailmcp.googleapis.com/mcp/v1", "https://drivemcp.googleapis.com/mcp/v1"].includes(
-        item.endpointUrl?.replace(/\/+$/u, "") ?? "",
-      ) &&
+      [
+        "https://gmailmcp.googleapis.com/mcp/v1",
+        "https://drivemcp.googleapis.com/mcp/v1",
+        "https://calendarmcp.googleapis.com/mcp/v1",
+      ].includes(item.endpointUrl?.replace(/\/+$/u, "") ?? "") &&
       (input.payload.connectionRef?.subjectScope !== "subject" ||
         Object.keys(input.payload.headers ?? {}).length > 0)
     ) {
@@ -441,6 +506,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       input.db,
       input,
       async (tx, policy) => {
+        if (input.personalSetup) assertPersonalIntegrationSetupAllowed(policy);
         const existing = await unchangedMcpInstallation(
           { ...input, db: tx },
           item,
@@ -511,13 +577,19 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   };
   return {
     commit: (db: Database) =>
-      item.kind === "mcp"
-        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
-            if (input.verifiedConnection)
-              await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+      item.kind === "mcp" && input.personalSetup
+        ? withOrganizationIntegrationPolicyFence(db, installation, async (tx, policy) => {
+            assertPersonalIntegrationSetupAllowed(policy);
+            assertOrganizationIntegrationAllowed(policy, "custom:mcp");
             return enableCapabilityInstallation(tx, installation);
           })
-        : enableCapabilityInstallation(db, installation),
+        : item.kind === "mcp"
+          ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
+              if (input.verifiedConnection)
+                await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+              return enableCapabilityInstallation(tx, installation);
+            })
+          : enableCapabilityInstallation(db, installation),
   };
 }
 
@@ -1863,8 +1935,121 @@ export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
 
 export { OPENGENI_BROWSER_EXTENSION_URL };
 
+export {
+  INTEGRATION_DEFINITION_CAPABILITY_PREFIX,
+  integrationDefinitionCapabilityId,
+  integrationDefinitionIdFromCapabilityId,
+};
+
+/**
+ * What people call each reviewed definition when they ask for it. Someone asks
+ * for "my Hotmail" or "Outlook", not "Microsoft Graph mail", so the names of
+ * the consumer and work mail services are search tags here. Beyond each
+ * definition's own name, tags are only names that mean Microsoft: generic
+ * words (email, inbox, chat, meetings, files) would outrank Gmail, Google
+ * Calendar, Slack or Google Drive for requests that never mention Microsoft.
+ * Search splits "live.com" into the bare word "live", so Live addresses are
+ * named in the description only.
+ */
+const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
+  Record<string, { description: string; category: string; tags: readonly string[] }>
+> = {
+  "microsoft-outlook-mail": {
+    description:
+      "Read, search, send and organize email in the person's own Microsoft mailbox: an Outlook.com, Hotmail, Live.com or MSN address, or a work or school Microsoft 365 (Exchange) account.",
+    category: "communication",
+    tags: [
+      "outlook",
+      "hotmail",
+      "outlook.com",
+      "hotmail.com",
+      "msn.com",
+      "exchange",
+      "microsoft",
+      "microsoft-365",
+      "office-365",
+    ],
+  },
+  "microsoft-outlook-calendar": {
+    description:
+      "Read and manage events, meetings and availability in the person's own Outlook calendar (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
+    category: "productivity",
+    tags: ["outlook", "calendar", "exchange", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-outlook-contacts": {
+    description:
+      "Read and manage contacts and people in the person's own Outlook address book (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
+    category: "productivity",
+    tags: ["outlook", "contacts", "exchange", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-onedrive": {
+    description:
+      "Find, read, upload and share files in the person's own OneDrive (personal, or work or school Microsoft 365), including files shared with them.",
+    category: "productivity",
+    tags: ["onedrive", "sharepoint", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-teams": {
+    description:
+      "Read the person's teams, channels and chats, and send messages as them, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+    category: "communication",
+    tags: ["teams", "microsoft-teams", "microsoft", "microsoft-365", "office-365"],
+  },
+};
+
+/**
+ * Agent-facing entries for the reviewed API integration definitions this
+ * deployment can connect. Like the GitHub App and Connected Machine entries,
+ * these are recommendations for the native Connect flow, not rows in the
+ * Capabilities UI catalog (which shows these definitions as their own rows).
+ * Each person connects their own account; the card installs the definition's
+ * reviewed tools for that account.
+ */
+export function integrationDefinitionCapabilityRecommendations(
+  definitions: readonly IntegrationDefinition[],
+): CapabilityCatalogItem[] {
+  return definitions.map((definition) => {
+    const discovery = INTEGRATION_DEFINITION_DISCOVERY[definition.id];
+    const provider = definition.provider.id === "microsoft" ? "Microsoft" : "Google";
+    return CapabilityCatalogItem.parse({
+      id: integrationDefinitionCapabilityId(definition.id),
+      kind: "api",
+      source: "built_in",
+      name: definition.name,
+      description: discovery?.description ?? definition.summary,
+      category: discovery?.category ?? "productivity",
+      tags: [...(discovery?.tags ?? [definition.provider.id])],
+      homepageUrl: null,
+      providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",
+      authModel: "oauth2_authorization_code",
+      authKind: "oauth2",
+      surfaceType: "integration_definition",
+      tools: [],
+      runtime: {
+        available: true,
+        notes: `Each person connects their own ${provider} account from the chat card.`,
+      },
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "Connect an account from the chat card.",
+        managedBy: "platform",
+      },
+      actions: ["connect", "inspect"],
+      metadata: {
+        integrationDefinitionId: definition.id,
+        recommendationOnly: true,
+      },
+    });
+  });
+}
+
 export function nativeConnectionCapabilityRecommendations(
-  options: { connectedMachines?: boolean; browserExtension?: BrowserExtension } = {},
+  options: {
+    connectedMachines?: boolean;
+    browserExtension?: BrowserExtension;
+    /** Reviewed API integration definitions this deployment can connect here. */
+    integrationDefinitions?: readonly IntegrationDefinition[];
+  } = {},
 ): CapabilityCatalogItem[] {
   const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
   const items = [
@@ -1960,6 +2145,9 @@ export function nativeConnectionCapabilityRecommendations(
       }),
     );
   }
+  items.push(
+    ...integrationDefinitionCapabilityRecommendations(options.integrationDefinitions ?? []),
+  );
   return items;
 }
 

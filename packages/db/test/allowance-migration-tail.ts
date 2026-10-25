@@ -24,4 +24,9 @@ export const allowanceMigrationTail = [
   // Read-only probes and scheduling projections extend both allowance and
   // session-limit routines, so replay after those withheld definitions.
   "0847_read_only_runtime_probes.sql",
+  // Moves 0638's unbilled counting into a shared helper over the counters
+  // introduced by withheld 0552 and adds recording triggers; replay after it.
+  "0976_recording_allowance_usage.sql",
+  // Rewrites 0976's trigger function and calls its shared helper; replay after it.
+  "0977_recording_credit_cost.sql",
 ] as const;

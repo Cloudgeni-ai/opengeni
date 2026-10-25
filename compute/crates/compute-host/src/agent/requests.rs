@@ -366,10 +366,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 .sandbox(id.0)
                 .is_some_and(|view| view.unsavable && view.state.durability == Durability::Volatile)
         {
-            return Err(HostError::Invalid(format!(
-                "sandbox {id}'s VM may have lost disk writes, so it cannot be saved; \
-                 it sleeps no deeper than compressed until its VM is replaced"
-            )));
+            return Err(cannot_save(id));
         }
         if level == Level::Compressed && !self.can_compress {
             return Err(HostError::Invalid(
@@ -916,4 +913,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 /// What the API reports of a VM cgroup's memory counters.
 fn memory_status(stats: compute_engine::MemoryStats) -> MemoryStatus {
     MemoryStatus::new(stats.zswpout, stats.zswpin, stats.pressure_some_avg10)
+}
+
+/// The refusal of a sleep, or hand-off, that needs sandbox `id`'s VM
+/// process saved when no copy of it can be trusted.
+pub(super) fn cannot_save(id: Id) -> HostError {
+    HostError::Invalid(format!(
+        "sandbox {id}'s VM may have lost disk writes, so it cannot be saved; \
+         it sleeps no deeper than compressed until its VM is replaced"
+    ))
 }

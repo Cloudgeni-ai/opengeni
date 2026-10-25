@@ -22,6 +22,10 @@ import {
   type Workspace,
 } from "@opengeni/contracts";
 import {
+  PERSONAL_INTEGRATION_SETUP_PERMISSION,
+  permissionSetCovers,
+} from "@opengeni/contracts/personal-integration-setup";
+import {
   bootstrapWorkspace,
   ensureManagedAccessForUser,
   getManagedUserProfilesByIds,
@@ -119,7 +123,7 @@ export function requireApiKeyDelegationContext(
   const ceiling = authority ?? external;
   if (
     ceiling?.permissionMode === "explicit" &&
-    permissions.some((permission) => !ceiling.permissions.includes(permission))
+    permissions.some((permission) => !ceilingCovers(ceiling.permissions, permission))
   ) {
     throw new HTTPException(403, {
       message: "cannot delegate a permission outside the organization key policy",
@@ -131,7 +135,7 @@ export function requireApiKeyDelegationContext(
     organizationAccessPresetPermissions("full").some(
       (permission) =>
         !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
-        !ceiling.permissions.includes(permission),
+        !ceilingCovers(ceiling.permissions, permission),
     )
   ) {
     throw new HTTPException(403, {
@@ -176,7 +180,7 @@ export function requireExplicitPermissionDelegation(
 ): void {
   if (
     grant.permissionMode === "explicit" &&
-    requested.some((permission) => !grant.permissions.includes(permission))
+    requested.some((permission) => !ceilingCovers(grant.permissions, permission))
   ) {
     throw new HTTPException(403, {
       message: "cannot delegate a permission outside the organization key policy",
@@ -188,7 +192,7 @@ export function requireExplicitPermissionDelegation(
     organizationAccessPresetPermissions("full").some(
       (permission) =>
         !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
-        !grant.permissions.includes(permission),
+        !ceilingCovers(grant.permissions, permission),
     )
   ) {
     throw new HTTPException(403, {
@@ -1418,13 +1422,35 @@ export function hasPermission(
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
-  const granted = permissions.includes(permission) || grantsSecretAlias(permissions, permission);
+  const granted =
+    permissions.includes(permission) ||
+    grantsSecretAlias(permissions, permission) ||
+    grantsPersonalIntegrationSetup(permissions, permission);
   if (permissionMode === "explicit" || explicitPermissionSets.has(permissions)) return granted;
   // Variable-set metadata, plaintext read, write/rotation, attachment, and
   // runtime use are independent capabilities. Deprecated broad permissions
   // remain parseable but do not imply any of the exact permissions.
   return granted || permissions.includes("workspace:admin");
 }
+
+/**
+ * `connections:write` (connect accounts, including one's own) includes the
+ * narrow personal setup permission, so roles, keys and policies that hold it
+ * keep their meaning when a route asks for `connections:personal`.
+ */
+function grantsPersonalIntegrationSetup(
+  permissions: readonly Permission[],
+  permission: Permission,
+): boolean {
+  return (
+    permission === PERSONAL_INTEGRATION_SETUP_PERMISSION &&
+    permissionSetCovers(permissions, permission)
+  );
+}
+
+/** A ceiling (organization key policy) covers a requested permission. */
+const ceilingCovers = (ceiling: readonly Permission[], permission: Permission): boolean =>
+  permissionSetCovers(ceiling, permission);
 
 /**
  * Stored roles and API keys keep their legacy variable-set names (Q-16): a

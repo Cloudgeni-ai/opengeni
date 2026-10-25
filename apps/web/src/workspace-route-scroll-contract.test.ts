@@ -45,6 +45,7 @@ const workspaceRouteContracts = {
   workspaceAutomationNewRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceAutomationDetailRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceAutomationEditRoute: { kind: "page", source: "routes/automations.tsx" },
+  workspaceAutomationTemplatesRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourcesRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourceNewRoute: { kind: "page", source: "routes/automations.tsx" },
   workspaceEventSourceDetailRoute: { kind: "page", source: "routes/automations.tsx" },

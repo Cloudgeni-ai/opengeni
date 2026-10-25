@@ -126,7 +126,7 @@ export async function reachSessionInOtherWorkspace(input: {
   if (!input.reach) return refusal(NO_FULL_ACCESS);
   if (input.toolName === "session_get" && input.arguments["sessionId"] === undefined)
     return refusal("Pass sessionId with workspaceId: it names a chat in that workspace.");
-  const actingPerson = await input.reach.actingPerson();
+  const actingPerson = await input.reach.fullAccessPerson();
   if (!actingPerson) return refusal(ENDED);
   const outcome = await runOrganizationAction(actingPerson, {
     id: INVOKE_ACTION,

@@ -8,6 +8,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import { summarizeUpdateBlockers, type UpdateBlocker } from "./update-admission";
 import {
+  BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
@@ -35,7 +36,11 @@ import {
   NetworkRouteConsistency,
   type InteractionError,
 } from "@opengeni/contracts";
-import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
+import {
+  InteractionControllerError,
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import {
   CdpCommandTimeoutError,
   CdpProtocolError,
@@ -169,6 +174,36 @@ type InteractionSocketData = BrowserSocketData | ComputerSocketData | ComputerRf
 type BrowserServer = ReturnType<typeof Bun.serve<InteractionSocketData>>;
 type BrowserSocket = Bun.ServerWebSocket<InteractionSocketData>;
 
+/** Seconds a controller connection may stay silent before the server closes it. */
+const BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS = 120;
+
+/**
+ * An action request answers only once its action or batch finished, which
+ * its declared waits may let run past the server's idle timeout; the server
+ * may then reset the connection while the batch keeps running. Bun clamps a
+ * per-request idle timeout to 255 seconds, so turn it off for this request:
+ * the caller's deadline, derived from the same declared waits, bounds it, and
+ * a caller that gives up closes the connection. The timer belongs to the
+ * connection, so it is restored once the action settles: later requests on a
+ * kept-alive connection, and the idle connection itself, keep the timeout.
+ */
+async function withoutActionIdleTimeout<T>(
+  server: BrowserServer,
+  request: Request,
+  action: () => Promise<T>,
+): Promise<T> {
+  server.timeout(request, 0);
+  try {
+    return await action();
+  } finally {
+    try {
+      server.timeout(request, BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS);
+    } catch {
+      // The connection already closed; there is no timer left to restore.
+    }
+  }
+}
+
 export type BrowserControlServerOptions = {
   supervisor: BrowserSupervisor;
   computerSupervisor?: ComputerSupervisor;
@@ -230,7 +265,7 @@ export class BrowserControlServer {
     this.server = Bun.serve<InteractionSocketData>({
       hostname: requestedHostname,
       port: options.port ?? BROWSER_CONTROL_PORT,
-      idleTimeout: 120,
+      idleTimeout: BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS,
       maxRequestBodySize: BROWSER_CONTROL_MAX_JSON_BYTES,
       fetch: async (request, server) => await this.handleFetch(request, server),
       websocket: {
@@ -622,13 +657,25 @@ export class BrowserControlServer {
           409,
         );
       }
-      const receipt = await this.supervisor.action(command);
-      // Older clients parse receipts strictly. Return resolved targets only to
-      // a caller that asked for them.
-      if (url.searchParams.get(BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER) === "1")
-        return success(receipt);
-      const { targets: _targets, ...withoutTargets } = receipt;
-      return success(withoutTargets);
+      const receipt = await withoutActionIdleTimeout(
+        server,
+        request,
+        async () => await this.supervisor.action(command),
+      );
+      // Older clients parse receipts strictly. Return resolved targets and
+      // per-action notes only to a caller that asked for them.
+      const { targets, notes, ...base } = receipt;
+      return success({
+        ...base,
+        ...(targets !== undefined &&
+        url.searchParams.get(BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER) === "1"
+          ? { targets }
+          : {}),
+        ...(notes !== undefined &&
+        url.searchParams.get(BROWSER_ACTION_RECEIPT_NOTES_PARAMETER) === "1"
+          ? { notes }
+          : {}),
+      });
     }
     if (
       segments.length === 6 &&
@@ -970,7 +1017,11 @@ export class BrowserControlServer {
           409,
         );
       }
-      const receipt = await supervisor.action(command);
+      const receipt = await withoutActionIdleTimeout(
+        server,
+        request,
+        async () => await supervisor.action(command),
+      );
       // Older clients parse receipts strictly. Return role stand-ins only to
       // a caller that asked for them.
       if (url.searchParams.get(COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER) === "1")
@@ -2309,6 +2360,11 @@ function protocolResponse(
   }
   if (error instanceof InteractionDefiniteDriverError) {
     return fail(error.code, error.message, false, interactionStatus(error.code));
+  }
+  // A driver that cannot tell whether its change happened (a tab close whose
+  // browser connection ended) says so, so the caller checks before retrying.
+  if (error instanceof InteractionOutcomeUnknownDriverError) {
+    return fail(error.code, error.message, error.retryable, interactionStatus(error.code));
   }
   return fail("driver_failed", "interaction controller request failed", false, 500);
 }

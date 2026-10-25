@@ -1042,6 +1042,7 @@ export async function createOpenGeniWorkerService(
   });
   const activeCleanupContainment = cleanupContainment;
   lifecycle = createWorkerServiceLifecycle({
+    cleanupContainmentRequested: activeCleanupContainment.requested,
     ...(options.onDrainStarted ? { onDrainStarted: options.onDrainStarted } : {}),
     role: options.role,
     worker: {

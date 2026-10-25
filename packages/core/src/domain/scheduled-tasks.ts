@@ -265,12 +265,12 @@ export async function scheduledConnectionTools(
       ...settings.mcpServers.map(({ id }) => id),
       ...target.mcpServers.map(({ id }) => id),
     ],
-    defaultMcpServerIds: await workspaceSessionToolPolicyDefaultServerIds(
-      db,
-      workspaceId,
-      settings,
-      subjectId,
-    ),
+    // Explicit and inherited selections ignore workspace defaults. Their current
+    // registry is already supplied above; account authority is resolved by callers.
+    defaultMcpServerIds:
+      target.toolPolicy.mode === "workspace_default"
+        ? await workspaceSessionToolPolicyDefaultServerIds(db, workspaceId, settings, subjectId)
+        : [],
   }).toolRefs;
 }
 
@@ -371,6 +371,8 @@ export async function createValidatedScheduledTask(input: {
   authorizationSurface?: SessionAuthorizationSurface | undefined;
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
+  /** Reads event sources (MCP servers and Gmail) while checking triggers; for tests. */
+  eventSourceFetch?: typeof fetch | undefined;
 }): Promise<ScheduledTask> {
   // Variable Sets were replaced by vaults (RM-1).
   if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
@@ -655,11 +657,14 @@ export async function createValidatedScheduledTask(input: {
     ? await validateScheduledTaskEvents({
         settings: input.settings,
         db: input.db,
+        accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         ownerSubjectId,
+        actorSubjectId: input.grant.subjectId,
         schedule: input.payload.schedule,
         action,
         events: requestedEvents,
+        ...(input.eventSourceFetch ? { fetch: input.eventSourceFetch } : {}),
       })
     : null;
   const visibility = await resolveScheduledTaskVisibility({
@@ -1436,7 +1441,7 @@ export async function validatedScheduledTaskUpdate(
 async function withScheduledTaskEventsUpdate(
   input: Pick<
     Parameters<typeof validatedScheduledTaskUpdateWithoutAudience>[0],
-    "settings" | "db" | "existing" | "payload"
+    "settings" | "db" | "grant" | "existing" | "payload" | "eventSourceFetch"
   >,
   update: UpdateScheduledTaskInput,
 ): Promise<UpdateScheduledTaskInput> {
@@ -1446,12 +1451,15 @@ async function withScheduledTaskEventsUpdate(
     ? await validateScheduledTaskEvents({
         settings: input.settings,
         db: input.db,
+        accountId: existing.accountId,
         workspaceId: existing.workspaceId,
         ownerSubjectId: existing.ownerSubjectId,
+        actorSubjectId: input.grant.subjectId,
         taskId: existing.id,
         schedule,
         action: update.action ?? existing.action,
         events: input.payload.events,
+        ...(input.eventSourceFetch ? { fetch: input.eventSourceFetch } : {}),
       })
     : null;
   if (!events && update.schedule) {
@@ -1524,6 +1532,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   authorizationSurface?: SessionAuthorizationSurface | undefined;
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
+  /** See createValidatedScheduledTask. */
+  eventSourceFetch?: typeof fetch | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   const requestedPrompt =
     input.payload.prompt ??

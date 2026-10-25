@@ -87,6 +87,7 @@ if (origin && window.location.origin === origin) {
     if (meetingListener) meetingListener(request);
     else waitingMeeting = { request, at: Date.now() };
   });
+  const appVersion = argument("opengeni-app-version");
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -103,8 +104,11 @@ if (origin && window.location.origin === origin) {
       ...(systemAudio ? (["systemAudio"] as const) : []),
       ...(systemAudio ? (["meetingDetection"] as const) : []),
       "computerCapabilities",
+      "captureWindow",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
+    ...(appVersion ? { appVersion } : {}),
+    captureWindow: () => ipcRenderer.invoke(DESKTOP_IPC.captureWindow),
     accounts: {
       list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,
       switchTo: (accountId) => ipcRenderer.invoke(DESKTOP_IPC.accountsSwitch, accountId),

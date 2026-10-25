@@ -1,10 +1,12 @@
 import {
   getWorkspaceVideoGenerationPolicy,
+  ImageGenerationCreditError,
   loadWorkspaceVercelAiGatewayCredentialLease,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
+  ensureSessionWorkspaceGovernance,
   sessionHasToolRouterHistory,
   readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
@@ -25,7 +27,7 @@ import {
 import {
   serviceTierForLatencyMode,
   WORKSPACE_GATEWAY_PROVIDER_ID,
-  resolveModelProvider,
+  configuredProviders,
   type Settings,
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
@@ -43,7 +45,11 @@ import { recordTurnStartupPhase } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
-import { executeGatewayImageGeneration } from "../gateway-image-generation";
+import {
+  executeGatewayImageGeneration,
+  imageGenerationCreditRefusedResult,
+  managedImageGenerationCredential,
+} from "../gateway-image-generation";
 import {
   executeCodexImageGeneration,
   executeCoreCodexImageGeneration,
@@ -95,6 +101,7 @@ export type BuildTurnAgentDeps = {
   mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
+  bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
@@ -164,6 +171,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     mcpServers,
     input,
     db,
+    bus,
     runtime,
     objectStorage,
     observability,
@@ -421,34 +429,61 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       return {};
     }
 
-    const gatewayResolution = resolveModelProvider(
-      capabilitySettings,
-      WORKSPACE_GATEWAY_PROVIDER_ID,
+    // The workspace's own Gateway key pays first. Otherwise the deployment's
+    // Gateway key generates the image on Opengeni credits, like credit-funded
+    // video, unless the operator or the workspace turned that off. The
+    // workspace key is a provider, not a model: look it up by provider id.
+    const gateway = configuredProviders(capabilitySettings).find(
+      (provider) => provider.id === WORKSPACE_GATEWAY_PROVIDER_ID,
     );
-    const gateway = gatewayResolution?.provider;
-    if (gateway?.kind !== "vercel-gateway-workspace" || !gateway.apiKey) return {};
-    const gatewayApiKey = gateway.apiKey;
+    const route =
+      gateway?.kind === "vercel-gateway-workspace" && gateway.apiKey
+        ? {
+            apiKey: gateway.apiKey,
+            modelId: capabilitySettings.imageGenerationModel,
+            pricedCostMicros: 0,
+          }
+        : deps.workspaceCreditModelsAllowed === false
+          ? null
+          : managedImageGenerationCredential(capabilitySettings);
+    if (!route) return {};
     return {
       imageGeneration: {
         kind: "provider_adapter",
         execute: async ({ prompt, references }, { toolCallId }) => {
           const referenceResolution = await resolveImageReferences(references);
           if (referenceResolution.status === "rejected") return referenceResolution.result;
-          const receipt = await executeGatewayImageGeneration({
-            db,
-            objectStorage,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turn.id,
-            attemptId: input.attemptId,
-            apiKey: gatewayApiKey,
-            modelId: capabilitySettings.imageGenerationModel,
-            prompt,
-            references: referenceResolution.references,
-            toolCallId,
-            ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
-          });
+          let receipt: Awaited<ReturnType<typeof executeGatewayImageGeneration>>;
+          try {
+            receipt = await executeGatewayImageGeneration({
+              db,
+              objectStorage,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              attemptId: input.attemptId,
+              apiKey: route.apiKey,
+              modelId: route.modelId,
+              ...(route.pricedCostMicros > 0
+                ? {
+                    pricedCostMicros: route.pricedCostMicros,
+                    creditUsageModelId: turnExecutionPolicy.productModelId,
+                  }
+                : {}),
+              prompt,
+              references: referenceResolution.references,
+              toolCallId,
+              ...(runtimeCancellationSignal ? { abortSignal: runtimeCancellationSignal } : {}),
+            });
+          } catch (error) {
+            // Credits refused the image before any provider request: tell the
+            // agent plainly so it can tell the person, instead of failing.
+            if (error instanceof ImageGenerationCreditError) {
+              return imageGenerationCreditRefusedResult(error);
+            }
+            throw error;
+          }
           media.rememberGeneratedImageCreatedThisTurn(receipt);
           await media.materializeGeneratedImage(receipt);
           return receipt;
@@ -600,6 +635,19 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedAttemptId: input.attemptId,
     catalog: formatSkillCatalog(deps.skillCatalog),
   });
+  // Governance changes between turns and with who starts a turn. It reaches
+  // the model as a durable history item before the first turn that sees a new
+  // value, never in the system prompt, so a change does not rewrite text that
+  // earlier requests sent (which invalidated the whole cached history).
+  await ensureSessionWorkspaceGovernance(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    expectedExecutionGeneration: turn.executionGeneration,
+    expectedAttemptId: input.attemptId,
+    governance: workspaceGovernance ?? null,
+  });
   eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
@@ -741,6 +789,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // W1: `{{secret:…}}` references resolve at the exec boundary.
         secretResolver: createAttemptSecretResolver({
           db,
+          bus,
           settings: eventing.modelRunSettings,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -884,7 +933,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),
-        ...(workspaceGovernance ? { workspaceGovernance } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for

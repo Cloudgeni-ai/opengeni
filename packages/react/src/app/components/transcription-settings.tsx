@@ -18,7 +18,9 @@ export const voiceInputProviderLabels: Record<VoiceInputProviderId, string> = {
   "codex-subscription": "Codex subscription",
   openai: "OpenAI · Opengeni credits",
   "azure-openai": "Azure OpenAI · Opengeni credits",
-  "azure-mai": "MAI Transcribe · Opengeni credits",
+  "azure-mai": "Azure Speech · MAI-Transcribe-2",
+  "azure-speech": "Azure Speech · MAI-Transcribe-2",
+  elevenlabs: "ElevenLabs Scribe · workspace key",
 };
 
 /** The Voice input row of Settings > General > New session defaults. */
@@ -64,7 +66,9 @@ export function VoiceInputPreferences({
   // honours the saved preference, so gating on it would lock an admin out of
   // changing a preference whose provider stopped being available.
   const available = capability?.available === true || providers.length > 0;
-  const selected = preferences?.preferredProvider ?? null;
+  // `azure-mai` is the older name of the Azure Speech provider.
+  const saved = preferences?.preferredProvider ?? null;
+  const selected = saved === "azure-mai" ? "azure-speech" : saved;
   const fallbackEnabled = preferences?.fallbackEnabled ?? true;
 
   async function save(patch: Partial<WorkspaceVoiceInputSettings>, message: string) {

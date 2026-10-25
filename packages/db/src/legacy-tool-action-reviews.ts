@@ -230,7 +230,7 @@ export async function legacyToolActionReview(
         ...(proven
           ? {
               ...toolReviewAction(toolName, args, context),
-              ...toolReviewFields(args, context),
+              ...toolReviewFields(args, context, toolName),
             }
           : { ...toolReviewAction(toolName, null, context), fields: [], moreFields: 0 }),
         ...(context.accountLabel ? { accountLabel: context.accountLabel } : {}),

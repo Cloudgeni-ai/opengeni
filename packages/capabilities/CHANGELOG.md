@@ -1,5 +1,60 @@
 # @opengeni/capabilities
 
+## 5.3.1
+
+### Minor Changes
+
+- 119f33d: Add independently gated Microsoft Teams agent tools and linked Teams conversations, with durable admission and delivery, private-message authority checks, and workspace setup APIs. Both integrations remain disabled by default.
+
+### Patch Changes
+
+- 5c4cf54: Gmail search, thread and draft-list results now reach the model as compact mail cards (sender, recipients, date, subject, labels, attachment names and the start of the body, with `contentTruncated` when cut), sized to the current model's tool-output budget, so a 50-message full-content search is about 47 KB of model-visible text instead of a 3.5 MB result that had to spill to a file. `get_message` stays complete but drops the HTML body when a plain-text body exists, and replaces an HTML-only body that does not fit the budget with its readable text. Codemode and the spill file still receive the exact results. Local MCP bridges can supply such a model-only copy through the new optional `projectModelToolResult` hook. Cards keep a Reply-To that names another address than the sender. A spilled tool result that arrives before the turn's lazy sandbox has started now starts it and copies the file, so its receipt gives the shell path instead of `null`; the path is given only once the copy is really there.
+- Updated dependencies [c8ddf55]
+- Updated dependencies [1988e97]
+- Updated dependencies [e7f5d38]
+- Updated dependencies [e3782bb]
+- Updated dependencies [e1838ff]
+- Updated dependencies [ce72530]
+- Updated dependencies [4c6bf32]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [cccd692]
+- Updated dependencies [3fa5c6e]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [392db50]
+- Updated dependencies [31bca3c]
+- Updated dependencies [6acfbd3]
+- Updated dependencies [21e7ecf]
+- Updated dependencies [627b2f1]
+- Updated dependencies [c307566]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [4695d41]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [f9f0607]
+- Updated dependencies [cc319f3]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [a9809ee]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [c194abb]
+- Updated dependencies [0383280]
+- Updated dependencies [7c02dbd]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/network@5.3.0
+
 ## 5.2.1
 
 ### Patch Changes

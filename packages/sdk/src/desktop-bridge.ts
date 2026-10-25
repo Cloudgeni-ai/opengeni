@@ -40,7 +40,9 @@ export type DesktopCapability =
   /** Notice when a call app starts using the microphone, and offer to record the meeting. */
   | "meetingDetection"
   /** What Opengeni may do on this computer: switches the app enforces, and the microphone. */
-  | "computerCapabilities";
+  | "computerCapabilities"
+  /** A still of the window's page, taken without a prompt (for feedback reports). */
+  | "captureWindow";
 
 export type DesktopSystemAudioErrorCode =
   /** This computer, its OS version or this app build can't record other apps' audio. */
@@ -282,6 +284,14 @@ export interface DesktopComputerCapabilities {
   problems?: Partial<Record<keyof DesktopComputerSettings, string>>;
 }
 
+/** A still of the desktop window's page: PNG bytes, base64-encoded. */
+export interface DesktopWindowCapture {
+  contentType: "image/png";
+  base64: string;
+  width: number;
+  height: number;
+}
+
 /** `window.opengeniDesktop` inside a desktop app. */
 export interface DesktopBridge {
   readonly version: number;
@@ -289,6 +299,13 @@ export interface DesktopBridge {
   readonly capabilities: readonly DesktopCapability[];
   /** The shell's product name, e.g. "Opengeni". */
   readonly productName: string;
+  /** The app's own version, e.g. "0.1.29". Absent from older apps. */
+  readonly appVersion?: string;
+  /**
+   * A PNG of the page in the window as it is now, at the screen's pixel
+   * density, or null when nothing is shown. With the `captureWindow` capability.
+   */
+  captureWindow?(): Promise<DesktopWindowCapture | null>;
   readonly accounts: {
     list(): Promise<DesktopAccountsSnapshot>;
     /** Show another account in the window. */
@@ -450,6 +467,7 @@ export const DESKTOP_IPC = {
   computerDisconnect: "og:computer:disconnect",
   computerChanged: "og:computer:changed",
   openExternal: "og:open-external",
+  captureWindow: "og:capture-window",
   command: "og:command",
   menuActionsSet: "og:menu-actions:set",
   menuAction: "og:menu-action",

@@ -147,6 +147,14 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
     matches: (tool) => tool === "meetings_search" || tool === "meeting_read",
   },
   {
+    id: "app-actions",
+    name: "Settings in chat",
+    description:
+      "Do what you could do in settings yourself: invite people, share chats, check your plan, credits and usage, and change preferences. Each change asks you first.",
+    kind: "opengeni",
+    matches: (tool) => tool === "admin_actions_search" || tool.startsWith("admin_action_"),
+  },
+  {
     id: "workspace",
     name: "Workspace operations",
     description:

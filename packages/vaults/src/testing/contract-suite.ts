@@ -1,5 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { generatePassword, totpCode } from "@opengeni/contracts";
+import {
+  generatePassword,
+  totpCode,
+  type VaultItemType,
+  type VaultFieldKind,
+} from "@opengeni/contracts";
 import {
   createProviderCallBudget,
   VaultProviderError,
@@ -8,6 +13,7 @@ import {
   type VaultProviderContext,
   type VaultProviderErrorCode,
 } from "../provider";
+import { generateSshKeyPair } from "../ssh-keys";
 
 export interface VaultProviderUnderTest {
   provider: VaultProvider;
@@ -51,6 +57,57 @@ function field(meta: ProviderItemMeta, name: string) {
   const found = meta.fields.find((candidate) => candidate.name.toLowerCase() === name);
   if (!found) throw new Error(`field ${name} missing from ${meta.name}`);
   return found;
+}
+
+type TypedFixture = {
+  category: string | null;
+  fields: Array<{ name: string; kind: VaultFieldKind; value: string }>;
+};
+
+/** A small item of each creatable type, with the standard fields every provider has. */
+function typedFixture(type: VaultItemType): TypedFixture | null {
+  switch (type) {
+    case "api_key":
+      return {
+        category: "database",
+        fields: [{ name: "value", kind: "concealed", value: generatePassword({ length: 24 }) }],
+      };
+    case "note":
+      return { category: null, fields: [{ name: "note", kind: "concealed", value: "line 1" }] };
+    case "card":
+      return {
+        category: null,
+        fields: [
+          { name: "cardholder name", kind: "text", value: "Ada Example" },
+          { name: "number", kind: "concealed", value: "4111111111111111" },
+          { name: "expiry month", kind: "text", value: "7" },
+          { name: "expiry year", kind: "text", value: "2031" },
+        ],
+      };
+    case "identity":
+      return {
+        category: null,
+        fields: [
+          { name: "first name", kind: "text", value: "Ada" },
+          { name: "last name", kind: "text", value: "Example" },
+          { name: "email", kind: "text", value: "ada@example.test" },
+        ],
+      };
+    case "ssh_key": {
+      const pair = generateSshKeyPair("ed25519");
+      return {
+        category: null,
+        fields: [
+          { name: "private key", kind: "concealed", value: pair.privateKey },
+          { name: "public key", kind: "text", value: pair.publicKey },
+          { name: "fingerprint", kind: "text", value: pair.fingerprint },
+        ],
+      };
+    }
+    default:
+      // Logins have their own step; files and passkeys are not created this way.
+      return null;
+  }
 }
 
 /**
@@ -210,14 +267,17 @@ export function runVaultProviderContractSuite(
       created = updated;
     });
 
-    test("archives an item; it leaves the metadata mirror", async () => {
+    test("archives an item; it leaves the active items", async () => {
       await ready;
       if (!subject.provider.capabilities().write) return;
       if (!created) throw new Error("create step failed");
       const archivedId = created.externalItemId;
       await subject.provider.archiveItem(context(), subject.externalVaultId, archivedId);
       const items = await subject.provider.listItems(context(), subject.externalVaultId);
-      expect(items.some((item) => item.externalItemId === archivedId)).toBe(false);
+      // A provider may keep listing an archived item, marked with `archivedAt`.
+      expect(items.some((item) => item.externalItemId === archivedId && !item.archivedAt)).toBe(
+        false,
+      );
     });
 
     test("maps a missing item to provider_not_found", async () => {
@@ -228,6 +288,43 @@ export function runVaultProviderContractSuite(
         ]),
         "provider_not_found",
       );
+    });
+
+    test("creates every item type it declares as that type, keeping its category", async () => {
+      await ready;
+      const types = subject.provider.capabilities().operations?.createItemTypes ?? [];
+      for (const type of types) {
+        const fixture = typedFixture(type);
+        if (!fixture) continue;
+        const meta = await subject.provider.writeItem(context(), subject.externalVaultId, {
+          name: `${prefix()}${type}-${crypto.randomUUID().slice(0, 8)}`,
+          type,
+          ...(fixture.category ? { category: fixture.category } : {}),
+          websites: [],
+          fields: fixture.fields,
+        });
+        expect([type, meta.type, meta.category ?? null]).toEqual([type, type, fixture.category]);
+        for (const expected of fixture.fields) {
+          const written = field(meta, expected.name);
+          const [value] = await subject.provider.readFields(
+            context(),
+            subject.externalVaultId,
+            meta.externalItemId,
+            [written.externalFieldId],
+          );
+          const material = value!.material;
+          // A public key's comment is the provider's own; compare the key itself.
+          const comparable = (text: string) =>
+            expected.name === "public key"
+              ? text.trim().split(/\s+/).slice(0, 2).join(" ")
+              : text.trim();
+          expect([
+            type,
+            expected.name,
+            material.type === "text" ? comparable(material.value) : null,
+          ]).toEqual([type, expected.name, comparable(expected.value)]);
+        }
+      }
     });
 
     test("reads from a read-only vault but refuses writes there", async () => {

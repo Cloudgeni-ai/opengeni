@@ -10,7 +10,7 @@ use compute_engine::{Engine, EngineError, ErrorKind};
 
 use super::{
     Archived, Base, Job, archive_receipt, blocking, clear_local, failure, images_of, io_failure,
-    learned, pager_learned, state_failure, suspect_error, wake_profile,
+    learned, pager_learned, state_failure, suspect_error, wake_profile, withdraw_base,
 };
 use crate::image::{Parts, Suspect};
 use crate::layout::{remove_if_present, write_atomic};
@@ -319,12 +319,14 @@ impl<E: Engine, S: Store> Job<E, S> {
         {
             return state_failure(&error);
         }
-        // A paused VM loses the base its next diff would be merged over.
+        // A paused VM loses the base its next diff would be merged over,
+        // and so does its record, before the images go.
         if let Some(live) = self.live.as_mut() {
             live.memory.base = Base::Unknown;
         }
         let paths = self.paths.clone();
         let cleared = blocking(move || {
+            withdraw_base(&paths)?;
             remove_if_present(&paths.snapshot.state)?;
             remove_if_present(&paths.snapshot.memory)?;
             images_of(&paths).clear()

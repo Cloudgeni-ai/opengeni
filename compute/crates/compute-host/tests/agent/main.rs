@@ -44,6 +44,7 @@ mod required;
 mod restart;
 mod roots;
 mod sleep;
+mod stopped;
 
 /// Bytes of fake guest memory that hold its value. A memory image is as long
 /// as the sandbox's memory, so the rest of it is a hole.
@@ -53,6 +54,12 @@ const FAKE_MEMORY: usize = 64 << 10;
 /// starts, after its value: a real guest keeps it in its memory, so it moves
 /// with each image to whichever host restores it.
 const NOTICE_AT: usize = FAKE_MEMORY - 1024;
+
+/// The page size of fake guest memory: what a diff holds or leaves out.
+const FAKE_PAGE: usize = 4096;
+
+/// The memory value of a guest that stopped (see [`guest`]).
+const STOPPED: &str = "(stopped)";
 
 /// How long each fake operation takes.
 #[derive(Clone, Copy, Debug)]
@@ -131,6 +138,9 @@ struct World {
     compress_cancelled: AtomicUsize,
     /// Snapshots taken: full, then diff.
     snapshots: [AtomicUsize; 2],
+    /// While set, a snapshot is taken, then the VMM does not answer until
+    /// it is cleared.
+    stall_after_snapshots: AtomicBool,
     next_vm: AtomicU64,
     /// The latest VM process of every sandbox, by name, so a restarted
     /// agent can take it back and a test can crash it.
@@ -166,13 +176,38 @@ struct World {
     limits_set: Mutex<Vec<(String, Option<u64>)>>,
     /// Times a guest was asked to write its disks out.
     syncs: AtomicUsize,
+    /// While set, a paused VM's guest takes no connection, as with a real
+    /// VMM, whose guest's processors do not run while it is paused.
+    paused_take_nothing: AtomicBool,
+    /// Each VM process's host-side vsock socket, in the order they started.
+    vsocks: Mutex<Vec<PathBuf>>,
+    /// How long a guest takes to take each connection, in milliseconds, as
+    /// one on a slow host does.
+    handshake_ms: AtomicU64,
+    /// While set, a connection a guest is still taking when its VM is
+    /// paused fails, but only a moment after the VM runs again: as with a
+    /// VMM frozen with its guest, which gives up on the connection once it
+    /// thaws.
+    pause_fails_handshakes: AtomicBool,
+    /// Connections guests are taking slowly now.
+    handshaking: AtomicUsize,
+    /// While set, no guest takes a connection, as when the guard froze
+    /// every VM on the host.
+    frozen: AtomicBool,
 }
 
 /// What a fake VM process is, independent of any agent's handle to it.
 #[derive(Clone, Debug)]
 struct Process {
+    /// Which VM process this is, as [`Engine::process_identity`] names it.
+    serial: u64,
     vsock: PathBuf,
     memory: Arc<Mutex<String>>,
+    /// The image as the guest's memory was when this process started or
+    /// last took a snapshot: a diff holds only the pages changed since, as
+    /// a real VMM's does, so a diff merged over the wrong base loses
+    /// memory.
+    snapped: Arc<Mutex<Vec<u8>>>,
     /// The latest restore notice the guest applied, which its memory images
     /// carry.
     applied: Arc<Mutex<Option<String>>>,
@@ -236,6 +271,9 @@ struct Work {
     /// Commands started through the guest's helper still running, which
     /// keep it awake whatever they do.
     commands: u32,
+    /// Until when the guest takes no connection, as one far behind on a
+    /// busy host.
+    stalled_until: Option<Instant>,
 }
 
 /// Time a fake VM spent on one kind of work.
@@ -321,21 +359,26 @@ impl Fake {
             ));
         }
         let vsock = spec.vsock_path();
+        self.world.vsocks.lock().unwrap().push(vsock.clone());
         std::fs::create_dir_all(&spec.dir).unwrap();
         let _ = std::fs::remove_file(&vsock);
         let listener = UnixListener::bind(&vsock).unwrap();
         let memory = Arc::new(Mutex::new(memory));
         let applied = Arc::new(Mutex::new(applied));
         let work = Arc::new(Mutex::new(Work::default()));
+        let paused = Arc::new(Mutex::new(false));
         let (exit, mut exited) = watch::channel(false);
         let guest = tokio::spawn(guest(
             listener,
-            Arc::clone(&memory),
-            Arc::clone(&applied),
-            spec.drives[0].path.clone(),
-            Arc::default(),
-            Arc::clone(&work),
-            Arc::clone(&self.world),
+            GuestState {
+                memory: Arc::clone(&memory),
+                applied: Arc::clone(&applied),
+                disk: spec.drives[0].path.clone(),
+                notice: Arc::default(),
+                work: Arc::clone(&work),
+                paused: Arc::clone(&paused),
+                world: Arc::clone(&self.world),
+            },
         ));
         let world = Arc::clone(&self.world);
         let dead = name.clone();
@@ -348,11 +391,13 @@ impl Fake {
             world.live.lock().unwrap().remove(&dead);
         });
         let process = Process {
+            serial: self.world.next_vm.fetch_add(1, Ordering::Relaxed),
             vsock,
             memory,
+            snapped: Arc::default(),
             applied,
             memory_len: spec.memory_bytes(),
-            paused: Arc::default(),
+            paused,
             exit,
             guest: guest.abort_handle(),
             work,
@@ -363,7 +408,6 @@ impl Fake {
             .lock()
             .unwrap()
             .insert(name.clone(), process.clone());
-        self.world.next_vm.fetch_add(1, Ordering::Relaxed);
         FakeVm {
             name,
             sandbox_dir: spec.dir.parent().unwrap().to_owned(),
@@ -401,22 +445,14 @@ impl Fake {
 /// A guest: answers shell-like lines on any port, and remembers the restore
 /// notice this VM process was given, if any, as well as the latest one its
 /// memory has applied (`applied`, which images carry).
-async fn guest(
-    listener: UnixListener,
-    memory: Arc<Mutex<String>>,
-    applied: Arc<Mutex<Option<String>>>,
-    disk: PathBuf,
-    notice: Arc<Mutex<Option<String>>>,
-    work: Arc<Mutex<Work>>,
-    world: Arc<World>,
-) {
+///
+/// After `halt` it has stopped, as a real guest that powers off does: its
+/// VM runs on, but its kernel takes no connection. That is in its memory
+/// ([`STOPPED`]), so every image saved since carries the stopped guest;
+/// only a boot from its disk starts it again.
+async fn guest(listener: UnixListener, state: GuestState) {
     while let Ok((stream, _)) = listener.accept().await {
-        let memory = Arc::clone(&memory);
-        let applied = Arc::clone(&applied);
-        let disk = disk.clone();
-        let notice = Arc::clone(&notice);
-        let work = Arc::clone(&work);
-        let world = Arc::clone(&world);
+        let state = state.clone();
         tokio::spawn(async move {
             let (read, mut write) = stream.into_split();
             let mut lines = BufReader::new(read).lines();
@@ -424,75 +460,20 @@ async fn guest(
                 Ok(Some(line)) if line.starts_with("CONNECT ") => {}
                 _ => return,
             }
+            if !state.handshake().await {
+                return;
+            }
+            // A guest that takes no connection: its VMM drops it.
+            if !state.takes_connections() {
+                return;
+            }
             if write.write_all(b"OK 1073741824\n").await.is_err() {
                 return;
             }
             let mut flood = None;
             while let Ok(Some(line)) = lines.next_line().await {
-                let reply = match line.split_once(' ').unwrap_or((line.as_str(), "")) {
-                    ("exit", _) => break,
-                    // Sends that many bytes while it reads what the client
-                    // sends until it ends, then answers how much it read.
-                    ("flood", size) => {
-                        flood = size.parse::<usize>().ok();
-                        "ok".into()
-                    }
-                    ("get", _) => memory.lock().unwrap().clone(),
-                    ("set", value) => {
-                        value.clone_into(&mut memory.lock().unwrap());
-                        "ok".into()
-                    }
-                    ("write", value) => {
-                        std::fs::write(&disk, value).unwrap();
-                        "ok".into()
-                    }
-                    ("disk", _) => std::fs::read_to_string(&disk).unwrap_or_default(),
-                    ("restored", fields) => answer_notice(fields, &notice, &applied, &world),
-                    ("told-restored?", _) => notice.lock().unwrap().is_some().to_string(),
-                    // The sandbox id the last restore notice named.
-                    ("sandbox?", _) => notice
-                        .lock()
-                        .unwrap()
-                        .as_deref()
-                        .and_then(|fields| {
-                            fields
-                                .split_whitespace()
-                                .find_map(|field| field.strip_prefix("sandbox="))
-                        })
-                        .unwrap_or_default()
-                        .to_owned(),
-                    ("busy", _) => {
-                        work.lock().unwrap().cpu.set_busy(true);
-                        "ok".into()
-                    }
-                    ("quiet", _) => {
-                        work.lock().unwrap().cpu.set_busy(false);
-                        "ok".into()
-                    }
-                    ("stream", _) => {
-                        work.lock().unwrap().io.set_busy(true);
-                        "ok".into()
-                    }
-                    ("still", _) => {
-                        work.lock().unwrap().io.set_busy(false);
-                        "ok".into()
-                    }
-                    // A quiet command, such as `sleep 300 && deploy`.
-                    ("start-command", _) => {
-                        work.lock().unwrap().commands += 1;
-                        "ok".into()
-                    }
-                    ("end-command", _) => {
-                        let mut work = work.lock().unwrap();
-                        work.commands = work.commands.saturating_sub(1);
-                        "ok".into()
-                    }
-                    ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
-                    ("sync", _) => {
-                        world.syncs.fetch_add(1, Ordering::Relaxed);
-                        "synced".into()
-                    }
-                    (other, _) => format!("unknown {other}"),
+                let Some(reply) = state.answer(&line, &mut flood) else {
+                    break;
                 };
                 if write
                     .write_all(format!("{reply}\n").as_bytes())
@@ -507,6 +488,153 @@ async fn guest(
                 flood_both_ways(lines.into_inner(), write, size).await;
             }
         });
+    }
+}
+
+/// What a guest keeps: its memory and disk, what it was told and what it
+/// runs.
+#[derive(Clone)]
+struct GuestState {
+    memory: Arc<Mutex<String>>,
+    applied: Arc<Mutex<Option<String>>>,
+    disk: PathBuf,
+    notice: Arc<Mutex<Option<String>>>,
+    work: Arc<Mutex<Work>>,
+    paused: Arc<Mutex<bool>>,
+    world: Arc<World>,
+}
+
+impl GuestState {
+    /// Takes as long to take a connection as the world says, and says
+    /// whether the VMM still holds it then: not if the VM was paused
+    /// meanwhile and paused VMs fail what they were taking, which only
+    /// shows once the VM runs again.
+    async fn handshake(&self) -> bool {
+        let delay = Duration::from_millis(self.world.handshake_ms.load(Ordering::Relaxed));
+        if delay.is_zero() {
+            return true;
+        }
+        self.world.handshaking.fetch_add(1, Ordering::Relaxed);
+        let until = Instant::now() + delay;
+        let mut paused_meanwhile = false;
+        while Instant::now() < until {
+            paused_meanwhile |= *self.paused.lock().unwrap();
+            sleep(Duration::from_millis(1)).await;
+        }
+        paused_meanwhile |= *self.paused.lock().unwrap();
+        self.world.handshaking.fetch_sub(1, Ordering::Relaxed);
+        if !(paused_meanwhile && self.world.pause_fails_handshakes.load(Ordering::Relaxed)) {
+            return true;
+        }
+        // Not forever for a VM ended while paused.
+        let ended = Instant::now() + Duration::from_secs(10);
+        while *self.paused.lock().unwrap() && Instant::now() < ended {
+            sleep(Duration::from_millis(1)).await;
+        }
+        // It gives up a moment after it runs again, once the agent holds
+        // the VM again.
+        sleep(Duration::from_millis(30)).await;
+        false
+    }
+
+    /// Whether the guest takes a connection now: not once it has stopped,
+    /// nor while it stalls, nor while it is paused if paused guests take
+    /// none.
+    fn takes_connections(&self) -> bool {
+        let stalled = self
+            .work
+            .lock()
+            .unwrap()
+            .stalled_until
+            .is_some_and(|until| Instant::now() < until);
+        let paused =
+            *self.paused.lock().unwrap() && self.world.paused_take_nothing.load(Ordering::Relaxed);
+        let frozen = self.world.frozen.load(Ordering::Relaxed);
+        *self.memory.lock().unwrap() != STOPPED && !stalled && !paused && !frozen
+    }
+
+    /// The answer to `line`, or `None` to end the connection. A `flood`
+    /// sets `flood` to how many bytes to send.
+    fn answer(&self, line: &str, flood: &mut Option<usize>) -> Option<String> {
+        let Self {
+            memory,
+            applied,
+            disk,
+            notice,
+            work,
+            world,
+            ..
+        } = self;
+        Some(match line.split_once(' ').unwrap_or((line, "")) {
+            ("exit", _) => return None,
+            // Sends that many bytes while it reads what the client sends
+            // until it ends, then answers how much it read.
+            ("flood", size) => {
+                *flood = size.parse::<usize>().ok();
+                "ok".into()
+            }
+            ("get", _) => memory.lock().unwrap().clone(),
+            ("set", value) => {
+                value.clone_into(&mut memory.lock().unwrap());
+                "ok".into()
+            }
+            ("write", value) => {
+                std::fs::write(disk, value).unwrap();
+                "ok".into()
+            }
+            ("disk", _) => std::fs::read_to_string(disk).unwrap_or_default(),
+            ("halt", _) => {
+                STOPPED.clone_into(&mut memory.lock().unwrap());
+                "ok".into()
+            }
+            ("stall", millis) => {
+                let until = Instant::now() + Duration::from_millis(millis.parse().unwrap());
+                work.lock().unwrap().stalled_until = Some(until);
+                "ok".into()
+            }
+            ("restored", fields) => answer_notice(fields, notice, applied, world),
+            ("told-restored?", _) => notice.lock().unwrap().is_some().to_string(),
+            // The sandbox id the last restore notice named.
+            ("sandbox?", _) => notice
+                .lock()
+                .unwrap()
+                .as_deref()
+                .and_then(|fields| notice_field(fields, "sandbox"))
+                .unwrap_or_default()
+                .to_owned(),
+            ("busy", _) => {
+                work.lock().unwrap().cpu.set_busy(true);
+                "ok".into()
+            }
+            ("quiet", _) => {
+                work.lock().unwrap().cpu.set_busy(false);
+                "ok".into()
+            }
+            ("stream", _) => {
+                work.lock().unwrap().io.set_busy(true);
+                "ok".into()
+            }
+            ("still", _) => {
+                work.lock().unwrap().io.set_busy(false);
+                "ok".into()
+            }
+            // A quiet command, such as `sleep 300 && deploy`.
+            ("start-command", _) => {
+                work.lock().unwrap().commands += 1;
+                "ok".into()
+            }
+            ("end-command", _) => {
+                let mut work = work.lock().unwrap();
+                work.commands = work.commands.saturating_sub(1);
+                "ok".into()
+            }
+            ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
+            ("sync", _) => {
+                world.syncs.fetch_add(1, Ordering::Relaxed);
+                "synced".into()
+            }
+            (other, _) => format!("unknown {other}"),
+        })
     }
 }
 
@@ -610,6 +738,11 @@ impl Engine for Fake {
         "fake"
     }
 
+    fn process_identity(&self, vm: &FakeVm) -> Result<String, EngineError> {
+        Self::alive(vm, "process_identity")?;
+        Ok(format!("fake-{}", vm.serial))
+    }
+
     async fn restore(&self, spec: &VmSpec, files: &RestoreFiles) -> Result<FakeVm, EngineError> {
         let now = self.world.restoring.fetch_add(1, Ordering::SeqCst) + 1;
         self.world.max_restoring.fetch_max(now, Ordering::SeqCst);
@@ -640,6 +773,7 @@ impl Engine for Fake {
                 )
             })
             .map_err(|error| EngineError::caused_by(ErrorKind::MemoryLost, "restore", error))?;
+        let loaded = memory.clone();
         let (value, applied) = memory.split_at(memory.len().min(NOTICE_AT));
         let applied = String::from_utf8_lossy(applied)
             .trim_end_matches('\0')
@@ -653,6 +787,8 @@ impl Engine for Fake {
             memory,
             Some(applied).filter(|notice| !notice.is_empty()),
         );
+        // The VMM's record of changed pages starts from what it loaded.
+        *vm.snapped.lock().unwrap() = loaded;
         *vm.paused.lock().unwrap() = true;
         Ok(vm)
     }
@@ -737,10 +873,25 @@ impl Engine for Fake {
         assert!(image.len() <= FAKE_MEMORY, "fake guest notice overflow");
         image.resize(FAKE_MEMORY, 0);
         let file = std::fs::File::create(&files.memory).unwrap();
-        std::io::Write::write_all(&mut &file, &image).unwrap();
+        {
+            let mut snapped = vm.snapped.lock().unwrap();
+            snapped.resize(FAKE_MEMORY, 0);
+            // A diff holds only the pages that changed since the last
+            // snapshot or start, and leaves holes for the rest.
+            for (index, page) in image.chunks(FAKE_PAGE).enumerate() {
+                let start = index * FAKE_PAGE;
+                if kind == SnapshotKind::Full || snapped[start..start + page.len()] != *page {
+                    std::os::unix::fs::FileExt::write_all_at(&file, page, start as u64).unwrap();
+                }
+            }
+            *snapped = image;
+        }
         file.set_len(vm.memory_len).unwrap();
         self.world.snapshots[usize::from(kind == SnapshotKind::Diff)]
             .fetch_add(1, Ordering::Relaxed);
+        while self.world.stall_after_snapshots.load(Ordering::SeqCst) {
+            sleep(Duration::from_millis(2)).await;
+        }
         Ok(())
     }
 
@@ -929,6 +1080,7 @@ impl Lab {
             stream_idle: HostConfig::STREAM_IDLE,
             guest_ports: Vec::new(),
             restore_notice_port: None,
+            guest_checks: compute_host::GuestChecks::DEFAULT,
             first_uid: 1 << 30,
             network: None,
             busy: Some(BusyRule {
@@ -943,10 +1095,12 @@ impl Lab {
             pager: PagerConfig::new(root.join("no-pager")),
             about: compute_host::protocol::About::default(),
             lease: None,
+            guard_freezes: None,
             observer: compute_host::observe::Observer::default(),
             summary_every: HostConfig::SUMMARY_EVERY,
             agent_link: None,
             processor_share: None,
+            prepare: None,
         }
     }
 
@@ -1115,11 +1269,13 @@ impl Lab {
 
     async fn wait_until(&self, what: &str, done: impl Fn(&HostStatus) -> bool) -> HostStatus {
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last = None;
         loop {
-            // A status that never comes times out too.
-            let status = tokio::time::timeout_at(deadline, self.status())
-                .await
-                .unwrap_or_else(|_| panic!("timed out waiting for {what}: no status"));
+            // A status that never comes times out too, showing the last
+            // one that came.
+            let Ok(status) = tokio::time::timeout_at(deadline, self.status()).await else {
+                panic!("timed out waiting for {what}; the last status: {last:#?}");
+            };
             if done(&status) {
                 return status;
             }
@@ -1127,6 +1283,7 @@ impl Lab {
                 Instant::now() < deadline,
                 "timed out waiting for {what}: {status:#?}"
             );
+            last = Some(status);
             sleep(Duration::from_millis(5)).await;
         }
     }

@@ -183,6 +183,7 @@ test("a reached limit refuses the first request and the parallel title request b
           executionGeneration: 1,
           model: "scripted-model",
           initiatingHumanSubjectId: "user:frozen-initiator",
+          resources: [],
         },
         turnExecutionPolicy: { providerId: "openai" },
         providerTurn: {},
@@ -190,6 +191,8 @@ test("a reached limit refuses the first request and the parallel title request b
         eventing: { modelRunSettings: settings },
         historySink: {
           seedHistory: () => undefined,
+          seedHistoryFootprint: () => undefined,
+          historyFootprintCompactionSignal: () => null,
           reconcileConversationTruth: async () => undefined,
         },
         billingState: {

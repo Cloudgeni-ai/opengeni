@@ -168,6 +168,26 @@ describe("browser model text", () => {
     ]);
   });
 
+  test("an action receipt passes on what its actions noted, such as a network that stayed busy", () => {
+    const text = browserActionText({
+      targetId: "T1",
+      state: "completed",
+      error: null,
+      notes: [
+        {
+          message:
+            "page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there",
+        },
+      ],
+      observation: formObservation(),
+    });
+    expect(text.split("\n").slice(0, 3)).toEqual([
+      "Action completed on tab T1.",
+      "Note: page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there.",
+      'Tab T1: "Checkout" https://shop.example/checkout',
+    ]);
+  });
+
   test("an opened Chrome profile names the computer it is on", () => {
     const session = {
       id: "11111111-1111-4111-8111-111111111111",

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/network",
-  "version": "5.2.1",
+  "version": "5.3.1",
   "description": "DNS-pinned outbound HTTP transport and shared MCP OAuth discovery primitives.",
   "license": "Apache-2.0",
   "repository": {
@@ -19,6 +19,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./azure-entra": {
+      "types": "./src/azure-entra.ts",
+      "default": "./src/azure-entra.ts"
+    },
     "./responses-websocket": {
       "types": "./src/responses-websocket.ts",
       "default": "./src/responses-websocket.ts"
@@ -38,6 +42,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@azure/msal-node": "5.6.0",
     "undici": "^6.21.3",
     "ws": "8.21.1"
   },

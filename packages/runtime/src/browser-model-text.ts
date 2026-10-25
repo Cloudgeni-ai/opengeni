@@ -336,6 +336,7 @@ export function browserActionText(receipt: {
     | null
     | undefined;
   targets?: readonly BrowserTextResolvedTarget[] | undefined;
+  notes?: readonly { message: string }[] | undefined;
   observation?: BrowserTextObservation | null | undefined;
   allRefs?: boolean | undefined;
 }): string {
@@ -351,6 +352,7 @@ export function browserActionText(receipt: {
   if (receipt.targets && receipt.targets.length > 0) {
     lines.push(`Acted on: ${receipt.targets.map(resolvedTargetText).join("; ")}`);
   }
+  for (const note of receipt.notes ?? []) lines.push(`Note: ${note.message}.`);
   if (receipt.observation) {
     lines.push(browserObservationText(receipt.observation, { allRefs: receipt.allRefs === true }));
   }

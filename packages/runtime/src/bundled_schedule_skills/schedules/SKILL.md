@@ -65,9 +65,11 @@ Use `scheduled_tasks_create` with:
 - A `prompt` (or `agentConfig.prompt` for a separate agent) describing the work,
   relevant sources and destinations, what to report, and when to stay quiet.
   Preserve the user's requested brevity and notification conditions.
-- The requested cadence and time zone. Use the time zone supplied in the
-  request unless the user explicitly chooses another. Inspect the current tool
-  schema for supported schedule shapes rather than guessing cron fields.
+- The requested cadence and time zone. Times the user gives are in the local
+  time of their message, shown with its zone when they sent it; leave
+  `timeZone` out to use that zone, and set it only when the user names another.
+  Inspect the current tool schema for supported schedule shapes rather than
+  guessing cron fields.
 - For a separate agent, the required repository resources, tool selections, and
   any vault narrowing (`vaultPolicy`).
   Scheduled runs inherit the creating session's tool and permission ceiling;

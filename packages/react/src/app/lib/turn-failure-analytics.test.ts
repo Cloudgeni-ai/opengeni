@@ -27,6 +27,9 @@ describe("turn failure class", () => {
       "context_limit",
     );
     expect(turnFailureClass({ ...base, reason: "something odd" })).toBe("other");
+    expect(turnFailureClass({ ...base, reason: "something odd", sandboxStartFailed: true })).toBe(
+      "sandbox",
+    );
     expect(
       turnFailureClass({
         ...base,

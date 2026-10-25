@@ -310,7 +310,11 @@ mod tests {
             "an earlier registration"
         );
         let id = Id(compute_core::SandboxId(1));
-        let hand_off = Request::HandOff { id, owner_epoch: 4 };
+        let hand_off = Request::HandOff {
+            id,
+            owner_epoch: 4,
+            awake: false,
+        };
         assert_eq!(check(sent(3, 10, Some(4)), &hand_off), None);
         assert_eq!(
             check(sent(3, 10, Some(5)), &hand_off),

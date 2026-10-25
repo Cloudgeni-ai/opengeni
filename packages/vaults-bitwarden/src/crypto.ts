@@ -190,6 +190,21 @@ export function encryptString(plain: string, key: SymmetricKey): string {
   return encryptBytes(new TextEncoder().encode(plain), key);
 }
 
+/**
+ * An attachment body as Bitwarden clients upload it (an EncArrayBuffer):
+ * the type byte 2, the 16-byte IV, the 32-byte MAC over IV and data, then
+ * the AES-256-CBC data. `decryptAttachment` reads it back.
+ */
+export function encryptAttachment(plain: Uint8Array, key: SymmetricKey): Uint8Array {
+  if (!key.macKey) {
+    throw new BitwardenCryptoError("unsupported", "new values are never written with a legacy key");
+  }
+  const iv = new Uint8Array(randomBytes(16));
+  const cipher = createCipheriv("aes-256-cbc", key.encKey, iv);
+  const data = new Uint8Array(Buffer.concat([cipher.update(plain), cipher.final()]));
+  return concat(new Uint8Array([ENC_AES_CBC_256_HMAC]), iv, hmac(key.macKey, iv, data), data);
+}
+
 /** Decrypts an RSA-wrapped value (organization keys) with a PKCS#8 DER private key. */
 export function rsaDecrypt(value: string, privateKeyDer: Uint8Array): Uint8Array {
   const parsed = parseEncString(value);

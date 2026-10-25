@@ -189,7 +189,12 @@ describe("session-only entry", () => {
     );
     // The draft store asks the pure human-input rules which questions offer Other.
     expect(reactSources.some((id) => id.endsWith("/src/human-input-model.ts"))).toBe(true);
-    expect(reactSources.length).toBe(59);
+    // Pure startup-step titles: an unclassified turn failure is named by the
+    // step it failed at ("Sandbox didn't start") instead of its recorded text.
+    expect(
+      reactSources.some((id) => id.endsWith("/src/timeline/platform-activity-presentation.ts")),
+    ).toBe(true);
+    expect(reactSources.length).toBe(60);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

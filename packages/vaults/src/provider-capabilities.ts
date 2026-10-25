@@ -1,4 +1,4 @@
-import type { VaultProviderOperations } from "@opengeni/contracts";
+import { weakerArchiveKind, type VaultProviderOperations } from "@opengeni/contracts";
 import type { ProviderVault, VaultProviderCapabilities } from "./provider";
 
 /** Preserve the published legacy port, while new adapters declare exact operations. */
@@ -30,7 +30,10 @@ export function providerOperations(
     updateItem: base.updateItem && (override?.updateItem ?? true),
     removeField: base.removeField && (override?.removeField ?? true),
     archiveItem: base.archiveItem && (override?.archiveItem ?? true),
-    archiveKind: base.archiveKind,
+    // A vault may narrow an archive to a trash (or none), never widen it.
+    archiveKind: override
+      ? weakerArchiveKind(base.archiveKind, override.archiveKind)
+      : base.archiveKind,
     deleteItem: false,
     restoreItem: base.restoreItem && (override?.restoreItem ?? true),
     readFiles: base.readFiles && (override?.readFiles ?? true),
@@ -40,7 +43,6 @@ export function providerOperations(
     createVault: base.createVault && (override?.createVault ?? true),
     restoreFieldHistory: base.restoreFieldHistory && (override?.restoreFieldHistory ?? true),
   };
-  if (override && override.archiveKind !== base.archiveKind) operations.archiveItem = false;
   if (operations.archiveKind === "none") operations.archiveItem = false;
   if (!operations.archiveItem) operations.archiveKind = "none";
   operations.removeField &&= operations.updateItem;

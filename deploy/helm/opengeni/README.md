@@ -67,6 +67,36 @@ duplicate entries, release-identity/role/listener overrides and overrides of
 active chart-generated service settings fail rendering. Other workload-specific
 variables follow Kubernetes' normal explicit-env precedence over `envFrom`.
 
+## Additional trust beside compute-control TLS
+
+When `computeControl.enabled` and `computeControl.apiTls.secretName` are set,
+API and both worker roles use the compute authority through `NODE_EXTRA_CA_CERTS`.
+Do not override that variable through `extraEnv` or expect a shared ConfigMap
+value to replace the chart-owned environment entry. To retain another private
+service authority, explicitly name its public PEM bundle:
+
+```yaml
+computeControl:
+  apiTls:
+    additionalCaConfigMaps:
+      - name: telemetry-ca
+        key: ca.crt
+```
+
+The chart composes these same-namespace ConfigMap keys with the existing compute
+`ca.crt` once, before application startup. An init container uses the exact API
+or worker image already selected, no network or runtime credentials, read-only
+source mounts, and a bounded writable `emptyDir`. Missing, empty, malformed,
+non-CA or oversized inputs prevent startup. The completed bundle is read-only in
+the application container; the original compute CA mount is retained. No
+collector authentication or TLS verification is disabled.
+
+The empty default preserves the existing compute-only path without an init
+container. With compute disabled or no API TLS Secret, this optional list is
+inactive; other workload trust configuration remains authoritative. Public CA
+bundle updates require an ordinary pod rollout: Bun reads `NODE_EXTRA_CA_CERTS`
+at process startup, so projected-volume changes alone do not reload trust.
+
 ## Volumes
 
 The chart accepts native Kubernetes volume and volume-mount lists at:

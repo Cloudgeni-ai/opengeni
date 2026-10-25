@@ -3,7 +3,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
-import { InteractionControllerError } from "@opengeni/interaction";
+import {
+  InteractionControllerError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import {
   BROWSER_CONTROL_WEBSOCKET_BEARER_PREFIX,
   BROWSER_CONTROL_WEBSOCKET_PROTOCOL,
@@ -462,6 +465,22 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("browser and computer actions run without the idle timeout, then restore it", async () => {
+    const source = await readFile(new URL("../src/server.ts", import.meta.url), "utf8");
+    for (const run of [
+      "async () => await this.supervisor.action(command)",
+      "async () => await supervisor.action(command)",
+    ]) {
+      const at = source.indexOf(run);
+      expect(at).toBeGreaterThan(0);
+      const lift = source.lastIndexOf("await withoutActionIdleTimeout(", at);
+      expect(lift).toBeGreaterThan(source.lastIndexOf('segments[3] === "actions"', at));
+    }
+    expect(source).toContain("server.timeout(request, 0)");
+    expect(source).toContain("server.timeout(request, BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS)");
+    expect(source).toContain("idleTimeout: BROWSER_CONTROL_IDLE_TIMEOUT_SECONDS");
+  });
+
   test.each([
     { code: "timeout" as const, status: 504 },
     { code: "resource_unavailable" as const, status: 503 },
@@ -485,6 +504,29 @@ describe("BrowserControlServer", () => {
         expect(failure.error).toEqual({ code, message, retryable: true });
       },
       { screenshotError: new InteractionControllerError(code, message, true) },
+    );
+  });
+
+  test("reports a tab close the driver cannot confirm as an unknown outcome", async () => {
+    const message = "The browser profile's connection ended while closing this tab";
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const closed = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}`,
+          { method: "DELETE", token: controlToken },
+        );
+        expect(closed.status).toBe(409);
+        const failure = (await closed.json()) as { error: unknown };
+        expect(failure.error).toEqual({ code: "outcome_unknown", message, retryable: false });
+      },
+      { closeError: new InteractionOutcomeUnknownDriverError("outcome_unknown", message, false) },
     );
   });
 
@@ -753,8 +795,10 @@ describe("BrowserControlServer", () => {
       expect(acted.status).toBe(200);
       const actedBody = await json(acted);
       expect(actedBody.data.state).toBe("completed");
-      // Callers that did not ask for resolved targets may parse strictly.
+      // Callers that did not ask for resolved targets or notes may parse
+      // strictly.
       expect(actedBody.data).not.toHaveProperty("targets");
+      expect(actedBody.data).not.toHaveProperty("notes");
       const traced = await json(
         await request(
           server,
@@ -770,6 +814,22 @@ describe("BrowserControlServer", () => {
           role: "button",
           name: "Close",
           container: { role: "dialog", name: "Edit item" },
+        },
+      ]);
+      expect(traced.data).not.toHaveProperty("notes");
+      const noted = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=1`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect(noted.data.targets).toHaveLength(1);
+      expect(noted.data.notes).toEqual([
+        {
+          actionIndex: 0,
+          kind: "network_busy",
+          message: "page loaded; its network was still busy after 30 s, so the wait ended there",
         },
       ]);
 
@@ -1463,6 +1523,7 @@ async function withServer(
     focusedInputObservations?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
+    closeError?: Error;
     beforeDriverOperation?: (
       operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
     ) => void;
@@ -1537,6 +1598,7 @@ function fakeDriver(
     focusedInputObservations?: boolean;
     failStart?: boolean;
     screenshotError?: Error;
+    closeError?: Error;
     beforeDriverOperation?: (
       operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
     ) => void;
@@ -1603,6 +1665,7 @@ function fakeDriver(
       return observation();
     },
     async closeTarget() {
+      if (options.closeError) throw options.closeError;
       return [];
     },
     async observe() {
@@ -1640,6 +1703,11 @@ function fakeDriver(
         role: "button",
         name: "Close",
         container: { role: "dialog", name: "Edit item" },
+      });
+      trace?.record({
+        actionIndex: 0,
+        kind: "network_busy",
+        message: "page loaded; its network was still busy after 30 s, so the wait ended there",
       });
       return observation();
     },

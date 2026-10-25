@@ -12,16 +12,16 @@ import {
   type VoiceInputUsage,
 } from "@opengeni/config";
 import {
+  createAzureSpeechRecordingTranscriptionProvider,
   createVoiceInputBilling,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
   voiceInputBillableUsage,
   type TranscriptionBilling,
 } from "@opengeni/core";
-import { createFfmpegAudioNormalizer } from "../src/transcription/normalize";
-import { createTranscriptionService } from "../src/transcription/service";
-import { createMaiTranscriptionProvider } from "../src/transcription/providers/azure-mai";
-import { parseTranscriptionResponseBody } from "../src/transcription/providers/openai";
+import { createFfmpegAudioNormalizer } from "@opengeni/core/transcription-service";
+import { createTranscriptionService } from "@opengeni/core/transcription-service";
+import { parseTranscriptionResponseBody } from "@opengeni/core/transcription-service";
 
 const pricing = { microsPerMinute: 6000, marginBps: 500 };
 const request = {
@@ -58,12 +58,10 @@ const ffmpegAvailable = spawnSync("ffmpeg", ["-version"]).status === 0;
 
 test("MAI uses Speech multipart and the provider's measured duration", async () => {
   let sent: Request | undefined;
-  const provider = createMaiTranscriptionProvider({
+  const provider = createAzureSpeechRecordingTranscriptionProvider({
     endpoint: "https://speech.example.test/",
-    apiKey: "key",
+    credentials: async () => ({ apiKey: "key" }),
     apiVersion: "2025-10-15",
-    model: "MAI-Transcribe-2",
-    ffmpegPath: "ffmpeg",
     fetch: async (url, init) => {
       sent = new Request(url, init);
       return Response.json({
@@ -73,12 +71,15 @@ test("MAI uses Speech multipart and the provider's measured duration", async () 
       });
     },
   });
-  const result = await provider.transcribe({
-    ...request,
-    mimeType: "audio/wav",
-    filename: "audio.wav",
-  });
-  expect(result).toEqual({
+  const result = await provider.transcribe(
+    {
+      audio: { bytes: request.audio, mimeType: "audio/wav", fileName: "audio.wav" },
+      model: "MAI-Transcribe-2",
+      diarize: false,
+    },
+    null,
+  );
+  expect(result).toMatchObject({
     text: "hello",
     languages: ["en"],
     usage: { kind: "duration", seconds: 5.123 },
@@ -86,9 +87,14 @@ test("MAI uses Speech multipart and the provider's measured duration", async () 
   expect(sent!.url).toBe(
     "https://speech.example.test/speechtotext/transcriptions:transcribe?api-version=2025-10-15",
   );
+  expect(sent!.headers.get("ocp-apim-subscription-key")).toBe("key");
   const form = await sent!.formData();
   expect(JSON.parse(String(form.get("definition")))).toEqual({
-    enhancedMode: { enabled: true, model: "MAI-Transcribe-2" },
+    enhancedMode: {
+      enabled: true,
+      model: "MAI-Transcribe-2",
+      modelOptions: { timestamps: "word" },
+    },
   });
   expect(form.get("audio")).toBeInstanceOf(File);
 });
@@ -154,7 +160,7 @@ test("one-shot sends the server-normalized audio and bills its measured duration
   expect(result.creditCostMicros).toBe(525);
   expect(result.audioSeconds).toBe(3);
   expect(settled).toMatchObject({
-    providerId: "azure-mai",
+    providerId: "azure-speech",
     usage: { kind: "duration", seconds: 5 },
     billing: { sourceId: "unit", trustedDurationSeconds: 3 },
   });
@@ -379,7 +385,7 @@ test("readiness honours preference and fallback; a throwing probe never fails th
     preferredProvider: "codex-subscription",
     fallbackEnabled: false,
   };
-  expect(await service.availableProviderIds?.(pinned)).toEqual(["azure-mai"]);
+  expect(await service.availableProviderIds?.(pinned)).toEqual(["azure-speech"]);
   expect(await service.available(pinned)).toBe(false);
   expect(await service.available({ ...pinned, fallbackEnabled: true })).toBe(true);
 });
