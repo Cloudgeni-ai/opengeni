@@ -63,6 +63,7 @@ function useNarrow(): boolean {
 export function MeetingsListPage({
   workspaceId,
   liveTranscriptDefault = false,
+  liveTranscript = true,
   defaultLanguage = null,
   recordings: recordingsClient,
   meetingHref,
@@ -74,6 +75,8 @@ export function MeetingsListPage({
   workspaceId: string;
   /** Whether the workspace shows a live transcript while recording by default. */
   liveTranscriptDefault?: boolean;
+  /** Offer the live transcript preview at all; false hides it even when a live model is connected. */
+  liveTranscript?: boolean;
   /** The workspace's meeting language; null detects it. */
   defaultLanguage?: string | null;
   /** A recordings client to use instead of the app's, for previews. */
@@ -154,7 +157,7 @@ export function MeetingsListPage({
           externalRef={externalRef}
           notice={notice}
           liveTranscript={
-            liveModel
+            liveTranscript && liveModel
               ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }
               : null
           }

@@ -88,8 +88,9 @@ the console uses:
   `externalRef` to show only the meetings that belong to something of yours,
   such as a project, and to give new recordings started there the same id;
   `notice` for a line shown before every start, such as a reminder to tell
-  the people present; and `header={false}` when the list sits inside a page
-  of your own.
+  the people present; `liveTranscript={false}` to not offer the live preview
+  even when a live model is connected; and `header={false}` when the list sits
+  inside a page of your own.
 - `MeetingDetailPage`: one meeting, with its player, transcript, speaker
   naming, versions and sharing. `details` adds your own lines beside the
   transcript, such as the project it belongs to.
