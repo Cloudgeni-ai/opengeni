@@ -154,6 +154,12 @@ export type TurnInputOptions = {
   programmaticApprovalAcknowledged?: boolean;
   knowledgeSourcePreparationNote?: string;
   workspaceRecoveryNote?: string;
+  /**
+   * File resources mounted into the sandbox for this turn. The system
+   * instructions never list them, so each one must appear in the turn's
+   * attachment notice even when it did not come from the message payload.
+   */
+  mountedFileResources?: readonly ResourceRef[];
   providerApi: HistoryProviderApi;
   servingProviderId?: string;
   projectCanonicalHistory?: ModelHistoryAttachmentProjector;
@@ -752,7 +758,10 @@ export async function turnInput(
           resources,
         ),
     );
-    const attachmentContext = userMessageAttachmentsContext(fileAttachments);
+    const attachmentContext = userMessageAttachmentsContext([
+      ...fileAttachments,
+      ...(await mountedFileAttachmentsNotIn(db, trigger.workspaceId, options, fileAttachments)),
+    ]);
     return await messageInput(
       db,
       runtime,
@@ -779,13 +788,16 @@ export async function turnInput(
     if (trigger.type === "system.update.delivered" && updates.length === 0) {
       throw new Error("Internal update inference has no delivered updates");
     }
+    const mountedContext = userMessageAttachmentsContext(
+      await mountedFileAttachmentsNotIn(db, trigger.workspaceId, options, []),
+    );
     return await messageInput(
       db,
       runtime,
       agent,
       trigger,
       undefined,
-      internalContext,
+      joinInternalContext(internalContext, mountedContext),
       [],
       options.providerApi,
       options.projectCanonicalHistory,
@@ -988,6 +1000,37 @@ type UserMessageFileAttachment = {
   resource: Extract<ResourceRef, { kind: "file" }>;
   file: FileAsset;
 };
+
+/**
+ * Files mounted for this turn that the message payload does not already list
+ * (for example resources supplied outside the message). They join the turn's
+ * attachment notice, so a mounted file is never invisible to the model. A file
+ * the requester cannot read is left out rather than failing the turn.
+ */
+async function mountedFileAttachmentsNotIn(
+  db: Database,
+  workspaceId: string,
+  options: Pick<TurnInputOptions, "fileAuthority" | "mountedFileResources">,
+  listed: readonly UserMessageFileAttachment[],
+): Promise<UserMessageFileAttachment[]> {
+  const listedIds = new Set(listed.map(({ resource }) => resource.fileId));
+  const extra = (options.mountedFileResources ?? []).filter(
+    (resource): resource is FileResourceRef =>
+      resource.kind === "file" && !listedIds.has(resource.fileId),
+  );
+  if (extra.length === 0) return [];
+  const files = await getFilesForSubject(db, {
+    accountId: options.fileAuthority.accountId,
+    workspaceId,
+    subjectId: options.fileAuthority.subjectId,
+    fileIds: extra.map((resource) => resource.fileId),
+  });
+  const fileById = new Map(files.map((file) => [file.id, file]));
+  return extra.flatMap((resource) => {
+    const file = fileById.get(resource.fileId);
+    return file ? [{ resource, file }] : [];
+  });
+}
 
 async function resolveUserMessageFileAttachments(
   db: Database,

@@ -656,6 +656,84 @@ describe("turnInput attachment projection", () => {
     }
   });
 
+  test("lists every file mounted for the turn in its notice, once, even outside the payload", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    const attached = file("00000000-0000-4000-8000-000000000060", "text/csv", 7, "sales.csv");
+    const supplied = file("00000000-0000-4000-8000-000000000061", "application/pdf", 9, "spec.pdf");
+    const unreadable = "00000000-0000-4000-8000-000000000062";
+    let preparedInput: AgentSegmentInput | undefined;
+    const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockImplementation(
+      async (_db, { fileIds }) =>
+        [attached, supplied].filter((candidate) => fileIds.includes(candidate.id)),
+    );
+    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
+    const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
+    const runtime = {
+      prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
+        preparedInput = input;
+        return { input: [], persistedHistoryCount: 1 };
+      },
+    } as unknown as OpenGeniRuntime;
+    const turnWith = (payloadFileIds: string[]) =>
+      turnInput(
+        {} as Database,
+        runtime,
+        {},
+        {
+          id: "00000000-0000-4000-8000-000000000063",
+          workspaceId,
+          sessionId: "00000000-0000-4000-8000-000000000064",
+          sequence: 1,
+          type: "user.message",
+          payload: {
+            text: "compare them",
+            resources: payloadFileIds.map((fileId) => ({ kind: "file", fileId })),
+          },
+          occurredAt: "2026-10-25T00:00:00.000Z",
+        },
+        {
+          turnId: "00000000-0000-4000-8000-000000000065",
+          fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
+          providerApi: "responses",
+          mountedFileResources: [
+            { kind: "file", fileId: attached.id },
+            { kind: "file", fileId: supplied.id },
+            { kind: "file", fileId: unreadable },
+          ],
+          loadActiveHistory: async () => [
+            {
+              id: "00000000-0000-4000-8000-000000000066",
+              position: 0,
+              item: user("compare them"),
+              providerArtifactInvalidatedAt: null,
+            },
+          ],
+        },
+      );
+    const expectedNotice =
+      "Attached files are available in the sandbox:\n" +
+      `- sales.csv (text/csv, 7 bytes): .opengeni/files/${attached.id}/sales.csv\n` +
+      `- spec.pdf (application/pdf, 9 bytes): .opengeni/files/${supplied.id}/spec.pdf` +
+      `\n${ATTACHED_FILES_GUIDANCE}`;
+
+    try {
+      // A file attached to the message and one supplied only as a turn
+      // resource are both listed, the attached one once, in the same order as
+      // the mounted files. A file the requester cannot read neither appears
+      // nor fails the turn.
+      await turnWith([attached.id]);
+      expect(preparedInput?.internalContext).toBe(expectedNotice);
+
+      // Files supplied only as session or API resources still reach the model.
+      await turnWith([]);
+      expect(preparedInput?.internalContext).toBe(expectedNotice);
+    } finally {
+      getFilesForSubject.mockRestore();
+      listUpdates.mockRestore();
+      getEnvelope.mockRestore();
+    }
+  });
+
   test("system-update turns retain historical receipts without reloading bytes", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const image = {

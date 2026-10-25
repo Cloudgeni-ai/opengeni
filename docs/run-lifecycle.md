@@ -5257,6 +5257,9 @@ to it) is in the turn's "Attached files are available in the sandbox" notice,
 which follows history and is persisted with the turn. A turn with a file
 therefore shares the cached prefix of a turn without one and only the
 attachment tail is uncached.
+The notice lists every file mounted for the turn, including files supplied as
+session or API resources rather than attached to the message, each once; a
+mounted file the requester cannot read is left out without failing the turn.
 The receipt-format change incurs a one-time prefix change for existing histories.
 One exception: when this turn's file-authority lookup does not return an active
 reference (another participant's file in a shared session, or a file that is no
