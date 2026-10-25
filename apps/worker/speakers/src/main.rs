@@ -92,24 +92,43 @@ impl Args {
 }
 
 fn read_audio(args: &Args) -> Result<Vec<f32>> {
-    let mut bytes = Vec::new();
     match args.values.get("input") {
         Some(path) => {
-            bytes = std::fs::read(path).map_err(|error| format!("reading {path}: {error}"))?;
+            let file =
+                std::fs::File::open(path).map_err(|error| format!("reading {path}: {error}"))?;
+            decode_pcm(file).map_err(|error| format!("reading {path}: {error}"))
         }
-        None => {
-            std::io::stdin()
-                .read_to_end(&mut bytes)
-                .map_err(|error| format!("reading audio: {error}"))?;
-        }
+        None => decode_pcm(std::io::stdin().lock()),
     }
-    if bytes.len() % 4 != 0 {
+}
+
+/// Decode 32-bit float PCM as it arrives, so the raw bytes are never held
+/// next to the samples.
+fn decode_pcm(mut input: impl Read) -> Result<Vec<f32>> {
+    let mut samples = Vec::new();
+    let mut buffer = vec![0u8; 1 << 16];
+    let mut held = 0;
+    loop {
+        let read = match input.read(&mut buffer[held..]) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("reading audio: {error}")),
+        };
+        let filled = held + read;
+        let whole = filled - filled % 4;
+        samples.extend(
+            buffer[..whole]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+        );
+        buffer.copy_within(whole..filled, 0);
+        held = filled - whole;
+    }
+    if held != 0 {
         return Err("the audio is not 32-bit float PCM".into());
     }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-        .collect())
+    Ok(samples)
 }
 
 fn embedders(
@@ -235,7 +254,7 @@ fn run_embed(args: &Args) -> Result<String> {
             continue;
         }
         let weights: Vec<f32> = jobs.iter().map(|piece| piece.len() as f32).collect();
-        let vectors = diarize::embed_all(&mut embedders, jobs)?;
+        let vectors = diarize::embed_all(&mut embedders, jobs.len(), |index| &jobs[index])?;
         let mut sum = vec![0f32; vectors[0].len()];
         for (vector, weight) in vectors.iter().zip(&weights) {
             for (total, value) in sum.iter_mut().zip(vector) {
