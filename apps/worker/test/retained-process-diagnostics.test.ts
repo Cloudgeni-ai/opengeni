@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { SandboxWorkspaceMutationFencedError } from "@opengeni/db";
 import { failureDiagnostic } from "../../../packages/observability/src/failure-diagnostic";
-import { warnRetainedProcessProofFailure } from "../src/retained-process-diagnostics";
+import {
+  warnRetainedProcessProofFailure,
+  warnRetainedProcessObservationFailure,
+} from "../src/retained-process-diagnostics";
 
 const process = {
   id: "00000000-0000-4000-8000-000000000001",
@@ -10,6 +13,53 @@ const process = {
   ownerTurnId: null,
   reconcileAttempts: 3,
 };
+
+test("observation diagnostics retain the nested provider status and stage without leaking text or identifiers", () => {
+  const records: ReturnType<typeof failureDiagnostic>[] = [];
+  const warnings: unknown[] = [];
+  warnRetainedProcessObservationFailure(
+    {
+      recordFailureDiagnostic: (input) => {
+        const record = failureDiagnostic(input);
+        records.push(record);
+        return record.diagnosticId;
+      },
+      warn: (_message, fields) => {
+        warnings.push(fields);
+      },
+    },
+    {
+      stage: "observation",
+      error: Object.assign(
+        new Error("SECRET_PROVIDER_PAYLOAD", {
+          cause: Object.assign(new Error("SECRET_PROVIDER_PAYLOAD"), {
+            code: 9,
+            details: "SECRET_PROVIDER_PAYLOAD",
+          }),
+        }),
+        { name: "ProviderCommandObservationUnavailableError" },
+      ),
+    },
+    process,
+  );
+  expect(records[0]).toMatchObject({
+    code: "retained_process_observation_failed",
+    stage: "sandbox_retained_processes.observation",
+    causes: [
+      { kind: "ProviderCommandObservationUnavailableError" },
+      { kind: "Error", providerStatus: 9 },
+    ],
+  });
+  expect(warnings).toEqual([
+    {
+      surface: "retained_process_observation",
+      reason: "observation",
+      correlationId: records[0]!.diagnosticId,
+    },
+  ]);
+  expect(JSON.stringify({ records, warnings })).not.toContain("SECRET_PROVIDER_PAYLOAD");
+  expect(JSON.stringify(warnings)).not.toContain(process.id);
+});
 
 test("proof diagnostics distinguish fencing from nested database failures without text leakage", () => {
   const records: ReturnType<typeof failureDiagnostic>[] = [];

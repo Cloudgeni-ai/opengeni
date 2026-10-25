@@ -16,12 +16,16 @@
 import { warnDrainSnapshotFailure } from "../sandbox-snapshot-diagnostics";
 import { maybePersistWarmWorkspaceSnapshot } from "../sandbox-resume";
 import { publishDurableSessionEvents } from "../session-event-fanout";
-import { warnRetainedProcessProofFailure } from "../retained-process-diagnostics";
+import {
+  warnRetainedProcessProofFailure,
+  warnRetainedProcessObservationFailure,
+} from "../retained-process-diagnostics";
 import { retainedProcessDeadlineRetryMs } from "../retained-process-retry";
 
 import { createHash, randomUUID } from "node:crypto";
 import { requestRetainedProcessDeadlineCancellation } from "@opengeni/db/retained-provider-commands";
 import type { ProviderCommandPersistence, ProviderCommandSession } from "@opengeni/runtime";
+import { isProviderCommandObservationUnavailableError } from "@opengeni/runtime";
 import { Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
 import {
@@ -416,6 +420,11 @@ export type RetainedProcessProbeResult =
         | "process_observation_unavailable";
       /** A running command whose last read still returned a large backlog. */
       outputBacklog?: boolean;
+      /** Private diagnostic input only; never persisted or used as exit proof. */
+      failure?: {
+        stage: "binding" | "client" | "deserialize" | "resume" | "observation";
+        error: unknown;
+      };
     };
 
 export type RetainedProcessProbeFn = (
@@ -2756,6 +2765,8 @@ async function reconcileTerminalRetainedProcesses(
         }
       }
       if (observation.status === "deferred") {
+        if (observation.failure)
+          warnRetainedProcessObservationFailure(observability, observation.failure, process);
         await deferRetainedProcessClaim(
           db,
           settings,
@@ -3203,6 +3214,7 @@ export async function probeRetainedProcessAtProvider(
       return {
         status: "deferred",
         reason: error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "provider_error",
+        failure: { stage: "binding", error },
       };
     }
     if (configuredModalBinding.key !== process.providerBindingKey) {
@@ -3215,8 +3227,8 @@ export async function probeRetainedProcessAtProvider(
     client = createSandboxClientForBackend(process.providerBackend as never, settings) as
       | RetainedProcessProbeClient
       | undefined;
-  } catch {
-    return { status: "deferred", reason: "provider_error" };
+  } catch (error) {
+    return { status: "deferred", reason: "provider_error", failure: { stage: "client", error } };
   }
   if (
     !client ||
@@ -3234,8 +3246,12 @@ export async function probeRetainedProcessAtProvider(
       envelopeSessionState,
       process.providerInstanceId,
     );
-  } catch {
-    return { status: "deferred", reason: "provider_error" };
+  } catch (error) {
+    return {
+      status: "deferred",
+      reason: "provider_error",
+      failure: { stage: "deserialize", error },
+    };
   }
   if (resumedState === undefined) {
     return { status: "deferred", reason: "resume_state_missing" };
@@ -3269,7 +3285,7 @@ export async function probeRetainedProcessAtProvider(
         },
       };
     }
-    return { status: "deferred", reason: "provider_error" };
+    return { status: "deferred", reason: "provider_error", failure: { stage: "resume", error } };
   }
   if (typeof session.writeStdin !== "function") {
     return { status: "deferred", reason: "backend_unsupported" };
@@ -3285,6 +3301,7 @@ export async function probeRetainedProcessAtProvider(
       return {
         status: "deferred",
         reason: error === RETAINED_PROCESS_PROBE_TIMEOUT ? "provider_timeout" : "provider_error",
+        failure: { stage: "binding", error },
       };
     }
     if (!process.providerBindingKey) {
@@ -3380,7 +3397,21 @@ export async function probeRetainedProcessAtProvider(
         },
       };
     }
-    return { status: "deferred", reason: "provider_error" };
+    if (isProviderCommandObservationUnavailableError(error)) {
+      // A forgotten exec/read failure is not sandbox loss. Keep the writer
+      // until exact proof or the existing idle/deadline drain, and preserve
+      // this diagnosis instead of repeatedly reporting an opaque provider error.
+      return {
+        status: "deferred",
+        reason: "process_observation_unavailable",
+        failure: { stage: "observation", error },
+      };
+    }
+    return {
+      status: "deferred",
+      reason: "provider_error",
+      failure: { stage: "observation", error },
+    };
   }
   // Cancellation keeps draining with empty reads too: a stopped command's exit
   // is also reported only after its unread output reaches EOF.

@@ -124,14 +124,17 @@ containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
 `finalizationStage`; slow and containment logs carry the same hashed attempt
 `correlationId` as worker execution, never raw session or attempt IDs or metric labels.
+Tool-writer logs also sample the fence's closed `writerKinds` set (tool call,
+shell session, pending shell start, remote operation) and registration count;
+command text, numeric handles and provider locators are never logged.
 Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
 A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other
 live turns checkpoint and resume the same logical turn on a healthy worker,
 without spending their unexpected-worker-death redispatch allowance. The
-standalone host arms a 100-second exit backstop alongside Temporal's existing
-shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
+standalone host arms its existing role-specific process-exit backstop alongside
+Temporal's shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
 retained-process proofs still govern its admission. Temporal force shutdown only
 rejects `Worker.run()` and cannot stop JavaScript activity promises. Embedded
 service hosts own their fatality policy through `terminateWorker` or an equivalent
@@ -140,6 +143,10 @@ never exit the shared process. The deadline resets only when cleanup advances
 to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
+Host containment intent survives a Temporal finalization exception that masks
+its force-timeout error. The lifecycle reports `force_stopped`, keeps the SDK
+exception as the cause, and the standalone entry point labels its nonzero exit
+as a force stop, not an unexplained fatal crash. No shutdown timing changes.
 Closed attempts with unsettled workspace mutations or active, unadopted retained
 processes also block admission, even when their logical outcome is `completed`.
 The work peeker exposes the existing previous-attempt wait, and the final writer's
@@ -1130,6 +1137,27 @@ waiter-local. Supervised cancellation preserves durable intent and its original
 writer; a bounded helper observation failure keeps the same helper UUID, cursor
 and partial response for a later drain. Rejection never proves quiescence or
 permits numeric-PID fallback or another possibly dispatched helper Start.
+
+When a model-facing foreground wait returns an unavailable observation for a
+durably adoptable command, it commits the ordinary session background-command
+handoff **before** exposing its command UUID, just as it does for a running
+receipt. Only then does the turn fence remove its shell registration. Failed
+adoption, cancelled waits and worker-local handles keep their existing ownership
+rules. Setup/lifecycle calls still throw; nothing replays a Start or claims exit.
+The process holder and parent admission stay active and continue to block
+non-point-in-time capture until exact provider proof or the existing idle/deadline
+containment settles them. This prevents an unavailable observer from owning both
+an unfindable command ID and an unfinishable turn cleanup loop.
+
+An exact Modal router `FAILED_PRECONDITION` / `exec not found` response means
+observation state is unavailable, not that a process group has stopped. It is
+typed non-retryable read uncertainty, never Start replay or physical-loss proof.
+The reaper records `process_observation_unavailable` rather than generic
+`provider_error`; protected failure diagnostics retain the source/cause chain
+and numeric gRPC statuses, while public logs contain only the lookup key and
+bounded probe stage. Forgotten output cannot be reconstructed. The existing
+idle-command window, explicit disable switch and provider deadline remain
+unchanged; a successful containment still captures before stopping the box.
 
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference, plus the first-party

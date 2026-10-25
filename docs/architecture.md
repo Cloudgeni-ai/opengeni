@@ -2773,6 +2773,13 @@ existing readiness budget.
 Post-start recovery preserves IDs/cursors, budgets and writer fences.
 Cancellation stays waiter-local; mixed faults never retry. Cleanup retains its
 helper UUID/cursors.
+An unavailable model-facing foreground observation commits the same durable
+background-command handoff as a running result before exposing its UUID. The
+turn's shell registration ends, but the process holder/admission and capture
+gate remain. Exact router exec-state loss is observation uncertainty, never
+process-group exit proof; protected reaper diagnostics retain its bounded
+cause/status evidence. Finalizer containment logs identify outstanding writer
+kinds, and host force-stop intent survives a masking Temporal shutdown error.
 
 Legacy retained Modal commands use the existing drain once the group is unused
 for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` and no active command printed
