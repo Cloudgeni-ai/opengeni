@@ -122,7 +122,15 @@ export function registerRecordingRoutes(
   deps: ApiRouteDeps,
   options: { deployment?: SpeechToTextDeployment } = {},
 ): void {
-  const { db } = deps;
+  const { db, observability } = deps;
+  /** Telemetry failures never reach the request. */
+  const count = (name: string, help: string, labels: Record<string, string>, amount = 1) => {
+    try {
+      observability?.incrementCounter({ name, help, labels, amount });
+    } catch {
+      // Product execution never inherits an observability failure.
+    }
+  };
   const deployment =
     options.deployment ??
     deps.speechToText ??
@@ -619,6 +627,7 @@ export function registerRecordingRoutes(
     );
     const missing: number[] = [];
     const present: number[] = [];
+    let newlyStoredBytes = 0;
     for (const chunkNumber of new Set(body.chunkNumbers)) {
       const row = rows.find((item) => item.chunkNumber === chunkNumber);
       if (!row) {
@@ -630,8 +639,10 @@ export function registerRecordingRoutes(
         continue;
       }
       const size = await storedSize(objects, row.objectKey);
-      if (size === row.byteLength) present.push(chunkNumber);
-      else missing.push(chunkNumber);
+      if (size === row.byteLength) {
+        present.push(chunkNumber);
+        newlyStoredBytes += row.byteLength;
+      } else missing.push(chunkNumber);
     }
     const updated = await guard(() =>
       markRecordingChunksUploaded(db, {
@@ -641,6 +652,14 @@ export function registerRecordingRoutes(
         chunkNumbers: present,
       }),
     );
+    if (newlyStoredBytes > 0) {
+      count(
+        "opengeni_recording_stored_bytes_total",
+        "Bytes of recording audio written to object storage, by kind.",
+        { kind: "chunks" },
+        newlyStoredBytes,
+      );
+    }
     return c.json({
       uploaded: updated.filter((row) => row.state === "uploaded").map((row) => row.chunkNumber),
       missing: missing.sort((left, right) => left - right),
@@ -702,6 +721,12 @@ export function registerRecordingRoutes(
       }),
     );
     await startTranscript(actor.accountId, recording, version.id);
+    // Asking again is the clearest sign a transcript wasn't good enough.
+    count("opengeni_recording_transcript_reruns_total", "Transcripts asked for again.", {
+      purpose: recording.purpose,
+      provider: version.providerId,
+      model: version.model,
+    });
     return c.json(version, 202);
   });
 
@@ -989,7 +1014,13 @@ export function registerRecordingRoutes(
     await admitRecordingUsage(actor);
     const resolved = await deployment.credentials(provider.id, actor);
     const credentials = resolved === "missing" ? null : resolved.credentials;
+    const liveLabels = { provider: provider.id, model: spec.model, funding: provider.funding };
+    const liveHelp = "Live transcript sessions asked for, by outcome.";
     if (!credentials) {
+      count("opengeni_recording_live_sessions_total", liveHelp, {
+        ...liveLabels,
+        outcome: "no_credentials",
+      });
       throw new ApiHttpError(409, {
         code: "conflict",
         message: `Add an ${provider.name} API key to this workspace's models to see a live transcript.`,
@@ -1013,6 +1044,10 @@ export function registerRecordingRoutes(
         credentials,
       );
     } catch (error) {
+      count("opengeni_recording_live_sessions_total", liveHelp, {
+        ...liveLabels,
+        outcome: error instanceof RecordingTranscriptionError ? `provider_${error.code}` : "error",
+      });
       if (!(error instanceof RecordingTranscriptionError)) throw error;
       const rejected = error.code === "unauthorized";
       throw new ApiHttpError(rejected ? 409 : 502, {
@@ -1026,6 +1061,10 @@ export function registerRecordingRoutes(
         details: { code: error.code, providerId: provider.id },
       });
     }
+    count("opengeni_recording_live_sessions_total", liveHelp, {
+      ...liveLabels,
+      outcome: "started",
+    });
     const session: RecordingLiveSession = {
       providerId: provider.id,
       model: spec.model,
@@ -1060,6 +1099,32 @@ export function registerRecordingRoutes(
         segments: body.segments,
       }),
     );
+    const streamedSeconds = (body.streamedMilliseconds - (live?.streamedMilliseconds ?? 0)) / 1_000;
+    if (live && streamedSeconds > 0) {
+      const provider = registry.get(live.providerId);
+      const labels = {
+        provider: live.providerId,
+        model: live.model,
+        funding: provider?.funding ?? "none",
+      };
+      count(
+        "opengeni_recording_live_audio_seconds_total",
+        "Seconds of audio streamed to live transcript models.",
+        labels,
+        streamedSeconds,
+      );
+      const costMicros = spec
+        ? estimateRecordingTranscriptionCostMicros(spec, streamedSeconds * 1_000)
+        : null;
+      if (costMicros !== null) {
+        count(
+          "opengeni_recording_live_cost_usd_total",
+          "Live transcript provider spend at list price, in US dollars.",
+          labels,
+          costMicros / 1_000_000,
+        );
+      }
+    }
     return c.json(result);
   });
 

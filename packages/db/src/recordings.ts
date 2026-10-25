@@ -1692,6 +1692,8 @@ export type RecordingTranscriptionJob = {
   creditAttribution: CreditDebitAttribution | null;
   chunks: RecordingChunk[];
   processingOwner: string;
+  /** How long the version waited before its first attempt; null on later attempts. */
+  queuedMilliseconds: number | null;
 };
 
 /**
@@ -1761,6 +1763,10 @@ export async function claimRecordingTranscriptVersion(
       creditAttribution: CreditDebitAttribution.safeParse(claimed.creditAttribution).data ?? null,
       chunks,
       processingOwner: input.processingOwner,
+      queuedMilliseconds:
+        claimed.attemptCount === 1 && claimed.processingStartedAt
+          ? Math.max(0, claimed.processingStartedAt.getTime() - claimed.createdAt.getTime())
+          : null,
     };
   });
 }
