@@ -16,6 +16,9 @@ import {
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+  INTERACTION_ACTION_DEADLINE_MAX_MS,
+  browserActionDeadlineMs,
+  computerActionDeadlineMs,
   BrowserActionCommand,
   BrowserActionReceipt,
   BrowserClipboard,
@@ -117,7 +120,7 @@ const NATIVE_PLACEMENT_CONTROLLER_WORKDIR = "/tmp";
 export const BROWSER_CONTROL_ADMIN_TOKEN_FILE = "/tmp/opengeni-browserd/authority/admin-token";
 const COMMAND_OK = "OPENGENI_BROWSER_CONTROL_CLIENT_OK";
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
-const MAX_REQUEST_TIMEOUT_MS = 20 * 60_000;
+const MAX_REQUEST_TIMEOUT_MS = INTERACTION_ACTION_DEADLINE_MAX_MS;
 const BROWSER_STATE_TRANSFER_TIMEOUT_MS = 20 * 60_000;
 /** Stopping writes the recording's bundle (up to 200 MB) to local disk. */
 const BROWSER_RECORDING_STOP_TIMEOUT_MS = 2 * 60_000;
@@ -526,6 +529,50 @@ export type ProvisionBrowserControlClientResult = {
 export class BrowserControlTransportError extends Error {
   readonly name = "BrowserControlTransportError";
   readonly retryable = true;
+}
+
+/**
+ * An action request outlived the deadline derived from its own declared waits
+ * (browserActionDeadlineMs / computerActionDeadlineMs). The controller may
+ * still be running it, so it is neither a transport outage nor safe to replay:
+ * callers report it as is and never retry it.
+ */
+export class BrowserControlActionDeadlineError extends Error {
+  readonly name = "BrowserControlActionDeadlineError";
+  readonly retryable = false;
+
+  constructor(
+    readonly surface: "browser" | "computer",
+    readonly deadlineMs: number,
+    options?: ErrorOptions,
+  ) {
+    super(`${surface} action did not finish within its ${deadlineMs} ms deadline`, options);
+  }
+}
+
+/** Every transport bounds a request by its timeoutMs and then fails with a
+ * transport error (curl max-time, the fetch abort, the runner's own deadline
+ * or its reply timer). A transport failure that arrives once the deadline has
+ * elapsed is that deadline; an earlier one remains an ordinary transport fault. */
+const ACTION_DEADLINE_DETECTION_SLACK_MS = 1_000;
+
+async function withActionDeadline<T>(
+  surface: "browser" | "computer",
+  deadlineMs: number,
+  request: (timeoutMs: number) => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await request(deadlineMs);
+  } catch (error) {
+    if (
+      error instanceof BrowserControlTransportError &&
+      Date.now() - startedAt >= deadlineMs - ACTION_DEADLINE_DETECTION_SLACK_MS
+    ) {
+      throw new BrowserControlActionDeadlineError(surface, deadlineMs, { cause: error });
+    }
+    throw error;
+  }
 }
 
 export class BrowserControlProtocolError extends Error {
@@ -2236,13 +2283,19 @@ export class BrowserControlSessionClient {
     }
     let data: unknown;
     try {
-      data = await this.parent.requestForSession({
-        method: "POST",
-        // Controllers that predate resolved targets ignore this parameter.
-        path: `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1`,
-        token: this.controlToken,
-        body: parsed,
-      });
+      data = await withActionDeadline(
+        "browser",
+        browserActionDeadlineMs(parsed.action),
+        async (timeoutMs) =>
+          await this.parent.requestForSession({
+            method: "POST",
+            // Controllers that predate resolved targets ignore this parameter.
+            path: `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1`,
+            token: this.controlToken,
+            body: parsed,
+            timeoutMs,
+          }),
+      );
     } catch (error) {
       // This command already passed the release's schema. The controller's
       // exact parser rejection proves a schema mismatch, not invalid tool use.
@@ -2482,13 +2535,19 @@ export class ComputerControlSessionClient {
       throw new BrowserControlProtocolError("computer action targets another controller binding");
     }
     return ComputerActionReceipt.parse(
-      await this.parent.requestForSession({
-        method: "POST",
-        // Controllers that predate role stand-ins ignore this parameter.
-        path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1`,
-        token: this.controlToken,
-        body: parsed,
-      }),
+      await withActionDeadline(
+        "computer",
+        computerActionDeadlineMs(parsed.action),
+        async (timeoutMs) =>
+          await this.parent.requestForSession({
+            method: "POST",
+            // Controllers that predate role stand-ins ignore this parameter.
+            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1`,
+            token: this.controlToken,
+            body: parsed,
+            timeoutMs,
+          }),
+      ),
     );
   }
 
@@ -2622,6 +2681,10 @@ async function requestExposedController(
         ...(body === undefined ? {} : { body }),
         redirect: "manual",
         signal: AbortSignal.timeout(timeoutMs),
+        // The signal is this request's whole deadline. The runtime's default
+        // five-minute socket idle timer would otherwise end a longer action
+        // batch, whose controller sends nothing until the batch finishes.
+        timeout: false,
       }),
   );
   const responseText = await controllerTransport(async () => await response.text());

@@ -258,6 +258,7 @@ import { InteractionRouteStages, reportInteractionRouteStages } from "../interac
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
 import {
+  interactionActionDeadlineApiError,
   interactionControlApiError,
   legacyInteractionCapacityError,
   legacyInteractionCapacityFailure,
@@ -6954,6 +6955,8 @@ type PreservedWorkingCopyCallback<T> = (input: {
 }) => Promise<T>;
 
 function browserRouteError(error: unknown): HTTPException {
+  const actionDeadline = interactionActionDeadlineApiError(error);
+  if (actionDeadline) return actionDeadline;
   const tabDiagnosis = browserTabDiagnosisError(error);
   if (tabDiagnosis instanceof ApiHttpError) return tabDiagnosis;
   const connectedMachineError = interactionControlApiError(error, "browser");

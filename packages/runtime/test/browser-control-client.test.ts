@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -7,6 +7,8 @@ import {
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+  browserActionDeadlineMs,
+  computerActionDeadlineMs,
   type BrowserObservation,
   type BrowserTarget,
   type ComputerActionReceipt,
@@ -14,6 +16,7 @@ import {
   type ComputerTarget,
 } from "@opengeni/contracts";
 import {
+  BrowserControlActionDeadlineError,
   BrowserControlClient,
   BrowserControlProtocolError,
   BrowserControlRequestError,
@@ -2990,4 +2993,214 @@ test("reads and reverts an adoption recorded by an earlier controller generation
   } finally {
     await server.stop(true);
   }
+});
+
+describe("action request deadlines", () => {
+  type NativeCall = Parameters<
+    NonNullable<BrowserControlPlacementSession["browserControlHttp"]>
+  >[0];
+
+  afterEach(() => {
+    setSystemTime();
+  });
+
+  /** A runner whose controller takes `runMs` to answer; like the real runner,
+   * it gives up once the request's own timeoutMs has passed. Time advances
+   * through the system clock, so the test does not actually wait. */
+  function slowController(runMs: number, respond: (call: NativeCall) => unknown) {
+    const calls: NativeCall[] = [];
+    const session: BrowserControlPlacementSession = {
+      async exec() {
+        throw new Error("the native transport must not start a process");
+      },
+      async execWithInput() {
+        throw new Error("the native transport must not start a process");
+      },
+      async ensureBrowserControl() {
+        return { port: 9, sidecarGeneration: "sidecar-1" };
+      },
+      async browserControlHttp(call) {
+        calls.push(call);
+        setSystemTime(new Date(Date.now() + Math.min(runMs, call.timeoutMs)));
+        if (call.timeoutMs < runMs) throw new Error("browser controller request timed out");
+        return {
+          kind: "response",
+          status: 200,
+          headers: new Map([["content-type", "application/json"]]),
+          body: new TextEncoder().encode(
+            JSON.stringify({
+              protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+              ok: true,
+              data: respond(call),
+            }),
+          ),
+        };
+      },
+    };
+    const client = new BrowserControlClient(session, {
+      adminToken,
+      nativeAuthority: { scopeId: randomUUID(), scopeGeneration: "connection-1" },
+    });
+    return { client, calls };
+  }
+
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+  const uploadThenAsk = {
+    type: "batch" as const,
+    actions: [
+      {
+        type: "wait" as const,
+        condition: "visible" as const,
+        locator: { kind: "text" as const, text: "Uploaded" },
+      },
+      {
+        type: "fill" as const,
+        locator: { kind: "label" as const, text: "Message" },
+        value: "Summarize it",
+      },
+      { type: "press" as const, key: "Enter" },
+      {
+        type: "wait" as const,
+        condition: "visible" as const,
+        locator: { kind: "text" as const, text: "Summary" },
+        timeoutMs: 90_000,
+      },
+    ],
+  };
+  const command = () => ({
+    protocolVersion: 1 as const,
+    operationId: randomUUID(),
+    ...reference,
+    targetId: "target-1",
+    expectedTargetGeneration: "target-1",
+    expectedDocumentGeneration: "document-1",
+    expectedFrameId: "frame-1",
+    actor: { kind: "system" as const, subjectId: "test" },
+    observationMode: "none" as const,
+    action: uploadThenAsk,
+  });
+  const receipt = (call: NativeCall) => {
+    const body = JSON.parse(new TextDecoder().decode(call.body)) as { operationId: string };
+    return {
+      protocolVersion: 1,
+      operationId: body.operationId,
+      ...reference,
+      targetId: "target-1",
+      state: "completed",
+      dispatchedAt: "2026-08-10T12:00:00.000Z",
+      settledAt: "2026-08-10T12:01:10.000Z",
+      observation: null,
+      error: null,
+    };
+  };
+
+  test("a 70-second batch within its declared waits completes with its receipt", async () => {
+    setSystemTime(new Date("2026-08-10T12:00:00.000Z"));
+    const { client, calls } = slowController(70_000, receipt);
+    const browser = client.sessionClient({ reference, controlToken, viewToken });
+    const sent = command();
+    const result = await browser.action(sent);
+    expect(result).toMatchObject({ operationId: sent.operationId, state: "completed" });
+    expect(calls).toHaveLength(1);
+    // The request carried the batch's own deadline, not the 60-second default.
+    expect(calls[0]!.timeoutMs).toBe(browserActionDeadlineMs(uploadThenAsk));
+    expect(calls[0]!.timeoutMs).toBeGreaterThan(70_000);
+  });
+
+  test("a single action keeps the one-minute request budget", async () => {
+    const { client, calls } = slowController(1_000, receipt);
+    const browser = client.sessionClient({ reference, controlToken, viewToken });
+    await browser.action({
+      ...command(),
+      action: { type: "click", locator: { kind: "text", text: "Send" } },
+    });
+    expect(calls[0]!.timeoutMs).toBe(60_000);
+  });
+
+  test("a batch that outlives its deadline reports the deadline and is sent once", async () => {
+    setSystemTime(new Date("2026-08-10T12:00:00.000Z"));
+    const { client, calls } = slowController(10 * 60_000, receipt);
+    const browser = client.sessionClient({ reference, controlToken, viewToken });
+    const error = await browser.action(command()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(BrowserControlActionDeadlineError);
+    expect(error).toMatchObject({
+      surface: "browser",
+      deadlineMs: browserActionDeadlineMs(uploadThenAsk),
+      retryable: false,
+    });
+    expect((error as Error).cause).toBeInstanceOf(BrowserControlTransportError);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("an early transport failure stays a transport failure", async () => {
+    const session: BrowserControlPlacementSession = {
+      async exec() {
+        throw new Error("unused");
+      },
+      async execWithInput() {
+        throw new Error("unused");
+      },
+      async ensureBrowserControl() {
+        return { port: 9, sidecarGeneration: "sidecar-1" };
+      },
+      async browserControlHttp() {
+        throw new Error("synthetic transport loss");
+      },
+    };
+    const browser = new BrowserControlClient(session, {
+      adminToken,
+      nativeAuthority: { scopeId: randomUUID(), scopeGeneration: "connection-1" },
+    }).sessionClient({ reference, controlToken, viewToken });
+    const error = await browser.action(command()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(BrowserControlTransportError);
+    expect(error).not.toBeInstanceOf(BrowserControlActionDeadlineError);
+  });
+
+  test("a computer batch carries its own deadline and reports it when exceeded", async () => {
+    setSystemTime(new Date("2026-08-10T12:00:00.000Z"));
+    const computerSessionId = randomUUID();
+    const target = computerTarget(computerSessionId, "controller-1");
+    const actions = Array.from({ length: 5 }, () => ({
+      type: "semantic" as const,
+      locator: { kind: "role" as const, role: "button", name: "Next" },
+      action: "invoke" as const,
+    }));
+    const computerCommand = () => ({
+      protocolVersion: 1 as const,
+      operationId: randomUUID(),
+      computerSessionId,
+      controllerGeneration: "controller-1",
+      targetId: target.id,
+      expectedTargetGeneration: target.targetGeneration,
+      expectedObservationId: "computer-observation-1",
+      expectedFrameId: null,
+      actor: { kind: "system" as const, subjectId: "test" },
+      action: { type: "batch" as const, actions },
+    });
+    const respond = (call: NativeCall) =>
+      computerReceipt(
+        (JSON.parse(new TextDecoder().decode(call.body)) as { operationId: string }).operationId,
+        computerObservation(target),
+      );
+    const fast = slowController(65_000, respond);
+    const computer = fast.client.computerSessionClient({
+      reference: { computerSessionId, controllerGeneration: "controller-1" },
+      controlToken,
+      viewToken,
+    });
+    expect((await computer.action(computerCommand())).state).toBe("completed");
+    expect(fast.calls[0]!.timeoutMs).toBe(computerActionDeadlineMs({ type: "batch", actions }));
+
+    const stuck = slowController(10 * 60_000, respond);
+    const error = await stuck.client
+      .computerSessionClient({
+        reference: { computerSessionId, controllerGeneration: "controller-1" },
+        controlToken,
+        viewToken,
+      })
+      .action(computerCommand())
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(BrowserControlActionDeadlineError);
+    expect(error).toMatchObject({ surface: "computer" });
+  });
 });

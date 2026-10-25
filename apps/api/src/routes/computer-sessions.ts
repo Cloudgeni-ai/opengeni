@@ -127,6 +127,7 @@ import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat"
 import { validateInteractionRequestOrigin } from "../http/cors";
 import { ApiHttpError } from "../http/api-error";
 import {
+  interactionActionDeadlineApiError,
   interactionControlApiError,
   legacyInteractionCapacityError,
 } from "../http/interaction-control-error";
@@ -2344,6 +2345,8 @@ function interactionFailure(error: unknown) {
 }
 
 function computerRouteError(error: unknown): HTTPException {
+  const actionDeadline = interactionActionDeadlineApiError(error);
+  if (actionDeadline) return actionDeadline;
   const connectedMachineError = interactionControlApiError(error, "computer");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;
