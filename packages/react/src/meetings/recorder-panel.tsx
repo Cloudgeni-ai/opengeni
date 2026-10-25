@@ -11,6 +11,7 @@ import {
   CircleIcon,
   InfoIcon,
   MicIcon,
+  NotebookPenIcon,
   PauseIcon,
   PencilIcon,
   PlayIcon,
@@ -401,6 +402,7 @@ function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
 export function RecorderPanel({
   recorder,
   onStopped,
+  onOpenNotes,
   liveTranscript = null,
   defaultLanguage = null,
   autoStart = null,
@@ -411,6 +413,8 @@ export function RecorderPanel({
   recorder: MeetingRecorder | null;
   /** After Stop, with the recording to open. */
   onStopped?: ((recordingId: string) => void) | undefined;
+  /** Opens the meeting being recorded, where its notepad is. */
+  onOpenNotes?: ((recordingId: string) => void) | undefined;
   /** Offer the live transcript preview; null when the workspace has no live model. */
   liveTranscript?: { defaultOn: boolean; usdPerHour?: number | null } | null;
   /** The workspace's meeting language; null detects it. */
@@ -536,6 +540,17 @@ export function RecorderPanel({
             ))}
           </div>
           <div className="flex shrink-0 items-center gap-2 max-sm:w-full">
+            {onOpenNotes && recordingId && recorder.upload?.created ? (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => onOpenNotes(recordingId)}
+                className="rounded-[10px] pointer-coarse:h-11 max-sm:flex-1"
+              >
+                <NotebookPenIcon aria-hidden="true" />
+                {msg("meetings.recorderPanel.takeNotes")}
+              </Button>
+            ) : null}
             <Button
               type="button"
               variant="outline"

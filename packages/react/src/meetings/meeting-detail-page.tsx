@@ -93,6 +93,7 @@ import {
 } from "./meeting-transcript";
 import { liveSpeakerName, recorderLiveLines, uploadLine } from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
+import { MeetingNotes } from "./meeting-notes";
 import { useMeetingRecorder } from "./recorder-context";
 
 const defaultText = createOpenGeniText();
@@ -561,6 +562,7 @@ export function MeetingDetailPage({
   onBack,
   onOpenSettings,
   details,
+  onOpenChat,
 }: {
   workspaceId: string;
   recordingId: string;
@@ -579,6 +581,8 @@ export function MeetingDetailPage({
    * transcript, such as the project it belongs to.
    */
   details?: ((recording: Recording) => readonly MeetingDetail[]) | undefined;
+  /** Opens a chat, such as the one whose agent wrote the notes. */
+  onOpenChat?: ((sessionId: string) => void) | undefined;
 }) {
   const msg = useOpenGeniText();
   const override = { workspaceId, ...(recordingsClient ? { recordings: recordingsClient } : {}) };
@@ -1161,6 +1165,12 @@ export function MeetingDetailPage({
         </div>
       ) : null}
       <DetailPageBody aside={aside}>
+        <MeetingNotes
+          recordingId={recording.id}
+          recording={override}
+          capturing={recording.state === "capturing"}
+          onOpenChat={onOpenChat}
+        />
         <DetailSection title={msg("meetings.detailPage.transcript")}>
           {showTranscript && reviewLabels.length > 0 ? (
             // Beside the speakers card, the speakers still to review sit at

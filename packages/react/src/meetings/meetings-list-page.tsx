@@ -161,6 +161,7 @@ export function MeetingsListPage({
           <RecorderPanel
             recorder={recorder}
             onStopped={onOpen}
+            onOpenNotes={onOpen}
             defaultLanguage={defaultLanguage}
             autoStart={autoStart}
             externalRef={externalRef}

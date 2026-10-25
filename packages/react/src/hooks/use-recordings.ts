@@ -3,6 +3,8 @@ import type {
   ListRecordingModelsResponse,
   Recording,
   RecordingLiveSegment,
+  RecordingNote,
+  RecordingNoteKind,
   RecordingPerson,
   RecordingVoiceprintConsent,
   RecordingSpeaker,
@@ -60,6 +62,8 @@ export type RecordingsClientLike = Pick<
   | "createRecordingLiveSession"
   | "appendRecordingLiveSegments"
   | "listRecordingLiveSegments"
+  | "listRecordingNotes"
+  | "saveRecordingNote"
 >;
 
 /** Refresh every few seconds while `active`, without an extra read when it turns on. */
@@ -993,5 +997,79 @@ export function useRecordingModels(
     pinned: state.data?.pinned === true,
     loading: state.loading,
     error: state.error,
+  };
+}
+
+// --- Notes -------------------------------------------------------------------
+
+/** How often an open meeting checks for notes someone else, or an agent, saved. */
+const NOTES_POLL_MS = 15_000;
+
+export type UseRecordingNotesOptions = RecordingsClientOverride & {
+  enabled?: boolean;
+  /** Check for notes saved elsewhere this often; default 15 seconds, 0 to never. */
+  pollIntervalMs?: number;
+};
+
+export type UseRecordingNotesResult = {
+  /** What people jotted down while the meeting was recorded. */
+  notepad: RecordingNote | null;
+  /** The written-up summary, decisions and action items. */
+  notes: RecordingNote | null;
+  loading: boolean;
+  error: Error | null;
+  refresh: () => Promise<void>;
+  /**
+   * Replace the notepad or the notes. The notes are saved against the revision
+   * this hook last read, so a newer save made elsewhere fails with 409
+   * `notes_changed` instead of being overwritten; the notepad, saved as people
+   * type, always wins.
+   */
+  save: (kind: RecordingNoteKind, body: string) => Promise<RecordingNote>;
+};
+
+/** A meeting's notepad and notes, kept fresh while it is open. */
+export function useRecordingNotes(
+  recordingId: string | null,
+  options: UseRecordingNotesOptions = {},
+): UseRecordingNotesResult {
+  const { client, workspaceId } = useEmbeddedRecordings(
+    options,
+    ["listRecordingNotes", "saveRecordingNote"],
+    "useRecordingNotes",
+  );
+  const load = useCallback(
+    async () =>
+      recordingId ? (await client.listRecordingNotes(workspaceId, recordingId)).notes : [],
+    [client, workspaceId, recordingId],
+  );
+  const pollIntervalMs = options.pollIntervalMs ?? NOTES_POLL_MS;
+  const state = usePolledValue(load, {
+    enabled: (options.enabled ?? true) && recordingId !== null,
+    ...(pollIntervalMs > 0 ? { pollIntervalMs } : {}),
+  });
+  const notes = state.data ?? [];
+  const notepad = notes.find((note) => note.kind === "notepad") ?? null;
+  const written = notes.find((note) => note.kind === "notes") ?? null;
+  const writtenRevision = written?.revision ?? 0;
+  const refresh = state.refresh;
+  return {
+    notepad,
+    notes: written,
+    loading: state.loading,
+    error: state.error,
+    refresh,
+    save: useCallback(
+      async (kind: RecordingNoteKind, body: string) => {
+        if (!recordingId) throw new Error("No recording selected.");
+        const saved = await client.saveRecordingNote(workspaceId, recordingId, kind, {
+          body,
+          ...(kind === "notes" ? { expectedRevision: writtenRevision } : {}),
+        });
+        await refresh();
+        return saved;
+      },
+      [client, workspaceId, recordingId, writtenRevision, refresh],
+    ),
   };
 }

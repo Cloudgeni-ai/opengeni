@@ -7,6 +7,8 @@ import type {
   ListRecordingModelsResponse,
   Recording,
   RecordingLiveSegment,
+  RecordingNote,
+  RecordingNoteKind,
   RecordingPerson,
   RecordingSpeaker,
   RecordingTranscriptSegment,
@@ -437,6 +439,28 @@ export function createMeetingsFixture(
     return found;
   };
   const delay = <T>(value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), 120));
+  // The ready meeting has notes an agent wrote and a few lines jotted during it.
+  const notes = new Map<string, RecordingNote[]>([
+    [
+      readyId,
+      [
+        {
+          kind: "notepad",
+          body: "- error rate flat after release\n- Tomas: schema review",
+          revision: 3,
+          updatedAt: iso(minutes(41)),
+          updatedBy: { subjectId: ME, sessionId: null },
+        },
+        {
+          kind: "notes",
+          body: "## Summary\n\nThe release went out cleanly and the error rate is flat. Onboarding completion is up, but the second step still loses people.\n\n## Decisions\n\n- Ship the migration once the schema change is reviewed.\n\n## Action items\n\n- [ ] Tomas reviews the schema change today\n- [ ] Ingrid shares the onboarding numbers by Friday",
+          revision: 1,
+          updatedAt: iso(minutes(36)),
+          updatedBy: { subjectId: ME, sessionId: "7c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f" },
+        },
+      ],
+    ],
+  ]);
   const client = {
     listRecordings: async (
       _workspaceId: string,
@@ -578,6 +602,26 @@ export function createMeetingsFixture(
       return await delay(people[index]!);
     },
     listRecordingModels: async () => await delay(models),
+    listRecordingNotes: async (_workspaceId: string, id: string) =>
+      await delay({ notes: notes.get(id) ?? [] }),
+    saveRecordingNote: async (
+      _workspaceId: string,
+      id: string,
+      kind: RecordingNoteKind,
+      request: { body: string },
+    ) => {
+      const current = notes.get(id) ?? [];
+      const previous = current.find((note) => note.kind === kind);
+      const saved: RecordingNote = {
+        kind,
+        body: request.body,
+        revision: (previous?.revision ?? 0) + 1,
+        updatedAt: new Date().toISOString(),
+        updatedBy: { subjectId: ME, sessionId: null },
+      };
+      notes.set(id, [...current.filter((note) => note.kind !== kind), saved]);
+      return await delay(saved);
+    },
     listRecordingLiveSegments: async (
       _workspaceId: string,
       id: string,

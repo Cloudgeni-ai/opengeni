@@ -31,6 +31,7 @@ export type { MeetingPlayerHandle, MeetingPlayerSource } from "./meetings/meetin
 export { LiveTranscript } from "./meetings/live-transcript";
 export type { LiveTranscriptLine } from "./meetings/live-transcript";
 export { DeleteMeetingDialog } from "./meetings/delete-meeting-dialog";
+export { MeetingNotes } from "./meetings/meeting-notes";
 export { MeetingDefaultsView } from "./meetings/meeting-settings";
 export type { MeetingSettingsViewer } from "./meetings/meeting-settings";
 export { DETECT_LANGUAGE, MEETING_LANGUAGES } from "./meetings/meeting-languages";

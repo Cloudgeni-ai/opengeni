@@ -2426,6 +2426,32 @@ export const englishMessages = {
   "meetings.liveTranscript.preview": "· preview",
   "meetings.liveTranscript.reconnectingTheLiveTextThe":
     "Reconnecting the live text. The recording itself is unaffected, and its full transcript comes after you stop.",
+  "meetings.notes.cancel": "Cancel",
+  "meetings.notes.changedMeanwhile":
+    "Someone saved these notes while you were editing. Saving now replaces their version with yours.",
+  "meetings.notes.couldNotSave": "Couldn't save the notes",
+  "meetings.notes.edit": "Edit",
+  "meetings.notes.edited": "Edited · {time}",
+  "meetings.notes.editorLabel": "Meeting notes",
+  "meetings.notes.editorPlaceholder":
+    "## Summary\n\n## Decisions\n\n## Action items\n- [ ] Who does what, by when",
+  "meetings.notes.empty":
+    "No notes yet. Write a summary yourself, or have an agent write one after every meeting with an automation.",
+  "meetings.notes.markdownHint": "Markdown works here.",
+  "meetings.notes.notepad": "Notepad",
+  "meetings.notes.notepadFailed": "Couldn't save",
+  "meetings.notes.notepadPlaceholder":
+    "Jot down what matters as you go. It's kept with the meeting, and agents read it with the transcript.",
+  "meetings.notes.notepadRetry": "Try saving again",
+  "meetings.notes.notepadSaved": "Saved",
+  "meetings.notes.notepadSaving": "Saving…",
+  "meetings.notes.openChat": "Open the chat",
+  "meetings.notes.save": "Save",
+  "meetings.notes.saveAnyway": "Save anyway",
+  "meetings.notes.saved": "Notes saved",
+  "meetings.notes.title": "Notes",
+  "meetings.notes.write": "Write notes",
+  "meetings.notes.writtenByAgent": "Written by an agent · {time}",
   "meetings.player.backCountSeconds_one": "Back {count} second",
   "meetings.player.backCountSeconds_other": "Back {count} seconds",
   "meetings.player.formatclockOfFormatclock2": "{formatClock} of {formatClock2}",
@@ -2521,6 +2547,7 @@ export const englishMessages = {
   "meetings.recorderPanel.startRecording": "Start recording",
   "meetings.recorderPanel.stop": "Stop",
   "meetings.recorderPanel.tabAudio": "Tab audio",
+  "meetings.recorderPanel.takeNotes": "Take notes",
   "meetings.recorderPanel.theLiveTranscriptAddsAbout":
     "The live transcript adds about ${value} per hour of audio.",
   "meetings.recorderPanel.theLiveTranscriptionAccountHas":

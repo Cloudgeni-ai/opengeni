@@ -11,6 +11,7 @@ export {
   useRecorder,
   useRecording,
   useRecordingModels,
+  useRecordingNotes,
   useRecordingPeople,
   useRecordings,
   useRecordingsClient,
@@ -25,6 +26,8 @@ export type {
   UseRecordingResult,
   UseRecordingsOptions,
   UseRecordingsResult,
+  UseRecordingNotesOptions,
+  UseRecordingNotesResult,
   UseTranscriptOptions,
   UseTranscriptResult,
 } from "./hooks/use-recordings";
