@@ -1152,3 +1152,37 @@ test("a server's sign-in inspection message stays out of the card", async () => 
     await view.unmount();
   }
 });
+
+test("a reviewed catalog service reads as the service; a hand-added server keeps its MCP label", async () => {
+  const render = async (source: CapabilityCatalogItem["source"]) => {
+    const shown = { ...item, source, enabled: false, connectionRef: null } as CapabilityCatalogItem;
+    const client = new Proxy(
+      {
+        listCapabilities: async () => ({ items: [shown] }),
+        listConnections: async () => [],
+        connectTransport: () => ({}),
+      },
+      { get: (target, key) => (key in target ? Reflect.get(target, key) : async () => ({})) },
+    ) as unknown as OpenGeniClient;
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={client}
+        workspaceId="workspace"
+        sessionId="session"
+        capabilityId="service"
+        name="Example service"
+        returnUrl="https://host.example/"
+      />,
+    );
+    await flush();
+    const header = document.querySelector(".og-session-capability-header");
+    const result = {
+      badge: header?.querySelector(".og-session-capability-type")?.textContent ?? null,
+      provider: header?.textContent?.includes("service.example") ?? false,
+    };
+    await view.unmount();
+    return result;
+  };
+  expect(await render("library")).toEqual({ badge: null, provider: true });
+  expect(await render("manual")).toEqual({ badge: "MCP server", provider: true });
+});

@@ -8,6 +8,7 @@ import {
 } from "./attach-session-capability";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard } from "../../../components/session-mcp-capability-card";
+import { showsMcpServerLabel } from "../../../components/mcp-server-label";
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
 import { SessionIntegrationCapabilityCard } from "../../../components/session-integration-capability-card";
 import "../../../../styles/connect.css";
@@ -232,7 +233,15 @@ function ScopedSessionCapabilityCard({
       subtitle={catalogItem ? (catalogItem.providerDomain ?? "") : item.providerDomain}
       logo={logo}
       typeLabel={
-        skill ? "Skill" : excel ? "Add-in" : recommendation.kind === "mcp" ? "MCP server" : "API"
+        skill
+          ? "Skill"
+          : excel
+            ? "Add-in"
+            : recommendation.kind === "mcp"
+              ? showsMcpServerLabel(catalogItem)
+                ? "MCP server"
+                : ""
+              : "API"
       }
       description={catalogItem?.description || recommendation.rationale}
       skill={skill}
