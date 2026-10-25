@@ -1619,6 +1619,163 @@ describe("interaction attempt tools", () => {
     });
   });
 
+  test.each([
+    ["browser_observe", { targetId: "tab-1" }],
+    ["browser_act", { targetId: "tab-1", action: { type: "scroll", deltaX: 0, deltaY: 400 } }],
+    ["browser_tabs", { operation: "list" }],
+  ] as const)(
+    "%s with a mistyped BrowserSession id lists this chat's open BrowserSessions",
+    async (tool, args) => {
+      const open = discoveredBrowserSession(browserSessionId, sessionId);
+      open.lifecycle = "active";
+      open.name = "Research\n  browser";
+      const older = discoveredBrowserSession(randomUUID(), sessionId);
+      older.lifecycle = "suspended";
+      older.name = "x".repeat(80);
+      older.lastUsedAt = new Date(Date.parse(open.lastUsedAt) - 60_000).toISOString();
+      // Never offered: another chat's browser, and one that has ended.
+      const otherChats = discoveredBrowserSession(randomUUID(), randomUUID());
+      otherChats.lifecycle = "active";
+      const ended = discoveredBrowserSession(randomUUID(), sessionId);
+      ended.lifecycle = "ended";
+      const mistyped = `${browserSessionId.slice(0, -1)}${browserSessionId.endsWith("0") ? "1" : "0"}`;
+      const missing = () =>
+        new OpenGeniApiError(
+          404,
+          JSON.stringify({
+            error: {
+              code: "not_found",
+              message: "BrowserSession not found",
+              requestId: "request-1",
+            },
+          }),
+        );
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listBrowserSessions: async () =>
+            ({ revision: 1, sessions: [older, otherChats, ended, open] }) as never,
+          observeBrowserTarget: async () => {
+            throw missing();
+          },
+          actInBrowser: async () => {
+            throw missing();
+          },
+          getBrowserTargetState: async () => {
+            throw missing();
+          },
+          listBrowserTargets: async () => {
+            throw missing();
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: [tool],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { browserSessionId: mistyped, ...args },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: "not_found", retryable: false } },
+      });
+      const message = (result.structuredContent as { error: { message: string } }).error.message;
+      expect(message).toBe(
+        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${browserSessionId} "Research browser", ${older.id} "${"x".repeat(59)}…". Use one of these ids, or omit browserSessionId to use the one you used last. Reference: request-1.`,
+      );
+    },
+  );
+
+  test("a missing BrowserSession in a chat with no open browser says to open one", async () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [] }) as never,
+        observeBrowserTarget: async () => {
+          throw new OpenGeniApiError(404, "BrowserSession not found");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: "tab-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    const message = (result.structuredContent as { error: { message: string } }).error.message;
+    expect(message).toBe(
+      "API 404: BrowserSession not found. This chat has no open BrowserSession; call browser_open to start one.",
+    );
+  });
+
+  test("a missing-id hint lists at most five sessions and leaves other 404s alone", async () => {
+    const sessions = Array.from({ length: 7 }, (_, index) => {
+      const browser = discoveredBrowserSession(randomUUID(), sessionId);
+      browser.lifecycle = "active";
+      browser.name = `Browser ${index}`;
+      browser.lastUsedAt = new Date(Date.parse(now) - index * 60_000).toISOString();
+      return browser;
+    });
+    let refusal = new OpenGeniApiError(404, "BrowserSession not found");
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions }) as never,
+        observeBrowserTarget: async () => {
+          throw refusal;
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const run = async () =>
+      (
+        (
+          await definitions[0]!.execute(
+            { browserSessionId: randomUUID(), targetId: "tab-1" },
+            { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+          )
+        ).structuredContent as { error: { message: string } }
+      ).error.message;
+    const listed = await run();
+    for (const browser of sessions.slice(0, 5)) expect(listed).toContain(browser.id);
+    for (const browser of sessions.slice(5)) expect(listed).not.toContain(browser.id);
+    refusal = new OpenGeniApiError(404, "browser target does not exist");
+    expect(await run()).toBe("API 404: browser target does not exist");
+  });
+
+  test("computer tools with a mistyped ComputerSession id list this chat's open ComputerSessions", async () => {
+    const open = discoveredComputerSession(randomUUID(), sessionId);
+    open.lifecycle = "active";
+    open.name = "Desktop";
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+        observeComputerTarget: async () => {
+          throw new OpenGeniApiError(404, "ComputerSession not found");
+        },
+        captureComputerTarget: async () => {
+          throw new OpenGeniApiError(404, "ComputerSession not found");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_observe"],
+      permissions: ["sessions:read"],
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId: randomUUID(), targetId: "window-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    const message = (result.structuredContent as { error: { message: string } }).error.message;
+    expect(message).toBe(
+      `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+    );
+  });
+
   test("an action never runs on a browser resumed while it was in flight", async () => {
     const browser = stoppedBrowser();
     // The restored tab's outline is slow, so the resume stays unreported while
