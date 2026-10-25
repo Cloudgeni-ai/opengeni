@@ -1249,6 +1249,7 @@ export function buildOpenGeniMcpServer(
       server,
       deps,
       grant,
+      sessionId,
       authorize: async () => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       },

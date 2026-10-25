@@ -4031,6 +4031,7 @@ export type FirstPartyMcpToolName =
   | "knowledge_retain_file"
   | "meetings_search"
   | "meeting_read"
+  | "meeting_notes_save"
   | "knowledge_retain_message"
   | "knowledge_archive"
   | "instruction_policy_save"

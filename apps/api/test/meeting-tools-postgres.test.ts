@@ -11,6 +11,7 @@ import {
   finalizeRecording,
   markRecordingChunksUploaded,
   reserveRecordingChunks,
+  saveRecordingNote,
   startRecordingLiveTrack,
   updateRecordingSpeakers,
   type DbClient,
@@ -38,8 +39,8 @@ type Handler = (input: Record<string, unknown>) => Promise<{
   isError?: boolean;
 }>;
 
-/** The two tools as an agent acting for `subjectId` calls them. */
-function toolsFor(grant: AccessGrant) {
+/** The meeting tools as an agent acting for `subjectId` calls them. */
+function toolsFor(grant: AccessGrant, sessionId: string = crypto.randomUUID()) {
   const handlers = new Map<string, { handler: Handler; schema: Record<string, unknown> }>();
   const server = {
     registerTool(name: string, config: { inputSchema: Record<string, unknown> }, handler: Handler) {
@@ -50,6 +51,7 @@ function toolsFor(grant: AccessGrant) {
     server: server as never,
     deps: { db: client!.db } as unknown as ApiRouteDeps,
     grant,
+    sessionId,
     authorize: async () => undefined,
     json: (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] }),
   });
@@ -346,5 +348,63 @@ describe("meeting tools", () => {
     });
     expect(rest.lines).toBe("[18:20] Microphone: Line 1094. Line 1095. Line 1096.");
     expect(rest.nextCursor).toBeNull();
+  });
+
+  test("read shows the notepad and notes; saving notes checks the revision and keeps the notepad", async () => {
+    if (!client) return;
+    const scope = await fixture();
+    const recordingId = await scope.meeting({
+      title: "Budget",
+      visibility: "workspace",
+      segments: [{ at: 0, label: "speaker_0", text: "We approve the budget." }],
+    });
+    const sessionId = crypto.randomUUID();
+    const tools = toolsFor(scope.grantFor(scope.owner), sessionId);
+
+    const before = await tools("meeting_read", { meetingId: recordingId });
+    expect(before.meeting.notes).toEqual({ revision: 0, text: null });
+    expect(before.meeting.notepad).toBeUndefined();
+
+    await saveRecordingNote(client.db, {
+      ...scope.actor,
+      recordingId,
+      kind: "notepad",
+      body: "- budget?",
+    });
+    const saved = await tools("meeting_notes_save", {
+      meetingId: recordingId,
+      notes: "## Decisions\n\n- The budget is approved.",
+      expectedRevision: 0,
+    });
+    expect(saved).toEqual({ saved: true, revision: 1, isError: false });
+
+    const after = await tools("meeting_read", { meetingId: recordingId });
+    expect(after.meeting.notepad).toBe("- budget?");
+    expect(after.meeting.notes).toEqual({
+      revision: 1,
+      text: "## Decisions\n\n- The budget is approved.",
+    });
+    const [row] = await shared!.admin<
+      { updated_by_session_id: string; updated_by_subject_id: string }[]
+    >`
+      select updated_by_session_id, updated_by_subject_id from recording_notes
+      where recording_id = ${recordingId} and kind = 'notes'`;
+    expect(row).toEqual({ updated_by_session_id: sessionId, updated_by_subject_id: scope.owner });
+
+    // A save against an older revision is refused with the current one.
+    const stale = await tools("meeting_notes_save", {
+      meetingId: recordingId,
+      notes: "Something else.",
+      expectedRevision: 0,
+    });
+    expect(stale).toMatchObject({ isError: true, error: { code: "notes_changed" } });
+    expect(stale.error.message).toContain("revision 1");
+
+    // A meeting the person can't see is not found, and its notes stay untouched.
+    const hidden = await scope.meeting({ title: "Private", visibility: "private" });
+    const outsider = toolsFor(scope.grantFor(`user:someone-${crypto.randomUUID()}`));
+    expect(
+      await outsider("meeting_notes_save", { meetingId: hidden, notes: "x", expectedRevision: 0 }),
+    ).toMatchObject({ found: false });
   });
 });

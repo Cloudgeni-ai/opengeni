@@ -5398,6 +5398,8 @@ export const englishMessages = {
   "timeline.toolStep.runSchedule.running": "Running an automation",
   "timeline.toolStep.saveGuide.done": "Saved a skill",
   "timeline.toolStep.saveGuide.running": "Saving a skill",
+  "timeline.toolStep.saveMeetingNotes.done": "Saved meeting notes",
+  "timeline.toolStep.saveMeetingNotes.running": "Saving meeting notes",
   "timeline.toolStep.saveNote.done": "Saved a note",
   "timeline.toolStep.saveNote.running": "Saving a note",
   "timeline.toolStep.savePassword.done": "Saved a password securely",

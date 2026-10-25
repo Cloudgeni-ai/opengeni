@@ -42,6 +42,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // Recorded meetings, read as the person the session works for.
   meetings_search: { sessionRequired: true, allOf: ["sessions:read"] },
   meeting_read: { sessionRequired: true, allOf: ["sessions:read"] },
+  meeting_notes_save: { sessionRequired: true, allOf: ["sessions:create"] },
   knowledge_retain_message: { sessionRequired: true, allOf: ["documents:search", "sessions:read"] },
   knowledge_save: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_archive: { sessionRequired: true, allOf: ["documents:search"] },
