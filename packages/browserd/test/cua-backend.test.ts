@@ -3832,6 +3832,22 @@ describe("CUA desktop boundary", () => {
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
+        // A web dropdown whose menu would bring the browser forward was not
+        // opened: say how to choose its option, without CUA's input modes.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "select_menu_would_raise_window",
+            message: 'Open the menu with delivery_mode:"foreground" only if the user agreed',
+          }),
+          expected: {
+            code: "unsupported",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent: choose an option with set_value on its ref and the option's text",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
         // One that could not be proven to be in the window at all keeps
         // CUA's own reason, and is still a definite refusal.
         {
@@ -3925,6 +3941,8 @@ describe("CUA desktop boundary", () => {
         /** What the parts read once run_steps ran, when Chrome leaves the
          * field itself without a value. */
         partsAfterRun: string[] | null = null;
+        /** Whether the field shows Chrome's "Show date picker" button. */
+        picker = false;
         async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
           const response = await super.callTool(name, argumentsJson);
           if (name === "run_steps" && !this.reply && !this.partsAfterRun)
@@ -3955,6 +3973,18 @@ describe("CUA desktop boundary", () => {
               value: (ran && this.partsAfterRun?.[index]) || "--",
               actions: ["AXIncrement", "AXDecrement"],
             })),
+            ...(this.picker
+              ? [
+                  {
+                    element_index: 2 + parts.length,
+                    element_token: `${s}:${2 + parts.length}`,
+                    parent_index: 1,
+                    role: "AXPopUpButton",
+                    label: "Show date picker Meeting",
+                    actions: ["AXPress"],
+                  },
+                ]
+              : []),
           ];
           response.structuredJson = JSON.stringify(data);
           return response;
@@ -4051,6 +4081,47 @@ describe("CUA desktop boundary", () => {
               message: `This is one part of the date or time field ${field(observation).ref} ("Meeting"), which is filled as a whole: set_value on ${field(observation).ref} with its value in the form YYYY-MM-DDTHH:MM`,
             });
           }
+        } finally {
+          await backend.close();
+        }
+      });
+
+      test("the field's date picker button points to the field, and nothing is sent", async () => {
+        const fixture = new DateFixture();
+        fixture.picker = true;
+        const { backend, observation } = await open(fixture);
+        try {
+          const picker = observation.roots.find(
+            (node) => node.name === "Show date picker Meeting",
+          )!;
+          const ref = field(observation).ref;
+          const before = fixture.calls.length;
+          const failure = await backend
+            .dispatch({
+              ...command(observation),
+              action: {
+                type: "semantic",
+                locator: { kind: "ref", ref: picker.ref },
+                action: "invoke",
+              },
+            })
+            .catch((error: unknown) => error);
+          expect(failure).toMatchObject({
+            code: "unsupported",
+            dispatched: false,
+            message: `This button opens the date picker of the date or time field ${ref} ("Meeting"), which would bring the browser in front of the person's window, so nothing was sent: set_value on ${ref} with its value in the form YYYY-MM-DDTHH:MM`,
+          });
+          expect(mutations(fixture)).toHaveLength(0);
+          expect(fixture.calls.slice(before).some((call) => call.name === "click")).toBe(false);
+          const typed = await backend
+            .dispatch({ ...setDate(observation, picker.ref, "2027-03-07") })
+            .catch((error: unknown) => error);
+          expect(typed).toMatchObject({
+            code: "unsupported",
+            dispatched: false,
+            message: `This button opens the date picker of the date or time field ${ref} ("Meeting"), which would bring the browser in front of the person's window, so nothing was sent: set_value on ${ref} with its value in the form YYYY-MM-DDTHH:MM`,
+          });
+          expect(mutations(fixture)).toHaveLength(0);
         } finally {
           await backend.close();
         }

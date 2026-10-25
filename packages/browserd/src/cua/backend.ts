@@ -146,10 +146,11 @@ export class CuaComputerBackend implements ComputerBackend {
    * element (AXOpen) instead of pressing it. */
   private readonly openingTokens = new Map<string, Set<string>>();
   /** Per window, the web date and time fields of its latest reading: each
-   * field's parts by its CUA token, and the field each part belongs to. */
+   * field's parts by its CUA token, the field each part (or its date picker
+   * button) belongs to, and those picker buttons. */
   private readonly dateFieldTokens = new Map<
     string,
-    { fields: Map<string, DateSegment[]>; owners: Map<string, string> }
+    { fields: Map<string, DateSegment[]>; owners: Map<string, string>; pickers: Set<string> }
   >();
   /** Per window, the element's own label behind each CUA token of its latest
    * reading: what CUA's lookup by name matches. An observed name can instead
@@ -1113,6 +1114,14 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<ComputerBackendError | null> {
     const target = this.targetsById.get(targetId);
     if (!target) return null;
+    // CUA's wording names an input mode this tool does not offer.
+    if (cuaCode === "select_menu_would_raise_window")
+      return new ComputerBackendError(
+        code,
+        "Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent: choose an option with set_value on its ref and the option's text",
+        false,
+        false,
+      );
     if (cuaCode === "element_in_attached_window")
       return new ComputerBackendError(
         code,
@@ -1248,15 +1257,30 @@ export class CuaComputerBackend implements ComputerBackend {
       const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
       const fields = new Map<string, DateSegment[]>();
       const owners = new Map<string, string>();
+      const pickers = new Set<string>();
+      const dateFieldByIndex = new Map<number, string>();
       for (const [index, field] of dateFields(state.elements)) {
         const token = byIndex.get(index)!.element_token!;
         fields.set(token, field.segments);
+        dateFieldByIndex.set(index, token);
         for (const part of field.parts) {
           const partToken = byIndex.get(part)?.element_token;
           if (partToken) owners.set(partToken, token);
         }
       }
-      if (fields.size) this.dateFieldTokens.set(targetId, { fields, owners });
+      // Chrome shows a "Show date picker" button inside the field. Its menu
+      // would bring the browser in front, so it is refused, as a <select> is.
+      for (const element of state.elements) {
+        const field =
+          element.parent_index === undefined
+            ? undefined
+            : dateFieldByIndex.get(element.parent_index);
+        if (field && element.role === "AXPopUpButton" && element.element_token) {
+          owners.set(element.element_token, field);
+          pickers.add(element.element_token);
+        }
+      }
+      if (fields.size) this.dateFieldTokens.set(targetId, { fields, owners, pickers });
       while (this.dateFieldTokens.size > 32)
         this.dateFieldTokens.delete(this.dateFieldTokens.keys().next().value!);
     }
@@ -1370,7 +1394,12 @@ export class CuaComputerBackend implements ComputerBackend {
   private dateFieldOf(
     targetId: string,
     ref: string,
-  ): { ref: string; name: string | undefined; segments: DateSegment[] } | null {
+  ): {
+    ref: string;
+    name: string | undefined;
+    segments: DateSegment[];
+    picker: boolean;
+  } | null {
     const known = this.dateFieldTokens.get(targetId);
     const token = this.tokens.get(targetId)?.get(ref);
     const fieldToken = token === undefined ? undefined : known?.owners.get(token);
@@ -1380,7 +1409,12 @@ export class CuaComputerBackend implements ComputerBackend {
     )?.[0];
     if (!fieldRef) return null;
     const name = this.observations.get(targetId)?.roots.find((node) => node.ref === fieldRef)?.name;
-    return { ref: fieldRef, name, segments: known.fields.get(fieldToken)! };
+    return {
+      ref: fieldRef,
+      name,
+      segments: known.fields.get(fieldToken)!,
+      picker: known.pickers.has(token!),
+    };
   }
 
   /**
@@ -1709,6 +1743,15 @@ export class CuaComputerBackend implements ComputerBackend {
         if (!named) throw error;
         return [named];
       }
+      // A date field's picker button opens a menu that would bring the
+      // browser in front; the field itself takes the whole value.
+      const picker = this.dateFieldOf(command.targetId, node.ref);
+      if (picker?.picker)
+        throw unsupported(
+          `This button opens the date picker of the date or time field ${picker.ref}${
+            picker.name ? ` ("${picker.name}")` : ""
+          }, which would bring the browser in front of the person's window, so nothing was sent: set_value on ${picker.ref} with its value in the form ${dateFieldFormat(picker.segments)}`,
+        );
       // set_value true or false (or select, deselect) on a checkbox or switch
       // presses it only when it is not in that state already.
       const wanted = toggleWanted(node.role, action);

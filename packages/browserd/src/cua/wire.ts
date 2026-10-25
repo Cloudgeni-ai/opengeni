@@ -127,6 +127,9 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   not_a_toggle: "invalid_action",
   // A step's name fits several elements once the window settled; nothing ran.
   ambiguous: "locator_ambiguous",
+  // A web <select> whose menu would bring the browser in front; nothing was
+  // sent, and set_value chooses its options.
+  select_menu_would_raise_window: "unsupported",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can
