@@ -6,6 +6,8 @@ import { execFileSync } from "node:child_process";
 import {
   cli,
   prepare,
+  prepareAppOnly,
+  appOnlyCheckName,
   verify,
   writable,
   validatePlan,
@@ -83,6 +85,110 @@ function staged(plan: Plan, phase: "guard" | "namespace" | "applied") {
 }
 
 describe("offline batcher administration contract", () => {
+  test("v4 recovery identifies only the exact legacy and ordered partial upgrade inventories", () => {
+    const legacy = prepare(fixture(), 5425399, 174101112);
+    const next = prepareAppOnly(fixture(), 5425399, 174101112);
+    const { current, receipts } = staged(legacy, "applied");
+    const retained = JSON.stringify(receipts);
+    expect(() => verify(next, current, "legacy-applied", receipts)).not.toThrow();
+    expect(() => verify(legacy, current, "legacy-applied", receipts)).toThrow(
+      "explicit version 4 plan",
+    );
+    expect(() => verify(next, current, "applied", receipts)).toThrow();
+    current.rulesets[0] = { ...next.admission, id: next.admissionId };
+    expect(() => verify(next, current, "upgrade-admission", receipts)).not.toThrow();
+    expect(() => verify(next, current, "legacy-applied", receipts)).toThrow();
+    expect(() => verify(next, current, "applied", receipts)).toThrow();
+    current.rulesets[0] = { ...next.restore, id: next.admissionId };
+    expect(() => verify(next, current, "legacy-namespace", receipts)).not.toThrow();
+    expect(() => verify(next, current, "namespace", receipts)).toThrow();
+    current.rulesets[0] = { ...next.admission, id: next.admissionId };
+    current.rulesets[current.rulesets.length - 1] = {
+      ...next.namespace,
+      id: receipts.namespace.id,
+    };
+    expect(() => verify(next, current, "applied", receipts)).not.toThrow();
+    expect(JSON.stringify(receipts)).toBe(retained);
+    current.rulesets[0] = { ...legacy.admission, id: legacy.admissionId };
+    for (const phase of [
+      "legacy-applied",
+      "upgrade-admission",
+      "legacy-namespace",
+      "applied",
+    ] as const)
+      expect(() => verify(next, current, phase, receipts)).toThrow();
+    expect(mergeMode("legacy-applied")).toBe("hold");
+    expect(mergeMode("upgrade-admission")).toBe("hold");
+  });
+
+  test("App-only v4 binds the guiding check and both bypass lists to the App", () => {
+    const before = fixture();
+    const plan = prepareAppOnly(before, 5425399, 174101112);
+    const onlyApp = [{ actor_id: 5425399, actor_type: "Integration", bypass_mode: "always" }];
+    expect(plan.schemaVersion).toBe(4);
+    expect(plan.admission.bypass_actors).toEqual(onlyApp);
+    expect(plan.namespace.bypass_actors).toEqual(onlyApp);
+    expect(plan.admission.rules).toContainEqual({
+      type: "required_status_checks",
+      parameters: {
+        required_status_checks: [{ context: appOnlyCheckName, integration_id: 5425399 }],
+        strict_required_status_checks_policy: false,
+        do_not_enforce_on_create: false,
+      },
+    });
+    expect(plan.restore).toEqual(writable(before.rulesets[0]!));
+    expect(plan.restore.bypass_actors).toEqual([
+      { actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" },
+    ]);
+    expect(
+      (plan.restore.rules as { type: string }[]).some((r) => r.type === "required_status_checks"),
+    ).toBe(false);
+    for (const phase of ["guard", "namespace", "applied"] as const) {
+      const { current, receipts } = staged(plan, phase);
+      expect(() => verify(plan, current, phase, receipts)).not.toThrow();
+    }
+    expect(() => verify(plan, before, "restored", {})).not.toThrow();
+  });
+
+  test("App-only plans reject admin bypass and unbound guiding checks; legacy plans remain exact", () => {
+    const legacy = prepare(fixture(), 5425399, 174101112);
+    const saved = JSON.stringify(legacy);
+    expect(() => validatePlan(legacy)).not.toThrow();
+    const plan = prepareAppOnly(fixture(), 5425399, 174101112);
+    for (const key of ["namespace", "admission"] as const) {
+      const changed = structuredClone(plan);
+      (changed[key].bypass_actors as unknown[]).push({
+        actor_id: null,
+        actor_type: "OrganizationAdmin",
+        bypass_mode: "always",
+      });
+      expect(() => validatePlan(changed)).toThrow();
+    }
+    const changed = structuredClone(plan);
+    const rules = changed.admission.rules as {
+      type: string;
+      parameters?: { required_status_checks: { integration_id?: number }[] };
+    }[];
+    delete rules.find((r) => r.type === "required_status_checks")!.parameters!
+      .required_status_checks[0]!.integration_id;
+    expect(() => validatePlan(changed)).toThrow();
+    expect(JSON.stringify(legacy)).toBe(saved);
+  });
+
+  test("App-only provider readback includes the explicit create default without accepting changed semantics", () => {
+    const plan = prepareAppOnly(fixture(), 5425399, 174101112);
+    const { current, receipts } = staged(plan, "applied");
+    const rule = (
+      current.rulesets[0]!.rules as { type: string; parameters: Record<string, unknown> }[]
+    ).find((r) => r.type === "required_status_checks")!;
+    rule.parameters.do_not_enforce_on_create = false;
+    expect(() => verify(plan, current, "applied", receipts)).not.toThrow();
+    for (const value of [true, null, "false", 0]) {
+      rule.parameters.do_not_enforce_on_create = value;
+      expect(() => verify(plan, current, "applied", receipts)).toThrow();
+    }
+  });
+
   test("OrganizationAdmin null readback matches sentinel 1 without rewriting saved policy", () => {
     const plan = prepare(fixture(), 5425399, 174101112);
     const saved = JSON.stringify(plan);
