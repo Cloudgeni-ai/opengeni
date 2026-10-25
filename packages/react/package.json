@@ -248,6 +248,14 @@
     "./session-attention-model": {
       "types": "./src/session-attention-model.ts",
       "default": "./src/session-attention-model.ts"
+    },
+    "./in-chat-connect-model": {
+      "types": "./src/in-chat-connect-model.ts",
+      "default": "./src/in-chat-connect-model.ts"
+    },
+    "./approval-review-model": {
+      "types": "./src/approval-review-model.ts",
+      "default": "./src/approval-review-model.ts"
     }
   },
   "publishConfig": {

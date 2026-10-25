@@ -210,6 +210,7 @@ import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { authNeededPresentation } from "../auth-needed-presentation";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
 const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
@@ -5459,33 +5460,8 @@ export function AuthNeededRow({
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const recommendation = item.capability ?? null;
-  const provider =
-    recommendation?.name ??
-    (item.serverId === "codex_apps"
-      ? t("messageTimeline.codexApps")
-      : providerLabel(t, item.providerDomain));
-  const unavailable =
-    item.reason === "personal_authority_unavailable" ||
-    item.reason === "unsupported_auth" ||
-    item.reason === "resource_scope_unavailable";
-  const missing = item.reason === "missing_connection";
-  const actionLabel = recommendation
-    ? recommendation.action === "connect"
-      ? t("messageTimeline.connect")
-      : t("messageTimeline.review")
-    : missing
-      ? t("messageTimeline.connect")
-      : t("messageTimeline.reconnect");
-  const title = recommendation
-    ? recommendation.action === "connect"
-      ? t("messageTimeline.connectProvider", { provider })
-      : recommendation.action === "add_credentials"
-        ? t("messageTimeline.setUpProvider", { provider })
-        : t("messageTimeline.enableProvider", { provider })
-    : unavailable
-      ? t("messageTimeline.providerToolsUnavailable", { provider })
-      : `${actionLabel} ${provider}`;
-  const reasonLine = recommendation?.rationale ?? authReasonLine(t, item.reason);
+  const presentation = authNeededPresentation(t, item, { setupUnavailable });
+  const { provider, actionLabel, title, reasonLine, unavailable } = presentation;
   const hostAuthorizationUrl = item.authoritySource === "host" ? item.authorizationUrl : null;
 
   const start = async () => {
@@ -5526,18 +5502,14 @@ export function AuthNeededRow({
           <div className="min-w-0">
             <p className="truncate text-og-md font-medium text-og-fg">{title}</p>
             <p className="line-clamp-2 text-og-sm text-og-fg-subtle">{reasonLine}</p>
-            {recommendation ? (
+            {presentation.providerLine ? (
               <p className="mt-1 truncate text-og-xs text-og-fg-muted">
-                {t("messageTimeline.providerProviderdomain", {
-                  providerDomain: item.providerDomain,
-                })}
+                {presentation.providerLine}
               </p>
             ) : null}
-            {recommendation && recommendation.requiredVariables.length > 0 ? (
+            {presentation.variablesLine ? (
               <p className="mt-1 truncate text-og-xs text-og-fg-muted">
-                {t("messageTimeline.needsVariablesJoin", {
-                  join: recommendation.requiredVariables.join(", "),
-                })}
+                {presentation.variablesLine}
               </p>
             ) : null}
           </div>
@@ -5583,25 +5555,11 @@ export function AuthNeededRow({
           </a>
         ) : null}
       </div>
-      {!unavailable ? (
-        <p className="px-1 text-og-xs text-og-fg-subtle">
-          {recommendation && setupUnavailable
-            ? t("messageTimeline.setupUnavailableHere", { provider })
-            : recommendation
-              ? t("messageTimeline.noAccessHasBeenGranted")
-              : t(
-                  missing
-                    ? "messageTimeline.toolCallNotReplayedAfterConnecting"
-                    : "messageTimeline.toolCallNotReplayedAfterReconnecting",
-                )}
-        </p>
+      {presentation.footnote ? (
+        <p className="px-1 text-og-xs text-og-fg-subtle">{presentation.footnote}</p>
       ) : null}
       {failed ? (
-        <p className="px-1 text-og-xs text-og-status-failed">
-          {t("messageTimeline.couldnTStart")}{" "}
-          {missing ? t("messageTimeline.connecting") : t("messageTimeline.reconnecting")}{" "}
-          {t("messageTimeline.providerTryAgain", { provider })}
-        </p>
+        <p className="px-1 text-og-xs text-og-status-failed">{presentation.startFailed}</p>
       ) : null}
     </div>
   );
@@ -5652,42 +5610,4 @@ function monogram(label: string): string {
     return words[0]!.slice(0, 2).toUpperCase();
   }
   return (words[0]![0]! + words[1]![0]!).toUpperCase();
-}
-
-/** "linear.app" -> "Linear": the first domain label, capitalized. A calm human
-    name for the provider — never the raw domain shown as a label. */
-function providerLabel(t: OpenGeniText, domain: string): string {
-  const host =
-    domain
-      .trim()
-      .replace(/^https?:\/\//, "")
-      .replace(/^www\./, "")
-      .split("/")[0] ?? "";
-  const first = host.split(".")[0] ?? host;
-  if (!first) {
-    return t("messageTimeline.thisService");
-  }
-  return first.charAt(0).toUpperCase() + first.slice(1);
-}
-
-/** A calm, human helper line per reauth reason — the `reason` informs the copy
-    but is never rendered as a raw enum/code. */
-function authReasonLine(t: OpenGeniText, reason: AuthNeededItem["reason"]): string {
-  switch (reason) {
-    case "insufficient_scope":
-      return t("messageTimeline.itNeedsAdditionalAccessTo");
-    case "missing_connection":
-      return t("messageTimeline.itIsnTConnectedYet");
-    case "expired":
-    case "refresh_failed":
-      return t("messageTimeline.itsAccessExpired");
-    case "personal_authority_unavailable":
-      return t("messageTimeline.thisAutomationWasNotGranted");
-    case "unsupported_auth":
-      return t("messageTimeline.thisConnectionCannotAuthenticateThe");
-    case "resource_scope_unavailable":
-      return t("messageTimeline.thisToolEndpointCannotEnforce");
-    default:
-      return t("messageTimeline.itsConnectionNeedsAttention");
-  }
 }

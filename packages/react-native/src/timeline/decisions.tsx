@@ -6,6 +6,13 @@ import type {
 } from "@opengeni/sdk";
 import type { PendingApproval } from "@opengeni/react/session";
 import {
+  approvalAnswerLabels,
+  approvalToolName,
+  formatApprovalToolName,
+  pendingApprovalReview,
+  reviewFacts,
+} from "@opengeni/react/approval-review-model";
+import {
   answersFromDrafts,
   defaultHumanInputFormMessages,
   emptyDraft,
@@ -636,7 +643,7 @@ export interface ApprovalStripMessages {
   reject: string;
   approved: string;
   rejected: string;
-  /** The tool's display name; the web live strip shows the raw name. */
+  /** The tool's readable name, the card's title when the runtime gives none. */
   formatToolName: (name: string) => string;
 }
 
@@ -645,7 +652,7 @@ export const defaultApprovalStripMessages = (t: OpenGeniText): ApprovalStripMess
   reject: t("native.timeline.decisions.reject"),
   approved: t("native.timeline.decisions.approved"),
   rejected: t("native.timeline.decisions.rejected"),
-  formatToolName: (name) => name,
+  formatToolName: (name) => formatApprovalToolName(t, name),
 });
 
 export interface ApprovalStripProps {
@@ -654,7 +661,12 @@ export interface ApprovalStripProps {
   messages?: Partial<ApprovalStripMessages> | undefined;
 }
 
-/** The web live decision strip: one waiting Notice per pending tool approval. */
+/**
+ * The live decision strip: one readable review card per pending tool approval,
+ * as the web approval surface shows it. An app action (a setting changed
+ * through chat) reads as a plain question answered with Allow or Cancel; the
+ * raw arguments stay behind Details.
+ */
 export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
   const t = useOpenGeniText();
   const messages = { ...defaultApprovalStripMessages(t), ...overrides };
@@ -663,6 +675,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
   const c = theme.colors;
   const [pending, setPending] = useState<Record<string, "approve" | "reject">>({});
   const [settled, setSettled] = useState<Record<string, "approve" | "reject">>({});
+  const [details, setDetails] = useState<Record<string, boolean>>({});
   if (approvals.length === 0) return null;
   const decide = async (id: string, decision: "approve" | "reject") => {
     setPending((current) => ({ ...current, [id]: decision }));
@@ -677,14 +690,31 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
       });
     }
   };
+  const small = { ...fontStyle(theme), fontSize: theme.size.xs, lineHeight: 16 };
+  const body = { ...fontStyle(theme), fontSize: theme.size.sm, lineHeight: 20 };
   return (
-    <ScrollView style={{ maxHeight: 256 }} contentContainerStyle={{ gap: 12 }} nestedScrollEnabled>
+    <ScrollView style={{ maxHeight: 320 }} contentContainerStyle={{ gap: 12 }} nestedScrollEnabled>
       {approvals.map((approval) => {
         const busy = Boolean(pending[approval.id]) || Boolean(settled[approval.id]);
-        const payload = JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2);
+        const toolName = approvalToolName(approval);
+        const answer = approvalAnswerLabels(t, toolName);
+        const review = pendingApprovalReview(approval, {
+          formatToolName: messages.formatToolName,
+          approveLabel: answer?.approve ?? messages.approve,
+        });
+        const facts = reviewFacts(review);
+        const note = review.consequence;
+        const canApprove = review.availableActions.includes("approve");
+        const showDetails = details[approval.id] === true;
+        const payload = showDetails
+          ? JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2)
+          : "";
+        const approveLabel = answer?.approve ?? messages.approve;
+        const rejectLabel = answer?.reject ?? messages.reject;
         return (
           <View
             key={approval.id}
+            accessibilityLabel={review.title}
             style={{
               borderRadius: theme.radius.lg,
               borderWidth: 1,
@@ -697,58 +727,128 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
             }}
           >
             <View style={{ paddingTop: 2 }}>
-              <Icon name="circle-alert" size={16} color={tone.waiting} />
+              <Icon name="shield-check" size={16} color={tone.waiting} />
             </View>
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <Text
-                style={{ ...fontStyle(theme, 500), fontSize: 14, lineHeight: 20, color: c.fg }}
-                numberOfLines={2}
-              >
-                {messages.formatToolName(approval.name)}
-              </Text>
-              <ScrollView
-                style={{
-                  marginTop: 8,
-                  maxHeight: 160,
-                  borderRadius: theme.radius.md,
-                  borderWidth: 1,
-                  borderColor: c.border,
-                  backgroundColor: withAlpha(c["surface-2"], 0.6),
-                }}
-                contentContainerStyle={{ padding: 10 }}
-                nestedScrollEnabled
-              >
-                <Text
-                  selectable
-                  style={{
-                    ...fontStyle(theme, 400, "mono"),
-                    fontSize: theme.size.sm,
-                    lineHeight: 20,
-                    color: c["fg-muted"],
-                  }}
-                >
-                  {payload}
+            <View style={{ flex: 1, minWidth: 0, gap: 8 }}>
+              <View style={{ gap: 2 }}>
+                <Text style={{ ...small, color: tone.waiting }}>
+                  {t("toolActionReview.approvalNeeded")}
                 </Text>
-              </ScrollView>
+                <Text
+                  accessibilityRole="header"
+                  style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 21, color: c.fg }}
+                >
+                  {review.title}
+                </Text>
+                {review.accountLabel ? (
+                  <Text style={{ ...small, color: c["fg-muted"] }}>{review.accountLabel}</Text>
+                ) : null}
+              </View>
+              {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
+              {facts.effects.length > 0 ? (
+                <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
+                  {facts.effects.map((effect) => (
+                    <Text key={effect} style={{ ...body, color: c.fg }}>
+                      {"\u2022 "}
+                      {effect}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+              {facts.shown.length > 0 ? (
+                <View style={{ gap: 6 }}>
+                  {facts.shown.map((field) => (
+                    <View key={field.path}>
+                      <Text style={{ ...small, color: c["fg-muted"] }}>{field.label}</Text>
+                      <Text numberOfLines={4} style={{ ...body, color: c.fg }}>
+                        {field.preview}
+                      </Text>
+                    </View>
+                  ))}
+                  {facts.hiddenFields > 0 ? (
+                    <Text style={{ ...small, color: c["fg-subtle"] }}>
+                      {facts.hiddenFields === 1
+                        ? t("toolActionReview.n1MoreValue")
+                        : t("toolActionReview.hiddenfieldsMoreValues", {
+                            hiddenFields: facts.hiddenFields,
+                          })}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+              {!canApprove ? (
+                <Text style={{ ...body, color: c.fg }}>
+                  {t("toolActionReview.theDetailsOfThisOlder")}
+                </Text>
+              ) : null}
+              {showDetails ? (
+                <ScrollView
+                  style={{
+                    maxHeight: 160,
+                    borderRadius: theme.radius.md,
+                    borderWidth: 1,
+                    borderColor: c.border,
+                    backgroundColor: withAlpha(c["surface-2"], 0.6),
+                  }}
+                  contentContainerStyle={{ padding: 10 }}
+                  nestedScrollEnabled
+                >
+                  <Text
+                    selectable
+                    style={{
+                      ...fontStyle(theme, 400, "mono"),
+                      fontSize: theme.size.sm,
+                      lineHeight: 20,
+                      color: c["fg-muted"],
+                    }}
+                  >
+                    {payload}
+                  </Text>
+                </ScrollView>
+              ) : null}
               <View
-                style={{ marginTop: 12, flexDirection: "row", justifyContent: "flex-end", gap: 8 }}
+                style={{
+                  marginTop: 4,
+                  flexDirection: "row",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  gap: 8,
+                }}
               >
-                <Button
-                  icon="check"
-                  variant="primary"
-                  label={settled[approval.id] === "approve" ? messages.approved : messages.approve}
-                  busy={pending[approval.id] === "approve"}
-                  disabled={busy}
-                  onPress={() => void decide(approval.id, "approve")}
-                />
+                {review.detailsAvailable ? (
+                  <Button
+                    variant="ghost"
+                    label={
+                      showDetails
+                        ? t("approvalSurface.backToReview")
+                        : t("toolActionReview.details")
+                    }
+                    onPress={() =>
+                      setDetails((current) => ({ ...current, [approval.id]: !showDetails }))
+                    }
+                  />
+                ) : null}
+                <View style={{ flex: 1 }} />
                 <Button
                   icon="x"
-                  variant="destructive"
-                  label={settled[approval.id] === "reject" ? messages.rejected : messages.reject}
+                  variant="secondary"
+                  size="form"
+                  label={settled[approval.id] === "reject" ? messages.rejected : rejectLabel}
                   busy={pending[approval.id] === "reject"}
                   disabled={busy}
                   onPress={() => void decide(approval.id, "reject")}
                 />
+                {canApprove ? (
+                  <Button
+                    icon="check"
+                    variant="primary"
+                    size="form"
+                    label={settled[approval.id] === "approve" ? messages.approved : approveLabel}
+                    busy={pending[approval.id] === "approve"}
+                    disabled={busy}
+                    onPress={() => void decide(approval.id, "approve")}
+                  />
+                ) : null}
               </View>
             </View>
           </View>

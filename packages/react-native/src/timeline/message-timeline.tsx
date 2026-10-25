@@ -8,6 +8,7 @@ import {
   buildTimeline,
   groupTimeline,
   type AgentMessageItem,
+  type AuthNeededItem,
   type HumanInputItem,
   type TimelineGroup,
   type TimelineAnnotationSourceDescriptor,
@@ -63,6 +64,7 @@ import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
 import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
+import { NativeAuthNeededRow } from "./in-chat-connect";
 import { humanInputAnswerLines } from "./secret-field-model";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import {
@@ -122,6 +124,12 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Files sent with a user message, shown above its bubble (images as previews). */
   renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
+  /**
+   * Draw a connection request (an agent asking the person to connect an
+   * account, or a lapsed connection). Return undefined for the default row.
+   * `NativeSessionScreen` supplies the in-chat connect cards.
+   */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode) | undefined;
   onCopy?: ((text: string) => void) | undefined;
   /** Rendered after the last group (pending questions, approvals, errors). */
   trailing?: ReactNode;
@@ -508,6 +516,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     renderPreparing: props.renderPreparing,
     renderMessageActions: props.renderMessageActions,
     renderUserAttachments: props.renderUserAttachments,
+    renderAuthNeeded: props.renderAuthNeeded,
     onCopy: props.onCopy,
     reportLiveFold,
     onRevealAnnotation: revealSource,
@@ -712,6 +721,7 @@ type GroupContext = {
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode) | undefined;
   onCopy?: ((text: string) => void) | undefined;
   /** A live work row reports its open state, so its progress notes above fold. */
   reportLiveFold?: ((workId: string, open: boolean) => void) | undefined;
@@ -972,35 +982,9 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
         </View>
       );
     case "auth-needed":
-      return (
-        <View
-          style={{
-            borderRadius: theme.radius.md,
-            borderWidth: 1,
-            borderColor: theme.colors.border,
-            padding: 14,
-            backgroundColor: theme.colors["surface-1"],
-          }}
-        >
-          <Text
-            style={{ ...fontStyle(theme, 500), fontSize: theme.size.md, color: theme.colors.fg }}
-          >
-            {t("native.timeline.messageTimeline.connectionNeeded")}
-          </Text>
-          <Text
-            style={{
-              ...fontStyle(theme),
-              marginTop: 4,
-              fontSize: theme.size.sm,
-              color: theme.colors["fg-muted"],
-            }}
-          >
-            {t("native.timeline.messageTimeline.providerdomainNeedsToBeReconnected", {
-              providerDomain: item.providerDomain,
-            })}
-          </Text>
-        </View>
-      );
+      // An agent's connect request becomes a card the person can finish
+      // here; anything else (a lapsed account, unavailable tools) is a row.
+      return context.renderAuthNeeded?.(item) ?? <NativeAuthNeededRow item={item} />;
     default:
       return null;
   }
