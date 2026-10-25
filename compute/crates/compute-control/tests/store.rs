@@ -454,6 +454,55 @@ async fn a_returning_host_gets_back_only_what_nobody_took() {
     each(reclaim, reclaim).await;
 }
 
+async fn reclaim_forgotten<S: Store>(store: S) {
+    let returning = name();
+    let (host, _) = registered(&store, &register(&returning, random(), Vec::new())).await;
+    let row = sandbox(host);
+    assert_eq!(store.insert(&row).await.unwrap(), Write::Done);
+    // Given up on long ago, before the give-ups other checks count on
+    // keeping, then forgotten.
+    let count = renewals(&store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, 5).await.unwrap(), Some(1));
+    store.prune_hosts(6).await.unwrap();
+    assert!(!listed(&store, host).await, "forgotten");
+
+    // Back after being forgotten, it registers as a new host and gets back
+    // what it still holds and nobody took.
+    let held = vec![Held {
+        id: row.id,
+        owner_epoch: row.ownership.epoch.0,
+    }];
+    let Admission::Registered {
+        host: again,
+        rulings,
+        ..
+    } = store
+        .register(&register(&returning, random(), held))
+        .await
+        .unwrap()
+    else {
+        panic!("a forgotten host registers afresh");
+    };
+    assert_ne!(again, host, "a new host");
+    let Some(Verdict::Keep { owner_epoch }) = rulings
+        .iter()
+        .find(|ruling| ruling.id == row.id)
+        .map(|ruling| ruling.verdict)
+    else {
+        panic!("{rulings:?}");
+    };
+    let back = store.sandbox(row.id).await.unwrap().unwrap();
+    assert_eq!(
+        (back.ownership.owner, back.ownership.epoch),
+        (Some(again), OwnerEpoch(owner_epoch))
+    );
+}
+
+#[tokio::test]
+async fn a_host_back_after_being_forgotten_gets_back_what_nobody_took() {
+    each(reclaim_forgotten, reclaim_forgotten).await;
+}
+
 async fn keys<S: Store>(store: S) {
     let digest = format!("{:x}", random());
     assert_eq!(store.team_of(&digest).await.unwrap(), None);

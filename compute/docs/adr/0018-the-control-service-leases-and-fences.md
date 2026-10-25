@@ -267,7 +267,9 @@ can be built and tested.
   their next full read) without anything coming to name it again; a
   machine that comes back under a forgotten name registers as a new host.
   The database enforces the same (a sandbox's owner is a foreign key to
-  its host), so a replica of an older build still running during a
+  its host, checked when the write's transaction commits, so a
+  registration may give a new host what it holds before writing the host
+  itself), so a replica of an older build still running during a
   rollout, whose check lets a missing host pass, has such a write refused
   too, and rolling back keeps working: older builds never forget hosts.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
