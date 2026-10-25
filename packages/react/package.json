@@ -140,6 +140,10 @@
       "types": "./src/recordings.ts",
       "default": "./src/recordings.ts"
     },
+    "./meetings": {
+      "types": "./src/meetings.ts",
+      "default": "./src/meetings.ts"
+    },
     "./artifacts": {
       "types": "./src/artifacts.ts",
       "default": "./src/artifacts.ts"
@@ -196,6 +200,10 @@
     "./testing": {
       "types": "./src/testing/session-scenarios.ts",
       "default": "./src/testing/session-scenarios.ts"
+    },
+    "./testing/meetings": {
+      "types": "./src/testing/meetings-fixture.ts",
+      "default": "./src/testing/meetings-fixture.ts"
     },
     "./timeline-model": {
       "types": "./src/timeline-model.ts",

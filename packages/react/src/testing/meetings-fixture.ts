@@ -12,7 +12,7 @@ import type {
   RecordingTranscriptSegment,
   RecordingTranscriptVersion,
 } from "@opengeni/contracts";
-import type { RecordingsClientLike } from "@opengeni/react/recordings";
+import type { RecordingsClientLike } from "../recordings";
 
 const WORKSPACE = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
 const ME = "user:ingrid";
@@ -402,10 +402,15 @@ export function createMeetingsFixture(
   };
   const delay = <T>(value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), 120));
   const client = {
-    listRecordings: async (_workspaceId: string, request: { query?: string } = {}) =>
+    listRecordings: async (
+      _workspaceId: string,
+      request: { query?: string; externalRef?: string } = {},
+    ) =>
       await delay({
-        recordings: recordings.filter((entry) =>
-          request.query ? matchesSearch(entry, request.query) : true,
+        recordings: recordings.filter(
+          (entry) =>
+            (request.query ? matchesSearch(entry, request.query) : true) &&
+            (request.externalRef ? entry.externalRef === request.externalRef : true),
         ),
         nextBefore: null,
       }),

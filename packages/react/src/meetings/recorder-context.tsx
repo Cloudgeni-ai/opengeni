@@ -7,6 +7,10 @@
  * browser still holds a recording that hasn't finished uploading. The live
  * snapshot changes several times a second while recording, so it lives in an
  * external store; only the components that read it re-render.
+ *
+ * In the desktop app, the provider also carries out the call notifications'
+ * choices; the host says where Meetings and a meeting are with
+ * `onOpenMeetings` and `onOpenMeeting`.
  */
 import {
   createContext,
@@ -20,8 +24,8 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { desktopCapability } from "@opengeni/react/app/lib/desktop";
-import type { UseRecorderResult } from "@opengeni/react/recordings";
+import { desktopCapability } from "../app/lib/desktop";
+import type { UseRecorderResult } from "../recordings";
 
 export type MeetingRecorder = UseRecorderResult;
 
@@ -108,15 +112,23 @@ async function hasLocalRecordings(): Promise<boolean> {
 
 export function MeetingRecorderProvider({
   workspaceId,
+  client,
   onOpenMeetings,
   onOpenMeeting,
   children,
 }: {
-  workspaceId: string;
-  /** Shows the Meetings page, where the recorder panel takes a requested start. */
-  onOpenMeetings: () => void;
-  /** Shows one meeting, such as the one a call notification just stopped. */
-  onOpenMeeting: (recordingId: string) => void;
+  /** The workspace recordings go to; null while the host is still finding it. */
+  workspaceId: string | null;
+  /**
+   * The SDK client the recorder uploads with, for a host that mounts this
+   * above its routes without an <OpenGeniProvider> there. The provider's
+   * client otherwise.
+   */
+  client?: object | undefined;
+  /** Show the Meetings page, where a desktop call notification's recording starts. */
+  onOpenMeetings?: (() => void) | undefined;
+  /** Show one meeting, after a desktop call notification stopped its recording. */
+  onOpenMeeting?: ((recordingId: string) => void) | undefined;
   children: ReactNode;
 }) {
   const [active, setActive] = useState(false);
@@ -130,13 +142,18 @@ export function MeetingRecorderProvider({
       cancelled = true;
     };
   }, []);
-  useDesktopMeetingRequests(store, onOpenMeetings, onOpenMeeting);
+  useDesktopMeetingRequests(store, { onOpenMeetings, onOpenMeeting });
   return (
     <MeetingRecorderContext.Provider value={store}>
       {children}
-      {active ? (
+      {active && workspaceId ? (
         <Suspense fallback={null}>
-          <LazyRecorderHost key={workspaceId} store={store} />
+          <LazyRecorderHost
+            key={workspaceId}
+            store={store}
+            workspaceId={workspaceId}
+            client={client}
+          />
         </Suspense>
       ) : null}
     </MeetingRecorderContext.Provider>
@@ -151,12 +168,15 @@ const NO_FINISHED: readonly string[] = [];
  */
 function useDesktopMeetingRequests(
   store: MeetingRecorderStore,
-  onOpenMeetings: () => void,
-  onOpenMeeting: (recordingId: string) => void,
+  navigation: {
+    onOpenMeetings?: (() => void) | undefined;
+    onOpenMeeting?: ((recordingId: string) => void) | undefined;
+  },
 ): void {
-  // The latest callbacks, without re-subscribing to the desktop app on each render.
-  const open = useRef({ onOpenMeetings, onOpenMeeting });
-  open.current = { onOpenMeetings, onOpenMeeting };
+  const latest = useRef(navigation);
+  useEffect(() => {
+    latest.current = navigation;
+  });
   useEffect(() => {
     const detection = desktopCapability("meetingDetection")?.meetingDetection;
     if (!detection) return;
@@ -165,13 +185,13 @@ function useDesktopMeetingRequests(
       if (request.kind === "record") {
         // Already recording shows that recording rather than start a second one.
         if (!recorder || recorder.state === "idle") store.requestStart({ title: request.title });
-        open.current.onOpenMeetings();
+        latest.current.onOpenMeetings?.();
         return;
       }
       const recordingId = recorder?.recordingId ?? null;
       if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
       void recorder.stop().then(() => {
-        if (recordingId) open.current.onOpenMeeting(recordingId);
+        if (recordingId) latest.current.onOpenMeeting?.(recordingId);
       });
     });
   }, [store]);

@@ -4,14 +4,17 @@
  * meeting's real transcript (with speakers told apart) replaces it once the
  * recording is done.
  */
+import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownIcon } from "lucide-react";
 
-import { Button } from "@opengeni/react/ui/button";
-import { cn } from "@opengeni/react/app/lib/utils";
-import { formatClock } from "@opengeni/react/recordings";
+import { Button } from "../ui/button";
+import { cn } from "../app/lib/utils";
+import { formatClock } from "../recordings";
 
 import { SpeakerDot } from "./meeting-transcript";
+
+const defaultText = createOpenGeniText();
 
 export type LiveTranscriptLine = {
   trackNumber: number;
@@ -95,6 +98,7 @@ export function LiveTranscript({
   heading?: boolean;
   className?: string;
 }) {
+  const msg = useOpenGeniText();
   const turns = useMemo(() => groupLiveTurns(lines), [lines]);
   const heard = partials
     .map((partial) => ({ ...partial, text: tidyPartialText(partial.text) }))
@@ -161,12 +165,18 @@ export function LiveTranscript({
   ) : null;
 
   return (
-    <section aria-label="Live transcript" className={cn("grid min-w-0 gap-2", className)}>
+    <section
+      aria-label={msg("meetings.liveTranscript.liveTranscript")}
+      className={cn("grid min-w-0 gap-2", className)}
+    >
       {heading ? (
         <>
           <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
             <h3 className="text-xs leading-4 font-medium text-fg-label">
-              Live transcript <span className="font-normal text-fg-muted">· preview</span>
+              {msg("meetings.liveTranscript.liveTranscript")}{" "}
+              <span className="font-normal text-fg-muted">
+                {msg("meetings.liveTranscript.preview")}
+              </span>
             </h3>
             {status?.tone === "muted" ? statusLine : null}
           </div>
@@ -180,7 +190,7 @@ export function LiveTranscript({
           ref={scrollRef}
           role="log"
           aria-live="polite"
-          aria-label="Live transcript text"
+          aria-label={msg("meetings.liveTranscript.liveTranscriptText")}
           tabIndex={0}
           className={cn(
             "max-h-64 min-h-16 overflow-y-auto rounded-[10px] px-3 py-2.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
@@ -223,7 +233,7 @@ export function LiveTranscript({
                         aria-hidden="true"
                         className="inline-block size-1.5 animate-pulse rounded-full bg-status-waiting motion-reduce:animate-none"
                       />
-                      now
+                      {msg("meetings.liveTranscript.now")}
                     </span>
                   </div>
                   <p className="text-sm leading-5 text-fg-label">{partial.text}</p>
@@ -241,7 +251,7 @@ export function LiveTranscript({
             className="absolute right-3 bottom-2 rounded-full bg-surface shadow-[0_1px_2px_rgb(0_0_0/0.08)] pointer-coarse:h-11"
           >
             <ArrowDownIcon aria-hidden="true" />
-            Latest
+            {msg("meetings.liveTranscript.latest")}
           </Button>
         ) : null}
       </div>
@@ -252,19 +262,23 @@ export function LiveTranscript({
 /** The local recorder's live state as the panel's status line, or null when all is well. */
 export function liveStatus(
   tracks: readonly { state: string; error: { message: string } | null }[],
+  msg: OpenGeniText = defaultText,
 ): { text: string; tone: "muted" | "waiting" } | null {
   if (tracks.length === 0) return null;
   if (tracks.every((track) => track.state === "unavailable")) {
-    return { text: "Live preview unavailable. The recording is unaffected.", tone: "muted" };
+    return {
+      text: msg("meetings.liveTranscript.livePreviewUnavailableTheRecording"),
+      tone: "muted",
+    };
   }
   if (tracks.some((track) => track.state === "reconnecting")) {
     return {
-      text: "Reconnecting the live text. The recording itself is unaffected, and its full transcript comes after you stop.",
+      text: msg("meetings.liveTranscript.reconnectingTheLiveTextThe"),
       tone: "waiting",
     };
   }
   if (tracks.every((track) => track.state === "connecting")) {
-    return { text: "Connecting", tone: "muted" };
+    return { text: msg("meetings.liveTranscript.connecting"), tone: "muted" };
   }
   return null;
 }

@@ -1,18 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { MeetingDetailPage } from "@/components/meetings/meeting-detail-page";
-import { MeetingDefaultsView } from "@/components/meetings/meeting-settings";
-import { MeetingsListPage } from "@/components/meetings/meetings-list-page";
 import {
   createMeetingRecorderStore,
+  MeetingDefaultsView,
+  MeetingDetailPage,
+  MeetingsListPage,
   MeetingRecorderStoreProvider,
   type MeetingRecorder,
-} from "@/components/meetings/recorder-context";
+} from "@opengeni/react/meetings";
 import type { WorkspaceRecordingSettings } from "@opengeni/contracts";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 
 import { KitBlock, KitCanvas, KitSection } from "../kit";
-import { createMeetingsFixture, LIVE_LINES, LIVE_RECORDING_ID } from "../pages/meetings/fixture";
+import {
+  createMeetingsFixture,
+  LIVE_LINES,
+  LIVE_RECORDING_ID,
+} from "@opengeni/react/testing/meetings";
 
 type View = "list" | "meeting" | "settings";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "denied";

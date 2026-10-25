@@ -2,32 +2,33 @@
 // model transcribes them, and whether people are recognized by voice. All
 // live under the workspace's `recordings` settings, which a patch replaces as
 // a whole.
+import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { useState } from "react";
 import { toast } from "sonner";
 
 import {
-  resolveWorkspaceRecordingSettings,
   type RecordingPerson,
   type RecordingRetention,
   type RecordingVisibility,
   type WorkspaceRecordingSettings,
 } from "@opengeni/contracts";
-import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   languageName,
   useRecordingModels,
   useRecordingPeople,
   type RecordingsClientOverride,
-} from "@opengeni/react/recordings";
-import { Button } from "@opengeni/react/ui/button";
-import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
-import { Section } from "@opengeni/react/ui/section";
-import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
-import { NativeSelect, type SelectOption } from "@opengeni/react/ui/select-menu";
-import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
-import { Switch } from "@opengeni/react/ui/switch";
+} from "../recordings";
+import { Button } from "../ui/button";
+import { ConfirmDialog } from "../ui/confirm-dialog";
+import { Section } from "../ui/section";
+import { SegmentedControl } from "../ui/segmented-control";
+import { NativeSelect, type SelectOption } from "../ui/select-menu";
+import { SettingRow, SettingRowLink } from "../ui/setting-row";
+import { Switch } from "../ui/switch";
 
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
+
+const defaultText = createOpenGeniText();
 
 const DEFAULT = "default";
 const KEEP = "keep";
@@ -36,9 +37,9 @@ const AUDIO_PERIODS = [0, 7, 30, 90, 365] as const;
 const MEETING_PERIODS = [30, 90, 180, 365, 730] as const;
 
 /** "30 days", "1 year", "2 years". */
-export function retentionPeriodName(days: number): string {
-  if (days % 365 === 0) return days === 365 ? "1 year" : `${days / 365} years`;
-  return days === 1 ? "1 day" : `${days} days`;
+export function retentionPeriodName(days: number, msg: OpenGeniText = defaultText): string {
+  if (days % 365 === 0) return msg("meetings.settings.countYears", { count: days / 365 });
+  return msg("meetings.settings.countDays", { count: days });
 }
 
 /**
@@ -48,15 +49,18 @@ export function retentionPeriodName(days: number): string {
 export function retentionChangeWarning(
   before: RecordingRetention | undefined,
   after: RecordingRetention,
+  msg: OpenGeniText = defaultText,
 ): { title: string; description: string; confirmLabel: string } | null {
   const shorter = (previous: number | undefined, next: number | undefined) =>
     next !== undefined && (previous === undefined || next < previous);
   if (shorter(before?.transcriptDays, after.transcriptDays)) {
-    const period = retentionPeriodName(after.transcriptDays!);
+    const period = retentionPeriodName(after.transcriptDays!, msg);
     return {
-      title: `Delete meetings after ${period}?`,
-      description: `Meetings recorded more than ${period} ago, with their audio and transcripts, are deleted within a few minutes, and every meeting is deleted once it is ${period} old. This can't be undone.`,
-      confirmLabel: "Delete old meetings",
+      title: msg("meetings.settings.deleteMeetingsAfterPeriod", { period: period }),
+      description: msg("meetings.settings.meetingsRecordedMoreThanPeriod", {
+        period: period,
+      }),
+      confirmLabel: msg("meetings.settings.deleteOldMeetings"),
     };
   }
   if (shorter(before?.audioDays, after.audioDays)) {
@@ -64,13 +68,20 @@ export function retentionChangeWarning(
     return {
       title:
         days === 0
-          ? "Delete audio once transcribed?"
-          : `Delete audio after ${retentionPeriodName(days)}?`,
+          ? msg("meetings.settings.deleteAudioOnceTranscribed")
+          : msg("meetings.settings.deleteAudioAfterRetentionperiodname", {
+              retentionPeriodName: retentionPeriodName(days, msg),
+            }),
       description:
         days === 0
-          ? "The audio of every transcribed meeting is deleted within a few minutes, and from now on as soon as its transcript is ready. Transcripts stay, but meetings can't be played or transcribed again. This can't be undone."
-          : `The audio of meetings recorded more than ${retentionPeriodName(days)} ago is deleted within a few minutes. Transcripts stay, but those meetings can't be played or transcribed again. This can't be undone.`,
-      confirmLabel: days === 0 ? "Delete transcribed audio" : "Delete old audio",
+          ? msg("meetings.settings.theAudioOfEveryTranscribed")
+          : msg("meetings.settings.theAudioOfMeetingsRecorded", {
+              retentionPeriodName: retentionPeriodName(days, msg),
+            }),
+      confirmLabel:
+        days === 0
+          ? msg("meetings.settings.deleteTranscribedAudio")
+          : msg("meetings.settings.deleteOldAudio"),
     };
   }
   return null;
@@ -79,41 +90,6 @@ export function retentionChangeWarning(
 /** Who is looking at the settings, so they can agree to have their own voice remembered. */
 export type MeetingSettingsViewer = { subjectId: string; name: string };
 
-export function MeetingDefaultsSection({
-  workspaceId,
-  personal,
-  canManage,
-  onConnectModels,
-}: {
-  workspaceId: string;
-  /** A Personal workspace has only its person, so visibility has nothing to choose. */
-  personal: boolean;
-  canManage: boolean;
-  /** Opens where model accounts are added, for people who may add them. */
-  onConnectModels?: (() => void) | undefined;
-}) {
-  const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const viewer = context.accessContext;
-  return (
-    <MeetingDefaultsView
-      workspaceId={workspaceId}
-      settings={resolveWorkspaceRecordingSettings(workspace?.settings)}
-      personal={personal}
-      canManage={canManage}
-      viewer={{ subjectId: viewer.subjectId, name: viewer.subjectLabel?.trim() || "Me" }}
-      onConnectModels={onConnectModels}
-      onSave={async (next) => {
-        const accepted = context.captureWorkspaceInvocation(workspaceId);
-        if (!accepted) return false;
-        const updated = await context.updateWorkspaceSettings(workspaceId, { recordings: next });
-        return Boolean(updated) && context.ownsWorkspaceInvocation(workspaceId, accepted);
-      }}
-    />
-  );
-}
-
-/** The Meetings settings rows over plain values, so previews can render them. */
 export function MeetingDefaultsView({
   workspaceId,
   settings: current,
@@ -135,9 +111,10 @@ export function MeetingDefaultsView({
   /** A recordings client to use instead of the app's, for previews. */
   recordings?: RecordingsClientOverride["recordings"];
 }) {
+  const msg = useOpenGeniText();
   const models = useRecordingModels({ workspaceId, ...(recordings ? { recordings } : {}) });
   const [saving, setSaving] = useState(false);
-  const reason = canManage ? undefined : "Only workspace admins can change this.";
+  const reason = canManage ? undefined : msg("meetings.settings.onlyWorkspaceAdminsCanChange");
 
   /** False when the change failed or a newer one took over. */
   async function save(next: WorkspaceRecordingSettings, success: string): Promise<boolean> {
@@ -147,7 +124,7 @@ export function MeetingDefaultsView({
       if (saved) toast.success(success);
       return saved;
     } catch {
-      toast.error("Couldn't update meeting settings");
+      toast.error(msg("meetings.settings.couldnTUpdateMeetingSettings"));
       return false;
     } finally {
       setSaving(false);
@@ -161,8 +138,8 @@ export function MeetingDefaultsView({
     void save(
       next === "private" ? rest : { ...rest, defaultVisibility: next },
       next === "workspace"
-        ? "New meetings are shared with the workspace"
-        : "New meetings are private",
+        ? msg("meetings.settings.newMeetingsAreSharedWith")
+        : msg("meetings.settings.newMeetingsArePrivate"),
     );
   };
 
@@ -177,15 +154,21 @@ export function MeetingDefaultsView({
   const modelOptions: SelectOption[] = [
     {
       value: DEFAULT,
-      label: fallbackName ? `Default (${fallbackName})` : "Default",
+      label: fallbackName
+        ? msg("meetings.settings.defaultFallbackname", { fallbackName: fallbackName })
+        : msg("meetings.settings.default"),
     },
     ...models.models.map((entry) => ({
       value: `${entry.providerId}/${entry.model}`,
       label: entry.name,
       meta:
-        entry.usdPerHour !== null ? `$${entry.usdPerHour.toFixed(2)} per hour` : entry.providerName,
+        entry.usdPerHour !== null
+          ? msg("meetings.settings.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
+          : entry.providerName,
       disabled: !entry.available,
-      disabledReason: entry.available ? undefined : `Connect ${entry.providerName} first`,
+      disabledReason: entry.available
+        ? undefined
+        : msg("meetings.settings.connectProvidernameFirst", { providerName: entry.providerName }),
     })),
   ];
   const chooseModel = (value: string) => {
@@ -198,7 +181,9 @@ export function MeetingDefaultsView({
       entry
         ? { ...rest, transcription: { providerId: entry.providerId, model: entry.model } }
         : rest,
-      entry ? `New meetings use ${entry.name}` : "New meetings use the default model",
+      entry
+        ? msg("meetings.settings.newMeetingsUseName", { name: entry.name })
+        : msg("meetings.settings.newMeetingsUseTheDefault"),
     );
   };
   const noneAvailable =
@@ -211,8 +196,10 @@ export function MeetingDefaultsView({
     void save(
       value === DETECT_LANGUAGE ? rest : { ...rest, language: value },
       value === DETECT_LANGUAGE
-        ? "New meetings detect their language"
-        : `New meetings are transcribed in ${languageName(value)}`,
+        ? msg("meetings.settings.newMeetingsDetectTheirLanguage")
+        : msg("meetings.settings.newMeetingsAreTranscribedIn", {
+            languageName: languageName(value),
+          }),
     );
   };
 
@@ -224,7 +211,10 @@ export function MeetingDefaultsView({
       setConfirmingOff(true);
       return;
     }
-    void save({ ...current, voiceprints: true }, "People are recognized by voice");
+    void save(
+      { ...current, voiceprints: true },
+      msg("meetings.settings.peopleAreRecognizedByVoice"),
+    );
   };
 
   const liveTranscript = current.liveTranscript === true;
@@ -235,7 +225,9 @@ export function MeetingDefaultsView({
     const { liveTranscript: _previous, ...rest } = current;
     void save(
       next ? { ...rest, liveTranscript: true } : rest,
-      next ? "New meetings show a live transcript" : "New meetings don't show a live transcript",
+      next
+        ? msg("meetings.settings.newMeetingsShowALive")
+        : msg("meetings.settings.newMeetingsDonTShow"),
     );
   };
 
@@ -264,14 +256,18 @@ export function MeetingDefaultsView({
     const success =
       field === "audioDays"
         ? days === undefined
-          ? "Audio is kept as long as its meeting"
+          ? msg("meetings.settings.audioIsKeptAsLong")
           : days === 0
-            ? "Audio is deleted once the transcript is ready"
-            : `Audio is deleted after ${retentionPeriodName(days)}`
+            ? msg("meetings.settings.audioIsDeletedOnceThe")
+            : msg("meetings.settings.audioIsDeletedAfterRetentionperiodname", {
+                retentionPeriodName: retentionPeriodName(days, msg),
+              })
         : days === undefined
-          ? "Meetings are kept until someone deletes them"
-          : `Meetings are deleted after ${retentionPeriodName(days)}`;
-    const warning = retentionChangeWarning(retention, next);
+          ? msg("meetings.settings.meetingsAreKeptUntilSomeone")
+          : msg("meetings.settings.meetingsAreDeletedAfterRetentionperiodname", {
+              retentionPeriodName: retentionPeriodName(days, msg),
+            });
+    const warning = retentionChangeWarning(retention, next, msg);
     if (warning) {
       setPendingRetention({ next, success, warning });
       return;
@@ -293,10 +289,15 @@ export function MeetingDefaultsView({
         const tooLong = limit !== undefined && day > limit;
         return {
           value: String(day),
-          label: day === 0 ? "Delete once transcribed" : retentionPeriodName(day),
+          label:
+            day === 0
+              ? msg("meetings.settings.deleteOnceTranscribed")
+              : retentionPeriodName(day, msg),
           disabled: tooLong,
           disabledReason: tooLong
-            ? `Meetings are deleted after ${retentionPeriodName(limit)}`
+            ? msg("meetings.settings.meetingsAreDeletedAfterRetentionperiodname", {
+                retentionPeriodName: retentionPeriodName(limit, msg),
+              })
             : undefined,
         };
       }),
@@ -305,16 +306,16 @@ export function MeetingDefaultsView({
 
   return (
     <Section
-      title="Meetings"
-      description="Defaults for new meetings, and how long meetings are kept."
+      title={msg("meetings.settings.meetings")}
+      description={msg("meetings.settings.defaultsForNewMeetingsAnd")}
     >
       {personal ? null : (
         <SettingRow
-          label="Who sees new meetings"
+          label={msg("meetings.settings.whoSeesNewMeetings")}
           description={
             visibility === "workspace"
-              ? "Everyone in this workspace can open a new meeting. Whoever recorded it can make it private."
-              : "Only the person who recorded a meeting can open it, until they share it with the workspace."
+              ? msg("meetings.settings.everyoneInThisWorkspaceCan")
+              : msg("meetings.settings.onlyThePersonWhoRecorded")
           }
           controlWidth="auto"
           control={
@@ -323,8 +324,8 @@ export function MeetingDefaultsView({
               value={visibility}
               onValueChange={(next) => chooseVisibility(next as RecordingVisibility)}
               options={[
-                { value: "private", label: "Only me" },
-                { value: "workspace", label: "Workspace" },
+                { value: "private", label: msg("meetings.settings.onlyMe") },
+                { value: "workspace", label: msg("meetings.settings.workspace") },
               ].map((option) => ({
                 ...option,
                 disabled: saving || !canManage,
@@ -335,23 +336,23 @@ export function MeetingDefaultsView({
         />
       )}
       <SettingRow
-        label="Transcription model"
-        description="Turns a meeting's audio into a transcript with speakers. A meeting can still be transcribed again with another model."
+        label={msg("meetings.settings.transcriptionModel")}
+        description={msg("meetings.settings.turnsAMeetingSAudio")}
         controlWidth="select"
         hint={
           noneAvailable ? (
             onConnectModels ? (
               <SettingRowLink onClick={onConnectModels}>
-                Connect a transcription provider to transcribe meetings
+                {msg("meetings.settings.connectATranscriptionProviderTo")}
               </SettingRowLink>
             ) : (
-              "An organization admin needs to connect a transcription provider before meetings are transcribed."
+              msg("meetings.settings.anOrganizationAdminNeedsTo")
             )
           ) : undefined
         }
         control={
           <NativeSelect
-            aria-label="Transcription model"
+            aria-label={msg("meetings.settings.transcriptionModel")}
             options={modelOptions}
             value={chosen}
             onValueChange={chooseModel}
@@ -362,13 +363,13 @@ export function MeetingDefaultsView({
         }
       />
       <SettingRow
-        label="Meeting language"
-        description="New meetings are transcribed in this language, and whoever records can pick another. Detecting it works for the final transcript, but the live transcript can drift between languages, so pick one if most meetings are in it."
+        label={msg("meetings.settings.meetingLanguage")}
+        description={msg("meetings.settings.newMeetingsAreTranscribedIn2")}
         controlWidth="select"
         control={
           <NativeSelect
-            aria-label="Meeting language"
-            options={meetingLanguageOptions(language)}
+            aria-label={msg("meetings.settings.meetingLanguage")}
+            options={meetingLanguageOptions(language, undefined, msg)}
             value={language}
             onValueChange={chooseLanguage}
             disabled={saving || !canManage}
@@ -378,26 +379,34 @@ export function MeetingDefaultsView({
       />
       {liveModel ? (
         <SettingRow
-          label="Live transcript"
-          description={`Shows what's said while recording, as a preview until the transcript is ready. Anyone recording can turn it on or off for their meeting.${
-            liveModel.usdPerHour !== null
-              ? ` ${liveModel.providerName} charges about $${liveModel.usdPerHour.toFixed(2)} per hour of audio for it, on top of the transcript.`
-              : ""
-          }`}
+          label={msg("meetings.settings.liveTranscript")}
+          description={msg("meetings.settings.showsWhatSSaidWhile", {
+            value:
+              liveModel.usdPerHour !== null
+                ? msg("meetings.settings.providernameChargesAboutValuePer", {
+                    providerName: liveModel.providerName,
+                    value: liveModel.usdPerHour.toFixed(2),
+                  })
+                : "",
+          })}
           hint={
             !models.loading && !liveAvailable ? (
               onConnectModels ? (
                 <SettingRowLink onClick={onConnectModels}>
-                  Connect {liveModel.providerName} to show a live transcript
+                  {msg("meetings.settings.connectProvidernameToShowA", {
+                    providerName: liveModel.providerName,
+                  })}
                 </SettingRowLink>
               ) : (
-                `An organization admin needs to connect ${liveModel.providerName} first.`
+                msg("meetings.settings.anOrganizationAdminNeedsTo2", {
+                  providerName: liveModel.providerName,
+                })
               )
             ) : undefined
           }
           control={
             <Switch
-              aria-label="Live transcript"
+              aria-label={msg("meetings.settings.liveTranscript")}
               checked={liveTranscript}
               pending={saving}
               disabled={!canManage}
@@ -408,15 +417,15 @@ export function MeetingDefaultsView({
         />
       ) : null}
       <SettingRow
-        label="Recognize people by voice"
+        label={msg("meetings.settings.recognizePeopleByVoice")}
         description={
           voiceprints
-            ? "Suggests names for speakers it has heard before. Only people who agreed are recognized, and someone confirms each suggestion. Turning this off forgets every voice."
-            : "Suggests names for speakers it has heard before. Only people who agreed are recognized."
+            ? msg("meetings.settings.suggestsNamesForSpeakersIt")
+            : msg("meetings.settings.suggestsNamesForSpeakersIt2")
         }
         control={
           <Switch
-            aria-label="Recognize people by voice"
+            aria-label={msg("meetings.settings.recognizePeopleByVoice")}
             checked={voiceprints}
             pending={saving}
             disabled={!canManage}
@@ -433,16 +442,16 @@ export function MeetingDefaultsView({
         />
       ) : null}
       <SettingRow
-        label="Keep meetings"
-        description="Counted from when a meeting was recorded. After that the meeting is deleted with its audio and transcript, including meetings recorded before this was set."
+        label={msg("meetings.settings.keepMeetings")}
+        description={msg("meetings.settings.countedFromWhenAMeeting")}
         controlWidth="select"
         control={
           <NativeSelect
-            aria-label="Keep meetings"
+            aria-label={msg("meetings.settings.keepMeetings")}
             options={periodOptions(
               MEETING_PERIODS,
               retention?.transcriptDays,
-              "Until someone deletes them",
+              msg("meetings.settings.untilSomeoneDeletesThem"),
               undefined,
             )}
             value={
@@ -455,16 +464,16 @@ export function MeetingDefaultsView({
         }
       />
       <SettingRow
-        label="Keep audio"
-        description="Deleting the audio keeps the transcript, but the meeting can't be played or transcribed again."
+        label={msg("meetings.settings.keepAudio")}
+        description={msg("meetings.settings.deletingTheAudioKeepsThe")}
         controlWidth="select"
         control={
           <NativeSelect
-            aria-label="Keep audio"
+            aria-label={msg("meetings.settings.keepAudio")}
             options={periodOptions(
               AUDIO_PERIODS,
               retention?.audioDays,
-              "As long as the meeting",
+              msg("meetings.settings.asLongAsTheMeeting"),
               retention?.transcriptDays,
             )}
             value={retention?.audioDays === undefined ? KEEP : String(retention.audioDays)}
@@ -482,7 +491,7 @@ export function MeetingDefaultsView({
         title={pendingRetention?.warning.title ?? ""}
         description={pendingRetention?.warning.description ?? ""}
         confirmLabel={pendingRetention?.warning.confirmLabel ?? ""}
-        pendingLabel="Saving…"
+        pendingLabel={msg("meetings.settings.saving")}
         onConfirm={async () => {
           if (!pendingRetention) return false;
           return await saveRetention(pendingRetention.next, pendingRetention.success);
@@ -491,13 +500,13 @@ export function MeetingDefaultsView({
       <ConfirmDialog
         open={confirmingOff}
         onOpenChange={setConfirmingOff}
-        title="Stop recognizing people by voice?"
-        description="Every voice remembered in this workspace is forgotten, and pending suggestions are removed. Names people already gave to speakers stay. Turning it back on starts from nothing."
-        confirmLabel="Turn off and forget voices"
-        pendingLabel="Forgetting…"
+        title={msg("meetings.settings.stopRecognizingPeopleByVoice")}
+        description={msg("meetings.settings.everyVoiceRememberedInThis")}
+        confirmLabel={msg("meetings.settings.turnOffAndForgetVoices")}
+        pendingLabel={msg("meetings.settings.forgetting")}
         onConfirm={async () => {
           const { voiceprints: _previous, ...rest } = current;
-          return await save(rest, "Voices forgotten. People aren't recognized by voice anymore");
+          return await save(rest, msg("meetings.settings.voicesForgottenPeopleArenT"));
         }}
       />
     </Section>
@@ -517,6 +526,7 @@ function VoiceRows({
   viewer: MeetingSettingsViewer;
   recordings?: RecordingsClientOverride["recordings"];
 }) {
+  const msg = useOpenGeniText();
   const people = useRecordingPeople({ workspaceId, ...(recordings ? { recordings } : {}) });
   const [busy, setBusy] = useState(false);
   const me: RecordingPerson | null =
@@ -543,16 +553,16 @@ function VoiceRows({
           (await people.create({ displayName: viewer.name, memberSubjectId: viewer.subjectId }));
         await people.rememberVoice(person.id, "self");
       },
-      "Your voice will be remembered",
-      "Couldn't remember your voice",
+      msg("meetings.settings.yourVoiceWillBeRemembered"),
+      msg("meetings.settings.couldnTRememberYourVoice"),
     );
   const forget = () =>
     void run(
       async () => {
         if (me) await people.forgetVoice(me.id);
       },
-      "Your voice is forgotten",
-      "Couldn't forget your voice",
+      msg("meetings.settings.yourVoiceIsForgotten"),
+      msg("meetings.settings.couldnTForgetYourVoice"),
     );
 
   const others = people.people
@@ -561,26 +571,26 @@ function VoiceRows({
   const forgetOther = (person: RecordingPerson) =>
     void run(
       async () => await people.forgetVoice(person.id),
-      `${person.displayName}'s voice is forgotten`,
-      "Couldn't forget this voice",
+      msg("meetings.settings.displaynameSVoiceIsForgotten", { displayName: person.displayName }),
+      msg("meetings.settings.couldnTForgetThisVoice"),
     );
 
   return (
     <>
       <SettingRow
-        label="Your voice"
+        label={msg("meetings.settings.yourVoice")}
         description={
           voice
             ? voice.learned
-              ? "Remembered. Meetings suggest your name when you speak. Forgetting it removes your voice right away."
-              : "You agreed. Opengeni learns your voice the next time you're named as a speaker in a meeting."
-            : "Lets meetings suggest your name when you speak. Opengeni learns your voice from meetings where you're named as a speaker. Only you can agree for yourself."
+              ? msg("meetings.settings.rememberedMeetingsSuggestYourName")
+              : msg("meetings.settings.youAgreedOpengeniLearnsYour")
+            : msg("meetings.settings.letsMeetingsSuggestYourName")
         }
         controlWidth="auto"
         control={
           voice ? (
             <Button type="button" size="sm" variant="outline" disabled={busy} onClick={forget}>
-              Forget my voice
+              {msg("meetings.settings.forgetMyVoice")}
             </Button>
           ) : (
             <Button
@@ -590,36 +600,39 @@ function VoiceRows({
               disabled={busy || people.loading}
               onClick={remember}
             >
-              Remember my voice
+              {msg("meetings.settings.rememberMyVoice")}
             </Button>
           )
         }
       />
       <SettingRow
-        label="Remembered voices"
+        label={msg("meetings.settings.rememberedVoices")}
         description={
           others.length === 0
-            ? "Nobody else yet. People can agree for themselves here, and you can remember someone from outside the workspace from a speaker's menu in a meeting, once they agree."
-            : "People whose voices suggest names in meetings. Members decide for themselves; anyone here can forget someone from outside the workspace."
+            ? msg("meetings.settings.nobodyElseYetPeopleCan")
+            : msg("meetings.settings.peopleWhoseVoicesSuggestNames")
         }
         controlWidth="auto"
       />
       {others.length > 0 ? (
-        <ul aria-label="Remembered voices" className="grid gap-1 pb-2">
+        <ul aria-label={msg("meetings.settings.rememberedVoices")} className="grid gap-1 pb-2">
           {others.map((person) => (
             <li key={person.id} className="flex min-w-0 items-center gap-3 py-1">
               <span className="grid min-w-0 flex-1">
                 <span className="truncate text-sm leading-5 text-fg">{person.displayName}</span>
                 <span className="truncate text-xs leading-4 text-fg-muted">
                   {person.voice?.consent === "self"
-                    ? "Agreed for themselves"
-                    : "Someone confirmed they agreed"}
-                  {person.voice?.learned ? "" : " · Not heard in a meeting yet"}
+                    ? person.voice?.learned
+                      ? msg("meetings.settings.agreedForThemselves")
+                      : msg("meetings.settings.agreedForThemselvesNotHeard")
+                    : person.voice?.learned
+                      ? msg("meetings.settings.someoneConfirmedTheyAgreed")
+                      : msg("meetings.settings.someoneConfirmedTheyAgreedNot")}
                 </span>
               </span>
               {person.memberSubjectId ? (
                 <span className="shrink-0 text-xs leading-4 text-fg-muted">
-                  Only they can forget it
+                  {msg("meetings.settings.onlyTheyCanForgetIt")}
                 </span>
               ) : (
                 <Button
@@ -627,10 +640,12 @@ function VoiceRows({
                   size="sm"
                   variant="ghost"
                   disabled={busy}
-                  aria-label={`Forget ${person.displayName}'s voice`}
+                  aria-label={msg("meetings.settings.forgetDisplaynameSVoice", {
+                    displayName: person.displayName,
+                  })}
                   onClick={() => forgetOther(person)}
                 >
-                  Forget
+                  {msg("meetings.settings.forget")}
                 </Button>
               )}
             </li>

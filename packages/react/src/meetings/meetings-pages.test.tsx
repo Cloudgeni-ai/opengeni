@@ -26,9 +26,13 @@ afterAll(() => {
 
 const { MeetingsListPage } = await import("./meetings-list-page");
 const { MeetingDetailPage } = await import("./meeting-detail-page");
-const { createMeetingRecorderStore, MeetingRecorderStoreProvider } =
-  await import("./recorder-context");
-const { createMeetingsFixture } = await import("../../dev/ui-kit/pages/meetings/fixture");
+const {
+  createMeetingRecorderStore,
+  MeetingRecorderProvider,
+  MeetingRecorderStoreProvider,
+  useMeetingRecorder,
+} = await import("./recorder-context");
+const { createMeetingsFixture } = await import("../testing/meetings-fixture");
 
 async function render(node: React.ReactNode) {
   const container = document.createElement("div");
@@ -163,9 +167,121 @@ describe("Meetings list", () => {
       await view.unmount();
     }
   });
+
+  test("a host can show only its own meetings inside its page, with a reminder at Start", async () => {
+    const fixture = createMeetingsFixture();
+    await fixture.client.updateRecording(fixture.workspaceId, fixture.readyId, {
+      externalRef: "project:42",
+    });
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+        externalRef="project:42"
+        header={false}
+        notice="Tell the people present that you're recording."
+      />,
+    );
+    try {
+      await waitForText(view.container, "Weekly product sync");
+      const text = view.container.textContent ?? "";
+      expect(text).not.toContain("Transcript failed");
+      expect(text).toContain("Tell the people present that you're recording.");
+      expect(view.container.querySelector("h1")).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a host that doesn't let this person record says why, and still lists the meetings", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+        recordingOff="An administrator has to turn on meeting recording."
+      />,
+    );
+    try {
+      await waitForText(view.container, "Weekly product sync");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("An administrator has to turn on meeting recording.");
+      const start = [...view.container.querySelectorAll("button")].find((button) =>
+        /start recording/i.test(button.textContent ?? ""),
+      );
+      expect(start).toBeUndefined();
+    } finally {
+      await view.unmount();
+    }
+  });
+});
+
+describe("Recorder provider", () => {
+  test("records with the host's own client, once the host knows its workspace", async () => {
+    const requests: string[] = [];
+    const client = {
+      requestJson: async (method: string, path: string) => {
+        requests.push(`${method} ${path}`);
+        return {};
+      },
+    };
+    const seen: { recorder: ReturnType<typeof useMeetingRecorder>["recorder"] } = {
+      recorder: null,
+    };
+    function Probe() {
+      seen.recorder = useMeetingRecorder().recorder;
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const mount = (workspaceId: string | null) =>
+      act(async () => {
+        root.render(
+          <MeetingRecorderProvider workspaceId={workspaceId} client={client}>
+            <Probe />
+          </MeetingRecorderProvider>,
+        );
+      });
+    await mount(null);
+    await settle(100);
+    expect(seen.recorder).toBeNull();
+    await mount("workspace-1");
+    const deadline = Date.now() + 3_000;
+    while (!seen.recorder && Date.now() < deadline) await settle(50);
+    expect(seen.recorder?.state).toBe("idle");
+    await act(async () => root.unmount());
+    container.remove();
+  });
 });
 
 describe("Meeting page", () => {
+  test("shows the host's own details beside the transcript", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+        details={(recording) => [
+          { id: "project", label: "Project", content: `Linked to ${recording.title}` },
+        ]}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Linked to Weekly product sync");
+      expect(view.container.textContent).toContain("Project");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("shows the transcript with named and unnamed speakers", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
@@ -311,6 +427,13 @@ describe("Recorder errors", () => {
       body: "Turn on System Audio Recording for Opengeni in System Settings.",
     });
   });
+
+  test("a used-up usage allowance says so in the person's words", async () => {
+    const { uploadFailureReason } = await import("./recorder-panel");
+    expect(uploadFailureReason("The workspace usage allowance is exhausted.")).toBe(
+      "The usage allowance is used up, so new meetings can't be transcribed until it renews.",
+    );
+  });
 });
 
 describe("Live transcript", () => {
@@ -369,7 +492,7 @@ describe("Live transcript", () => {
   });
 
   test("a meeting recorded elsewhere shows the saved live text as a preview", async () => {
-    const { LIVE_RECORDING_ID } = await import("../../dev/ui-kit/pages/meetings/fixture");
+    const { LIVE_RECORDING_ID } = await import("../testing/meetings-fixture");
     const fixture = createMeetingsFixture();
     const view = await render(
       <MeetingDetailPage

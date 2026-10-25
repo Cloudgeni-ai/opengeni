@@ -3,13 +3,25 @@
  * Loaded lazily by MeetingRecorderProvider; renders nothing.
  */
 import { useEffect, useLayoutEffect } from "react";
-import { desktopCapability } from "@opengeni/react/app/lib/desktop";
-import { useRecorder } from "@opengeni/react/recordings";
+import { desktopCapability } from "../app/lib/desktop";
+import { useRecorder } from "../recordings";
 
 import type { MeetingRecorderStore } from "./recorder-context";
 
-export default function RecorderHost({ store }: { store: MeetingRecorderStore }) {
-  const recorder = useRecorder({ onFinished: (recordingId) => store.markFinished(recordingId) });
+export default function RecorderHost({
+  store,
+  workspaceId,
+  client,
+}: {
+  store: MeetingRecorderStore;
+  workspaceId: string;
+  client?: object | undefined;
+}) {
+  const recorder = useRecorder({
+    workspaceId,
+    ...(client ? { client } : {}),
+    onFinished: (recordingId) => store.markFinished(recordingId),
+  });
   useLayoutEffect(() => {
     store.set(recorder);
   });

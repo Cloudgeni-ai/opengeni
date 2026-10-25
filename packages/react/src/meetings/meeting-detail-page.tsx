@@ -7,7 +7,8 @@
  * uploading (from this browser or another device), transcribing, or failed
  * with the reason and what to try.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AudioLinesIcon,
   CheckIcon,
@@ -43,10 +44,10 @@ import {
   useLiveTranscript,
   useTranscript,
   type RecordingsClientOverride,
-} from "@opengeni/react/recordings";
+} from "../recordings";
 
-import { Button } from "@opengeni/react/ui/button";
-import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { Button } from "../ui/button";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 import {
   DetailAside,
   DetailAsideItem,
@@ -54,26 +55,26 @@ import {
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@opengeni/react/ui/detail-page";
-import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+} from "../ui/detail-page";
+import { DetailSection } from "../ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@opengeni/react/ui/dropdown-menu";
-import { EmptyState } from "@opengeni/react/ui/empty-state";
-import { ErrorMessage } from "@opengeni/react/ui/error-message";
-import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
-import { FormDialog } from "@opengeni/react/ui/form-dialog";
-import { MoreMenu } from "@opengeni/react/ui/page-actions";
-import { Notice } from "@opengeni/react/ui/notice";
-import { formatAbsoluteTime } from "@opengeni/react/ui/relative-time";
-import { NativeSelect, type SelectOption } from "@opengeni/react/ui/select-menu";
-import { Skeleton } from "@opengeni/react/ui/skeleton";
-import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { cn } from "@opengeni/react/app/lib/utils";
+} from "../ui/dropdown-menu";
+import { EmptyState } from "../ui/empty-state";
+import { ErrorMessage } from "../ui/error-message";
+import { Field, FieldStack, TextInput } from "../ui/field";
+import { FormDialog } from "../ui/form-dialog";
+import { MoreMenu } from "../ui/page-actions";
+import { Notice } from "../ui/notice";
+import { formatAbsoluteTime } from "../ui/relative-time";
+import { NativeSelect, type SelectOption } from "../ui/select-menu";
+import { Skeleton } from "../ui/skeleton";
+import { StatusBadge } from "../ui/status-badge";
+import { cn } from "../app/lib/utils";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -93,6 +94,8 @@ import {
 import { liveSpeakerName, recorderLiveLines, uploadLine } from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
 import { useMeetingRecorder } from "./recorder-context";
+
+const defaultText = createOpenGeniText();
 
 function errorText(error: unknown): string | undefined {
   return error instanceof Error ? error.message : undefined;
@@ -157,6 +160,7 @@ function RenameDialog({
   onClose: () => void;
   onRename: (title: string) => Promise<void>;
 }) {
+  const msg = useOpenGeniText();
   const [value, setValue] = useState(title);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -171,23 +175,23 @@ function RenameDialog({
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
-      title="Rename meeting"
-      submitLabel="Save"
-      pendingLabel="Saving…"
+      title={msg("meetings.detailPage.renameMeeting")}
+      submitLabel={msg("meetings.detailPage.save")}
+      pendingLabel={msg("meetings.detailPage.saving")}
       submitDisabled={!value.trim() || value.trim() === title}
       error={error}
       onSubmit={async () => {
         try {
           await onRename(value.trim());
         } catch (cause) {
-          setError(errorText(cause) ?? "Couldn't rename this meeting.");
+          setError(errorText(cause) ?? msg("meetings.detailPage.couldnTRenameThisMeeting"));
           return false;
         }
       }}
       onSubmitted={onClose}
     >
       <FieldStack>
-        <Field label="Title">
+        <Field label={msg("meetings.detailPage.title")}>
           <TextInput
             value={value}
             maxLength={300}
@@ -220,6 +224,7 @@ function TranscribeAgainDialog({
     maxSpeakers?: number;
   }) => Promise<void>;
 }) {
+  const msg = useOpenGeniText();
   const current = recording.transcript;
   const initialModel = current
     ? `${current.providerId}/${current.model}`
@@ -244,16 +249,20 @@ function TranscribeAgainDialog({
     value: `${entry.providerId}/${entry.model}`,
     label: entry.name,
     meta:
-      entry.usdPerHour !== null ? `$${entry.usdPerHour.toFixed(2)} per hour` : entry.providerName,
+      entry.usdPerHour !== null
+        ? msg("meetings.detailPage.valuePerHour", { value: entry.usdPerHour.toFixed(2) })
+        : entry.providerName,
     disabled: !entry.available,
-    disabledReason: entry.available ? undefined : `Connect ${entry.providerName} first`,
+    disabledReason: entry.available
+      ? undefined
+      : msg("meetings.detailPage.connectProvidernameFirst", { providerName: entry.providerName }),
   }));
   const selected = models.find((entry) => `${entry.providerId}/${entry.model}` === model);
   const estimate =
     selected?.usdPerHour != null && recording.durationMilliseconds > 0
       ? (selected.usdPerHour * recording.durationMilliseconds) / 3_600_000
       : null;
-  const languageOptions = meetingLanguageOptions(language);
+  const languageOptions = meetingLanguageOptions(language, undefined, msg);
   const speakerCount = speakers.trim() ? Number(speakers) : undefined;
   const speakersInvalid =
     speakerCount !== undefined &&
@@ -264,10 +273,10 @@ function TranscribeAgainDialog({
       onOpenChange={(next) => {
         if (!next) onClose();
       }}
-      title="Transcribe again"
-      description="Makes a new version from the full audio. Speaker names carry over; corrected words and moved turns stay with the current version, which you keep reading until the new one is ready."
-      submitLabel="Transcribe"
-      pendingLabel="Starting…"
+      title={msg("meetings.detailPage.transcribeAgain")}
+      description={msg("meetings.detailPage.makesANewVersionFrom")}
+      submitLabel={msg("meetings.detailPage.transcribe")}
+      pendingLabel={msg("meetings.detailPage.starting")}
       submitDisabled={!selected || !selected.available || speakersInvalid}
       error={error}
       onSubmit={async () => {
@@ -280,7 +289,7 @@ function TranscribeAgainDialog({
             ...(speakerCount !== undefined ? { maxSpeakers: speakerCount } : {}),
           });
         } catch (cause) {
-          setError(errorText(cause) ?? "Couldn't start transcribing.");
+          setError(errorText(cause) ?? msg("meetings.detailPage.couldnTStartTranscribing"));
           return false;
         }
       }}
@@ -288,32 +297,39 @@ function TranscribeAgainDialog({
     >
       <FieldStack>
         <Field
-          label="Model"
+          label={msg("meetings.detailPage.model")}
           hint={
             estimate !== null
-              ? `About ${estimate < 0.01 ? "less than $0.01" : `$${estimate.toFixed(2)}`} for this ${formatDuration(recording.durationMilliseconds)} meeting.`
+              ? estimate < 0.01
+                ? msg("meetings.detailPage.aboutLessThan001", {
+                    duration: formatDuration(recording.durationMilliseconds),
+                  })
+                : msg("meetings.detailPage.aboutEstimateForThisDuration", {
+                    estimate: estimate.toFixed(2),
+                    duration: formatDuration(recording.durationMilliseconds),
+                  })
               : undefined
           }
         >
           <NativeSelect options={modelOptions} value={model} onValueChange={setModel} />
         </Field>
         <Field
-          label="Language"
-          hint="Set it when the meeting is in one language the model mishears."
+          label={msg("meetings.detailPage.language")}
+          hint={msg("meetings.detailPage.setItWhenTheMeeting")}
         >
           <NativeSelect options={languageOptions} value={language} onValueChange={setLanguage} />
         </Field>
         {selected?.capabilities.diarization ? (
           <Field
-            label="Maximum number of speakers"
+            label={msg("meetings.detailPage.maximumNumberOfSpeakers")}
             optional
-            hint="Leave empty to let the model decide."
-            error={speakersInvalid ? "Enter a whole number from 1 to 32." : undefined}
+            hint={msg("meetings.detailPage.leaveEmptyToLetThe")}
+            error={speakersInvalid ? msg("meetings.detailPage.enterAWholeNumberFrom") : undefined}
           >
             <TextInput
               inputMode="numeric"
               value={speakers}
-              placeholder="Auto"
+              placeholder={msg("meetings.detailPage.auto")}
               onChange={(event) => setSpeakers(event.target.value.replace(/[^0-9]/gu, ""))}
               className="max-w-24"
             />
@@ -331,12 +347,17 @@ function VisibilityMenu({
   visibility: RecordingVisibility;
   onChange: (visibility: RecordingVisibility) => void;
 }) {
+  const msg = useOpenGeniText();
   const options: Array<{ value: RecordingVisibility; label: string; description: string }> = [
-    { value: "private", label: "Only me", description: "Only you can open it." },
+    {
+      value: "private",
+      label: msg("meetings.detailPage.onlyMe"),
+      description: msg("meetings.detailPage.onlyYouCanOpenIt"),
+    },
     {
       value: "workspace",
-      label: "Workspace",
-      description: "Everyone in this workspace can open it and name speakers.",
+      label: msg("meetings.detailPage.workspace"),
+      description: msg("meetings.detailPage.everyoneInThisWorkspaceCan"),
     },
   ];
   return (
@@ -347,14 +368,21 @@ function VisibilityMenu({
           size="sm"
           variant="outline"
           className="rounded-[10px] pointer-coarse:h-11"
-          aria-label={`Who can see this: ${visibility === "private" ? "Only me" : "Workspace"}`}
+          aria-label={msg("meetings.detailPage.whoCanSeeThisValue", {
+            value:
+              visibility === "private"
+                ? msg("meetings.detailPage.onlyMe")
+                : msg("meetings.detailPage.workspace"),
+          })}
         >
           {visibility === "private" ? (
             <LockIcon aria-hidden="true" />
           ) : (
             <GlobeIcon aria-hidden="true" />
           )}
-          {visibility === "private" ? "Only me" : "Workspace"}
+          {visibility === "private"
+            ? msg("meetings.detailPage.onlyMe")
+            : msg("meetings.detailPage.workspace")}
           <ChevronDownIcon aria-hidden="true" className="text-fg-subtle" />
         </Button>
       </DropdownMenuTrigger>
@@ -397,32 +425,40 @@ function PhaseNotice({
   recordingElsewhere: boolean;
   onRetry: () => void;
 }) {
+  const msg = useOpenGeniText();
   const phase = meetingPhase(recording);
   if (phase.kind === "uploading") {
     if (uploadingHere === null && recordingElsewhere) {
       return (
-        <Notice tone="waiting" icon={SPINNER} title="Not finished yet" live="polite">
-          It's still being recorded or uploaded, in another tab or on another device. What's said
-          shows below as it comes in, and this page updates by itself. The transcript starts once
-          all the audio is in.
+        <Notice
+          tone="waiting"
+          icon={SPINNER}
+          title={msg("meetings.detailPage.notFinishedYet")}
+          live="polite"
+        >
+          {msg("meetings.detailPage.itSStillBeingRecorded")}
         </Notice>
       );
     }
     return uploadingHere !== null ? (
-      <Notice tone="waiting" icon={SPINNER} title="Uploading the audio" live="polite">
-        {uploadingHere} Keep this tab open, or come back later: the audio is saved in this browser
-        until it's uploaded.
+      <Notice
+        tone="waiting"
+        icon={SPINNER}
+        title={msg("meetings.detailPage.uploadingTheAudio")}
+        live="polite"
+      >
+        {msg("meetings.detailPage.uploadinghereKeepThisTabOpen", { uploadingHere: uploadingHere })}
       </Notice>
     ) : (
-      <Notice tone="waiting" icon={SPINNER} title="Still uploading">
-        The audio is on the device that recorded it. The transcript starts once it's uploaded.
+      <Notice tone="waiting" icon={SPINNER} title={msg("meetings.detailPage.stillUploading")}>
+        {msg("meetings.detailPage.theAudioIsOnThe")}
       </Notice>
     );
   }
   if (phase.kind === "transcribing") {
     return (
       <Notice tone="waiting" icon={SPINNER} live="polite">
-        Transcribing. This usually takes a minute or two, and the page updates when it's done.
+        {msg("meetings.detailPage.transcribingThisUsuallyTakesA")}
       </Notice>
     );
   }
@@ -430,10 +466,10 @@ function PhaseNotice({
     return (
       <Notice
         tone="failed"
-        title="The transcript failed"
+        title={msg("meetings.detailPage.theTranscriptFailed")}
         action={
           <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-            Transcribe again
+            {msg("meetings.detailPage.transcribeAgain")}
           </Button>
         }
       >
@@ -447,10 +483,15 @@ function PhaseNotice({
 function versionLine(
   version: RecordingTranscriptVersion,
   modelName: (version: RecordingTranscriptVersion) => string,
+  msg: OpenGeniText = defaultText,
 ): string {
-  const parts = [`Version ${version.versionNumber}`, modelName(version)];
-  if (version.state === "queued" || version.state === "processing") parts.push("Transcribing");
-  if (version.state === "failed") parts.push("Failed");
+  const parts = [
+    msg("meetings.detailPage.versionVersionnumber", { versionNumber: version.versionNumber }),
+    modelName(version),
+  ];
+  if (version.state === "queued" || version.state === "processing")
+    parts.push(msg("meetings.detailPage.transcribing"));
+  if (version.state === "failed") parts.push(msg("meetings.detailPage.failed"));
   if (version.state === "complete" && version.languages.length > 0) {
     parts.push(version.languages.map(languageName).join(", "));
   }
@@ -472,6 +513,7 @@ function RerunNotice({
   modelName: (version: RecordingTranscriptVersion) => string;
   onRetry: () => void;
 }) {
+  const msg = useOpenGeniText();
   const newest = versions.reduce<RecordingTranscriptVersion | null>(
     (best, entry) => (!best || entry.versionNumber > best.versionNumber ? entry : best),
     null,
@@ -480,7 +522,9 @@ function RerunNotice({
   if (newest.state === "queued" || newest.state === "processing") {
     return (
       <Notice tone="waiting" icon={SPINNER} live="polite">
-        Transcribing again with {modelName(newest)}. This version stays until the new one is ready.
+        {msg("meetings.detailPage.transcribingAgainWithModelnameThis", {
+          modelName: modelName(newest),
+        })}
       </Notice>
     );
   }
@@ -488,29 +532,35 @@ function RerunNotice({
     return (
       <Notice
         tone="failed"
-        title="Transcribing again failed"
+        title={msg("meetings.detailPage.transcribingAgainFailed")}
         action={
           <Button type="button" size="sm" variant="outline" onClick={onRetry}>
-            Transcribe again
+            {msg("meetings.detailPage.transcribeAgain")}
           </Button>
         }
       >
-        {transcriptErrorText(newest.errorCode)} This version is unchanged.
+        {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
+          transcriptErrorText: transcriptErrorText(newest.errorCode),
+        })}
       </Notice>
     );
   }
   return null;
 }
 
+/** One of the host's own lines about a meeting, such as its project. */
+export type MeetingDetail = { id: string; label: string; content: ReactNode };
+
 export function MeetingDetailPage({
   workspaceId,
   recordingId,
   viewerSubjectId,
-  viewerName = "Me",
+  viewerName,
   voiceRecognition = false,
   recordings: recordingsClient,
   onBack,
   onOpenSettings,
+  details,
 }: {
   workspaceId: string;
   recordingId: string;
@@ -524,7 +574,13 @@ export function MeetingDetailPage({
   onBack: () => void;
   /** Opens Meetings settings, where voice recognition is turned on. */
   onOpenSettings?: (() => void) | undefined;
+  /**
+   * The host's own lines about this meeting, shown first beside the
+   * transcript, such as the project it belongs to.
+   */
+  details?: ((recording: Recording) => readonly MeetingDetail[]) | undefined;
 }) {
+  const msg = useOpenGeniText();
   const override = { workspaceId, ...(recordingsClient ? { recordings: recordingsClient } : {}) };
   const meeting = useRecording(recordingId, override);
   const recording = meeting.recording;
@@ -589,12 +645,13 @@ export function MeetingDetailPage({
   const tellNotRemembered = useCallback(() => {
     if (voiceRecognition || toldNotRemembered.current) return;
     toldNotRemembered.current = true;
-    toast("Names aren't suggested in later meetings", {
-      description:
-        "Voice recognition is off in this workspace. An admin can turn it on in Meetings settings.",
-      ...(onOpenSettings ? { action: { label: "Settings", onClick: onOpenSettings } } : {}),
+    toast(msg("meetings.detailPage.namesArenTSuggestedIn"), {
+      description: msg("meetings.detailPage.voiceRecognitionIsOffIn"),
+      ...(onOpenSettings
+        ? { action: { label: msg("meetings.detailPage.settings"), onClick: onOpenSettings } }
+        : {}),
     });
-  }, [voiceRecognition, onOpenSettings]);
+  }, [msg, voiceRecognition, onOpenSettings]);
   const actions: TranscriptActions = useMemo(
     () => ({
       nameSpeaker: async (label, name) => {
@@ -605,21 +662,24 @@ export function MeetingDetailPage({
       nameSelf: async (label: string) => {
         const me =
           peopleList.find((person) => person.memberSubjectId === viewerSubjectId) ??
-          (await createPerson({ displayName: viewerName, memberSubjectId: viewerSubjectId }));
+          (await createPerson({
+            displayName: viewerName ?? msg("meetings.detailPage.me"),
+            memberSubjectId: viewerSubjectId,
+          }));
         await nameSpeaker(label, { personId: me.id });
         if (!voiceRecognition) {
           tellNotRemembered();
         } else if (!me.voice) {
           // Naming yourself is when remembering your voice makes sense.
-          toast.success("Named you", {
-            description: "Remember your voice and later meetings suggest your name when you speak.",
+          toast.success(msg("meetings.detailPage.namedYou"), {
+            description: msg("meetings.detailPage.rememberYourVoiceAndLater"),
             action: {
-              label: "Remember my voice",
+              label: msg("meetings.detailPage.rememberMyVoice"),
               onClick: () =>
                 void rememberVoice(me.id, "self").then(
-                  () => toast.success("Your voice will be remembered"),
+                  () => toast.success(msg("meetings.detailPage.yourVoiceWillBeRemembered")),
                   (error: unknown) =>
-                    toast.error("Couldn't remember your voice", {
+                    toast.error(msg("meetings.detailPage.couldnTRememberYourVoice"), {
                       description: errorText(error),
                     }),
                 ),
@@ -632,16 +692,18 @@ export function MeetingDetailPage({
         await rejectSuggestion(label);
         const personId = suggested?.personId;
         toast.success(
-          suggested ? "Suggestion dismissed" : "Left unnamed",
+          suggested
+            ? msg("meetings.detailPage.suggestionDismissed")
+            : msg("meetings.detailPage.leftUnnamed"),
           suggested && personId
             ? {
-                description: `This speaker is unnamed again. Pick a name from its menu.`,
+                description: msg("meetings.detailPage.thisSpeakerIsUnnamedAgain"),
                 // A mis-tap on "Not them" is easy; naming them puts it right.
                 action: {
-                  label: "Undo",
+                  label: msg("meetings.detailPage.undo"),
                   onClick: () =>
                     void nameSpeaker(label, { personId }).catch((error: unknown) =>
-                      toast.error("Couldn't name this speaker", {
+                      toast.error(msg("meetings.detailPage.couldnTNameThisSpeaker"), {
                         description: errorText(error),
                       }),
                     ),
@@ -662,9 +724,11 @@ export function MeetingDetailPage({
                 return;
               }
               void rememberVoice(person.id, "self").then(
-                () => toast.success("Your voice will be remembered"),
+                () => toast.success(msg("meetings.detailPage.yourVoiceWillBeRemembered")),
                 (error: unknown) =>
-                  toast.error("Couldn't remember your voice", { description: errorText(error) }),
+                  toast.error(msg("meetings.detailPage.couldnTRememberYourVoice"), {
+                    description: errorText(error),
+                  }),
               );
             },
             forget: async (person) => {
@@ -673,14 +737,17 @@ export function MeetingDetailPage({
               await refreshTranscript();
               toast.success(
                 person.memberSubjectId === viewerSubjectId
-                  ? "Your voice is forgotten"
-                  : `${person.displayName}'s voice is forgotten`,
+                  ? msg("meetings.detailPage.yourVoiceIsForgotten")
+                  : msg("meetings.detailPage.displaynameSVoiceIsForgotten", {
+                      displayName: person.displayName,
+                    }),
               );
             },
           }
         : null,
     }),
     [
+      msg,
       nameSpeaker,
       rejectSuggestion,
       transcriptSpeakers,
@@ -700,17 +767,17 @@ export function MeetingDetailPage({
 
   if (!recording) {
     return (
-      <DetailPage back={{ label: "Meetings", onClick: onBack }}>
+      <DetailPage back={{ label: msg("meetings.detailPage.meetings"), onClick: onBack }}>
         {meeting.error ? (
           isNotFound(meeting.error) ? (
             <EmptyState
               variant="page"
               icon={<AudioLinesIcon />}
-              title="This meeting doesn't exist"
-              description="It may have been deleted, or it's private to the person who recorded it."
+              title={msg("meetings.detailPage.thisMeetingDoesnTExist")}
+              description={msg("meetings.detailPage.itMayHaveBeenDeleted")}
               action={
                 <Button type="button" variant="outline" onClick={onBack}>
-                  Back to Meetings
+                  {msg("meetings.detailPage.backToMeetings")}
                 </Button>
               }
               className="pt-12"
@@ -718,8 +785,8 @@ export function MeetingDetailPage({
           ) : (
             <ErrorMessage
               align="center"
-              title="Couldn't load this meeting"
-              details={[{ label: "Error", value: meeting.error.message }]}
+              title={msg("meetings.detailPage.couldnTLoadThisMeeting")}
+              details={[{ label: msg("meetings.detailPage.error"), value: meeting.error.message }]}
               action={
                 <Button
                   type="button"
@@ -727,11 +794,11 @@ export function MeetingDetailPage({
                   size="sm"
                   onClick={() => void meeting.refresh()}
                 >
-                  Try again
+                  {msg("meetings.detailPage.tryAgain")}
                 </Button>
               }
             >
-              Check your connection, then try again.
+              {msg("meetings.detailPage.checkYourConnectionThenTry")}
             </ErrorMessage>
           )
         ) : (
@@ -747,7 +814,7 @@ export function MeetingDetailPage({
               <Skeleton className="h-4 w-5/6" />
             </div>
             <span className="sr-only" role="status">
-              Loading meeting
+              {msg("meetings.detailPage.loadingMeeting")}
             </span>
           </div>
         )}
@@ -759,7 +826,7 @@ export function MeetingDetailPage({
   const phase = meetingPhase(recording);
   const uploadingHere =
     recorder && recorder.recordingId === recording.id
-      ? uploadLine(recorder, navigator.onLine)
+      ? uploadLine(recorder, navigator.onLine, msg)
       : null;
   const segments = transcript.segments;
   const speakerLabels = [...speakerColorSlots(segments).keys()];
@@ -796,10 +863,10 @@ export function MeetingDetailPage({
       const suggested = speakerIsSuggested(label, transcript.speakers);
       const unnamed = !speakerIsNamed(label, transcript.speakers);
       const menuLabel = suggested
-        ? `${name}, suggested from their voice. Confirm or correct`
+        ? msg("meetings.detailPage.nameSuggestedFromTheirVoice", { name: name })
         : unnamed
-          ? `${name}, name this speaker`
-          : `${name}, change who this is`;
+          ? msg("meetings.detailPage.nameNameThisSpeaker", { name: name })
+          : msg("meetings.detailPage.nameChangeWhoThisIs", { name: name });
       return (
         <li key={label} className="min-w-0">
           <SpeakerNameMenu
@@ -822,7 +889,7 @@ export function MeetingDetailPage({
                   <span className="truncate">{name}</span>
                   {suggested ? (
                     <span className="truncate text-xs leading-4 text-fg-muted">
-                      Suggested from their voice
+                      {msg("meetings.detailPage.suggestedFromTheirVoice")}
                     </span>
                   ) : null}
                 </span>
@@ -853,33 +920,35 @@ export function MeetingDetailPage({
                 size="xs"
                 className="pointer-coarse:h-11"
                 variant="outline"
-                aria-label={`Yes, it's ${name}`}
+                aria-label={msg("meetings.detailPage.yesItSName", { name: name })}
                 onClick={() =>
                   void actions
                     .nameSpeaker(label, { personId: suggested.personId! })
                     .catch((error: unknown) =>
-                      toast.error("Couldn't confirm this name", { description: errorText(error) }),
+                      toast.error(msg("meetings.detailPage.couldnTConfirmThisName"), {
+                        description: errorText(error),
+                      }),
                     )
                 }
               >
                 <CheckIcon aria-hidden="true" />
-                Confirm
+                {msg("meetings.detailPage.confirm")}
               </Button>
               <Button
                 type="button"
                 size="xs"
                 className="pointer-coarse:h-11"
                 variant="ghost"
-                aria-label={`Not ${name}`}
+                aria-label={msg("meetings.detailPage.notName", { name: name })}
                 onClick={() =>
                   void actions.rejectSuggestion(label).catch((error: unknown) =>
-                    toast.error("Couldn't turn down this name", {
+                    toast.error(msg("meetings.detailPage.couldnTTurnDownThis"), {
                       description: errorText(error),
                     }),
                   )
                 }
               >
-                Not them
+                {msg("meetings.detailPage.notThem")}
               </Button>
             </div>
           ) : null}
@@ -890,10 +959,18 @@ export function MeetingDetailPage({
     reviewLabels.length === 0
       ? null
       : unnamedCount > 0 && suggestedCount > 0
-        ? `Who spoke? ${unnamedCount} ${unnamedCount === 1 ? "speaker" : "speakers"} to name, ${suggestedCount} ${suggestedCount === 1 ? "name" : "names"} to confirm.`
+        ? suggestedCount === 1
+          ? msg("meetings.detailPage.whoSpokeSpeakersToNameOneName", {
+              count: unnamedCount,
+              suggestedCount: suggestedCount,
+            })
+          : msg("meetings.detailPage.whoSpokeSpeakersToNameNames", {
+              count: unnamedCount,
+              suggestedCount: suggestedCount,
+            })
         : unnamedCount > 0
-          ? `Who spoke? ${unnamedCount === 1 ? "One speaker has" : `${unnamedCount} speakers have`} no name yet.`
-          : `Who spoke? ${suggestedCount === 1 ? "One name was" : `${suggestedCount} names were`} suggested from a voice.`;
+          ? msg("meetings.detailPage.whoSpokeSpeakersHaveNoName", { count: unnamedCount })
+          : msg("meetings.detailPage.whoSpokeNamesWereSuggested", { count: suggestedCount });
 
   const update = async (
     request: Parameters<typeof meeting.update>[0],
@@ -913,11 +990,13 @@ export function MeetingDetailPage({
       chips={
         phase.kind === "transcribing" ? (
           <StatusBadge variant="dot" tone="progress" pulse>
-            Transcribing
+            {msg("meetings.detailPage.transcribing")}
           </StatusBadge>
         ) : phase.kind === "uploading" ? (
           <StatusBadge variant="dot" tone="progress" pulse>
-            {previewing && !recordingHere ? "In progress" : "Uploading"}
+            {previewing && !recordingHere
+              ? msg("meetings.detailPage.inProgress")
+              : msg("meetings.detailPage.uploading")}
           </StatusBadge>
         ) : undefined
       }
@@ -928,9 +1007,11 @@ export function MeetingDetailPage({
             ? formatDuration(recording.durationMilliseconds)
             : null}
           {speakerLabels.length > 0
-            ? `${speakerLabels.length} ${speakerLabels.length === 1 ? "speaker" : "speakers"}`
+            ? msg("meetings.detailPage.countSpeakers", { count: speakerLabels.length })
             : null}
-          {!owner && recording.visibility === "workspace" ? "Shared with the workspace" : null}
+          {!owner && recording.visibility === "workspace"
+            ? msg("meetings.detailPage.sharedWithTheWorkspace")
+            : null}
         </DetailMeta>
       }
       actions={
@@ -939,27 +1020,31 @@ export function MeetingDetailPage({
             <VisibilityMenu
               visibility={recording.visibility}
               onChange={(visibility) =>
-                void update({ visibility }, "Couldn't change who can see this").then(
+                void update({ visibility }, msg("meetings.detailPage.couldnTChangeWhoCan")).then(
                   () =>
                     toast.success(
                       visibility === "workspace"
-                        ? "Shared with the workspace"
-                        : "Only you can see this now",
+                        ? msg("meetings.detailPage.sharedWithTheWorkspace")
+                        : msg("meetings.detailPage.onlyYouCanSeeThis"),
                     ),
                   () => undefined,
                 )
               }
             />
           ) : null}
-          <MoreMenu label={`More actions for ${recording.title}`}>
+          <MoreMenu
+            label={msg("meetings.detailPage.moreActionsForTitle", { title: recording.title })}
+          >
             <DropdownMenuItem onSelect={() => setRenaming(true)}>
               <PencilIcon aria-hidden="true" />
-              Rename
+              {msg("meetings.detailPage.rename")}
             </DropdownMenuItem>
             {recording.state !== "capturing" ? (
               <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
                 <RefreshCwIcon aria-hidden="true" />
-                {rerunPending ? "Transcribing again…" : "Transcribe again"}
+                {rerunPending
+                  ? msg("meetings.detailPage.transcribingAgain")
+                  : msg("meetings.detailPage.transcribeAgain")}
               </DropdownMenuItem>
             ) : null}
             {owner ? (
@@ -967,7 +1052,7 @@ export function MeetingDetailPage({
                 <DropdownMenuSeparator />
                 <DropdownMenuItem variant="destructive" onSelect={() => setDeleting(true)}>
                   <Trash2Icon aria-hidden="true" />
-                  Delete meeting
+                  {msg("meetings.detailPage.deleteMeeting")}
                 </DropdownMenuItem>
               </>
             ) : null}
@@ -977,37 +1062,43 @@ export function MeetingDetailPage({
     />
   );
 
+  const hostDetails = details?.(recording) ?? [];
   const aside =
-    showTranscript || meeting.versions.length > 0 ? (
-      <DetailAside label="About this transcript">
+    showTranscript || meeting.versions.length > 0 || hostDetails.length > 0 ? (
+      <DetailAside label={msg("meetings.detailPage.aboutThisTranscript")}>
+        {hostDetails.map((detail) => (
+          <DetailAsideItem key={detail.id} label={detail.label}>
+            {detail.content}
+          </DetailAsideItem>
+        ))}
         {speakerLabels.length > 0 ? (
-          <DetailAsideItem label="Speakers">
+          <DetailAsideItem label={msg("meetings.detailPage.speakers")}>
             <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>
           </DetailAsideItem>
         ) : null}
         {meeting.versions.length > 0 ? (
-          <DetailAsideItem label="Transcript">
+          <DetailAsideItem label={msg("meetings.detailPage.transcript")}>
             <div className="grid w-full min-w-0 gap-2">
               {meeting.versions.length > 1 ? (
                 <NativeSelect
                   options={meeting.versions.map((entry) => ({
                     value: entry.id,
-                    label: versionLine(entry, modelName),
+                    label: versionLine(entry, modelName, msg),
                     disabled: entry.state !== "complete",
                   }))}
                   value={transcriptVersionId ?? meeting.versions[0]!.id}
                   onValueChange={(versionId) =>
-                    void meeting
-                      .setCurrentVersion(versionId)
-                      .catch((error: unknown) =>
-                        toast.error("Couldn't switch versions", { description: errorText(error) }),
-                      )
+                    void meeting.setCurrentVersion(versionId).catch((error: unknown) =>
+                      toast.error(msg("meetings.detailPage.couldnTSwitchVersions"), {
+                        description: errorText(error),
+                      }),
+                    )
                   }
                   size="sm"
                 />
               ) : (
                 <span className="text-sm leading-5 text-fg">
-                  {versionLine(meeting.versions[0]!, modelName)}
+                  {versionLine(meeting.versions[0]!, modelName, msg)}
                 </span>
               )}
               <Button
@@ -1019,7 +1110,9 @@ export function MeetingDetailPage({
                 className="w-fit rounded-[10px] pointer-coarse:h-11"
               >
                 {rerunPending ? SPINNER : <RefreshCwIcon aria-hidden="true" />}
-                {rerunPending ? "Transcribing again…" : "Transcribe again"}
+                {rerunPending
+                  ? msg("meetings.detailPage.transcribingAgain")
+                  : msg("meetings.detailPage.transcribeAgain")}
               </Button>
             </div>
           </DetailAsideItem>
@@ -1028,7 +1121,7 @@ export function MeetingDetailPage({
     ) : undefined;
 
   return (
-    <DetailPage back={{ label: "Meetings", onClick: onBack }}>
+    <DetailPage back={{ label: msg("meetings.detailPage.meetings"), onClick: onBack }}>
       {header}
       <div className="mt-6 grid gap-4 empty:hidden">
         <PhaseNotice
@@ -1048,8 +1141,10 @@ export function MeetingDetailPage({
         {audioGone ? (
           <Notice tone="muted">
             {recording.audioDeletedAt
-              ? `The audio was deleted on ${formatAbsoluteTime(recording.audioDeletedAt)}, because this workspace keeps audio only for a set time. The transcript stays, but the meeting can't be played or transcribed again.`
-              : "The audio for this meeting isn't available anymore, so it can't be played or transcribed again. The transcript stays."}
+              ? msg("meetings.detailPage.theAudioWasDeletedOn", {
+                  formatAbsoluteTime: formatAbsoluteTime(recording.audioDeletedAt),
+                })
+              : msg("meetings.detailPage.theAudioForThisMeeting")}
           </Notice>
         ) : null}
       </div>
@@ -1066,7 +1161,7 @@ export function MeetingDetailPage({
         </div>
       ) : null}
       <DetailPageBody aside={aside}>
-        <DetailSection title="Transcript">
+        <DetailSection title={msg("meetings.detailPage.transcript")}>
           {showTranscript && reviewLabels.length > 0 ? (
             // Beside the speakers card, the speakers still to review sit at
             // the top of the transcript, where the reader starts. Only the outer
@@ -1074,7 +1169,10 @@ export function MeetingDetailPage({
             <div className="mb-5 @max-[620px]/detail:hidden">
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-sm leading-5 text-fg-muted">{reviewLine}</p>
-                <ul aria-label="Speakers to review" className="flex flex-wrap gap-2">
+                <ul
+                  aria-label={msg("meetings.detailPage.speakersToReview")}
+                  className="flex flex-wrap gap-2"
+                >
                   {speakerButtons("chips", reviewLabels)}
                 </ul>
               </div>
@@ -1085,12 +1183,17 @@ export function MeetingDetailPage({
             // wrapper carries no display class, so the container query wins.
             <div className="mb-5 @[620px]/detail:hidden">
               <div className="grid gap-2">
-                <ul aria-label="Speakers" className="flex flex-wrap gap-2">
+                <ul
+                  aria-label={msg("meetings.detailPage.speakers")}
+                  className="flex flex-wrap gap-2"
+                >
                   {speakerButtons("chips")}
                 </ul>
                 {reviewLine ? (
                   <p className="text-xs leading-4.5 text-fg-muted">
-                    {reviewLine} Tap a dashed name to say who it is.
+                    {msg("meetings.detailPage.reviewlineTapADashedName", {
+                      reviewLine: reviewLine,
+                    })}
                   </p>
                 ) : null}
               </div>
@@ -1100,11 +1203,11 @@ export function MeetingDetailPage({
             <div className="grid gap-3">
               <p className="text-sm leading-5 text-fg-muted">
                 <span className="mr-2 inline-flex rounded-full border border-border px-1.5 text-xs leading-4 font-medium text-fg-label">
-                  Preview
+                  {msg("meetings.detailPage.preview")}
                 </span>
                 {recording.state === "capturing"
-                  ? "What's said so far, as it's heard. The transcript, with each speaker told apart, replaces it after the recording ends."
-                  : "What was said, as it was heard. The transcript, with each speaker told apart, replaces it in a minute or two."}
+                  ? msg("meetings.detailPage.whatSSaidSoFar")
+                  : msg("meetings.detailPage.whatWasSaidAsIt")}
               </p>
               {recordingHere && recorder?.live ? (
                 <LiveTranscript
@@ -1114,9 +1217,9 @@ export function MeetingDetailPage({
                     trackNumber: track.trackNumber,
                     text: track.partial,
                   }))}
-                  speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber)}
-                  status={liveStatus(recorder.live)}
-                  empty="Listening. What's said shows up here within a few seconds."
+                  speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg)}
+                  status={liveStatus(recorder.live, msg)}
+                  empty={msg("meetings.detailPage.listeningWhatSSaidShows")}
                 />
               ) : (
                 <LiveTranscript
@@ -1127,13 +1230,13 @@ export function MeetingDetailPage({
                   }
                   status={
                     savedLive.error
-                      ? { text: "Can't load the preview right now", tone: "waiting" }
+                      ? { text: msg("meetings.detailPage.canTLoadThePreview"), tone: "waiting" }
                       : null
                   }
                   empty={
                     recording.state === "capturing"
-                      ? "Nothing said yet. Text shows up here a few seconds after it's said."
-                      : "No live text was saved for this meeting."
+                      ? msg("meetings.detailPage.nothingSaidYetTextShows")
+                      : msg("meetings.detailPage.noLiveTextWasSaved")
                   }
                 />
               )}
@@ -1141,10 +1244,10 @@ export function MeetingDetailPage({
           ) : !showTranscript ? (
             <p className="text-sm leading-5 text-fg-muted">
               {phase.kind === "failed"
-                ? "No transcript yet."
+                ? msg("meetings.detailPage.noTranscriptYet")
                 : phase.kind === "no_transcript"
-                  ? "This meeting hasn't been transcribed."
-                  : "The transcript shows here when it's ready."}
+                  ? msg("meetings.detailPage.thisMeetingHasnTBeen")
+                  : msg("meetings.detailPage.theTranscriptShowsHereWhen")}
             </p>
           ) : transcript.loading && segments.length === 0 ? (
             <div className="space-y-3" aria-busy="true">
@@ -1154,8 +1257,10 @@ export function MeetingDetailPage({
             </div>
           ) : transcript.error && segments.length === 0 ? (
             <ErrorMessage
-              title="Couldn't load the transcript"
-              details={[{ label: "Error", value: transcript.error.message }]}
+              title={msg("meetings.detailPage.couldnTLoadTheTranscript")}
+              details={[
+                { label: msg("meetings.detailPage.error"), value: transcript.error.message },
+              ]}
               action={
                 <Button
                   type="button"
@@ -1163,15 +1268,15 @@ export function MeetingDetailPage({
                   size="sm"
                   onClick={() => void transcript.refresh()}
                 >
-                  Try again
+                  {msg("meetings.detailPage.tryAgain")}
                 </Button>
               }
             >
-              Check your connection, then try again.
+              {msg("meetings.detailPage.checkYourConnectionThenTry")}
             </ErrorMessage>
           ) : segments.length === 0 ? (
             <p className="text-sm leading-5 text-fg-muted">
-              No speech was found in this recording.
+              {msg("meetings.detailPage.noSpeechWasFoundIn")}
             </p>
           ) : (
             <MeetingTranscript
@@ -1190,7 +1295,9 @@ export function MeetingDetailPage({
         open={renaming}
         title={recording.title}
         onClose={() => setRenaming(false)}
-        onRename={async (title) => await update({ title }, "Couldn't rename this meeting")}
+        onRename={async (title) =>
+          await update({ title }, msg("meetings.detailPage.couldnTRenameThisMeeting2"))
+        }
       />
       <TranscribeAgainDialog
         open={rerunning}
@@ -1200,8 +1307,8 @@ export function MeetingDetailPage({
         onClose={() => setRerunning(false)}
         onRun={async (options) => {
           await meeting.rerun(options);
-          toast.success("Transcribing again", {
-            description: "The new version replaces this one when it's ready.",
+          toast.success(msg("meetings.detailPage.transcribingAgain2"), {
+            description: msg("meetings.detailPage.theNewVersionReplacesThis"),
           });
         }}
       />
@@ -1221,18 +1328,28 @@ export function MeetingDetailPage({
           if (!open) setRememberingVoice(null);
         }}
         destructive={false}
-        title={`Remember ${rememberingVoice?.displayName ?? "their"}'s voice?`}
-        description={`Only do this if ${rememberingVoice?.displayName ?? "they"} agreed. Opengeni learns their voice from every meeting in this workspace where they're named as a speaker, earlier ones included, and suggests their name in later meetings. It keeps a voice summary, not audio, until someone forgets it in Settings or voice recognition is turned off.`}
-        confirmLabel="They agreed. Remember"
-        pendingLabel="Saving…"
+        title={msg("meetings.detailPage.rememberValueSVoice", {
+          value: rememberingVoice?.displayName ?? msg("meetings.detailPage.their"),
+        })}
+        description={msg("meetings.detailPage.onlyDoThisIfValue", {
+          value: rememberingVoice?.displayName ?? msg("meetings.detailPage.they"),
+        })}
+        confirmLabel={msg("meetings.detailPage.theyAgreedRemember")}
+        pendingLabel={msg("meetings.detailPage.saving")}
         onConfirm={async () => {
           const person = rememberingVoice;
           if (!person) return;
           try {
             await rememberVoice(person.id, "attested");
-            toast.success(`${person.displayName}'s voice will be remembered`);
+            toast.success(
+              msg("meetings.detailPage.displaynameSVoiceWillBe", {
+                displayName: person.displayName,
+              }),
+            );
           } catch (error) {
-            toast.error("Couldn't remember this voice", { description: errorText(error) });
+            toast.error(msg("meetings.detailPage.couldnTRememberThisVoice"), {
+              description: errorText(error),
+            });
             return false;
           }
         }}

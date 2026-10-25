@@ -77,6 +77,36 @@ segment to another speaker and text edits), `useRecordingPeople` and
 `recordings` client such as a host proxy that implements only the methods the
 mounted hooks call.
 
+`@opengeni/react/meetings` is the ready-made UI on those hooks, the same one
+the console uses:
+
+- `MeetingRecorderProvider`: mount it once above the routes, so a recording
+  keeps going while the person moves around. In the desktop app it also
+  carries out the call notifications ("Record this meeting?"); pass
+  `onOpenMeetings` and `onOpenMeeting` to say where those open. A host
+  without an `OpenGeniProvider` above its routes passes its SDK `client`,
+  and `workspaceId={null}` until it knows the workspace.
+- `MeetingsListPage`: the recorder plus the searchable list. Pass
+  `externalRef` to show only the meetings that belong to something of yours,
+  such as a project, and to give new recordings started there the same id;
+  `notice` for a line shown before every start, such as a reminder to tell
+  the people present; `liveTranscript={false}` to not offer the live preview
+  even when a live model is connected; `recordingOff` to show why this person
+  can't record here instead of the recorder, such as a setting an
+  administrator has to turn on, while the meetings stay listed; and
+  `header={false}` when the list sits inside a page of your own.
+- `MeetingDetailPage`: one meeting, with its player, transcript, speaker
+  naming, versions and sharing. `details` adds your own lines beside the
+  transcript, such as the project it belongs to.
+- `MeetingDefaultsView`: the workspace's meeting settings over plain values
+  and an `onSave`.
+- The smaller pieces they are built from: `RecorderPanel`,
+  `MeetingTranscript`, `MeetingPlayer` and `LiveTranscript`.
+
+The pages navigate through callbacks (`onOpen`, `meetingHref`, `onBack`), so
+any router works. `@opengeni/react/testing/meetings` has an in-memory
+recordings client with meetings in every state, for previews and tests.
+
 ## Live transcript preview
 
 While a meeting is recorded, each track can also be streamed to a live speech

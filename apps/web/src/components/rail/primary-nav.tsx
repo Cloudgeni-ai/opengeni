@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 
 import { useKnowledgeReviewIndicator } from "./use-knowledge-review-indicator";
 import { useScheduledTaskAttentionIndicator } from "./use-scheduled-task-attention";
-import { useMeetingRecorderState } from "@/components/meetings/recorder-context";
+import { useMeetingRecorderState } from "@opengeni/react/meetings";
 import { InboxLink } from "@/components/rail/inbox-link";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
