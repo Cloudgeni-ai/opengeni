@@ -30,8 +30,15 @@ export interface MacWindows {
 const Presence = z.enum(["minimized", "application_hidden", "not_shown", "unknown"]);
 const Console = z.enum(["available", "locked", "other_user"]);
 
+/** The screen check runs before listing, every action and heartbeats, all
+ * queued behind one another; a helper that hangs must not stall them. */
+const CONSOLE_TIMEOUT_MS = 2_500;
+
 /** The packaged computer-native helper, run once per command. */
-export function computerNativeMacWindows(binaryPath: string): MacWindows {
+export function computerNativeMacWindows(
+  binaryPath: string,
+  consoleTimeoutMs = CONSOLE_TIMEOUT_MS,
+): MacWindows {
   return {
     async presence(windows) {
       if (windows.length === 0) return [];
@@ -45,23 +52,40 @@ export function computerNativeMacWindows(binaryPath: string): MacWindows {
         .presence;
     },
     async console() {
-      return z.object({ console: Console }).parse(await run(binaryPath, "console", {})).console;
+      return z
+        .object({ console: Console })
+        .parse(await run(binaryPath, "console", {}, consoleTimeoutMs)).console;
     },
   };
 }
 
-async function run(binaryPath: string, command: string, request: unknown): Promise<unknown> {
+async function run(
+  binaryPath: string,
+  command: string,
+  request: unknown,
+  timeoutMs?: number,
+): Promise<unknown> {
   const child = spawn(binaryPath, ["window", command], { stdio: ["pipe", "pipe", "pipe"] });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  let timedOut = false;
+  const timer =
+    timeoutMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGKILL");
+        }, timeoutMs);
   const exited = new Promise<number | null>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", resolve);
   });
   child.stdin.end(JSON.stringify(request));
-  const code = await exited;
+  const code = await exited.finally(() => clearTimeout(timer));
+  if (timedOut)
+    throw new Error(`computer-native window ${command} timed out after ${timeoutMs} ms`);
   if (code !== 0)
     throw new Error(
       `computer-native window ${command} failed: ${Buffer.concat(stderr).toString("utf8").trim().slice(0, 2_000)}`,

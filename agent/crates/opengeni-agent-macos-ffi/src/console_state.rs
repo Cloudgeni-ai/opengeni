@@ -38,6 +38,12 @@ pub struct MacConsoleFacts {
 
 /// Decides what is on screen. Another user's session wins over a lock: what
 /// a person must do then is switch back to this user.
+///
+/// Known limitation: a Screen Sharing session that logs in as a different
+/// user than the one at the physical screen gets its own virtual display and
+/// can be usable, but it is off the console like a switched-away session, so
+/// it is reported as `OtherUser`. No cheap signal that tells the two apart
+/// has been verified.
 #[must_use]
 pub fn console_state(facts: &MacConsoleFacts) -> MacConsoleState {
     let other_owner = facts

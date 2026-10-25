@@ -253,6 +253,7 @@ export class CuaComputerBackend implements ComputerBackend {
 
   validateNative(request: ComputerNativeCallRequest): Promise<void> {
     return this.run(async () => {
+      await this.assertOnScreen(true);
       this.nativeTools ??= new CuaNativeTools(
         this.runtime,
         this.nativeSession,
@@ -263,6 +264,9 @@ export class CuaComputerBackend implements ComputerBackend {
   }
   callNative(request: ComputerNativeCallRequest) {
     return this.run(async () => {
+      // Native tools send input and read windows directly, so they are
+      // checked in full before anything runs, like actions.
+      await this.assertOnScreen(true);
       this.nativeTools ??= new CuaNativeTools(
         this.runtime,
         this.nativeSession,

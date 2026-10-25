@@ -2918,6 +2918,15 @@ describe("CUA desktop boundary", () => {
       await expect(backend.targets()).rejects.toMatchObject(locked);
       await expect(backend.observe(target!.id)).rejects.toMatchObject(locked);
       await expect(backend.validate(command(observation))).rejects.toMatchObject(locked);
+      // Native tools are checked before anything runs too.
+      const native = {
+        operationId: crypto.randomUUID(),
+        tool: "type_text",
+        arguments: { pid: 42, window_id: 1, text: "secret" },
+      };
+      await expect(backend.validateNative(native)).rejects.toMatchObject(locked);
+      await expect(backend.callNative(native)).rejects.toMatchObject(locked);
+      expect(fixture.calls.some((call) => call.name === "type_text")).toBe(false);
       fixture.console = "other_user";
       await expect(backend.targets()).rejects.toMatchObject({
         code: "machine_locked",
