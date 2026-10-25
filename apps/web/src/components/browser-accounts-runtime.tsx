@@ -314,6 +314,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
   supergrokEnabled?: boolean;
   modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   activeEmail: string | null;
+  activeName?: string | null;
   invitation: OrganizationInvitationContinuation | null;
   onComplete: (destination?: OnboardingDestination) => void;
 }) {
@@ -366,6 +367,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
       supergrokEnabled={props.supergrokEnabled}
       modelDefaults={props.modelDefaults ?? null}
       activeEmail={props.activeEmail}
+      activeName={props.activeName ?? null}
       invitation={props.invitation}
       onUseInvitedAccount={useInvitedAccount}
       onUseAnotherAccount={() => authenticate("add")}

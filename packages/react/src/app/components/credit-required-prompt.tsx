@@ -24,7 +24,7 @@ import { useAppContext } from "../app-context";
 import { userErrorText } from "../../ui/api-error";
 import { validTopupAmount } from "../lib/format";
 import { analyticsAction } from "../../ui/analytics-actions";
-import { billingCheckoutReturnUrl, checkoutTabReturnUrl } from "../lib/credit-checkout";
+import { checkoutPageReturnUrl, checkoutTabReturnUrl } from "../lib/credit-checkout";
 import { subscriptionAction } from "../lib/subscription-plans";
 
 const DEFAULT_TOPUP = "25.00";
@@ -36,6 +36,11 @@ type CreditRequiredPromptProps = {
   canBuyCredits: boolean;
   purpose?: "required" | "topup" | undefined;
   onOpenChange: (open: boolean) => void;
+  /**
+   * Runs before this page leaves for checkout, such as saving the composer's
+   * draft now instead of after its autosave pause, so paying keeps it.
+   */
+  beforeLeave?: (() => Promise<unknown>) | undefined;
 };
 
 export function CreditRequiredPrompt(props: CreditRequiredPromptProps) {
@@ -50,6 +55,7 @@ export function CreditRequiredPromptView({
   canBuyCredits,
   purpose = "required",
   onOpenChange,
+  beforeLeave,
 }: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
   const page = usePage();
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
@@ -103,13 +109,17 @@ export function CreditRequiredPromptView({
         amountUsd: Number(topupAmount),
         accountId,
         // Beside an embed, checkout ends on a page that asks to go back to it.
+        // Otherwise it returns to this page (the chat, with its draft), which
+        // confirms the credits.
         successUrl: page.opensBeside
           ? checkoutTabReturnUrl(page.origin(), "success")
-          : billingCheckoutReturnUrl(page.origin(), workspaceId, "success"),
+          : checkoutPageReturnUrl(page.href(), accountId, "success"),
         cancelUrl: page.opensBeside
           ? checkoutTabReturnUrl(page.origin(), "cancelled")
-          : billingCheckoutReturnUrl(page.origin(), workspaceId, "cancelled"),
+          : checkoutPageReturnUrl(page.href(), accountId, "cancelled"),
       });
+      // A failed save (a conflict, a dropped request) doesn't hold up checkout.
+      if (!page.opensBeside) await beforeLeave?.().catch(() => undefined);
       page.assign(session.url);
       // The web app has left for checkout; an embed stays and can buy again.
       if (page.opensBeside) setBusy(false);
@@ -141,7 +151,6 @@ export function CreditRequiredPromptView({
             <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />
             <Button
               type="button"
-              variant={purpose === "topup" ? "default" : "outline"}
               disabled={busy || !validTopupAmount(topupAmount)}
               onClick={() => void buyCredits()}
               {...analyticsAction("buy_credits")}
@@ -151,7 +160,7 @@ export function CreditRequiredPromptView({
               ) : (
                 <CreditCardIcon className="size-4" />
               )}
-              {purpose === "topup" ? "Continue to Stripe" : "Buy credits"}
+              {purpose === "topup" ? "Continue to Stripe" : "Add credits"}
             </Button>
             {accountId ? (
               <div className="border-t border-border pt-3">
@@ -172,7 +181,12 @@ export function CreditRequiredPromptView({
         ) : null}
         {purpose === "required" ? (
           <DialogFooter>
-            <Button asChild type="button">
+            {/* Credits are the main action when they can be bought here. */}
+            <Button
+              asChild
+              type="button"
+              variant={canBuyCredits && stripeEnabled ? "outline" : "default"}
+            >
               <Link
                 to="/workspaces/$workspaceId/organization"
                 params={{ workspaceId }}
@@ -189,7 +203,7 @@ export function CreditRequiredPromptView({
                 ) : (
                   <SparklesIcon className="size-3.5" />
                 )}
-                {canUpgrade ? "View upgrade options" : "Connect a model"}
+                {canUpgrade ? "View upgrade options" : "Use your own provider account"}
               </Link>
             </Button>
           </DialogFooter>
@@ -199,25 +213,38 @@ export function CreditRequiredPromptView({
   );
 }
 
+/**
+ * Before the person types: the selected model is paid with Opengeni credits
+ * and none are left. Says so once, in plain words, with the one action that
+ * fixes it; using your own provider account stays as a quiet second choice.
+ */
 export function EmptyCreditsNotice({
   workspaceId,
   accountId,
   canBuyCredits,
   canReadBilling,
   creditFunding,
+  onAddCredits,
 }: {
   workspaceId: string;
   accountId: string | null;
   canBuyCredits: boolean;
   canReadBilling: boolean;
   creditFunding?: WorkspaceModelCatalogModel["creditFunding"] | undefined;
+  /** Opens the add-credits prompt on this page; without it, Add credits opens billing. */
+  onAddCredits?: (() => void) | undefined;
 }) {
   const client = useAppContext().client;
   const [legacyEmpty, setEmpty] = useState(false);
+  // The balance is positive but this model can't use it (for example free
+  // credit for other models), so "you don't have any" would be untrue. Only
+  // that much is known, so the words claim no more.
+  const [someCredit, setSomeCredit] = useState(false);
   const [stripeEnabled, setStripeEnabled] = useState(false);
 
   useEffect(() => {
     setEmpty(false);
+    setSomeCredit(false);
     setStripeEnabled(false);
     if (!accountId || !canReadBilling) return;
     let active = true;
@@ -226,11 +253,13 @@ export function EmptyCreditsNotice({
       .then((summary) => {
         if (!active) return;
         setEmpty(summary.mode !== "disabled" && summary.balance.balanceMicros <= 0);
+        setSomeCredit(summary.balance.balanceMicros > 0);
         setStripeEnabled(summary.mode === "stripe");
       })
       .catch(() => {
         if (!active) return;
         setEmpty(false);
+        setSomeCredit(false);
         setStripeEnabled(false);
       });
     return () => {
@@ -242,31 +271,69 @@ export function EmptyCreditsNotice({
     stripeEnabled && (creditFunding === undefined ? legacyEmpty : creditFunding === "unavailable");
   useCreditExposure(empty, workspaceId);
   if (!empty) return null;
+  const canAdd = canBuyCredits && stripeEnabled;
+  const body = someCredit
+    ? canAdd
+      ? "This model can't use the Opengeni credits you have right now. Add credits, or choose another model."
+      : "This model can't use your organization's Opengeni credits right now. Choose another model, or ask an organization owner to add credits."
+    : canAdd
+      ? "Chats here are paid with Opengeni credits, and you don't have any right now."
+      : "Chats here are paid with Opengeni credits, and there are none left. Ask an organization owner to add some.";
   return (
-    <Notice tone="waiting" title="This model uses Opengeni credits">
-      No credits are available for this model. Choose another model or add credits.
-      <div className="mt-2 flex flex-wrap gap-2">
-        {canBuyCredits && stripeEnabled ? (
-          <Button asChild type="button" size="sm" variant="outline">
-            <Link
-              to="/workspaces/$workspaceId/organization"
-              params={{ workspaceId }}
-              search={{ section: "billing" }}
+    <Notice
+      tone="waiting"
+      title={
+        canAdd
+          ? someCredit
+            ? "Add credits to use this model"
+            : "Add credits to start chatting"
+          : someCredit
+            ? "Credits needed for this model"
+            : "No credits left"
+      }
+    >
+      {body}
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+        {canAdd ? (
+          onAddCredits ? (
+            <Button
+              type="button"
+              size="sm"
+              onClick={onAddCredits}
               {...analyticsAction("buy_credits")}
             >
               <CreditCardIcon className="size-3.5" />
-              Buy credits
-            </Link>
-          </Button>
+              Add credits
+            </Button>
+          ) : (
+            <Button asChild type="button" size="sm">
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: "billing" }}
+                {...analyticsAction("buy_credits")}
+              >
+                <CreditCardIcon className="size-3.5" />
+                Add credits
+              </Link>
+            </Button>
+          )
         ) : null}
-        <Button asChild type="button" size="sm">
+        {/* Beside Add credits it is a quiet link, flush with the text when it wraps. */}
+        <Button
+          asChild
+          type="button"
+          size="sm"
+          variant={canAdd ? "link" : "outline"}
+          className={canAdd ? "px-0" : undefined}
+        >
           <Link
             to="/workspaces/$workspaceId/organization"
             params={{ workspaceId }}
             search={{ section: "models", workspace: workspaceId }}
             {...analyticsAction("connect_model")}
           >
-            Connect a model
+            Use your own provider account
           </Link>
         </Button>
       </div>

@@ -21,6 +21,7 @@ export function CreditRefusalNotice({
   canBuyCredits,
   canConnectModel,
   onChooseModel,
+  onAddCredits,
   onDismiss,
 }: {
   gap: FreeCreditGap;
@@ -31,6 +32,8 @@ export function CreditRefusalNotice({
   canConnectModel: boolean;
   /** Select a covered model in the composer. */
   onChooseModel?: ((id: string) => void) | undefined;
+  /** Opens the add-credits prompt on this page; without it, Add credits opens billing. */
+  onAddCredits?: (() => void) | undefined;
   onDismiss?: (() => void) | undefined;
 }) {
   const switchTo = !gap.selectionUsable && onChooseModel ? gap.covered[0] : undefined;
@@ -60,7 +63,18 @@ export function CreditRefusalNotice({
               Use {switchTo.label}
             </Button>
           ) : null}
-          {canBuyCredits ? (
+          {canBuyCredits && onAddCredits ? (
+            <Button
+              type="button"
+              size="sm"
+              variant={switchTo ? "outline" : "default"}
+              onClick={onAddCredits}
+              {...analyticsAction("buy_credits")}
+            >
+              <CreditCardIcon className="size-3.5" />
+              Add credits
+            </Button>
+          ) : canBuyCredits ? (
             <Button asChild type="button" size="sm" variant={switchTo ? "outline" : "default"}>
               <Link
                 to="/workspaces/$workspaceId/organization"
@@ -69,7 +83,7 @@ export function CreditRefusalNotice({
                 {...analyticsAction("buy_credits")}
               >
                 <CreditCardIcon className="size-3.5" />
-                Buy credits
+                Add credits
               </Link>
             </Button>
           ) : null}
@@ -81,7 +95,7 @@ export function CreditRefusalNotice({
                 search={{ section: "models", workspace: workspaceId }}
                 {...analyticsAction("connect_model")}
               >
-                Connect a model
+                Use your own provider account
               </Link>
             </Button>
           ) : null}

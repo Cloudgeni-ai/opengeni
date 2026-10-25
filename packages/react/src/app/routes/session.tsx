@@ -339,6 +339,12 @@ const LazyCreditRefusalNotice = lazy(() =>
     default: module.CreditRefusalNotice,
   })),
 );
+// Add credits from the chat opens checkout here; paying returns to this chat.
+const LazyCreditTopupPrompt = lazy(() =>
+  import("../components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
+  })),
+);
 
 const LazyAgentConfigurationPanel = lazy(() =>
   import("../components/session/agent-configuration-panel").then(({ AgentConfigurationPanel }) => ({
@@ -3352,6 +3358,24 @@ function SessionChatPane(props: {
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspaceAccountId) &&
     hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
+  const openCreditTopup = canBuyCredits ? () => setCreditTopupOpen(true) : undefined;
+  const creditTopupPrompt =
+    canBuyCredits && workspaceAccountId ? (
+      <Suspense fallback={null}>
+        {creditTopupOpen ? (
+          <LazyCreditTopupPrompt
+            purpose="topup"
+            open
+            workspaceId={props.session.workspaceId}
+            accountId={workspaceAccountId}
+            canBuyCredits
+            onOpenChange={setCreditTopupOpen}
+            beforeLeave={composer.flushDraft}
+          />
+        ) : null}
+      </Suspense>
+    ) : null;
   const canConnectModel = hasWorkspacePermission(
     context.accessContext,
     props.session.workspaceId,
@@ -3385,6 +3409,7 @@ function SessionChatPane(props: {
             onChooseModel={chooseCoveredModel}
             workspaceId={props.session.workspaceId}
             canBuyCredits={canBuyCredits}
+            onAddCredits={openCreditTopup}
             canConnectModel={canConnectModel}
             sandboxRecovery={
               needsSandboxRecoveryCheck(props.session, props.failure.structuralSandboxFailure)
@@ -3470,6 +3495,7 @@ function SessionChatPane(props: {
           canBuyCredits={canBuyCredits}
           canConnectModel={canConnectModel}
           onChooseModel={modelPickerDisabled ? undefined : chooseCoveredModel}
+          onAddCredits={openCreditTopup}
           onDismiss={() => setCreditRefusal(null)}
         />
       </Suspense>
@@ -3503,6 +3529,7 @@ function SessionChatPane(props: {
     Fragment,
     null,
     reviewDetailPane,
+    creditTopupPrompt,
     createElement(
       "div",
       { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },

@@ -107,7 +107,7 @@ test("without covered models it offers credits and a connection, and can be dism
   });
   expect(container.textContent).not.toContain("Your credits cover");
   const links = [...container.querySelectorAll("a")].map((link) => link.textContent);
-  expect(links).toEqual(["Buy credits", "Connect a model"]);
+  expect(links).toEqual(["Add credits", "Use your own provider account"]);
   await act(async () =>
     container.querySelector<HTMLButtonElement>('[aria-label="Dismiss"]')!.click(),
   );
