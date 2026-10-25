@@ -213,9 +213,10 @@ export const ACCESSIBILITY_CHEAP_REBUILD_NODES = 1_000;
 export const ACCESSIBILITY_REBUILD_INTERVAL_MS = 1_000;
 
 /** Why the driver reads a tab's accessibility tree: for an outline the model
- * sees, for a locator or wait ("read", which may be a poll), or for the last
- * look before reporting that a locator found nothing. */
-export type AccessibilityRead = "outline" | "read" | "final";
+ * sees, for a locator or wait ("read", which may be a poll), right after a
+ * locator or wait first missed in an action ("miss"), or for the last look
+ * before reporting that a locator found nothing. */
+export type AccessibilityRead = "outline" | "read" | "miss" | "final";
 
 /**
  * Whether to rebuild Chromium's accessibility tree before a read (see
@@ -227,7 +228,9 @@ export type AccessibilityRead = "outline" | "read" | "final";
  * "not found", and a wait never times out, from a stale tree. Routine reads
  * rebuild only on cheap pages: every outline, the first read of each call or
  * batch action, and polls about once a second. A tab not read yet rebuilds
- * once. The cost is judged by the node count of the tab's last read rather
+ * once. Larger pages also rebuild once when an action's locator or wait first
+ * misses, so a stale tree costs one rebuild there rather than the whole wait.
+ * The cost is judged by the node count of the tab's last read rather
  * than by timing a rebuild: a count does not swing with host load, and every
  * read refreshes it, so a page that grows or shrinks is re-judged at once.
  */
@@ -238,7 +241,7 @@ export function accessibilityRebuildWanted(input: {
   msSinceRebuild: number;
 }): boolean {
   if (input.read === "final" || input.lastNodeCount === null) return true;
-  if (input.lastNodeCount > ACCESSIBILITY_CHEAP_REBUILD_NODES) return false;
+  if (input.lastNodeCount > ACCESSIBILITY_CHEAP_REBUILD_NODES) return input.read === "miss";
   return (
     input.read === "outline" ||
     input.firstReadOfCall ||
@@ -5059,16 +5062,25 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     let pause = 25;
     let entry: CdpAccessibilityEntry;
     let finalAttempt = false;
+    let missed = false;
+    let read: AccessibilityRead = "read";
     for (;;) {
       let found: CdpAccessibilityEntry | null = null;
+      const purpose: AccessibilityRead = finalAttempt ? "final" : read;
+      read = "read";
       try {
-        found = await this.resolveLocator(state, locator, finalAttempt ? "final" : "read");
+        found = await this.resolveLocator(state, locator, purpose);
       } catch (error) {
         const notFound =
           error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found";
         if (locator.kind === "ref" || !notFound || finalAttempt) throw error;
         // Polls may reuse Chromium's tree; "not found" is only reported from
-        // a freshly built one.
+        // a freshly built one, and the first miss looks again at once.
+        if (!missed) {
+          missed = true;
+          read = "miss";
+          continue;
+        }
         if (Date.now() >= deadline) {
           finalAttempt = true;
           continue;
@@ -6575,6 +6587,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const deadline = Date.now() + timeoutMs;
     let pollMs = 0;
     let lookedFinal = false;
+    let locatorPolls = 0;
     while (Date.now() < deadline) {
       const pollStartedAt = Date.now();
       if (action.condition === "load") {
@@ -6603,12 +6616,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           return;
         }
       } else if (action.locator) {
-        // Polls may reuse Chromium's tree; the one expected to be last
-        // before the deadline looks at a freshly built one, once.
+        // Polls may reuse Chromium's tree; the one after the first miss and
+        // the one expected to be last before the deadline look at a freshly
+        // built one, once each.
         const last: boolean = !lookedFinal && pollStartedAt + pollMs + 50 >= deadline;
-        const visible = await this.locatorVisible(state, action.locator, last ? "final" : "read");
+        const visible = await this.locatorVisible(
+          state,
+          action.locator,
+          last ? "final" : locatorPolls === 1 ? "miss" : "read",
+        );
         if (action.condition === "visible" ? visible : !visible) return;
         lookedFinal ||= last;
+        locatorPolls += 1;
         pollMs = Date.now() - pollStartedAt;
       } else {
         throw new InteractionDefiniteDriverError(

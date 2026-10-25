@@ -32,9 +32,12 @@ describe("accessibility rebuild policy", () => {
     expect(wanted("read", small, true)).toBe(true);
     expect(wanted("read", small, false, ACCESSIBILITY_REBUILD_INTERVAL_MS - 1)).toBe(false);
     expect(wanted("read", small, false, ACCESSIBILITY_REBUILD_INTERVAL_MS)).toBe(true);
+    // A miss there is an ordinary poll: the call's first read already rebuilt.
+    expect(wanted("miss", small, false, ACCESSIBILITY_REBUILD_INTERVAL_MS - 1)).toBe(false);
   });
 
-  test("larger pages rebuild only before a failure", () => {
+  test("larger pages rebuild only after a first miss and before a failure", () => {
+    expect(wanted("miss", large)).toBe(true);
     expect(wanted("outline", large)).toBe(false);
     expect(wanted("read", large, true)).toBe(false);
     expect(wanted("read", large, false, 60_000)).toBe(false);

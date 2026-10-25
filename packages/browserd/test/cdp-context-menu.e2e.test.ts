@@ -178,10 +178,11 @@ for (const [index, [variant, html]] of Object.entries(FIXTURES).entries()) {
 }
 
 // On a page too large for routine rebuilds, the outline may miss the
-// late-slotted menu, but a locator for one of its items still finds it: the
-// look before "not found" rebuilds Chromium's tree.
+// late-slotted menu, but a locator for one of its items still finds it at
+// once: its first miss rebuilds Chromium's tree, well before the locator wait
+// would run out.
 e2e(
-  "on a large page a late-slotted menu item is found before locator_not_found",
+  "on a large page a late-slotted menu item is found after its first miss",
   async () => {
     const filler = Array.from(
       { length: 80 },
@@ -234,10 +235,12 @@ e2e(
         button: "right",
         locator: { kind: "role", role: "treeitem", name: "Invoices", exact: true },
       });
+      const startedAt = Date.now();
       observation = await run(observation, {
         type: "click",
         locator: { kind: "role", role: "menuitem", name: "Duplicate", exact: true },
       });
+      expect(Date.now() - startedAt).toBeLessThan(8_000);
       expect(nodes(observation).find((node) => node.name?.startsWith("Last action:"))?.name).toBe(
         "Last action: Duplicate Invoices",
       );
