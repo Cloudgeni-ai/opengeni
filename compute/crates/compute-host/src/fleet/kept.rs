@@ -9,17 +9,21 @@
 //! ends, and the next guard of the service takes it over from the store,
 //! without opening it, which would feed it too.
 //!
-//! A guard is ready only once it sees systemd keep the device
-//! ([`held_by_manager`]).
+//! A guard is ready only once it sees systemd keep the device: once
+//! systemd has dealt with its request ([`Barrier`]) and holds the device
+//! after that ([`held_by_manager`]). systemd holds a descriptor it was
+//! sent for a moment before it decides whether to keep it, so holding it
+//! alone shows nothing.
 
 use std::fs::File;
-use std::io::{self, IoSlice};
+use std::io::{self, IoSlice, PipeReader};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use compute_engine::watchdog::Watchdog;
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::net::{
     AddressFamily, SendAncillaryBuffer, SendAncillaryMessage, SendFlags, SocketAddrUnix,
@@ -87,8 +91,56 @@ pub fn kept(device: &Path, timeout: Duration) -> io::Result<Option<Watchdog>> {
 /// # Errors
 ///
 /// When the message cannot be sent. systemd answers nothing: one that
-/// cannot keep it (the service keeps no store) logs that and drops it.
+/// cannot keep it (the service keeps no store) logs that and closes it;
+/// a [`Barrier`] sent after it shows when systemd has done one or the
+/// other.
 pub fn keep(socket: &str, name: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
+    notify(socket, &format!("FDSTORE=1\nFDNAME={name}\nFDPOLL=0\n"), fd)
+}
+
+/// A barrier sent to systemd (`BARRIER=1`, as `sd_notify_barrier` sends
+/// it): systemd deals with the notifications it is sent in order, and
+/// closes the barrier's descriptor as it deals with it, so once the
+/// barrier has [`passed`](Self::passed), every notification sent before it
+/// has been dealt with: a descriptor systemd was asked to keep is in the
+/// store, or closed.
+#[derive(Debug)]
+pub struct Barrier(PipeReader);
+
+impl Barrier {
+    /// Sends a barrier through systemd's notification socket `socket`.
+    ///
+    /// # Errors
+    ///
+    /// When the message cannot be sent.
+    pub fn send(socket: &str) -> io::Result<Self> {
+        let (reader, writer) = std::io::pipe()?;
+        notify(socket, "BARRIER=1\n", writer.as_fd())?;
+        // Only systemd's end is left, so the pipe hangs up once it closes it.
+        drop(writer);
+        Ok(Self(reader))
+    }
+
+    /// Whether systemd has dealt with the barrier, without waiting.
+    ///
+    /// # Errors
+    ///
+    /// When the pipe cannot be polled.
+    pub fn passed(&self) -> io::Result<bool> {
+        let mut fds = [PollFd::new(&self.0, PollFlags::IN)];
+        let now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        poll(&mut fds, Some(&now))?;
+        Ok(fds[0].revents().intersects(PollFlags::HUP | PollFlags::ERR))
+    }
+}
+
+/// Sends systemd the notification `message` with the descriptor `fd`,
+/// through its notification socket `socket` (a path, or an abstract name
+/// after `@`, as `NOTIFY_SOCKET` gives it).
+fn notify(socket: &str, message: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
     let address = match socket.strip_prefix('@') {
         Some(abstract_name) => SocketAddrUnix::new_abstract_name(abstract_name.as_bytes())?,
         None if socket.starts_with('/') => SocketAddrUnix::new(socket)?,
@@ -105,7 +157,6 @@ pub fn keep(socket: &str, name: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
         SocketFlags::CLOEXEC,
         None,
     )?;
-    let message = format!("FDSTORE=1\nFDNAME={name}\nFDPOLL=0\n");
     let fds = [fd];
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = SendAncillaryBuffer::new(&mut space);
@@ -168,7 +219,6 @@ fn held_by(pid: u32, fd: BorrowedFd<'_>) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use std::io::IoSliceMut;
-    use std::os::fd::AsFd as _;
     use std::os::unix::net::UnixDatagram;
 
     use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
@@ -268,5 +318,40 @@ mod tests {
             child.wait().unwrap();
         }
         assert!(held_by(u32::MAX, file.as_fd()).is_err(), "no such process");
+    }
+
+    /// A barrier passes once systemd has closed what it was sent, not while
+    /// the message waits or systemd holds it.
+    #[test]
+    fn a_barrier_passes_once_systemd_closes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("notify");
+        let systemd = UnixDatagram::bind(&socket).unwrap();
+        let barrier = Barrier::send(socket.to_str().unwrap()).unwrap();
+        assert!(!barrier.passed().unwrap(), "not yet received");
+
+        let mut text = [0_u8; 64];
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = RecvAncillaryBuffer::new(&mut space);
+        let received = recvmsg(
+            &systemd,
+            &mut [IoSliceMut::new(&mut text)],
+            &mut control,
+            RecvFlags::empty(),
+        )
+        .unwrap();
+        assert_eq!(&text[..received.bytes], b"BARRIER=1\n");
+        let fds: Vec<OwnedFd> = control
+            .drain()
+            .filter_map(|message| match message {
+                RecvAncillaryMessage::ScmRights(fds) => Some(fds),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(fds.len(), 1);
+        assert!(!barrier.passed().unwrap(), "received, not yet dealt with");
+        drop(fds);
+        assert!(barrier.passed().unwrap());
     }
 }
