@@ -309,6 +309,48 @@ impl Cgroup {
         Ok(Freezer::parse(asked, &events))
     }
 
+    /// Whether the group's processes are held frozen: the kernel reports
+    /// it frozen, or it or a group above it asks for a freeze (one still
+    /// completing, or one a process leaving the group interrupts, holds
+    /// the rest all the same). A group that does not exist is not.
+    pub fn is_held_frozen(&self) -> io::Result<bool> {
+        let freezer = self.freezer()?;
+        if freezer.empty {
+            return Ok(false);
+        }
+        if freezer.frozen || freezer.asked {
+            return Ok(true);
+        }
+        // Up to the root group, the only one without a freezer of its own.
+        let mut above = self.path.parent();
+        while let Some(group) = above {
+            match fs::read_to_string(group.join("cgroup.freeze")) {
+                Ok(value) if value.trim() == "1" => return Ok(true),
+                Ok(_) => above = group.parent(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
+
+    /// The groups directly inside this one; none if it is gone.
+    pub fn children(&self) -> io::Result<Vec<Self>> {
+        let entries = match fs::read_dir(&self.path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut children = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                children.push(Self::at(entry.path()));
+            }
+        }
+        Ok(children)
+    }
+
     /// Moves process `pid` into the group.
     pub fn add(&self, pid: u32) -> io::Result<()> {
         fs::write(self.path.join("cgroup.procs"), pid.to_string())
@@ -726,6 +768,56 @@ mod tests {
         let empty = Freezer::parse(true, "populated 0\nfrozen 1\n");
         assert!(empty.empty && empty.frozen);
         assert!(Freezer::parse(false, "").empty);
+    }
+
+    /// A group with processes is held frozen once the kernel says it is,
+    /// or while it or a group above it asks for a freeze, even one that
+    /// reads `frozen 0` because a process in it is ending.
+    #[test]
+    fn a_group_is_held_frozen_by_its_own_freeze_or_one_above() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("vms");
+        let vm = parent.join("vm");
+        std::fs::create_dir_all(&vm).unwrap();
+        let set = |path: &Path, freeze: &str, events: &str| {
+            std::fs::write(path.join("cgroup.freeze"), freeze).unwrap();
+            std::fs::write(path.join("cgroup.events"), events).unwrap();
+        };
+        let group = Cgroup::at(&vm);
+        set(&parent, "0", "populated 1\nfrozen 0\n");
+        set(&vm, "0", "populated 1\nfrozen 0\n");
+        assert!(!group.is_held_frozen().unwrap(), "running");
+        set(&parent, "1", "populated 1\nfrozen 0\n");
+        assert!(group.is_held_frozen().unwrap(), "the group above asks");
+        set(&vm, "0", "populated 1\nfrozen 1\n");
+        assert!(group.is_held_frozen().unwrap());
+        set(&parent, "0", "populated 1\nfrozen 0\n");
+        set(&vm, "1", "populated 1\nfrozen 0\n");
+        assert!(
+            group.is_held_frozen().unwrap(),
+            "its own freeze, still completing"
+        );
+        set(&vm, "1", "populated 0\nfrozen 1\n");
+        assert!(!group.is_held_frozen().unwrap(), "nothing left to hold");
+        assert!(!Cgroup::at(parent.join("gone")).is_held_frozen().unwrap());
+
+        let names = |group: &Cgroup| {
+            let mut names: Vec<_> = group
+                .children()
+                .unwrap()
+                .iter()
+                .map(|child| child.path().file_name().unwrap().to_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        std::fs::create_dir(parent.join("other")).unwrap();
+        assert_eq!(
+            names(&Cgroup::at(&parent)),
+            ["other", "vm"],
+            "groups, not files"
+        );
+        assert_eq!(names(&Cgroup::at(parent.join("gone"))), [""; 0]);
     }
 
     #[test]

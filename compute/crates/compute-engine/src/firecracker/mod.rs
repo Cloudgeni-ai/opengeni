@@ -432,8 +432,11 @@ impl Firecracker {
         self.cgroup_of(spec)
             .protect_parent()
             .map_err(|error| format!("protecting the VMs' group: {error}"))?;
-        // Requests reach only this VMM, never a later one at the same path.
-        let api = Api::new(spec.api_socket()).served_by(pid.as_raw_pid());
+        // Requests reach only this VMM, never a later one at the same path,
+        // and wait out the time it is frozen.
+        let api = Api::new(spec.api_socket())
+            .served_by(pid.as_raw_pid())
+            .held_by(self.cgroup_of(spec));
         Ok(FirecrackerVm {
             name: spec.name.clone(),
             process,

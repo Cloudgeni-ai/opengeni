@@ -275,6 +275,47 @@ async fn a_run_state_change_fails_only_when_nothing_changed() {
     assert_eq!(resume(&gone, true).await, Err(ErrorKind::Transient));
 }
 
+/// A VMM frozen with every other VM, by the guard while the host's lease
+/// has run out, cannot answer: its request waits for the thaw instead of
+/// failing, then has its own time again, however long the freeze lasted.
+#[tokio::test]
+async fn time_a_vmm_spends_frozen_does_not_count_toward_its_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let (vms, own) = (dir.path().join("vms"), dir.path().join("vms/vm"));
+    fs::create_dir_all(&own).unwrap();
+    let freeze = |value: &str| fs::write(vms.join("cgroup.freeze"), value).unwrap();
+    freeze("1");
+    fs::write(own.join("cgroup.freeze"), "0").unwrap();
+    // Asked of the group above, with this VM's process ending or not yet
+    // frozen: held all the same.
+    fs::write(own.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(Cgroup::at(&own));
+    let started = std::time::Instant::now();
+    let call = tokio::spawn(async move { api.call("GET", "/", None).await });
+    // Many times its 200 ms deadline.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(!call.is_finished(), "a frozen VMM's request kept waiting");
+    freeze("0");
+    let error = call.await.unwrap().unwrap_err();
+    assert!(matches!(error, ApiError::Timeout(_)), "{error}");
+    let took = started.elapsed();
+    assert!(
+        took >= Duration::from_millis(1_050) && took < Duration::from_secs(3),
+        "after the thaw it had its own time, then failed: {took:?}"
+    );
+
+    // One never frozen fails at its deadline, as before.
+    let (_socket, api) = vmm(Answer::Hang, Answer::Hang);
+    let api = api.held_by(Cgroup::at(&own));
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        api.call("GET", "/", None).await,
+        Err(ApiError::Timeout(_))
+    ));
+    assert!(started.elapsed() < Duration::from_millis(600));
+}
+
 #[test]
 fn boot_pins_the_clock_source_restore_can_correct() {
     assert_eq!(
