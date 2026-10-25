@@ -798,6 +798,52 @@ describe("ogtool CLI", () => {
     }
   });
 
+  test("call reads its arguments from @file and from stdin", async () => {
+    const token = await tokenFile();
+    const mock = codemodeServer();
+    const environment = {
+      OPENGENI_CODEMODE_URL: mock.url,
+      OPENGENI_CODEMODE_TOKEN_FILE: token.path,
+    };
+    try {
+      const path = join(token.root, "large arguments.json");
+      const large = "x".repeat(200_000);
+      await writeFile(path, JSON.stringify({ query: "from-file", padding: large }));
+      const fromFile = await run(["call", "docs.search", `@${path}`], environment);
+      expect(fromFile.exitCode).toBe(0);
+      expect(fromFile.stdout).toContain("from-file");
+
+      const child = Bun.spawn([process.execPath, cliSource, "call", "docs.search", "-"], {
+        env: {
+          ...process.env,
+          OPENGENI_CODEMODE_TOKEN: undefined,
+          OPENGENI_OGTOOL_PACKAGE_SPEC: undefined,
+          ...environment,
+        },
+        stdin: new Blob([JSON.stringify({ query: "from-stdin" })]),
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        child.exited,
+      ]);
+      expect(exitCode).toBe(0);
+      expect(stdout).toContain("from-stdin");
+
+      const before = mock.requests.length;
+      const missing = await run(
+        ["call", "docs.search", `@${join(token.root, "none.json")}`],
+        environment,
+      );
+      expect(missing.exitCode).toBe(1);
+      expect(missing.stderr).toContain("tool arguments file could not be read as UTF-8");
+      expect(mock.requests).toHaveLength(before);
+    } finally {
+      mock.server.stop(true);
+    }
+  });
+
   test("returns a bounded generic HTTP failure", async () => {
     const token = await tokenFile();
     const mock = codemodeServer({ failStatus: 503 });
