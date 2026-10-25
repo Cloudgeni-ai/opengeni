@@ -11,16 +11,24 @@ export type MacWindowQuery = {
   bounds: { x: number; y: number; width: number; height: number };
 };
 
+/** Whether this login session's windows are on the Mac's screen: not while
+ * the screen is locked or shows the login window, nor while another user's
+ * session is on it (see the computer-native `window console` command). */
+export type MacConsoleState = "available" | "locked" | "other_user";
+
 /** What CUA cannot do on macOS: say why a window is not on screen, and bring a
  * minimized window or a hidden app's window back behind the person's front
- * window without activating its app. */
+ * window without activating its app; and say whether this session's windows
+ * are on screen at all. */
 export interface MacWindows {
   presence(windows: readonly MacWindowQuery[]): Promise<MacWindowPresence[]>;
   /** Restores a minimized or hidden window; returns what it was before. */
   restore(window: MacWindowQuery): Promise<MacWindowPresence>;
+  console(): Promise<MacConsoleState>;
 }
 
 const Presence = z.enum(["minimized", "application_hidden", "not_shown", "unknown"]);
+const Console = z.enum(["available", "locked", "other_user"]);
 
 /** The packaged computer-native helper, run once per command. */
 export function computerNativeMacWindows(binaryPath: string): MacWindows {
@@ -35,6 +43,9 @@ export function computerNativeMacWindows(binaryPath: string): MacWindows {
     async restore(window) {
       return z.object({ presence: Presence }).parse(await run(binaryPath, "restore", { window }))
         .presence;
+    },
+    async console() {
+      return z.object({ console: Console }).parse(await run(binaryPath, "console", {})).console;
     },
   };
 }

@@ -105,6 +105,24 @@ extern "C" {
     fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
 }
 
+// `io_registry_entry_t` is a `mach_port_t` (`unsigned int`); the default main
+// port is `MACH_PORT_NULL`.
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IORegistryGetRootEntry(main_port: u32) -> u32;
+    fn IORegistryEntryCreateCFProperty(
+        entry: u32,
+        key: core_foundation::string::CFStringRef,
+        allocator: *const c_void,
+        options: u32,
+    ) -> core_foundation::base::CFTypeRef;
+    fn IOObjectRelease(object: u32) -> i32;
+}
+
+extern "C" {
+    fn getuid() -> u32;
+}
+
 /// Screen Recording preflight (non-prompting).
 pub(super) fn screen_capture_granted() -> bool {
     CGPreflightScreenCaptureAccess()
@@ -133,6 +151,55 @@ pub(super) fn machine_locked() -> Result<bool, MacFfiError> {
         .find(&key)
         .and_then(|value| value.downcast::<CFBoolean>())
         .is_some_and(bool::from))
+}
+
+/// The facts [`crate::console_state`] decides from: this session's
+/// CoreGraphics dictionary, the IORegistry root's `IOConsoleLocked`, and the
+/// owner of `/dev/console`.
+pub(super) fn console_facts() -> Result<crate::MacConsoleFacts, MacFfiError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let raw = unsafe { CGSessionCopyCurrentDictionary() };
+    if raw.is_null() {
+        return Err(MacFfiError::Ffi(
+            "CoreGraphics returned no current login-session state".to_string(),
+        ));
+    }
+    let session: CFDictionary<CFString, CFType> =
+        unsafe { CFDictionary::wrap_under_create_rule(raw) };
+    let flag = |key: &str| {
+        session
+            .find(&CFString::new(key))
+            .and_then(|value| value.downcast::<CFBoolean>())
+            .map(bool::from)
+    };
+    Ok(crate::MacConsoleFacts {
+        session_locked: flag("CGSSessionScreenIsLocked").unwrap_or(false),
+        session_on_console: flag("kCGSSessionOnConsoleKey").unwrap_or(true),
+        console_locked: registry_console_locked(),
+        console_owner: std::fs::metadata("/dev/console")
+            .ok()
+            .map(|metadata| metadata.uid()),
+        user: unsafe { getuid() },
+    })
+}
+
+/// The IORegistry root's `IOConsoleLocked`; false when it cannot be read.
+fn registry_console_locked() -> bool {
+    let root = unsafe { IORegistryGetRootEntry(0) };
+    if root == 0 {
+        return false;
+    }
+    let key = CFString::new("IOConsoleLocked");
+    let value = unsafe {
+        IORegistryEntryCreateCFProperty(root, key.as_concrete_TypeRef(), core::ptr::null(), 0)
+    };
+    unsafe { IOObjectRelease(root) };
+    if value.is_null() {
+        return false;
+    }
+    let value = unsafe { CFType::wrap_under_create_rule(value) };
+    value.downcast::<CFBoolean>().is_some_and(bool::from)
 }
 
 /// Fires the Screen Recording + Accessibility system prompts once.

@@ -16,7 +16,7 @@ async fn main() {
         }
         return;
     }
-    // `window presence|restore`: one-shot window commands, JSON on stdin.
+    // `window presence|restore|console`: one-shot window commands, JSON on stdin.
     let mut arguments = std::env::args().skip(1);
     if arguments.next().as_deref() == Some("window") {
         let command = arguments.next().unwrap_or_default();

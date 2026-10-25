@@ -34,7 +34,8 @@ pub use model::*;
 pub use rpc::{run_native_rpc, NativeRpcServerError, NATIVE_RPC_PROTOCOL_VERSION};
 pub use tree::{RawSemanticNode, SemanticSnapshotIndex};
 pub use window_command::{
-    answer_window_command, run_window_command, WindowBounds, WindowPresence, WindowQuery,
+    answer_window_command, run_window_command, ConsoleState, WindowBounds, WindowNative,
+    WindowPresence, WindowQuery,
 };
 
 /// Opens the native adapter for the current desktop seat.

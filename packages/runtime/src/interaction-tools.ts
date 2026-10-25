@@ -2664,7 +2664,7 @@ export function createInteractionAttemptToolDefinitions(
       return `${opened}\n${computerActionText(launch)}`;
     },
     execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
-      const opened = await withSessionHint(
+      const { unavailable, ...opened } = await withSessionHint(
         "ComputerSession",
         value.computerSessionId,
         "open",
@@ -2672,6 +2672,12 @@ export function createInteractionAttemptToolDefinitions(
           await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
       );
       currentComputer.use(opened.session.id);
+      // Its screen is locked or shows another user's session: nothing on it
+      // can be read, launched, captured or clicked, so say why and do nothing.
+      if (unavailable)
+        return new InteractionExecutionResult(opened, [
+          { type: "text" as const, text: unavailable },
+        ]);
       // The computer is already open. A failed launch or capture must not turn
       // its result into an error the model could answer by opening another
       // computer: the result says what failed instead.
@@ -4305,7 +4311,7 @@ async function openComputer(
   sourceSessionId: string,
   value: z.output<typeof ComputerOpenInput>,
   context: AttemptToolExecutionContext,
-): Promise<z.input<typeof ComputerOpenOutput>> {
+): Promise<z.input<typeof ComputerOpenOutput> & { unavailable?: string }> {
   let session: z.infer<typeof ComputerSession>;
   if (value.computerSessionId) {
     session = await transport.getComputerSession(workspaceId, value.computerSessionId);
@@ -4345,13 +4351,28 @@ async function openComputer(
           })
         ).session;
   }
-  return {
-    session,
-    targets:
-      session.lifecycle === "active"
-        ? (await transport.listComputerTargets(workspaceId, session.id)).targets
-        : [],
-  };
+  if (session.lifecycle !== "active") return { session, targets: [] };
+  try {
+    return {
+      session,
+      targets: (await transport.listComputerTargets(workspaceId, session.id)).targets,
+    };
+  } catch (error) {
+    // 423: the computer is open, but its screen is locked or shows another
+    // user's session, so it has no target to offer until a person acts.
+    if (error instanceof OpenGeniApiError && error.status === 423 && !error.outcomeUnknown)
+      return {
+        session,
+        targets: [],
+        unavailable: lockedScreenText(error.message),
+      };
+    throw error;
+  }
+}
+
+/** The controller's own reason, without the API's status prefix. */
+function lockedScreenText(message: string): string {
+  return boundedErrorMessage(message.replace(/^API 423: /u, "").replace(/ Reference: \S+\.$/u, ""));
 }
 
 /**

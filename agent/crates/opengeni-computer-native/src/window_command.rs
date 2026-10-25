@@ -4,7 +4,9 @@
 //! not on screen, nor bring a minimized window or a hidden app's window back
 //! without activating its app. `computer-native window presence` and
 //! `computer-native window restore` do that natively: JSON in on stdin, JSON
-//! out on stdout.
+//! out on stdout. `computer-native window console` says whether this login
+//! session's windows are on the screen at all: not while it is locked or
+//! another user's session is on it.
 
 use serde::{Deserialize, Serialize};
 
@@ -71,20 +73,54 @@ struct RestoreResponse {
     presence: WindowPresence,
 }
 
-/// Answers one window command. `presence` and `restore` are the native
-/// operations; a window whose presence cannot be read is `unknown`, while a
-/// failed restore fails the command.
+/// Whether this login session's windows are on the Mac's screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleState {
+    /// On screen and unlocked.
+    Available,
+    /// The screen is locked, or shows the login window.
+    Locked,
+    /// Another user's session is on screen.
+    OtherUser,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsoleRequest {}
+
+#[derive(Serialize)]
+struct ConsoleResponse {
+    console: ConsoleState,
+}
+
+/// The native operations a window command runs.
+pub struct WindowNative<P, R, C> {
+    /// Why a window is not on screen.
+    pub presence: P,
+    /// Brings a window back on screen; returns what it was.
+    pub restore: R,
+    /// What is on the Mac's screen.
+    pub console: C,
+}
+
+/// Answers one window command. A window whose presence cannot be read is
+/// `unknown`, while a failed restore or console read fails the command.
 ///
 /// # Errors
 ///
 /// Returns a message for an unknown command, invalid input, or a failed
-/// restore.
-pub fn answer_window_command(
+/// restore or console read.
+pub fn answer_window_command<P, R, C>(
     command: &str,
     input: &str,
-    presence: impl Fn(&WindowQuery) -> Result<WindowPresence, String>,
-    restore: impl Fn(&WindowQuery) -> Result<WindowPresence, String>,
-) -> Result<String, String> {
+    native: &WindowNative<P, R, C>,
+) -> Result<String, String>
+where
+    P: Fn(&WindowQuery) -> Result<WindowPresence, String>,
+    R: Fn(&WindowQuery) -> Result<WindowPresence, String>,
+    C: Fn() -> Result<ConsoleState, String>,
+{
     let invalid = |error: serde_json::Error| format!("invalid window {command} request: {error}");
     let output = match command {
         "presence" => {
@@ -93,14 +129,20 @@ pub fn answer_window_command(
                 presences: request
                     .windows
                     .iter()
-                    .map(|window| presence(window).unwrap_or(WindowPresence::Unknown))
+                    .map(|window| (native.presence)(window).unwrap_or(WindowPresence::Unknown))
                     .collect(),
             })
         }
         "restore" => {
             let request: RestoreRequest = serde_json::from_str(input).map_err(invalid)?;
             serde_json::to_string(&RestoreResponse {
-                presence: restore(&request.window)?,
+                presence: (native.restore)(&request.window)?,
+            })
+        }
+        "console" => {
+            let _: ConsoleRequest = serde_json::from_str(input).map_err(invalid)?;
+            serde_json::to_string(&ConsoleResponse {
+                console: (native.console)()?,
             })
         }
         other => return Err(format!("unknown window command: {other}")),
@@ -114,13 +156,21 @@ pub fn answer_window_command(
 ///
 /// See [`answer_window_command`]; every command fails off macOS.
 pub fn run_window_command(command: &str, input: &str) -> Result<String, String> {
-    answer_window_command(command, input, native::presence, native::restore)
+    answer_window_command(
+        command,
+        input,
+        &WindowNative {
+            presence: native::presence,
+            restore: native::restore,
+            console: native::console,
+        },
+    )
 }
 
 #[cfg(target_os = "macos")]
 mod native {
-    use super::{WindowPresence, WindowQuery};
-    use opengeni_agent_macos_ffi::{MacRect, MacWindowPresence, MacWindowQuery};
+    use super::{ConsoleState, WindowPresence, WindowQuery};
+    use opengeni_agent_macos_ffi::{MacConsoleState, MacRect, MacWindowPresence, MacWindowQuery};
 
     fn query(window: &WindowQuery) -> MacWindowQuery {
         MacWindowQuery {
@@ -155,11 +205,21 @@ mod native {
             .map(presence_of)
             .map_err(|error| error.to_string())
     }
+
+    pub(super) fn console() -> Result<ConsoleState, String> {
+        opengeni_agent_macos_ffi::read_console_state()
+            .map(|state| match state {
+                MacConsoleState::Available => ConsoleState::Available,
+                MacConsoleState::Locked => ConsoleState::Locked,
+                MacConsoleState::OtherUser => ConsoleState::OtherUser,
+            })
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod native {
-    use super::{WindowPresence, WindowQuery};
+    use super::{ConsoleState, WindowPresence, WindowQuery};
 
     #[allow(clippy::unnecessary_wraps)] // Matches the macOS signature.
     pub(super) fn presence(_window: &WindowQuery) -> Result<WindowPresence, String> {
@@ -170,6 +230,11 @@ mod native {
     pub(super) fn restore(_window: &WindowQuery) -> Result<WindowPresence, String> {
         Err("window restore is available only on macOS".to_string())
     }
+
+    #[allow(clippy::unnecessary_wraps)] // Matches the macOS signature.
+    pub(super) fn console() -> Result<ConsoleState, String> {
+        Err("window console is available only on macOS".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +244,24 @@ mod tests {
     const NOTES: &str =
         r#"{"processId":42,"title":"Notes","bounds":{"x":213,"y":77,"width":656,"height":422}}"#;
 
+    type Answer = Result<WindowPresence, String>;
+
+    fn natives(
+        presence: impl Fn(&WindowQuery) -> Answer,
+        restore: impl Fn(&WindowQuery) -> Answer,
+        console: impl Fn() -> Result<ConsoleState, String>,
+    ) -> WindowNative<
+        impl Fn(&WindowQuery) -> Answer,
+        impl Fn(&WindowQuery) -> Answer,
+        impl Fn() -> Result<ConsoleState, String>,
+    > {
+        WindowNative {
+            presence,
+            restore,
+            console,
+        }
+    }
+
     #[test]
     fn presence_reads_each_window_and_an_unreadable_one_is_unknown() {
         let input = format!(
@@ -187,15 +270,18 @@ mod tests {
         let output = answer_window_command(
             "presence",
             &input,
-            |window| {
-                if window.process_id == 42 {
-                    assert_eq!(window.title, "Notes");
-                    Ok(WindowPresence::Minimized)
-                } else {
-                    Err("gone".to_string())
-                }
-            },
-            |_| unreachable!(),
+            &natives(
+                |window| {
+                    if window.process_id == 42 {
+                        assert_eq!(window.title, "Notes");
+                        Ok(WindowPresence::Minimized)
+                    } else {
+                        Err("gone".to_string())
+                    }
+                },
+                |_| unreachable!(),
+                || unreachable!(),
+            ),
         )
         .unwrap();
         assert_eq!(output, r#"{"presences":["minimized","unknown"]}"#);
@@ -207,26 +293,50 @@ mod tests {
         let output = answer_window_command(
             "restore",
             &input,
-            |_| unreachable!(),
-            |_| Ok(WindowPresence::ApplicationHidden),
+            &natives(
+                |_| unreachable!(),
+                |_| Ok(WindowPresence::ApplicationHidden),
+                || unreachable!(),
+            ),
         )
         .unwrap();
         assert_eq!(output, r#"{"presence":"application_hidden"}"#);
         let failed = answer_window_command(
             "restore",
             &input,
-            |_| unreachable!(),
-            |_| Err("not settable".to_string()),
+            &natives(
+                |_| unreachable!(),
+                |_| Err("not settable".to_string()),
+                || unreachable!(),
+            ),
         );
         assert_eq!(failed, Err("not settable".to_string()));
     }
 
     #[test]
+    fn console_reports_what_is_on_screen_and_fails_when_it_cannot_be_read() {
+        let unused = |_: &WindowQuery| -> Answer { unreachable!() };
+        let output = answer_window_command(
+            "console",
+            "{}",
+            &natives(unused, unused, || Ok(ConsoleState::OtherUser)),
+        )
+        .unwrap();
+        assert_eq!(output, r#"{"console":"other_user"}"#);
+        let failed = answer_window_command(
+            "console",
+            "{}",
+            &natives(unused, unused, || Err("no session".to_string())),
+        );
+        assert_eq!(failed, Err("no session".to_string()));
+    }
+
+    #[test]
     fn unknown_commands_and_fields_are_refused() {
         let ignore = |_: &WindowQuery| Ok(WindowPresence::Unknown);
-        assert!(answer_window_command("focus", "{}", ignore, ignore).is_err());
-        assert!(
-            answer_window_command("presence", r#"{"windows":[],"x":1}"#, ignore, ignore).is_err()
-        );
+        let native = natives(ignore, ignore, || Ok(ConsoleState::Available));
+        assert!(answer_window_command("focus", "{}", &native).is_err());
+        assert!(answer_window_command("presence", r#"{"windows":[],"x":1}"#, &native).is_err());
+        assert!(answer_window_command("console", r#"{"x":1}"#, &native).is_err());
     }
 }
