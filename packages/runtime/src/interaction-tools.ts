@@ -3397,7 +3397,7 @@ async function openBrowser(
       resolveProfile
         ? transport.listAttachedBrowsers(workspaceId, { includeDisconnected: false })
         : null,
-      resolveProfile || (value.mode !== "new" && namesMachinePlacement(value.placement))
+      resolveProfile || (value.mode !== "new" && value.placement?.kind === "connected_machine")
         ? // Only a preference here: a failed read must not fail the open.
           readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(() => null)
         : value.mode === "new" || value.placement
@@ -3766,7 +3766,7 @@ async function openComputer(
           }),
       value.mode === "new"
         ? null
-        : namesMachinePlacement(value.placement)
+        : value.placement?.kind === "connected_machine"
           ? // Only a preference here: a failed read must not fail the open.
             readCurrentInteractionPlacement(transport, workspaceId, sourceSessionId).catch(
               () => null,
@@ -3832,21 +3832,18 @@ function compatibleInteractionPlacement(
     // reused, never one left on a machine the chat has since swapped away from.
     return current === null || placementFieldsMatch(candidate, current);
   }
-  // A session on a named machine the chat is not routed to cannot be used
+  // A session on a Connected Machine the chat is not routed to cannot be used
   // from here: the server retires it on contact. Opening a new one instead
-  // returns the error that says how to move the chat to that machine.
-  if (namesMachinePlacement(requested) && current !== null) {
-    if (!placementFieldsMatch(current, requested)) return false;
+  // returns the error that says how to move the chat to that machine. The
+  // chat's own sandbox group stays usable from any route.
+  if (
+    requested.kind === "connected_machine" &&
+    current !== null &&
+    !placementFieldsMatch(current, requested)
+  ) {
+    return false;
   }
   return placementFieldsMatch(candidate, requested);
-}
-
-/** A placement that names one machine (the chat's own sandbox group or a
- * Connected Machine), as opposed to the person's Chrome or a provider. */
-function namesMachinePlacement(
-  placement: z.infer<typeof BrowserOpenPlacement> | undefined,
-): boolean {
-  return placement?.kind === "connected_machine" || placement?.kind === "sandbox_group";
 }
 
 /** The Connected Machine this session runs on now (its sandbox ID), or null on

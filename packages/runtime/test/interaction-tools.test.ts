@@ -6188,4 +6188,57 @@ describe("open reuses only a session on the chat's current machine", () => {
       }
     });
   }
+
+  // The chat's own sandbox group is usable from any route, so a session there
+  // is reused while the chat works on a Connected Machine.
+  test("computer_open naming the chat's own sandbox from a Connected Machine reuses it", async () => {
+    const home = discoveredComputerSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [home] }),
+          createComputerSession: async () => {
+            throw new Error("the home Desktop is reused");
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "sandbox_group", sandboxGroupId: groupId } },
+      context(),
+    );
+    expect((result.structuredContent as { session: ComputerSession }).session.id).toBe(home.id);
+  });
+
+  test("browser_open naming the chat's own sandbox from a Connected Machine reuses it", async () => {
+    const home = discoveredBrowserSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [home] }),
+          getBrowserSession: async () => home,
+          createBrowserSession: async () => {
+            throw new Error("the home browser is reused");
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "sandbox_group", sandboxGroupId: groupId } },
+      context(),
+    );
+    expect((result.structuredContent as { session: BrowserSession }).session.id).toBe(home.id);
+  });
 });
