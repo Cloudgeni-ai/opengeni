@@ -856,6 +856,7 @@ const ComputerOpenInput = z
     mode: z.enum(["reuse_or_create", "new"]).optional(),
     name: z.string().trim().min(1).max(200).optional(),
     placement: InteractionPlacement.optional(),
+    includeScreenshot: z.boolean().optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -2468,13 +2469,13 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Set includeScreenshot=true to also get a still image of the screen in the same call when its visual state matters. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,
     idempotent: true,
     modelText: computerOpenText,
-    execute: async (value, context) => {
+    execute: async ({ includeScreenshot, ...value }, context) => {
       const opened = await openComputer(
         input.transport,
         input.workspaceId,
@@ -2483,7 +2484,45 @@ export function createInteractionAttemptToolDefinitions(
         context,
       );
       currentComputer.use(opened.session.id);
-      return opened;
+      if (!includeScreenshot) return opened;
+      // The computer is already open. A failed capture must not turn its result
+      // into an error the model could answer by opening another computer.
+      const target =
+        opened.targets.find((candidate) => candidate.kind === "screen") ??
+        opened.targets.find((candidate) => candidate.kind === "window");
+      if (!target)
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: "The computer opened, but it has no screen or window to capture a screenshot of.",
+          },
+        ]);
+      try {
+        const frame = await input.transport.captureComputerTarget(
+          input.workspaceId,
+          opened.session.id,
+          target.id,
+        );
+        const image = await compactComputerImage(frame.data, frame.mediaType);
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: `Screenshot of ${target.id}: frameId ${frame.frameId}, ${frame.width}x${frame.height} pixels; use these pixels for pointer coordinates.`,
+          },
+          {
+            type: "image" as const,
+            data: Buffer.from(image.data).toString("base64"),
+            mimeType: image.mimeType,
+          },
+        ]);
+      } catch (error) {
+        return new InteractionExecutionResult(opened, [
+          {
+            type: "text" as const,
+            text: `The computer opened, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
+          },
+        ]);
+      }
     },
   });
 

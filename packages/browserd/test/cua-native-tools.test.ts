@@ -16,6 +16,34 @@ import type { CuaDesktopRuntime } from "../src/cua/wire";
 
 const computerSessionId = randomUUID();
 
+test("every platform catalog comes from the same CUA release as macOS", () => {
+  // Each catalog is generated on its own platform after a CUA pin change. A
+  // catalog left on an older release refuses every call whose result shape
+  // changed, so field names in shared result schemas must agree with macOS.
+  const fieldNames = (schema: unknown, names = new Set<string>()): Set<string> => {
+    if (schema && typeof schema === "object") {
+      for (const [key, value] of Object.entries(schema)) {
+        if (key === "properties" && value && typeof value === "object") {
+          for (const name of Object.keys(value)) names.add(name);
+        }
+        fieldNames(value, names);
+      }
+    }
+    return names;
+  };
+  const mac = new Map(CUA_DESKTOP_TOOLS.map((tool) => [tool.name, tool]));
+  for (const catalog of [CUA_LINUX_DESKTOP_TOOLS, CUA_WINDOWS_DESKTOP_TOOLS]) {
+    const stale = catalog
+      .filter((tool) => mac.has(tool.name))
+      .filter((tool) => {
+        const expected = [...fieldNames(mac.get(tool.name)!.outputSchema)].sort();
+        return [...fieldNames(tool.outputSchema)].sort().join() !== expected.join();
+      })
+      .map((tool) => tool.name);
+    expect(stale).toEqual([]);
+  }
+});
+
 test("Linux native admission uses the Linux release schema without accepting a Mac worker", async () => {
   const runtime: CuaDesktopRuntime = {
     listToolsJson: async () => JSON.stringify({ tools: CUA_LINUX_DESKTOP_TOOLS }),

@@ -2199,12 +2199,25 @@ async function authorizeSourceSession(
 async function parseJsonBody<T>(
   context: Context,
   schema: {
-    safeParse(value: unknown): { success: true; data: T } | { success: false };
+    safeParse(value: unknown):
+      | { success: true; data: T }
+      | {
+          success: false;
+          error: { issues: readonly { path: readonly PropertyKey[]; message: string }[] };
+        };
   },
 ): Promise<T> {
   const value = await context.req.json().catch(() => undefined);
   const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new HTTPException(400, { message: "invalid request body" });
+  if (!parsed.success) {
+    // Name the first rejected field, so a caller (often a model) can correct
+    // that one value instead of guessing which part of the body was wrong.
+    const issue = parsed.error.issues[0];
+    const detail = issue
+      ? `: ${issue.path.length ? `${issue.path.map(String).join(".")}: ` : ""}${issue.message}`
+      : "";
+    throw new HTTPException(400, { message: `invalid request body${detail}`.slice(0, 300) });
+  }
   return parsed.data;
 }
 

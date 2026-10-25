@@ -48,6 +48,7 @@ import {
   type UnindexedRow,
 } from "./projection";
 import type { MacWindowPresence, MacWindows } from "./macos-windows";
+import type { ForegroundResult } from "./windows-foreground";
 
 type Target = {
   native: ComputerBackendTarget;
@@ -189,6 +190,7 @@ export class CuaComputerBackend implements ComputerBackend {
     actionBatches: boolean,
     private readonly launchWindowWaitMs: number,
     private readonly macWindows: MacWindows | null,
+    private readonly frontWindow: ((windowId: number) => Promise<ForegroundResult>) | null,
   ) {
     this.identity = { platform, adapterId: `opengeni.cua.${platform}.v1` };
     this.initialCapabilities = {
@@ -223,6 +225,9 @@ export class CuaComputerBackend implements ComputerBackend {
       /** Native macOS window presence and restore; without it, a window that
        * is not on screen stays unreadable. */
       macWindows?: MacWindows | null;
+      /** Windows: bring a window to the foreground before CUA sends it
+       * pointer or keyboard input (see windows-foreground.ts). */
+      frontWindow?: ((windowId: number) => Promise<ForegroundResult>) | null;
     } = {},
   ): Promise<CuaComputerBackend> {
     try {
@@ -236,6 +241,7 @@ export class CuaComputerBackend implements ComputerBackend {
         options.launchWindowWaitMs ??
           (platform === "macos" ? MACOS_LAUNCH_WINDOW_WAIT_MS : LAUNCH_WINDOW_WAIT_MS),
         platform === "macos" ? (options.macWindows ?? null) : null,
+        platform === "windows" ? (options.frontWindow ?? null) : null,
       );
       await backend.startSession(backend.session);
       return backend;
@@ -270,6 +276,9 @@ export class CuaComputerBackend implements ComputerBackend {
       this.nativeSessionStarted = true;
       this.nativeObservations = true;
       this.observations.clear();
+      const { delivery_mode, window_id } = request.arguments as Record<string, unknown>;
+      if (delivery_mode === "foreground" && typeof window_id === "number")
+        await this.front(window_id);
       return await this.nativeTools.call(request);
     });
   }
@@ -380,6 +389,7 @@ export class CuaComputerBackend implements ComputerBackend {
       this.observations.delete(command.targetId);
       const acted = await this.target(command.targetId);
       const known = new Set(this.targetsById.keys());
+      if (operations.some(inForeground)) await this.front(acted.windowId);
       let report = "";
       for (let index = 0; index < operations.length; index++) {
         const operation = operations[index]!;
@@ -631,6 +641,7 @@ export class CuaComputerBackend implements ComputerBackend {
     this.observations.delete(command.targetId);
     const acted = await this.target(command.targetId);
     const known = new Set(this.targetsById.keys());
+    if (steps.some(inForeground)) await this.front(acted.windowId);
     let report = "";
     let stopped: { step: number; outcome: Extract<RunStepsOutcome, { kind: "stopped" }> } | null =
       null;
@@ -2210,6 +2221,26 @@ export class CuaComputerBackend implements ComputerBackend {
   private inputDelivery(): "foreground" | "background" {
     return this.identity.platform === "macos" ? "background" : "foreground";
   }
+
+  /** Windows sends foreground input to whichever window is in front, so the
+   * window is brought there first, past a Start menu or Search left open,
+   * and the input is refused, with nothing sent, while Windows keeps another
+   * window in front. */
+  private async front(windowId: number): Promise<void> {
+    if (!this.frontWindow) return;
+    const fronted = await this.frontWindow(windowId);
+    if (!fronted.front)
+      throw new ComputerBackendError(
+        "unavailable",
+        `Windows kept ${fronted.inFront} in front and would not bring this window forward, so no input was sent. Close or dismiss that window first, then try again`,
+        false,
+        false,
+      );
+  }
+}
+
+function inForeground(operation: Operation): boolean {
+  return operation.args.delivery_mode === "foreground";
 }
 
 const RECENT_OBSERVATIONS = 4;

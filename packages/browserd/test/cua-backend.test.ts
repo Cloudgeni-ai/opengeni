@@ -866,6 +866,69 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("Windows brings the window to the front before foreground input, and sends nothing when Windows refuses", async () => {
+    const fixture = new WindowsFixture();
+    const fronted: number[] = [];
+    let refuse = false;
+    const backend = await CuaComputerBackend.open(fixture, "windows", {
+      frontWindow: async (windowId) => {
+        fronted.push(windowId);
+        fixture.calls.push({ name: "(front)", args: { windowId } });
+        return refuse ? { front: false, inFront: '"Search" (SearchHost)' } : { front: true };
+      },
+    });
+    try {
+      const target = (await backend.targets())[0]!;
+      await backend.dispatch({
+        ...command(await backend.observe(target.id)),
+        action: { type: "keyboard", action: "type", value: "Hello" },
+      });
+      const names = fixture.calls.map((call) => call.name);
+      expect(names.indexOf("(front)")).toBeGreaterThan(-1);
+      expect(names.indexOf("(front)")).toBeLessThan(names.indexOf("type_text"));
+      expect(fronted).toEqual([1]);
+      // Accessibility actions stay in the background: nothing is fronted.
+      await backend.dispatch(command(await backend.observe(target.id)));
+      expect(fronted).toEqual([1]);
+      refuse = true;
+      const typed = fixture.calls.filter((call) => call.name === "type_text").length;
+      await expect(
+        backend.dispatch({
+          ...command(await backend.observe(target.id)),
+          action: { type: "keyboard", action: "type", value: "Refused" },
+        }),
+      ).rejects.toMatchObject({
+        code: "unavailable",
+        dispatched: false,
+        message:
+          'Windows kept "Search" (SearchHost) in front and would not bring this window forward, so no input was sent. Close or dismiss that window first, then try again',
+      });
+      expect(fixture.calls.filter((call) => call.name === "type_text")).toHaveLength(typed);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("Windows CUA's refusal to act on a window that is not in front is a plain definite failure", async () => {
+    const runtime: CuaDesktopRuntime = {
+      callTool: async () => ({
+        text: "foreground_unavailable: Windows did not confirm exact target HWND 0x101ca for text delivery within 500 ms (actual foreground HWND 0x30130). Windows refused the foreground change, usually because another window holds the foreground lock; no input was sent.",
+        images: [],
+        isError: true,
+        degraded: false,
+        rawJson: "{}",
+      }),
+      shutdown: async () => undefined,
+    };
+    await expect(callDesktop(runtime, "type_text", { text: "x" }, true)).rejects.toMatchObject({
+      code: "unavailable",
+      dispatched: false,
+      retryable: true,
+      message:
+        "Windows did not keep this window in front for the input, so no input was sent; try again",
+    });
+  });
+
   test("Windows capture requires exact native publication, including failed-image envelopes", async () => {
     for (const change of [
       { capture_id: undefined },
