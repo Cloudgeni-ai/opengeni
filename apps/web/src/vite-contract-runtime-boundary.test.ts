@@ -51,6 +51,7 @@ describe("web contract runtime chunk boundary", () => {
       for (const relative of [
         "node_modules/zod/v4/core/index.js",
         "node_modules/.bun/zod@4.4.3/node_modules/zod/v4/core/index.js",
+        "packages/contracts/src/define-schema.ts",
         "packages/contracts/src/skills.ts",
         "packages/contracts/src/permissions.ts",
       ]) {
