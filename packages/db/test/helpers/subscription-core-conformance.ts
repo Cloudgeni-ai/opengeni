@@ -1078,6 +1078,12 @@ export function describeSubscriptionCoreConformance<Credential>(
    * answers with a refresh is retried once on the same connection, with the
    * same replies scripted for the renewed credential unless the refusal is
    * one the refresh cures (`survivesRefresh: false`).
+   *
+   * Only the transport call is classified: a failure of the settlement or of
+   * its assertions is the suite's own and surfaces as itself. An unclassified
+   * transport failure is an unknown outcome only when the script lost the
+   * connection; any other one (a refused or reset socket, a body that is not
+   * the upstream's) is a harness fault and fails the call with its cause.
    */
   async function callUpstream(
     turn: Turn,
@@ -1118,45 +1124,75 @@ export function describeSubscriptionCoreConformance<Credential>(
         attemptId: turn.attemptId,
         executionGeneration: turn.executionGeneration,
       };
+      let failure: { error: unknown } | null = null;
       try {
         await subject.upstream.complete(credential, model.upstreamModelId);
+      } catch (error) {
+        failure = { error };
+      }
+      if (failure === null) {
         await requests.settleSubscriptionCoreRequest(db(), turn.identity, lease, {
           ...request,
           outcome: "response_received",
         });
         expect(await requestOutcome(operationId)).toBe("response_received");
         return null;
-      } catch (error) {
-        const outcome = subject.upstream.classify(error, now, turn.productModelId);
-        const settled = await subscriptionCoreSettlement(provider).settleSubscriptionCoreOutcome(
-          db(),
-          settings,
-          turn.identity,
-          lease,
-          {
-            outcome,
-            refreshGeneration: loaded.credential.refreshGeneration,
-            credential,
-            refreshed,
-            request,
-            now,
-          },
-        );
-        if (outcome === null) {
-          expect(settled).toEqual({ kind: "no_failover" });
-          expect(await requestOutcome(operationId)).toBe("unknown");
-          return "unknown_outcome";
-        }
-        if (settled.kind === "retry_same_connection" && !refreshed) continue;
-        if (settled.kind === "settled") {
-          expect(settled).toEqual({ kind: "settled", receipt: true, health: true });
-          expect(await requestOutcome(operationId)).toBe("refused");
-        } else {
-          expect(settled).toEqual({ kind: "no_failover" });
-        }
-        return outcome;
       }
+      const outcome = subject.upstream.classify(failure.error, now, turn.productModelId);
+      const settled = await subscriptionCoreSettlement(provider).settleSubscriptionCoreOutcome(
+        db(),
+        settings,
+        turn.identity,
+        lease,
+        {
+          outcome,
+          refreshGeneration: loaded.credential.refreshGeneration,
+          credential,
+          refreshed,
+          request,
+          now,
+        },
+      );
+      if (outcome === null) {
+        expect(settled).toEqual({ kind: "no_failover" });
+        expect(await requestOutcome(operationId)).toBe("unknown");
+        if (!replies.some((reply) => reply.kind === "connection_lost")) {
+          throw new Error(
+            `the scripted upstream call failed without a scripted lost connection: ${describeError(failure.error)}`,
+            { cause: failure.error },
+          );
+        }
+        return "unknown_outcome";
+      }
+      if (settled.kind === "retry_same_connection" && !refreshed) continue;
+      if (settled.kind === "settled") {
+        expect(settled).toEqual({ kind: "settled", receipt: true, health: true });
+        expect(await requestOutcome(operationId)).toBe("refused");
+      } else {
+        expect(settled).toEqual({ kind: "no_failover" });
+      }
+      return outcome;
     }
+  }
+
+  /** An error's name, code and message (and its cause's), for a failure message. */
+  function describeError(error: unknown): string {
+    const parts: string[] = [];
+    for (let current: unknown = error, depth = 0; current !== undefined && depth < 3; depth += 1) {
+      if (current === null || typeof current !== "object") {
+        parts.push(String(current));
+        break;
+      }
+      const { name, code, message, cause } = current as {
+        name?: unknown;
+        code?: unknown;
+        message?: unknown;
+        cause?: unknown;
+      };
+      parts.push([name, code, message].filter((part) => part !== undefined).map(String).join(" "));
+      current = cause;
+    }
+    return parts.join(" <- ");
   }
 
   async function requestOutcome(operationId: string): Promise<string | null> {
