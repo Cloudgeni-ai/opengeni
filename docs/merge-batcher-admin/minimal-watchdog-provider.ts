@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { off } from "./off";
+import { off, resumeOff } from "./off";
 import { tick } from "./minimal-watchdog";
 
 type Cloud = {
@@ -37,6 +37,7 @@ export type Dependencies = {
     expectedPlanSha256?: string,
   ): Promise<void>;
   request: typeof fetch;
+  resumeOff?: Dependencies["off"];
   now(): number;
   record(event: unknown): void;
 };
@@ -44,6 +45,7 @@ const defaults: Dependencies = {
   read: (path) => readFile(path, "utf8"),
   loadCloud: (path) => import(path),
   off,
+  resumeOff,
   request: fetch,
   now: Date.now,
   record: (event) => console.log(JSON.stringify(event)),
@@ -142,6 +144,17 @@ export async function run(config: Configuration, deps = defaults): Promise<strin
         config.planSha256,
       );
     },
+    ...(deps.resumeOff
+      ? {
+          resumeOff: () =>
+            deps.resumeOff!(
+              config.adminDirectory,
+              "--apply-after-go",
+              config.contractSha256,
+              config.planSha256,
+            ),
+        }
+      : {}),
     async record(event) {
       deps.record({ event: "minimal-watchdog", ...event, planSha256: config.planSha256 });
     },

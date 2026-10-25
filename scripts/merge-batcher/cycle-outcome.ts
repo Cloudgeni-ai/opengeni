@@ -5,6 +5,9 @@ import { ReadUnavailable } from "./read-retry";
 // durable effect journal or the supervisor's prior unknown-outcome checkpoint.
 const cycles = new AsyncLocalStorage<{ writes: Set<string>; durable: Set<string> }>();
 const deferred = new WeakSet<object>();
+function deferrable(error: unknown): error is Error {
+  return error instanceof ReadUnavailable;
+}
 export const OBSERVATION_DEFERRED_EXIT = 75;
 export function writeAttempted(key: string): void {
   cycles.getStore()?.writes.add(key);
@@ -17,7 +20,7 @@ export function observeDurableUncertainty(ids: string[]): void {
   if (cycle) cycle.durable = new Set(ids);
 }
 export function observationDeferred(error: unknown): boolean {
-  return error instanceof ReadUnavailable && deferred.has(error);
+  return deferrable(error) && deferred.has(error);
 }
 export async function observeCycle<T>(step: () => Promise<T>): Promise<T> {
   return cycles.run({ writes: new Set(), durable: new Set() }, async () => {
@@ -25,8 +28,8 @@ export async function observeCycle<T>(step: () => Promise<T>): Promise<T> {
       return await step();
     } catch (error) {
       const state = cycles.getStore()!;
-      if (error instanceof ReadUnavailable) deferred.delete(error);
-      if (error instanceof ReadUnavailable && state.writes.size === 0 && state.durable.size === 0)
+      if (deferrable(error)) deferred.delete(error);
+      if (deferrable(error) && state.writes.size === 0 && state.durable.size === 0)
         deferred.add(error);
       throw error;
     }

@@ -39,7 +39,6 @@ export type Effect =
   | { kind: "park"; number: number; body: string; key: string };
 export interface Transaction {
   expectedState: string | null;
-  nextState: string;
   expectedLedger: Ledger;
   nextLedger: Ledger;
   now: string;
@@ -404,10 +403,8 @@ export class Controller {
               this.clock().toISOString();
         }
         ledger = this.executor?.prepareLedger?.(ledger, effect, observation.now) ?? ledger;
-        const nextState = await this.git.stateCommit(ledger, observation.stateSha, observation.now);
         await this.executor!.transact({
           expectedState: observation.stateSha,
-          nextState,
           expectedLedger: observation.ledger,
           nextLedger: ledger,
           now: observation.now,
@@ -483,15 +480,16 @@ export class FencedGitExecutor implements Executor {
     requireActiveCapabilities(this.capabilities);
     if (t.effect.kind === "land" && t.effect.headRefresh)
       throw new Error("This adapter does not implement verified head refresh landing");
-    if (t.nextLedger.epoch !== t.expectedLedger.epoch + 1 || t.nextState === t.expectedState)
+    if (t.nextLedger.epoch !== t.expectedLedger.epoch + 1)
       throw new Error("Invalid fence transition");
     if (
       t.expectedLedger.owner !== t.nextLedger.owner &&
       Date.parse(t.expectedLedger.expiresAt) > Date.parse(t.now)
     )
       throw new Error("Live lease cannot be stolen");
+    const nextState = await this.writer.git.stateCommit(t.nextLedger, t.expectedState, t.now);
     const updates: RefUpdate[] = [
-      { ref: this.writer.stateRef, expected: t.expectedState, next: t.nextState },
+      { ref: this.writer.stateRef, expected: t.expectedState, next: nextState },
     ];
     if (t.effect.kind === "publish")
       updates.push({
