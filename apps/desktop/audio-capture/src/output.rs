@@ -30,7 +30,7 @@ pub enum Event<'a> {
     },
 }
 
-fn json_string(value: &str) -> String {
+pub fn json_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('"');
     for character in value.chars() {

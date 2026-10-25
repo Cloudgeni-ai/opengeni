@@ -37,6 +37,8 @@ export type DesktopCapability =
   | "updates"
   /** Record the audio other apps play (a meeting's other participants) as its own track. */
   | "systemAudio"
+  /** Notice when a call app starts using the microphone, and offer to record the meeting. */
+  | "meetingDetection"
   /** What Opengeni may do on this computer: switches the app enforces, and the microphone. */
   | "computerCapabilities";
 
@@ -57,6 +59,26 @@ export interface DesktopSystemAudioError {
   /** Technical detail for logs. */
   detail?: string;
 }
+
+/** Call detection as the web app shows it in settings. */
+export interface DesktopMeetingDetectionStatus {
+  /** The person's switch: offer to record when a call starts. */
+  enabled: boolean;
+  /** This computer, its OS version and this app build can tell when a call starts. */
+  available: boolean;
+  /** Why detection isn't working right now, in a sentence for its row. */
+  problem?: string;
+}
+
+/**
+ * What the person chose on one of the app's meeting notifications: record the
+ * call an app just started, or stop recording because the call ended. `app`
+ * is the call app's name ("Zoom", "Google Chrome"); `title` suggests a name
+ * for the meeting.
+ */
+export type DesktopMeetingRequest =
+  | { kind: "record"; app: string; title: string }
+  | { kind: "stop"; app: string };
 
 /**
  * The app's own updates as the web app shows them. `downloading` means a new
@@ -359,6 +381,28 @@ export interface DesktopBridge {
       listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
     ): Unsubscribe;
   };
+  /**
+   * Call detection. With the `meetingDetection` capability. While on, the
+   * app shows a notification when a call app (Zoom, Teams, Slack, Meet in a
+   * browser) starts using the microphone, and another when the call it is
+   * recording ends.
+   */
+  readonly meetingDetection?: {
+    status(): Promise<DesktopMeetingDetectionStatus>;
+    update(change: { enabled?: boolean }): Promise<DesktopMeetingDetectionStatus>;
+    /**
+     * Tell the app whether this page is recording a meeting, so it doesn't
+     * offer to record another and can offer to stop when the call ends.
+     */
+    setRecording(recording: boolean): void;
+    /**
+     * The person chose a notification's action. The window comes to the
+     * front first. Only the newest listener receives them.
+     */
+    onRequest(listener: (request: DesktopMeetingRequest) => void): Unsubscribe;
+    /** The switch or its state changed. */
+    onChange(listener: () => void): Unsubscribe;
+  };
   /** What Opengeni may do on this computer. With the `computerCapabilities` capability. */
   readonly computerCapabilities?: {
     status(): Promise<DesktopComputerCapabilities>;
@@ -422,6 +466,11 @@ export const DESKTOP_IPC = {
   systemAudioStop: "og:system-audio:stop",
   systemAudioSamples: "og:system-audio:samples",
   systemAudioEnded: "og:system-audio:ended",
+  meetingDetectionStatus: "og:meeting-detection:status",
+  meetingDetectionUpdate: "og:meeting-detection:update",
+  meetingDetectionRecording: "og:meeting-detection:recording",
+  meetingDetectionRequest: "og:meeting-detection:request",
+  meetingDetectionChanged: "og:meeting-detection:changed",
   capabilitiesStatus: "og:capabilities:status",
   capabilitiesUpdate: "og:capabilities:update",
   capabilitiesRequestMicrophone: "og:capabilities:request-microphone",

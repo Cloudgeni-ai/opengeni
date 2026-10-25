@@ -10,10 +10,13 @@
 //! - `{"event":"stopped","droppedSamples":0}`
 //!
 //! It stops when stdin closes, so it never outlives the app that started it.
+//! `--watch-microphone` instead reports which apps use a microphone, for call
+//! detection; see the microphone module.
 //! Options: `--exclude-pid <pid>` (repeatable) leaves out a process and, where
 //! the platform supports it, its children; `--exclude-bundle-prefix <id>`
 //! (macOS) leaves out every process whose bundle id starts with it.
 
+mod microphone;
 mod output;
 
 #[cfg(target_os = "linux")]
@@ -115,6 +118,9 @@ fn start(options: &Options, sink: Sink) -> Result<Capture, CaptureError> {
 }
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--watch-microphone") {
+        return microphone::watch();
+    }
     let options = match parse_options(std::env::args().skip(1)) {
         Ok(options) => options,
         Err(error) => {

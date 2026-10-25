@@ -371,6 +371,7 @@ export function RecorderPanel({
   onStopped,
   liveTranscript = null,
   defaultLanguage = null,
+  autoStart = null,
 }: {
   /** Null while the capture code loads. */
   recorder: MeetingRecorder | null;
@@ -380,6 +381,12 @@ export function RecorderPanel({
   liveTranscript?: { defaultOn: boolean; usdPerHour?: number | null } | null;
   /** The workspace's meeting language; null detects it. */
   defaultLanguage?: string | null | undefined;
+  /**
+   * Start recording as soon as the recorder is ready, with this panel's
+   * defaults, as a desktop call notification asked. `take` returns the
+   * request once, so it starts one recording.
+   */
+  autoStart?: { pending: boolean; take: () => { title: string } | null } | null;
 }) {
   const titleId = useId();
   const tabAudioId = useId();
@@ -398,6 +405,28 @@ export function RecorderPanel({
   const online = useOnline();
   const state = recorder?.state ?? "idle";
   const live = state === "recording" || state === "paused" || state === "stopping";
+
+  const start = async (titleText: string = title) => {
+    if (!recorder) return;
+    setErrorDismissed(false);
+    await recorder.start({
+      ...(titleText.trim() ? { title: titleText.trim() } : {}),
+      systemAudio: tabAudio,
+      ...(liveOn ? { liveTranscript: true } : {}),
+      // Sent even when it's the workspace's, so this meeting keeps it.
+      transcription: { language: language === DETECT_LANGUAGE ? null : language },
+    });
+  };
+  const autoStartReady = Boolean(autoStart?.pending && recorder?.supported && state === "idle");
+  const startRef = useRef(start);
+  startRef.current = start;
+  useEffect(() => {
+    if (!autoStartReady) return;
+    const request = autoStart?.take();
+    if (!request) return;
+    setTitle(request.title);
+    void startRef.current(request.title);
+  }, [autoStart, autoStartReady]);
 
   if (recorder && !recorder.supported) {
     return (
@@ -516,17 +545,6 @@ export function RecorderPanel({
     tabAudio,
     systemAudioSupported: Boolean(recorder?.systemAudioSupported),
   });
-  const start = async () => {
-    if (!recorder) return;
-    setErrorDismissed(false);
-    await recorder.start({
-      ...(title.trim() ? { title: title.trim() } : {}),
-      systemAudio: tabAudio,
-      ...(liveOn ? { liveTranscript: true } : {}),
-      // Sent even when it's the workspace's, so this meeting keeps it.
-      transcription: { language: language === DETECT_LANGUAGE ? null : language },
-    });
-  };
   return (
     <section aria-label="New recording" className="grid gap-3">
       <form
