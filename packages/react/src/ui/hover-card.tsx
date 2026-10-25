@@ -9,20 +9,21 @@ import { containedPortal } from "./portal-container";
 
 const HoverCardContainedPortal = containedPortal(HoverCardPrimitive.Portal);
 
-function HoverCard({ ...props }: React.ComponentProps<typeof HoverCardPrimitive.Root>) {
+function HoverCard({ ...props }: React.ComponentPropsWithoutRef<typeof HoverCardPrimitive.Root>) {
   return <HoverCardPrimitive.Root data-slot="hover-card" {...props} />;
 }
 
-function HoverCardTrigger({ ...props }: React.ComponentProps<typeof HoverCardPrimitive.Trigger>) {
-  return <HoverCardPrimitive.Trigger data-slot="hover-card-trigger" {...props} />;
-}
+const HoverCardTrigger = /* @__PURE__ */ React.forwardRef<
+  React.ComponentRef<typeof HoverCardPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof HoverCardPrimitive.Trigger>
+>(function HoverCardTrigger({ ...props }, ref) {
+  return <HoverCardPrimitive.Trigger data-slot="hover-card-trigger" ref={ref} {...props} />;
+});
 
-function HoverCardContent({
-  className,
-  align = "start",
-  sideOffset = 6,
-  ...props
-}: React.ComponentProps<typeof HoverCardPrimitive.Content>) {
+const HoverCardContent = /* @__PURE__ */ React.forwardRef<
+  React.ComponentRef<typeof HoverCardPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof HoverCardPrimitive.Content>
+>(function HoverCardContent({ className, align = "start", sideOffset = 6, ...props }, ref) {
   return (
     <HoverCardContainedPortal>
       <HoverCardPrimitive.Content
@@ -34,10 +35,11 @@ function HoverCardContent({
           "z-50 w-72 origin-(--radix-hover-card-content-transform-origin) p-3 outline-hidden data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
           className,
         )}
+        ref={ref}
         {...props}
       />
     </HoverCardContainedPortal>
   );
-}
+});
 
 export { HoverCard, HoverCardContent, HoverCardTrigger };

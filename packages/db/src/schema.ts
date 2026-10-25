@@ -139,12 +139,20 @@ export const organizationIntegrationPolicies = pgTable(
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     mode: text("mode").$type<"unrestricted" | "restricted">().notNull(),
     allowedIntegrationKeys: jsonb("allowed_integration_keys").$type<string[]>().notNull(),
+    personalIntegrationSetup: text("personal_integration_setup")
+      .$type<"members" | "admins">()
+      .notNull()
+      .default("members"),
     revision: bigint("revision", { mode: "number" }).notNull(),
   },
   (table) => ({
     modeCheck: check(
       "organization_integration_policies_mode_check",
       sql`${table.mode} in ('unrestricted', 'restricted')`,
+    ),
+    personalIntegrationSetupCheck: check(
+      "organization_integration_policies_personal_setup_check",
+      sql`${table.personalIntegrationSetup} in ('members', 'admins')`,
     ),
     keysCheck: check(
       "organization_integration_policies_allowed_integration_keys_check",
@@ -4850,6 +4858,10 @@ export const organizationAgentAdminAccess = pgTable("organization_agent_admin_ac
     .primaryKey()
     .references(() => managedAccounts.id, { onDelete: "cascade" }),
   sessionAdminAccessAllowed: boolean("session_admin_access_allowed").notNull().default(false),
+  // 0971: agents in a chat a person started may do app actions for them, each
+  // change after they confirm it in the chat. On unless an owner or admin
+  // turns it off.
+  chatActionsAllowed: boolean("chat_actions_allowed").notNull().default(true),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4893,6 +4905,26 @@ export const sessionAdminAccess = pgTable(
   },
   (table) => [index("session_admin_access_account_idx").on(table.accountId)],
 );
+
+// What one turn's message may do through app actions, frozen when the message
+// is accepted (0971): who sent it, whether they can confirm changes from where
+// they sent it, and at most their own access then. Written once; a turn
+// without a row runs no app actions.
+export const sessionTurnAppActionGrants = pgTable("session_turn_app_action_grants", {
+  turnId: uuid("turn_id")
+    .primaryKey()
+    .references(() => sessionTurns.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id")
+    .notNull()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  subjectId: text("subject_id").notNull(),
+  changes: text("changes").$type<"confirm" | "none">().notNull(),
+  permissions: text("permissions").array().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // One workspace-local short-lived holder per running Codex turn. Selection and
 // insertion happen atomically while codex_rotation_settings is locked FOR
@@ -6611,6 +6643,15 @@ export const imageGenerationOperations = pgTable(
       >()
       .notNull()
       .default("prepared"),
+    /** Opengeni-credit price frozen at admission; zero when credits do not fund it. */
+    pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    /** A priced operation is debited exactly once, when its image is delivered. */
+    creditState: text("credit_state")
+      .$type<"not_applicable" | "pending" | "debited">()
+      .notNull()
+      .default("not_applicable"),
+    /** The turn's canonical chat model whose plan and trial grants may pay. */
+    creditUsageModelId: text("credit_usage_model_id"),
     providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     lastError: text("last_error"),
@@ -6628,6 +6669,9 @@ export const imageGenerationOperations = pgTable(
       table.createdAt,
       table.id,
     ),
+    creditHold: index("image_generation_operations_credit_hold_idx")
+      .on(table.workspaceId, table.providerStartedAt)
+      .where(sql`${table.creditState} = 'pending' and ${table.status} = 'provider_started'`),
     workspaceAccount: foreignKey({
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
@@ -6655,6 +6699,16 @@ export const imageGenerationOperations = pgTable(
       sql`(${table.status} = 'prepared' and ${table.providerStartedAt} is null and ${table.completedAt} is null)
         or (${table.status} in ('provider_started', 'outcome_unknown', 'retention_failed') and ${table.providerStartedAt} is not null and ${table.completedAt} is null)
         or (${table.status} = 'completed' and ${table.providerStartedAt} is not null and ${table.completedAt} is not null)`,
+    ),
+    creditValid: check(
+      "image_generation_operations_credit_chk",
+      sql`(${table.pricedCostMicros} = 0 and ${table.creditState} = 'not_applicable'
+          and ${table.creditUsageModelId} is null)
+        or (${table.pricedCostMicros} between 1 and 1000000000
+          and (${table.creditUsageModelId} is null
+            or octet_length(${table.creditUsageModelId}) between 1 and 256)
+          and ((${table.creditState} = 'pending' and ${table.status} <> 'completed')
+            or (${table.creditState} = 'debited' and ${table.status} = 'completed')))`,
     ),
   }),
 );
@@ -8740,6 +8794,11 @@ export const connectorActionRequests = pgTable(
       .notNull(),
     decision: text("decision").$type<"approve" | "reject">(),
     decisionBySubjectId: text("decision_by_subject_id"),
+    // 0971: how the decider reached the card, and whether they were signed in
+    // where an app-action change may be confirmed: the app itself, or an embed
+    // the deployment opted in (never a key, chat integration or other token).
+    decisionByKind: text("decision_by_kind").$type<"human" | "api" | "agent_attempt" | "system">(),
+    decisionBySignedInPerson: boolean("decision_by_signed_in_person").notNull().default(false),
     decisionEventId: uuid("decision_event_id"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     executionStartedAt: timestamp("execution_started_at", {
@@ -9207,7 +9266,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress', 'secret_use_approval_decided')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress', 'secret_use_approval_decided', 'capability_setup_completed')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",
@@ -15618,6 +15677,10 @@ export const feedbackSubmissions = pgTable(
     sentiment: text("sentiment"),
     comment: losslessText("comment"),
     commentCodecVersion: losslessCodecVersion("comment_codec_version"),
+    /** App and device facts the report was sent with (FeedbackContext). */
+    context: jsonb("context").$type<Record<string, unknown>>(),
+    /** Screenshot metadata in send order (FeedbackScreenshot); bytes are in object storage. */
+    screenshots: jsonb("screenshots").$type<unknown[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

@@ -144,6 +144,23 @@ an init system of its own.
   host kept across a restart is checked against its digest and used
   without asking the store. An E2B
   template id names one of these images.
+- **Images that follow releases.** The service can be told the OCI image,
+  pinned by digest, that a release's sandboxes of an image name start
+  from (`--image-source name=<ref@sha256:…>`). When no stored image was
+  recorded as built from it, a replica asks a live host to build one
+  (`prepare`): the host answers at once, builds in the background, one
+  image at a time, and answers the image's id to every later ask, so no
+  call stays open through a build of minutes. The replica records it,
+  keyed by the OCI image; builds differ byte for byte, so the first
+  recorded is the one every replica, and every later rollout of the same
+  release, uses. New creates of the name then start from it. Until then
+  they start from the image recorded under the name last (the release
+  before's), or the one `--stored-image` names. Each name that uses a
+  source is recorded with it, also when two names share one, so each
+  keeps its own image to start from while its next is built. A rollback
+  finds its release's image recorded already. Existing sandboxes keep the image they
+  were created from; their agent follows agent releases on its own
+  (ADR 21).
 - **What every image gets, for the SDK to work.** The SDK runs commands
   as `/bin/bash -l -c` and starts PTYs with bash, and envd looks users up
   in the image's account files. So the build adds a static bash at

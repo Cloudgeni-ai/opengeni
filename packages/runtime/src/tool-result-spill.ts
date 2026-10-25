@@ -5,7 +5,6 @@ import {
 } from "@opengeni/codex";
 import {
   ToolResultSpilledReceipt,
-  sandboxShellPath,
   type AttemptToolIdentity,
   type AttemptToolResult as AttemptToolResultValue,
   type ToolResultSpilledReceipt as ToolResultSpilledReceiptValue,
@@ -54,18 +53,30 @@ export function modelToolResultOverflowError(): AttemptToolResultValue {
 export function spilledModelToolResult(
   receipt: ToolResultSpilledReceiptValue,
 ): AttemptToolResultValue {
-  // Rematerialization keeps the virtual `/workspace/tool-results/...` path.
-  // The model-visible receipt is cwd-relative so exec_command can open the copy
-  // on a Connected Machine (no `/workspace` directory exists there).
-  const structuredContent = ToolResultSpilledReceipt.parse({
-    ...receipt,
-    sandboxPath: receipt.sandboxPath === null ? null : sandboxShellPath(receipt.sandboxPath),
-  });
+  // `sandboxPath` is where the model's shell can open the copy, as the spill
+  // port resolved it for the turn's placement, or null when there is no copy.
+  const structuredContent = ToolResultSpilledReceipt.parse(receipt);
   return {
     isError: false,
-    content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+    content: [
+      { type: "text", text: JSON.stringify(structuredContent) },
+      { type: "text", text: spilledToolResultGuidance(structuredContent) },
+    ],
     structuredContent,
   };
+}
+
+/** How the model reads a spilled result: the shell copy when there is one,
+ * and otherwise (or when that copy is gone, for example in a later turn on a
+ * new box) the workspace File through the Files download tool, as for
+ * attachments. */
+function spilledToolResultGuidance(receipt: ToolResultSpilledReceiptValue): string {
+  const size = `The result was too large to show (${receipt.byteSize} bytes)`;
+  const read = "read the parts you need, for example with jq, head or grep";
+  const download = `call files__files_get_download_url with fileId ${receipt.fileId} and download it with the shell`;
+  return receipt.sandboxPath === null
+    ? `${size}, so its exact JSON is saved as a workspace file. To read it, ${download}, then ${read}.`
+    : `${size}, so its exact JSON is saved at ${receipt.sandboxPath} where your shell runs. With the shell, ${read}, instead of printing it whole. If the file is not there, ${download}.`;
 }
 
 /** True when the model receives this result as is, without a spill or overflow error. */

@@ -3,6 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { stableAgentVersion } from "../sandbox/agent-release";
 
 // The get.<domain> install-serving routes. These are
 // UNAUTHENTICATED (see http/auth.ts isAuthExempt — the `installExemptPaths` set)
@@ -213,7 +214,7 @@ const VERSION_SEG = /^v[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   const releasesBase = deps.settings.agentReleasesBaseUrl.replace(/\/+$/, "");
-  const stableAgentTag = `agent-v${deps.settings.agentStableVersion}`;
+  const stableVersion = stableAgentVersion(deps.settings);
 
   for (const [path, { file, contentType }] of Object.entries(TEXT_ASSETS)) {
     app.get(path, async (c) => {
@@ -234,10 +235,11 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   // (the Linux musl binary + sidecars that match the control plane exactly),
   // otherwise 302 to the GitHub Release at `redirectUrl` (mac/windows + any
   // un-baked asset). The baked path makes the agent the API enrolls against
-  // identical to the API that serves it — no version skew, no extra hop.
+  // identical to the API that serves it — no version skew, no extra hop. A null
+  // `redirectUrl` (no stable release is known) is a 404, never a guess.
   async function serveAsset(
     asset: string,
-    redirectUrl: string,
+    redirectUrl: string | null,
     allowBaked: boolean,
   ): Promise<Response> {
     const committed = COMMITTED_BINARY_ASSETS[asset];
@@ -268,6 +270,11 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     // Not baked here → the GitHub Release is the source of truth (the public
     // archive + the documented install.sh fallback). 302 so the client refetches.
+    if (!redirectUrl) {
+      throw new HTTPException(404, {
+        message: "no stable agent release is configured (OPENGENI_AGENT_STABLE_VERSION)",
+      });
+    }
     return new Response(null, {
       status: 302,
       headers: { location: redirectUrl },
@@ -285,7 +292,11 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!ASSET_NAME.test(asset)) {
       throw new HTTPException(400, { message: "invalid asset name" });
     }
-    return serveAsset(asset, `${releasesBase}/download/${stableAgentTag}/${asset}`, true);
+    return serveAsset(
+      asset,
+      stableVersion ? `${releasesBase}/download/agent-v${stableVersion}/${asset}` : null,
+      true,
+    );
   });
 
   // Signed self-update channel manifests. Each deployment exposes its own
@@ -293,7 +304,7 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   // public get.opengeni.ai hostname. The manifest and signature are ordinary
   // assets on the selected immutable agent release.
   for (const [channel, version] of [
-    ["stable", deps.settings.agentStableVersion],
+    ["stable", stableVersion],
     ["beta", deps.settings.agentBetaVersion],
   ] as const) {
     app.get(`/agent/${channel}/:manifestAsset`, (c) => {

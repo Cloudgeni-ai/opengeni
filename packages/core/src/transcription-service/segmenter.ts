@@ -20,13 +20,22 @@ export class TranscriptionSegmenterError extends Error {
   }
 }
 
+/** Runs ffmpeg; a host may supply its own to account for what each run costs. */
+export type TranscriptionSegmenterCommandRunner = (
+  command: string,
+  args: string[],
+  signal?: AbortSignal,
+) => Promise<{ exitCode: number | null; stderr: string; spawnError: boolean; cancelled: boolean }>;
+
 export function createFfmpegTranscriptionSegmenter(input: {
   ffmpegPath: string;
+  runCommand?: TranscriptionSegmenterCommandRunner | undefined;
 }): TranscriptionSegmenter {
+  const run = input.runCommand ?? runCommand;
   let availability: Promise<boolean> | null = null;
   return {
     available() {
-      availability ??= commandSucceeds(input.ffmpegPath, ["-version"]);
+      availability ??= commandSucceeds(run, input.ffmpegPath, ["-version"]);
       return availability;
     },
     async *segment(request): AsyncIterable<PreparedTranscriptionSegment> {
@@ -69,7 +78,7 @@ export function createFfmpegTranscriptionSegmenter(input: {
       const outputPattern = join(directory, "segment-%06d.wav");
       try {
         await writeChunks(inputPath, request.chunks, request.signal);
-        const result = await runCommand(
+        const result = await run(
           input.ffmpegPath,
           [
             "-nostdin",
@@ -225,9 +234,13 @@ function extensionForMimeType(mimeType: string): string {
   }
 }
 
-async function commandSucceeds(command: string, args: string[]): Promise<boolean> {
+async function commandSucceeds(
+  run: TranscriptionSegmenterCommandRunner,
+  command: string,
+  args: string[],
+): Promise<boolean> {
   try {
-    const result = await runCommand(command, args);
+    const result = await run(command, args);
     return !result.spawnError && result.exitCode === 0;
   } catch {
     // Some runtimes throw during spawn instead of emitting an error event.

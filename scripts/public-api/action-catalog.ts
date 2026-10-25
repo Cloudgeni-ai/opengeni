@@ -12,9 +12,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../../apps/api/src/app";
 import surface from "./surface.gen.json";
 import { ACTION_SCHEMA_IMPORTS_PATH, renderActionSchemaImports } from "./action-schema-imports";
+import { actionSecretFields } from "./action-secrets";
 
-export type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
-import type { ActionCatalogEntry } from "../../apps/api/src/mcp/action-catalog-types";
+export type { ActionCatalogEntry } from "../../packages/contracts/src/app-action-catalog-types";
+import type { ActionCatalogEntry } from "../../packages/contracts/src/app-action-catalog-types";
 
 /**
  * Routes that are not actions a person takes, each with the reason. Provider
@@ -131,6 +132,49 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
     pattern: /^PUT \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/approval$/,
     request: "SetVaultItemApprovalRequest",
   },
+  { pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults$/, request: "CreateVaultRequest" },
+  {
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId$/,
+    request: "UpdateVaultRequest",
+  },
+  {
+    pattern: /^DELETE \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId$/,
+    request: "DeleteVaultRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/link$/,
+    request: "LinkProviderVaultRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/connections\/:connectionId\/managed-vaults$/,
+    request: "CreateManagedProviderVaultRequest",
+  },
+  {
+    pattern: /^GET \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items$/,
+    request: "ListVaultItemsQuery",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items$/,
+    request: "CreateVaultItemRequest",
+  },
+  {
+    pattern: /^PATCH \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId$/,
+    request: "UpdateVaultItemRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/move$/,
+    request: "MoveVaultItemRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/fields\/:fieldId\/reveal$/,
+    request: "RevealVaultFieldRequest",
+  },
+  {
+    pattern:
+      /^POST \/v1\/workspaces\/:workspaceId\/vaults\/:vaultId\/items\/:itemId\/fields\/:fieldId\/restore$/,
+    request: "RestoreVaultFieldVersionRequest",
+  },
   {
     pattern:
       /^PUT \/v1\/(organizations|workspaces)\/:scopeId\/model-connections\/:kind\/:connectionId\/access$/,
@@ -195,12 +239,43 @@ export const ACTION_REQUEST_SCHEMAS: ReadonlyArray<{ pattern: RegExp; request: s
     pattern: /^PUT \/v1\/workspaces\/:workspaceId\/site-limit-profile$/,
     request: "SiteLimitProfile",
   },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/connections\/1password\/install$/,
+    request: "InstallOnePasswordRequest",
+  },
+  {
+    pattern: /^PUT \/v1\/workspaces\/:workspaceId\/connections\/:connectionId\/1password\/token$/,
+    request: "ReplaceOnePasswordTokenRequest",
+  },
+  {
+    pattern: /^POST \/v1\/workspaces\/:workspaceId\/enrollments\/device\/deny$/,
+    request: "DeviceEnrollmentDenyRequest",
+  },
 ];
 
 function inlineRequestSchemas(method: string, path: string): string[] {
   const key = `${method} ${path}`;
   const match = ACTION_REQUEST_SCHEMAS.find((rule) => rule.pattern.test(key));
   return match ? [match.request] : [];
+}
+
+/**
+ * Response bodies the public surface manifest can't name because the SDK
+ * types them by hand, matched against "METHOD /path". Each names a schema
+ * exported by @opengeni/contracts that describes what the route returns, so
+ * a secret in it (a sign-in code) marks the action.
+ */
+export const ACTION_RESPONSE_SCHEMAS: ReadonlyArray<{ pattern: RegExp; response: string }> = [
+  {
+    pattern: /^POST \/v1\/\w+\/:\w+\/(codex|supergrok)\/connect\/start$/,
+    response: "SubscriptionDeviceSignInStart",
+  },
+];
+
+function inlineResponseSchemas(method: string, path: string): string[] {
+  const key = `${method} ${path}`;
+  const match = ACTION_RESPONSE_SCHEMAS.find((rule) => rule.pattern.test(key));
+  return match ? [match.response] : [];
 }
 
 /**
@@ -279,12 +354,13 @@ export function buildActionCatalog(
       const [method, path] = [key.slice(0, key.indexOf(" ")), key.slice(key.indexOf(" ") + 1)];
       const route = described.get(key);
       const request = route?.request ?? [];
+      const response = route?.response ?? [];
       return {
         method,
         path,
         sdk: route?.sdk ?? [],
         request: request.length > 0 ? request : inlineRequestSchemas(method, path),
-        response: route?.response ?? [],
+        response: response.length > 0 ? response : inlineResponseSchemas(method, path),
       };
     })
     .filter((route) => !isActionCatalogExempt(route.path));
@@ -302,6 +378,7 @@ export function buildActionCatalog(
     .map((route, index) => {
       const name = preferred[index];
       const browserOnly = actionCatalogBrowserOnlyReason(route.method, route.path);
+      const secretFields = actionSecretFields(route);
       return {
         id: name && counts.get(name) === 1 ? name : `${route.method} ${route.path}`,
         method: route.method,
@@ -309,6 +386,7 @@ export function buildActionCatalog(
         request: [...route.request],
         response: [...route.response],
         ...(browserOnly ? { browserOnly } : {}),
+        ...(secretFields.length > 0 ? { secretFields } : {}),
       };
     })
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -316,14 +394,14 @@ export function buildActionCatalog(
 
 export function renderActionCatalog(entries: ActionCatalogEntry[]): string {
   return `// Generated by scripts/public-api/action-catalog.ts from the registered API routes. Do not edit.
-import type { ActionCatalogEntry } from "./action-catalog-types";
+import type { ActionCatalogEntry } from "./app-action-catalog-types";
 
 export const ACTION_CATALOG: readonly ActionCatalogEntry[] = ${JSON.stringify(entries, null, 2)};
 `;
 }
 
 export const ACTION_CATALOG_PATH = new URL(
-  "../../apps/api/src/mcp/action-catalog.gen.ts",
+  "../../packages/contracts/src/app-action-catalog.gen.ts",
   import.meta.url,
 );
 

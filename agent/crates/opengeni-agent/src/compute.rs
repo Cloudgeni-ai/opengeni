@@ -3,10 +3,11 @@
 //! The sandbox's guest init starts `opengeni-agent run --compute <link file>`.
 //! The agent then holds no credential: it dials NATS on a loopback port that
 //! the guest forwards to its host, and the host speaks for it to Opengeni
-//! (the contract is `compute/docs/agent-link.md`, section 2). Everything a
+//! (the contract is `compute/docs/agent-link.md`, section 2). What a
 //! Connected Machine does to stay enrolled (enrollment, credential renewal,
-//! self-update, service installation) is Opengeni compute's job instead; the rest
-//! of the agent is the same code.
+//! service installation) is Opengeni compute's job instead. It updates
+//! itself as a Connected Machine does (see `run_compute`); the rest of the
+//! agent is the same code.
 //!
 //! This module holds the parts of that mode with no runtime around them: the
 //! link file, the relay credential the host sends, and the activity file the

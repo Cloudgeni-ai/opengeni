@@ -126,6 +126,15 @@ pub enum Input {
         /// The reason that ended.
         hold: HoldId,
     },
+    /// Nothing here wants the sandbox awake any more: every hold on it
+    /// ended at once, whatever held it, and so did any wake asked of it,
+    /// even one still retrying, as when its host hands it off awake.
+    /// Counts as activity, as a release does; a hold released later,
+    /// already ended here, changes nothing.
+    LetGo {
+        /// The sandbox.
+        sandbox: SandboxId,
+    },
     /// The sandbox did work on its own while running, such as a build using
     /// its processors or a download moving data. Counts as activity only
     /// while it runs with no step in progress but a checkpoint, which lets
@@ -794,13 +803,8 @@ impl Host {
                 until,
                 priority,
             } => self.hold(now, sandbox, (hold, until), priority, out),
-            Input::Release { sandbox, hold } => {
-                if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
-                    slot.holds.remove(&hold);
-                    slot.touch(now);
-                    self.mark(sandbox);
-                }
-            }
+            Input::Release { sandbox, hold } => self.release(now, sandbox, Some(hold)),
+            Input::LetGo { sandbox } => self.release(now, sandbox, None),
             Input::Busy { sandbox } => self.busy(now, sandbox),
             Input::Finished {
                 sandbox,
@@ -857,6 +861,21 @@ impl Host {
             slot.touch(now);
             slot.requested = Level::Running;
             slot.request_wake(priority, now);
+            self.mark(sandbox);
+        }
+    }
+
+    /// Takes in [`Input::Release`] of `hold`, or [`Input::LetGo`] for
+    /// every hold and any wake asked.
+    fn release(&mut self, now: At, sandbox: SandboxId, hold: Option<HoldId>) {
+        if let Some(slot) = self.sandboxes.get_mut(&sandbox) {
+            if let Some(hold) = hold {
+                slot.holds.remove(&hold);
+            } else {
+                slot.holds.clear();
+                slot.wake = None;
+            }
+            slot.touch(now);
             self.mark(sandbox);
         }
     }

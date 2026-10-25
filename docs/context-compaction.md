@@ -139,6 +139,46 @@ conservative bounded fallback. Inline image bytes or data-URL base64 therefore
 do not grow the text estimate linearly. A data URL inside ordinary textual
 content is still text and receives ordinary text accounting.
 
+## Stored size and image-count triggers
+
+Tokens are not the only thing that grows. Inline screenshots cost a few hundred
+to a few thousand provider tokens each but 100–200 KB of stored JSON, so a long
+browser- or computer-use session can fill the worker's active-history
+materialization guard (15 MiB UTF-8 JSON, 8,192 rows, 131,072 JSON nodes or
+65,536 object properties) after about a hundred images, while still far below
+its token threshold. Two more signals therefore enter the same proactive
+checkpoint path as the token threshold, checked before every model request:
+
+| signal | compacts at | measured |
+| --- | --- | --- |
+| stored active history | 60% of any guard limit (for example 9 MiB) | by PostgreSQL in the read that prepared the turn, plus each row the turn appends, measured in the same insert statement |
+| images in one request | 60% of the route's per-request image limit | by counting image parts in the prepared request |
+
+Per-request image limits: Azure OpenAI Responses 50, Anthropic Messages 100
+for 200k-token-window models and 600 otherwise, OpenAI Responses 1,500. Chat
+Completions routes have no knowable limit and get no image trigger. 60%
+leaves room for the checkpoint request itself and for several more large tool
+results produced before the next request boundary.
+
+These triggers change only *when* a checkpoint happens; the checkpoint is the
+ordinary one (`trigger: "proactive"`). No item is rewritten between ordinary
+requests.
+
+A history that is already over the guard (for example written before these
+triggers existed) is not decoded in full. Turn preparation and compaction read
+a bounded recovery view instead, built in PostgreSQL to fit 60% of every limit:
+base64 data-URL payloads in the oldest items are replaced first (tool results
+before messages, oldest first) with a fixed, content-free note, or with the
+standard omission card for computer screenshots; only if that is not enough
+are the oldest rows left out, starting the view at a message. Raw base64 that
+is not a data URL (encrypted reasoning, signatures) is never touched. Such a
+view is used only to checkpoint, never for ordinary inference, and the
+`session.context.compacted` event records `compactionInputInlinePayloadRowsElided`
+and `compactionInputHistoryRowsOmitted`. Only when even the newest item alone
+cannot fit does a turn fail with `active_history_too_large`; clearing the
+context (`/clear` or `clearSessionContext`) deactivates rows without reading
+them and lets the session continue.
+
 ## Claude request bytes and image-heavy recovery
 
 Request bytes are independent of model context tokens. Claude's Messages API

@@ -313,6 +313,16 @@ pub trait Store: Send + Sync + 'static {
         let _ = (image, path);
         ready(Ok(false))
     }
+
+    /// Stores the sandbox image file at `path` (ADR 19) and returns the
+    /// id creates name it by; `None` from a store that keeps no images.
+    fn put_image(
+        &self,
+        path: &Path,
+    ) -> impl Future<Output = Result<Option<ImageId>, EngineError>> + Send {
+        let _ = path;
+        ready(Ok(None))
+    }
 }
 
 /// No store: sandboxes never leave the host.
@@ -718,6 +728,10 @@ impl Store for Directory {
             Ok(true)
         })
         .await
+    }
+
+    async fn put_image(&self, path: &Path) -> Result<Option<ImageId>, EngineError> {
+        self.put_rootfs(path).await.map(Some)
     }
 
     async fn forget_memory(&self, id: Id, _: Stamp) -> Result<Owned<Option<Receipt>>, EngineError> {

@@ -8,6 +8,7 @@ import {
   type ProviderFieldValue,
   type ProviderItemMeta,
   type ProviderVault,
+  type ProviderWriteField,
   type SecretMaterial,
   type VaultProvider,
   type VaultProviderCapabilities,
@@ -17,11 +18,13 @@ import {
 import {
   BitwardenHttp,
   BITWARDEN_MAX_RESPONSE_BYTES,
+  CLIENT_HEADERS,
   rateLimited,
   statusError,
   type BitwardenApiKey,
   type BitwardenEndpoints,
   type BitwardenHttpOptions,
+  type BitwardenServerConfig,
 } from "./client";
 import {
   BitwardenCryptoError,
@@ -30,6 +33,10 @@ import {
   decryptOptional,
   decryptUserKey,
   deriveMasterKey,
+  encryptAttachment,
+  encryptBytes,
+  encryptString,
+  generateSymmetricKey,
   kdfFromServer,
   rsaDecrypt,
   symmetricKeyBytes,
@@ -40,6 +47,7 @@ import {
 import {
   ATTACHMENT_FIELD_PREFIX,
   WriteRefused,
+  archivedDateOf,
   createRequest,
   fieldValue,
   isProtected,
@@ -52,17 +60,24 @@ import {
   type MappedField,
 } from "./mapping";
 
-/** What a Bitwarden account can do through its API key and keys. */
+/**
+ * What a Bitwarden account can do through its API key and keys. Logins,
+ * notes, cards, identities and SSH keys are Bitwarden's own types; API-key
+ * and file items are stored as secure notes (see mapping.ts); files are
+ * attachments. Archive is Bitwarden's own Archive where the server and the
+ * account have it, else the trash (see `archiveItem`); a vault reports
+ * `archiveKind: "trash"` when it falls back.
+ */
 export const BITWARDEN_OPERATIONS: VaultProviderOperations = {
-  createItemTypes: ["login", "note"],
+  createItemTypes: ["login", "api_key", "note", "file", "card", "identity", "ssh_key"],
   updateItem: true,
   removeField: true,
   archiveItem: true,
-  archiveKind: "trash",
+  archiveKind: "archive",
   deleteItem: false,
   restoreItem: false,
   readFiles: true,
-  writeFiles: false,
+  writeFiles: true,
   createTotp: true,
   updateTotp: true,
   createVault: false,
@@ -208,6 +223,8 @@ async function accessToken(
 interface AccountKeys {
   userId: string;
   email: string | null;
+  /** Premium, personally or through a paid organization: what Bitwarden's Archive needs. */
+  premium: boolean;
   userKey: SymmetricKey;
   orgKeys: Map<string, SymmetricKey>;
   orgNames: Map<string, string>;
@@ -265,6 +282,7 @@ export function accountKeys(profile: Json, userKey: SymmetricKey): AccountKeys {
   return {
     userId,
     email: typeof profile.email === "string" ? profile.email : null,
+    premium: profile.premium === true || profile.premiumFromOrganization === true,
     userKey,
     orgKeys,
     orgNames,
@@ -285,8 +303,13 @@ function ownerKey(keys: AccountKeys, cipher: Json): SymmetricKey {
   return key;
 }
 
+/**
+ * Whether a cipher belongs to a vault. Trashed items do not; archived items
+ * do, marked archived (Bitwarden's archive is per person, so this is the
+ * connected account's own view).
+ */
 function inVault(cipher: Json, vaultId: string): boolean {
-  if (cipher.deletedDate || cipher.archivedDate) return false;
+  if (cipher.deletedDate) return false;
   if (vaultId === PERSONAL_VAULT_ID) return !cipher.organizationId;
   return (
     Array.isArray(cipher.collectionIds) && cipher.collectionIds.some((id) => lower(id) === vaultId)
@@ -353,7 +376,11 @@ export async function connectBitwarden(
     `${endpoints.identityUrl}/accounts/prelogin`,
     {
       method: "POST",
-      headers: { accept: "application/json", "content-type": "application/json; charset=utf-8" },
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json; charset=utf-8",
+        ...CLIENT_HEADERS,
+      },
       body: JSON.stringify({ email }),
     },
     { signal: options.signal, what: "reading the key settings" },
@@ -449,11 +476,12 @@ export function createBitwardenVaultProvider(
   // values are always read live, and only encrypted data is held, briefly.
   const snapshots = new WeakMap<ProviderCallBudget, Map<string, Promise<VaultSnapshot>>>();
   const profiles = new WeakMap<ProviderCallBudget, Promise<AccountKeys>>();
+  const configs = new WeakMap<ProviderCallBudget, Promise<BitwardenServerConfig>>();
 
   /** One authenticated request; a token the server no longer accepts is replaced once. */
   async function request(
     ctx: VaultProviderContext,
-    method: "GET" | "POST" | "PUT",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     body: unknown,
     what: string,
@@ -482,7 +510,7 @@ export function createBitwardenVaultProvider(
 
   async function requestJson(
     ctx: VaultProviderContext,
-    method: "GET" | "POST" | "PUT",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     body: unknown,
     what: string,
@@ -552,6 +580,29 @@ export function createBitwardenVaultProvider(
     snapshots.delete(ctx.budget);
   }
 
+  function serverConfig(ctx: VaultProviderContext): Promise<BitwardenServerConfig> {
+    let pending = configs.get(ctx.budget);
+    if (!pending) {
+      pending = http.serverConfig(endpoints, ctx.signal);
+      configs.set(ctx.budget, pending);
+      pending.catch(() => {
+        if (configs.get(ctx.budget) === pending) configs.delete(ctx.budget);
+      });
+    }
+    return pending;
+  }
+
+  /**
+   * Whether Opengeni's Archive can use Bitwarden's own Archive for this
+   * account: the server offers it and the account has premium (Vaultwarden
+   * gives every account premium). Otherwise archiving moves items to the trash.
+   */
+  async function archiveAvailable(ctx: VaultProviderContext, keys?: AccountKeys): Promise<boolean> {
+    const config = await serverConfig(ctx);
+    if (!config.archive) return false;
+    return (keys ?? (await account(ctx))).premium;
+  }
+
   function reportFresh(ctx: VaultProviderContext) {
     const at = new Date(http.clock()).toISOString();
     ctx.onFreshness?.({
@@ -594,6 +645,122 @@ export function createBitwardenVaultProvider(
     if (!inVault(cipher, vault))
       throw new VaultProviderError("provider_not_found", "No such item in this Bitwarden vault");
     return cipher;
+  }
+
+  /**
+   * Adds one file to a cipher as an attachment, encrypted as Bitwarden
+   * clients do: a new attachment key wrapped in the item's key, the file name
+   * encrypted with the item's key, and the body under the attachment key. The
+   * server says where the body goes: to itself (self-hosted, Vaultwarden) or
+   * to blob storage (Bitwarden cloud).
+   */
+  async function addAttachment(
+    ctx: VaultProviderContext,
+    cipher: Json,
+    ownerKeyValue: SymmetricKey,
+    file: { name: string; bytes: Uint8Array },
+  ): Promise<void> {
+    const holder = itemKey(cipher, ownerKeyValue);
+    const attachmentKey = generateSymmetricKey();
+    const body = encryptAttachment(file.bytes, attachmentKey);
+    const fileName = encryptString(file.name, holder);
+    const cipherId = lower(cipher.id);
+    const upload = await requestJson(
+      ctx,
+      "POST",
+      `/ciphers/${cipherId}/attachment/v2`,
+      {
+        key: encryptBytes(symmetricKeyBytes(attachmentKey), holder),
+        fileName,
+        fileSize: body.byteLength,
+        adminRequest: false,
+      },
+      "adding the attachment",
+      { write: true },
+    );
+    const attachmentId = typeof upload.attachmentId === "string" ? upload.attachmentId : null;
+    if (!attachmentId) {
+      throw new VaultProviderError(
+        "provider_outcome_unknown",
+        "Bitwarden did not confirm the attachment; check the item before trying again",
+      );
+    }
+    if (upload.fileUploadType === 1 && typeof upload.url === "string") {
+      await http.uploadToBlob(upload.url, body, ctx.signal);
+      return;
+    }
+    const form = new FormData();
+    form.append("data", new Blob([body.slice().buffer]), fileName);
+    await request(
+      ctx,
+      "POST",
+      `/ciphers/${cipherId}/attachment/${encodeURIComponent(attachmentId)}`,
+      form,
+      "uploading the attachment",
+      { write: true },
+    );
+  }
+
+  async function deleteAttachment(
+    ctx: VaultProviderContext,
+    cipher: Json,
+    attachmentId: string,
+  ): Promise<void> {
+    await request(
+      ctx,
+      "DELETE",
+      `/ciphers/${lower(cipher.id)}/attachment/${encodeURIComponent(attachmentId)}`,
+      undefined,
+      "removing the attachment",
+      { write: true },
+    );
+  }
+
+  /** What a write does to attachments, checked before anything is sent. */
+  function attachmentPlan(
+    fields: readonly ProviderWriteField[],
+    existing: readonly MappedField[],
+  ): { add: Array<{ name: string; bytes: Uint8Array }>; remove: string[] } {
+    const add: Array<{ name: string; bytes: Uint8Array }> = [];
+    const remove: string[] = [];
+    const removedNames = new Set<string>();
+    const key = (name: string) => name.normalize("NFC").trim().toLowerCase();
+    for (const field of fields) {
+      const id = field.externalFieldId;
+      if (id === undefined || !id.startsWith(ATTACHMENT_FIELD_PREFIX)) continue;
+      const current = existing.find((candidate) => candidate.id === id);
+      if (!current || current.source.type !== "attachment") {
+        throw new VaultProviderError("provider_not_found", `The item has no field ${id}`);
+      }
+      if (!field.remove && !field.file) {
+        throw new VaultProviderError(
+          "provider_conflict",
+          `Send the content of "${current.name}" to change it; Bitwarden attachments change by uploading them again`,
+        );
+      }
+      remove.push(String(current.source.attachment.id));
+      removedNames.add(key(current.name));
+      // An attachment is named by its file name, so it keeps the field's name.
+      if (field.file) add.push({ name: field.name, bytes: field.file.bytes });
+    }
+    const taken = new Set(
+      existing.map((field) => key(field.name)).filter((name) => !removedNames.has(name)),
+    );
+    for (const field of fields) {
+      if (field.externalFieldId !== undefined || field.kind !== "file") continue;
+      if (!field.file) {
+        throw new VaultProviderError("provider_conflict", `"${field.name}" has no file content`);
+      }
+      if (taken.has(key(field.name))) {
+        throw new VaultProviderError(
+          "provider_conflict",
+          `The item already has a field named "${field.name}"`,
+        );
+      }
+      taken.add(key(field.name));
+      add.push({ name: field.name, bytes: field.file.bytes });
+    }
+    return { add, remove };
   }
 
   async function keyFor(ctx: VaultProviderContext, cipher: Json): Promise<SymmetricKey> {
@@ -681,7 +848,7 @@ export function createBitwardenVaultProvider(
         createVault: false,
         totp: true,
         // The legacy flag means file writes; reads are declared in operations.
-        files: false,
+        files: true,
         groupGrants: false,
         passkeys: false,
         operations: {
@@ -699,16 +866,27 @@ export function createBitwardenVaultProvider(
 
     async listVaults(ctx): Promise<ProviderVault[]> {
       const snap = await snapshot(ctx);
+      // Without Bitwarden's Archive here, Opengeni's Archive uses the trash.
+      const vaultOperations: VaultProviderOperations | undefined = (await archiveAvailable(
+        ctx,
+        snap.keys,
+      ))
+        ? undefined
+        : { ...BITWARDEN_OPERATIONS, archiveKind: "trash" };
       const fingerprint = (vault: string, name: string) => {
         const hash = createHash("sha256").update(name);
         let count = 0;
         const entries = snap.ciphers
           .filter((cipher) => inVault(cipher, vault))
-          .map((cipher) => `${lower(cipher.id)}@${revisionOf(cipher) ?? ""}`)
+          // Archiving is per person and may not change the revision, so it is part of the version.
+          .map(
+            (cipher) =>
+              `${lower(cipher.id)}@${revisionOf(cipher) ?? ""}${archivedDateOf(cipher) ? "#archived" : ""}`,
+          )
           .sort();
         for (const entry of entries) {
           hash.update(`\n${entry}`);
-          count += 1;
+          if (!entry.endsWith("#archived")) count += 1;
         }
         return { contentVersion: hash.digest("hex").slice(0, 32), itemCount: count };
       };
@@ -718,6 +896,7 @@ export function createBitwardenVaultProvider(
           name: "My vault",
           ...fingerprint(PERSONAL_VAULT_ID, "My vault"),
           writeAccess: "read_write",
+          ...(vaultOperations ? { operations: vaultOperations } : {}),
         },
       ];
       const multipleOrgs = snap.keys.orgNames.size > 1;
@@ -740,6 +919,7 @@ export function createBitwardenVaultProvider(
           name: label.replace(/[/\\{}#]/g, "-").slice(0, VAULT_LIMITS.nameMaxChars) || "Collection",
           ...fingerprint(id, label),
           writeAccess: collection.readOnly === true ? "read_only" : "read_write",
+          ...(vaultOperations ? { operations: vaultOperations } : {}),
         });
       }
       reportFresh(ctx);
@@ -831,6 +1011,8 @@ export function createBitwardenVaultProvider(
       const vault = vaultOf(externalVaultId);
       ctx.budget.take("write");
       let saved: Json;
+      let files: { add: Array<{ name: string; bytes: Uint8Array }>; remove: string[] };
+      let ownerKeyValue: SymmetricKey;
       if (item.externalItemId === undefined) {
         let orgId: string | null = null;
         let key = userKey;
@@ -846,6 +1028,8 @@ export function createBitwardenVaultProvider(
           orgId = lower(collection.organizationId);
           key = ownerKey(snap.keys, { organizationId: orgId });
         }
+        ownerKeyValue = key;
+        files = attachmentPlan(item.fields, []);
         let body: Json;
         try {
           body = createRequest(item, key, orgId, (await account(ctx)).userId);
@@ -881,6 +1065,13 @@ export function createBitwardenVaultProvider(
           );
         }
         const key = await keyFor(ctx, cipher);
+        ownerKeyValue = key;
+        try {
+          files = attachmentPlan(item.fields, mapCipher(cipher, key).fields);
+        } catch (error) {
+          if (error instanceof BitwardenCryptoError) cryptoFailure(error, "This Bitwarden item");
+          throw error;
+        }
         let body: Json;
         try {
           body = updateRequest(cipher, key, item, (await account(ctx)).userId);
@@ -897,6 +1088,26 @@ export function createBitwardenVaultProvider(
           { write: true },
         );
       }
+      if (files.add.length > 0 || files.remove.length > 0) {
+        // The item is saved; a failure from here on leaves part of the change applied.
+        try {
+          for (const file of files.add) await addAttachment(ctx, saved, ownerKeyValue, file);
+          for (const attachmentId of files.remove) await deleteAttachment(ctx, saved, attachmentId);
+          saved = await requestJson(
+            ctx,
+            "GET",
+            `/ciphers/${lower(saved.id)}/details`,
+            undefined,
+            "reading the item",
+          );
+        } catch (error) {
+          forget(ctx);
+          throw new VaultProviderError(
+            "provider_outcome_unknown",
+            `Bitwarden saved the item, but its attachments did not all change${error instanceof Error ? ` (${error.message})` : ""}; check the item before trying again`,
+          );
+        }
+      }
       forget(ctx);
       try {
         return mapCipher(saved, await keyFor(ctx, saved)).meta;
@@ -912,17 +1123,30 @@ export function createBitwardenVaultProvider(
       const vault = vaultOf(externalVaultId);
       ctx.budget.take("write");
       const cipher = await liveCipher(ctx, vault, externalItemId);
-      // Soft delete: the item moves to Bitwarden's trash and can be restored there.
-      await request(
-        ctx,
-        "PUT",
-        `/ciphers/${lower(cipher.id)}/delete`,
-        undefined,
-        "moving the item to the trash",
-        {
-          write: true,
-        },
-      );
+      if (await archiveAvailable(ctx)) {
+        // Bitwarden's Archive is per person: this hides the item for the
+        // connected account only. Others who share it still see it active.
+        if (!cipher.archivedDate) {
+          await request(
+            ctx,
+            "PUT",
+            `/ciphers/${lower(cipher.id)}/archive`,
+            undefined,
+            "archiving the item",
+            { write: true },
+          );
+        }
+      } else {
+        // Soft delete: the item moves to Bitwarden's trash and can be restored there.
+        await request(
+          ctx,
+          "PUT",
+          `/ciphers/${lower(cipher.id)}/delete`,
+          undefined,
+          "moving the item to the trash",
+          { write: true },
+        );
+      }
       forget(ctx);
     },
   };

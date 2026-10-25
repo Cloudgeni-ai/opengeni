@@ -1916,7 +1916,7 @@ function baseAgentRunFailurePayload(
     // connectivity backoff and never continues without the image's pixels.
     return {
       error:
-        "An image attached earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
+        "An image from earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
       code: RETAINED_ATTACHMENT_UNAVAILABLE_CODE,
       retryable: true,
     };
@@ -2014,9 +2014,13 @@ function baseAgentRunFailurePayload(
       ? String((error as { code?: unknown }).code)
       : undefined;
   if (error instanceof ActiveSessionHistoryLimitExceededError) {
+    // Over-guard history normally compacts through the bounded recovery view.
+    // This error remains only when even that view cannot fit (for example, the
+    // newest item alone is larger than the recovery budget), so compaction
+    // cannot help. Clearing deactivates rows without reading them.
     return {
       error:
-        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+        "The session's active context is too large to load safely, even with inline images and older items left out, so it cannot be compacted. Clear the session context (/clear in chat, or the clearSessionContext action) to restart the model from an empty context, then send the next message; earlier messages stay in the timeline. Alternatively, start a new session.",
       code: error.code,
       retryable: false,
       detail: error.message,

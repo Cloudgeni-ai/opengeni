@@ -156,6 +156,7 @@ async fn restart_with<S: Store>(
         stream_idle: HostConfig::STREAM_IDLE,
         guest_ports: Vec::new(),
         restore_notice_port: None,
+        guest_checks: compute_host::GuestChecks::DEFAULT,
         first_uid,
         network: None,
         busy: None,
@@ -168,10 +169,12 @@ async fn restart_with<S: Store>(
         },
         about: compute_host::protocol::About::default(),
         lease: None,
+        guard_freezes: None,
         observer: setup.observer,
         summary_every: HostConfig::SUMMARY_EVERY,
         agent_link: None,
         processor_share: None,
+        prepare: None,
     };
     let socket = root.join("agent.sock");
     let _ = std::fs::remove_file(&socket);

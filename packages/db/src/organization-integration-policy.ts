@@ -53,7 +53,7 @@ async function read(
 ): Promise<OrganizationIntegrationPolicy> {
   const [row] = await rawRows<{ policy: unknown }>(
     tx,
-    sql`select jsonb_build_object('mode', mode, 'allowedIntegrationKeys', allowed_integration_keys, 'revision', revision) as policy from organization_integration_policies where account_id = ${scope.accountId}::uuid`,
+    sql`select jsonb_build_object('mode', mode, 'allowedIntegrationKeys', allowed_integration_keys, 'personalIntegrationSetup', personal_integration_setup, 'revision', revision) as policy from organization_integration_policies where account_id = ${scope.accountId}::uuid`,
   );
   return OrganizationIntegrationPolicy.parse(row?.policy ?? {});
 }
@@ -136,7 +136,18 @@ export async function updateOrganizationIntegrationPolicy(
           tx,
           sql`select opengeni_private.update_organization_integration_policy(${scope.accountId}::uuid, ${actor.subjectId}, ${JSON.stringify(request)}::jsonb) as result`,
         );
-        return OrganizationIntegrationPolicy.parse(row?.result);
+        // The stored result names the personal setup choice only when the
+        // request did (older writers parse it strictly). Otherwise read the
+        // kept value under the same exclusive policy lock.
+        const result = row?.result as Record<string, unknown> | undefined;
+        if (result && !("personalIntegrationSetup" in result)) {
+          const current = await read(tx, scope);
+          return OrganizationIntegrationPolicy.parse({
+            ...result,
+            personalIntegrationSetup: current.personalIntegrationSetup,
+          });
+        }
+        return OrganizationIntegrationPolicy.parse(result);
       });
     },
     undefined,

@@ -132,29 +132,51 @@ pub fn promote(install_path: &Path) -> UpdateResult<()> {
 /// `self-replace` crate. Keeps the backup the same way [`swap_binary`] does so the
 /// boot health-gate can roll back.
 ///
+/// `preflight` checks the new binary staged beside the running one before
+/// anything is replaced, as [`replace_running_exe_at`] does on Unix: a binary
+/// that cannot start on this machine (for example one that needs a DLL the
+/// machine lacks) never replaces a working agent.
+///
 /// Use this in the live agent; tests drive [`swap_binary`] on a temp path instead.
 ///
 /// # Errors
 ///
+/// Returns `preflight`'s error with the running executable unchanged, or
 /// [`UpdateError::Io`] if the current-exe path cannot be resolved or the replace
 /// fails.
-pub fn replace_running_exe(new_bytes: &[u8]) -> UpdateResult<PathBuf> {
+pub fn replace_running_exe(
+    new_bytes: &[u8],
+    preflight: impl FnOnce(&Path) -> UpdateResult<()>,
+) -> UpdateResult<PathBuf> {
     let exe = std::env::current_exe().map_err(|e| UpdateError::io("current_exe".to_string(), e))?;
+    replace_exe_with_preflight(&exe, new_bytes, preflight, |staged| {
+        self_replace::self_replace(staged)
+    })
+}
 
-    // Write the verified bytes to a same-dir temp, keep a backup, then let
-    // self-replace atomically swap the temp over the live exe (handling the
-    // running-exe lock on every OS).
-    let tmp = temp_sibling(&exe);
+/// Writes the verified bytes to a same-dir temp, lets `preflight` start it there,
+/// keeps a backup, then lets `replace` swap the temp over the live exe (the
+/// running-exe lock handling). The temp never outlives the call.
+fn replace_exe_with_preflight(
+    exe: &Path,
+    new_bytes: &[u8],
+    preflight: impl FnOnce(&Path) -> UpdateResult<()>,
+    replace: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> UpdateResult<PathBuf> {
+    let tmp = temp_sibling(exe);
     write_executable(&tmp, new_bytes)?;
-
-    // Back up the current exe before the swap so rollback has a known-good copy.
-    let backup = backup_path(&exe);
-    let _ = std::fs::remove_file(&backup);
-    std::fs::copy(&exe, &backup).map_err(|e| UpdateError::io(backup.display().to_string(), e))?;
-
-    self_replace::self_replace(&tmp).map_err(|e| UpdateError::io(exe.display().to_string(), e))?;
+    let result = (|| {
+        preflight(&tmp)?;
+        // Back up the current exe before the swap so rollback has a known-good copy.
+        let backup = backup_path(exe);
+        let _ = std::fs::remove_file(&backup);
+        std::fs::copy(exe, &backup)
+            .map_err(|e| UpdateError::io(backup.display().to_string(), e))?;
+        replace(&tmp).map_err(|e| UpdateError::io(exe.display().to_string(), e))?;
+        Ok(backup)
+    })();
     let _ = std::fs::remove_file(&tmp);
-    Ok(backup)
+    result
 }
 
 /// Atomically replaces a Unix executable at its previously captured install path.
@@ -162,12 +184,22 @@ pub fn replace_running_exe(new_bytes: &[u8]) -> UpdateResult<PathBuf> {
 /// Unlike a late current_exe lookup, this remains valid after a prior apply or
 /// rollback in the same process.
 ///
+/// `preflight` checks the new binary staged beside the install path, with the
+/// install's permissions, before anything replaces it, so the install path only
+/// ever holds the old binary or one that passed it. A copy of the disk taken at
+/// any moment (a checkpoint, a reboot, a power loss) then never starts a binary
+/// the startup check would have rolled back, with nothing left to roll it back.
+///
 /// # Errors
 ///
-/// Returns an I/O error if the existing install cannot be inspected, backed up,
-/// or atomically replaced.
+/// Returns `preflight`'s error, the install unchanged, or an I/O error if the
+/// existing install cannot be inspected, backed up, or atomically replaced.
 #[cfg(unix)]
-pub fn replace_running_exe_at(install_path: &Path, new_bytes: &[u8]) -> UpdateResult<PathBuf> {
+pub fn replace_running_exe_at(
+    install_path: &Path,
+    new_bytes: &[u8],
+    preflight: impl FnOnce(&Path) -> UpdateResult<()>,
+) -> UpdateResult<PathBuf> {
     let permissions = std::fs::metadata(install_path)
         .map_err(|error| UpdateError::io(install_path.display().to_string(), error))?
         .permissions();
@@ -177,6 +209,7 @@ pub fn replace_running_exe_at(install_path: &Path, new_bytes: &[u8]) -> UpdateRe
     let result = (|| {
         std::fs::set_permissions(&tmp, permissions)
             .map_err(|error| UpdateError::io(tmp.display().to_string(), error))?;
+        preflight(&tmp)?;
         let _ = std::fs::remove_file(&backup);
         std::fs::copy(install_path, &backup)
             .map_err(|error| UpdateError::io(backup.display().to_string(), error))?;
@@ -236,7 +269,18 @@ mod tests {
         let bin = dir.path().join("agent");
         fs::write(&bin, b"old").unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o750)).unwrap();
-        let backup = replace_running_exe_at(&bin, b"new").unwrap();
+        let backup = replace_running_exe_at(&bin, b"new", |staged| {
+            // The candidate as it will be installed, beside the install.
+            assert_eq!(read(staged), b"new");
+            assert_eq!(staged.parent(), bin.parent());
+            assert_eq!(
+                fs::metadata(staged).unwrap().permissions().mode() & 0o777,
+                0o750
+            );
+            assert_eq!(read(&bin), b"old");
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(read(&bin), b"new");
         assert_eq!(read(&backup), b"old");
         assert_eq!(
@@ -245,10 +289,34 @@ mod tests {
         );
         rollback(&bin).unwrap();
         assert_eq!(read(&bin), b"old");
-        replace_running_exe_at(&bin, b"retry").unwrap();
+        replace_running_exe_at(&bin, b"retry", |_| Ok(())).unwrap();
         promote(&bin).unwrap();
         assert_eq!(read(&bin), b"retry");
         assert!(!backup.exists());
+        assert!(!temp_sibling(&bin).exists());
+    }
+
+    /// A candidate the startup check rejects never reaches the install path,
+    /// so no copy of the disk, whenever it is taken, can start it: the install
+    /// stays the old binary, with no backup or staged file left beside it.
+    #[cfg(unix)]
+    #[test]
+    fn a_candidate_rejected_by_its_preflight_never_replaces_the_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("agent");
+        fs::write(&bin, b"old").unwrap();
+        let error = replace_running_exe_at(&bin, b"broken", |staged| {
+            assert_eq!(read(&bin), b"old", "replaced before its preflight");
+            assert!(!backup_path(&bin).exists());
+            Err(UpdateError::HealthCheck(format!(
+                "{} does not start",
+                staged.display()
+            )))
+        })
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::HealthCheck(_)), "{error}");
+        assert_eq!(read(&bin), b"old");
+        assert!(!backup_path(&bin).exists());
         assert!(!temp_sibling(&bin).exists());
     }
 
@@ -262,6 +330,77 @@ mod tests {
         assert_eq!(read(&bin), b"NEW-v2", "new bytes are live");
         assert_eq!(read(&backup), b"OLD-v1", "old bytes are retained as backup");
         assert_eq!(backup, backup_path(&bin));
+    }
+
+    /// The running-executable replace (the Windows self-update) refuses a
+    /// candidate whose startup check fails before it touches the running agent.
+    #[test]
+    fn a_running_exe_candidate_rejected_by_its_preflight_is_never_swapped_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("opengeni-agent.exe");
+        fs::write(&exe, b"old").unwrap();
+        let error = replace_exe_with_preflight(
+            &exe,
+            b"broken",
+            |staged| {
+                assert_eq!(read(staged), b"broken");
+                assert_eq!(staged.parent(), exe.parent());
+                Err(UpdateError::HealthCheck("exit code: 0xc0000135".into()))
+            },
+            |_| panic!("a rejected candidate must not be swapped in"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::HealthCheck(_)), "{error}");
+        assert_eq!(read(&exe), b"old");
+        assert!(!backup_path(&exe).exists());
+        assert!(!temp_sibling(&exe).exists());
+    }
+
+    #[test]
+    fn a_running_exe_candidate_that_passes_its_preflight_is_swapped_in_with_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("opengeni-agent.exe");
+        fs::write(&exe, b"old").unwrap();
+        let backup = replace_exe_with_preflight(
+            &exe,
+            b"new",
+            |_| Ok(()),
+            |staged| fs::copy(staged, &exe).map(drop),
+        )
+        .unwrap();
+        assert_eq!(read(&exe), b"new");
+        assert_eq!(read(&backup), b"old");
+        assert!(!temp_sibling(&exe).exists());
+    }
+
+    /// The staged candidate keeps a `.new` suffix after `.exe`; Windows must
+    /// still start it so the preflight tests the real binary.
+    #[cfg(windows)]
+    #[test]
+    fn windows_starts_a_staged_candidate_for_its_preflight() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("opengeni-agent.exe");
+        fs::write(&exe, b"old").unwrap();
+        let this_test_binary = fs::read(std::env::current_exe().unwrap()).unwrap();
+        replace_exe_with_preflight(
+            &exe,
+            &this_test_binary,
+            |staged| {
+                let status = std::process::Command::new(staged)
+                    .args(["--list", "--format", "terse"])
+                    .stdout(std::process::Stdio::null())
+                    .status()
+                    .map_err(|error| UpdateError::io(staged.display().to_string(), error))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(UpdateError::HealthCheck(status.to_string()))
+                }
+            },
+            |staged| fs::copy(staged, &exe).map(drop),
+        )
+        .unwrap();
+        assert_eq!(read(&exe), this_test_binary);
     }
 
     #[test]

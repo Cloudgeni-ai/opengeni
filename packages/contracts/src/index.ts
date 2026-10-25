@@ -4,7 +4,10 @@ import {
   workspaceControlUtf8Bytes,
 } from "./workspace-control-event";
 export * from "./workspace-control-event";
+export * from "./secret-value";
+export * from "./integration-capability-id";
 import { defineSchema } from "./define-schema";
+import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./turn-serving-policy";
 import { AzureOpenAIEndpoint } from "./direct-model-provider";
@@ -1382,18 +1385,23 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 } as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
 
 /**
- * Tools a session has only while it has admin access: the organization's
- * actions, run as the person who gave it, with exactly their access. Admin access, not the
- * session's tool selection, decides whether they are there.
+ * App actions: what the person could do in the app's pages and settings, run
+ * as that person in a session they started themselves. Reads run at once; a
+ * change waits for their confirmation in the chat unless the session has full
+ * access. Ordinary, selectable tools, never carried into a child session.
  */
-export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
+export const SESSION_APP_ACTION_TOOL_NAMES = [
   "admin_actions_search",
   "admin_action_describe",
   "admin_action_call",
 ] as const satisfies readonly FirstPartyMcpToolName[];
-export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
-  SESSION_ADMIN_ACCESS_TOOL_NAMES,
+export const SESSION_APP_ACTION_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(
+  SESSION_APP_ACTION_TOOL_NAMES,
 );
+/** @deprecated Renamed to SESSION_APP_ACTION_TOOL_NAMES; these tools no longer need full access. */
+export const SESSION_ADMIN_ACCESS_TOOL_NAMES = SESSION_APP_ACTION_TOOL_NAMES;
+/** @deprecated Renamed to SESSION_APP_ACTION_TOOL_NAME_SET. */
+export const SESSION_ADMIN_ACCESS_TOOL_NAME_SET = SESSION_APP_ACTION_TOOL_NAME_SET;
 
 /**
  * Connector-wide tools are explicit-only except prepared bot sending. Ordinary
@@ -1412,8 +1420,7 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
       name === "slack_bot_prepare_message" ||
       name === "slack_bot_send_prepared_message") &&
     !name.startsWith("fiken_") &&
-    !name.startsWith("atlassian_") &&
-    !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
+    !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
@@ -2480,11 +2487,20 @@ export const WorkspaceTranscriptionPolicy = /* @__PURE__ */ defineSchema(() =>
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
 /**
- * Workspace voice-input preferences. Public provider identifiers express the
- * preferred billing route; credentials and model configuration remain private.
+ * Speech-to-text provider identifiers. Every transcription use (dictation,
+ * meetings) chooses from the same providers. `azure-mai` is the older name
+ * of `azure-speech` and is read as it.
  */
 export const VoiceInputProviderId = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["supergrok-subscription", "codex-subscription", "openai", "azure-openai", "azure-mai"]),
+  z.enum([
+    "supergrok-subscription",
+    "codex-subscription",
+    "openai",
+    "azure-openai",
+    "azure-mai",
+    "azure-speech",
+    "elevenlabs",
+  ]),
 );
 export type VoiceInputProviderId = z.infer<typeof VoiceInputProviderId>;
 
@@ -2492,6 +2508,7 @@ export const WorkspaceVoiceInputSettings = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       enabled: primitives.boolean,
+      /** The provider dictation tries first; each provider runs one dictation model. */
       preferredProvider: VoiceInputProviderId.nullable().optional(),
       fallbackEnabled: primitives.optionalBoolean,
     })
@@ -2851,19 +2868,35 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Whether members may give a session they started their own access. Off by
- * default; turning it off ends every session's admin access.
+ * What agents may do in the app for a person, organization-wide.
+ * `sessionAdminAccessAllowed`: members may give a session they started their
+ * own full access. Off by default; turning it off ends every session's full
+ * access. `chatActionsAllowed`: in a chat a person started, the agent may do
+ * what that person could do in the app's pages and settings, each change only
+ * after the person confirms it in the chat. On by default.
  */
 export const OrganizationAgentAdminAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
     sessionAdminAccessAllowed: primitives.boolean,
+    chatActionsAllowed: primitives.boolean,
     updatedAt: primitives.nullableString,
   }),
 );
 export type OrganizationAgentAdminAccess = z.infer<typeof OrganizationAgentAdminAccess>;
 
+/** Change either choice; an omitted one stays as it is. */
 export const UpdateOrganizationAgentAdminAccessRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ sessionAdminAccessAllowed: primitives.boolean }).strict(),
+  z
+    .object({
+      sessionAdminAccessAllowed: primitives.optionalBoolean,
+      chatActionsAllowed: primitives.optionalBoolean,
+    })
+    .strict()
+    .refine(
+      (value) =>
+        value.sessionAdminAccessAllowed !== undefined || value.chatActionsAllowed !== undefined,
+      { message: "Change at least one setting." },
+    ),
 );
 export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
   typeof UpdateOrganizationAgentAdminAccessRequest
@@ -7757,7 +7790,7 @@ export const SessionMcpServerInput = /* @__PURE__ */ defineSchema(() =>
     requireApproval: SessionMcpApprovalPolicy.optional(),
     // Write-only credential headers. Values are encrypted at rest and never
     // returned in session responses or events; response metadata exposes names.
-    headers: z.record(primitives.string, primitives.string).optional(),
+    headers: secretValue(z.record(primitives.string, primitives.string)).optional(),
     // Non-secret pointer resolved by the native connection credential engine.
     connectionRef: McpServerConnectionRef.optional(),
   }),
@@ -7767,7 +7800,7 @@ export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
 export const SessionMcpCredentialUpdateInput = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: SessionMcpServerId,
-    headers: z.record(primitives.string, primitives.string),
+    headers: secretValue(z.record(primitives.string, primitives.string)),
   }),
 );
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
@@ -7784,7 +7817,7 @@ export const RotateSessionMcpCredentialsRequest = /* @__PURE__ */ defineSchema((
               id: SessionMcpServerId,
               expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
               expectedServerUrl: httpsUrl,
-              headers: z.record(primitives.string, primitives.string),
+              headers: secretValue(z.record(primitives.string, primitives.string)),
             })
             .strict()
             .or(
@@ -8490,6 +8523,67 @@ export const UpdateSessionToolPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPolicyRequest>;
+
+/**
+ * The person finished setup from a capability card the agent posted in this
+ * chat (OAuth return, popup, API-key form, "use in this conversation"). The
+ * server finds the latest card for this capability, checks the capability is
+ * now usable in the chat and that the person has not written since, and then
+ * wakes the agent once so it continues the request that needed it.
+ */
+export const ContinueAfterCapabilitySetupRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      capabilityId: z.string().trim().min(1).max(512),
+    })
+    .strict(),
+);
+export type ContinueAfterCapabilitySetupRequest = z.infer<
+  typeof ContinueAfterCapabilitySetupRequest
+>;
+
+/** Why no continuation was sent. Each is a normal outcome, not an error. */
+export const CapabilitySetupContinuationSkipReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    // No card for this capability was posted in this chat.
+    "no_card",
+    // The person already wrote after the card; their message carries on.
+    "later_message",
+    // The capability is not yet usable in this chat.
+    "not_ready",
+    // This card completes through its own flow (it sends a message itself).
+    "not_applicable",
+    // The request that posted the card belongs to someone else, or the chat
+    // has no request to continue.
+    "not_requester",
+    // The chat is closed or archived.
+    "session_closed",
+  ]),
+);
+export type CapabilitySetupContinuationSkipReason = z.infer<
+  typeof CapabilitySetupContinuationSkipReason
+>;
+
+export const ContinueAfterCapabilitySetupResponse = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("outcome", [
+    z
+      .object({
+        // `queued` the first time; `already_queued` for every repeat of the same card.
+        outcome: z.enum(["queued", "already_queued"]),
+        updateId: primitives.uuid,
+      })
+      .strict(),
+    z
+      .object({
+        outcome: z.literal("not_needed"),
+        reason: CapabilitySetupContinuationSkipReason,
+      })
+      .strict(),
+  ]),
+);
+export type ContinueAfterCapabilitySetupResponse = z.infer<
+  typeof ContinueAfterCapabilitySetupResponse
+>;
 
 /**
  * A member's personal pin preference for a session. `expectedVersion` is
@@ -10257,6 +10351,7 @@ export const SessionSystemUpdateKind = /* @__PURE__ */ defineSchema(() =>
     "child_waiting_capacity",
     "child_progress",
     "secret_use_approval_decided",
+    "capability_setup_completed",
   ]),
 );
 export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
@@ -10288,6 +10383,7 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   child_waiting_capacity: "deferred",
   child_progress: "deferred",
   secret_use_approval_decided: "immediate",
+  capability_setup_completed: "immediate",
 };
 
 /**
@@ -10467,6 +10563,37 @@ export const ChildProgressPayload = /* @__PURE__ */ defineSchema(() =>
     .passthrough(),
 );
 export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
+
+/** Bound on the capability name copied into a setup-completed update. */
+export const CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS = 256;
+
+/**
+ * The person finished setup from the capability card `cardEventId` that the
+ * agent posted. One per card: the producer's dedupe key is the card event.
+ */
+export const CapabilitySetupCompletedPayload = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("capability_setup_completed"),
+      capabilityId: z.string().min(1).max(512),
+      name: z.string().min(1).max(CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS),
+      cardEventId: primitives.uuid,
+    })
+    .passthrough(),
+);
+export type CapabilitySetupCompletedPayload = z.infer<typeof CapabilitySetupCompletedPayload>;
+
+/**
+ * The one fact the agent receives when a person finishes setup from its card.
+ * Written once into the durable update row and replayed verbatim afterwards.
+ * Tools are claimed available only when the server verified them in the chat;
+ * when the chat's tool list is too long to check, the fact leaves that out.
+ */
+export function capabilitySetupCompletedSummary(name: string, toolsVerified: boolean): string {
+  return toolsVerified
+    ? `The person finished setting up ${name} from your request. Its tools are now available, so continue the request that needed it.`
+    : `The person finished setting up ${name} from your request, so continue the request that needed it.`;
+}
 
 /**
  * Bound, in UTF-8 bytes including the truncation marker, on the child's final
@@ -10755,6 +10882,7 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
         destination: boundedUtf8String(500).nullable(),
       })
       .passthrough(),
+    CapabilitySetupCompletedPayload,
   ]),
 );
 export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
@@ -11197,6 +11325,7 @@ const TRANSIENT_SESSION_SYSTEM_UPDATE_KINDS: ReadonlySet<string> = new Set<Sessi
     "child_progress",
     "child_waiting_capacity",
     "child_requires_action_resolved",
+    "capability_setup_completed",
   ],
 );
 
@@ -14586,7 +14715,7 @@ function compareDescending(left: number | string, right: number | string): numbe
 }
 
 export const ConnectionCredentialBundle = /* @__PURE__ */ defineSchema(() =>
-  z.record(primitives.string, z.unknown()),
+  secretValue(z.record(primitives.string, z.unknown())),
 );
 export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
 
@@ -14998,7 +15127,7 @@ export const EnableCapabilityRequest = /* @__PURE__ */ defineSchema(() =>
      * workspace-variable-sets key, injected only into the runtime MCP client,
      * and never returned by the API — responses expose header names only.
      */
-    headers: z.record(primitives.string, primitives.string).default({}),
+    headers: secretValue(z.record(primitives.string, primitives.string)).default({}),
   }),
 );
 export type EnableCapabilityRequest = z.infer<typeof EnableCapabilityRequest>;
@@ -15686,6 +15815,8 @@ export const ApiIntegrationInstallationSummary = /* @__PURE__ */ defineSchema(()
       connected: primitives.boolean,
       requiresConnection: primitives.boolean,
       connectionId: primitives.nullableUuid,
+      /** When the bound connection was last used, so a client can pick which account to reconnect. */
+      connectionLastUsedAt: primitives.nullableString.optional(),
       ownership: z.enum(["workspace", "personal", "none"]),
       allowedTools: z.array(z.string().min(1).max(200)).max(2000),
       toolCount: primitives.nonnegativeInteger,
@@ -19991,7 +20122,9 @@ export const HumanInputSecretSpec = /* @__PURE__ */ defineSchema(() =>
       item: VaultName,
       field: VaultFieldName.default("password"),
       fieldKind: z.enum(["concealed", "totp", "text"]).default("concealed"),
-      itemType: z.enum(["login", "api_key", "note"]).default("login"),
+      itemType: z
+        .enum(["login", "api_key", "note", "card", "identity", "ssh_key"])
+        .default("login"),
       username: z
         .object({ prompt: z.string().max(200), value: z.string().max(512).nullable().optional() })
         .strict()
@@ -20438,6 +20571,13 @@ export const SteerSessionMessageResponse = /* @__PURE__ */ defineSchema(() =>
     receipt: SessionCommandReceipt,
     routing: SessionPromptRouting,
     interruptionCount: primitives.nonnegativeInteger,
+    /**
+     * The chat runs on another person's personal machine, so the message
+     * waits for its owner instead of steering: the owner's next message
+     * brings it to the agent, or it runs once the chat moves to a machine
+     * the sender may use. Older servers omit it.
+     */
+    waitsForMachineOwner: primitives.boolean.optional(),
     replay: primitives.boolean,
   }),
 );
@@ -20451,6 +20591,8 @@ export const SubmitComposerDraftResponse = /* @__PURE__ */ defineSchema(() =>
     receipt: SessionCommandReceipt,
     routing: SessionPromptRouting,
     interruptionCount: primitives.nonnegativeInteger,
+    /** As on `SteerSessionMessageResponse`. Older servers omit it. */
+    waitsForMachineOwner: primitives.boolean.optional(),
     replay: primitives.boolean,
   }),
 );
@@ -21718,6 +21860,23 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
           /** The waiting results come from the caller's own work. */
           isYou: z.boolean(),
           results: z.number().int().positive(),
+        }),
+      )
+      .optional(),
+    /**
+     * Messages other people sent here that wait because only the machine's
+     * owner may start work on it, grouped by sender. The owner's next message
+     * brings them to the agent; moving the chat to a machine the sender may
+     * use runs them. Older servers omit it.
+     */
+    waitingMessages: z
+      .array(
+        z.object({
+          /** The sender's display name, when known. */
+          name: z.string().nullable(),
+          /** The caller sent them. */
+          isYou: z.boolean(),
+          messages: z.number().int().positive(),
         }),
       )
       .optional(),

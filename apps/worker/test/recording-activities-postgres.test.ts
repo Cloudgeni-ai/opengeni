@@ -4,6 +4,7 @@ import {
   RecordingTranscriptionError,
   TranscriptionBillingRefusedError,
   type RecordingDiarizer,
+  type RecordingWordAligner,
   type RecordingTranscriptionProvider,
   type RecordingTranscriptionRequest,
   type TranscriptionRequest,
@@ -26,6 +27,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { textModelCapabilities } from "@opengeni/core/transcription-service";
 import { createHash } from "node:crypto";
 import { createRecordingActivities } from "../src/activities/recordings";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -68,6 +71,7 @@ function fakeProvider(
   return {
     id: "elevenlabs",
     name: "Fake",
+    funding: "workspace_key",
     models: [
       {
         model: "scribe_v2",
@@ -94,7 +98,14 @@ function fakeProvider(
   };
 }
 
-async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
+async function capturedRecording(
+  storage: ReturnType<typeof memoryStorage>,
+  transcription: { providerId: string; model: string; options: Record<string, unknown> } = {
+    providerId: "elevenlabs",
+    model: "scribe_v2",
+    options: { language: "en" },
+  },
+) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(db, {
@@ -159,7 +170,7 @@ async function capturedRecording(storage: ReturnType<typeof memoryStorage>) {
       { trackNumber: 0, chunkCount: 2 },
       { trackNumber: 1, chunkCount: 2 },
     ],
-    transcription: { providerId: "elevenlabs", model: "scribe_v2", options: { language: "en" } },
+    transcription,
   });
   return {
     actor,
@@ -179,13 +190,14 @@ function activities(
   provider: RecordingTranscriptionProvider,
   apiKey: string | null = "key",
   diarizer: RecordingDiarizer | null = null,
+  aligner: RecordingWordAligner | null = null,
 ) {
   const warnings: string[] = [];
   const services = async () =>
     ({
       db: client!.db,
       objectStorage: storage.storage,
-      settings: { voiceInputFfmpegPath: ffmpegPath },
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
       observability: { warn: (message: string) => warnings.push(message), info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;
@@ -197,6 +209,7 @@ function activities(
       heartbeat: () => undefined,
       cancellationSignal: () => undefined,
       diarizer: () => diarizer,
+      aligner: () => aligner,
     }),
   };
 }
@@ -450,6 +463,122 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(version).toMatchObject({ state: "failed", errorCode: "missing_provider_key" });
   });
 
+  test("a meeting can't use a model that returns only text, and sends it no audio", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "codex-subscription",
+      model: "chatgpt-dictation",
+      options: {},
+    });
+    let heard = 0;
+    const subscription: RecordingTranscriptionProvider = {
+      id: "codex-subscription",
+      name: "ChatGPT subscription",
+      funding: "workspace_subscription",
+      available: () => true,
+      models: [
+        {
+          model: "chatgpt-dictation",
+          name: "ChatGPT dictation",
+          usdPerHour: 0,
+          capabilities: textModelCapabilities({ maxDurationSeconds: 600, maxFileBytes: null }),
+        },
+      ],
+      transcribe: async () => {
+        heard += 1;
+        return { languages: [], audioMilliseconds: null, diarized: false, words: [], text: "" };
+      },
+    };
+    const run = activities(storage, subscription, null).activities;
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({
+      outcome: "failed",
+      errorCode: "model_unavailable",
+    });
+    expect(heard).toBe(0);
+  });
+
+  test("our aligner times a text-only model's words, and our diarizer names their speakers", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, {
+      providerId: "codex-subscription",
+      model: "chatgpt-dictation",
+      options: {},
+    });
+    const subscription: RecordingTranscriptionProvider = {
+      id: "codex-subscription",
+      name: "ChatGPT subscription",
+      funding: "workspace_subscription",
+      available: () => true,
+      models: [
+        {
+          model: "chatgpt-dictation",
+          name: "ChatGPT dictation",
+          usdPerHour: 0,
+          capabilities: textModelCapabilities({ maxDurationSeconds: 600, maxFileBytes: null }),
+        },
+      ],
+      transcribe: async (request) => ({
+        languages: [],
+        audioMilliseconds: null,
+        diarized: false,
+        words: [],
+        text: request.audio.fileName === "track-0.webm" ? " Hello there " : "Hi. Yes!",
+      }),
+    };
+    const aligned: Array<{ fileName: string; words: readonly string[] }> = [];
+    const aligner: RecordingWordAligner = {
+      id: "test-aligner",
+      align: async (audio, words) => {
+        aligned.push({ fileName: audio.fileName, words });
+        return {
+          words: words.map((_, index) => ({
+            startMilliseconds: 200 + index * 600,
+            endMilliseconds: 600 + index * 600,
+            score: -1,
+          })),
+          anchoredWords: 0,
+          spreadWords: 0,
+          untimedWords: 0,
+        };
+      },
+    };
+    const ours: RecordingDiarizer = {
+      id: "test",
+      diarize: async () => ({
+        voiceModel: "test-voices",
+        turns: [
+          { startMilliseconds: 0, endMilliseconds: 700, speaker: "A" },
+          { startMilliseconds: 700, endMilliseconds: 2_000, speaker: "B" },
+        ],
+        voices: [],
+      }),
+    };
+    const run = activities(storage, subscription, null, ours, aligner).activities;
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    expect(aligned).toEqual([
+      { fileName: "track-0.webm", words: ["Hello", "there"] },
+      { fileName: "track-1.webm", words: ["Hi.", "Yes!"] },
+    ]);
+    const transcript = await getRecordingTranscriptPage(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(transcript.version.diarization).toBe("ours");
+    expect(
+      transcript.segments.map((segment) => [
+        segment.speakerLabel,
+        segment.text,
+        segment.startMilliseconds,
+      ]),
+    ).toEqual([
+      ["track-0", "Hello there", 200],
+      ["speaker_0", "Hi.", 200],
+      ["speaker_1", "Yes!", 800],
+    ]);
+  });
+
   test("deletion removes every object of the recording, then its rows", async () => {
     if (!client) return;
     const storage = memoryStorage();
@@ -556,7 +685,7 @@ function dictationActivities(
     ({
       db: client!.db,
       objectStorage: storage.storage,
-      settings: { voiceInputFfmpegPath: ffmpegPath },
+      settings: testSettings({ voiceInputFfmpegPath: ffmpegPath }),
       observability: { warn: () => undefined, info: () => undefined },
       startRecordingWorkflow: null,
     }) as unknown as ControlActivityServices;

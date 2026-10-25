@@ -36,6 +36,7 @@ import {
 import { mcpToolLeaf, toolMatchesLeaf } from "./tool-display-name";
 import { invokedTool } from "./invoked-tool";
 import { presentTurnFailureText } from "./compaction-copy";
+import { startupPhaseTitle } from "./platform-activity-presentation";
 import { toolOutputPreviewFact, type ToolOutputReader } from "../hooks/tool-output-reads";
 import type {
   AgentMessageItem,
@@ -368,6 +369,7 @@ export function buildTimeline(
         durationMs,
         outcome,
         blockedReason,
+        detail: undefined,
         occurredAt: startedAt,
       } satisfies Partial<StartupPhaseItem>);
       startupPhases.set(key, [prior, startupAttemptId, startupRecoveryRevision]);
@@ -388,6 +390,33 @@ export function buildTimeline(
     };
     items.push(item);
     startupPhases.set(key, [item, startupAttemptId, startupRecoveryRevision]);
+  };
+
+  // A failed startup step keeps its recorded error behind Details.
+  const recordStartupFailureDetail = (
+    phase: StartupPhase,
+    payload: Record<string, unknown>,
+  ): void => {
+    const item = startupPhases.get(`${startupTurnId}:${phase}`)?.[0];
+    if (item?.status !== "failed") return;
+    const detail = failureMessage(t, payload)?.trim();
+    if (detail) item.detail = detail;
+  };
+
+  // The first startup step the current turn attempt failed at. Later failed
+  // steps (model preparation around a lazy sandbox start) only follow it.
+  const firstFailedStartupStep = (turnId: string | null): StartupPhaseItem | null => {
+    let first: StartupPhaseItem | null = null;
+    if (turnId === null) return first;
+    for (const [item, attemptId, revision] of startupPhases.values()) {
+      const sameAttempt =
+        attemptId && startupAttemptId
+          ? attemptId === startupAttemptId
+          : revision === startupRecoveryRevision;
+      if (item.turnId !== turnId || item.status !== "failed" || !sameAttempt) continue;
+      if (!first || failedAt(item) < failedAt(first)) first = item;
+    }
+    return first;
   };
 
   const last = (): TimelineItem | undefined => items[items.length - 1];
@@ -558,6 +587,7 @@ export function buildTimeline(
         undefined,
         blockedReason,
       );
+      recordStartupFailureDetail(setupPhase, payload);
       continue;
     }
 
@@ -1132,6 +1162,7 @@ export function buildTimeline(
                     : undefined))
               : undefined,
           );
+          recordStartupFailureDetail(startupPhase, payload);
           break;
         }
         // Routine per-turn platform plumbing that runs before EVERY turn to
@@ -1201,6 +1232,7 @@ export function buildTimeline(
             null,
             status === "running" ? 2 : 1,
           );
+          recordStartupFailureDetail("provider_first_byte", payload);
         }
         break;
       }
@@ -1666,26 +1698,43 @@ export function buildTimeline(
         // (detail/segmentLimit), so classify the whole payload before falling
         // back to the generic error/message extraction.
         const allowance = parseAllowanceExhaustedRefusal(payload);
+        const creditExhausted = !allowance && isCreditExhaustionPayload(payload);
+        const presented = allowance || creditExhausted ? null : presentFailure(t, payload);
         const failureText = allowance
           ? ALLOWANCE_TURN_END_TEXT(t)
-          : isCreditExhaustionPayload(payload)
+          : creditExhausted
             ? CREDIT_EXHAUSTION_MESSAGE(t)
-            : failureMessage(t, payload);
+            : (presented?.reason ?? null);
         // The TURN failed — the in-flight items did not. Chip doctrine: red is
         // spent once, on the turn-level outcome. Items caught mid-flight read
         // as calm "interrupted" (same as turn.cancelled); an item that itself
         // failed keeps its own failed status from its output event.
         finalizeOpen(turnId, "cancelled", event.occurredAt);
-        items.push(turnEndItem(event, "failed", failureText));
-        // A compaction failure names its outcome and keeps the recorded
-        // provider text behind Details. The turn's own failed compaction
-        // landmark is the one place that shows it: it receives the recorded
-        // text, and no separate notice repeats it.
+        // Diagnostic text (an unclassified error or operator text) is not
+        // written for people: name the outcome instead, in the words of the
+        // startup step this attempt failed at when there is one ("Sandbox
+        // didn't start"), and keep the recorded text behind Details. A
+        // compaction failure does the same with its own title.
+        const failedStep = presented?.diagnostic ? firstFailedStartupStep(turnId) : null;
+        const failure = allowance
+          ? null
+          : presentTurnFailureText(
+              t,
+              failureText,
+              presented?.diagnostic
+                ? failedStep
+                  ? startupPhaseTitle(t, failedStep.phase, "failed", failedStep.outcome)
+                  : t("timeline.projection.theTurnStoppedUnexpectedly")
+                : null,
+            );
+        items.push(turnEndItem(event, "failed", failure?.summary ?? failureText, failure?.detail));
+        // The turn's own failed compaction landmark is the one place that
+        // shows a compaction failure's recorded text: it receives it, and no
+        // separate notice repeats it.
         // Retry reopens the same logical turn, so only a landmark from this
         // attempt (after the turn's previous settlement) can own this failure.
-        const failure = allowance ? null : presentTurnFailureText(t, failureText);
         let landmarkIndex = -1;
-        if (failure?.detail !== undefined && turnId !== null) {
+        if (failure?.compaction && turnId !== null) {
           // Skip the turn-end just pushed for this failure.
           for (let index = items.length - 2; index >= 0; index -= 1) {
             const item = items[index];
@@ -2396,7 +2445,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
   const seenTurns = new Set<string>();
   const settlements = new Map<
     string,
-    { endedAt: string; outcome?: Work["outcome"]; failureText?: string }
+    { endedAt: string; outcome?: Work["outcome"]; failureText?: string; failureDetail?: string }
   >();
   const compactionTurns = new Map<ContextCompactionItem, string>();
   // Turns that handed over to a Steer instead of finishing.
@@ -2486,6 +2535,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
           group.work!.endedAt = settlement.endedAt;
           if (settlement.outcome) group.outcome = settlement.outcome;
           if (settlement.failureText) group.failureText = settlement.failureText;
+          if (settlement.failureDetail) group.failureDetail = settlement.failureDetail;
         }
         turns.set(key, group);
         const firstMessageIndex =
@@ -2547,6 +2597,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
           endedAt: item.occurredAt,
           outcome: item.outcome,
           ...(item.failureText ? { failureText: item.failureText } : {}),
+          ...(item.failureDetail ? { failureDetail: item.failureDetail } : {}),
         });
       }
       const group = turns.get(key);
@@ -2559,6 +2610,11 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
               id: item.id,
               tone: "failed",
               text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
+              ...(item.failureDetail
+                ? {
+                    details: { label: t("timeline.projection.details"), value: item.failureDetail },
+                  }
+                : {}),
               occurredAt: item.occurredAt,
             },
           });
@@ -2566,6 +2622,7 @@ function groupReadableTurns(t: OpenGeniText, items: TimelineItem[]): TimelineGro
         }
         group.outcome = item.outcome;
         if (item.failureText) group.failureText = item.failureText;
+        if (item.failureDetail) group.failureDetail = item.failureDetail;
         group.work.endedAt = item.occurredAt;
       }
     } else if (item.kind === "context-compaction" && item.phase === "compacted") {
@@ -3065,6 +3122,7 @@ const ROUTINE_MACHINE_INPUT_KINDS: ReadonlySet<MachineInputMember["kind"]> = new
   "child_paused",
   "child_waiting_capacity",
   "child_progress",
+  "capability_setup_completed",
 ]);
 
 /* --- helpers ---------------------------------------------------------------- */
@@ -3327,6 +3385,7 @@ function turnEndItem(
   event: SessionEvent,
   outcome: TurnEndItem["outcome"],
   failureText: string | null,
+  failureDetail?: string,
 ): TurnEndItem {
   return {
     kind: "turn-end",
@@ -3334,6 +3393,7 @@ function turnEndItem(
     turnId: event.turnId ?? null,
     outcome,
     failureText,
+    ...(failureDetail ? { failureDetail } : {}),
     occurredAt: event.occurredAt,
   };
 }
@@ -3422,6 +3482,7 @@ function applyTurnOutcome(
   group.outcome = hasFailed ? "failed" : hasInterrupted ? "cancelled" : "complete";
   if (turnEnd.failureText && hasFailed) {
     group.failureText = turnEnd.failureText;
+    if (turnEnd.failureDetail) group.failureDetail = turnEnd.failureDetail;
   }
 }
 
@@ -3532,6 +3593,7 @@ function foldSettledTurn(groups: TimelineGroup[], turnEnd: TurnEndItem): void {
   };
   if (turnEnd.failureText) {
     turnGroup.failureText = turnEnd.failureText;
+    if (turnEnd.failureDetail) turnGroup.failureDetail = turnEnd.failureDetail;
   }
 
   groups.splice(startIndex, collectedLength, turnGroup, ...keptNotices, ...visibleMessages);
@@ -3764,6 +3826,7 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
     "child_paused",
     "child_waiting_capacity",
     "child_progress",
+    "capability_setup_completed",
   ]);
   const classifications = new Set<MachineInputBatchItem["members"][number]["classification"]>([
     "success",
@@ -4050,6 +4113,12 @@ function elapsedDurationMs(startedAt: string, completedAt: string): number | nul
   const start = Date.parse(startedAt);
   const end = Date.parse(completedAt);
   return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
+}
+
+/** When a settled startup step ended, for ordering; unknown sorts last. */
+function failedAt(item: StartupPhaseItem): number {
+  const at = item.completedAt === null ? Number.NaN : Date.parse(item.completedAt);
+  return Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
 }
 
 function failureMessage(t: OpenGeniText, payload: Record<string, unknown>): string | null {

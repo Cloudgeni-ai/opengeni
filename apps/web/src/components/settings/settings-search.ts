@@ -186,6 +186,10 @@ const PAGE_TOPICS: Record<string, readonly SettingsTopic[]> = {
   ],
   "organization:security": [
     { label: "Data retention", keywords: ["retention", "delete data"] },
+    {
+      label: "Actions in chat",
+      keywords: ["agents", "confirm", "invite", "share", "settings in chat"],
+    },
     { label: "Full access for agent sessions", keywords: ["agents", "admin", "elevate"] },
   ],
   "account:security": [

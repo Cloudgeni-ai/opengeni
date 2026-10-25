@@ -659,6 +659,51 @@ describe("BrowserInteractionController", () => {
         'browser target "app:guessed" does not exist; list the current targets and use one of their ids',
     });
   });
+
+  test("an action on a tab the driver knows is gone says why, and never dispatches", async () => {
+    let dispatches = 0;
+    const gone =
+      "browser target does not exist: this tab was closed at 2026-01-02T03:04:05Z by a close-tab call; list the current tabs and use one of their IDs";
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: {
+        ...driver(new Map(), async () => {
+          dispatches++;
+          return observation(target());
+        }),
+        async target() {
+          throw new InteractionDefiniteDriverError("target_not_found", gone);
+        },
+      },
+    });
+
+    const receipt = await controller.run(command(1));
+    expect(receipt.state).toBe("failed");
+    expect(receipt.dispatchedAt).toBeNull();
+    expect(receipt.error).toEqual({ code: "target_not_found", message: gone, retryable: false });
+    expect(dispatches).toBe(0);
+  });
+
+  test("any other driver failure before dispatch stays a generic driver failure", async () => {
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver: {
+        ...driver(new Map(), async () => observation(target())),
+        async target() {
+          throw new InteractionDefiniteDriverError("invalid_action", "internal detail");
+        },
+      },
+    });
+
+    const receipt = await controller.run(command(1));
+    expect(receipt.error).toEqual({
+      code: "driver_failed",
+      message: "browser command failed before dispatch",
+      retryable: false,
+    });
+  });
 });
 
 describe("resolved action targets", () => {

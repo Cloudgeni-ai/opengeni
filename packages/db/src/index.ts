@@ -22,6 +22,8 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
+export * from "./active-session-history";
+import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -120,6 +122,9 @@ export {
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
+  CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
+  capabilitySetupCompletedSummary,
+  type CapabilitySetupContinuationSkipReason,
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
   parseSecretReference,
@@ -161,6 +166,13 @@ import {
   turnHuman,
   inboxOrigin,
 } from "./inbox-execution-context";
+import {
+  notWaitingForMachineOwnerSql,
+  runnableQueuedTurnExists,
+  sessionMachineOwnerSubject,
+  WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT,
+  waitsForMachineOwnerSql,
+} from "./machine-owner-wait";
 import { parentOutboxAuthorityTx } from "./child-outbox-authority";
 import {
   compactionFailureHoldSequenceTx,
@@ -1237,6 +1249,7 @@ export const { importArchivedSession, appendArchivedSessionEvents } =
   });
 export * from "./session-model-settings";
 export * from "./session-queue-commands";
+export { WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT } from "./machine-owner-wait";
 export * from "./session-realtime";
 export * from "./session-realtime-context";
 export * from "./session-realtime-ledger";
@@ -2188,6 +2201,7 @@ export const allWorkspacePermissions: Permission[] = [
   "api_keys:manage",
   "connections:read",
   "connections:write",
+  "connections:personal",
   "capabilities:manage",
   "variable-sets:list",
   "variable-sets:read",
@@ -25468,20 +25482,14 @@ export async function armSubscriptionCoreCapacityWait(
             retryNotBefore,
           },
         };
-        const [waitingPrompt] = stopped
-          ? await tx
-              .select({ id: schema.sessionTurns.id })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.status, "queued"),
-                  inArray(schema.sessionTurns.source, ["user", "api"]),
-                ),
-              )
-              .limit(1)
-          : [];
+        const waitingPrompt = stopped
+          ? await runnableQueuedTurnExists(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sources: ["user", "api"],
+            })
+          : false;
         const sessionStatus = stopped ? (waitingPrompt ? "queued" : "failed") : "waiting_capacity";
         await closeSessionTurnAttemptInTransaction(tx, {
           id: input.attemptId,
@@ -26193,19 +26201,13 @@ async function supersedeSubscriptionCoreCodexCapacityWaitInTransaction(
       );
     }
   }
-  const [queued] = turnWasCurrent
-    ? await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, input.session.workspaceId),
-            eq(schema.sessionTurns.sessionId, input.session.id),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1)
-    : [];
+  const queued = turnWasCurrent
+    ? await runnableQueuedTurnExists(tx, {
+        accountId: input.session.accountId,
+        workspaceId: input.session.workspaceId,
+        sessionId: input.session.id,
+      })
+    : false;
   const nextSessionStatus =
     input.session.status === "cancelled" ? "cancelled" : queued ? "queued" : "idle";
   const eventValues: SessionEventInsertWithPayload[] = [
@@ -38188,17 +38190,59 @@ export async function listSessionEventPage(
             truncatedBy = rows.length >= remainingCount ? "count" : "bytes";
           }
         } else {
-          // Plan the page from bounded metadata before selecting any canonical
-          // payload. row_to_json includes private storage columns omitted by the
-          // public event, so this conservatively bounds ordinary page transfer.
-          // One oversized event is selected alone and remains exact.
-          const metadataRows = await scopedDb
-            .select(sessionEventProjectionMetadataSelect(toolOutputPreview))
-            .from(schema.sessionEvents)
-            .where(and(...filters))
-            .orderBy(ordering)
-            .limit(queryLimit);
-          sourceRowCount = metadataRows.length;
+          // Discover the complete candidate frontier without payloads, then size
+          // only the prefix the byte/count budget can use (plus its overflow row).
+          // Indexing the ordered ID array avoids rescanning an ordered CTE at
+          // every recursion step. Keep the subsequent payload SELECT separate:
+          // this is still metadata planning, not a new page-wide snapshot.
+          const metadataRows = await rawRows<
+            SessionEventProjectionMetadataRow & { sourceRowCount: number }
+          >(
+            scopedDb,
+            sql`with recursive candidates as materialized (
+                select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence}
+                from ${schema.sessionEvents}
+                where ${and(...filters)} order by ${ordering} limit ${queryLimit}
+              ), ordered as materialized (
+                select array_agg(id order by ${
+                  options.authoritativeLatest || direction === "before"
+                    ? sql`sequence desc`
+                    : sql`sequence asc`
+                }) as ids from candidates
+              ), bounded as (
+                select sized.id, sized.sequence,
+                  1 as row_number, sized.bytes as transfer_bytes,
+                  ${bytes + (events.length === 0 ? 0 : 1)}::bigint + sized.bytes as cumulative_bytes
+                from ordered cross join lateral (
+                  select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
+                    (${transferBytesSql})::int as bytes
+                  from ${schema.sessionEvents}
+                  where ${schema.sessionEvents.id} = ordered.ids[1]
+                    and ${schema.sessionEvents.workspaceId} = ${workspaceId}
+                    and ${schema.sessionEvents.sessionId} = ${sessionId}
+                  offset 0
+                ) sized
+                union all
+                select sized.id, sized.sequence,
+                  bounded.row_number + 1, sized.bytes,
+                  bounded.cumulative_bytes + 1 + sized.bytes
+                from bounded cross join ordered
+                cross join lateral (
+                  select ${schema.sessionEvents.id}, ${schema.sessionEvents.sequence},
+                    (${transferBytesSql})::int as bytes
+                  from ${schema.sessionEvents}
+                  where ${schema.sessionEvents.id} = ordered.ids[bounded.row_number + 1]
+                    and ${schema.sessionEvents.workspaceId} = ${workspaceId}
+                    and ${schema.sessionEvents.sessionId} = ${sessionId}
+                  offset 0
+                ) sized
+                where bounded.cumulative_bytes <= ${maxBytes}
+                  and bounded.row_number <= ${requestedLimit - events.length}
+              ) select id, sequence, transfer_bytes as "transferBytes",
+                  (select cardinality(ids) from ordered) as "sourceRowCount"
+                from bounded order by row_number`,
+          );
+          sourceRowCount = Number(metadataRows[0]?.sourceRowCount ?? 0);
           if (metadataRows.length === 0) break;
 
           const exactIds: string[] = [];
@@ -38215,7 +38259,7 @@ export async function listSessionEventPage(
             if (estimatedBytes + separatorBytes + transferBytes > maxBytes) {
               if (events.length === 0 && exactIds.length === 0) {
                 exactIds.push(metadata.id);
-                if (metadataRows.length > 1) {
+                if (sourceRowCount > 1) {
                   hasMore = true;
                   truncatedBy = "bytes";
                 }
@@ -38228,7 +38272,7 @@ export async function listSessionEventPage(
             exactIds.push(metadata.id);
             estimatedBytes += separatorBytes + transferBytes;
           }
-          sourceRowsFullyConsumed = exactIds.length >= metadataRows.length;
+          sourceRowsFullyConsumed = exactIds.length >= sourceRowCount;
 
           if (exactIds.length > 0) {
             rows = await scopedDb
@@ -38456,14 +38500,6 @@ export async function listSessionEventConversationBookkeeping(
       .orderBy(asc(schema.sessionEvents.sequence));
     return rows.map(mapProjectedEvent);
   });
-}
-
-function sessionEventProjectionMetadataSelect(toolOutputPreview = false) {
-  return {
-    id: schema.sessionEvents.id,
-    sequence: schema.sessionEvents.sequence,
-    transferBytes: sql<number>`(${sessionEventTransferBytes(toolOutputPreview)})::int`,
-  } satisfies Record<keyof SessionEventProjectionMetadataRow, unknown>;
 }
 
 /**
@@ -41603,18 +41639,25 @@ export async function appendSessionHistoryItems(
     items: Array<{ position: number; item: Record<string, unknown> }>;
     /** Tool outputs already have durable timeline events; retire their receipts with history. */
     completedToolCallIds?: string[];
+    /**
+     * Receives the stored footprint of the rows this call inserted, measured by
+     * PostgreSQL in the same statement, once the append has committed.
+     */
+    onAppendedFootprint?: (delta: ActiveSessionHistoryFootprint) => void;
   },
 ): Promise<boolean> {
   if (input.items.length === 0 && !input.completedToolCallIds?.length) {
     return true;
   }
+  let appendedFootprint: ActiveSessionHistoryFootprint | null = null;
   // One idempotent transaction: a deadlock/serialization victim rolled back
   // entirely, so it retries as a unit; it contains no external effect.
-  return await retryRlsPersistence(
+  const appended = await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (tx) => {
+      appendedFootprint = null;
       const allowed = await lockTurnAttemptWriteFenceTx(tx, {
         rowProjection: "event",
         workspaceId: input.workspaceId,
@@ -41624,7 +41667,7 @@ export async function appendSessionHistoryItems(
         attemptId: input.expectedAttemptId,
       });
       if (!allowed.allowed) return false;
-      const saved =
+      const inserted =
         input.items.length === 0
           ? []
           : await tx
@@ -41662,7 +41705,40 @@ export async function appendSessionHistoryItems(
                 turnId: schema.sessionHistoryItems.turnId,
                 item: schema.sessionHistoryItems.item,
                 itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+                // Measured exactly as the active-history guard measures:
+                // bytes of the ordered JSON text, shape of the jsonb projection
+                // the insert trigger maintains.
+                jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
+                jsonNodes: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(session_history_items.item, 'strict $.**')
+                )`,
+                jsonProperties: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(
+                    session_history_items.item,
+                    'strict $.** ? (@.type() == "object")'
+                  ) as object_value
+                  cross join lateral jsonb_object_keys(object_value) as property
+                )`,
               });
+      // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
+      // add to the active footprint.
+      appendedFootprint = inserted.reduce<ActiveSessionHistoryFootprint>(
+        (total, row) => ({
+          jsonBytes: total.jsonBytes + Number(row.jsonBytes) + 1,
+          rows: total.rows + 1,
+          jsonNodes: total.jsonNodes + Number(row.jsonNodes),
+          jsonProperties: total.jsonProperties + Number(row.jsonProperties),
+        }),
+        { jsonBytes: 0, rows: 0, jsonNodes: 0, jsonProperties: 0 },
+      );
+      const saved = inserted.map(({ position, turnId, item, itemCodecVersion }) => ({
+        position,
+        turnId,
+        item,
+        itemCodecVersion,
+      }));
       // A position conflict is idempotent only when the exact conversation
       // item is already there. Never acknowledge a different item as saved.
       // Fresh inserts already return their durable representation. Re-reading
@@ -41724,6 +41800,10 @@ export async function appendSessionHistoryItems(
       return true;
     },
   );
+  // Assigned inside the retried transaction callback; the last attempt wins.
+  const delta = appendedFootprint as ActiveSessionHistoryFootprint | null;
+  if (appended && delta) input.onAppendedFootprint?.(delta);
+  return appended;
 }
 
 export type PendingSessionToolCallInput = {
@@ -42415,270 +42495,6 @@ export async function getActiveSessionHistoryItems(
   });
 }
 
-/**
- * Profiled upper envelope for one session's complete active, model-facing
- * transcript. Bytes alone do not bound the decoded object graph, so rows, JSON
- * nodes, and object properties are independently limited. Normal token-driven
- * compaction keeps active history far below these boundaries. The limits are a
- * final materialization guard: a corrupt/imported/pathological transcript fails
- * deterministically before a Postgres driver decodes it instead of using the
- * pod OOM killer as admission.
- */
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 15 * 1024 * 1024;
-export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 8_192;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 131_072;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 65_536;
-
-export type ActiveSessionHistoryLimitKind =
-  | "json_bytes"
-  | "rows"
-  | "json_nodes"
-  | "json_properties";
-
-export class ActiveSessionHistoryLimitExceededError extends Error {
-  readonly code = "active_history_too_large";
-
-  constructor(
-    readonly actualBytes: number,
-    readonly maximumBytes: number,
-    readonly limitKind: ActiveSessionHistoryLimitKind = "json_bytes",
-    readonly actual: number = actualBytes,
-    readonly maximum: number = maximumBytes,
-  ) {
-    super(activeSessionHistoryLimitMessage(limitKind, actual, maximum));
-    this.name = "ActiveSessionHistoryLimitExceededError";
-  }
-}
-
-function activeSessionHistoryLimitMessage(
-  kind: ActiveSessionHistoryLimitKind,
-  actual: number,
-  maximum: number,
-): string {
-  if (kind === "json_bytes") {
-    return `Active session history is ${actual} UTF-8 JSON bytes, exceeding the ${maximum}-byte materialization limit.`;
-  }
-  const label =
-    kind === "rows"
-      ? "rows"
-      : kind === "json_nodes"
-        ? "decoded JSON nodes"
-        : "decoded JSON object properties";
-  return `Active session history has ${actual} ${label}; the materialization limit is ${maximum}.`;
-}
-
-/**
- * Memory-bounded active-history read for model input and compaction. PostgreSQL
- * first measures the complete logical window without returning any JSONB item,
- * then keyset-pages the admitted rows on the same repeatable-read snapshot.
- */
-export async function getActiveSessionHistoryItemsPaged(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  pageSize = ACTIVE_SESSION_HISTORY_MAX_ROWS,
-  maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
-  maximumRows = ACTIVE_SESSION_HISTORY_MAX_ROWS,
-  maximumJsonNodes = ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
-  maximumJsonProperties = ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
-): Promise<
-  Array<{
-    id: string;
-    position: number;
-    item: Record<string, unknown>;
-    providerArtifactInvalidatedAt: Date | null;
-  }>
-> {
-  if (
-    !Number.isSafeInteger(pageSize) ||
-    pageSize < 1 ||
-    pageSize > ACTIVE_SESSION_HISTORY_MAX_ROWS
-  ) {
-    throw new Error(
-      `active session history page size must be an integer between 1 and ${ACTIVE_SESSION_HISTORY_MAX_ROWS}`,
-    );
-  }
-  if (!Number.isSafeInteger(maximumJsonBytes) || maximumJsonBytes < 1) {
-    throw new Error("active session history JSON limit must be a positive safe integer");
-  }
-  for (const [name, value] of [
-    ["row", maximumRows],
-    ["JSON node", maximumJsonNodes],
-    ["JSON property", maximumJsonProperties],
-  ] as const) {
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new Error(`active session history ${name} limit must be a positive safe integer`);
-    }
-  }
-
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => {
-      // Measure one logical JSON array. pg_column_size(jsonb) is deliberately
-      // insufficient because TOAST/compression could hide the decoded size.
-      const [size] = await scopedDb
-        .select({
-          bytes: sql<string>`case
-            when count(*) = 0 then 2
-            else sum(octet_length((${schema.sessionHistoryItems.item})::text)) + count(*) + 1
-          end`,
-          rows: sql<string>`count(*)`,
-        })
-        .from(schema.sessionHistoryItems)
-        .where(
-          and(
-            eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-            eq(schema.sessionHistoryItems.sessionId, sessionId),
-            eq(schema.sessionHistoryItems.active, true),
-          ),
-        );
-      const actualBytes = Number(size?.bytes ?? 0);
-      if (!Number.isSafeInteger(actualBytes) || actualBytes < 0) {
-        throw new Error(
-          `Active session history size is not a safe integer: ${String(size?.bytes)}`,
-        );
-      }
-      if (actualBytes > maximumJsonBytes) {
-        throw new ActiveSessionHistoryLimitExceededError(actualBytes, maximumJsonBytes);
-      }
-      const actualRows = Number(size?.rows ?? 0);
-      if (!Number.isSafeInteger(actualRows) || actualRows < 0) {
-        throw new Error(
-          `Active session history row count is not a safe integer: ${String(size?.rows)}`,
-        );
-      }
-      if (actualRows > maximumRows) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "rows",
-          actualRows,
-          maximumRows,
-        );
-      }
-
-      // Bound decoded shape independently from bytes. LIMIT maximum+1 keeps
-      // rejection work proportional to the admitted envelope.
-      const [nodeCount] = await rawRows<{ nodes: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as nodes
-          from (
-            select node
-            from session_history_items history
-            cross join lateral jsonb_path_query(history.item, 'strict $.**') as node
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and history.active = true
-            limit ${maximumJsonNodes + 1}
-          ) bounded_nodes
-        `,
-      );
-      const actualJsonNodes = Number(nodeCount?.nodes ?? 0);
-      if (!Number.isSafeInteger(actualJsonNodes) || actualJsonNodes < 0) {
-        throw new Error(
-          `Active session history JSON node count is not a safe integer: ${String(nodeCount?.nodes)}`,
-        );
-      }
-      if (actualJsonNodes > maximumJsonNodes) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "json_nodes",
-          actualJsonNodes,
-          maximumJsonNodes,
-        );
-      }
-
-      const [propertyCount] = await rawRows<{ properties: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as properties
-          from (
-            select property
-            from session_history_items history
-            cross join lateral jsonb_path_query(
-              history.item,
-              'strict $.** ? (@.type() == "object")'
-            ) as object_value
-            cross join lateral jsonb_object_keys(object_value) as property
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and history.active = true
-            limit ${maximumJsonProperties + 1}
-          ) bounded_properties
-        `,
-      );
-      const actualJsonProperties = Number(propertyCount?.properties ?? 0);
-      if (!Number.isSafeInteger(actualJsonProperties) || actualJsonProperties < 0) {
-        throw new Error(
-          `Active session history JSON property count is not a safe integer: ${String(propertyCount?.properties)}`,
-        );
-      }
-      if (actualJsonProperties > maximumJsonProperties) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "json_properties",
-          actualJsonProperties,
-          maximumJsonProperties,
-        );
-      }
-
-      const rows: Array<{
-        id: string;
-        position: number;
-        item: Record<string, unknown>;
-        providerArtifactInvalidatedAt: Date | null;
-      }> = [];
-      let afterPosition: number | null = null;
-      for (;;) {
-        const page: Array<{
-          id: string;
-          position: number;
-          item: Record<string, unknown>;
-          itemCodecVersion: number | null;
-          providerArtifactInvalidatedAt: Date | null;
-        }> = await scopedDb
-          .select({
-            id: schema.sessionHistoryItems.id,
-            position: schema.sessionHistoryItems.position,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-            providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, sessionId),
-              eq(schema.sessionHistoryItems.active, true),
-              ...(afterPosition === null
-                ? []
-                : [gt(schema.sessionHistoryItems.position, afterPosition)]),
-            ),
-          )
-          .orderBy(schema.sessionHistoryItems.position)
-          .limit(pageSize);
-        rows.push(
-          ...page.map(({ itemCodecVersion, ...row }) => ({
-            ...row,
-            item: fromPostgresLosslessJson(row.item, itemCodecVersion),
-          })),
-        );
-        if (rows.length === actualRows || page.length < pageSize) return rows;
-        const nextPosition = page.at(-1)!.position;
-        if (afterPosition !== null && nextPosition <= afterPosition) {
-          throw new Error("active session history keyset did not advance");
-        }
-        afterPosition = nextPosition;
-      }
-    },
-    { isolationLevel: "repeatable read" },
-  );
-}
-
 /** Bounded finalized voice turns used only to resume a later realtime call. */
 export async function getSessionRealtimeContinuityEntries(
   db: Database,
@@ -43292,7 +43108,31 @@ async function pendingSteerExists(
       ),
     )
     .limit(1);
-  if (steerPrompt) return true;
+  if (steerPrompt) {
+    // A queued Steer that waits for the personal machine's owner cannot run,
+    // so it must not hand the owner's running turn over to it.
+    const owner = await sessionMachineOwnerSubject(db, {
+      accountId: null,
+      workspaceId,
+      sessionId,
+    });
+    if (owner === null) return true;
+    const [runnableSteer] = await db
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, workspaceId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurns.status, "queued"),
+          ne(schema.sessionTurns.id, turnId),
+          sql`${schema.sessionTurns.metadata} ->> 'delivery' = 'steer'`,
+          notWaitingForMachineOwnerSql(owner),
+        ),
+      )
+      .limit(1);
+    if (runnableSteer) return true;
+  }
   const [agentSteer] = await db
     .select({ id: schema.sessionSystemUpdates.id })
     .from(schema.sessionSystemUpdates)
@@ -63160,6 +63000,34 @@ export async function readLease(
   });
 }
 
+/**
+ * Waits while a sandbox group's lease is warming, the spawner that won
+ * cold->warming still bringing its box up, reading it every `pollMs`. Returns
+ * the first read that is no longer warming (warm once the spawner commits,
+ * cold or draining if its attempt ended, null if the lease is gone), or the
+ * last read, still warming, once `timeoutMs` has passed. An abort of `signal`
+ * ends the wait with its reason.
+ */
+export async function waitWhileLeaseWarming(
+  db: Database,
+  workspaceId: string,
+  sandboxGroupId: string,
+  options: { timeoutMs: number; pollMs: number; signal?: AbortSignal | undefined },
+): Promise<LeaseSnapshot | null> {
+  const deadline = Date.now() + options.timeoutMs;
+  let lease: LeaseSnapshot | null = null;
+  do {
+    await waitForSandboxTransition(
+      Math.max(0, Math.min(options.pollMs, deadline - Date.now())),
+      options.signal,
+      "sandbox warming wait cancelled",
+    );
+    lease = await readLease(db, workspaceId, sandboxGroupId);
+    if (lease?.liveness !== "warming") return lease;
+  } while (Date.now() < deadline);
+  return lease;
+}
+
 // P4.2 — record the (re-)resolved desktop data-plane URL on an ALREADY-WARM
 // lease, EPOCH-FENCED. commitWarmingToWarm records the URL at cold→warming→warm
 // (the spawn path); this is the WARM-path counterpart used when a viewer mints
@@ -70813,6 +70681,13 @@ export async function evaluateGoalContinuation(
         if (!row || row.status !== "active") {
           return { decision: "none" } as const;
         }
+        // A message waiting for the personal machine's owner is not queued
+        // work: the owner's goal keeps going beside it.
+        const machineOwner = await sessionMachineOwnerSubject(tx, {
+          accountId: null,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -70824,6 +70699,7 @@ export async function evaluateGoalContinuation(
               eq(schema.sessionTurns.workspaceId, input.workspaceId),
               eq(schema.sessionTurns.sessionId, input.sessionId),
               inArray(schema.sessionTurns.status, ["queued", "running", "requires_action"]),
+              notWaitingForMachineOwnerSql(machineOwner),
             ),
           )
           .limit(1);
@@ -71165,6 +71041,11 @@ export async function materializeGoalContinuation(
             ),
           );
 
+        const machineOwner = await sessionMachineOwnerSubject(tx, {
+          accountId: null,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -71183,6 +71064,8 @@ export async function materializeGoalContinuation(
                 "recovering",
                 "waiting_capacity",
               ]),
+              // Waiting messages never hold back the owner's goal.
+              notWaitingForMachineOwnerSql(machineOwner),
             ),
           )
           .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt))
@@ -72866,7 +72749,8 @@ function systemUpdateCausalHumanTurnId(
     ? lineage?.parentTurnId
     : update.kind === "goal_continuation" ||
         update.kind === "background_command_result" ||
-        update.kind === "session_wait_timeout"
+        update.kind === "session_wait_timeout" ||
+        update.kind === "capability_setup_completed"
       ? lineage?.causalTurnId
       : null;
   if (typeof value !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value)) {
@@ -72920,7 +72804,8 @@ function systemUpdateCausalExecutionKey(
     isChildLifecycleSystemUpdateKind(update.kind) ||
     update.kind === "goal_continuation" ||
     update.kind === "background_command_result" ||
-    update.kind === "session_wait_timeout"
+    update.kind === "session_wait_timeout" ||
+    update.kind === "capability_setup_completed"
   ) {
     // Malformed historical authority-bearing rows still own distinct claims.
     // They may carry ordinary authority-neutral context, but they must never
@@ -73211,7 +73096,11 @@ async function planInboxBatch(
       loaded.context &&
       !loaded.context.externalLink &&
       (loaded.eligibleIds.has(updates[0].id) ||
-        (updates[0].kind === "goal_continuation" && compatible(updates[0])))),
+        // A setup continuation stands in for the person's own "done": like a
+        // goal continuation it runs in their receiving context.
+        ((updates[0].kind === "goal_continuation" ||
+          updates[0].kind === "capability_setup_completed") &&
+          compatible(updates[0])))),
   );
   const candidates = receiverOwned && updates[0] && !compatible(updates[0]) ? [] : updates;
   const selected = selectBoundedSystemUpdateBatch(
@@ -74468,31 +74357,62 @@ async function withSandboxRecoveryWarningClaimProtocol<T>(
 }
 
 /** The session lock must already be held. Shared with pre-claim failure settlement
- * so a failed batch claim is attributed to the same logical turn. */
+ * so a failed batch claim is attributed to the same logical turn.
+ *
+ * On a personal machine, messages from anyone but its owner wait
+ * (`machine-owner-wait.ts`): they are never the head. `waiting` returns the
+ * ones sent before the owner's claimed head (queued ahead of it, or sent
+ * before an owner's Steer that jumped them), oldest first, which that turn
+ * takes in as context ahead of its own prompt. */
 async function selectQueuedSessionClaimBatch(
   tx: Database,
   session: typeof schema.sessions.$inferSelect,
   pendingAgentSteer: boolean,
-): Promise<Array<typeof schema.sessionTurns.$inferSelect>> {
+): Promise<{
+  batch: Array<typeof schema.sessionTurns.$inferSelect>;
+  waiting: Array<typeof schema.sessionTurns.$inferSelect>;
+}> {
+  const machineOwner = await sessionMachineOwnerSubject(tx, {
+    accountId: session.accountId,
+    workspaceId: session.workspaceId,
+    sessionId: session.id,
+  });
+  const waits =
+    machineOwner === null
+      ? sql`false`
+      : sql`coalesce(${waitsForMachineOwnerSql(machineOwner)}, false)`;
   // Only fetch full prompt/authority rows for the leading Steer run (or the
   // ordinary head). A long queue of later Sends must not inflate claim memory.
-  const previews = await rawRows<{ id: string; version: number }>(
+  // Waiting messages break that run, and only those sent before the head are
+  // taken in with it.
+  const previews = await rawRows<{ id: string; version: number; waits: boolean }>(
     tx,
     sql`
-    with ordered as (
-      select id, version, position, created_at,
-        row_number() over (order by position, created_at, id) as ordinal,
-        count(*) filter (where metadata->>'delivery' is distinct from 'steer')
-          over (order by position, created_at, id rows unbounded preceding) as sends
+    with candidates as (
+      select id, version, position, created_at, ${waits} as waits,
+        metadata->>'delivery' is distinct from 'steer' as send
       from session_turns
       where workspace_id = ${session.workspaceId} and session_id = ${session.id}
         and status = 'queued' and source in ('user', 'api')
         and (${pendingAgentSteer} = false or metadata->>'delivery' = 'steer')
+    ), ordered as (
+      select id, version, position, created_at, waits,
+        count(*) filter (where not waits) over run as runnable,
+        count(*) filter (where not waits and send) over run as sends,
+        count(*) filter (where waits) over run as waited
+      from candidates
+      window run as (order by position, created_at, id rows unbounded preceding)
+    ), head as (
+      select waited, created_at from ordered where not waits and runnable = 1
     )
-    select id, version from ordered where ordinal = 1 or sends = 0
+    select id, version, waits from ordered
+    where exists (select 1 from head) and (
+      (waits and (runnable = 0 or created_at < (select created_at from head)))
+      or (not waits and runnable = 1)
+      or (not waits and sends = 0 and waited = (select waited from head)))
     order by position, created_at, id`,
   );
-  if (previews.length === 0) return [];
+  if (previews.length === 0) return { batch: [], waiting: [] };
   const locked = await lockSessionEventWriteRows(tx, {
     workspaceId: session.workspaceId,
     controlLock: "already_locked",
@@ -74500,7 +74420,7 @@ async function selectQueuedSessionClaimBatch(
     turnIds: previews.map((turn) => turn.id),
   });
   const lockedById = new Map(locked.turns.map((turn) => [turn.id, turn]));
-  const queued = previews.map((preview) => {
+  const rows = previews.map((preview) => {
     const turn = lockedById.get(preview.id);
     if (
       !turn ||
@@ -74513,10 +74433,11 @@ async function selectQueuedSessionClaimBatch(
         "Queued claim selection changed under the session lock",
       );
     }
-    return turn;
+    return { turn, waits: preview.waits === true };
   });
+  const queued = rows.filter((row) => !row.waits).map((row) => row.turn);
   const first = queued[0];
-  if (!first) return [];
+  if (!first) return { batch: [], waiting: [] };
   const plainSteer = (turn: typeof first) =>
     turn.metadata?.delivery === "steer" &&
     turn.executionGeneration === 0 &&
@@ -74556,7 +74477,16 @@ async function selectQueuedSessionClaimBatch(
       break;
     batch.push(next);
   }
-  return batch;
+  // A waiting message whose history cannot be rendered stays queued rather
+  // than failing the owner's claim.
+  const waiting = rows
+    .filter((row) => row.waits && validHistory(row.turn))
+    .map((row) => row.turn)
+    .sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+    );
+  return { batch, waiting };
 }
 
 /**
@@ -75905,11 +75835,12 @@ export async function claimSessionWorkForAttempt(
         // internal instruction is delivered as context on that same human turn
         // instead of manufacturing another system inference ahead of it.
         // Ordinary queued sends retain the established Agent-Steer priority.
-        const queuedBatch = await selectQueuedSessionClaimBatch(
-          tx as unknown as Database,
-          session,
-          Boolean(pendingAgentSteer),
-        );
+        const { batch: queuedBatch, waiting: waitingMessages } =
+          await selectQueuedSessionClaimBatch(
+            tx as unknown as Database,
+            session,
+            Boolean(pendingAgentSteer),
+          );
         const queuedTurnRow = queuedBatch.at(-1);
         for (const member of queuedBatch) {
           await goalSnapshotForAcceptedTurnInTransaction(tx as unknown as Database, member);
@@ -77055,9 +76986,25 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionHistoryItems.sessionId, sessionId),
             ),
           );
-        const historyTurns = [...queuedBatch.slice(0, -1), row];
+        // Messages that waited for this machine's owner come first, in the
+        // order they were sent, marked as such; then the claimed batch.
+        const waitingHistory = waitingMessages.map((waitingTurn) => ({
+          historyTurn: waitingTurn,
+          modelContext: [WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT, waitingTurn.modelContext?.trim()]
+            .filter(Boolean)
+            .join("\n\n"),
+          goalSnapshot: undefined,
+        }));
+        const historyTurns = [
+          ...waitingHistory,
+          ...[...queuedBatch.slice(0, -1), row].map((historyTurn) => ({
+            historyTurn,
+            modelContext: historyTurn.modelContext,
+            goalSnapshot: SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+          })),
+        ];
         await tx.insert(schema.sessionHistoryItems).values(
-          historyTurns.map((historyTurn, index) =>
+          historyTurns.map(({ historyTurn, modelContext, goalSnapshot }, index) =>
             withLosslessContentWriteVersion(
               {
                 accountId: session.accountId,
@@ -77072,8 +77019,8 @@ export async function claimSessionWorkForAttempt(
                       ? (historyTurn.resources as ResourceRef[])
                       : [],
                     TimelineAnnotations.parse(historyTurn.annotations),
-                    historyTurn.modelContext,
-                    SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+                    modelContext,
+                    goalSnapshot,
                     // Acceptance time, not claim time: a queued message keeps the
                     // moment the user sent it.
                     historyTurn.createdAt,
@@ -77088,7 +77035,9 @@ export async function claimSessionWorkForAttempt(
             ),
           ),
         );
-        const consumed = queuedBatch.slice(0, -1);
+        // Both the waiting messages and the batch's earlier members are
+        // delivered with this turn and never run on their own.
+        const consumed = [...waitingMessages, ...queuedBatch.slice(0, -1)];
         const consumedEvents: SessionEventInsertWithPayload[] = consumed.map((member, index) => ({
           accountId: session.accountId,
           workspaceId,
@@ -79121,18 +79070,13 @@ export async function peekSessionWork(
       throw new Error(`Session ${sessionId} has terminal active turn ${turn.id} (${turn.status})`);
     }
 
-    const [queued] = await scopedDb
-      .select({ id: schema.sessionTurns.id })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "queued"),
-          inArray(schema.sessionTurns.source, ["user", "api"]),
-        ),
-      )
-      .limit(1);
+    // A message waiting for the personal machine's owner is not work yet.
+    const queued = await runnableQueuedTurnExists(scopedDb, {
+      accountId: session.accountId,
+      workspaceId,
+      sessionId,
+      sources: ["user", "api"],
+    });
     if (queued || session.compactRequested) return runnable;
     const waitState = await sessionInputWaitStateTx(scopedDb, workspaceId, sessionId, session);
     const inputWaitPeek =
@@ -79990,7 +79934,7 @@ async function settleSessionWorkBeforeAttemptClaim(
               desc(schema.sessionSystemUpdates.id),
             )
             .limit(1);
-          const queuedBatch = await selectQueuedSessionClaimBatch(
+          const { batch: queuedBatch } = await selectQueuedSessionClaimBatch(
             tx as unknown as Database,
             session,
             Boolean(pendingAgentSteer),
@@ -81066,17 +81010,13 @@ export async function settleSessionIdleWithParentOutbox(
       ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
-      const [queued] = await tx
-        .select({ id: schema.sessionTurns.id })
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.status, "queued"),
-          ),
-        )
-        .limit(1);
+      // A message waiting for the personal machine's owner does not keep the
+      // chat busy: it is not work until the owner writes or the chat moves.
+      const queued = await runnableQueuedTurnExists(tx as unknown as Database, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+      });
       if (queued || !["queued", "running", "idle"].includes(session.status)) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
@@ -82847,18 +82787,13 @@ export async function applySessionTurnSettlement(
 
       let effectiveSessionStatus = input.sessionStatus;
       if (input.sessionStatus === "idle" && input.activeTurnId === null) {
-        const [waitingPrompt] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, workspaceId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.status, "queued"),
-              inArray(schema.sessionTurns.source, ["user", "api"]),
-            ),
-          )
-          .limit(1);
+        // Messages waiting for the personal machine's owner leave it idle.
+        const waitingPrompt = await runnableQueuedTurnExists(tx as unknown as Database, {
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          sources: ["user", "api"],
+        });
         if (waitingPrompt) effectiveSessionStatus = "queued";
       }
       const now = new Date();
@@ -86287,18 +86222,14 @@ export async function markSessionWorkflowWakeDelivered(
                 return { action: "pending_admission", blocker: "pending_input_wait" } as const;
               }
             }
-            const [pendingPromptTurn] = await tx
-              .select({ id: schema.sessionTurns.id })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
-                  eq(schema.sessionTurns.sessionId, input.sessionId),
-                  eq(schema.sessionTurns.status, "queued"),
-                  inArray(schema.sessionTurns.source, ["user", "api"]),
-                ),
-              )
-              .limit(1);
+            // A message waiting for the personal machine's owner is not
+            // undelivered work, so it must not keep the wake pending.
+            const pendingPromptTurn = await runnableQueuedTurnExists(tx as unknown as Database, {
+              accountId: null,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sources: ["user", "api"],
+            });
             if (pendingPromptTurn) {
               return {
                 action: "pending_admission",
@@ -86704,6 +86635,259 @@ export async function addSessionSystemUpdate(
     throw new Error(`Internal update payload discriminator must equal kind ${input.kind}`);
   }
   return await addSessionSystemUpdateWithSourceMutation(db, input, async () => undefined);
+}
+
+export type EnqueueCapabilitySetupContinuationInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  capabilityId: string;
+  /** The live catalog's name for the capability, shown to the agent. */
+  capabilityName: string;
+  /**
+   * Whether the caller verified the capability's tools are in the chat (not
+   * only assumed because the chat's tool list was too long to check).
+   */
+  toolsVerified: boolean;
+  /** The authenticated person who finished setup. */
+  requesterSubjectId: string;
+};
+
+export type EnqueueCapabilitySetupContinuationResult =
+  | {
+      outcome: "queued" | "already_queued";
+      update: SessionSystemUpdate;
+      shouldWake: boolean;
+      workflowWakeRevision: number | null;
+      temporalWorkflowId: string | null;
+      events: SessionEvent[];
+    }
+  | {
+      outcome: "not_needed";
+      reason: Extract<
+        CapabilitySetupContinuationSkipReason,
+        "no_card" | "later_message" | "not_requester" | "session_closed"
+      >;
+    };
+
+class CapabilitySetupContinuationNotNeeded extends Error {
+  constructor(readonly reason: "later_message" | "not_requester") {
+    super(`capability setup continuation not needed: ${reason}`);
+  }
+}
+
+/** The card's dedupe key: at most one continuation per posted card. */
+export function capabilitySetupContinuationDedupeKey(cardEventId: string): string {
+  return `capability-setup-continuation:${cardEventId}`;
+}
+
+/**
+ * Wake the agent once after the person finished setup from the latest card it
+ * posted for `capabilityId`. The caller has already checked that the
+ * capability is usable in this chat. Nothing is sent when no such card exists,
+ * when the person has written since the card (their message carries on), or
+ * when the request the card belongs to is someone else's. The update runs in
+ * the person's receiving context, exactly as their own next message would.
+ */
+export async function enqueueCapabilitySetupContinuation(
+  db: Database,
+  input: EnqueueCapabilitySetupContinuationInput,
+): Promise<EnqueueCapabilitySetupContinuationResult> {
+  const read = await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scoped) => {
+    const tx = scoped as unknown as Database;
+    const [card] = await tx
+      .select({ id: schema.sessionEvents.id, sequence: schema.sessionEvents.sequence })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "tool.auth_needed"),
+          sql`${schema.sessionEvents.payload} -> 'capability' ->> 'id' = ${input.capabilityId}`,
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    if (!card) return { kind: "skip", reason: "no_card" } as const;
+    const [existing] = await tx
+      .select()
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.dedupeKey, capabilitySetupContinuationDedupeKey(card.id)),
+        ),
+      )
+      .limit(1);
+    if (existing) return { kind: "existing", update: mapSessionSystemUpdate(existing) } as const;
+    const [session] = await tx
+      .select({
+        status: schema.sessions.status,
+        contentArchiveState: schema.sessions.contentArchiveState,
+        executionContextTurnId: schema.sessions.executionContextTurnId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    if (!session || session.status === "cancelled" || session.contentArchiveState !== null) {
+      return { kind: "skip", reason: "session_closed" } as const;
+    }
+    if (await userMessageAfterSequenceTx(tx, input, card.sequence)) {
+      return { kind: "skip", reason: "later_message" } as const;
+    }
+    if (!session.executionContextTurnId) return { kind: "skip", reason: "not_requester" } as const;
+    const [context] = await tx
+      .select()
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, session.executionContextTurnId),
+        ),
+      )
+      .limit(1);
+    // The continuation stands in for the requester's own "done", so it runs
+    // on their receiving context: the person who made the request, or for a
+    // request no person made (a host server's own key) that same principal.
+    // Someone else finishing setup in a shared chat can simply say so.
+    if (
+      !context ||
+      (turnHuman(context) ?? context.initiatorSubjectId) !== input.requesterSubjectId
+    ) {
+      return { kind: "skip", reason: "not_requester" } as const;
+    }
+    return { kind: "card", card, context } as const;
+  });
+  if (read.kind === "skip") return { outcome: "not_needed", reason: read.reason };
+  if (read.kind === "existing") {
+    return {
+      outcome: "already_queued",
+      update: read.update,
+      shouldWake: false,
+      workflowWakeRevision: null,
+      temporalWorkflowId: null,
+      events: [],
+    };
+  }
+  const { card, context } = read;
+  const human = turnHuman(context);
+  // The receiving context's exact authority, as a goal continuation copies
+  // its causal turn's: the claim then admits it into that context and
+  // resolves the person's current accounts, including the one just set up.
+  const personalConnectionDelegations = parsedPersonalConnectionDelegations(
+    context.personalConnectionDelegations,
+    `session_turns:${input.workspaceId}:${input.sessionId}:${context.id}`,
+  );
+  const xaiProviderAccountAuthoritySnapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
+    context.xaiProviderAccountAuthoritySnapshot,
+  );
+  const claudeProviderAccountAuthoritySnapshot = ClaudeProviderAccountAuthoritySnapshotV1.parse(
+    context.claudeProviderAccountAuthoritySnapshot,
+  );
+  const name = input.capabilityName.trim().slice(0, CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS);
+  try {
+    const result = await addSessionSystemUpdateWithSourceMutation(
+      db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        kind: "capability_setup_completed",
+        classification: "success",
+        sourceId: card.id,
+        dedupeKey: capabilitySetupContinuationDedupeKey(card.id),
+        summary: capabilitySetupCompletedSummary(name || input.capabilityId, input.toolsVerified),
+        payload: {
+          type: "capability_setup_completed",
+          capabilityId: input.capabilityId,
+          name: name || input.capabilityId.slice(0, CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS),
+          cardEventId: card.id,
+        },
+        lineage: {
+          causalTurnId: context.id,
+          ...(human && personalConnectionDelegations.length > 0
+            ? { connectionAuthoritySubjectId: human }
+            : {}),
+          ...(human && xaiProviderAccountAuthoritySnapshot.scope === "user"
+            ? { xaiAuthoritySubjectId: human }
+            : {}),
+          ...(human && claudeProviderAccountAuthoritySnapshot.scope === "user"
+            ? { claudeAuthoritySubjectId: human }
+            : {}),
+        },
+        personalConnectionDelegations,
+        mcpAccountBindings: parseAcceptedMcpAccountBindings(context.mcpAccountBindings),
+        xaiProviderAccountAuthoritySnapshot,
+        claudeProviderAccountAuthoritySnapshot,
+      },
+      async () => undefined,
+      {
+        // Re-check under the session lock: a message or a new receiving
+        // context committed since the read wins over this continuation.
+        prepareSource: async (tx) => {
+          const [locked] = await tx
+            .select({ executionContextTurnId: schema.sessions.executionContextTurnId })
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (await userMessageAfterSequenceTx(tx, input, card.sequence)) {
+            throw new CapabilitySetupContinuationNotNeeded("later_message");
+          }
+          if (locked?.executionContextTurnId !== context.id) {
+            throw new CapabilitySetupContinuationNotNeeded("not_requester");
+          }
+        },
+      },
+    );
+    if (result.reason === "session_cancelled") {
+      return { outcome: "not_needed", reason: "session_closed" };
+    }
+    return {
+      outcome: result.added ? "queued" : "already_queued",
+      update: result.update,
+      shouldWake: result.shouldWake,
+      workflowWakeRevision: result.workflowWakeRevision,
+      temporalWorkflowId: result.temporalWorkflowId,
+      events: result.events,
+    };
+  } catch (error) {
+    if (error instanceof CapabilitySetupContinuationNotNeeded) {
+      return { outcome: "not_needed", reason: error.reason };
+    }
+    throw error;
+  }
+}
+
+async function userMessageAfterSequenceTx(
+  tx: Database,
+  input: Pick<EnqueueCapabilitySetupContinuationInput, "workspaceId" | "sessionId">,
+  sequence: number,
+): Promise<boolean> {
+  const [message] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.type, "user.message"),
+        gt(schema.sessionEvents.sequence, sequence),
+      ),
+    )
+    .limit(1);
+  return message !== undefined;
 }
 
 /**
@@ -88204,6 +88388,13 @@ export async function acceptSessionApprovalDecision(
     mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
     /** Bounded decider kind for the parent's resolution notice; `human` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
+    /**
+     * The decider is signed in where an app-action change may be confirmed:
+     * the app itself, or an embed the deployment opted in; never a key, chat
+     * integration or other token carrying their identity. Only such a
+     * decision confirms an app-action change.
+     */
+    decidedBySignedInPerson?: boolean;
     clientEventId?: string | null;
     interactionIntervention?: {
       interventionId: string;
@@ -88457,6 +88648,8 @@ export async function acceptSessionApprovalDecision(
                 "approval actor",
                 1024,
               ),
+              decisionByKind: input.respondedByKind ?? "human",
+              decisionBySignedInPerson: input.decidedBySignedInPerson === true,
               decisionEventId: event.id,
               decidedAt: event.occurredAt,
               updatedAt: new Date(),

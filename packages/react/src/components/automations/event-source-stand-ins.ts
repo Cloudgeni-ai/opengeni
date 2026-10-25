@@ -1,13 +1,24 @@
 /**
- * Sources a person can pick before they have them: the host's MCP servers and
- * this workspace's own events, such as its meetings. Neither needs setting
- * up, so each stands in for the person's own source until it is used, and
- * that source is added the first time its events are read or an automation
- * is saved on it.
+ * Sources a person can pick before they have them: the ones the server lists
+ * as ready (MCP servers they are signed in to that offer events, their Gmail
+ * accounts and this workspace's own events), and the host's own MCP servers.
+ * None needs setting up, so each stands in for the person's own source until
+ * it is used, and that source is added the first time its events are read or
+ * an automation is saved on it.
  */
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 
-import type { EventSource, EventTypeDescriptor, OpenGeniClient } from "@opengeni/sdk";
+import {
+  readyEventSourceKey,
+  readyEventSourceRequest,
+  type ReadyEventSourceKind,
+} from "@opengeni/contracts/event-triggers";
+import type {
+  EventSource,
+  EventTypeDescriptor,
+  OpenGeniClient,
+  ReadyEventSource,
+} from "@opengeni/sdk";
 
 import { useOpenGeniText } from "../../messages/runtime";
 import type { EventTriggersDraft } from "./event-trigger-model";
@@ -26,6 +37,8 @@ export interface EventSourceStandInsOptions {
   workspaceId: string;
   /** The sources the person can use; undefined while they load. */
   sources: EventSource[] | undefined;
+  /** What the server lists as ready to use (`listReadyEventSources`). */
+  readySources?: readonly ReadyEventSource[] | undefined;
   /** MCP servers whose events people can pick right away, such as the host's own. */
   eventServers?: readonly AutomationEventServer[] | undefined;
   /** Offer this workspace's own events, such as a meeting's transcript being ready. */
@@ -43,20 +56,22 @@ export interface EventSourceStandIns {
   usesStandIn: (events: EventTriggersDraft) => boolean;
 }
 
-const SERVER_PREFIX = "mcp-server:";
-const WORKSPACE_STAND_IN = "workspace-source:";
-
+/** A stand-in's id is the ready source's key, which never looks like a source id. */
 function isStandIn(sourceId: string): boolean {
-  return sourceId.startsWith(SERVER_PREFIX) || sourceId === WORKSPACE_STAND_IN;
+  return readyEventSourceRequest(sourceId) !== null;
 }
 
 function standIn(
   workspaceId: string,
-  fields: Pick<EventSource, "id" | "kind" | "name" | "mcp">,
+  ready: { key: string; kind: ReadyEventSourceKind; name: string },
 ): EventSource {
+  const request = readyEventSourceRequest(ready.key);
   return {
+    id: ready.key,
     workspaceId,
+    kind: ready.kind,
     adapter: null,
+    name: ready.name,
     ownerSubjectId: null,
     visibility: "private",
     status: "active",
@@ -65,10 +80,10 @@ function standIn(
     statusReasonDetail: null,
     webhookUrl: null,
     awaitingSigningSecret: false,
+    mcp: request?.kind === "mcp" ? { serverId: request.serverId, connectionId: null } : null,
     lastDeliveryAt: null,
     createdAt: "",
     updatedAt: "",
-    ...fields,
   };
 }
 
@@ -77,60 +92,69 @@ export function useEventSourceStandIns({
   client,
   workspaceId,
   sources,
+  readySources,
   eventServers,
   workspaceEvents = false,
 }: EventSourceStandInsOptions): EventSourceStandIns {
   const t = useOpenGeniText();
   const workspaceName = t("automations.source.workspace.name");
+  // The source each used stand-in became: once the person has it, it shows instead.
+  const [added, setAdded] = useState<ReadonlyMap<string, string>>(() => new Map());
   const withStandIns = useMemo(() => {
     if (!sources) return undefined;
-    const extra: EventSource[] = [];
+    const ready = new Map<string, { key: string; kind: ReadyEventSourceKind; name: string }>();
+    for (const entry of readySources ?? []) {
+      if (entry.kind === "workspace" && !workspaceEvents) continue;
+      ready.set(entry.key, entry);
+    }
     for (const server of eventServers ?? []) {
-      if (
-        sources.some((source) => source.kind === "mcp" && source.mcp?.serverId === server.serverId)
-      )
-        continue;
-      extra.push(
-        standIn(workspaceId, {
-          id: `${SERVER_PREFIX}${server.serverId}`,
-          kind: "mcp",
-          name: server.name ?? server.serverId,
-          mcp: { serverId: server.serverId, connectionId: null },
-        }),
-      );
+      const key = readyEventSourceKey({ kind: "mcp", serverId: server.serverId });
+      ready.set(key, {
+        key,
+        kind: "mcp",
+        name: server.name ?? ready.get(key)?.name ?? server.serverId,
+      });
     }
-    if (workspaceEvents && !sources.some((source) => source.kind === "workspace")) {
-      extra.push(
-        standIn(workspaceId, {
-          id: WORKSPACE_STAND_IN,
-          kind: "workspace",
-          name: workspaceName,
-          mcp: null,
-        }),
-      );
+    if (workspaceEvents) {
+      const key = readyEventSourceKey({ kind: "workspace" });
+      ready.set(key, { key, kind: "workspace", name: workspaceName });
     }
+    const has = (key: string, kind: ReadyEventSourceKind): boolean => {
+      const id = added.get(key);
+      if (id !== undefined && sources.some((source) => source.id === id)) return true;
+      const request = readyEventSourceRequest(key);
+      if (request?.kind === "mcp") {
+        return sources.some(
+          (source) => source.kind === "mcp" && source.mcp?.serverId === request.serverId,
+        );
+      }
+      // A person has one This workspace source.
+      return kind === "workspace" && sources.some((source) => source.kind === "workspace");
+    };
+    const extra = [...ready.values()]
+      .filter((entry) => !has(entry.key, entry.kind))
+      .map((entry) => standIn(workspaceId, entry));
     return extra.length > 0 ? [...sources, ...extra] : sources;
-  }, [eventServers, sources, workspaceEvents, workspaceId, workspaceName]);
+  }, [added, eventServers, readySources, sources, workspaceEvents, workspaceId, workspaceName]);
 
   // One creation per stand-in, shared by every read and save that needs it.
   const adding = useRef(new Map<string, Promise<string>>());
   const realSourceId = useCallback(
     (sourceId: string): Promise<string> => {
-      if (!isStandIn(sourceId)) return Promise.resolve(sourceId);
+      const request = readyEventSourceRequest(sourceId);
+      if (!request) return Promise.resolve(sourceId);
       let pending = adding.current.get(sourceId);
       if (!pending) {
-        const serverId = sourceId.startsWith(SERVER_PREFIX)
-          ? sourceId.slice(SERVER_PREFIX.length)
-          : null;
-        const name = serverId
-          ? eventServers?.find((server) => server.serverId === serverId)?.name
-          : undefined;
+        const name =
+          request.kind === "mcp"
+            ? eventServers?.find((server) => server.serverId === request.serverId)?.name
+            : undefined;
         pending = client
-          .createEventSource(
-            workspaceId,
-            serverId ? { kind: "mcp", serverId, ...(name ? { name } : {}) } : { kind: "workspace" },
-          )
-          .then((created) => created.source.id);
+          .createEventSource(workspaceId, { ...request, ...(name ? { name } : {}) })
+          .then((created) => {
+            setAdded((current) => new Map(current).set(sourceId, created.source.id));
+            return created.source.id;
+          });
         adding.current.set(sourceId, pending);
         pending.catch(() => adding.current.delete(sourceId));
       }

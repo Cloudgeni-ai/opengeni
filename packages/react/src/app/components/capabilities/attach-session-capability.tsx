@@ -1,6 +1,7 @@
 export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
+  continueAfterCapabilitySetup,
   prepareSessionCapabilityAccess,
   applySessionCapabilityAccess,
   type SessionCapabilityAccessPlan,

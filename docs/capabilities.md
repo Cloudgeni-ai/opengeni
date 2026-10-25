@@ -199,7 +199,9 @@ and Drive MCP use the separate `/v1/integrations/oauth/callback` flow and
 the Google issuer entry; their scopes require their own applicable verification.
 A Google Web application client must include its client
 secret; a public client may explicitly use `tokenEndpointAuthMethod: "none"`.
-Callbacks consume single-use state, recheck `connections:write`, verify the
+Callbacks consume single-use state, recheck the start's Connect permission
+(`connections:personal` for your own account of a reviewed definition,
+otherwise `connections:write`), verify the
 provider principal, require every Definition scope, preserve an existing refresh
 token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
@@ -784,6 +786,53 @@ The GitHub App card is the one card that can also add something to the chat:
 after the workspace binding exists it lists the shared repositories, and **Use**
 sends an ordinary human message carrying the composer picker's repository
 resource through the same Send endpoint and validation. See [GitHub App workspace bindings](github-app.md#using-a-repository-from-the-conversation-card).
+
+The deployment's reviewed API integrations (Outlook Mail, Outlook Calendar,
+Outlook Contacts, OneDrive and, where the Teams rollout allows it, Microsoft
+Teams) are also search results for agents, as `api:integration:<definition id>`
+entries tagged only with names that mean Microsoft (Outlook, Hotmail, MSN,
+Exchange, OneDrive, Teams), so generic requests such as "send an email" or
+"schedule a meeting" keep finding Gmail or Google Calendar. They are offered
+only when the definition is available in the workspace and the deployment's
+OAuth client and encryption are configured. Their setup state is per person:
+`ready` when one of the person's signed-in accounts has tools in the current
+turn, `unavailable` when it is signed in but its tools load in the next turn
+(or, in a chat with a fixed tool list that does not include it, until the
+person adds it to the chat's tools), otherwise `authorization_required`,
+including when the account's sign-in expired or was revoked. The card
+(`SessionIntegrationCapabilityCard`, the same component in the console and in
+`SessionConversation` / `OpenGeniChat` embeds, including session-proxy embeds)
+always connects the viewer's own personal account, never a workspace account.
+It starts a personal Connect attempt for a new account, or reconnects the
+viewer's expired or revoked account (the most recently used one when there are
+several), opens the provider sign-in in a popup from the same click, and lets
+the shared setup view install the definition's reviewed tools for that
+account. It then selects them for the chat and asks the chat to
+continue (`continueAfterCapabilitySetup`), so the agent resumes the request
+without the person typing anything. The card shows the viewer's own state; in
+a shared chat a teammate connects their own account, and the agent continues
+only for the person whose request it was. When Microsoft reports that an
+administrator must approve the app, the card shows the administrator approval
+link with a copy button and a **Try again** action.
+
+Installing a reviewed definition's tools for your own personal account counts
+as connecting your own account, so it needs only `connections:personal`
+(included in `connections:write`), not `capabilities:manage`: the instance
+resolves credentials for that person alone. The card itself also needs
+`sessions:control` to add the tools to the chat and continue it. A
+workspace-owned account or a custom source needs `connections:write`, and
+binding an instance that is not already bound to the same account still needs
+`capabilities:manage`. Where this client cannot connect a personal account
+(for example a shared service identity), the card says so instead of offering
+Connect.
+
+In `GET /v1/workspaces/:workspaceId/integrations`, `connected` is true only
+while the instance is bound to a connection whose status is active. An
+instance whose account sign-in expired or was revoked reports
+`connected: false` but keeps its `connectionId` and `ownership`, so clients
+can reconnect that account. `connectionLastUsedAt` is when the bound
+connection was last used (null when never used or unbound); clients use it to
+pick which of several disconnected accounts to reconnect.
 
 Reviewed library Skills install for the workspace. Their source/version review
 is available in the setup dialog; personal and conversation-only library

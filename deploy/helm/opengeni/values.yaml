@@ -1161,6 +1161,12 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
+  # The largest request body the primary Ingress passes on, as
+  # nginx.ingress.kubernetes.io/proxy-body-size (unless annotations set one).
+  # The API refuses bodies over 32 MiB itself (API_MAX_REQUEST_BODY_BYTES);
+  # ingress-nginx's own default of 1m would refuse sandbox file writes, voice
+  # uploads and imports the API accepts. "" leaves the controller's default.
+  maxRequestBody: 32m
   hosts:
     - host: opengeni.local
       paths:
@@ -1476,6 +1482,11 @@ computeControl:
   # control-worker and turn-worker pods trust ca.crt (NODE_EXTRA_CA_CERTS)
   # and OPENGENI_COMPUTE_API_URL is https://<apiTls.host>:<apiPort>.
   apiTls:
+    # Optional public CA bundles in same-namespace ConfigMaps (name/key).
+    # Composed with compute ca.crt once at pod initialization, using the same
+    # workload image. Empty preserves the existing compute-only trust path.
+    # Source CA changes require a normal pod rollout; no live reload is implied.
+    additionalCaConfigMaps: []
     secretName: ""
     # Default: the API Service's cluster name, <name>.<namespace>.svc.
     host: ""
@@ -1511,6 +1522,13 @@ computeControl:
   # creates may name (name: image id, as `compute-host build-image` prints).
   defaultImage: base
   storedImages: {}
+  # The OCI image, pinned by digest, this release's sandboxes of each image
+  # name start from (name: registry/repository@sha256:<hex>), normally the
+  # release's sandbox and desktop images. When none was built from it, the
+  # service has a host build it into a stored image and new creates of the
+  # name start from that; until then from the image the name had before, or
+  # its storedImages entry. Existing sandboxes keep the image they have.
+  imageSources: {}
   diskMib: 1024
   # Grow and fence a GCP managed instance group of hosts:
   # projects/P/zones/Z/instanceGroupManagers/N. Empty: hosts are added and

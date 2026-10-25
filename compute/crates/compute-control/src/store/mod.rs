@@ -20,7 +20,7 @@ use std::future::Future;
 use compute_fleet::{Change, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends, Verdict};
 use compute_protocol::fleet::Verdict as Wire;
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Report, Ruling};
-use compute_protocol::host::{Id, SandboxConfig};
+use compute_protocol::host::{Id, ImageId, SandboxConfig};
 use serde::{Deserialize, Serialize};
 
 use crate::e2b::lifecycle::Record;
@@ -287,13 +287,23 @@ pub trait Store: Send + Sync + 'static {
 
     /// Gives up on `host` if its renewal count is still `renewals`, and in
     /// the same transaction leaves each of its sandboxes without an owner
-    /// under a raised epoch. Returns how many it had, or `None` when a
+    /// under a raised epoch, noting `at_ms` as when, for
+    /// [`Store::prune_hosts`]. Returns how many it had, or `None` when a
     /// renewal came meanwhile or another replica gave up on it first.
     fn give_up(
         &self,
         host: HostId,
         renewals: u64,
+        at_ms: u64,
     ) -> impl Future<Output = Result<Option<usize>>> + Send;
+
+    /// Forgets the hosts given up on before `before_ms`, so hosts replaced
+    /// over time are not kept forever. Answers how many. Nothing is lost:
+    /// a host given up on owns no sandbox, a write naming a host the store
+    /// does not have is refused as one naming a host given up on
+    /// ([`Write::OwnerLost`]), and a host registering again under a
+    /// forgotten name is a new host.
+    fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send;
 
     /// Moves a host from `from` to `to` (live and draining), if it is in
     /// `from`.
@@ -418,6 +428,27 @@ pub trait Store: Send + Sync + 'static {
         after: Option<Id>,
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send;
+
+    /// The stored image recorded as built from the OCI image `source` (a
+    /// reference pinned by digest), if one was.
+    fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
+
+    /// Records `image` as built from `source` at `at_ms`, unless an image
+    /// was recorded for `source` already, and that the fleet's name `name`
+    /// now uses `source`. Answers the image recorded for `source`, which
+    /// creates of `name` use: builds are not byte for byte the same, so the
+    /// first recorded wins. Every name that uses a source is recorded, so
+    /// two names sharing one each keep it as their latest.
+    fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        at_ms: u64,
+    ) -> impl Future<Output = Result<ImageId>> + Send;
+
+    /// The image of the source the name `name` was last recorded as using.
+    fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
 }
 
 /// How a conditional write of a sandbox's row went.
@@ -426,10 +457,11 @@ pub enum Write {
     Done,
     /// Someone wrote it since it was read, or, for an insert, it exists.
     Conflict,
-    /// It names as owner a host the service has given up on. Giving up
-    /// clears the owner of every sandbox the host owns in one transaction,
-    /// and this check is ordered with it, so no sandbox is left owned by a
-    /// host after it was given up on.
+    /// It names as owner a host the service has given up on, or one it
+    /// does not have, such as a host given up on and since forgotten.
+    /// Giving up clears the owner of every sandbox the host owns in one
+    /// transaction, and this check is ordered with it, so no sandbox is
+    /// left owned by a host after it was given up on.
     OwnerLost,
 }
 

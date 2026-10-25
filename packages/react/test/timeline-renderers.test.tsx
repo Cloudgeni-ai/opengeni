@@ -1,5 +1,5 @@
 import { setStartupDetails } from "../src/timeline/startup-preference";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { EMPTY_FINAL_REPLY_NOTICE, type SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush, actRun } from "./render-hook";
@@ -28,6 +28,20 @@ const englishText = createOpenGeniText();
    -------------------------------------------------------------------------- */
 
 registerDom({ clock: "virtual" });
+
+// The timeline's lazy rows load with real I/O, but this file runs on the
+// virtual clock, where Date.now(), performance.now() and even Bun.nanoseconds()
+// advance with every flush. A wait for a row is therefore a budget of flush
+// steps, which a loaded runner can spend in a few real milliseconds before a
+// cold import finishes. Load the modules once up front so no render waits on I/O.
+beforeAll(async () => {
+  await Promise.all([
+    import("../src/timeline/fleet-decision-row"),
+    import("../src/timeline/platform-activity-row"),
+    import("../src/components/timeline-annotation-selection"),
+    import("../src/components/timeline-annotation-markers"),
+  ]);
+});
 
 // Radix chooses its layout-effect implementation at import time. Load the real
 // renderers only after the DOM exists so close/open assertions test browser
@@ -139,8 +153,8 @@ function timelineEvent(
 }
 
 async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElement> {
-  const deadline = performance.now() + 5_000;
-  while (performance.now() < deadline) {
+  // Virtual time (see the preload above): 500 flush steps, not five real seconds.
+  for (let step = 0; step < 500; step += 1) {
     const disclosure = Array.from(
       container.querySelectorAll<HTMLElement>('[role="button"][aria-expanded]'),
     ).find((candidate) => candidate.textContent?.includes("Fleet policy shadow"));
@@ -148,7 +162,7 @@ async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElem
     await flush(10);
   }
 
-  throw new Error("Fleet policy shadow disclosure did not load within 5 seconds");
+  throw new Error("Fleet policy shadow disclosure did not render within 500 flush steps");
 }
 
 describe("allowance refusal rendering", () => {
@@ -2891,7 +2905,35 @@ describe("MessageTimeline — settled turn folding", () => {
 
     const trigger = turnSummaryTrigger(r.container);
     expect(trigger?.getAttribute("data-state")).toBe("open");
-    expect(trigger?.textContent).toContain("provider down");
+    // Unclassified text is a diagnostic: the chip names the outcome and keeps
+    // the recorded text as its hover title, never as visible chip text.
+    expect(trigger?.textContent).toContain("The turn stopped unexpectedly");
+    expect(trigger?.textContent).not.toContain("provider down");
+    expect(trigger?.querySelector('[title="provider down"]')).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("copy written for people stays on the failed summary chip", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy preview" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "helm upgrade preview ./chart" },
+      }),
+      timelineEvent("turn.failed", {
+        code: "mcp_server_unavailable",
+        error: "The GitHub connection is unavailable.",
+      }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.textContent).toContain("The GitHub connection is unavailable.");
+    expect(trigger?.querySelector("[title]")).toBeNull();
 
     await r.unmount();
   });
@@ -3241,11 +3283,11 @@ describe("MessageTimeline — settled turn folding", () => {
     // Outer owns the loud failure (auto-open). Nested cluster chips stay bare /
     // closed — no repeated failure text, two calm sub-expands for the two clusters.
     expect(triggers).toHaveLength(3);
-    expect(triggers[0]?.textContent ?? "").toContain("provider down");
+    expect(triggers[0]?.textContent ?? "").toContain("The turn stopped unexpectedly");
     expect(triggers[0]?.getAttribute("data-state")).toBe("open");
-    expect(triggers.slice(1).every((t) => !(t.textContent ?? "").includes("provider down"))).toBe(
-      true,
-    );
+    expect(
+      triggers.slice(1).every((t) => !(t.textContent ?? "").includes("stopped unexpectedly")),
+    ).toBe(true);
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
 
     await r.unmount();
@@ -3993,6 +4035,46 @@ describe("SandboxRow — failed chip", () => {
 });
 
 describe("StartupPhaseRow", () => {
+  test("a failed step keeps its recorded error behind Details, not in its title", async () => {
+    const detail = "This compute sandbox's agent is too old (capabilities.op_release).";
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "sandbox-failed",
+      turnId: "turn-failed",
+      phase: "sandbox",
+      status: "failed",
+      detail,
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(1000).toISOString(),
+      durationMs: 1000,
+      outcome: null,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const row = r.container.querySelector<HTMLElement>('[role="button"][data-status="failed"]');
+    expect(row?.textContent ?? "").toContain("Sandbox didn’t start");
+    expect(r.container.textContent ?? "").not.toContain(detail);
+    expect(row?.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => row!.click());
+    expect(r.container.textContent ?? "").toContain("Details");
+    expect(r.container.textContent ?? "").toContain(detail);
+    await r.unmount();
+
+    // A host that hides raw technical detail keeps the row a plain status.
+    const { ToolDetailsProvider } = await import("../src/timeline/tool-details");
+    const plain = await renderComponent(
+      <ToolDetailsProvider value="plain">
+        <ActivityRail items={[item]} />
+      </ToolDetailsProvider>,
+    );
+    await flush();
+    expect(plain.container.querySelector('[role="button"][data-status="failed"]')).toBeNull();
+    expect(plain.container.textContent ?? "").toContain("Sandbox didn’t start");
+    expect(plain.container.textContent ?? "").not.toContain(detail);
+    await plain.unmount();
+  });
+
   test("names a sandbox rotation wait", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",

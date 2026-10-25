@@ -232,6 +232,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiBaseUrl: undefined,
     openaiModel: "scripted-model",
     imageGenerationModel: "openai/gpt-image-2",
+    imageGenerationOpengeniCreditsEnabled: true,
     videoGenerationPollIntervalMs: 5_000,
     videoGenerationRecoveryDeadlineMs: 2 * 60 * 60_000,
     videoGenerationReferenceUrlTtlSeconds: 60 * 60,
@@ -393,6 +394,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     recordingFramerate: 15,
     recordingMaxSeconds: 600,
     recordingMaxBytes: 268_435_456,
+    recordingWordAlignment: false,
     daytonaApiKey: undefined,
     daytonaApiUrl: undefined,
     daytonaTarget: undefined,
@@ -452,6 +454,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxLazyProvisionEnabled: false,
     sandboxSelfhostedEnabled: false,
     agentOpStreamEnabled: true,
+    delegatedSignInAppActionChangesEnabled: false,
     // Mirror production: command duration is unbounded; control probes remain short.
     sandboxSelfhostedExecTimeoutMs: 0,
     sandboxSelfhostedControlTimeoutMs: 30_000,

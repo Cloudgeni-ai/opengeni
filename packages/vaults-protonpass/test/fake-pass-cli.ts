@@ -87,7 +87,8 @@ function civilNow(): string {
   return new Date().toISOString().slice(0, 19);
 }
 
-const stdin = argv.includes("-") ? readStdin() : "";
+const stdin =
+  argv.includes("-") || argv.includes("--from-private-key=/dev/stdin") ? readStdin() : "";
 const env = process.env;
 appendFileSync(
   logPath,
@@ -280,12 +281,25 @@ if (command === "item" && sub === "create") {
   const shareId = option("share-id")!;
   const role = shareRole(shareId);
   const kind = third!;
-  const context = `Error creating ${kind} item`;
+  const context =
+    {
+      "credit-card": "Error creating credit card item",
+      wifi: "Error creating WiFi item",
+      "ssh-key": "Error creating SSH key item",
+    }[kind] ?? `Error creating ${kind} item`;
   let template: Record<string, unknown>;
-  try {
-    template = JSON.parse(stdin) as Record<string, unknown>;
-  } catch {
-    fail("Error parsing JSON from stdin", "expected value at line 1 column 1");
+  if (kind === "ssh-key") {
+    // `ssh-key import --title=… --from-private-key=/dev/stdin`
+    if (argv[3] !== "import" || !stdin.includes("PRIVATE KEY")) {
+      fail('Error reading private key file: "/dev/stdin"');
+    }
+    template = { title: option("title") };
+  } else {
+    try {
+      template = JSON.parse(stdin) as Record<string, unknown>;
+    } catch {
+      fail("Error parsing JSON from stdin", "expected value at line 1 column 1");
+    }
   }
   if (role === "Viewer") fail(context, "Could not perform operation. Reason: PermissionDenied");
   const now = civilNow();
@@ -307,6 +321,38 @@ if (command === "item" && sub === "create") {
   } else if (kind === "note") {
     content = { Note: null };
     note = (template.note as string | null) ?? "";
+  } else if (kind === "credit-card") {
+    note = (template.note as string | null) ?? "";
+    content = {
+      CreditCard: {
+        cardholder_name: template.cardholder_name ?? "",
+        // pass-cli 2.4.2 ignores the template's card_type.
+        card_type: "Unspecified",
+        number: template.number ?? "",
+        verification_number: template.cvv ?? "",
+        expiration_date: template.expiration_date ?? "",
+        pin: template.pin ?? "",
+      },
+    };
+  } else if (kind === "identity") {
+    note = (template.note as string | null) ?? "";
+    const identity: Record<string, unknown> = { extra_sections: [] };
+    for (const [key, value] of Object.entries(template)) {
+      if (key !== "title" && key !== "note") identity[key] = value ?? "";
+    }
+    content = { Identity: identity };
+  } else if (kind === "wifi") {
+    note = (template.note as string | null) ?? "";
+    content = {
+      Wifi: {
+        ssid: template.ssid ?? "",
+        password: template.password ?? "",
+        security: 0,
+        sections: [],
+      },
+    };
+  } else if (kind === "ssh-key") {
+    content = { SshKey: { private_key: stdin, public_key: "", sections: [] } };
   } else if (kind === "custom") {
     note = (template.note as string | null) ?? "";
     const sections =

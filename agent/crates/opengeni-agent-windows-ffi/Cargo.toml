@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-agent-windows-ffi"
-description = "Windows-only leaf FFI crate: display probe, GDI screen capture, SendInput and the per-user registry for the Opengeni agent, wrapped behind a safe API."
+description = "Windows-only leaf FFI crate: display probe, GDI screen capture, SendInput, the per-user registry and whole-machine metrics for the Opengeni agent, wrapped behind a safe API."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Security",
+  "Win32_Storage_FileSystem",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_IO",
   "Win32_System_SystemInformation",

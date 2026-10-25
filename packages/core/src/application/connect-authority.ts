@@ -1,4 +1,5 @@
 import type { Permission } from "@opengeni/contracts";
+import { CORE_INTEGRATION_DEFINITIONS } from "@opengeni/capabilities";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import { hasPermission } from "../access";
 import { requireExternalContinuationAuthority } from "./external-continuation";
@@ -12,6 +13,46 @@ import {
   nestedPostgresSqlState,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+
+/** Connect providers whose personal setup is only a sign-in: no installation. */
+const PERSONAL_SIGN_IN_PROVIDERS = new Set([
+  "mcp-oauth",
+  "gmail",
+  "google-drive",
+  "slack-personal",
+]);
+
+/**
+ * Deployment-reviewed integration definitions (Outlook Mail, OneDrive, ...).
+ * Each personal account gets its own instance of the reviewed tools, which
+ * resolves credentials for that person alone, so connecting one's own
+ * account to one is personal setup too. The install step separately allows
+ * only a fresh instance or one already bound to that same account.
+ */
+const REVIEWED_INTEGRATION_DEFINITION_IDS: ReadonlySet<string> = new Set(
+  CORE_INTEGRATION_DEFINITIONS.map((definition) => definition.id),
+);
+
+/**
+ * The permission a Connect step needs. Signing in to one's own account
+ * (personal ownership and no MCP setup, with a sign-in-only provider and no
+ * installation target, or a reviewed integration definition and no custom
+ * source) needs only `connections:personal`; everything else keeps
+ * `connections:write`. `connections:write` includes `connections:personal`.
+ */
+export function connectSetupPermission(attempt: {
+  providerId: string;
+  ownership: string;
+  mcpSetup?: unknown;
+  installationTarget?: unknown;
+  source?: unknown;
+}): "connections:personal" | "connections:write" {
+  if (attempt.ownership !== "personal" || attempt.mcpSetup) return "connections:write";
+  return (PERSONAL_SIGN_IN_PROVIDERS.has(attempt.providerId) && !attempt.installationTarget) ||
+    (REVIEWED_INTEGRATION_DEFINITION_IDS.has(attempt.providerId) && !attempt.source)
+    ? "connections:personal"
+    : "connections:write";
+}
 
 /** Accept only a verified request owner or authenticated server-minted OAuth
  * state. The callback does not need a browser cookie: it rechecks the stored

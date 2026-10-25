@@ -1253,6 +1253,20 @@ export class DesktopShell {
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
     });
+    // A still of the asking page itself, for a feedback report: only the
+    // account page can ask, and it only ever gets its own pixels.
+    ipcMain.handle(DESKTOP_IPC.captureWindow, async (event) => {
+      this.senderAccount(event);
+      const image = await event.sender.capturePage();
+      if (image.isEmpty()) return null;
+      const { width, height } = image.getSize();
+      return {
+        contentType: "image/png",
+        base64: image.toPNG().toString("base64"),
+        width,
+        height,
+      };
+    });
     handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
     handle(DESKTOP_IPC.updatesState, () => this.updates?.pageState ?? { kind: "none" });
     handle(DESKTOP_IPC.updatesInstall, () => {

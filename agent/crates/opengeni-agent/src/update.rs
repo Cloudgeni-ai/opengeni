@@ -62,14 +62,18 @@ fn apply_verified_update(
 ) -> UpdateResult<PathBuf> {
     // Unix permits replacing the running file using the captured pathname.
     // Windows still needs self-replace's running-image lock handling.
+    // On every platform the candidate passes its startup check, staged beside
+    // the install, before it replaces it, and again once installed: a binary
+    // this machine cannot start (a missing DLL on Windows) is never swapped in.
+    let preflight = |staged: &Path| verify_installed_binary(staged, &pending.version);
     #[cfg(unix)]
     {
-        pending.apply_running_at(install_path)
+        pending.apply_running_at(install_path, preflight)
     }
     #[cfg(not(unix))]
     {
         let _ = install_path;
-        pending.apply_running()
+        pending.apply_running(preflight)
     }
 }
 
@@ -505,9 +509,11 @@ fn managed_fetch_failure(
     error_code
 }
 
-/// Executes the newly-swapped binary through the smallest stable startup surface.
-/// If the loader, executable bit, CLI wiring, or embedded version is wrong, the
-/// updater rolls back atomically before reporting success.
+/// Executes the binary at `install_path` through the smallest stable startup
+/// surface: the candidate staged beside the install before it replaces it,
+/// then the newly-swapped binary. If the loader, executable bit, CLI
+/// wiring, or embedded version is wrong, the updater leaves or rolls back the
+/// install before reporting success.
 fn verify_installed_binary(install_path: &std::path::Path, version: &str) -> UpdateResult<()> {
     let output = std::process::Command::new(install_path)
         .arg("--version")
@@ -750,15 +756,19 @@ mod tests {
             let captured = installed_executable().unwrap();
             assert_eq!(captured, installed);
             let bytes = std::fs::read(captured).unwrap();
-            opengeni_agent_update::replace_running_exe_at(captured, &bytes).unwrap();
+            opengeni_agent_update::replace_running_exe_at(captured, &bytes, |_| Ok(())).unwrap();
             assert_ne!(std::env::current_exe().unwrap(), captured);
             opengeni_agent_update::rollback(captured).unwrap();
             // Rollback restores a copied binary; our running inode remains deleted.
             assert_ne!(std::env::current_exe().unwrap(), captured);
             // Retry must continue using the same canonical install identity.
             assert_eq!(installed_executable().unwrap(), installed);
-            opengeni_agent_update::replace_running_exe_at(installed_executable().unwrap(), &bytes)
-                .unwrap();
+            opengeni_agent_update::replace_running_exe_at(
+                installed_executable().unwrap(),
+                &bytes,
+                |_| Ok(()),
+            )
+            .unwrap();
             opengeni_agent_update::finalize_update(captured, Ok(())).unwrap();
             assert_ne!(std::env::current_exe().unwrap(), captured);
             assert_eq!(installed_executable().unwrap(), installed);
@@ -785,6 +795,99 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(directory.path().join("ready-for-successor").exists());
+    }
+
+    /// The guest init signals the agent's process to reconnect whenever its
+    /// host loses the link, and may do so while a verified successor image is
+    /// still starting, before it handles the signal: the successor reconnects
+    /// at once then, rather than ending, with every command it carries. Nor
+    /// do the threads it starts, or the commands they run, keep the signal
+    /// blocked as it was across the exec: a program the user runs that waits
+    /// for it receives it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reconnect_signal_during_the_exec_reconnects_the_successor() {
+        use nix::sys::signal::{kill, Signal};
+        const CHILD_DIR: &str = "OPENGENI_TEST_RECONNECT_SUCCESSOR_DIR";
+        /// Whether a process that ran `cat /proc/self/status`, in `status`,
+        /// had `SIGUSR1` blocked.
+        fn blocks_usr1(status: &[u8]) -> bool {
+            let status = String::from_utf8_lossy(status);
+            let mask = status
+                .lines()
+                .find_map(|line| line.strip_prefix("SigBlk:"))
+                .expect("a signal mask");
+            let mask = u64::from_str_radix(mask.trim(), 16).unwrap();
+            mask & (1 << (Signal::SIGUSR1 as u64 - 1)) != 0
+        }
+        if let Some(directory) = std::env::var_os(CHILD_DIR) {
+            let directory = PathBuf::from(directory);
+            let execed = directory.join("execed");
+            if !execed.exists() {
+                std::fs::write(&execed, b"").unwrap();
+                crate::exec_successor_holding_reconnect(&None).expect("successor exec");
+                panic!("successful Unix exec never returns");
+            }
+            // The successor, as its `main` starts, and not yet handling it.
+            crate::reconnect_signal::catch_until_handled().unwrap();
+            kill(nix::unistd::Pid::this(), Signal::SIGUSR1).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let worker = tokio::spawn(async {
+                    tokio::process::Command::new("cat")
+                        .arg("/proc/self/status")
+                        .output()
+                        .await
+                        .unwrap()
+                });
+                let blocking = tokio::task::spawn_blocking(|| {
+                    std::process::Command::new("cat")
+                        .arg("/proc/self/status")
+                        .output()
+                        .unwrap()
+                });
+                assert!(
+                    !blocks_usr1(&worker.await.unwrap().stdout),
+                    "a worker's command"
+                );
+                assert!(
+                    !blocks_usr1(&blocking.await.unwrap().stdout),
+                    "a blocking thread's command"
+                );
+                let reconnect = crate::supervisor::ReconnectSignal::default();
+                let mut requests = reconnect.subscribe();
+                crate::spawn_reconnect_handler(reconnect);
+                tokio::time::timeout(std::time::Duration::from_secs(5), requests.changed())
+                    .await
+                    .expect("the signal sent during the exec reconnects")
+                    .unwrap();
+            });
+            std::fs::write(directory.join("reconnected"), b"").unwrap();
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update::tests::a_reconnect_signal_during_the_exec_reconnects_the_successor",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(directory.path().join("reconnected").exists());
     }
 
     #[test]

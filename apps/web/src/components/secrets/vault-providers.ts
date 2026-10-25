@@ -157,7 +157,7 @@ export function unavailableProviders(
 /* ------------------------------------------------------------- operations */
 
 export const HOSTED_OPERATIONS: VaultProviderOperations = {
-  createItemTypes: ["login", "api_key", "note", "file"],
+  createItemTypes: ["login", "api_key", "note", "card", "identity", "ssh_key", "file"],
   updateItem: true,
   removeField: true,
   archiveItem: true,

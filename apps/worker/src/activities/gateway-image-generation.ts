@@ -1,4 +1,9 @@
-import type { Database } from "@opengeni/db";
+import { imageGenerationCreditCostMicros, type Settings } from "@opengeni/config";
+import type {
+  Database,
+  ImageGenerationCreditError,
+  ImageGenerationCreditRefusalCode,
+} from "@opengeni/db";
 import { readJsonBase64Field, readResponseTextBounded, type FetchLike } from "@opengeni/network";
 import type { ObjectStorage } from "@opengeni/storage";
 import { type GeneratedImageOutput, type GeneratedImageReceipt } from "./generated-images";
@@ -26,6 +31,66 @@ export class GatewayImageApiError extends Error {
   }
 }
 
+/** The deployment's Gateway image route, funded by Opengeni credits. */
+export type ManagedImageGenerationCredential = Readonly<{
+  apiKey: string;
+  modelId: string;
+  /** Zero when the deployment does not bill or meter Opengeni credits. */
+  pricedCostMicros: number;
+}>;
+
+/**
+ * The deployment's Gateway key pays the provider and the workspace pays
+ * Opengeni credits at the frozen product price of the configured image model,
+ * like managed video. Operators turn it off with
+ * `imageGenerationOpengeniCreditsEnabled`; a billed deployment never offers a
+ * model it cannot price. The caller withholds it when the workspace turns
+ * credits off.
+ */
+export function managedImageGenerationCredential(
+  settings: Pick<
+    Settings,
+    | "vercelAiGatewayApiKey"
+    | "imageGenerationModel"
+    | "imageGenerationOpengeniCreditsEnabled"
+    | "imageGenerationCreditMicrosPerImage"
+    | "billingMode"
+    | "usageLimitsMode"
+  >,
+): ManagedImageGenerationCredential | null {
+  if (!settings.imageGenerationOpengeniCreditsEnabled) return null;
+  const apiKey = settings.vercelAiGatewayApiKey?.trim();
+  if (!apiKey) return null;
+  const debitsCredits = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
+  const pricedCostMicros = debitsCredits ? imageGenerationCreditCostMicros(settings) : 0;
+  if (pricedCostMicros === null) return null;
+  return Object.freeze({ apiKey, modelId: settings.imageGenerationModel, pricedCostMicros });
+}
+
+export type ImageGenerationCreditRefusedResult = Readonly<{
+  isError: true;
+  status: "rejected";
+  code: ImageGenerationCreditRefusalCode;
+  message: string;
+  content: readonly [{ readonly type: "text"; readonly text: string }];
+}>;
+
+/**
+ * Model-visible result for an image Opengeni credits refused before any
+ * provider request, so the agent can tell the person why in plain words.
+ */
+export function imageGenerationCreditRefusedResult(
+  error: ImageGenerationCreditError,
+): ImageGenerationCreditRefusedResult {
+  return {
+    isError: true,
+    status: "rejected",
+    code: error.code,
+    message: error.message,
+    content: [{ type: "text", text: `This image can't be paid for: ${error.message}.` }],
+  };
+}
+
 export async function executeGatewayImageGeneration(input: {
   db: Database;
   objectStorage: ObjectStorage | null;
@@ -39,6 +104,10 @@ export async function executeGatewayImageGeneration(input: {
   prompt: string;
   references?: readonly ResolvedImageGenerationReference[];
   toolCallId: string;
+  /** Opengeni-credit price; set only for the managed credential. */
+  pricedCostMicros?: number;
+  /** The turn's canonical chat model whose plan and trial grants may pay. */
+  creditUsageModelId?: string;
   abortSignal?: AbortSignal;
 }): Promise<GeneratedImageReceipt> {
   const providerBindingHash = imageProviderBindingHash(GATEWAY_IMAGE_PROVIDER_ID, input.apiKey);

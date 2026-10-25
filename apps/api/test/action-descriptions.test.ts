@@ -1,9 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
+import { ACTION_CATALOG } from "@opengeni/contracts/app-actions";
 import { actionDescription, DESCRIBED_ACTION_PATH } from "../src/mcp/action-descriptions";
 import { describeAction, searchActions } from "../src/organization-mcp";
 
 describe("action descriptions", () => {
+  test("session discovery and describe explain the existing compact page query", () => {
+    const entry = ACTION_CATALOG.find((candidate) => candidate.id === "listSessionPage")!;
+    const description = describeAction(entry).description!;
+    expect(description).toContain('{"view":"page","projection":"summary","limit":50}');
+    expect(description).toContain("nextCursor as query.cursor");
+    expect(description).toContain("getSession");
+    expect(description).toContain("omit projection");
+    const found = searchActions({ query: "list chats", limit: 50, offset: 0 }).actions;
+    expect(found.find((action) => action.id === entry.id)?.description).toBe(description);
+    expect(actionDescription({ method: "POST", path: entry.path })).toBeUndefined();
+    expect(actionDescription({ method: "GET", path: `${entry.path}/:sessionId` })).toBeUndefined();
+  });
+
   test("every subscription, model and vault connection action has a description", () => {
     const missing = ACTION_CATALOG.filter(
       (entry) => DESCRIBED_ACTION_PATH.test(entry.path) && !actionDescription(entry),

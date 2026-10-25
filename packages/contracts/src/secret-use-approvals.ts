@@ -191,8 +191,19 @@ export const VaultItemApproval = /* @__PURE__ */ defineSchema(() =>
     /** Field names that need approval on their own. */
     fields: z.array(z.string()),
     grants: z.array(SecretUseGrant),
-    /** The caller may change the marks and revoke approvals (a signed-in person with secrets:write). */
+    /**
+     * The caller may change the marks freely and revoke approvals: a signed-in
+     * person with secrets:write. Others with secrets:write (agents, API keys)
+     * may only add marks; see `canAddMarks`.
+     */
     canChange: z.boolean(),
+    /** The caller may add marks (secrets:write); only `canChange` callers may lift them. */
+    canAddMarks: z.boolean(),
+    /**
+     * Set on the answer to a change: whether the marks are now different from
+     * before it. False when the request matched the marks already in force.
+     */
+    changed: z.boolean().optional(),
   }),
 );
 export type VaultItemApproval = z.infer<typeof VaultItemApproval>;

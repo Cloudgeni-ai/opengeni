@@ -89,6 +89,7 @@ test("organization server configuration is workspace-independent, fenced and can
   expect(await getOrganizationIntegrationPolicy(client, account!.id)).toEqual({
     mode: "unrestricted",
     allowedIntegrationKeys: [],
+    personalIntegrationSetup: "members",
     revision: 0,
   });
   const workspace = await createWorkspace(db.db, {
@@ -129,6 +130,7 @@ test("organization server configuration is workspace-independent, fenced and can
   expect(await updateOrganizationIntegrationPolicy(client, account!.id, request)).toEqual({
     mode: "restricted",
     allowedIntegrationKeys: [],
+    personalIntegrationSetup: "members",
     revision: 1,
   });
   const replayBegin = await begin();
@@ -155,6 +157,7 @@ test("organization server configuration is workspace-independent, fenced and can
   expect(await updateOrganizationIntegrationPolicy(client, account!.id, request)).toEqual({
     mode: "restricted",
     allowedIntegrationKeys: [],
+    personalIntegrationSetup: "members",
     revision: 1,
   });
   await expect(

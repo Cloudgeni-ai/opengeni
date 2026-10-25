@@ -68,7 +68,7 @@ describe("workspace provider import guard", () => {
     expect(allowed).toEqual([]);
 
     checkBillingPortalSurface(
-      "apps/api/src/mcp/action-catalog.gen.ts",
+      "packages/contracts/src/app-action-catalog.gen.ts",
       `const action = { path: "${portalPath}" };`,
       allowed,
     );
@@ -113,7 +113,7 @@ describe("workspace provider import guard", () => {
     ]);
   });
 
-  test.each(["apps/api/src/routes/example.ts", "apps/api/src/mcp/action-catalog.gen.ts"])(
+  test.each(["apps/api/src/routes/example.ts", "packages/contracts/src/app-action-catalog.gen.ts"])(
     "rejects Stripe module edges outside billing provider code: %s",
     async (file) => {
       const findings = await findingsFor(file, 'import Stripe from "stripe";');

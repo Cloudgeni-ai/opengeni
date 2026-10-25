@@ -70,8 +70,23 @@ and 16.1).
   checkpoint of a running one included, and a restored VM has none. The
   agent dials that address with no credential. Compute mode
   also turns off what does not belong in a sandbox: enrollment, credential
-  renewal, self-update (the image pins the agent) and service
-  installation.
+  renewal and service installation. (Amended after the long-running
+  staging runs: self-update used to be off too, on the view that the image
+  pins the agent. But a sandbox keeps its disk for as long as it lives,
+  months at a time, so its agent never moved past the one its image
+  carried, and Opengeni refuses an agent that lacks what it needs. The
+  agent now takes Opengeni's signed self-update as a connected machine
+  does: the verified release replaces `/usr/local/bin/opengeni-agent` on
+  the sandbox's disk and the process execs it, its commands and
+  connection instance handed over, so `compute-guest` keeps supervising
+  the same process and the host the same session. A sandbox reports only
+  while it runs, so one that sleeps is updated when it next wakes, and the
+  download and swap count as activity, so it does not sleep in the middle
+  of them. A checkpoint or guest reboot may still copy the disk at any
+  moment, so a release passes its startup check before it replaces the
+  binary, and `SIGUSR1` stays blocked across the exec until the new image
+  catches it, before it starts any thread, so no command it runs inherits
+  the block.)
 - **The host speaks NATS to its guests and keeps their sessions.** The
   host agent answers each guest's NATS connection itself, knowing from the
   vsock socket which sandbox it is. For each sandbox it keeps one session

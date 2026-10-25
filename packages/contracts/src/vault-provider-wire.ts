@@ -21,6 +21,7 @@ import { defineSchema } from "./define-schema";
 import {
   VAULT_LIMITS,
   VaultFieldKind,
+  VaultItemCategory,
   VaultItemType,
   VaultProviderOperations,
   isReservedVaultFieldName,
@@ -227,6 +228,7 @@ export const VaultProviderWireWriteItem = /* @__PURE__ */ defineSchema(() =>
       expectedVersion: Version.nullable().optional(),
       name: ItemName,
       type: VaultItemType.refine((type) => type !== "passkey", "passkeys are hosted only"),
+      category: VaultItemCategory.nullable().optional(),
       websites: z.array(Website).max(VAULT_LIMITS.websitesPerItem),
       fields: z.array(VaultProviderWireWriteField).max(VAULT_LIMITS.fieldsPerItem),
     })
@@ -368,6 +370,7 @@ export const VaultProviderWireItemMeta = /* @__PURE__ */ defineSchema(() =>
       name: ItemName,
       type: VaultItemType,
       username: z.string().max(VAULT_LIMITS.usernameMaxChars).nullable().optional(),
+      category: VaultItemCategory.nullable().optional(),
       websites: z.array(Website).max(VAULT_LIMITS.websitesPerItem),
       fields: z
         .array(VaultProviderWireFieldMeta)

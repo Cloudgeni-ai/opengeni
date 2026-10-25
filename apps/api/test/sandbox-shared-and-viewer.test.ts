@@ -1038,6 +1038,74 @@ describe("P1.4 API-direct viewer-holder lifecycle (real lease + reaper)", () => 
     expect(keeper?.holder_id).toBe("channel-a-keeper");
   }, 60_000);
 
+  test("a Channel-A request joining a box still starting waits for its start instead of refusing it", async () => {
+    if (!available) return;
+    const localSettings = testSettings({
+      sandboxBackend: "local",
+      sandboxOwnershipEnabled: true,
+      sandboxLeaseTtlMs: 5_000,
+      sandboxIdleGraceMs: 500,
+    });
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "channel-a joins a warming box",
+      resources: [],
+      metadata: {},
+      model: "m",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "local",
+    });
+    // A fresh chat's first turn is still bringing its sandbox up.
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: "channel-a-first-turn",
+      subjectId: session.id,
+      backend: "local",
+      leaseTtlMs: localSettings.sandboxLeaseTtlMs,
+    });
+    expect(acquired.role).toBe("spawner");
+
+    // Its first Browser or Computer open arrives meanwhile.
+    const request = withChannelA(
+      { db, settings: localSettings, bus: new MemoryEventBus() },
+      {
+        accountId,
+        workspaceId,
+        session: session as never,
+        subjectId: "channel-a-test",
+      },
+      async () => "unreachable",
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await Bun.sleep(800);
+    expect(await readLease(db, workspaceId, session.sandboxGroupId)).toMatchObject({
+      liveness: "warming",
+      refcount: 2,
+    });
+    // The turn's start commits. With no resume state recorded the request
+    // then fails on that, past the lease check it used to fail at.
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "channel-a-box-warming",
+      resumeBackendId: "unix_local",
+      resumeState: null,
+      leaseTtlMs: localSettings.sandboxLeaseTtlMs,
+    });
+    expect(committed.committed).toBe(true);
+    expect(await request).toBeInstanceOf(SandboxResumeStateUnavailableError);
+  }, 60_000);
+
   test("a viewer holder keeps a WARM box alive with NO turn running; the reaper does NOT terminate it", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

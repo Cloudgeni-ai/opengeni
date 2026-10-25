@@ -899,7 +899,10 @@ export class CuaComputerBackend implements ComputerBackend {
           id,
           targetGeneration: old?.native.targetGeneration ?? randomUUID(),
           kind: "window",
-          applicationId: null,
+          // The app that owns the window, as CUA names its process: the app's
+          // name on macOS, the executable (notepad.exe) on Windows, the window
+          // class (Gedit) on Linux.
+          applicationId: appIdentity(window.app_name),
           processId: window.pid,
           title: window.title || window.app_name,
           bounds: window.bounds,
@@ -2651,6 +2654,13 @@ type LaunchedApp = {
 
 /** A reverse-DNS bundle identifier such as com.apple.TextEdit; anything else is an app name. */
 const BUNDLE_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
+
+/** A listed window's owning app as a target's application ID, or null when
+ * CUA names none (or an implausibly long one). */
+function appIdentity(appName: string): string | null {
+  const name = appName.trim();
+  return name && name.length <= 1_024 ? name : null;
+}
 
 /** How CUA's launch_app names an app on each platform. */
 function launchArguments(

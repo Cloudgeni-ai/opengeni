@@ -73,13 +73,13 @@ export function scheduledTaskEventsToolInput() {
     .object({
       ...EventTriggerInput.shape,
       sourceId: EventTriggerInput.shape.sourceId.describe(
-        "An event source from event_sources_list.",
+        "An event source's id, or a readyToAdd id, from event_sources_list.",
       ),
       eventTypes: EventTriggerInput.shape.eventTypes.describe(
         "Event types the source offers (event_sources_list with its sourceId). An MCP source takes exactly one.",
       ),
       conditions: EventTriggerInput.shape.conditions.describe(
-        "Optional filters; every one must hold. field is type, subject, summary, url, actor.kind, actor.name or data.<path>.",
+        "Optional filters; every one must hold. field is type, subject, summary, url, actor.kind, actor.name or data.<path>. contains ignores case.",
       ),
       includeOwnEvents: EventTriggerInput.shape.includeOwnEvents.describe(
         "Also fire on events Opengeni's own bots made. Off by default, which prevents loops.",

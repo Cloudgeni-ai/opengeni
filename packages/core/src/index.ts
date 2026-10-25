@@ -83,6 +83,7 @@ export {
 export * from "./transcription";
 export * from "./recording-transcription";
 export * from "./xai-operation-availability";
+export * from "./recording-transcription-azure";
 export * from "./model-catalog";
 export * from "./model-provider-credentials";
 export * from "./goal-admission";
@@ -194,6 +195,7 @@ export {
   type HostSessionUsageLimit,
 } from "./host-session-usage-limit";
 export { resolveTurnSurface } from "./turn-surface";
+export { turnAppActionGrant } from "./app-action-turn-grant";
 
 export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
 

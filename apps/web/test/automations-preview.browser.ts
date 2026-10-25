@@ -160,6 +160,20 @@ const pages: Array<{
     },
   },
   {
+    name: "new-source-picker",
+    path: `${workspace}/automations/new`,
+    tall: true,
+    check: async (page) => {
+      await page.getByRole("button", { name: "Add an event" }).click();
+      await page.getByRole("combobox").filter({ hasText: "Choose a source" }).click();
+      // A server the viewer is signed in to that offers events, and this
+      // workspace, are offered beside the sources they have.
+      await expect(page.getByRole("option", { name: /Support desk/ })).toBeVisible();
+      await expect(page.getByRole("option", { name: /This workspace/ })).toBeVisible();
+      await expect(page.getByRole("option", { name: /Acme on GitHub/ })).toBeVisible();
+    },
+  },
+  {
     name: "templates",
     path: `${workspace}/automations/templates`,
     tall: true,

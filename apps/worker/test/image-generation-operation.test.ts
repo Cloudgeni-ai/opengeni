@@ -12,6 +12,7 @@ import { executeCodexImageGeneration } from "../src/activities/codex-image-gener
 import { isAuxiliaryProviderDispatch } from "../src/activities/auxiliary-provider-dispatch";
 import { CodexIncludedUsageExhaustedError } from "../src/activities/agent-turn/codex-credit-policy";
 import type { GeneratedImageReceipt } from "../src/activities/generated-images";
+import { ImageGenerationCreditError } from "@opengeni/db";
 
 const base = {
   workspaceId: "11111111-1111-4111-8111-111111111111",
@@ -183,6 +184,77 @@ describe("image generation paid-operation fence", () => {
     expect(result).toEqual(receipt);
     expect(generateCalls.count).toBe(1);
     expect(calls).toEqual(["prepare", "begin", "provider", "retain", "complete"]);
+  });
+
+  test("freezes a credit price on the operation and never dispatches a refused image", async () => {
+    const generateCalls = { count: 0 };
+    const prepared: unknown[] = [];
+    const refusal = new ImageGenerationCreditError();
+    const marks: string[] = [];
+    await expect(
+      executeImageGenerationOperation(
+        {
+          ...executionInput(generateCalls),
+          pricedCostMicros: 250_000,
+          creditUsageModelId: "gpt-6-sol",
+        },
+        operationPorts({
+          prepare: async (_db, value) => {
+            prepared.push(value);
+            return { operation: { status: "prepared" } as never, created: true };
+          },
+          begin: async () => {
+            throw refusal;
+          },
+          markOutcomeUnknown: async () => {
+            marks.push("outcome_unknown");
+            return { status: "outcome_unknown" } as never;
+          },
+          markRetentionFailed: async () => {
+            marks.push("retention_failed");
+            return { status: "retention_failed" } as never;
+          },
+        }),
+      ),
+    ).rejects.toBe(refusal);
+    expect(prepared).toEqual([
+      expect.objectContaining({ pricedCostMicros: 250_000, creditUsageModelId: "gpt-6-sol" }),
+    ]);
+    expect(generateCalls.count).toBe(0);
+    expect(marks).toEqual([]);
+  });
+
+  test("retention completes the operation as the image turns ready", async () => {
+    const retained: Array<Record<string, unknown>> = [];
+    const input = { ...executionInput({ count: 0 }), pricedCostMicros: 250_000 };
+    await executeImageGenerationOperation(
+      input,
+      operationPorts({
+        retain: async (value) => {
+          retained.push(value);
+          return { receipt, artifact: {} as never };
+        },
+      }),
+    );
+    const identity = imageGenerationOperationIdentity(input);
+    expect(retained[0]).toMatchObject({
+      operation: { operationId: identity.operationId, operationKey: identity.operationKey },
+    });
+  });
+
+  test("leaves an unpriced operation without a credit price", async () => {
+    const prepared: Array<Record<string, unknown>> = [];
+    await executeImageGenerationOperation(
+      executionInput({ count: 0 }),
+      operationPorts({
+        prepare: async (_db, value) => {
+          prepared.push(value);
+          return { operation: { status: "prepared" } as never, created: true };
+        },
+      }),
+    );
+    expect(prepared[0]).not.toHaveProperty("pricedCostMicros");
+    expect(prepared[0]).not.toHaveProperty("creditUsageModelId");
   });
 
   test("recovers a completed artifact without invoking the provider", async () => {

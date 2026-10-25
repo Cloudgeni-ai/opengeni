@@ -1221,6 +1221,58 @@ describe("createSessionProxyHandler", () => {
     expect(configRequest.url.searchParams.get("workspaceId")).toBe(WORKSPACE_ID);
   });
 
+  test("the in-chat integration Connect card reaches Opengeni as the end user", async () => {
+    const { upstream, browser } = setup();
+    const connect = browser.connectTransport();
+    await connect.catalog(WORKSPACE_ID);
+    await connect.begin(WORKSPACE_ID, {
+      providerId: "microsoft-outlook-mail",
+      ownership: "personal",
+      returnUrl: `${PRODUCT}/chat`,
+      idempotencyKey: "begin-1",
+    });
+    await connect.get(WORKSPACE_ID, "attempt-1");
+    await connect.advance(WORKSPACE_ID, "attempt-1", {
+      expectedRevision: 2,
+      idempotencyKey: "advance-1",
+      action: { type: "retry" },
+    });
+    await browser.listApiIntegrations(WORKSPACE_ID);
+    await browser.updateSessionToolPolicy(WORKSPACE_ID, SESSION_ID, {
+      mode: "explicit",
+      tools: [{ kind: "mcp", id: "api-outlook-mail", optional: true }],
+      firstPartyMcpTools: [],
+      expectedVersion: 1,
+    });
+    await browser.continueAfterCapabilitySetup(WORKSPACE_ID, SESSION_ID, {
+      capabilityId: "api:integration:microsoft-outlook-mail",
+    });
+    const workspace = `/v1/workspaces/${WORKSPACE_ID}`;
+    expect(upstream.requests.map((request) => [request.method, request.url.pathname])).toEqual([
+      ["GET", `${workspace}/connect/catalog`],
+      ["POST", `${workspace}/connect/attempts`],
+      ["GET", `${workspace}/connect/attempts/attempt-1`],
+      ["POST", `${workspace}/connect/attempts/attempt-1/advance`],
+      ["GET", `${workspace}/integrations`],
+      ["PUT", `${workspace}/sessions/${SESSION_ID}/tool-policy`],
+      ["POST", `${workspace}/sessions/${SESSION_ID}/capability-continuations`],
+    ]);
+    for (const request of upstream.requests) {
+      expect(
+        JSON.parse(decodeURIComponent(request.headers.get("x-opengeni-external-actor")!)),
+      ).toEqual({ mode: "external", identity: { externalId: "u_42", source: "northwind" } });
+    }
+  });
+
+  test("client config offers in-chat connections unless the server owns chat setup", async () => {
+    const open = await setup().browser.getClientConfig();
+    expect(open.chatConnections).toBe(true);
+    const owned = await setup({
+      createSession: ({ initialMessage }) => ({ initialMessage }),
+    }).browser.getClientConfig();
+    expect(owned.chatConnections).toBe(false);
+  });
+
   test("beforeForwardMessage adds server context and MCP credential rotation to every message", async () => {
     const inputs: unknown[] = [];
     const { upstream, browser } = setup({

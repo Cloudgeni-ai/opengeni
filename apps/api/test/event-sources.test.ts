@@ -227,6 +227,44 @@ async function makeDue(workspaceId: string): Promise<void> {
     where workspace_id = ${workspaceId} and dispatch_due_at is not null`;
 }
 
+type Fixture = Awaited<ReturnType<typeof fixture>>;
+
+/** The first-party MCP tools as an agent in the workspace calls them. */
+async function agent(
+  f: Fixture,
+  subjectId: string,
+  metadata: Record<string, unknown> = {},
+  permissions = ["scheduled_tasks:manage", "scheduled_tasks:run"],
+) {
+  const server = buildOpenGeniMcpServer(f.dependencies as unknown as ApiRouteDeps, {
+    accountId: f.workspace.accountId,
+    workspaceId: f.workspace.id,
+    subjectId,
+    permissions,
+    metadata,
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "event-agent-tools-test", version: "1" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = (await client.callTool({ name, arguments: args })) as {
+      isError?: boolean;
+      content: Array<{ text?: string }>;
+    };
+    const text = result.content.map((item) => item.text ?? "").join("\n");
+    if (result.isError) return { error: text };
+    return JSON.parse(text) as Record<string, any>;
+  };
+  return { client, call, close: () => Promise.all([client.close(), server.close()]) };
+}
+
+/** A separate agent per run, so a test needs no chat. */
+const separateAgent = {
+  runMode: "new_session_per_run",
+  agentConfig: { prompt: "Summarize the new order", resources: [], metadata: {} },
+};
+
 describe("event sources", () => {
   test("everything answers as absent while event triggers are off", async () => {
     const f = await fixture({ enabled: false });
@@ -665,37 +703,6 @@ describe("event sources", () => {
 });
 
 describe("agent tools", () => {
-  type Fixture = Awaited<ReturnType<typeof fixture>>;
-
-  async function agent(f: Fixture, subjectId: string, metadata: Record<string, unknown> = {}) {
-    const server = buildOpenGeniMcpServer(f.dependencies as unknown as ApiRouteDeps, {
-      accountId: f.workspace.accountId,
-      workspaceId: f.workspace.id,
-      subjectId,
-      permissions: ["scheduled_tasks:manage", "scheduled_tasks:run"],
-      metadata,
-    });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "event-agent-tools-test", version: "1" });
-    await server.connect(serverTransport);
-    await client.connect(clientTransport);
-    const call = async (name: string, args: Record<string, unknown>) => {
-      const result = (await client.callTool({ name, arguments: args })) as {
-        isError?: boolean;
-        content: Array<{ text?: string }>;
-      };
-      const text = result.content.map((item) => item.text ?? "").join("\n");
-      if (result.isError) return { error: text };
-      return JSON.parse(text) as Record<string, any>;
-    };
-    return { client, call, close: () => Promise.all([client.close(), server.close()]) };
-  }
-
-  const separateAgent = {
-    runMode: "new_session_per_run",
-    agentConfig: { prompt: "Summarize the new order", resources: [], metadata: {} },
-  };
-
   test("the tools and the events field exist only where event triggers run and the session selects them", async () => {
     const on = await fixture({ enabled: true });
     const cases = [
@@ -757,6 +764,8 @@ describe("agent tools", () => {
           lastEventAt: expect.any(String),
         },
       ],
+      // This workspace's own events need no setting up.
+      readyToAdd: [{ id: "workspace", name: "This workspace", kind: "workspace" }],
     });
     const described = await owner.call("event_sources_list", { sourceId: source.id });
     expect(described.eventTypes.map((type: { type: string }) => type.type)).toEqual([
@@ -1060,6 +1069,92 @@ describe("MCP event sources", () => {
       ],
     });
     expect(twoTypes.status).toBe(422);
+  });
+
+  test("a server that offers events is ready to use: its first use adds the person's source", async () => {
+    const f = await mcpFixture();
+    const ready = async (headers: Record<string, string>) =>
+      (await f.json(await f.app.request(`${f.sources}/ready`, { headers }))).sources;
+    const workspace = { key: "workspace", kind: "workspace", name: "This workspace" };
+    // A server without events isn't offered, and a workspace key owns no sources.
+    expect(await ready(f.owner.headers)).toEqual([
+      { key: "mcp-server:events-fixture", kind: "mcp", name: "Events Fixture" },
+      workspace,
+    ]);
+    expect(await ready(f.service)).toEqual([]);
+
+    // An agent with no sources finds the server, reads its event types and
+    // sets up an automation on it, without anyone adding a source first.
+    const owner = await agent(f, f.owner.subjectId);
+    expect(await owner.call("event_sources_list", {})).toEqual({
+      sources: [],
+      readyToAdd: [
+        { id: "mcp-server:events-fixture", name: "Events Fixture", kind: "mcp" },
+        { id: "workspace", name: "This workspace", kind: "workspace" },
+      ],
+    });
+    const described = await owner.call("event_sources_list", {
+      sourceId: "mcp-server:events-fixture",
+    });
+    expect(described.source).toMatchObject({ name: "Events Fixture", kind: "mcp" });
+    expect(described.eventTypes.map((type: { type: string }) => type.type)).toEqual([
+      "ticket.created",
+      "ticket.closed",
+    ]);
+    const sourceId = described.source.id as string;
+    const created = await owner.call("scheduled_tasks_create", {
+      name: "Billing tickets",
+      ...separateAgent,
+      events: {
+        triggers: [
+          {
+            sourceId: "mcp-server:events-fixture",
+            eventTypes: ["ticket.created"],
+            arguments: { queue: "billing" },
+          },
+        ],
+      },
+    });
+    expect(created.outcome).toBe("created");
+    const automation = await f.task(created.resource.id);
+    expect(automation.events.triggers[0]).toMatchObject({ sourceId, status: "active" });
+    expect(await ready(f.owner.headers)).toEqual([workspace]);
+    expect((await owner.call("event_sources_list", {})).sources).toMatchObject([
+      { id: sourceId, name: "Events Fixture", kind: "mcp" },
+    ]);
+
+    // The key keeps naming that same source.
+    const again = await f.createAutomation(f.owner.headers, {
+      triggers: [{ sourceId: "mcp-server:events-fixture", eventTypes: ["ticket.closed"] }],
+    });
+    expect(again.status).toBe(201);
+    expect((await f.json(again)).events.triggers[0].sourceId).toBe(sourceId);
+
+    // A key for a server without events, or from a workspace key, fails plainly.
+    const plain = await f.createAutomation(f.owner.headers, {
+      triggers: [{ sourceId: "mcp-server:plain-fixture", eventTypes: ["ticket.created"] }],
+    });
+    expect(plain.status).toBe(422);
+    expect(await plain.text()).toContain("Trigger 1:");
+    const asService = await f.createAutomation(f.service, {
+      triggers: [{ sourceId: "mcp-server:events-fixture", eventTypes: ["ticket.created"] }],
+    });
+    expect(asService.status).toBe(422);
+
+    // A session that can't set up automations isn't offered sources to add.
+    const reader = await agent(f, f.other.subjectId, {}, ["scheduled_tasks:run"]);
+    expect(await reader.call("event_sources_list", {})).not.toHaveProperty("readyToAdd");
+    expect(
+      await reader.call("event_sources_list", { sourceId: "mcp-server:events-fixture" }),
+    ).toEqual({ error: expect.stringContaining("Event source not found") });
+
+    // And the server's events wake the automation.
+    await f.pump();
+    await f.fake.emit("ticket.created", { queue: "billing", title: "Invoice wrong" });
+    await f.pump();
+    await f.dispatch();
+    expect(f.started.map((run) => run.taskId)).toContain(automation.id);
+    await Promise.all([owner.close(), reader.close()]);
   });
 
   test("a polled stream delivers new events once, in order, and wakes the automation", async () => {
@@ -1760,7 +1855,7 @@ describe("Gmail event sources", () => {
       ],
       eventSourceFetch: gmail.fetch,
     });
-    const connect = async (subjectId: string) =>
+    const connect = async (subjectId: string, mailbox = MAILBOX) =>
       await createConnection(db.db, {
         accountId: f.workspace.accountId,
         workspaceId: f.workspace.id,
@@ -1776,7 +1871,7 @@ describe("Gmail event sources", () => {
           Buffer.from(f.settings.environmentsEncryptionKey!, "base64"),
           JSON.stringify({ access_token: TOKEN, token_type: "Bearer", mcp_url: GMAIL_MCP }),
         ),
-        metadata: { gmailEmail: MAILBOX, mcpUrl: GMAIL_MCP },
+        metadata: { gmailEmail: mailbox, mcpUrl: GMAIL_MCP },
         createdBySubjectId: subjectId,
       });
     const createSource = async () =>
@@ -1902,6 +1997,76 @@ describe("Gmail event sources", () => {
     await f.pump();
     expect(f.gmail.requests.length).toBe(before);
     expect(await f.feed()).toMatchObject({ cursor: null });
+  });
+
+  test("a connected Gmail account is ready to use: naming it in a trigger adds its source", async () => {
+    const f = await gmailFixture();
+    const ready = async () =>
+      (await f.json(await f.app.request(`${f.sources}/ready`, { headers: f.owner.headers })))
+        .sources as Array<{ key: string; kind: string; name: string }>;
+    // Nothing to read until the person connects Gmail.
+    expect((await ready()).map((source) => source.kind)).toEqual(["workspace"]);
+
+    const connection = await f.connect(f.owner.subjectId);
+    const key = `gmail:${connection.id}`;
+    expect(await ready()).toEqual([
+      { key, kind: "gmail", name: `Gmail (${MAILBOX})` },
+      { key: "workspace", kind: "workspace", name: "This workspace" },
+    ]);
+
+    // Someone else in the workspace can't use another person's mailbox.
+    const borrowed = await f.createAutomation(f.other.headers, {
+      triggers: [{ sourceId: key, eventTypes: ["message.received"] }],
+    });
+    expect(borrowed.status).toBe(422);
+
+    const automation = await f.automation(key);
+    const sourceId = automation.events.triggers[0].sourceId as string;
+    expect(sourceId).not.toBe(key);
+    const source = await f.json(
+      await f.app.request(`${f.sources}/${sourceId}`, { headers: f.owner.headers }),
+    );
+    // Named as it was offered.
+    expect(source).toMatchObject({ kind: "gmail", name: `Gmail (${MAILBOX})` });
+    // Once added it is an ordinary source, and a second use reuses it.
+    expect((await ready()).map((entry) => entry.key)).toEqual(["workspace"]);
+    const again = await f.automation(key);
+    expect(again.events.triggers[0].sourceId).toBe(sourceId);
+  });
+
+  test("a mailbox connected twice is one account: offered once, added without choosing", async () => {
+    const f = await gmailFixture();
+    const ready = async () =>
+      (await f.json(await f.app.request(`${f.sources}/ready`, { headers: f.owner.headers })))
+        .sources as Array<{ key: string; kind: string; name: string }>;
+    const first = await f.connect(f.owner.subjectId);
+    const second = await f.connect(f.owner.subjectId, MAILBOX.toUpperCase());
+    const offered = (await ready()).filter((entry) => entry.kind === "gmail");
+    expect(offered).toHaveLength(1);
+    expect(offered[0]!.name.toLowerCase()).toBe(`gmail (${MAILBOX})`);
+    expect([`gmail:${first.id}`, `gmail:${second.id}`]).toContain(offered[0]!.key);
+
+    const created = await f.createSource();
+    expect(created.status).toBe(201);
+    const { source } = await f.json(created);
+    expect(source).toMatchObject({ kind: "gmail", name: `Gmail (${MAILBOX})` });
+    const [{ connection_id: used }] = await shared.admin`select connection_id from event_sources
+      where id = ${source.id}`;
+
+    // Received through either connection, the mailbox is no longer offered.
+    expect((await ready()).map((entry) => entry.kind)).toEqual(["workspace"]);
+    const viaOther = await f.automation(`gmail:${used === first.id ? second.id : first.id}`);
+    expect(viaOther.events.triggers[0].sourceId).toBe(source.id);
+
+    // A different mailbox is its own account, and then a source needs a choice.
+    const other = await f.connect(f.owner.subjectId, "second@example.com");
+    expect(await ready()).toEqual([
+      { key: `gmail:${other.id}`, kind: "gmail", name: "Gmail (second@example.com)" },
+      { key: "workspace", kind: "workspace", name: "This workspace" },
+    ]);
+    const ambiguous = await f.createSource();
+    expect(ambiguous.status).toBe(422);
+    expect(await ambiguous.text()).toContain("more than one Gmail account");
   });
 
   test("new inbox mail wakes the automation once; Opengeni's own mail and earlier mail don't", async () => {

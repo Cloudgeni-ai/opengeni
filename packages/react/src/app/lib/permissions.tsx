@@ -1,3 +1,4 @@
+import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import { Permission } from "@opengeni/contracts";
 import { organizationAdministrationAccountIds } from "../../organization-model";
 
@@ -50,6 +51,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "usage_allowances:manage": "Admin & account",
   "connections:read": "Connections",
   "connections:write": "Connections",
+  "connections:personal": "Connections",
   "capabilities:manage": "Connections",
   "members:manage": "Admin & account",
   "account:read": "Admin & account",
@@ -364,7 +366,7 @@ export function hasWorkspacePermission(
   const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
   return Boolean(
     grant &&
-    (grant.permissions.includes(permission) ||
+    (permissionSetCovers(grant.permissions, permission) ||
       (permission !== "secrets:read" && grant.permissions.includes("workspace:admin"))),
   );
 }

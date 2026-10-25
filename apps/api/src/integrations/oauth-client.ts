@@ -75,7 +75,7 @@ import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "./connect-authority";
 import {
   DEFAULT_OAUTH_PROFILE,
   OFFICIAL_GMAIL_MCP_URL,
@@ -847,6 +847,8 @@ async function completeMcpOAuthCallbackWithinDeadline(
   let state: OAuthStatePayload | null = null;
   let integrationKey: string | null = "custom:mcp";
   let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
+  // A personal sign-in started with `connections:personal` finishes with it too.
+  let ownerPermission: ReturnType<typeof connectSetupPermission> = "connections:write";
   if (!input.state) {
     const error = new OAuthCallbackStageError(
       "state_verify",
@@ -897,6 +899,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         stored.returnUrl !== state.returnUrl
       )
         throw new HTTPException(403, { message: "OAuth attempt mismatch" });
+      ownerPermission = connectSetupPermission(stored.attempt);
       connectOperation = {
         attemptId: state.connectAttemptId,
         operationId: `oauth:${state.nonce}`,
@@ -910,7 +913,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           ...connectOperation,
           expectedRevision: stored.attempt.revision,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
         },
         integrationKey,
         Boolean(input.code),
@@ -935,7 +938,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         await finishConnectOperation(db, state, {
           ...connectOperation,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
@@ -1167,7 +1170,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           {
             ...connectOperation!,
             authorize: (tx, _attempt, origin) =>
-              requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+              requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
             commit: async (tx, current) => {
               const connection = await persist(tx);
               if (!connection)
@@ -1229,7 +1232,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           finishConnectOperation(tx, state!, {
             ...connectOperation!,
             authorize: (locked, _attempt, origin) =>
-              requireConnectOwnerAuthority(locked, state!, "connections:write", origin),
+              requireConnectOwnerAuthority(locked, state!, ownerPermission, origin),
             commit: async (_locked, current) => ({
               ...current,
               revision: current.revision + 1,

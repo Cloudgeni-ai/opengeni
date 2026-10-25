@@ -682,6 +682,7 @@ export function createSessionProxyHandler(
               editableLiveUrl,
               uploadsEnabled,
               modelSelection: options.modelSelection,
+              chatConnections: !serverOwnsSetup,
               call,
             }),
           );
@@ -1303,6 +1304,7 @@ async function clientConfig(input: {
   editableLiveUrl: string | null;
   uploadsEnabled: boolean;
   modelSelection: boolean | undefined;
+  chatConnections: boolean;
   call: { signal: AbortSignal };
 }): Promise<Record<string, unknown>> {
   const { client, workspaceId, call } = input;
@@ -1357,6 +1359,10 @@ async function clientConfig(input: {
     artifacts,
     // Explicit true also tells stock UIs to offer end users the model picker.
     ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+    // With `createSession` the server owns chat tools, so the browser cannot
+    // add a newly connected capability to a chat: stock UIs then leave agent
+    // capability cards to the host.
+    chatConnections: input.chatConnections,
   };
 }
 

@@ -14,6 +14,7 @@ import type {
   EventTrigger,
   EventTypeDescriptor,
   InboundEvent,
+  ReadyEventSource,
   ScheduledTask,
   ScheduledTaskRun,
   WorkspaceAutomationTemplate,
@@ -96,6 +97,21 @@ const orders = source(6, {
   lastDeliveryAt: at(0.5),
 });
 const sources: EventSource[] = eventsEnabled ? [github, slack, linear, gmail, deploys, orders] : [];
+
+/** MCP servers the viewer is signed in to that offer events, by server id. */
+const readyServers: Record<string, string> = { support: "Support desk" };
+
+/** What the viewer can use without setting it up and hasn't added yet. */
+function readySources(): ReadyEventSource[] {
+  if (!eventsEnabled) return [];
+  const servers = Object.entries(readyServers)
+    .filter(([serverId]) => !sources.some((item) => item.mcp?.serverId === serverId))
+    .map(([serverId, name]) => ({ key: `mcp-server:${serverId}`, kind: "mcp" as const, name }));
+  const workspace = sources.some((item) => item.kind === "workspace")
+    ? []
+    : [{ key: "workspace", kind: "workspace" as const, name: "This workspace" }];
+  return [...servers, ...workspace];
+}
 
 function descriptor(type: string, description: string, fields: string[] = []): EventTypeDescriptor {
   return {
@@ -614,6 +630,7 @@ const modeled: Record<string, (...args: never[]) => unknown> = {
     return { ...findTask(id) };
   },
   listEventSources: async () => sources.map((item) => ({ ...item })),
+  listReadyEventSources: async () => readySources(),
   getEventSource: async (_workspace: string, id: string) => ({ ...findSource(id) }),
   listEventSourceTypes: async (_workspace: string, id: string) => eventTypes[id] ?? [],
   listEventDeliveries: async (_workspace: string, id: string) => ({
@@ -693,7 +710,11 @@ const modeled: Record<string, (...args: never[]) => unknown> = {
     if (request.kind === "mcp") {
       const created = source(10 + sources.length, {
         kind: "mcp",
-        name: request.name ?? request.serverId ?? "MCP server",
+        name:
+          request.name ??
+          (request.serverId ? readyServers[request.serverId] : undefined) ??
+          request.serverId ??
+          "MCP server",
         ownerSubjectId: viewer,
         visibility: "private",
         mcp: { serverId: request.serverId ?? "", connectionId: null } as EventSource["mcp"],

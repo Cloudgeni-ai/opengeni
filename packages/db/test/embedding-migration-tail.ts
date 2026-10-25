@@ -393,6 +393,11 @@ export const embeddingMigrationTail = [
   // Patches ensure_external_identity, transition_session_visibility and both
   // fork_session_content bodies by exact anchors; replay after all of them.
   "0925_membership_fences_allow_key_checks.sql",
+  // Patches the command-containment inventory withheld 0839 rewrites, by exact
+  // anchor; replay after it.
+  "0961_secret_use_approval_host_cards.sql",
+  // Extends 0961's containment update kinds by exact anchor; replay after it.
+  "0972_capability_setup_continuations.sql",
   // Rewrites keys on the withheld Knowledge tables by name; replay last.
   ...workspaceDeletionMigrationTail,
   // Builds on withheld 0275, 0345 and 0761; replay after all of them.

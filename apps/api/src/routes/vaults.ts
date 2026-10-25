@@ -229,10 +229,18 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
       const { workspaceId, actor } = await authorize(c, "secrets:list");
       const parsed = ListVaultItemsQuery.safeParse(c.req.query());
       if (!parsed.success) {
+        // Name each bad parameter, so a caller can fix the query without guessing.
+        const issues = parsed.error.issues.slice(0, 10).map((issue) => ({
+          path: issue.path.map(String).join("."),
+          message: issue.message,
+        }));
         throw new ApiHttpError(422, {
           code: "validation_failed",
-          message: "Invalid vault item query.",
+          message: `Invalid vault item query: ${issues
+            .map((issue) => `${issue.path || "query"}: ${issue.message}`)
+            .join("; ")}`,
           retryable: false,
+          details: { issues },
         });
       }
       return c.json(

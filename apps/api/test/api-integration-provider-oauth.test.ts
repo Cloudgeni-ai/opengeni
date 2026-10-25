@@ -13,6 +13,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
+  type Permission,
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -118,12 +119,13 @@ async function freshWorkspace() {
 async function bearer(
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   principalKind: "human_session" | "service" = "human_session",
+  permissions: Permission[] = ["connections:read", "connections:write", "workspace:read"],
 ): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     subjectId: workspace.subjectId,
-    permissions: ["connections:read", "connections:write", "workspace:read"],
+    permissions,
     principalKind,
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
@@ -1223,6 +1225,133 @@ describe("API Integration provider OAuth", () => {
     expect(
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
     ).toHaveLength(1);
+  }, 60_000);
+
+  test("a person installs a reviewed definition for their own account without integration management", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const app = testApp(fixture);
+    // A person who may connect their own accounts, but not manage integrations.
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const connectAndPreview = async (
+      input: Record<string, unknown>,
+      requestHeaders: Record<string, string> = headers,
+    ) => {
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-token",
+      });
+      const begun = await app.request(base, {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({
+          providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+          returnUrl: "https://host.example/chat",
+          idempotencyKey: crypto.randomUUID(),
+          ...input,
+        }),
+      });
+      if (begun.status !== 200) throw new Error(`begin failed: ${await begun.text()}`);
+      const attempt = await begun.json();
+      const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
+      await callback(fixture, state);
+      const advance = (body: unknown) =>
+        app.request(`${base}/${attempt.id}/advance`, {
+          method: "POST",
+          headers: requestHeaders,
+          body: JSON.stringify(body),
+        });
+      const preview = await (
+        await advance({
+          expectedRevision: 2,
+          idempotencyKey: crypto.randomUUID(),
+          action: { type: "retry" },
+        })
+      ).json();
+      if (preview.state !== "preview")
+        throw new Error(`preview failed: ${JSON.stringify(preview)}`);
+      return {
+        attempt,
+        install: () =>
+          advance({
+            expectedRevision: preview.revision,
+            idempotencyKey: crypto.randomUUID(),
+            action: {
+              type: "install",
+              previewId: preview.nextAction.previewId,
+              contentHash: preview.nextAction.contentHash,
+              operationIds: preview.nextAction.operations.map(
+                (operation: { id: string }) => operation.id,
+              ),
+            },
+          }),
+      };
+    };
+
+    // Their own account, in a fresh instance named after the attempt.
+    const own = await connectAndPreview({ ownership: "personal" });
+    expect(own.attempt.installationTarget).toEqual({
+      instanceKey: `account-${own.attempt.id}`,
+      displayName: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.name,
+    });
+    const installed = await own.install();
+    expect(installed.status).toBe(200);
+    expect(await installed.json()).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
+    });
+
+    // The narrow "connect my own account" permission alone is enough too
+    // (the per-user embed default: no connections:read or connections:write).
+    const narrowHeaders = {
+      ...headers,
+      authorization: await bearer(workspace, "human_session", [
+        "connections:personal",
+        "workspace:read",
+      ]),
+    };
+    const narrow = await connectAndPreview({ ownership: "personal" }, narrowHeaders);
+    const narrowInstalled = await narrow.install();
+    expect(narrowInstalled.status).toBe(200);
+    expect(await narrowInstalled.json()).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
+    });
+    // ...but never a workspace account.
+    fixture.microsoftPlans.length = 0;
+    const narrowShared = await app.request(base, {
+      method: "POST",
+      headers: narrowHeaders,
+      body: JSON.stringify({
+        providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+        returnUrl: "https://host.example/chat",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(narrowShared.status).toBe(403);
+
+    // A workspace account is integration management.
+    const workspaceOwned = await connectAndPreview({ ownership: "workspace" });
+    const sharedInstall = await workspaceOwned.install();
+    expect(sharedInstall.status).toBe(403);
+    expect(await sharedInstall.text()).toContain("capabilities:manage");
+
+    // So is binding an instance this account is not already bound to.
+    const other = await connectAndPreview({
+      ownership: "personal",
+      installationTarget: { instanceKey: "account-someone-else", displayName: "OneDrive" },
+    });
+    const otherInstall = await other.install();
+    expect(otherInstall.status).toBe(403);
+    expect(await otherInstall.text()).toContain("capabilities:manage");
   }, 60_000);
 
   test("a non-human principal cannot request personal ownership", async () => {

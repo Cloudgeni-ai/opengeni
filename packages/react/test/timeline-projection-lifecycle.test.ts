@@ -423,12 +423,15 @@ describe("projection lifecycle audit regressions", () => {
     ]);
     expect(prose(completed)).toEqual(["Verified"]);
     expect(work(completed)[0]!.outcome).toBe("complete");
+    // The retried attempt's unclassified failure names its outcome and keeps
+    // the recorded text behind Details.
     expect(
       work(completed)[0]!.work!.details.some(
         (group) =>
           group.kind === "item" &&
           group.item.kind === "notice" &&
-          group.item.text === "Provider unavailable",
+          group.item.text === "The turn stopped unexpectedly" &&
+          group.item.details?.value === "Provider unavailable",
       ),
     ).toBe(true);
   });

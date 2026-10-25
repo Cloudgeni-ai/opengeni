@@ -282,6 +282,7 @@ const VAULT_ERROR_CODES: ReadonlySet<string> = new Set<VaultErrorCode>([
   "vault_item_name_conflict",
   "vault_limit_reached",
   "vault_read_only",
+  "vault_operation_unsupported",
   "vault_generation_conflict",
   "vault_permission_denied",
   "vault_reveal_requires_human",

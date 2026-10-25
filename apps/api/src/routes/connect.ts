@@ -33,6 +33,7 @@ import {
   installApiIntegration,
   listConnectionsMetadata,
   getConnectionMetadata,
+  listInstalledApiIntegrations,
   createConnection,
   updateConnection,
   encryptEnvironmentValue,
@@ -56,7 +57,10 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
-import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
+import {
+  connectSetupPermission,
+  requireConnectOwnerAuthority,
+} from "../integrations/connect-authority";
 import { prepareFikenTokenInstall, startFikenOAuth } from "../integrations/fiken";
 import { startAtlassianOAuth } from "../integrations/atlassian";
 import { startSlackBotInstall } from "../integrations/slack-install";
@@ -103,17 +107,73 @@ import {
 import { parseRequestJson } from "../http/request-body";
 import { connectRequestActor, assertAgentPreparedConnect } from "../prepared-mcp-actor";
 
+/**
+ * Installing a deployment-reviewed integration's tools for the caller's own
+ * personal account is connecting that account, so it needs only the right to
+ * connect your own accounts (connections:personal, included in
+ * connections:write), like connecting Gmail. The instance resolves
+ * credentials for that person alone. Anything else (a workspace account, a
+ * custom source, or an instance not already bound to this same account)
+ * stays integration management (capabilities:manage).
+ */
+async function isOwnAccountInstall(
+  deps: ApiRouteDeps,
+  scope: { workspaceId: string; subjectId: string },
+  attempt: {
+    id: string;
+    providerId: string;
+    ownership: string;
+    source?: unknown;
+    account?: { id: string } | undefined;
+    installationTarget?: { instanceKey: string } | undefined;
+  },
+): Promise<boolean> {
+  if (attempt.ownership !== "personal" || attempt.source !== undefined || !attempt.account)
+    return false;
+  if (
+    !CORE_INTEGRATION_DEFINITIONS.some((definition) => definition.id === attempt.providerId) ||
+    !integrationAvailable(deps.settings, scope.workspaceId, attempt.providerId)
+  )
+    return false;
+  const connection = await getConnectionMetadata(
+    deps.db,
+    scope.workspaceId,
+    attempt.account.id,
+    scope.subjectId,
+  );
+  if (!connection || connection.subjectId !== scope.subjectId) return false;
+  const instanceKey = attempt.installationTarget?.instanceKey;
+  // A fresh instance named after this attempt cannot replace anyone's.
+  if (!instanceKey || instanceKey === `account-${attempt.id}`) return true;
+  // Reconnecting reuses only an instance already bound to this same account.
+  const installed = await listInstalledApiIntegrations(deps.db, scope.workspaceId, scope.subjectId);
+  return installed.some(
+    (instance) =>
+      instance.instanceKey === instanceKey &&
+      instance.definitionId === attempt.providerId &&
+      instance.connectionRef?.connectionId === attempt.account!.id,
+  );
+}
+
 /** Shared durable setup entry. Provider completion is distinct from
  * subsequent preview/install; never report an OAuth token as a ready integration. */
 export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const canReadAttempt = (permissions: Parameters<typeof hasPermission>[0], providerId: string) =>
-    ["x", "reddit", "mcp-install"].includes(providerId)
+  const canReadAttempt = (
+    permissions: Parameters<typeof hasPermission>[0],
+    attempt: Parameters<typeof connectSetupPermission>[0],
+  ) => {
+    const providerId = attempt.providerId;
+    return ["x", "reddit", "mcp-install"].includes(providerId)
       ? hasPermission(permissions, "workspace:read")
       : providerId === "github-app"
         ? hasPermission(permissions, "github:use") || hasPermission(permissions, "github:manage")
         : providerId === "github-lens"
           ? hasPermission(permissions, "workspace:read")
-          : hasPermission(permissions, "connections:read");
+          : hasPermission(permissions, "connections:read") ||
+            // One's own sign-in attempt is readable with the permission that started it.
+            (connectSetupPermission(attempt) === "connections:personal" &&
+              hasPermission(permissions, "connections:personal"));
+  };
   app.get("/v1/workspaces/:workspaceId/connect/catalog", async (c) => {
     const authorization = await requireAccessGrantAuthorization(
       c,
@@ -128,7 +188,15 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
       async (_tx, current) => current,
     );
     const canWrite = hasPermission(authorization.grant.permissions, "connections:write");
+    const personalSetup = hasPermission(authorization.grant.permissions, "connections:personal");
     const personal = isPersonalConnectionOwnerPrincipal(authorization);
+    // Signing in to one's own account needs only what the attempt will check.
+    const canSignInPersonally = (providerId: string) =>
+      personal &&
+      hasPermission(
+        authorization.grant.permissions,
+        connectSetupPermission({ providerId, ownership: "personal" }),
+      );
     let mcpConfigured = false;
     let credentialConfigured = false;
     try {
@@ -184,24 +252,30 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         integrationAvailable(deps.settings, c.req.param("workspaceId"), definition.id),
       ).map((definition) => {
         const readiness = curatedOAuthReadiness(deps.settings, definition);
+        // Without connections:write, a person may still connect their own
+        // account (connections:personal), so only personal ownership is offered.
+        const ownership = readiness.ownership.filter(
+          (owner) => (owner !== "personal" || personal) && (owner === "personal" || canWrite),
+        );
+        const allowed = canWrite || (personalSetup && ownership.includes("personal"));
         return ConnectProvider.parse({
           id: definition.id,
           label: definition.name,
           family: definition.provider.id,
           readiness:
-            !external || !canWrite
+            !external || !allowed
               ? "unsupported"
               : readiness.configured
                 ? "available"
                 : "needs_configuration",
           ...(!external
             ? { reason: "A verified user is required by this Connect adapter" }
-            : !canWrite
+            : !allowed
               ? { reason: "connections:write permission required" }
               : !readiness.configured
                 ? { reason: "Deployment OAuth or encryption configuration is incomplete" }
                 : {}),
-          ownership: readiness.ownership.filter((owner) => owner !== "personal" || personal),
+          ownership,
           setup: ["oauth"],
         });
       }),
@@ -244,7 +318,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Gmail",
         family: "google",
         readiness:
-          !external || !canWrite || !personal
+          !external || !canSignInPersonally("gmail")
             ? "unsupported"
             : mcpConfigured && gmailOAuthClientConfigured(deps.settings)
               ? "available"
@@ -265,7 +339,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               }
             : {}),
         readiness:
-          !external || !canWrite || !personal
+          !external || !canSignInPersonally("google-drive")
             ? "unsupported"
             : mcpConfigured && googleDriveOAuthClientConfigured(deps.settings)
               ? "available"
@@ -299,14 +373,20 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: "Slack account",
         family: "slack",
         readiness:
-          !external || !canWrite
+          !external || (!canWrite && !canSignInPersonally("slack-personal"))
             ? "unsupported"
             : mcpConfigured &&
                 deps.settings.slackClientId?.trim() &&
                 deps.settings.slackClientSecret?.trim()
               ? "available"
               : "needs_configuration",
-        ownership: personal ? ["workspace", "personal"] : ["workspace"],
+        ownership: !canWrite
+          ? canSignInPersonally("slack-personal")
+            ? ["personal"]
+            : ["workspace"]
+          : personal
+            ? ["workspace", "personal"]
+            : ["workspace"],
         setup: ["oauth"],
       }),
       ConnectProvider.parse({
@@ -679,7 +759,13 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const before = stored.attempt;
     assertAgentPreparedConnect(actor, before);
     const advancePermission =
-      before.providerId === "mcp-install" ? "capabilities:manage" : permission;
+      before.providerId === "mcp-install"
+        ? "capabilities:manage"
+        : action.type === "credentials"
+          ? connectSetupPermission(before)
+          : action.type === "install" && (await isOwnAccountInstall(deps, scope, before))
+            ? "connections:personal"
+            : permission;
     if (!hasPermission(authorization.grant.permissions, advancePermission))
       throw new HTTPException(403, { message: `${advancePermission} required` });
     if (before.mcpSetup && !hasPermission(authorization.grant.permissions, "capabilities:manage"))
@@ -1144,7 +1230,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
             .update(stableJson(input))
             .digest("hex"),
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, scope, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, scope, connectSetupPermission(before), origin),
           execute: async (attempt) => {
             if (attempt.state !== "credential_input")
               throw new HTTPException(409, { message: "Reload the current connection setup" });
@@ -1221,7 +1307,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
         operationId: input.idempotencyKey,
         inputDigest: createHash("sha256").update(stableJson(input)).digest("hex"),
         authorize: (tx, _attempt, origin) =>
-          requireConnectOwnerAuthority(tx, scope, permission, origin),
+          requireConnectOwnerAuthority(tx, scope, advancePermission, origin),
         execute: async (attempt) => {
           if (
             (!attempt.source && (!attempt.credentialsCommitted || !attempt.account)) ||
@@ -1353,7 +1439,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                     ? "workspace:admin"
                     : attempt.providerId === "slack-bot"
                       ? "capabilities:manage"
-                      : "connections:write";
+                      : connectSetupPermission(attempt);
           if (
             !hasPermission(authorization.grant.permissions, permission) ||
             (attempt.providerId === "github-lens" &&
@@ -1404,7 +1490,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                 // integration administration even though Members hold connections:write.
                 input.providerId === "slack-bot"
                 ? "capabilities:manage"
-                : "connections:write";
+                : connectSetupPermission(input);
     const authorization = await requireAccessGrantAuthorization(
       c,
       deps,
@@ -2047,7 +2133,10 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               : {
                   installationTarget: input.installationTarget ?? {
                     instanceKey: `account-${id}`,
-                    displayName: input.providerId,
+                    displayName:
+                      CORE_INTEGRATION_DEFINITIONS.find(
+                        (definition) => definition.id === input.providerId,
+                      )?.name ?? input.providerId,
                   },
                 }),
             ...(reconnect
@@ -2077,7 +2166,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       (await listPendingConnectAttempts(deps.db, actor.scope)).filter(
         (attempt) =>
-          canReadAttempt(grant.permissions, attempt.providerId) &&
+          canReadAttempt(grant.permissions, attempt) &&
           (!actor.preparedOnly || (attempt.providerId === "mcp-headers" && attempt.mcpSetup)),
       ),
     );
@@ -2089,7 +2178,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     const { grant } = actor;
     const { attempt } = await getConnectAttempt(deps.db, actor.scope, c.req.param("attemptId"));
     assertAgentPreparedConnect(actor, attempt);
-    if (!canReadAttempt(grant.permissions, attempt.providerId))
+    if (!canReadAttempt(grant.permissions, attempt))
       throw new HTTPException(403, { message: "Connect read permission required" });
     return c.json(attempt);
   });

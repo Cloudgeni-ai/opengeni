@@ -41,7 +41,7 @@ Fill the remaining question and request fields as the tool schema requires.
 | `item` | item name to create or update; name it after the service |
 | `field` | field name, default `password` |
 | `fieldKind` | `concealed` (default), `totp` (a seed or `otpauth://` URI), `text` |
-| `itemType` | `login` (default), `api_key` (field `value`), `note` |
+| `itemType` | `login` (default), `api_key` (field `value`), `note`, `card` (field `number` or `security code`), `identity` (field such as `national ID number`), `ssh_key` (field `private key`; the user pastes a key, and the public key and fingerprint are saved with it). To make a new key pair, use `secret_save` with `generateKey` instead |
 | `username` | for logins: `{prompt, value?}`; `value` pre-fills a known username |
 | `website` | the sign-in URL; helps the user's password manager fill the card |
 | `looksLike` | a hint such as `sk-...` or `6 digits` |

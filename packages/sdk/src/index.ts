@@ -39,6 +39,10 @@ export type {
   ListEventTypesResponse,
   ListEventSourcesResponse,
   ListInboundEventsResponse,
+  ListReadyEventSourcesResponse,
+  ReadyEventSource,
+  ReadyEventSourceKind,
+  ReadyEventSourceRequest,
   ReplayEventDeliveryResponse,
   RotateEventSourceSecretResponse,
   ScheduledOccurrenceEvent,
@@ -1564,6 +1568,9 @@ export type {
   UpdateSessionPinRequest,
   UpdateSessionRequest,
   UpdateSessionToolPolicyRequest,
+  ContinueAfterCapabilitySetupRequest,
+  ContinueAfterCapabilitySetupResponse,
+  CapabilitySetupContinuationSkipReason,
   UpdateSessionAgentRequest,
   AgentCapabilityId,
   AgentSkillsCapability,
@@ -1729,6 +1736,10 @@ export type {
   CreateFeedbackRequest,
   Feedback,
   FeedbackSubmissionResponse,
+  FeedbackContext,
+  FeedbackRecentError,
+  FeedbackScreenshot,
+  FeedbackScreenshotUpload,
 } from "./feedback";
 export type * from "./knowledge";
 export type {

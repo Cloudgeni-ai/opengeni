@@ -30,6 +30,11 @@ an agent reliably, without a second execution engine beside scheduled tasks.
   - an **MCP connection** whose server offers the events extension;
   - **this workspace** itself: things that happen in Opengeni, such as a
     meeting's transcript becoming ready.
+
+  Sources a person can only own themselves (an MCP server they are signed in
+  to that offers events, a Gmail account they connected, this workspace) need
+  no setting up: they are offered by key and added the first time they are
+  used. See [Ready sources](#ready-sources).
 - **Event.** One normalized occurrence: source, type, time, subject, actor,
   a one-line summary and bounded data. Every source produces the same shape.
 - **Run.** One execution of an automation: an existing `scheduled_task_runs`
@@ -341,6 +346,31 @@ source.
   error. The error in the body decides, so a server that stops offering events
   blocks its triggers instead of retrying quietly.
 
+### Ready sources
+
+A source that only needs the person's own sign-in is never something they
+should have to set up first. `GET /v1/workspaces/:workspaceId/event-sources/ready`
+lists, for the caller, the ones they don't have yet, each with a key, kind and
+name:
+
+- `mcp-server:<serverId>` for each workspace MCP server they are signed in to
+  (or that needs no sign-in) and that offers events, named as the server.
+  Whether a server offers events is learned by connecting as the person, with
+  an 8 second limit; the answer is kept for 10 minutes (1 minute when the
+  server could not be reached). Gmail's own server and servers that sign in
+  through the embedding app are left out, as they are for MCP sources.
+- `gmail:<connectionId>` for each Gmail account they connected, named
+  "Gmail (address)" as its source will be.
+- `workspace` for this workspace's own events.
+
+A workspace API key owns no sources, so it gets an empty list. Anywhere a
+trigger names a source (the API, the agent tools, the forms) the key can stand
+in for its id: saving adds the caller's own source behind it, or reuses the one
+they already have, with the same checks and errors as adding it by hand. The
+forms add it a moment earlier, when the person picks it, to read its event
+types. Nothing is stored for a key until it is used, so the list costs no rows
+and the person's sources page shows only what they use.
+
 ## Delivering events to the agent
 
 An event run is a scheduled-task run with `triggerType: "event"` and producer
@@ -405,9 +435,14 @@ the chat's waits.
 
 Two read tools are added, both deferred (loaded through tool search):
 
-- `event_sources_list` lists the sources the caller can use; with a `sourceId`
-  it returns that source's event types, the fields conditions can match and an
-  MCP event type's subscription arguments.
+- `event_sources_list` lists the sources the caller can use, and under
+  `readyToAdd` the [ready sources](#ready-sources) they don't have yet; with a
+  `sourceId` (a source's id or a ready id) it returns that source's event
+  types, the fields conditions can match and an MCP event type's subscription
+  arguments. A trigger's `sourceId` can also be a ready id. Either use adds
+  the caller's own source, so an agent that may manage automations never has
+  to ask a person to add one first; one that may not gets "Event source not
+  found" for a ready id.
 - `events_get` reads one stored event by id, or the events a run carried, 50
   per page.
 

@@ -66,6 +66,7 @@ test("default, workspace isolation, exact replay, revision conflict, deny-all an
   expect(await getOrganizationIntegrationPolicy(client.db, scope, authorize)).toEqual({
     mode: "unrestricted",
     allowedIntegrationKeys: [],
+    personalIntegrationSetup: "members",
     revision: 0,
   });
   await expect(
@@ -673,7 +674,9 @@ test("policy fence allows completed exact receipt reads but new progress still r
       return receipt!.result;
     },
   );
-  expect(replay).toEqual(recorded);
+  // The stored receipt names personalIntegrationSetup only when the request did.
+  const { personalIntegrationSetup: _kept, ...receiptShape } = recorded;
+  expect(replay).toEqual(receiptShape);
   let newEffect = false;
   await expect(
     withOrganizationIntegrationPolicyFence(client.db, scope, async (tx, policy) => {
@@ -709,4 +712,45 @@ test("policy fence provides a deeply frozen policy snapshot", async () => {
     }).toThrow();
     expect(() => assertOrganizationIntegrationAllowed(policy, "unknown")).toThrow();
   });
+});
+
+test("members' personal integration setup is kept unless an update names it", async () => {
+  const before = await getOrganizationIntegrationPolicy(client.db, scope, authorize);
+  const reserved = await updateOrganizationIntegrationPolicy(
+    client.db,
+    scope,
+    { ...request(before.revision, "unrestricted"), personalIntegrationSetup: "admins" },
+    authorize,
+  );
+  expect(reserved.personalIntegrationSetup).toBe("admins");
+  // An older writer omits the key: the stored choice stays and is reported.
+  const kept = await updateOrganizationIntegrationPolicy(
+    client.db,
+    scope,
+    request(reserved.revision, "unrestricted"),
+    authorize,
+  );
+  expect(kept).toEqual({ ...reserved, revision: reserved.revision + 1 });
+  expect(await getOrganizationIntegrationPolicy(client.db, scope, authorize)).toEqual(kept);
+  await withOrganizationIntegrationPolicyFence(client.db, scope, async (_tx, policy) => {
+    expect(policy.personalIntegrationSetup).toBe("admins");
+  });
+  const reopened = await updateOrganizationIntegrationPolicy(
+    client.db,
+    scope,
+    { ...request(kept.revision, "unrestricted"), personalIntegrationSetup: "members" },
+    authorize,
+  );
+  expect(reopened.personalIntegrationSetup).toBe("members");
+  await expect(
+    updateOrganizationIntegrationPolicy(
+      client.db,
+      scope,
+      {
+        ...request(reopened.revision, "unrestricted"),
+        personalIntegrationSetup: "everyone" as never,
+      },
+      authorize,
+    ),
+  ).rejects.toThrow();
 });

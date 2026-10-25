@@ -936,12 +936,12 @@ export class CodemodeBrowserTab {
     return new CodemodeBrowserLocator(this, { kind: "role", role, ...options });
   }
 
-  getByText(text: string) {
-    return new CodemodeBrowserLocator(this, { kind: "text", text });
+  getByText(text: string, exact?: boolean) {
+    return new CodemodeBrowserLocator(this, { kind: "text", text, ...(exact ? { exact } : {}) });
   }
 
-  getByLabel(text: string) {
-    return new CodemodeBrowserLocator(this, { kind: "label", text });
+  getByLabel(text: string, exact?: boolean) {
+    return new CodemodeBrowserLocator(this, { kind: "label", text, ...(exact ? { exact } : {}) });
   }
 
   getByPlaceholder(text: string) {

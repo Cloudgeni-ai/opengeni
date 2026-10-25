@@ -261,6 +261,74 @@ permissions and sign-in/consent are not bypassed. Without host configuration the
 default offer explains that computer setup is unavailable. It never substitutes
 an Opengeni download, setup token, shell command, or model-supplied setup URL.
 
+### Capability connection offers
+
+When the agent asks the person to connect a catalog OAuth integration (its
+`capability_authorization_request` card), `SessionConversation` and
+`OpenGeniChat` render the same connect card as the Opengeni web app, with no
+host code: the person picks who can use the connection, signs in through a
+popup, the card adds the integration to the chat, and the agent continues on
+its own. The popup's sign-in returns to the host page; the card follows the
+attempt's state through the API, so the page needs no return handler, and the
+person closes the popup.
+
+The card appears only when the person's own grant can finish every step: chat
+control (`sessions:control`) plus one of these:
+
+- `connections:personal`: connect their own account (personal ownership only)
+  and, if the integration is not on yet, turn it on for personal accounts. This
+  works only for a reviewed catalog integration that signs each person in with
+  OAuth and that the organization's integration policy allows. It never covers
+  custom MCP servers, shared or workspace connections, other people's
+  connections, or removing or reconfiguring an integration, and an
+  organization can reserve turning integrations on for admins.
+- `connections:write` with `connections:read` and `capabilities:manage` (or an
+  integration that is already on): any account, shared or personal.
+- `connections:read` alone, when the integration is already on and bound to a
+  shared workspace account.
+
+Otherwise the card says the integration can't be connected from here.
+
+Turning an integration on is a workspace change: once someone turns it on for
+personal accounts, the other members of that workspace see it as an optional
+integration that each of them must connect with their own account before
+their chats can use it. Nobody gets access to anyone else's account.
+
+Who gets `connections:personal` by default depends on whether each product
+user is their own Opengeni user, set with `identities` on the facade or on
+`createWorkspaceIdResolver`, because a personal connection belongs to the
+Opengeni user:
+
+| Setup | Default |
+| --- | --- |
+| One workspace per user (`resolve` returns `{ user }`, or `chats: "isolated"`) | On |
+| `identities: "per_user"` (each `user` is one real person) | On, also in tenant workspaces: the SDK adds each signed-in tenant user with the defaults plus `connections:personal` |
+| Tenant workspaces with `identities` unset | Off (users are left to the API's first-use grant) |
+| `identities: "shared"` (one `user` stands for many people, for example a team) | Off everywhere, so one person's Gmail is never usable by everyone behind that identity |
+
+`memberPermissions` overrides these defaults either way. The SDK never changes
+an existing member's permissions; use `updateExternalWorkspaceMember` for
+people added earlier. If the organization key's custom policy covers neither
+`connections:personal` nor `connections:write`, defaulted onboarding falls back
+to the conversation defaults instead of failing. A proxy with a
+`createSession` hook owns each chat's tools, so it reports
+`chatConnections: false` in client config and the stock conversation leaves
+these cards to the host. `timelineProps.renderAuthNeeded` still takes
+precedence, and host-managed connections (`authoritySource: "host"`) keep their
+own row.
+
+The agent's cards for the deployment's reviewed Microsoft integrations
+(Outlook Mail, Calendar and Contacts, OneDrive and Teams) render the same way,
+with `SessionIntegrationCapabilityCard`. Each person connects their own
+Microsoft account, which installs the integration's reviewed tools for that
+account alone, so these cards need `sessions:control` plus
+`connections:personal` (or `connections:write`), not `connections:read` or
+`capabilities:manage`. The per-user defaults above already include both, so
+the host does not pre-install anything; a shared identity without
+`connections:personal` sees the card as unavailable. The session proxy
+forwards the Connect, integration, tool-policy and continuation routes the
+card uses as the signed-in end user.
+
 ### Embedded defaults
 
 | Default in `SessionConversation` / `OpenGeniChat` | How the host changes it |

@@ -152,14 +152,24 @@ enabling it changes no session's backend.
    it from there; only service account key files are supported. Rotate
    the key as any long-lived credential, and delete it when the service
    moves onto Google Cloud.
-8. **Images.** Sandboxes start from stored images
-   (`computeControl.storedImages`, `name: <image id>`). Build each with
-   `compute-host build-image <oci-ref> --guest <bundle>/guest --output
-   image.ext4 --store gs://bucket/prefix` on any host (or a build machine
-   with the bundle), which prints the image id; the Opengeni sandbox and
-   desktop images (with `opengeni-agent`, ADR 21) are built this way from
-   the same Opengeni commit as the deployment. Hosts fetch an image from
-   the store on its first create.
+8. **Images.** Sandboxes start from stored images. Set
+   `computeControl.imageSources` (`name: registry/repository@sha256:<hex>`)
+   to the release's OCI images, normally the Opengeni sandbox and desktop
+   images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
+   the deployment. When a release names an OCI image no stored image was
+   built from, the service has a live host build it (a few minutes, one
+   at a time per host; the host's log says `built and stored a sandbox
+   image`), records it, and new creates of that name start from it; until
+   then they start from the image the name had before. Existing sandboxes
+   keep theirs. A host builds into its state directory's `prepare/`
+   scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
+   for a private registry. `computeControl.storedImages` (`name: <image
+   id>`) still pins an image by hand, and is what a name starts from
+   before anything is built for it: build one with `compute-host
+   build-image <oci-ref> --guest <bundle>/guest --output image.ext4
+   --store gs://bucket/prefix` on any host (or a build machine with the
+   bundle), which prints the image id. Hosts fetch an image from the store
+   on its first create.
 9. **Checkpoints.** A running sandbox whose create names no sleep config
    (Opengeni's never does) is checkpointed to the store after every ten
    minutes it runs: losing its host costs it what it did since its newest
@@ -203,9 +213,9 @@ computeControl:
       networking.gke.io/load-balancer-type: Internal
   archive: gs://example-compute-archive/archive
   gcpGroup: projects/example/zones/europe-west4-a/instanceGroupManagers/opengeni-compute-hosts
-  storedImages:
-    opengeni: "<image id>"
-    opengeni-desktop: "<image id>"
+  imageSources:
+    opengeni: ghcr.io/example/opengeni-sandbox@sha256:…
+    opengeni-desktop: ghcr.io/example/opengeni-desktop@sha256:…
   serviceAccount:
     annotations:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
@@ -378,15 +388,34 @@ authority alone for agent links.
   going there and hands off every sandbox on it that nothing holds awake;
   each is adopted elsewhere on its next wake (ADR 18). The answer counts
   those `moved` and those `left` (held awake, or the host did not answer):
-  drain again until none are left, or until those left are let go of by
-  their users. `POST /v1/hosts/<name>/undrain` takes the host back.
+  drain again until none are left. Some never let go: a desktop someone
+  keeps open, a program that never stops working. Once the sandboxes
+  that go to sleep have gone, drain with `{"awake": true}` as the body:
+  each sandbox still awake then has its holds and any wake asked of it
+  ended and is paused, saved and archived where it stands, memory and
+  all, and carries on where its next wake places it after a pause of
+  seconds to a minute. Its open connections end, as in any move; a
+  command still running goes on, and its output stays readable. One
+  whose VM cannot be saved (its disk may have lost writes) stays `left`:
+  deleting the host recovers it from its latest archive. A host from
+  before this option ignores it and leaves those sandboxes `left`.
+  `POST /v1/sandboxes/<id>/move` takes
+  `"awake": true` too. `POST /v1/hosts/<name>/undrain` takes the host
+  back.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,
   `gcloud compute instance-groups managed delete-instances` so the group
   does not replace it). Never delete a host that still owns sandboxes: the
-  service would treat it as lost and recover them, which is safe but
-  slower than a drain and wakes them from the archive.
+  service would treat it as lost and recover them from their latest
+  archive, which loses their programs and what they wrote since; drain
+  with `{"awake": true}` first.
 - **A lost host.** A host whose lease renewals stop is given up on after
-  its term and margin: the service fences it first (on GCP it resets the
+  its term and margin if it holds no sandboxes, or its instance is found
+  stopped or gone. One that holds sandboxes is waited for first, up to
+  `--give-up-after-s` (120 by default) from its last renewal, because a
+  host cut off only by the network keeps its VMs frozen and runs them on
+  once it renews again; giving up on it would end every program they
+  run. Meanwhile their wakes retry and new sandboxes go elsewhere. Then
+  the service fences it (on GCP it resets the
   instance, or finds it stopped or gone), then clears its sandboxes'
   owner with a raised epoch, and each wakes on another host from its
   latest archived copy on its next request. It boots from that copy's
@@ -400,9 +429,17 @@ authority alone for agent links.
   hand, except replacing the machine where no group does it.
   If the host comes back, its guard has already stopped its VMs (its
   lease ran out), and it registers again; the raised epochs keep it from
-  running any sandbox that moved (ADR 18). A host whose fence
-  keeps failing is not given up on: alert on hosts in state `lost` for
-  more than a few minutes and fence them by hand (stop the machine).
+  running any sandbox that moved (ADR 18). A host given up on stays in
+  `GET /v1/hosts` as `lost` for a day, then the service forgets it, so
+  machines replaced over months do not pile up there or in the metrics;
+  if it comes back after that, it registers as a new host. The database
+  refuses any write naming a forgotten host, including one from an older
+  replica during a rollout (that request gets an error instead), so the
+  control service can be rolled forward or back across this. A host whose
+  fence keeps failing is not given up on and stays `live` with a growing
+  `compute_fleet_host_renewal_age_seconds`: alert on that, or on
+  `compute_control_give_up_failures_total`, and fence it by hand (stop
+  the machine).
 
 ## Keys and certificates
 
@@ -752,6 +789,33 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   the fleet), `agent_link` (a request for its agent, a message with a
   reply subject; acknowledgements and other messages nobody waits on never
   wake one) or `guest_port` (data for the guest on a port that wakes it).
+- **Find a guest that stopped.** A guest can power off, halt or hang
+  while its VM process runs on. On a host with `--restore-notice-port`,
+  whose guests must all listen on it, the agent connects to each running
+  guest's notice port every thirty seconds. It logs a warning for each
+  check a guest takes no connection on, and after five in a row an error
+  naming the sandbox (`guest took no connection on its notice port`).
+  It then ends the VM as a crashed one: a `compute.alarm` for programs
+  lost, files kept, and the next wake boots from the disk. A host whose
+  guest image does not listen on the notice port must not set it.
+  A check counts only if the guest could run all through it: no step
+  paused it meanwhile, the guard did not freeze it, and the machine did
+  not suspend. The guard says when it freezes the VMs, which it does on
+  its own steps, when the lease is about to run out and while a suspend
+  is prepared: it keeps a count of its freezes beside its lock
+  (`/run/compute-host/guard.lock.freezes`), odd while the VMs may not
+  run and even while they do, and writes it at each of its steps with the
+  time it wrote it. On a host with a lease a check counts only if the
+  count was even when it began and the guard still writes the same after
+  it ended. A guard that cannot write the file logs `the guard could not
+  write its freeze count` once, and until it can, no check counts.
+  A guard from before the count keeps none, and then no check counts:
+  since an upgrade never restarts the guard, a host upgraded in place
+  finds stopped guests only from its next boot. It also
+  needs the host to be able to ask the VMM for the connection at all: a
+  host that cannot reach a VM's vsock socket, as when it is out of
+  descriptors, logs `could not check the guest` and counts nothing
+  against it.
 
 ## Upgrades
 

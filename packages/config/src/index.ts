@@ -502,13 +502,16 @@ const SettingsSchema = z.object({
     .string()
     .url()
     .default("https://github.com/Cloudgeni-ai/opengeni/releases"),
-  // Explicit operator-controlled promotion pointer for `/agent/latest/*`.
-  // Versioned agent releases are immutable; changing this setting promotes or
-  // rolls back the stable channel without moving or deleting a provider tag.
+  // Optional operator promotion pointer for `/agent/latest/*` and the stable
+  // update channel. Versioned agent releases are immutable; setting this pins,
+  // promotes or rolls back the stable channel without moving or deleting a
+  // provider tag. Unset, the API serves the agent release of its own source
+  // tree (agent/Cargo.toml), so the stable agent advances with the control
+  // plane instead of staying at whatever version a default once named.
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.54"),
+    .optional(),
   // Optional pin for the desktop app served by /desktop/latest/*. When unset,
   // the newest desktop-v release on the agent release repository is served.
   desktopStableVersion: z
@@ -876,6 +879,19 @@ const SettingsSchema = z.object({
   vercelAiGatewayApiKey: z.string().optional(),
   /** Image adapter route; native hosted providers ignore this model. */
   imageGenerationModel: z.string().trim().min(1).max(256).default("openai/gpt-image-2"),
+  // Offer image generation on Opengeni credits through the deployment's
+  // Gateway key when no turn-native, subscription or workspace route applies.
+  // On by default once the Gateway key and a price exist; false turns it off.
+  imageGenerationOpengeniCreditsEnabled: EnvBoolean.default(true),
+  // Opengeni's customer price for one credit-funded generated image. Unset uses
+  // the reviewed price of `imageGenerationModel`; a model without one is never
+  // offered on Opengeni credits. The operation freezes the price before dispatch.
+  imageGenerationCreditMicrosPerImage: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_000_000)
+    .optional(),
   /** Durable video generation uses the workspace-owned Gateway credential. */
   videoGenerationPollIntervalMs: z.coerce.number().int().min(1_000).max(60_000).default(5_000),
   videoGenerationRecoveryDeadlineMs: z.coerce
@@ -979,10 +995,60 @@ const SettingsSchema = z.object({
    */
   recordingSpeakersBinaryPath: z.string().trim().min(1).max(1024).optional(),
   recordingSpeakerModelsDir: z.string().trim().min(1).max(1024).optional(),
+  /**
+   * Place a text-only model's words on the audio ourselves (forced alignment
+   * with `alignment.onnx` from the speaker models directory), so models
+   * that return only text can serve meetings. The API and the worker both
+   * read it; the worker also needs the model.
+   */
+  recordingWordAlignment: EnvBoolean.default(false),
+  /**
+   * The deployment's own Azure Speech account for meeting transcripts
+   * (MAI-Transcribe), as its HTTPS origin. Audio is processed in the
+   * account's region. It authenticates with the account key when one is set,
+   * otherwise with Microsoft Entra ID through the standard AZURE_TENANT_ID and
+   * AZURE_CLIENT_ID plus AZURE_FEDERATED_TOKEN_FILE (a workload identity) or
+   * AZURE_CLIENT_SECRET.
+   */
+  recordingAzureSpeechEndpoint: z
+    .string()
+    .trim()
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      return url.protocol === "https:" && (url.pathname === "/" || url.pathname === "");
+    }, "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT must be the HTTPS origin of an Azure Speech account")
+    .optional(),
+  recordingAzureSpeechApiKey: z.string().trim().min(1).optional(),
+  /**
+   * The transcription model recordings use unless a workspace or request
+   * picks one, as `provider/model`. Defaults to Azure Speech when its
+   * account is configured, else ElevenLabs Scribe v2.
+   */
+  recordingTranscriptionDefault: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u, "Use provider/model, such as elevenlabs/scribe_v2")
+    .optional(),
+  /**
+   * One speech-to-text model for every use (meetings, dictation), as
+   * `provider/model`. Workspaces then cannot pick another, and nothing else
+   * hears the audio. Unset lets each workspace choose.
+   */
+  speechToTextPinned: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u,
+      "Use provider/model, such as azure-speech/MAI-Transcribe-2",
+    )
+    .optional(),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Connected subscription STT is preferred by default; operators can put
   // openai/azure-openai first explicitly.
-  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai.
+  // Supported: supergrok-subscription, codex-subscription, openai, azure-openai,
+  // azure-speech (also azure-mai) and elevenlabs. Speech-to-text providers
+  // not named here follow in the deployment's own order.
   voiceInputProviderOrder: z
     .string()
     .default("supergrok-subscription,codex-subscription,openai,azure-openai"),
@@ -1593,6 +1659,17 @@ const SettingsSchema = z.object({
   // EnvBoolean (NOT
   // z.coerce.boolean(), which coerces "false" -> true).
   agentOpStreamEnabled: EnvBoolean.default(true),
+  // In-chat app actions (admin_action_call without full access): a change
+  // waits for the person's confirmation in the chat, but only when they sent
+  // the message signed in to this app itself (its managed or local sign-in).
+  // Every other accepted person sign-in is delegated: an embed's host-issued
+  // token, an external user, or any other integration's person token. There
+  // someone else vouches for who the person is, so the route only reads.
+  // Turning this on lets every delegated sign-in confirm changes too (not only
+  // embeds); do it only when every issuer of such tokens maps each user to the
+  // right member. EnvBoolean (NOT z.coerce.boolean(), which coerces "false"
+  // -> true).
+  delegatedSignInAppActionChangesEnabled: EnvBoolean.default(false),
   // The HMAC secret the control plane signs the enrollment bearer credential with
   // (the `oge_` envelope the agent presents back to the control plane). Optional:
   // when ABSENT and sandboxSelfhostedEnabled is on, the poll route reports the
@@ -2351,6 +2428,16 @@ export type VoiceInputProviderId =
   | "codex-subscription"
   | "supergrok-subscription";
 
+/** Every speech-to-text provider a deployment can offer, for any use. */
+export const SPEECH_TO_TEXT_PROVIDER_IDS: readonly string[] = [
+  "openai",
+  "azure-openai",
+  "azure-speech",
+  "codex-subscription",
+  "supergrok-subscription",
+  "elevenlabs",
+];
+
 export type VoiceInputProviderConfig =
   | {
       id: "azure-mai";
@@ -2556,6 +2643,8 @@ function voiceInputProviderRegistryWithIssues(settings: Settings): {
   const order = settings.voiceInputProviderOrder
     .split(",")
     .map((part) => part.trim())
+    // azure-speech is the shared name of the MAI provider.
+    .map((part) => (part === "azure-speech" ? "azure-mai" : part))
     .filter(
       (part): part is VoiceInputProviderId =>
         part === "openai" ||
@@ -5352,6 +5441,12 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     vercelAiGatewayApiKey: optional("OPENGENI_VERCEL_AI_GATEWAY_API_KEY"),
     imageGenerationModel: optional("OPENGENI_IMAGE_GENERATION_MODEL"),
+    imageGenerationOpengeniCreditsEnabled: optional(
+      "OPENGENI_IMAGE_GENERATION_OPENGENI_CREDITS_ENABLED",
+    ),
+    imageGenerationCreditMicrosPerImage: optional(
+      "OPENGENI_IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE",
+    ),
     videoGenerationPollIntervalMs: optional("OPENGENI_VIDEO_GENERATION_POLL_INTERVAL_MS"),
     videoGenerationRecoveryDeadlineMs: optional("OPENGENI_VIDEO_GENERATION_RECOVERY_DEADLINE_MS"),
     videoGenerationReferenceUrlTtlSeconds: optional(
@@ -5391,6 +5486,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
     recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
+    recordingWordAlignment: optional("OPENGENI_RECORDING_WORD_ALIGNMENT"),
+    recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
+    recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
+    recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),
+    speechToTextPinned: optional("OPENGENI_SPEECH_TO_TEXT_PINNED"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),
@@ -5609,6 +5709,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxLazyProvisionEnabled: optional("OPENGENI_SANDBOX_LAZY_PROVISION"),
     sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
     agentOpStreamEnabled: optional("OPENGENI_AGENT_OP_STREAM_ENABLED"),
+    delegatedSignInAppActionChangesEnabled: optional(
+      "OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES",
+    ),
     enrollmentSigningSecret: optional("OPENGENI_ENROLLMENT_SIGNING_SECRET"),
     selfhostedNatsUrl: optional("OPENGENI_SELFHOSTED_NATS_URL"),
     selfhostedRelayUrl: optional("OPENGENI_SELFHOSTED_RELAY_URL"),
@@ -9985,6 +10088,32 @@ export function calculateVideoGenerationCreditCostMicros(
   return cost;
 }
 
+/**
+ * Reviewed Opengeni customer prices (USD micros per generated image) for
+ * Gateway image models. GPT Image 2 is token-billed by its provider; this
+ * covers a high-quality 1024x1024 output plus its prompt and a few references.
+ */
+export const IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE: Readonly<Record<string, number>> =
+  Object.freeze({
+    "openai/gpt-image-2": 250_000,
+  });
+
+/**
+ * Exact Opengeni product price of one credit-funded image from the configured
+ * image model, frozen before the provider request starts. Null means the model
+ * has no price, so it must not be offered on Opengeni credits.
+ */
+export function imageGenerationCreditCostMicros(
+  settings: Pick<Settings, "imageGenerationModel" | "imageGenerationCreditMicrosPerImage">,
+): number | null {
+  if (settings.imageGenerationCreditMicrosPerImage !== undefined) {
+    return settings.imageGenerationCreditMicrosPerImage;
+  }
+  return Object.hasOwn(IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE, settings.imageGenerationModel)
+    ? IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE[settings.imageGenerationModel]!
+    : null;
+}
+
 export function configuredAllowedReasoningEfforts(
   settings: Settings,
 ): Array<z.infer<typeof ReasoningEffort>> {
@@ -10764,6 +10893,10 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // safe to cache / leave as-is.)
       cacheToolsList: false,
       setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
+      // App actions act as a person. The worker decides per call whether one
+      // waits for the person's confirmation in the chat (a change without full
+      // access) or runs at once (a read, or full access); the API enforces it.
+      requireApproval: ["admin_action_call"],
     },
     ...(hasFiles
       ? []
@@ -11015,6 +11148,38 @@ export function validateSitesDomain(
   }
 }
 
+/** A deployment's own transcription account must be usable, and the default must exist. */
+function validateRecordingTranscriptionSettings(settings: Settings): void {
+  if (
+    settings.recordingAzureSpeechEndpoint &&
+    !settings.recordingAzureSpeechApiKey &&
+    !deploymentAzureEntraCredential(settings)
+  ) {
+    throw new Error(
+      "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT needs OPENGENI_RECORDING_AZURE_SPEECH_API_KEY, or AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
+    );
+  }
+  for (const [env, value] of [
+    ["OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT", settings.recordingTranscriptionDefault],
+    ["OPENGENI_SPEECH_TO_TEXT_PINNED", settings.speechToTextPinned],
+  ] as const) {
+    const provider = value?.split("/")[0];
+    if (!provider) continue;
+    if (!SPEECH_TO_TEXT_PROVIDER_IDS.includes(provider)) {
+      throw new Error(`${env} must name one of ${SPEECH_TO_TEXT_PROVIDER_IDS.join(", ")}`);
+    }
+    if (
+      provider === "azure-speech" &&
+      !settings.recordingAzureSpeechEndpoint &&
+      !settings.voiceInputMaiEndpoint
+    ) {
+      throw new Error(
+        `${env} names azure-speech but OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set`,
+      );
+    }
+  }
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
@@ -11032,6 +11197,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
     );
   }
+  validateRecordingTranscriptionSettings(settings);
   const allowedFirstPartyMcpTools = new Set(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
   );

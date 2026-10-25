@@ -209,6 +209,69 @@ describe("tool result spill port", () => {
       }),
     ).rejects.toThrow(/object storage/);
   });
+
+  const bigResult = {
+    content: [{ type: "text" as const, text: "huge" }],
+    structuredContent: { tree: "x".repeat(64) },
+  };
+  const filename = toolResultSpillFilename(OPERATION_ID);
+  function machineSession(root: string, exitCode = 0) {
+    const commands: Array<{ cmd: string; workdir?: string }> = [];
+    return {
+      commands,
+      session: {
+        state: { manifest: { root } },
+        exec: async (args: { cmd: string; workdir?: string }) => {
+          commands.push(args);
+          return { exitCode, output: exitCode === 0 ? "" : "curl: (6) Could not resolve host" };
+        },
+      },
+    };
+  }
+  function guidance(projected: { content: unknown[] }): string {
+    return (projected.content[1] as { text: string }).text;
+  }
+
+  test("names the copy's absolute path on the machine, so any working directory opens it", async () => {
+    filesById.clear();
+    const machine = machineSession("/Users/user/project");
+    const projected = await spill("selfhosted", objectStorage(), {
+      sdkOwnedSession: () => machine.session,
+    }).spill({
+      operationId: OPERATION_ID,
+      result: bigResult,
+    });
+    const path = `/Users/user/project/tool-results/${filename}`;
+    expect(projected.structuredContent).toMatchObject({ sandboxPath: path });
+    expect(machine.commands).toHaveLength(1);
+    expect(machine.commands[0]!.workdir).toBe("/Users/user/project");
+    expect(machine.commands[0]!.cmd).toContain(`tool-results/${filename}`);
+    const fileId = (projected.structuredContent as { fileId: string }).fileId;
+    expect(projected.content[0]).toEqual({
+      type: "text",
+      text: JSON.stringify(projected.structuredContent),
+    });
+    expect(guidance(projected)).toBe(
+      `The result was too large to show (${JSON.stringify(bigResult).length} bytes), so its exact JSON is saved at ${path} where your shell runs. With the shell, read the parts you need, for example with jq, head or grep, instead of printing it whole. If the file is not there, call files__files_get_download_url with fileId ${fileId} and download it with the shell.`,
+    );
+  });
+
+  test("without a copy the model gets the file id and the download tool", async () => {
+    filesById.clear();
+    const failing = machineSession("/Users/user/project", 6);
+    for (const port of [
+      spill("none"),
+      spill("selfhosted", objectStorage(), { sdkOwnedSession: () => failing.session }),
+    ]) {
+      const projected = await port.spill({ operationId: OPERATION_ID, result: bigResult });
+      const fileId = (projected.structuredContent as { fileId: string }).fileId;
+      expect(projected.structuredContent).toMatchObject({ sandboxPath: null });
+      expect(guidance(projected)).toBe(
+        `The result was too large to show (${JSON.stringify(bigResult).length} bytes), so its exact JSON is saved as a workspace file. To read it, call files__files_get_download_url with fileId ${fileId} and download it with the shell, then read the parts you need, for example with jq, head or grep.`,
+      );
+    }
+    expect(failing.commands).toHaveLength(1);
+  });
 });
 
 type ExecCall = { cmd: string; workdir?: string };
@@ -274,9 +337,11 @@ describe("tool result spill receipt path", () => {
     const receipt = await port.spill({ operationId: OPERATION_ID, result });
     expect(receipt.structuredContent).toMatchObject({
       type: "tool_result_spilled",
-      sandboxPath: shellPath,
+      sandboxPath: `/workspace/${shellPath}`,
     });
-    expect(JSON.parse((receipt.content[0] as { text: string }).text).sandboxPath).toBe(shellPath);
+    expect(JSON.parse((receipt.content[0] as { text: string }).text).sandboxPath).toBe(
+      `/workspace/${shellPath}`,
+    );
     // The file is already in the shell's working directory, copied once by the
     // sandbox start, so the path holds in this and any later shell command.
     expect(sandbox.state.starts).toBe(1);
@@ -314,7 +379,9 @@ describe("tool result spill receipt path", () => {
     owned = shellSession("/workspace");
     filesById.clear();
     const ready = await port.spill({ operationId: OPERATION_ID, result });
-    expect((ready.structuredContent as { sandboxPath: string }).sandboxPath).toBe(shellPath);
+    expect((ready.structuredContent as { sandboxPath: string }).sandboxPath).toBe(
+      `/workspace/${shellPath}`,
+    );
     expect(owned.calls.at(-1)!.cmd).toContain(shellPath);
   });
 
@@ -325,26 +392,28 @@ describe("tool result spill receipt path", () => {
     expect((receipt.structuredContent as { sandboxPath: string | null }).sandboxPath).toBeNull();
   });
 
-  test("a Connected Machine copies into its working directory and reports the cwd-relative path", async () => {
+  test("a Connected Machine copies into its working directory and reports the absolute host path", async () => {
     filesById.clear();
     mutationCalls = 0;
-    const machine = shellSession("/Users/someone/projects/app");
+    const machine = shellSession("/Users/user/projects/app");
     const port = spill("selfhosted", objectStorage(), {
       resolved: () => resolvedSandbox(machine.session),
       setupSession: () => machine.session,
     });
     const receipt = await port.spill({ operationId: OPERATION_ID, result });
-    expect((receipt.structuredContent as { sandboxPath: string }).sandboxPath).toBe(shellPath);
+    expect((receipt.structuredContent as { sandboxPath: string }).sandboxPath).toBe(
+      `/Users/user/projects/app/${shellPath}`,
+    );
     expect(mutationCalls).toBe(1);
     expect(machine.calls).toHaveLength(1);
-    expect(machine.calls[0]!.workdir).toBe("/Users/someone/projects/app");
+    expect(machine.calls[0]!.workdir).toBe("/Users/user/projects/app");
     expect(machine.calls[0]!.cmd).toContain(shellPath);
     expect(machine.calls[0]!.cmd).not.toContain("/workspace/");
   });
 
   test("a failed copy into a live sandbox reports no path", async () => {
     filesById.clear();
-    const machine = shellSession("/Users/someone/projects/app", 1);
+    const machine = shellSession("/Users/user/projects/app", 1);
     const port = spill("selfhosted", objectStorage(), {
       resolved: () => resolvedSandbox(machine.session),
       setupSession: () => machine.session,

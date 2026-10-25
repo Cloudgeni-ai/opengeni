@@ -28,6 +28,10 @@ describe("Integration Facet authority migration replay", () => {
       }
       return;
     }
+    // Today's integration policy reader selects 0974's column; supply only
+    // that column, with its default, on this pre-0482 schema.
+    await shared.admin`ALTER TABLE organization_integration_policies
+      ADD COLUMN IF NOT EXISTS personal_integration_setup text NOT NULL DEFAULT 'members'`;
     let app = createDb(shared.appUrl);
     try {
       const grant = (

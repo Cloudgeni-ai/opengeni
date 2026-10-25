@@ -7,9 +7,16 @@ import type {
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { type OpenGeniText } from "./messages/runtime";
 
+/** What selecting a capability for a chat needs: its kind and tools. An
+ * installed API integration has no catalog row, only its runtime server. */
+export type SessionCapabilityToolSource = Pick<
+  CapabilityCatalogItem,
+  "kind" | "tools" | "runtime" | "metadata"
+>;
+
 /** Catalog tool discovery may be lazy; selecting the installed server does not
  * require its individual tool inventory to have been fetched. */
-export function sessionCapabilityTools(item: CapabilityCatalogItem) {
+export function sessionCapabilityTools(item: SessionCapabilityToolSource) {
   const serverId = item.kind === "mcp" ? item.runtime?.mcpServerId : undefined;
   return serverId && !item.tools.some((tool) => tool.kind === "mcp" && tool.id === serverId)
     ? [...item.tools, { kind: "mcp" as const, id: serverId }]
@@ -24,7 +31,7 @@ export async function attachSessionCapability(
   client: OpenGeniClient,
   workspaceId: string,
   sessionId: string,
-  item: CapabilityCatalogItem,
+  item: SessionCapabilityToolSource,
   stillCurrent: () => boolean = () => true,
 ): Promise<void> {
   const tools = sessionCapabilityTools(item);
@@ -39,7 +46,7 @@ export async function attachSessionCapability(
 function capabilityToolPolicyUpdate(
   t: OpenGeniText,
   session: Session,
-  item: CapabilityCatalogItem,
+  item: SessionCapabilityToolSource,
 ): UpdateSessionToolPolicyRequest | null {
   const tools = sessionCapabilityTools(item);
   if (item.kind === "skill" || tools.length === 0) return null;
@@ -182,7 +189,8 @@ export async function applySessionCapabilityAccess(
 }
 
 /** Native OAuth callbacks have already saved the provider connection. Finish
- * the separate, version-fenced session tool selection before reporting success. */
+ * the separate, version-fenced session tool selection before reporting success,
+ * then let the agent continue the request that asked for this connection. */
 export async function completeSessionCapabilityOAuth(
   t: OpenGeniText,
   client: OpenGeniClient,
@@ -197,4 +205,23 @@ export async function completeSessionCapabilityOAuth(
   if (!connected?.enabled)
     throw new Error(t("sessionCapabilityPolicy.theConnectionWasAuthorizedBut"));
   await attachSessionCapability(t, client, workspaceId, sessionId, connected);
+  continueAfterCapabilitySetup(client, workspaceId, sessionId, capabilityId);
+}
+
+/**
+ * After setup from an agent's capability card is verified, let the agent
+ * continue the request that needed it, so the person does not have to say
+ * they are done. The server sends at most one continuation per card and none
+ * once the person has written since; a failure here never fails the setup the
+ * person just finished, so it is swallowed. Call only on verified success.
+ */
+export function continueAfterCapabilitySetup(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  capabilityId: string,
+): void {
+  void Promise.resolve()
+    .then(() => client.continueAfterCapabilitySetup(workspaceId, sessionId, { capabilityId }))
+    .catch(() => undefined);
 }

@@ -1,6 +1,7 @@
 // DEV-only fixtures shaped like the §13B seed, for building and screenshotting
 // the Secrets UI before the vault API exists (and for transient states after).
 // Every value is fake.
+import { VAULT_DEFAULT_PRIMARY_FIELD } from "@opengeni/contracts";
 import type { VaultProviderConnectionSummary, VaultProviderOperations } from "@opengeni/sdk";
 import type {
   PasskeySummary,
@@ -125,7 +126,8 @@ export const MOCK_OPERATIONS: Record<
 > = {
   onepassword: {
     ...NONE,
-    createItemTypes: ["login", "api_key", "note"],
+    createItemTypes: ["login", "api_key", "note", "file", "card", "identity", "ssh_key"],
+    writeFiles: true,
     updateItem: true,
     removeField: true,
     archiveItem: true,
@@ -137,7 +139,7 @@ export const MOCK_OPERATIONS: Record<
   // pass-cli: create and recoverable trash; no update, no file writes, TOTP create only.
   protonpass: {
     ...NONE,
-    createItemTypes: ["login", "note"],
+    createItemTypes: ["login", "note", "api_key", "card", "identity", "ssh_key"],
     archiveItem: true,
     archiveKind: "trash",
     readFiles: false,
@@ -146,20 +148,21 @@ export const MOCK_OPERATIONS: Record<
   // Secrets Manager: login and note records; no archive; write grant unknown per folder.
   keeper: {
     ...NONE,
-    createItemTypes: ["login", "note"],
+    createItemTypes: ["login", "note", "api_key", "card", "identity", "ssh_key"],
     updateItem: true,
     removeField: true,
     createTotp: true,
     updateTotp: true,
   },
-  // Bitwarden: edits with revision checks, trash for removal, no attachment writes.
+  // Bitwarden: edits with revision checks, archive or trash for removal, attachments.
   bitwarden: {
     ...NONE,
-    createItemTypes: ["login", "note"],
+    createItemTypes: ["login", "api_key", "note", "file", "card", "identity", "ssh_key"],
+    writeFiles: true,
     updateItem: true,
     removeField: true,
     archiveItem: true,
-    archiveKind: "trash",
+    archiveKind: "archive",
     createTotp: true,
     updateTotp: true,
   },
@@ -184,6 +187,7 @@ function item(
   spec: {
     name: string;
     type: VaultItemType;
+    category?: string;
     fields: FieldSpec[];
     websites?: string[];
     expiresAt?: string | null;
@@ -216,16 +220,7 @@ function item(
       by: provider ? "provider" : index === 0 ? "migration" : "human",
     })),
   }));
-  const primaryName =
-    spec.type === "login"
-      ? "password"
-      : spec.type === "api_key"
-        ? "value"
-        : spec.type === "note"
-          ? "note"
-          : spec.type === "file"
-            ? "file"
-            : null;
+  const primaryName = VAULT_DEFAULT_PRIMARY_FIELD[spec.type];
   const primary = fields.find((field) => field.name === primaryName) ?? null;
   const totp = fields.find((field) => field.kind === "totp") ?? null;
   const username = fields.find((field) => field.name === "username")?.value ?? null;
@@ -233,6 +228,7 @@ function item(
     id: mockId(`${owner.name}/${spec.name}`),
     vaultId: owner.id,
     type: spec.type,
+    category: spec.category ?? null,
     name: spec.name,
     websites: spec.websites ?? [],
     username,
@@ -450,6 +446,62 @@ export function buildMockState(workspaceId: string): MockState {
       type: "note",
       fields: note("fake-1a2b-3c4d\nfake-5e6f-7a8b\nfake-9c0d-1e2f"),
       lastUsedAgo: null,
+    }),
+    item(privateVault, {
+      name: "Company card",
+      type: "card",
+      fields: [
+        { name: "cardholder name", kind: "text", values: ["Bendik Acme"] },
+        { name: "brand", kind: "text", values: ["Visa"] },
+        { name: "number", kind: "concealed", values: ["4111111111111111"] },
+        { name: "expiry month", kind: "text", values: ["7"] },
+        { name: "expiry year", kind: "text", values: ["2031"] },
+        { name: "security code", kind: "concealed", values: ["123"] },
+      ],
+      lastUsedAgo: null,
+    }),
+    item(privateVault, {
+      name: "Personal details",
+      type: "identity",
+      fields: [
+        { name: "first name", kind: "text", values: ["Bendik"] },
+        { name: "last name", kind: "text", values: ["Acme"] },
+        { name: "email", kind: "text", values: ["bendik@acme.dev"] },
+        { name: "city", kind: "text", values: ["Oslo"] },
+        { name: "passport number", kind: "concealed", values: ["FAKE12345"] },
+      ],
+      lastUsedAgo: null,
+    }),
+    item(privateVault, {
+      name: "Build server",
+      type: "ssh_key",
+      fields: [
+        {
+          name: "private key",
+          kind: "concealed",
+          values: ["-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----"],
+        },
+        {
+          name: "public key",
+          kind: "text",
+          values: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFake"],
+        },
+        {
+          name: "fingerprint",
+          kind: "text",
+          values: ["SHA256:fakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFak"],
+        },
+      ],
+    }),
+    item(privateVault, {
+      name: "Analytics warehouse",
+      type: "api_key",
+      category: "database",
+      websites: ["warehouse.internal.acme.dev"],
+      fields: [
+        { name: "username", kind: "text", values: ["analytics_ro"] },
+        { name: "value", kind: "concealed", values: ["fake-warehouse-pw"] },
+      ],
     }),
     item(privateVault, {
       name: "Service account",

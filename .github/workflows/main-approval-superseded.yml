@@ -1,0 +1,36 @@
+name: Cancel superseded main CI
+# 1. Main CI runs park on the public-release approval for the signed canary
+#    image. Only the SHA a release chooses is approved; cancel older parked
+#    runs. Keeps the newest five, anything under three hours old and the
+#    current main SHA; never touches running jobs or other environments.
+# 2. Main CI runs none of whose jobs has started are superseded by a newer main
+#    run, which tests a superset of their commits. Started runs always finish;
+#    the main SHA and Version merges are kept; re-runs wait six hours first.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/20 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+  deployments: read
+concurrency:
+  group: main-approval-superseded
+  cancel-in-progress: true
+jobs:
+  superseded:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: .bun-version
+      - name: Cancel superseded parked or not-started main CI runs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bun scripts/ci/main-approval-superseded.ts

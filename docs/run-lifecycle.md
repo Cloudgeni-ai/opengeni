@@ -727,8 +727,10 @@ worker construction, and live retained-memory growth contracts new slot
 availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
 active transcript above any of four materialization limits: 15 MiB UTF-8 JSON,
 8,192 rows, 131,072 decoded JSON nodes, or 65,536 object properties. It never
-silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. Pause stores only the open-suffix sentinel; the
+silently trims conversation truth for inference: proactive compaction runs when
+stored history reaches 60% of any of these limits, and a history already over
+them is only read as a bounded, payload-elided view for checkpointing (see
+[`context-compaction.md`](context-compaction.md)). Pause stores only the open-suffix sentinel; the
 approval/run-state serving envelope still rejects leftover SDK heaps above 3 MiB,
 65,536 nodes, or 32,768 properties so they cannot enter a serving worker. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never
@@ -1631,6 +1633,14 @@ Interactive pages select bounded candidates, then size only the payload prefix
 needed for the page. They retain the exact full event and durable cursor; one
 oversized event is delivered alone. Explicit continuation determines completion;
 a short page never substitutes for that durable read result.
+Larger and explicitly batched full reads also size only the needed prefix,
+including its first byte-overflow row, while retaining their separate metadata
+and payload statements. Candidate discovery still examines the ordinary filter
+range; this does not make sparse filtering constant-time or provide a coherent
+multi-statement snapshot. Compare exact-base results and local timings with
+`bun scripts/operator/bench-event-metadata.ts <exact-base-commit>` using the
+disposable PostgreSQL test environment. Keyed prefix planning adds overhead for
+small payloads; the intended saving is avoiding unnecessary large-payload sizing.
 The downstream one-frame queue cannot substitute for this upstream read bound.
 
 Generic OpenAI-compatible model streams (the built-in OpenAI/Azure client and
@@ -4641,19 +4651,24 @@ recovery replays the stored bytes. The instructions never contain a clock.
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
    Model-visible tool results stay at or below 1 MiB. Overflow is a successful
-   tool: exact serialized bytes become a workspace File, a current-turn copy
-   lands at `tool-results/<operationId>.json` relative to the shell cwd (the
-   durable rematerialization path remains the virtual
-   `/workspace/tool-results/<operationId>.json`), and history/events keep the
-   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt whose
-   `sandboxPath` is that cwd-relative shell path. The path is given only once
-   the copy is in the sandbox: a spill that finds the turn's lazy sandbox not
-   started yet joins it (as a shell command would; the start copies the
-   attempt's spilled files before releasing its first operation, and the spill
-   retries a failed copy once), so the receipt never promises a later copy. It
-   is `null` without a sandbox route, when the sandbox cannot start or the copy
-   fails, and on the SDK-owned path before its session exists. Later turns do not
-   rematerialize; retrieve old bytes through Files MCP plus shell. Spill write
+   tool: exact serialized bytes become a workspace File and a current-turn copy
+   lands at `tool-results/<operationId>.json` under the placement's workspace
+   root (the durable rematerialization path remains the virtual
+   `/workspace/tool-results/<operationId>.json`). History/events keep the
+   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt, followed by
+   one text block telling the model how to read it. `sandboxPath` is the
+   absolute path of the copy in the placement it was written to (a Connected
+   Machine's host-native root or a box's root), so the shell opens it from any
+   working directory; a root that is not an absolute POSIX path keeps the
+   cwd-relative form. The path is given only once the copy is in the sandbox:
+   a spill that finds the turn's lazy sandbox not started yet joins it (as a
+   shell command would; the start copies the attempt's spilled files before
+   releasing its first operation, and the spill retries a failed copy once), so
+   the receipt never promises a later copy. It is `null` without a sandbox
+   route, when the sandbox cannot start or the copy fails, and on the SDK-owned
+   path before its session exists. The text names the Files download tool
+   (`files__files_get_download_url` with the `fileId`) for a missing copy, as
+   attachment receipts do; later turns do not rematerialize. Spill write
    failure is a bounded `result_too_large` error and never puts the huge payload
    in history.
    Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on

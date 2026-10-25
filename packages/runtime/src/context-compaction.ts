@@ -751,9 +751,41 @@ export function estimateNativeImageTokens(input: {
   };
 }
 
+const NATIVE_IMAGE_PART_TYPES = new Set([
+  "input_image",
+  "image_url",
+  "image",
+  "computer_screenshot",
+]);
+
+/**
+ * Images one model-input item carries, counted the way providers count them
+ * per request: every native image part, plus a tool output that is a bare
+ * image data URL (sent as an image by the provider adapters).
+ */
+export function countModelInputImages(value: unknown): number {
+  if (!value || typeof value !== "object") return 0;
+  if (Array.isArray(value)) {
+    let count = 0;
+    for (const entry of value) count += countModelInputImages(entry);
+    return count;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.type === "string" && NATIVE_IMAGE_PART_TYPES.has(record.type)) return 1;
+  let count = 0;
+  for (const [key, entry] of Object.entries(record)) {
+    if (typeof entry === "string") {
+      if (key === "output" && entry.startsWith("data:image/")) count += 1;
+    } else {
+      count += countModelInputImages(entry);
+    }
+  }
+  return count;
+}
+
 function imageDescriptor(record: Record<string, unknown>): ImageDescriptor | null {
   const type = typeof record.type === "string" ? record.type : "";
-  if (!new Set(["input_image", "image_url", "image", "computer_screenshot"]).has(type)) {
+  if (!NATIVE_IMAGE_PART_TYPES.has(type)) {
     return null;
   }
   const imageUrl = record.image_url;
@@ -1215,29 +1247,48 @@ export function decideCompaction(input: {
   };
 }
 
+/**
+ * Active history is large in a dimension other than provider tokens: its
+ * stored size against the worker's materialization guard, or the number of
+ * images one request would carry against the provider's per-request limit.
+ */
+export type HistoryFootprintCompactionSignal = {
+  dimension: "json_bytes" | "rows" | "json_nodes" | "json_properties" | "images";
+  actual: number;
+  threshold: number;
+  /** The stored history is already over its materialization guard. */
+  exceeded?: boolean;
+};
+
 export class CompactionNeededError extends Error {
   readonly signalTokens: number;
   readonly thresholdTokens: number;
-  readonly signalSource: "provider" | "operator";
+  readonly signalSource: "provider" | "operator" | "history_footprint";
   readonly trigger: "threshold" | "operator";
+  readonly historyFootprint: HistoryFootprintCompactionSignal | null;
 
   constructor(input: {
     signalTokens: number;
     thresholdTokens: number;
-    signalSource: "provider" | "operator";
+    signalSource: "provider" | "operator" | "history_footprint";
     trigger?: "threshold" | "operator";
+    historyFootprint?: HistoryFootprintCompactionSignal;
   }) {
     const trigger = input.trigger ?? "threshold";
+    const footprint = input.historyFootprint ?? null;
     super(
       trigger === "operator"
         ? "Context compaction requested by the operator"
-        : `Context compaction needed: signal ${input.signalTokens} tokens exceeded threshold ${input.thresholdTokens}`,
+        : footprint
+          ? `Context compaction needed: active history ${footprint.dimension} ${footprint.actual} reached threshold ${footprint.threshold}`
+          : `Context compaction needed: signal ${input.signalTokens} tokens exceeded threshold ${input.thresholdTokens}`,
     );
     this.name = "CompactionNeededError";
     this.signalTokens = input.signalTokens;
     this.thresholdTokens = input.thresholdTokens;
     this.signalSource = input.signalSource;
     this.trigger = trigger;
+    this.historyFootprint = footprint;
   }
 }
 

@@ -7,7 +7,7 @@ import type {
   BlobDownloadResponseParsed,
   BlobGetPropertiesResponse,
 } from "@azure/storage-blob";
-import type { S3ClientConfig } from "@aws-sdk/client-s3";
+import type { GetObjectCommandOutput, S3ClientConfig } from "@aws-sdk/client-s3";
 import type { GetSignedUrlConfig, StorageOptions } from "@google-cloud/storage";
 
 export * from "./bounded-object-read";
@@ -28,6 +28,30 @@ export type ObjectHead = {
   /** Opaque provider generation/etag used only for conditional internal reads. */
   VersionToken?: string;
 };
+
+/**
+ * The store found the object and began answering, but its bytes never arrived
+ * intact: the body stream failed or ended short of the declared length. A
+ * replica that lost the object's data blocks behaves this way on every read,
+ * unlike an unreachable store, which fails before answering. Callers that can
+ * do without the object may treat a repeated occurrence as the object being
+ * gone; a single occurrence can still be a dropped connection.
+ */
+export class ObjectBodyIncompleteError extends Error {
+  readonly objectKey: string;
+
+  constructor(objectKey: string, options?: { cause?: unknown; receivedBytes?: number }) {
+    // The key stays a field: messages can reach people, storage paths should not.
+    super(
+      options?.receivedBytes === undefined
+        ? "Object body could not be read completely"
+        : `Object body ended after ${options.receivedBytes} bytes`,
+      options?.cause === undefined ? undefined : { cause: options.cause },
+    );
+    this.name = "ObjectBodyIncompleteError";
+    this.objectKey = objectKey;
+  }
+}
 
 export {
   uploadWorkspaceArchiveSpool,
@@ -77,7 +101,11 @@ export type ObjectStorage = {
     file: FileAsset,
     range: { start: number; end: number },
   ) => Promise<Uint8Array | null>;
-  /** Fetch an object by raw storage key (not a tracked FileAsset). Returns null on 404/missing. */
+  /**
+   * Fetch an object by raw storage key (not a tracked FileAsset). Returns null on
+   * 404/missing. S3 and Azure throw ObjectBodyIncompleteError when the object was
+   * found but its body failed or ended short.
+   */
   getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array; contentType?: string } | null>;
   /** Provider-versioned raw-key primitives used by bounded immutable adapters. */
   headObject?: (key: string) => Promise<ObjectHead | null>;
@@ -469,21 +497,24 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
       }
     },
     async getObjectBytes(key) {
+      let result: GetObjectCommandOutput;
       try {
-        const result = await requestClient.send(
+        result = await requestClient.send(
           new GetObjectCommand({
             Bucket: settings.objectStorageBucket,
             Key: key,
           }),
         );
-        const bytes = await s3BodyToBytes(result.Body, key);
-        return { bytes, ...(result.ContentType ? { contentType: result.ContentType } : {}) };
       } catch (error) {
         if (isS3NotFound(error)) {
           return null;
         }
         throw error;
       }
+      const bytes = await completeObjectBody(key, result.ContentLength, () =>
+        s3BodyToBytes(result.Body, key),
+      );
+      return { bytes, ...(result.ContentType ? { contentType: result.ContentType } : {}) };
     },
     async deleteObject(key) {
       // S3 DeleteObject is idempotent — deleting an absent key returns 204.
@@ -495,6 +526,27 @@ function createS3CompatibleObjectStorage(settings: ObjectStorageSettings): Objec
       );
     },
   };
+}
+
+/**
+ * Read a found object's whole body. Failing mid-body or ending short of the
+ * declared length is ObjectBodyIncompleteError; the store already answered.
+ */
+async function completeObjectBody(
+  objectKey: string,
+  declaredBytes: number | undefined,
+  read: () => Promise<Uint8Array>,
+): Promise<Uint8Array> {
+  let bytes: Uint8Array;
+  try {
+    bytes = await read();
+  } catch (error) {
+    throw new ObjectBodyIncompleteError(objectKey, { cause: error });
+  }
+  if (typeof declaredBytes === "number" && bytes.byteLength !== declaredBytes) {
+    throw new ObjectBodyIncompleteError(objectKey, { receivedBytes: bytes.byteLength });
+  }
+  return bytes;
 }
 
 async function s3BodyToBytes(body: unknown, objectKey: string): Promise<Uint8Array> {
@@ -947,16 +999,19 @@ function createAzureBlobObjectStorage(settings: ObjectStorageSettings): ObjectSt
       }
     },
     async getObjectBytes(key) {
+      let download: BlobDownloadResponseParsed;
       try {
-        const download = await requestContainerClient.getBlobClient(key).download();
-        const bytes = await azureDownloadToBytes(download);
-        return { bytes, ...(download.contentType ? { contentType: download.contentType } : {}) };
+        download = await requestContainerClient.getBlobClient(key).download();
       } catch (error) {
         if (isAzureNotFound(error)) {
           return null;
         }
         throw error;
       }
+      const bytes = await completeObjectBody(key, download.contentLength, () =>
+        azureDownloadToBytes(download),
+      );
+      return { bytes, ...(download.contentType ? { contentType: download.contentType } : {}) };
     },
     async deleteObject(key) {
       // deleteIfExists keeps the delete idempotent (a missing blob is a no-op).

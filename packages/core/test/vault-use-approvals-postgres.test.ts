@@ -275,6 +275,13 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         fields: ["password"],
         grants: [],
         canChange: true,
+        canAddMarks: true,
+        changed: true,
+      });
+      // The same marks again: accepted, and reported as no change.
+      expect(await w.mark(w.login.id, { item: false, fields: ["password"] })).toMatchObject({
+        fields: ["password"],
+        changed: false,
       });
       expect(await w.attempt(a.principal, ["GitHub/username"])).toEqual({ values: ["octo"] });
 
@@ -374,9 +381,13 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         expect(await setAs(caller, { item: false, fields: ["password"] })).toMatchObject({
           item: false,
           fields: ["password"],
+          // The marks changed; this caller may add more but not lift them.
+          changed: true,
+          canChange: false,
+          canAddMarks: true,
         });
         expect(await setAs(caller, { item: true, fields: ["password", "username"] })).toMatchObject(
-          { item: true, fields: ["password", "username"] },
+          { item: true, fields: ["password", "username"], changed: true },
         );
         for (const lift of [
           { item: false, fields: ["password", "username"] },

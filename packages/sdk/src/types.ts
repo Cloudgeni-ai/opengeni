@@ -828,6 +828,28 @@ export type UpdateSessionToolPolicyRequest =
       expectedVersion: number;
     };
 
+/**
+ * The person finished setup from a capability card the agent posted in this
+ * chat. The server wakes the agent once per card so it continues the request
+ * that needed the capability.
+ */
+export type ContinueAfterCapabilitySetupRequest = {
+  capabilityId: string;
+};
+
+/** Why no continuation was sent. Each is a normal outcome, not an error. */
+export type CapabilitySetupContinuationSkipReason =
+  | "no_card"
+  | "later_message"
+  | "not_ready"
+  | "not_applicable"
+  | "not_requester"
+  | "session_closed";
+
+export type ContinueAfterCapabilitySetupResponse =
+  | { outcome: "queued" | "already_queued"; updateId: string }
+  | { outcome: "not_needed"; reason: CapabilitySetupContinuationSkipReason };
+
 export type SessionEffectiveToolPolicy = {
   mode: SessionToolPolicy["mode"];
   inheritedFromSessionId: string | null;
@@ -2423,7 +2445,7 @@ export type HumanInputSecretSpec = {
   item: string;
   field?: string | undefined;
   fieldKind?: "concealed" | "totp" | "text" | undefined;
-  itemType?: "login" | "api_key" | "note" | undefined;
+  itemType?: "login" | "api_key" | "note" | "card" | "identity" | "ssh_key" | undefined;
   username?: { prompt: string; value?: string | null | undefined } | null | undefined;
   website?: string | null | undefined;
   looksLike?: string | null | undefined;
@@ -3967,6 +3989,7 @@ export const KNOWN_PERMISSIONS = [
   "usage_allowances:manage",
   "connections:read",
   "connections:write",
+  "connections:personal",
   "capabilities:manage",
   "environments:manage",
   "environments:use",
@@ -4869,16 +4892,23 @@ export type UpdateModelAccountPreferencesRequest = {
 };
 
 /**
- * Whether owners and admins may give agent sessions admin access. Off by
- * default; turning it off ends every session's admin access.
+ * What agents may do in the app for a person, organization-wide.
+ * `sessionAdminAccessAllowed`: members may give a session they started their
+ * own full access (off by default; turning it off ends every session's full
+ * access). `chatActionsAllowed`: in a chat a person started, the agent may do
+ * what that person could do in the app's pages and settings, each change only
+ * after the person confirms it in the chat (on by default).
  */
 export type OrganizationAgentAdminAccess = {
   sessionAdminAccessAllowed: boolean;
+  chatActionsAllowed: boolean;
   updatedAt: string | null;
 };
 
+/** Change either choice; an omitted one stays as it is. */
 export type UpdateOrganizationAgentAdminAccessRequest = {
-  sessionAdminAccessAllowed: boolean;
+  sessionAdminAccessAllowed?: boolean;
+  chatActionsAllowed?: boolean;
 };
 
 /**
@@ -5448,6 +5478,13 @@ export type ClientConfig = {
    * choice (embedded stock UIs then show the picker). Opengeni itself omits it.
    */
   modelSelection?: boolean | undefined;
+  /**
+   * `false` when a host's session proxy owns chat setup (`createSession`), so
+   * the browser cannot add a newly connected capability to a chat and stock
+   * conversations leave the agent's capability cards to the host. Opengeni
+   * itself omits it.
+   */
+  chatConnections?: boolean | undefined;
   /** Session proxy sandbox-path download opt-in; absent on native deployments. */
   sandboxFiles?: boolean | undefined;
   /**
@@ -6309,6 +6346,8 @@ export type UpdateSlackChannelRoutesRequest = {
 
 export type VoiceInputProviderId =
   | "azure-mai"
+  | "azure-speech"
+  | "elevenlabs"
   | "supergrok-subscription"
   | "codex-subscription"
   | "openai"
@@ -7261,7 +7300,8 @@ export type SessionSystemUpdateKind =
   | "child_paused"
   | "child_waiting_capacity"
   | "child_progress"
-  | "secret_use_approval_decided";
+  | "secret_use_approval_decided"
+  | "capability_setup_completed";
 
 export type SessionSystemUpdateState =
   | "pending"
@@ -7527,6 +7567,8 @@ export type SubmitComposerDraftResponse = {
   receipt: SessionCommandReceipt;
   routing: SessionPromptRouting;
   interruptionCount: number;
+  /** As on `SteerMessageResult`. Older servers omit it. */
+  waitsForMachineOwner?: boolean | undefined;
   replay: boolean;
 };
 
@@ -9480,6 +9522,8 @@ export type ApiIntegrationInstallationSummary = {
   connected: boolean;
   requiresConnection: boolean;
   connectionId: string | null;
+  /** When the bound connection was last used, or null when never or unbound. */
+  connectionLastUsedAt?: string | null;
   ownership: "workspace" | "personal" | "none";
   allowedTools: string[];
   toolCount: number;
@@ -10576,6 +10620,19 @@ export type SessionMachineAccess = {
    *  messages) waiting because only the machine's owner may start work on it,
    *  grouped by whose work it is. Older servers omit it. */
   waitingWork?: SessionWaitingWork[] | undefined;
+  /** Messages other people sent here that wait because only the machine's
+   *  owner may start work on it, grouped by sender. The owner's next message
+   *  brings them to the agent; moving the chat to a machine the sender may
+   *  use runs them. Older servers omit it. */
+  waitingMessages?: SessionWaitingMessages[] | undefined;
+};
+
+export type SessionWaitingMessages = {
+  /** The sender's display name, when known. */
+  name: string | null;
+  /** The caller sent them. */
+  isYou: boolean;
+  messages: number;
 };
 
 export type SessionWaitingWork = {

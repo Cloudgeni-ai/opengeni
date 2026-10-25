@@ -7,7 +7,11 @@ import {
 } from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
-import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
+import {
+  assertGoalResumeAllowed,
+  GoalResumeBlockedError,
+  turnAppActionGrant,
+} from "@opengeni/core";
 import { UnsupportedLatencyModeError } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
@@ -16,6 +20,12 @@ import { listSessionEventSlices } from "@opengeni/db/session-event-slices";
 import * as sessionPreviewSchema from "@opengeni/db/schema";
 import { and, eq, sql } from "drizzle-orm";
 import { SessionMessageSearchRequest } from "@opengeni/contracts";
+import { ContinueAfterCapabilitySetupRequest } from "@opengeni/contracts";
+import type { ContinueAfterCapabilitySetupResponse } from "@opengeni/contracts";
+import { enqueueCapabilitySetupContinuation } from "@opengeni/db";
+import { buildCapabilityCatalog, integrationDefinitionIdFromCapabilityId } from "@opengeni/core";
+import { integrationDefinitionSetupItem } from "../mcp/integration-definition-capabilities";
+import { capabilitySetupReadiness } from "../capability-setup-readiness";
 import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import {
   requireWorkspace,
@@ -2898,6 +2908,103 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  // The person finished setup from a capability card the agent posted. Wake
+  // the agent once per card so it continues the request that needed it,
+  // unless the person already wrote since the card or the capability is not
+  // usable in this chat yet. Every skip is a normal 200 outcome.
+  app.post(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      // Stands in for the person's own "done": only that person, present in a
+      // client, may send it; never an agent.
+      if (isAgentActingAsPerson(c)) {
+        throw new ApiHttpError(403, {
+          code: "forbidden",
+          message: "Only the person who finished setup can continue the request.",
+          retryable: false,
+        });
+      }
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      if (grant.principalKind === "agent_attempt") {
+        throw new ApiHttpError(403, {
+          code: "forbidden",
+          message: "Only the person who finished setup can continue the request.",
+          retryable: false,
+        });
+      }
+      const payload = await parseRequestJson(c, ContinueAfterCapabilitySetupRequest);
+      const session = await getSessionForSubject(
+        db,
+        workspaceId,
+        sessionId,
+        grant.subjectId,
+        relatedSessionAccessFor(c),
+      );
+      if (!session) throw new HTTPException(404, { message: "session not found" });
+      // A reviewed integration's card stands for the person's own connected
+      // instances of it, which the workspace catalog does not list.
+      const integration = integrationDefinitionIdFromCapabilityId(payload.capabilityId) !== null;
+      const [item, withPolicy] = await Promise.all([
+        integration
+          ? integrationDefinitionSetupItem(
+              db,
+              settings,
+              workspaceId,
+              grant.subjectId,
+              payload.capabilityId,
+            )
+          : buildCapabilityCatalog({
+              db,
+              workspaceId,
+              settings,
+              subjectId: grant.subjectId,
+              accountId: grant.accountId,
+            }).then((catalog) => catalog.items.find((entry) => entry.id === payload.capabilityId)),
+        withEffectivePolicy(deps, workspaceId, grant.subjectId, session),
+      ]);
+      const readiness = capabilitySetupReadiness(payload.capabilityId, item, withPolicy);
+      if (!item || (readiness !== "ready" && readiness !== "assumed_ready")) {
+        return c.json({
+          outcome: "not_needed",
+          reason: readiness === "not_applicable" ? "not_applicable" : "not_ready",
+        } satisfies ContinueAfterCapabilitySetupResponse);
+      }
+      const result = await enqueueCapabilitySetupContinuation(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        capabilityId: item.id,
+        capabilityName: item.name,
+        toolsVerified: readiness === "ready",
+        requesterSubjectId: grant.subjectId,
+      });
+      if (result.outcome === "not_needed") {
+        return c.json({
+          outcome: "not_needed",
+          reason: result.reason,
+        } satisfies ContinueAfterCapabilitySetupResponse);
+      }
+      if (result.events.length > 0) {
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+      }
+      if (result.shouldWake && result.workflowWakeRevision !== null) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: result.temporalWorkflowId ?? workflowIdForSession(sessionId),
+          wakeRevision: result.workflowWakeRevision,
+        });
+      }
+      return c.json({
+        outcome: result.outcome,
+        updateId: result.update.id,
+      } satisfies ContinueAfterCapabilitySetupResponse);
+    },
+  );
+
   // Replace the session's agent configuration (capabilities, identity,
   // instructions alias, renderer). Shares the tool-policy version CAS and
   // applies from the next attempt.
@@ -4222,6 +4329,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           sessionId,
           subjectId: grant.subjectId,
           respondedByKind: childRequiresActionRespondedByKindForGrant(grant),
+          // The same rule that decides whether a message may confirm app-action
+          // changes: the app's own sign-in, or an embed the deployment opted in.
+          // A key, chat integration or other token with this identity can't.
+          decidedBySignedInPerson:
+            turnAppActionGrant({
+              grant,
+              authorization,
+              delegatedSignInChangesEnabled:
+                settings.delegatedSignInAppActionChangesEnabled === true,
+            })?.changes === "confirm",
           payload,
           mcpCredentialUpdates,
           clientEventId: event.clientEventId ?? null,
@@ -5634,6 +5751,8 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/channel" && verb === "PUT") return "session.channel.write";
   if (suffix === "/variable-sets" && verb === "PUT") return "session.variable_sets.write";
   if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
+  // Stands in for the person's own next message, so it needs the same access.
+  if (suffix === "/capability-continuations" && verb === "POST") return "session.append";
   if (suffix === "/agent" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/skills" && verb === "PUT") return "session.tool_policy.write";
   if (suffix === "/admin-access") {

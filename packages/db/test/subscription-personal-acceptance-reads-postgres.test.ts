@@ -675,6 +675,10 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     heldBack.push(
       "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
     );
+    // 0976 adds the shared unbilled allowance counter.
+    heldBack.push(
+      "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
+    );
     // 0854 adds the private-file lookup.
     heldBack.push(
       "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",
@@ -796,6 +800,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "recording_notes",
       // 0959 automation templates are also withheld.
       "automation_templates",
+      // 0971 per-turn app action grants are also withheld.
+      "session_turn_app_action_grants",
     ].sort();
     // 0823 machine-consent tables are protected but not runtime-privileged.
     const protectedTables = [

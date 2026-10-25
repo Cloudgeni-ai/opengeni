@@ -133,6 +133,12 @@ pub(crate) fn rootfs_dir(root: &Path) -> PathBuf {
     root.join("rootfs")
 }
 
+/// Scratch space for the sandbox images the host builds (see
+/// [`crate::rootfs::PrepareConfig`]).
+pub(crate) fn prepare_dir(root: &Path) -> PathBuf {
+    root.join("prepare")
+}
+
 /// Checks that every socket a sandbox under `root` needs fits in a Unix
 /// socket address.
 pub(crate) fn check_root(root: &Path) -> Result<(), String> {

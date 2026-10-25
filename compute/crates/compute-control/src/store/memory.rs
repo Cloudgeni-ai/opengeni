@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use compute_fleet::{HostEpoch, HostId, HostState};
 use compute_protocol::fleet::{Register, Renew, Report, Ruling};
-use compute_protocol::host::Id;
+use compute_protocol::host::{Id, ImageId};
 
 use super::{
     Admission, Admits, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store, Write,
@@ -20,6 +20,8 @@ struct Host {
     row: HostRow,
     attempt: u64,
     answer: Vec<Ruling>,
+    /// When it was given up on, while it is.
+    gone_ms: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -31,6 +33,10 @@ struct Inner {
     lifecycles: BTreeMap<Id, LifecycleRow>,
     /// By team, then request id.
     requests: BTreeMap<(String, String), RequestRow>,
+    /// The image built from each OCI image.
+    built: HashMap<String, ImageId>,
+    /// Which OCI image each name used, the latest last.
+    image_uses: Vec<(String, String)>,
     next_host: u64,
     next_host_epoch: u64,
     changes: u64,
@@ -52,12 +58,14 @@ impl Inner {
         .then_some(row)
     }
 
-    /// Whether `row` names as owner a host given up on.
+    /// Whether `row` names as owner a host given up on, or one this store
+    /// does not have.
     fn owner_lost(&self, row: &SandboxRow) -> bool {
-        row.ownership
-            .owner
-            .and_then(|owner| self.hosts.get(&owner))
-            .is_some_and(|host| host.row.state == HostState::Lost)
+        row.ownership.owner.is_some_and(|owner| {
+            self.hosts
+                .get(&owner)
+                .is_none_or(|host| host.row.state == HostState::Lost)
+        })
     }
 
     fn insert(&mut self, row: &SandboxRow) -> Write {
@@ -157,6 +165,7 @@ impl MemoryStore {
                 },
                 attempt: register.attempt,
                 answer: rulings.clone(),
+                gone_ms: None,
             },
         );
         Admission::Registered {
@@ -220,7 +229,7 @@ impl MemoryStore {
             .collect()
     }
 
-    fn give_up_now(&self, host: HostId, renewals: u64) -> Option<usize> {
+    fn give_up_now(&self, host: HostId, renewals: u64, at_ms: u64) -> Option<usize> {
         let mut inner = self.lock();
         let changed = inner.changes + 1;
         let entry = inner.hosts.get_mut(&host)?;
@@ -229,6 +238,7 @@ impl MemoryStore {
         }
         entry.row.state = HostState::Lost;
         entry.row.changed = changed;
+        entry.gone_ms = Some(at_ms);
         inner.changes = changed;
         let mut cleared = 0;
         for sandbox in inner.sandboxes.values_mut() {
@@ -239,6 +249,18 @@ impl MemoryStore {
             }
         }
         Some(cleared)
+    }
+
+    fn prune_hosts_now(&self, before_ms: u64) -> u64 {
+        let mut inner = self.lock();
+        let inner = &mut *inner;
+        let before = inner.hosts.len();
+        inner
+            .hosts
+            .retain(|_, host| host.gone_ms.is_none_or(|at| at >= before_ms));
+        let hosts = &inner.hosts;
+        inner.by_name.retain(|_, id| hosts.contains_key(id));
+        u64::try_from(before - inner.hosts.len()).unwrap_or(u64::MAX)
     }
 
     fn set_state_now(&self, host: HostId, from: HostState, to: HostState) -> bool {
@@ -486,8 +508,13 @@ impl Store for MemoryStore {
         &self,
         host: HostId,
         renewals: u64,
+        at_ms: u64,
     ) -> impl Future<Output = Result<Option<usize>>> + Send {
-        ready(Ok(self.give_up_now(host, renewals)))
+        ready(Ok(self.give_up_now(host, renewals, at_ms)))
+    }
+
+    fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send {
+        ready(Ok(self.prune_hosts_now(before_ms)))
     }
 
     fn set_state(
@@ -629,5 +656,36 @@ impl Store for MemoryStore {
         limit: usize,
     ) -> impl Future<Output = Result<Vec<LifecycleRow>>> + Send {
         ready(Ok(self.lifecycles_paused_now(after, limit)))
+    }
+
+    fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+        ready(Ok(self.lock().built.get(source).copied()))
+    }
+
+    fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        _at_ms: u64,
+    ) -> impl Future<Output = Result<ImageId>> + Send {
+        let mut inner = self.lock();
+        let recorded = *inner.built.entry(source.to_owned()).or_insert(image);
+        inner
+            .image_uses
+            .retain(|(named, used)| named != name || used != source);
+        inner.image_uses.push((name.to_owned(), source.to_owned()));
+        ready(Ok(recorded))
+    }
+
+    fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
+        let inner = self.lock();
+        let latest = inner
+            .image_uses
+            .iter()
+            .rev()
+            .find_map(|(named, source)| (named == name).then(|| inner.built.get(source).copied()))
+            .flatten();
+        ready(Ok(latest))
     }
 }
