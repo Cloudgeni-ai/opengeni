@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { ModalRouterProviderCommand } from "./sandbox-provider-command";
@@ -12,16 +11,16 @@ export const MODAL_NATIVE_FRESH_COMPILER_FINGERPRINT =
   "db6d33c8a1142e5ffe3d1a130d8b9f9d819e46832ad0417d41d5606b7fe25ab1" as const;
 
 const uuid = /* @__PURE__ */ defineSchema(() =>
-  primitives.string.regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u),
+  z.string().regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u),
 );
 // Fresh readiness must round-trip through the retained original-command schema.
 // Reuse its exact UUID domain; do not widen it or change the frozen compiler.
 const commandExecId = /* @__PURE__ */ defineSchema(() =>
   uuid.pipe(ModalRouterProviderCommand.shape.execId),
 );
-const positive = /* @__PURE__ */ defineSchema(() => primitives.positiveInteger.safe());
-const nonnegative = /* @__PURE__ */ defineSchema(() => primitives.nonnegativeInteger.safe());
-const digest = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^[a-f0-9]{64}$/u));
+const positive = /* @__PURE__ */ defineSchema(() => z.number().int().positive().safe());
+const nonnegative = /* @__PURE__ */ defineSchema(() => z.number().int().nonnegative().safe());
+const digest = /* @__PURE__ */ defineSchema(() => z.string().regex(/^[a-f0-9]{64}$/u));
 const empty = /* @__PURE__ */ defineSchema(() => z.object({}).strict());
 const noItems = /* @__PURE__ */ defineSchema(() => z.tuple([]));
 const entrypoint = /* @__PURE__ */ defineSchema(() =>
@@ -170,8 +169,8 @@ export const ModalNativeFreshBlueprintV1 = /* @__PURE__ */ defineSchema(() =>
       create: z
         .object({
           operationId: uuid,
-          appId: primitives.string.regex(/^ap-[A-Za-z0-9_-]{1,200}$/u),
-          imageId: primitives.string.regex(/^im-[A-Za-z0-9_-]{1,200}$/u),
+          appId: z.string().regex(/^ap-[A-Za-z0-9_-]{1,200}$/u),
+          imageId: z.string().regex(/^im-[A-Za-z0-9_-]{1,200}$/u),
           cpu: z
             .number()
             .positive()
@@ -355,7 +354,7 @@ const claimFields = {
   claimRevision: positive,
   recordRevision: positive,
   captureId: uuid,
-  expiresAt: primitives.dateTime,
+  expiresAt: z.string().datetime(),
 };
 
 /** Scheduling custody ONLY. No lease/task grant is fabricated to authorize
@@ -409,7 +408,7 @@ export const ModalNativePreparedStartDescriptionV1 = /* @__PURE__ */ defineSchem
           encoding: z.literal("modal-start-protobuf-preflight-v1"),
           sha256: digest,
           byteLength: positive.max(1024 * 1024),
-          encoderFingerprint: primitives.string.regex(/^sha256:[a-f0-9]{64}$/u),
+          encoderFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
         })
         .strict(),
     })

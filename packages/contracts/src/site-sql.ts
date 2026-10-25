@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -701,17 +700,18 @@ export type SiteSqlLimits = {
 
 export const SITE_SQL_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 
-const SqlName = primitives.string
+const SqlName = z
+  .string()
   .regex(SITE_SQL_NAME)
   .describe("A letter, then letters, digits, - or _ (up to 64).");
 
 export const SiteSqlValueSchema = /* @__PURE__ */ defineSchema(() =>
-  z.union([primitives.string.max(64 * 1024), z.number(), primitives.boolean, z.null()]),
+  z.union([z.string().max(64 * 1024), z.number(), z.boolean(), z.null()]),
 );
 
 export const SiteSqlParams = /* @__PURE__ */ defineSchema(() =>
   z
-    .record(primitives.string.regex(PARAM_NAME), SiteSqlValueSchema)
+    .record(z.string().regex(PARAM_NAME), SiteSqlValueSchema)
     .refine((value) => Object.keys(value).length <= SITE_SQL_MAX_PARAMETERS, {
       message: `At most ${SITE_SQL_MAX_PARAMETERS} parameters`,
     })
@@ -737,7 +737,9 @@ export type SiteSqlQueryAudience = z.infer<typeof SiteSqlQueryAudience>;
 /** site_sql_define_query and PUT .../sql/queries/:name. */
 export const SiteSqlQueryDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    sql: primitives.nonEmptyString
+    sql: z
+      .string()
+      .min(1)
       .max(SITE_SQL_MAX_NAMED_LENGTH)
       .describe(
         "Exactly one SELECT, INSERT, UPDATE, DELETE or REPLACE statement (WITH allowed, not recursive). Use :name parameters; :viewer, :viewer_kind and :viewer_signed_in are bound by Opengeni from the signed-in viewer.",
@@ -766,7 +768,9 @@ export type SiteSqlRunRequest = z.infer<typeof SiteSqlRunRequest>;
 /** POST .../sql/query and .../sql/execute: one ad hoc statement from a manager. */
 export const SiteSqlStatementRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    sql: primitives.nonEmptyString
+    sql: z
+      .string()
+      .min(1)
       .max(SITE_SQL_MAX_AGENT_LENGTH)
       .describe("Exactly one SQLite statement; use :name parameters for values."),
     params: SiteSqlParams.optional(),
@@ -798,7 +802,9 @@ export type SiteSqlResetRequest = z.infer<typeof SiteSqlResetRequest>;
 export const SiteSqlMigrationRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     name: SqlName.describe("A unique migration name, such as create_votes."),
-    sql: primitives.nonEmptyString
+    sql: z
+      .string()
+      .min(1)
       .max(SITE_SQL_MAX_SCRIPT_LENGTH)
       .describe("One or more statements (CREATE TABLE, CREATE INDEX, ALTER TABLE, INSERT ...)."),
   }),
@@ -816,20 +822,23 @@ export const SiteSqlImportRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       format: SiteSqlExportFormat,
-      sql: primitives.string
+      sql: z
+        .string()
         .max(SITE_SQL_MAX_SCRIPT_LENGTH)
         .optional()
         .describe("sql format: statements to run together (schema and data)."),
-      table: primitives.string
+      table: z
+        .string()
         .regex(SITE_SQL_IDENTIFIER)
         .optional()
         .describe("csv and json formats: the existing table to insert into."),
-      csv: primitives.string
+      csv: z
+        .string()
         .max(SITE_SQL_MAX_SCRIPT_LENGTH)
         .optional()
         .describe("csv format: a header row of column names, then one row per line."),
       rows: z
-        .array(z.record(primitives.string, SiteSqlValueSchema))
+        .array(z.record(z.string(), SiteSqlValueSchema))
         .max(SITE_SQL_HARD_LIMITS.importRowsPerCall)
         .optional()
         .describe("json format: objects keyed by column name."),
@@ -851,7 +860,7 @@ export type SiteSqlImportRequest = z.infer<typeof SiteSqlImportRequest>;
 
 /** PUT .../sql/settings: the owner turns Site SQL on or off for one Site. */
 export const SiteSqlSettingsRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ enabled: primitives.boolean }),
+  z.object({ enabled: z.boolean() }),
 );
 export type SiteSqlSettingsRequest = z.infer<typeof SiteSqlSettingsRequest>;
 

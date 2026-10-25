@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -41,7 +40,9 @@ export type WorkspaceInstructionPolicyActivationType = z.infer<
 >;
 
 export const WorkspaceInstructionPolicyRoleKey = /* @__PURE__ */ defineSchema(() =>
-  primitives.nonEmptyString
+  z
+    .string()
+    .min(1)
     .max(WORKSPACE_INSTRUCTION_POLICY_ROLE_KEY_MAX_CHARS)
     .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
 );
@@ -56,7 +57,8 @@ export function normalizeWorkspaceInstructionPolicyRoleKey(value: string): strin
 }
 
 export const WorkspaceInstructionPolicyRoleKeyInput = /* @__PURE__ */ defineSchema(() =>
-  primitives.string
+  z
+    .string()
     .transform(normalizeWorkspaceInstructionPolicyRoleKey)
     .pipe(WorkspaceInstructionPolicyRoleKey),
 );
@@ -116,9 +118,7 @@ export type WorkspaceInstructionPolicyTarget = z.infer<typeof WorkspaceInstructi
 export const WorkspaceInstructionPolicyProvenance = /* @__PURE__ */ defineSchema(() =>
   z.object({
     source: WorkspaceInstructionPolicyProvenanceSource,
-    sourceId: primitives.nonEmptyString
-      .max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS)
-      .nullable(),
+    sourceId: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS).nullable(),
   }),
 );
 export type WorkspaceInstructionPolicyProvenance = z.infer<
@@ -126,9 +126,9 @@ export type WorkspaceInstructionPolicyProvenance = z.infer<
 >;
 
 const revisionIdentityShape = {
-  id: primitives.uuid,
-  revision: primitives.positiveInteger,
-  contentHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+  id: z.string().uuid(),
+  revision: z.number().int().positive(),
+  contentHash: z.string().regex(/^[0-9a-f]{64}$/),
 };
 
 export const WorkspaceInstructionPolicyRevisionIdentity = /* @__PURE__ */ defineSchema(() =>
@@ -141,38 +141,38 @@ export type WorkspaceInstructionPolicyRevisionIdentity = z.infer<
 export const WorkspaceInstructionPolicyRevision = /* @__PURE__ */ defineSchema(() =>
   z.object({
     ...revisionIdentityShape,
-    operationId: primitives.uuid,
-    accountId: primitives.uuid,
-    workspaceId: primitives.uuid,
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
     ...targetShape,
-    content: primitives.nonEmptyString.max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS),
+    content: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS),
     provenance: WorkspaceInstructionPolicyProvenance,
-    supersedesRevisionId: primitives.nullableUuid,
-    createdBySubjectId: primitives.nonEmptyString,
-    createdAt: primitives.dateTime,
+    supersedesRevisionId: z.string().uuid().nullable(),
+    createdBySubjectId: z.string().min(1),
+    createdAt: z.string().datetime(),
   }),
 );
 export type WorkspaceInstructionPolicyRevision = z.infer<typeof WorkspaceInstructionPolicyRevision>;
 
 export const WorkspaceInstructionPolicyHead = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    workspaceId: primitives.uuid,
+    workspaceId: z.string().uuid(),
     ...targetShape,
-    revisionId: primitives.uuid,
-    revision: primitives.positiveInteger,
-    contentHash: primitives.string.regex(/^[0-9a-f]{64}$/),
-    activationVersion: primitives.positiveInteger,
-    activatedAt: primitives.dateTime,
+    revisionId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    contentHash: z.string().regex(/^[0-9a-f]{64}$/),
+    activationVersion: z.number().int().positive(),
+    activatedAt: z.string().datetime(),
   }),
 );
 export type WorkspaceInstructionPolicyHead = z.infer<typeof WorkspaceInstructionPolicyHead>;
 
 export const WorkspaceInstructionPolicyInactiveHead = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    workspaceId: primitives.uuid,
+    workspaceId: z.string().uuid(),
     ...targetShape,
-    activationVersion: primitives.positiveInteger,
-    deactivatedAt: primitives.dateTime,
+    activationVersion: z.number().int().positive(),
+    deactivatedAt: z.string().datetime(),
   }),
 );
 export type WorkspaceInstructionPolicyInactiveHead = z.infer<
@@ -182,7 +182,10 @@ export type WorkspaceInstructionPolicyInactiveHead = z.infer<
 export const WorkspaceInstructionPolicySnapshotProvenance = /* @__PURE__ */ defineSchema(() =>
   z.object({
     source: WorkspaceInstructionPolicyProvenanceSource,
-    sourceIdHash: primitives.string.regex(/^[0-9a-f]{64}$/).nullable(),
+    sourceIdHash: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .nullable(),
   }),
 );
 export type WorkspaceInstructionPolicySnapshotProvenance = z.infer<
@@ -194,11 +197,11 @@ export const WorkspaceInstructionPolicySnapshotEntry = /* @__PURE__ */ defineSch
     kind: WorkspaceInstructionPolicyKind,
     scope: WorkspaceInstructionPolicyScope,
     roleKey: WorkspaceInstructionPolicyRoleKey.nullable(),
-    revisionId: primitives.uuid,
-    revision: primitives.positiveInteger,
-    contentHash: primitives.string.regex(/^[0-9a-f]{64}$/),
-    activationVersion: primitives.positiveInteger,
-    activatedAt: primitives.dateTime,
+    revisionId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    contentHash: z.string().regex(/^[0-9a-f]{64}$/),
+    activationVersion: z.number().int().positive(),
+    activatedAt: z.string().datetime(),
     provenance: WorkspaceInstructionPolicySnapshotProvenance,
   }),
 );
@@ -208,17 +211,17 @@ export type WorkspaceInstructionPolicySnapshotEntry = z.infer<
 
 export const WorkspaceInstructionPolicySnapshot = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    workspaceId: primitives.uuid,
-    sessionId: primitives.uuid,
-    turnId: primitives.uuid,
-    attemptId: primitives.uuid,
-    executionGeneration: primitives.positiveInteger,
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    attemptId: z.string().uuid(),
+    executionGeneration: z.number().int().positive(),
     policyRole: WorkspaceInstructionPolicyRoleKey.nullable(),
     roleSource: WorkspaceInstructionPolicyRoleSource,
-    entryHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+    entryHash: z.string().regex(/^[0-9a-f]{64}$/),
     entries: z.array(WorkspaceInstructionPolicySnapshotEntry).max(3),
-    createdAt: primitives.dateTime,
+    createdAt: z.string().datetime(),
   }),
 );
 export type WorkspaceInstructionPolicySnapshot = z.infer<typeof WorkspaceInstructionPolicySnapshot>;
@@ -226,7 +229,7 @@ export type WorkspaceInstructionPolicySnapshot = z.infer<typeof WorkspaceInstruc
 export const ResolvedWorkspaceInstructionPolicySnapshotEntry =
   /* @__PURE__ */ defineSchema(() =>
     WorkspaceInstructionPolicySnapshotEntry.extend({
-      content: primitives.nonEmptyString.max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS),
+      content: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS),
     }),
   );
 export type ResolvedWorkspaceInstructionPolicySnapshotEntry = z.infer<
@@ -244,18 +247,18 @@ export type ResolvedWorkspaceInstructionPolicySnapshot = z.infer<
 
 export const WorkspaceInstructionPolicyActivationEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    operationId: primitives.uuid,
-    accountId: primitives.uuid,
-    workspaceId: primitives.uuid,
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
     ...targetShape,
     type: WorkspaceInstructionPolicyActivationType,
-    activationVersion: primitives.positiveInteger,
+    activationVersion: z.number().int().positive(),
     oldRevision: WorkspaceInstructionPolicyRevisionIdentity.nullable(),
     newRevision: WorkspaceInstructionPolicyRevisionIdentity,
-    actorSubjectId: primitives.nonEmptyString,
-    reason: primitives.nonEmptyString.max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
-    createdAt: primitives.dateTime,
+    actorSubjectId: z.string().min(1),
+    reason: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
+    createdAt: z.string().datetime(),
   }),
 );
 export type WorkspaceInstructionPolicyActivationEvent = z.infer<
@@ -264,17 +267,17 @@ export type WorkspaceInstructionPolicyActivationEvent = z.infer<
 
 export const WorkspaceInstructionPolicyDeactivationEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    operationId: primitives.uuid,
-    accountId: primitives.uuid,
-    workspaceId: primitives.uuid,
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
     ...targetShape,
     type: z.literal("automatic_deactivate"),
-    activationVersion: primitives.positiveInteger,
+    activationVersion: z.number().int().positive(),
     oldRevision: WorkspaceInstructionPolicyRevisionIdentity,
-    actorSubjectId: primitives.nonEmptyString,
-    reason: primitives.nonEmptyString.max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
-    createdAt: primitives.dateTime,
+    actorSubjectId: z.string().min(1),
+    reason: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
+    createdAt: z.string().datetime(),
   }),
 );
 export type WorkspaceInstructionPolicyDeactivationEvent = z.infer<
@@ -284,19 +287,23 @@ export type WorkspaceInstructionPolicyDeactivationEvent = z.infer<
 export const CreateWorkspaceInstructionPolicyDraftRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.optionalUuid,
+      operationId: z.string().uuid().optional(),
       kind: WorkspaceInstructionPolicyKind,
       scope: WorkspaceInstructionPolicyScope,
       roleKey: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
-      content: primitives.nonEmptyString
+      content: z
+        .string()
+        .min(1)
         .max(WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS)
         .refine((value) => value.trim().length > 0, "instruction policy content must not be blank"),
       provenanceSource: WorkspaceInstructionPolicyDraftProvenanceSource.default("human"),
-      provenanceSourceId: primitives.nonEmptyString
+      provenanceSourceId: z
+        .string()
+        .min(1)
         .max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS)
         .nullable()
         .default(null),
-      supersedesRevisionId: primitives.nullableUuid.default(null),
+      supersedesRevisionId: z.string().uuid().nullable().default(null),
     })
     .superRefine(validateTarget),
 );
@@ -307,8 +314,8 @@ export type CreateWorkspaceInstructionPolicyDraftRequest = z.infer<
 export const ImportLegacyWorkspaceInstructionPolicyDraftRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.optionalUuid,
-      supersedesRevisionId: primitives.nullableUuid.default(null),
+      operationId: z.string().uuid().optional(),
+      supersedesRevisionId: z.string().uuid().nullable().default(null),
     })
     .strict(),
 );
@@ -334,7 +341,7 @@ export const WorkspaceInstructionPolicyListResponse = /* @__PURE__ */ defineSche
     revisions: z.array(WorkspaceInstructionPolicyRevision),
     activeHeads: z.array(WorkspaceInstructionPolicyHead),
     inactiveHeads: z.array(WorkspaceInstructionPolicyInactiveHead).default([]),
-    inactiveHeadsTruncated: primitives.boolean.default(false),
+    inactiveHeadsTruncated: z.boolean().default(false),
     activationEvents: z.array(WorkspaceInstructionPolicyActivationEvent),
     deactivationEvents: z.array(WorkspaceInstructionPolicyDeactivationEvent).default([]),
     nextAfterRevision: z.number().int().positive().nullable(),
@@ -347,8 +354,8 @@ export type WorkspaceInstructionPolicyListResponse = z.infer<
 export const WorkspaceInstructionPolicyDiffRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      fromRevisionId: primitives.uuid,
-      toRevisionId: primitives.uuid,
+      fromRevisionId: z.string().uuid(),
+      toRevisionId: z.string().uuid(),
     })
     .refine((value) => value.fromRevisionId !== value.toRevisionId, {
       message: "diff revisions must be different",
@@ -364,7 +371,7 @@ export const WorkspaceInstructionPolicyDiffResponse = /* @__PURE__ */ defineSche
     from: WorkspaceInstructionPolicyRevision,
     to: WorkspaceInstructionPolicyRevision,
     format: z.literal("unified"),
-    diff: primitives.string,
+    diff: z.string(),
   }),
 );
 export type WorkspaceInstructionPolicyDiffResponse = z.infer<
@@ -373,10 +380,10 @@ export type WorkspaceInstructionPolicyDiffResponse = z.infer<
 
 export const ActivateWorkspaceInstructionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: primitives.optionalUuid,
-    expectedCurrentRevisionId: primitives.nullableUuid,
+    operationId: z.string().uuid().optional(),
+    expectedCurrentRevisionId: z.string().uuid().nullable(),
     expectedActivationVersion: z.number().int().nonnegative().optional(),
-    reason: primitives.string.trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
+    reason: z.string().trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
   }),
 );
 export type ActivateWorkspaceInstructionPolicyRequest = z.infer<
@@ -385,11 +392,11 @@ export type ActivateWorkspaceInstructionPolicyRequest = z.infer<
 
 export const RollbackWorkspaceInstructionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: primitives.optionalUuid,
-    targetRevisionId: primitives.uuid,
-    expectedCurrentRevisionId: primitives.uuid,
+    operationId: z.string().uuid().optional(),
+    targetRevisionId: z.string().uuid(),
+    expectedCurrentRevisionId: z.string().uuid(),
     expectedActivationVersion: z.number().int().positive().optional(),
-    reason: primitives.string.trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
+    reason: z.string().trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_REASON_MAX_CHARS),
   }),
 );
 export type RollbackWorkspaceInstructionPolicyRequest = z.infer<
@@ -409,7 +416,7 @@ export type WorkspaceInstructionPolicyActivationResponse = z.infer<
 export const WorkspaceInstructionPolicyConflictResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     code: z.literal("WORKSPACE_INSTRUCTION_POLICY_CONFLICT"),
-    message: primitives.string,
+    message: z.string(),
     currentHead: WorkspaceInstructionPolicyHead.nullable(),
   }),
 );
@@ -420,7 +427,7 @@ export type WorkspaceInstructionPolicyConflictResponse = z.infer<
 export const WorkspaceInstructionPolicyOperationReuseResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     code: z.literal("WORKSPACE_INSTRUCTION_POLICY_OPERATION_REUSED"),
-    message: primitives.string,
+    message: z.string(),
   }),
 );
 export type WorkspaceInstructionPolicyOperationReuseResponse = z.infer<
@@ -429,10 +436,11 @@ export type WorkspaceInstructionPolicyOperationReuseResponse = z.infer<
 
 export const WorkspaceInstructionPolicyOnboardingProposalSource = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.nonEmptyString.max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS),
-    version: primitives.nonEmptyString.max(
-      WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_SOURCE_VERSION_MAX_CHARS,
-    ),
+    id: z.string().min(1).max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS),
+    version: z
+      .string()
+      .min(1)
+      .max(WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_SOURCE_VERSION_MAX_CHARS),
     confidenceBps: z.number().int().min(0).max(10_000),
   }),
 );
@@ -444,25 +452,23 @@ export const CreateWorkspaceInstructionPolicyOnboardingProposalRequest =
   /* @__PURE__ */ defineSchema(() =>
     z
       .object({
-        operationId: primitives.optionalUuid,
+        operationId: z.string().uuid().optional(),
         kind: WorkspaceInstructionPolicyKind,
         scope: WorkspaceInstructionPolicyScope,
         roleKey: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
         // Content bounds are enforced by the domain layer so empty and oversized
         // proposals retain their typed API outcomes instead of collapsing into a
         // generic request-shape error.
-        content: primitives.string,
-        sourceId: primitives.string
-          .trim()
-          .min(1)
-          .max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS),
-        sourceVersion: primitives.string
+        content: z.string(),
+        sourceId: z.string().trim().min(1).max(WORKSPACE_INSTRUCTION_POLICY_SOURCE_ID_MAX_CHARS),
+        sourceVersion: z
+          .string()
           .trim()
           .min(1)
           .max(WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_SOURCE_VERSION_MAX_CHARS),
         confidenceBps: z.number().int().min(0).max(10_000),
-        expectedCurrentRevisionId: primitives.nullableUuid,
-        expectedActivationVersion: primitives.nonnegativeInteger,
+        expectedCurrentRevisionId: z.string().uuid().nullable(),
+        expectedActivationVersion: z.number().int().nonnegative(),
       })
       .superRefine(validateTarget),
   );
@@ -472,17 +478,17 @@ export type CreateWorkspaceInstructionPolicyOnboardingProposalRequest = z.infer<
 
 export const WorkspaceInstructionPolicyOnboardingProposal = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    operationId: primitives.uuid,
-    accountId: primitives.uuid,
-    workspaceId: primitives.uuid,
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
     ...targetShape,
     source: WorkspaceInstructionPolicyOnboardingProposalSource,
     baseline: WorkspaceInstructionPolicyHead.nullable(),
     draft: WorkspaceInstructionPolicyRevision,
     status: z.literal("proposed"),
-    createdBySubjectId: primitives.nonEmptyString,
-    createdAt: primitives.dateTime,
+    createdBySubjectId: z.string().min(1),
+    createdAt: z.string().datetime(),
   }),
 );
 export type WorkspaceInstructionPolicyOnboardingProposal = z.infer<
@@ -503,7 +509,7 @@ export const WorkspaceInstructionPolicyOnboardingProposalListResponse =
   /* @__PURE__ */ defineSchema(() =>
     z.object({
       proposals: z.array(WorkspaceInstructionPolicyOnboardingProposal),
-      truncated: primitives.boolean,
+      truncated: z.boolean(),
     }),
   );
 export type WorkspaceInstructionPolicyOnboardingProposalListResponse = z.infer<
@@ -517,8 +523,8 @@ export const WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse =
         "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_EMPTY",
         "WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_OVERSIZED",
       ]),
-      message: primitives.string,
-      maxChars: primitives.positiveInteger,
+      message: z.string(),
+      maxChars: z.number().int().positive(),
     }),
   );
 export type WorkspaceInstructionPolicyOnboardingProposalContentErrorResponse = z.infer<
@@ -529,7 +535,7 @@ export const WorkspaceInstructionPolicyOnboardingProposalStaleResponse =
   /* @__PURE__ */ defineSchema(() =>
     z.object({
       code: z.literal("WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_STALE"),
-      message: primitives.string,
+      message: z.string(),
       currentHead: WorkspaceInstructionPolicyHead.nullable(),
     }),
   );
@@ -541,9 +547,9 @@ export const WorkspaceInstructionPolicyOnboardingProposalConflictResponse =
   /* @__PURE__ */ defineSchema(() =>
     z.object({
       code: z.literal("WORKSPACE_INSTRUCTION_POLICY_ONBOARDING_PROPOSAL_CONFLICT"),
-      message: primitives.string,
-      existingProposalId: primitives.uuid,
-      existingDraftRevisionId: primitives.uuid,
+      message: z.string(),
+      existingProposalId: z.string().uuid(),
+      existingDraftRevisionId: z.string().uuid(),
     }),
   );
 export type WorkspaceInstructionPolicyOnboardingProposalConflictResponse = z.infer<

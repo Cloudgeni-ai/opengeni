@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { ConnectionKind, SessionTenancyVisibility } from "./index";
@@ -22,15 +21,15 @@ const AcceptedConnectionWork = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         kind: z.literal("turn"),
-        turnId: primitives.uuid,
+        turnId: z.string().uuid(),
       })
       .strict(),
     z
       .object({
         kind: z.literal("scheduled_task"),
-        taskId: primitives.uuid,
-        taskAuthorityRevision: primitives.positiveInteger,
-        runId: primitives.uuid,
+        taskId: z.string().uuid(),
+        taskAuthorityRevision: z.number().int().positive(),
+        runId: z.string().uuid(),
       })
       .strict(),
   ]),
@@ -44,21 +43,21 @@ const AcceptedConnectionWork = /* @__PURE__ */ defineSchema(() =>
 export const ConnectionUseAuthoritySnapshot = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      organizationId: primitives.uuid,
-      originWorkspaceId: primitives.uuid,
-      targetWorkspaceId: primitives.uuid,
-      targetSessionId: primitives.uuid,
+      organizationId: z.string().uuid(),
+      originWorkspaceId: z.string().uuid(),
+      targetWorkspaceId: z.string().uuid(),
+      targetSessionId: z.string().uuid(),
       targetSessionVisibility: SessionTenancyVisibility,
-      targetSessionAuthorityEpoch: primitives.positiveInteger,
+      targetSessionAuthorityEpoch: z.number().int().positive(),
       acceptedWork: AcceptedConnectionWork,
-      connectionId: primitives.uuid,
-      connectionGeneration: primitives.positiveInteger,
+      connectionId: z.string().uuid(),
+      connectionGeneration: z.number().int().positive(),
       connectionStatus: z.literal("active"),
       providerDomain: z.string().min(1).max(2048),
       connectionKind: ConnectionKind,
       scope: z.enum(["workspace", "user"]),
       ownerSubjectId: z.string().min(1).max(512).nullable(),
-      ownerOrganizationMembershipId: primitives.nullableUuid,
+      ownerOrganizationMembershipId: z.string().uuid().nullable(),
       ownerMembershipAuthorizationRevision: z.number().int().positive().nullable().default(null),
       authoritySource: ConnectionAuthoritySelectionSource,
       selectionSources: z.array(ConnectionUseSelectionSource).min(1).max(128),
@@ -147,15 +146,15 @@ export type ConnectionUseDenialReason = z.infer<typeof ConnectionUseDenialReason
 const ConnectionUseAttributionFields = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      organizationId: primitives.uuid,
-      workspaceId: primitives.uuid,
-      sessionId: primitives.uuid,
-      connectionId: primitives.uuid,
-      connectionGeneration: primitives.positiveInteger,
+      organizationId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sessionId: z.string().uuid(),
+      connectionId: z.string().uuid(),
+      connectionGeneration: z.number().int().positive(),
       scope: z.enum(["workspace", "user", "legacy_user"]),
       ownerSubjectId: z.string().min(1).max(512).nullable(),
-      authorityId: primitives.nullableUuid,
-      grantId: primitives.nullableUuid,
+      authorityId: z.string().uuid().nullable(),
+      grantId: z.string().uuid().nullable(),
     })
     .strict(),
 );
@@ -210,7 +209,7 @@ export const ConnectionUseAuditFact = /* @__PURE__ */ defineSchema(() =>
   ConnectionUseAttributionFields.extend({
     outcome: z.enum(["authorized", "denied"]),
     denialReason: ConnectionUseDenialReason.nullable(),
-    occurredAt: primitives.string.datetime({ offset: true }),
+    occurredAt: z.string().datetime({ offset: true }),
   }).superRefine((value, context) => {
     refineConnectionUseAttribution(value, context);
     if ((value.outcome === "denied") !== (value.denialReason !== null)) {

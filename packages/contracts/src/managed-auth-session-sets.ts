@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -30,7 +29,7 @@ export type ManagedAuthVerifiedClaim = z.infer<typeof ManagedAuthVerifiedClaim>;
 /** Secret-free, browser-safe summary. Provider session ids and tokens never enter this shape. */
 export const ManagedAuthLoginSlot = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
+    id: z.string().uuid(),
     displayName: z.string().min(1).max(256),
     verifiedClaim: ManagedAuthVerifiedClaim,
     state: ManagedAuthLoginSlotState,
@@ -46,10 +45,10 @@ export type ManagedAuthSessionSetState = z.infer<typeof ManagedAuthSessionSetSta
 export const ManagedAuthSessionSetProjection = /* @__PURE__ */ defineSchema(() =>
   z.object({
     mode: ManagedAuthSessionSetMode,
-    generation: primitives.string.regex(/^[1-9][0-9]*$/),
-    actorEpoch: primitives.string.regex(/^[1-9][0-9]*$/),
+    generation: z.string().regex(/^[1-9][0-9]*$/),
+    actorEpoch: z.string().regex(/^[1-9][0-9]*$/),
     csrfToken: z.string().min(32).max(512),
-    selectedSlotId: primitives.nullableUuid,
+    selectedSlotId: z.string().uuid().nullable(),
     state: ManagedAuthSessionSetState,
     slots: z.array(ManagedAuthLoginSlot).max(MANAGED_AUTH_SESSION_SET_MAX_SLOTS),
   }),
@@ -58,8 +57,8 @@ export type ManagedAuthSessionSetProjection = z.infer<typeof ManagedAuthSessionS
 
 export const ManagedAuthOperationIdentity = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: primitives.uuid,
-    expectedGeneration: primitives.string.regex(/^[1-9][0-9]*$/),
+    operationId: z.string().uuid(),
+    expectedGeneration: z.string().regex(/^[1-9][0-9]*$/),
   }),
 );
 export type ManagedAuthOperationIdentity = z.infer<typeof ManagedAuthOperationIdentity>;
@@ -70,57 +69,60 @@ export type BootstrapManagedAuthSessionSetRequest = z.infer<
 >;
 
 export const ManagedAuthReturnIntent = /* @__PURE__ */ defineSchema(() =>
-  primitives.nonEmptyString.superRefine((value, context) => {
-    if (new TextEncoder().encode(value).byteLength > MANAGED_AUTH_RETURN_INTENT_MAX_BYTES) {
-      context.addIssue({ code: "custom", message: "return intent exceeds its UTF-8 byte limit" });
-    }
-    if (
-      !value.startsWith("/") ||
-      value.startsWith("//") ||
-      value.includes("?") ||
-      value.includes("#") ||
-      /[\u0000-\u001f\u007f\\]/.test(value)
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "return intent must be a safe same-origin path",
-      });
-      return;
-    }
-    try {
-      const parsed = new URL(value, "https://opengeni.invalid");
-      const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
-      const supportedPath = new RegExp(
-        `^/(?:sessions/${uuid}|workspaces/${uuid}(?:/sessions(?:/${uuid})?)?)$`,
-        "i",
-      );
+  z
+    .string()
+    .min(1)
+    .superRefine((value, context) => {
+      if (new TextEncoder().encode(value).byteLength > MANAGED_AUTH_RETURN_INTENT_MAX_BYTES) {
+        context.addIssue({ code: "custom", message: "return intent exceeds its UTF-8 byte limit" });
+      }
       if (
-        parsed.origin !== "https://opengeni.invalid" ||
-        parsed.username ||
-        parsed.password ||
-        parsed.search ||
-        parsed.hash ||
-        !supportedPath.test(value) ||
-        parsed.pathname !== value
+        !value.startsWith("/") ||
+        value.startsWith("//") ||
+        value.includes("?") ||
+        value.includes("#") ||
+        /[\u0000-\u001f\u007f\\]/.test(value)
       ) {
         context.addIssue({
           code: "custom",
-          message: "return intent contains unsafe authority data",
+          message: "return intent must be a safe same-origin path",
+        });
+        return;
+      }
+      try {
+        const parsed = new URL(value, "https://opengeni.invalid");
+        const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+        const supportedPath = new RegExp(
+          `^/(?:sessions/${uuid}|workspaces/${uuid}(?:/sessions(?:/${uuid})?)?)$`,
+          "i",
+        );
+        if (
+          parsed.origin !== "https://opengeni.invalid" ||
+          parsed.username ||
+          parsed.password ||
+          parsed.search ||
+          parsed.hash ||
+          !supportedPath.test(value) ||
+          parsed.pathname !== value
+        ) {
+          context.addIssue({
+            code: "custom",
+            message: "return intent contains unsafe authority data",
+          });
+        }
+      } catch {
+        context.addIssue({
+          code: "custom",
+          message: "return intent is not a valid same-origin path",
         });
       }
-    } catch {
-      context.addIssue({
-        code: "custom",
-        message: "return intent is not a valid same-origin path",
-      });
-    }
-  }),
+    }),
 );
 
 export const BeginManagedAuthLoginTransactionRequest = /* @__PURE__ */ defineSchema(() =>
   ManagedAuthOperationIdentity.extend({
     kind: z.enum(["add", "reauth"]),
-    slotId: primitives.optionalUuid,
+    slotId: z.string().uuid().optional(),
     returnIntent: ManagedAuthReturnIntent.optional(),
   }).superRefine((value, context) => {
     if ((value.kind === "reauth") !== Boolean(value.slotId)) {
@@ -138,10 +140,10 @@ export type BeginManagedAuthLoginTransactionRequest = z.infer<
 
 export const ManagedAuthLoginTransaction = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
+    id: z.string().uuid(),
     kind: z.enum(["add", "reauth"]),
-    expiresAt: primitives.dateTime,
-    returnIntentId: primitives.nullableUuid,
+    expiresAt: z.string().datetime(),
+    returnIntentId: z.string().uuid().nullable(),
   }),
 );
 export type ManagedAuthLoginTransaction = z.infer<typeof ManagedAuthLoginTransaction>;
@@ -157,7 +159,8 @@ export type ManagedAuthSocialProvider = z.infer<typeof ManagedAuthSocialProvider
  * client does not pull the attribution module into a new shared web chunk.
  */
 const SocialStartAttributionValue = /* @__PURE__ */ defineSchema(() =>
-  primitives.string
+  z
+    .string()
     .trim()
     .min(1)
     .max(100)
@@ -177,7 +180,7 @@ const SocialStartAttribution = /* @__PURE__ */ defineSchema(() =>
 
 export const StartManagedAuthSocialTransactionRequest = /* @__PURE__ */ defineSchema(() =>
   ManagedAuthOperationIdentity.extend({
-    transactionId: primitives.uuid,
+    transactionId: z.string().uuid(),
     provider: ManagedAuthSocialProvider,
     /**
      * Optional untrusted first-touch campaign tokens, used only by the
@@ -203,7 +206,7 @@ export type StartManagedAuthSocialTransactionResponse = z.infer<
 export const CompleteManagedAuthEmailPasswordTransactionRequest =
   /* @__PURE__ */ defineSchema(() =>
     ManagedAuthOperationIdentity.extend({
-      transactionId: primitives.uuid,
+      transactionId: z.string().uuid(),
       email: z.string().email().max(320),
       password: z.string().min(1).max(1_024),
     }),
@@ -224,7 +227,7 @@ export type CompleteManagedAuthLoginTransactionResponse = z.infer<
 
 export const CancelManagedAuthLoginTransactionRequest = /* @__PURE__ */ defineSchema(() =>
   ManagedAuthOperationIdentity.extend({
-    transactionId: primitives.uuid,
+    transactionId: z.string().uuid(),
   }),
 );
 export type CancelManagedAuthLoginTransactionRequest = z.infer<
@@ -233,15 +236,15 @@ export type CancelManagedAuthLoginTransactionRequest = z.infer<
 
 export const SelectManagedAuthLoginSlotRequest = /* @__PURE__ */ defineSchema(() =>
   ManagedAuthOperationIdentity.extend({
-    slotId: primitives.uuid,
+    slotId: z.string().uuid(),
   }),
 );
 export type SelectManagedAuthLoginSlotRequest = z.infer<typeof SelectManagedAuthLoginSlotRequest>;
 
 export const LogoutManagedAuthLoginSlotRequest = /* @__PURE__ */ defineSchema(() =>
   ManagedAuthOperationIdentity.extend({
-    slotId: primitives.uuid,
-    replacementSlotId: primitives.nullableUuid,
+    slotId: z.string().uuid(),
+    replacementSlotId: z.string().uuid().nullable(),
   }),
 );
 export type LogoutManagedAuthLoginSlotRequest = z.infer<typeof LogoutManagedAuthLoginSlotRequest>;
@@ -251,8 +254,8 @@ export type LogoutManagedAuthSessionSetRequest = z.infer<typeof LogoutManagedAut
 
 export const ManagedAuthLogoutAllReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    generation: primitives.string.regex(/^[1-9][0-9]*$/),
-    actorEpoch: primitives.string.regex(/^[1-9][0-9]*$/),
+    generation: z.string().regex(/^[1-9][0-9]*$/),
+    actorEpoch: z.string().regex(/^[1-9][0-9]*$/),
     state: z.literal("logged_out"),
   }),
 );

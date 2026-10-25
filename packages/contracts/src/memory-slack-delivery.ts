@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -18,7 +17,7 @@ export const MemorySlackPublicationDistribution = /* @__PURE__ */ defineSchema((
       importance: MemorySlackImportance,
       audience: z.literal("workspace"),
       slackMode: MemorySlackRequestedMode,
-      shareSummary: primitives.string.trim().min(1).max(4_096),
+      shareSummary: z.string().trim().min(1).max(4_096),
     })
     .strict(),
 );
@@ -26,18 +25,18 @@ export type MemorySlackPublicationDistribution = z.infer<typeof MemorySlackPubli
 
 export const MemorySlackPublicationConfiguration = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    workspaceId: primitives.uuid,
-    revision: primitives.positiveInteger,
-    enabled: primitives.boolean,
-    connectionId: primitives.nullableUuid,
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    enabled: z.boolean(),
+    connectionId: z.string().uuid().nullable(),
     slackTeamId: z.string().min(1).max(64).nullable(),
     slackChannelId: z.string().min(1).max(64).nullable(),
     slackChannelName: z.string().min(1).max(256).nullable(),
     autoImportances: z.array(MemorySlackImportance).max(3),
     reviewImportances: z.array(MemorySlackImportance).max(3),
     createdBySubjectId: z.string().min(1).max(1_024),
-    createdAt: primitives.string,
+    createdAt: z.string(),
   }),
 );
 export type MemorySlackPublicationConfiguration = z.infer<
@@ -47,11 +46,11 @@ export type MemorySlackPublicationConfiguration = z.infer<
 export const UpdateMemorySlackPublicationConfigurationRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      expectedRevision: primitives.nonnegativeInteger,
-      enabled: primitives.boolean,
-      connectionId: primitives.nullableUuid,
-      slackChannelId: primitives.string.trim().min(1).max(64).nullable(),
-      slackChannelName: primitives.string.trim().min(1).max(256).nullable(),
+      expectedRevision: z.number().int().nonnegative(),
+      enabled: z.boolean(),
+      connectionId: z.string().uuid().nullable(),
+      slackChannelId: z.string().trim().min(1).max(64).nullable(),
+      slackChannelName: z.string().trim().min(1).max(256).nullable(),
       autoImportances: z.array(MemorySlackImportance).max(3),
       reviewImportances: z.array(MemorySlackImportance).max(3),
     })
@@ -120,30 +119,30 @@ export type MemorySlackPublicationReceiptKind = z.infer<typeof MemorySlackPublic
 
 export const MemorySlackPublicationReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    publicationId: primitives.uuid,
-    sequence: primitives.positiveInteger,
+    id: z.string().uuid(),
+    publicationId: z.string().uuid(),
+    sequence: z.number().int().positive(),
     kind: MemorySlackPublicationReceiptKind,
     state: MemorySlackPublicationState,
-    attemptNumber: primitives.nonnegativeInteger,
+    attemptNumber: z.number().int().nonnegative(),
     actorKind: z.enum(["human", "agent", "service"]),
     actorSubjectId: z.string().min(1).max(1_024),
-    operationId: primitives.uuid,
+    operationId: z.string().uuid(),
     errorCode: z.string().min(1).max(128).nullable(),
-    retryAt: primitives.nullableString,
+    retryAt: z.string().nullable(),
     slackChannelId: z.string().min(1).max(64).nullable(),
     slackMessageTimestamp: z.string().min(1).max(64).nullable(),
-    createdAt: primitives.string,
+    createdAt: z.string(),
   }),
 );
 export type MemorySlackPublicationReceipt = z.infer<typeof MemorySlackPublicationReceipt>;
 
 export const MemorySlackPublication = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    workspaceId: primitives.uuid,
-    configurationRevision: primitives.positiveInteger,
-    connectionId: primitives.uuid,
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    configurationRevision: z.number().int().positive(),
+    connectionId: z.string().uuid(),
     slackTeamId: z.string().min(1).max(64),
     slackChannelId: z.string().min(1).max(64),
     sourceType: z.enum(["workspace_memory", "durable_learning"]),
@@ -158,14 +157,14 @@ export const MemorySlackPublication = /* @__PURE__ */ defineSchema(() =>
     initiatorKind: z.enum(["human", "agent", "service"]),
     initiatorSubjectId: z.string().min(1).max(1_024),
     initiatingHumanSubjectId: z.string().min(1).max(1_024).nullable(),
-    attemptCount: primitives.nonnegativeInteger,
-    retryAt: primitives.nullableString,
+    attemptCount: z.number().int().nonnegative(),
+    retryAt: z.string().nullable(),
     lastErrorCode: z.string().min(1).max(128).nullable(),
     slackMessageTimestamp: z.string().min(1).max(64).nullable(),
-    deliveredAt: primitives.nullableString,
-    terminalAt: primitives.nullableString,
-    createdAt: primitives.string,
-    updatedAt: primitives.string,
+    deliveredAt: z.string().nullable(),
+    terminalAt: z.string().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
     receipts: z.array(MemorySlackPublicationReceipt).max(100),
   }),
 );
@@ -174,7 +173,7 @@ export type MemorySlackPublication = z.infer<typeof MemorySlackPublication>;
 export const MemorySlackPublicationHistoryResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     publications: z.array(MemorySlackPublication).max(100),
-    nextCursor: primitives.nullableUuid,
+    nextCursor: z.string().uuid().nullable(),
   }),
 );
 export type MemorySlackPublicationHistoryResponse = z.infer<
@@ -197,7 +196,7 @@ export const SlackPublicationChannel = /* @__PURE__ */ defineSchema(() =>
   z.object({
     id: z.string().min(1).max(64),
     name: z.string().min(1).max(256).nullable(),
-    isPrivate: primitives.boolean,
+    isPrivate: z.boolean(),
   }),
 );
 export type SlackPublicationChannel = z.infer<typeof SlackPublicationChannel>;

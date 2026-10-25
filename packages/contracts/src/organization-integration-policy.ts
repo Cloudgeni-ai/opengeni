@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -21,7 +20,7 @@ export const OrganizationIntegrationPolicy = /* @__PURE__ */ defineSchema(() =>
     .object({
       mode: z.enum(["unrestricted", "restricted"]).default("unrestricted"),
       allowedIntegrationKeys: keys.default([]),
-      revision: primitives.nonnegativeInteger.safe().default(0),
+      revision: z.number().int().nonnegative().safe().default(0),
     })
     .strict(),
 );
@@ -32,8 +31,12 @@ export const UpdateOrganizationIntegrationPolicyRequest = /* @__PURE__ */ define
     .object({
       mode: z.enum(["unrestricted", "restricted"]),
       allowedIntegrationKeys: keys,
-      expectedRevision: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER - 1),
-      operationId: primitives.uuid,
+      expectedRevision: z
+        .number()
+        .int()
+        .nonnegative()
+        .max(Number.MAX_SAFE_INTEGER - 1),
+      operationId: z.string().uuid(),
     })
     .strict(),
 );

@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import {
@@ -48,12 +47,12 @@ export type RememberScope = z.infer<typeof RememberScope>;
 export const REMEMBER_CONTENT_MAX_CHARS = 4_000;
 
 const rememberBase = {
-  operationId: primitives.uuid,
+  operationId: z.string().uuid(),
   scope: RememberScope.default("workspace"),
   /** The exact user-directed content to remember, in the user's words. */
-  content: primitives.string.trim().min(1).max(REMEMBER_CONTENT_MAX_CHARS),
+  content: z.string().trim().min(1).max(REMEMBER_CONTENT_MAX_CHARS),
   /** Why the agent believes the user asked for this to be remembered. */
-  reason: primitives.string.trim().min(1).max(4_096),
+  reason: z.string().trim().min(1).max(4_096),
 };
 
 export const RememberRequest = /* @__PURE__ */ defineSchema(() =>
@@ -65,7 +64,8 @@ export const RememberRequest = /* @__PURE__ */ defineSchema(() =>
         // Only the short title/description descriptors are prompt-composed; the
         // content is retrieved on demand, so this length is retrieval cost rather
         // than standing prompt cost.
-        content: primitives.string
+        content: z
+          .string()
           .trim()
           .min(1)
           .max(
@@ -73,8 +73,9 @@ export const RememberRequest = /* @__PURE__ */ defineSchema(() =>
             AGENT_AUTHORED_PREFERENCE_CONTENT_TOO_LONG_MESSAGE,
           ),
         stableKey: PreferenceRegistryStableKey,
-        title: primitives.string.trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
-        description: primitives.string
+        title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+        description: z
+          .string()
           .trim()
           .min(1)
           .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
@@ -87,7 +88,8 @@ export const RememberRequest = /* @__PURE__ */ defineSchema(() =>
         // A mandatory rule is composed verbatim into the prompt of every session
         // it applies to, for as long as it stays active. Its storage bound is
         // shared with the human workspace-instruction editor.
-        content: primitives.string
+        content: z
+          .string()
           .trim()
           .min(1)
           .max(
@@ -106,7 +108,7 @@ export const RememberRequest = /* @__PURE__ */ defineSchema(() =>
         ...rememberBase,
         lane: z.literal("knowledge"),
         /** Short entity label the fact is about (company, product, person, team, ...). */
-        subject: primitives.string.trim().min(1).max(512),
+        subject: z.string().trim().min(1).max(512),
       })
       .strict(),
   ]),
@@ -139,8 +141,8 @@ export const RememberActivationSummary = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("destination", [
     z.object({
       destination: GovernedLearningActivationDestination,
-      receiptId: primitives.uuid,
-      destinationRevisionId: primitives.nullableUuid,
+      receiptId: z.string().uuid(),
+      destinationRevisionId: z.string().uuid().nullable(),
       effectiveAt: z.string().datetime().nullable(),
       authorityKind: z.enum(["automatic", "human_confirmed"]),
       /** The `/learning` API/SDK history exposes exact undo for this receipt. */
@@ -148,11 +150,11 @@ export const RememberActivationSummary = /* @__PURE__ */ defineSchema(() =>
     }),
     z.object({
       destination: z.literal("knowledge"),
-      receiptId: primitives.uuid,
-      claimId: primitives.uuid,
+      receiptId: z.string().uuid(),
+      claimId: z.string().uuid(),
       /** The retrievable Memory record materialized from the approved claim. */
-      memoryId: primitives.uuid,
-      approvalReviewId: primitives.uuid,
+      memoryId: z.string().uuid(),
+      approvalReviewId: z.string().uuid(),
       effectiveAt: z.string().datetime().nullable(),
       authorityKind: z.literal("human_confirmed"),
       /** Correct or archive the materialized record through the Memory lifecycle. */
@@ -167,7 +169,7 @@ export const RememberReceipt = /* @__PURE__ */ defineSchema(() =>
     /** Learning policy is off for this source: nothing durable was written. */
     z.object({
       status: z.literal("blocked"),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
       lane: RememberLane,
       scope: RememberScope,
       reason: z.literal("learning_policy_off"),
@@ -175,22 +177,22 @@ export const RememberReceipt = /* @__PURE__ */ defineSchema(() =>
     /** Kept for callers that still expect review-only Knowledge; not returned by `remember` today. */
     z.object({
       status: z.literal("proposed_for_review"),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
       lane: RememberLane,
       scope: RememberScope,
-      noteId: primitives.uuid,
-      claimId: primitives.uuid,
-      evidenceId: primitives.uuid,
-      reviewId: primitives.nullableUuid,
+      noteId: z.string().uuid(),
+      claimId: z.string().uuid(),
+      evidenceId: z.string().uuid(),
+      reviewId: z.string().uuid().nullable(),
     }),
     /** Activated immediately (automatic policy) through the destination lifecycle. */
     z.object({
       status: z.literal("activated"),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
       lane: RememberLane,
       scope: RememberScope,
-      noteId: primitives.uuid,
-      proposalId: primitives.uuid,
+      noteId: z.string().uuid(),
+      proposalId: z.string().uuid(),
       learning: CompanyBrainLearningDecisionSummary.nullable(),
       activation: RememberActivationSummary,
     }),
@@ -202,13 +204,13 @@ export const RememberReceipt = /* @__PURE__ */ defineSchema(() =>
      */
     z.object({
       status: z.literal("confirmation_required"),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
       lane: RememberLane,
       scope: RememberScope,
-      noteId: primitives.uuid,
+      noteId: z.string().uuid(),
       /** Ways-of-working lanes confirm a change proposal; Knowledge confirms the claim. */
-      proposalId: primitives.nullableUuid,
-      claimId: primitives.uuid,
+      proposalId: z.string().uuid().nullable(),
+      claimId: z.string().uuid(),
       learning: CompanyBrainLearningDecisionSummary.nullable(),
       learningFailure: CompanyBrainLearningStepFailure.nullable(),
       humanInput: RememberHumanInputPrompt,
@@ -223,20 +225,20 @@ export const RememberConfirmRequest = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         target: z.literal("proposal"),
-        operationId: primitives.uuid,
-        proposalId: primitives.uuid,
+        operationId: z.string().uuid(),
+        proposalId: z.string().uuid(),
         /** `learning.receiptId` from the `confirmation_required` remember receipt. */
-        decisionReceiptId: primitives.uuid,
+        decisionReceiptId: z.string().uuid(),
         /** The `requestId` returned by `request_human_input`. */
-        humanInputRequestId: primitives.uuid,
+        humanInputRequestId: z.string().uuid(),
       })
       .strict(),
     z
       .object({
         target: z.literal("knowledge_claim"),
-        operationId: primitives.uuid,
-        claimId: primitives.uuid,
-        humanInputRequestId: primitives.uuid,
+        operationId: z.string().uuid(),
+        claimId: z.string().uuid(),
+        humanInputRequestId: z.string().uuid(),
       })
       .strict(),
   ]),
@@ -246,10 +248,10 @@ export type RememberConfirmRequest = z.infer<typeof RememberConfirmRequest>;
 export const RememberConfirmReceipt = /* @__PURE__ */ defineSchema(() =>
   z.object({
     status: z.literal("activated"),
-    operationId: primitives.uuid,
-    proposalId: primitives.nullableUuid,
-    claimId: primitives.uuid,
-    decisionReceiptId: primitives.nullableUuid,
+    operationId: z.string().uuid(),
+    proposalId: z.string().uuid().nullable(),
+    claimId: z.string().uuid(),
+    decisionReceiptId: z.string().uuid().nullable(),
     activation: RememberActivationSummary,
   }),
 );

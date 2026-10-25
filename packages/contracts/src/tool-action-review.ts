@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -23,8 +22,8 @@ export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
       kind: z.enum(["generic", "gmail"]).default("generic"),
       title: z.string().max(256).optional(),
       accountLabel: z.string().max(256).optional(),
-      fieldLabels: z.record(primitives.string, z.string().max(256)).optional(),
-      protectedFields: z.array(primitives.string).optional(),
+      fieldLabels: z.record(z.string(), z.string().max(256)).optional(),
+      protectedFields: z.array(z.string()).optional(),
       email: z
         .object({
           from: z.string().max(4096),
@@ -34,14 +33,14 @@ export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
           subject: z.string().max(32768),
           textBody: z.string().max(262144),
           htmlBody: z.string().max(262144),
-          contentSha256: primitives.string.regex(/^[0-9a-f]{64}$/),
+          contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
           attachments: z
             .array(
               z
                 .object({
                   name: z.string().max(1024),
                   mediaType: z.string().max(256),
-                  bytes: primitives.nonnegativeInteger,
+                  bytes: z.number().int().nonnegative(),
                 })
                 .strict(),
             )
@@ -199,12 +198,12 @@ export type ToolReviewStatus = z.infer<typeof ToolReviewStatus>;
 export const ToolReviewField = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      path: primitives.string,
-      label: primitives.string,
-      preview: primitives.string,
+      path: z.string(),
+      label: z.string(),
+      preview: z.string(),
       count: z.number().int().nonnegative().optional(),
-      truncated: primitives.boolean,
-      protected: primitives.optionalBoolean,
+      truncated: z.boolean(),
+      protected: z.boolean().optional(),
     })
     .strict(),
 );
@@ -212,25 +211,25 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(1),
-      id: primitives.string,
-      actionDigest: primitives.string,
-      revision: primitives.string,
+      id: z.string(),
+      actionDigest: z.string(),
+      revision: z.string(),
       status: ToolReviewStatus,
-      title: primitives.string,
+      title: z.string(),
       accountLabel: z.string().optional(),
       consequence: z.string().optional(),
-      effects: z.array(primitives.string),
+      effects: z.array(z.string()),
       selectionCount: z.number().int().nonnegative().optional(),
       selectionKind: z.enum(["messages", "threads"]).optional(),
       samples: ToolReviewContext.shape.samples,
       fields: z.array(ToolReviewField),
-      moreFields: primitives.nonnegativeInteger,
-      reason: primitives.string,
-      createdAt: primitives.string,
-      updatedAt: primitives.string,
-      approveLabel: primitives.string,
+      moreFields: z.number().int().nonnegative(),
+      reason: z.string(),
+      createdAt: z.string(),
+      updatedAt: z.string(),
+      approveLabel: z.string(),
       availableActions: z.array(z.enum(["approve", "reject"])),
-      detailsAvailable: primitives.boolean,
+      detailsAvailable: z.boolean(),
     })
     .strict(),
 );
@@ -239,22 +238,22 @@ export const ToolReviewDetailsPage = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(1),
-      id: primitives.string,
-      actionDigest: primitives.string,
-      path: primitives.string,
+      id: z.string(),
+      actionDigest: z.string(),
+      path: z.string(),
       items: z.array(
         z
           .object({
-            label: primitives.string,
-            value: primitives.string,
+            label: z.string(),
+            value: z.string(),
             /** A secondary line, such as a selected message's sender and identifier. */
             detail: z.string().optional(),
             path: z.string().optional(),
-            truncated: primitives.optionalBoolean,
+            truncated: z.boolean().optional(),
           })
           .strict(),
       ),
-      total: primitives.nonnegativeInteger,
+      total: z.number().int().nonnegative(),
       nextOffset: z.number().int().nonnegative().nullable(),
     })
     .strict(),

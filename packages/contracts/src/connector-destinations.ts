@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -12,7 +11,7 @@ export type ConnectorDocumentDestinationAuthority = z.infer<
 export const ConnectorDocumentDestinationSelection = /* @__PURE__ */ defineSchema(() =>
   z.object({
     authorityKind: ConnectorDocumentDestinationAuthority,
-    collectionId: primitives.nullableUuid.default(null),
+    collectionId: z.string().uuid().nullable().default(null),
   }),
 );
 export type ConnectorDocumentDestinationSelection = z.infer<
@@ -23,10 +22,10 @@ export const ConnectorDocumentDestination = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       authorityKind: ConnectorDocumentDestinationAuthority,
-      authorityAccountId: primitives.uuid,
-      authorityWorkspaceId: primitives.nullableUuid,
-      authoritySubjectId: primitives.string.trim().min(1).max(1024).nullable(),
-      collectionId: primitives.nullableUuid.default(null),
+      authorityAccountId: z.string().uuid(),
+      authorityWorkspaceId: z.string().uuid().nullable(),
+      authoritySubjectId: z.string().trim().min(1).max(1024).nullable(),
+      collectionId: z.string().uuid().nullable().default(null),
     })
     .superRefine((destination, context) => {
       if (destination.authorityKind === "organization") {
@@ -133,5 +132,5 @@ export function connectorDocumentDestinationCollectionId(
   destination: ConnectorDocumentDestination,
   defaultCollectionId: string,
 ): string {
-  return destination.collectionId ?? primitives.uuid.parse(defaultCollectionId);
+  return destination.collectionId ?? z.string().uuid().parse(defaultCollectionId);
 }

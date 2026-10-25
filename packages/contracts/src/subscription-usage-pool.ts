@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { z } from "zod";
 import { defineSchema } from "./define-schema";
 
@@ -13,8 +12,8 @@ export const SubscriptionUsagePool = /* @__PURE__ */ defineSchema(() =>
         remainingPercent: z.number().min(0).max(100).nullable(),
         accounts: z.array(
           z.object({
-            id: primitives.uuid,
-            label: primitives.string,
+            id: z.string().uuid(),
+            label: z.string(),
             remainingPercent: z.number().min(0).max(100).nullable(),
             resetsAt: z.string().datetime().nullable(),
             weight: z.number().positive(),
@@ -24,7 +23,7 @@ export const SubscriptionUsagePool = /* @__PURE__ */ defineSchema(() =>
         ),
         forecast: z.object({
           kind: z.enum(["runs_out", "unused", "insufficient_history"]),
-          basis: primitives.string,
+          basis: z.string(),
           runsOutAt: z.string().datetime().nullable(),
           nextResetAt: z.string().datetime().nullable(),
           unusedPercent: z.number().min(0).max(100).nullable(),
@@ -39,6 +38,6 @@ export const SubscriptionUsagePool = /* @__PURE__ */ defineSchema(() =>
 export type SubscriptionUsagePool = z.infer<typeof SubscriptionUsagePool>;
 
 export const SubscriptionUsagePoolsResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ pools: z.array(SubscriptionUsagePool), checkedAt: primitives.dateTime }),
+  z.object({ pools: z.array(SubscriptionUsagePool), checkedAt: z.string().datetime() }),
 );
 export type SubscriptionUsagePoolsResponse = z.infer<typeof SubscriptionUsagePoolsResponse>;

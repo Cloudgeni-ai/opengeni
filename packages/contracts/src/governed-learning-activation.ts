@@ -1,9 +1,8 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
-const sha256 = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^[0-9a-f]{64}$/));
-const boundedActor = /* @__PURE__ */ defineSchema(() => primitives.string.trim().min(1).max(1_024));
+const sha256 = /* @__PURE__ */ defineSchema(() => z.string().regex(/^[0-9a-f]{64}$/));
+const boundedActor = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(1_024));
 
 export const GovernedLearningActivationDestination = /* @__PURE__ */ defineSchema(() =>
   z.enum(["instruction_policy", "preference"]),
@@ -21,7 +20,7 @@ export type GovernedLearningActivationDestination = z.infer<
 export const GovernedLearningActivationCaller = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      workspaceId: primitives.uuid,
+      workspaceId: z.string().uuid(),
       subjectId: boundedActor,
     })
     .strict(),
@@ -31,8 +30,8 @@ export type GovernedLearningActivationCaller = z.infer<typeof GovernedLearningAc
 export const ActivateGovernedLearningDecisionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.uuid,
-      decisionReceiptId: primitives.uuid,
+      operationId: z.string().uuid(),
+      decisionReceiptId: z.string().uuid(),
     })
     .strict(),
 );
@@ -43,8 +42,8 @@ export type ActivateGovernedLearningDecisionRequest = z.infer<
 export const UndoGovernedLearningActivationRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.uuid,
-      activationReceiptId: primitives.uuid,
+      operationId: z.string().uuid(),
+      activationReceiptId: z.string().uuid(),
     })
     .strict(),
 );
@@ -54,14 +53,14 @@ export type UndoGovernedLearningActivationRequest = z.infer<
 
 const destinationBoundary = {
   destination: GovernedLearningActivationDestination,
-  destinationProposalId: primitives.uuid,
-  destinationRevisionId: primitives.uuid,
-  destinationOldRevisionId: primitives.nullableUuid,
+  destinationProposalId: z.string().uuid(),
+  destinationRevisionId: z.string().uuid(),
+  destinationOldRevisionId: z.string().uuid().nullable(),
   destinationOldContentHash: sha256.nullable(),
-  destinationOldVersion: primitives.nonnegativeInteger,
+  destinationOldVersion: z.number().int().nonnegative(),
   destinationNewContentHash: sha256,
-  destinationNewVersion: primitives.positiveInteger,
-  destinationEventId: primitives.uuid,
+  destinationNewVersion: z.number().int().positive(),
+  destinationEventId: z.string().uuid(),
 };
 
 /**
@@ -71,45 +70,45 @@ const destinationBoundary = {
 export const GovernedLearningActivationReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      operationId: primitives.uuid,
+      id: z.string().uuid(),
+      operationId: z.string().uuid(),
       inputHash: sha256,
-      accountId: primitives.uuid,
-      workspaceId: primitives.uuid,
-      decisionReceiptId: primitives.uuid,
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      decisionReceiptId: z.string().uuid(),
       initiatingHumanSubjectId: boundedActor,
       serviceActorSubjectId: boundedActor,
-      policyRevisionId: primitives.uuid,
+      policyRevisionId: z.string().uuid(),
       policyHash: sha256,
-      policyActivationVersion: primitives.positiveInteger,
+      policyActivationVersion: z.number().int().positive(),
       sourceKind: z.enum(["scoped-knowledge-evidence", "task-note"]),
-      sourceId: primitives.uuid,
+      sourceId: z.string().uuid(),
       sourceAuthorityHash: sha256,
-      proposalId: primitives.uuid,
-      claimId: primitives.uuid,
-      evidenceId: primitives.uuid,
-      knowledgePreviousReviewId: primitives.uuid,
-      knowledgePreviousReviewRevision: primitives.positiveInteger,
-      knowledgeApprovalReviewId: primitives.uuid,
-      knowledgeApprovalReviewRevision: primitives.positiveInteger,
+      proposalId: z.string().uuid(),
+      claimId: z.string().uuid(),
+      evidenceId: z.string().uuid(),
+      knowledgePreviousReviewId: z.string().uuid(),
+      knowledgePreviousReviewRevision: z.number().int().positive(),
+      knowledgeApprovalReviewId: z.string().uuid(),
+      knowledgeApprovalReviewRevision: z.number().int().positive(),
       knowledgeApprovalInputHash: sha256,
       ...destinationBoundary,
       outcome: z.literal("activated"),
-      effectiveAt: primitives.dateTime,
+      effectiveAt: z.string().datetime(),
       /**
        * `automatic`: a final eligible evaluator receipt under an automatic policy.
        * `human_confirmed`: the exact initiating human answered the bound
        * `remember:<proposalId>` structured human-input question with `save`.
        */
       authorityKind: GovernedLearningActivationAuthorityKind,
-      humanInputRequestId: primitives.nullableUuid,
+      humanInputRequestId: z.string().uuid().nullable(),
       rollback: z
         .object({
           supported: z.literal(true),
           mechanism: z.literal("exact_head_and_latest_review"),
         })
         .strict(),
-      createdAt: primitives.dateTime,
+      createdAt: z.string().datetime(),
     })
     .strict(),
 );
@@ -118,9 +117,9 @@ export type GovernedLearningActivationReceipt = z.infer<typeof GovernedLearningA
 export const ActivateHumanConfirmedLearningDecisionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.uuid,
-      decisionReceiptId: primitives.uuid,
-      humanInputRequestId: primitives.uuid,
+      operationId: z.string().uuid(),
+      decisionReceiptId: z.string().uuid(),
+      humanInputRequestId: z.string().uuid(),
     })
     .strict(),
 );
@@ -132,30 +131,30 @@ export type ActivateHumanConfirmedLearningDecisionRequest = z.infer<
 export const GovernedLearningActivationUndoReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      operationId: primitives.uuid,
+      id: z.string().uuid(),
+      operationId: z.string().uuid(),
       inputHash: sha256,
-      accountId: primitives.uuid,
-      workspaceId: primitives.uuid,
-      activationReceiptId: primitives.uuid,
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      activationReceiptId: z.string().uuid(),
       initiatingHumanSubjectId: boundedActor,
       serviceActorSubjectId: boundedActor,
       destination: GovernedLearningActivationDestination,
-      knowledgeApprovalReviewId: primitives.uuid,
-      knowledgeRevocationReviewId: primitives.uuid,
-      knowledgeRevocationReviewRevision: primitives.positiveInteger,
+      knowledgeApprovalReviewId: z.string().uuid(),
+      knowledgeRevocationReviewId: z.string().uuid(),
+      knowledgeRevocationReviewRevision: z.number().int().positive(),
       knowledgeRevocationInputHash: sha256,
-      destinationActivatedRevisionId: primitives.uuid,
-      destinationRestoredRevisionId: primitives.nullableUuid,
+      destinationActivatedRevisionId: z.string().uuid(),
+      destinationRestoredRevisionId: z.string().uuid().nullable(),
       destinationActivatedContentHash: sha256,
       destinationRestoredContentHash: sha256.nullable(),
-      destinationOldVersion: primitives.positiveInteger,
-      destinationNewVersion: primitives.positiveInteger,
-      destinationEventId: primitives.uuid,
+      destinationOldVersion: z.number().int().positive(),
+      destinationNewVersion: z.number().int().positive(),
+      destinationEventId: z.string().uuid(),
       outcome: z.literal("undone"),
       superseded: z.literal(false),
-      effectiveAt: primitives.dateTime,
-      createdAt: primitives.dateTime,
+      effectiveAt: z.string().datetime(),
+      createdAt: z.string().datetime(),
     })
     .strict(),
 );
@@ -172,26 +171,26 @@ export type GovernedLearningActivationUndoReceipt = z.infer<
 export const RememberKnowledgeConfirmationReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      operationId: primitives.uuid,
+      id: z.string().uuid(),
+      operationId: z.string().uuid(),
       inputHash: sha256,
-      accountId: primitives.uuid,
-      workspaceId: primitives.uuid,
-      sessionId: primitives.uuid,
-      turnId: primitives.uuid,
-      executionGeneration: primitives.positiveInteger,
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sessionId: z.string().uuid(),
+      turnId: z.string().uuid(),
+      executionGeneration: z.number().int().positive(),
       initiatingHumanSubjectId: boundedActor,
       serviceActorSubjectId: boundedActor,
-      claimId: primitives.uuid,
-      evidenceId: primitives.uuid,
-      taskNoteId: primitives.uuid,
+      claimId: z.string().uuid(),
+      evidenceId: z.string().uuid(),
+      taskNoteId: z.string().uuid(),
       taskNoteTextHash: sha256,
-      humanInputRequestId: primitives.uuid,
-      previousReviewId: primitives.uuid,
-      previousReviewRevision: primitives.positiveInteger,
-      approvalReviewId: primitives.uuid,
-      approvalReviewRevision: primitives.positiveInteger,
-      createdAt: primitives.dateTime,
+      humanInputRequestId: z.string().uuid(),
+      previousReviewId: z.string().uuid(),
+      previousReviewRevision: z.number().int().positive(),
+      approvalReviewId: z.string().uuid(),
+      approvalReviewRevision: z.number().int().positive(),
+      createdAt: z.string().datetime(),
     })
     .strict(),
 );
@@ -202,9 +201,9 @@ export type RememberKnowledgeConfirmationReceipt = z.infer<
 export const ConfirmRememberKnowledgeClaimRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.uuid,
-      claimId: primitives.uuid,
-      humanInputRequestId: primitives.uuid,
+      operationId: z.string().uuid(),
+      claimId: z.string().uuid(),
+      humanInputRequestId: z.string().uuid(),
     })
     .strict(),
 );

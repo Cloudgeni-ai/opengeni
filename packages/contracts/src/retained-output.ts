@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -76,16 +75,16 @@ export const RetainedArtifactReferenceSchema = /* @__PURE__ */ defineSchema(() =
   z
     .object({
       available: z.literal(true),
-      artifactId: primitives.string.regex(LOWERCASE_UUID),
+      artifactId: z.string().regex(LOWERCASE_UUID),
       kind: RetainedOutputKind,
       contentType: z.string().max(127).regex(CANONICAL_MEDIA_TYPE),
-      originalBytes: primitives.nonnegativeInteger.safe(),
-      sha256: primitives.string.regex(LOWERCASE_SHA256),
-      retainedAt: primitives.string.datetime({ offset: true }),
+      originalBytes: z.number().int().nonnegative().safe(),
+      sha256: z.string().regex(LOWERCASE_SHA256),
+      retainedAt: z.string().datetime({ offset: true }),
       dimensions: z
         .object({
-          width: primitives.positiveInteger.max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
-          height: primitives.positiveInteger.max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
+          width: z.number().int().positive().max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
+          height: z.number().int().positive().max(COMPUTER_SCREENSHOT_MAX_DIMENSION),
         })
         .strict()
         .optional(),
@@ -99,7 +98,7 @@ export const RetainedArtifactReferenceSchema = /* @__PURE__ */ defineSchema(() =
         z
           .object({
             policy: z.literal("session_screenshot"),
-            expiresAt: primitives.string.datetime({ offset: true }),
+            expiresAt: z.string().datetime({ offset: true }),
           })
           .strict(),
       ]),
@@ -108,7 +107,7 @@ export const RetainedArtifactReferenceSchema = /* @__PURE__ */ defineSchema(() =
           method: z.literal("GET"),
           path: z.string().max(256),
           acceptRanges: z.literal("bytes"),
-          maxRangeBytes: primitives.positiveInteger.max(RETAINED_OUTPUT_MAX_PAGE_BYTES),
+          maxRangeBytes: z.number().int().positive().max(RETAINED_OUTPUT_MAX_PAGE_BYTES),
         })
         .strict(),
     })
@@ -239,7 +238,7 @@ export const RetainedArtifactUnavailableSchema = /* @__PURE__ */ defineSchema(()
   z
     .object({
       available: z.literal(false),
-      artifactId: primitives.string.regex(LOWERCASE_UUID),
+      artifactId: z.string().regex(LOWERCASE_UUID),
       reason: RetainedOutputUnavailableReason,
     })
     .strict(),

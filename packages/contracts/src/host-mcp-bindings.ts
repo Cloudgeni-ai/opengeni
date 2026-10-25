@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 export { HostMcpCreateSelections, type HostMcpCreateSelection } from "./index";
@@ -99,16 +98,16 @@ export function hostMcpBindingMatchesSelection(
 export const HostMcpBinding = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      accountId: primitives.uuid,
-      workspaceId: primitives.uuid,
+      id: z.string().uuid(),
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
       ownerSubjectId: HostMcpOwnerSubject,
-      authorizationRevision: primitives.positiveInteger.safe(),
-      generation: primitives.positiveInteger.safe(),
+      authorizationRevision: z.number().int().positive().safe(),
+      generation: z.number().int().positive().safe(),
       status: z.enum(["active", "revoked"]),
       definition: HostMcpBindingDefinition,
-      createdAt: primitives.string.datetime({ offset: true }),
-      revokedAt: primitives.string.datetime({ offset: true }).nullable(),
+      createdAt: z.string().datetime({ offset: true }),
+      revokedAt: z.string().datetime({ offset: true }).nullable(),
     })
     .strict(),
 );
@@ -117,7 +116,7 @@ export type HostMcpBinding = z.infer<typeof HostMcpBinding>;
 export const CreateHostMcpBindingRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
       definition: HostMcpBindingDefinition,
     })
     .strict(),
@@ -132,7 +131,7 @@ const HostMcpGrantRequest = /* @__PURE__ */ defineSchema(() =>
       context: SessionTenancyVisibility,
       sessionId: z.string().uuid().nullable().optional(),
       expectedAuthorityEpoch: z.number().int().positive().nullable().optional(),
-      workspaceSharedAcknowledged: primitives.boolean.default(false),
+      workspaceSharedAcknowledged: z.boolean().default(false),
     })
     .strict()
     .superRefine((value, context) => {
@@ -173,9 +172,9 @@ const HostMcpDelegationGrant = /* @__PURE__ */ defineSchema(() =>
 export const IssueHostMcpDelegationRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.uuid,
-      bindingId: primitives.uuid,
-      expectedBindingGeneration: primitives.positiveInteger.safe(),
+      operationId: z.string().uuid(),
+      bindingId: z.string().uuid(),
+      expectedBindingGeneration: z.number().int().positive().safe(),
       grant: HostMcpDelegationGrant,
     })
     .strict(),
@@ -185,18 +184,18 @@ export type IssueHostMcpDelegationRequest = z.infer<typeof IssueHostMcpDelegatio
 export const HostMcpDelegation = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      accountId: primitives.uuid,
-      workspaceId: primitives.uuid,
+      id: z.string().uuid(),
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
       ownerSubjectId: HostMcpOwnerSubject,
-      ownerAuthorizationRevision: primitives.positiveInteger.safe(),
-      bindingId: primitives.uuid,
-      bindingGeneration: primitives.positiveInteger.safe(),
+      ownerAuthorizationRevision: z.number().int().positive().safe(),
+      bindingId: z.string().uuid(),
+      bindingGeneration: z.number().int().positive().safe(),
       grant: HostMcpDelegationGrant,
-      generation: primitives.positiveInteger.safe(),
+      generation: z.number().int().positive().safe(),
       status: z.enum(["active", "revoked"]),
-      createdAt: primitives.string.datetime({ offset: true }),
-      revokedAt: primitives.string.datetime({ offset: true }).nullable(),
+      createdAt: z.string().datetime({ offset: true }),
+      revokedAt: z.string().datetime({ offset: true }).nullable(),
     })
     .strict(),
 );
@@ -211,25 +210,25 @@ export const HostMcpAcceptedAuthority = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(1),
-      accountId: primitives.uuid,
-      workspaceId: primitives.uuid,
-      targetSessionId: primitives.uuid,
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      targetSessionId: z.string().uuid(),
       targetSessionVisibility: SessionTenancyVisibility,
-      targetSessionAuthorityEpoch: primitives.positiveInteger.safe(),
+      targetSessionAuthorityEpoch: z.number().int().positive().safe(),
       acceptedWork: ConnectionUseAuthoritySnapshot.shape.acceptedWork,
-      bindingId: primitives.uuid,
-      bindingGeneration: primitives.positiveInteger.safe(),
+      bindingId: z.string().uuid(),
+      bindingGeneration: z.number().int().positive().safe(),
       definition: HostMcpBindingDefinition,
       ownerSubjectId: HostMcpOwnerSubject,
-      ownerOrganizationMembershipId: primitives.uuid,
-      ownerMembershipAuthorizationRevision: primitives.positiveInteger.safe(),
-      delegationId: primitives.uuid,
-      delegationGeneration: primitives.positiveInteger.safe(),
+      ownerOrganizationMembershipId: z.string().uuid(),
+      ownerMembershipAuthorizationRevision: z.number().int().positive().safe(),
+      delegationId: z.string().uuid(),
+      delegationGeneration: z.number().int().positive().safe(),
       scheduledOrigin: z
         .object({
-          taskId: primitives.uuid,
-          taskAuthorityRevision: primitives.positiveInteger.safe(),
-          runId: primitives.uuid,
+          taskId: z.string().uuid(),
+          taskAuthorityRevision: z.number().int().positive().safe(),
+          runId: z.string().uuid(),
         })
         .strict()
         .optional(),
@@ -239,15 +238,15 @@ export const HostMcpAcceptedAuthority = /* @__PURE__ */ defineSchema(() =>
         z
           .object({
             kind: z.literal("child_turn"),
-            sessionId: primitives.uuid,
-            turnId: primitives.uuid,
+            sessionId: z.string().uuid(),
+            turnId: z.string().uuid(),
           })
           .strict(),
         z
           .object({
             kind: z.literal("inherited_turn"),
-            sessionId: primitives.uuid,
-            turnId: primitives.uuid,
+            sessionId: z.string().uuid(),
+            turnId: z.string().uuid(),
           })
           .strict(),
       ]),
@@ -301,18 +300,18 @@ export const HostMcpTaskAuthority = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       version: z.literal(1),
-      accountId: primitives.uuid,
-      workspaceId: primitives.uuid,
-      taskId: primitives.uuid,
-      taskAuthorityRevision: primitives.positiveInteger.safe(),
-      taskExecutionDigest: primitives.string.regex(/^[0-9a-f]{64}$/),
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      taskId: z.string().uuid(),
+      taskAuthorityRevision: z.number().int().positive().safe(),
+      taskExecutionDigest: z.string().regex(/^[0-9a-f]{64}$/),
       ownerSubjectId: HostMcpOwnerSubject,
-      ownerOrganizationMembershipId: primitives.uuid,
-      ownerMembershipAuthorizationRevision: primitives.positiveInteger.safe(),
-      bindingId: primitives.uuid,
-      bindingGeneration: primitives.positiveInteger.safe(),
-      delegationId: primitives.uuid,
-      delegationGeneration: primitives.positiveInteger.safe(),
+      ownerOrganizationMembershipId: z.string().uuid(),
+      ownerMembershipAuthorizationRevision: z.number().int().positive().safe(),
+      bindingId: z.string().uuid(),
+      bindingGeneration: z.number().int().positive().safe(),
+      delegationId: z.string().uuid(),
+      delegationGeneration: z.number().int().positive().safe(),
       definition: HostMcpBindingDefinition,
       context: SessionTenancyVisibility,
     })

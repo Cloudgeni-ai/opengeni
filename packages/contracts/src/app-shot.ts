@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -34,26 +33,26 @@ export const AppShotCapture = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       /** The app's name as the system shows it, e.g. "Safari". */
-      app: primitives.string.trim().min(1).max(200),
+      app: z.string().trim().min(1).max(200),
       /** The app's stable identifier where the system has one (macOS bundle id). */
-      bundleId: primitives.string.trim().min(1).max(255).optional(),
+      bundleId: z.string().trim().min(1).max(255).optional(),
       /** The window's title; empty when the window has none. */
       title: z.string().max(1_000),
-      capturedAt: primitives.string.datetime({ offset: true }),
+      capturedAt: z.string().datetime({ offset: true }),
       platform: AppShotPlatform,
       /**
        * Text read from the window through the system's accessibility
        * interface, including parts scrolled out of view. Absent when the
        * window exposed none or it could not be read.
        */
-      text: primitives.string.max(APP_SHOT_TEXT_MAX_CHARS).optional(),
+      text: z.string().max(APP_SHOT_TEXT_MAX_CHARS).optional(),
       /** Not all of the window's text was kept (too long, or too slow to read). */
-      textTruncated: primitives.optionalBoolean,
+      textTruncated: z.boolean().optional(),
       /** The window as the system identifies it, for computer tools on that machine. */
       window: z
         .object({
-          processId: primitives.positiveInteger,
-          windowId: primitives.nonnegativeInteger,
+          processId: z.number().int().positive(),
+          windowId: z.number().int().nonnegative(),
         })
         .strict()
         .optional(),
@@ -63,9 +62,9 @@ export const AppShotCapture = /* @__PURE__ */ defineSchema(() =>
        */
       computer: z
         .object({
-          name: primitives.string.trim().min(1).max(200),
+          name: z.string().trim().min(1).max(200),
           /** The machine's id as agents address it (e.g. to switch to it). */
-          sandboxId: primitives.string.trim().min(1).max(200).optional(),
+          sandboxId: z.string().trim().min(1).max(200).optional(),
         })
         .strict()
         .optional(),
@@ -83,8 +82,8 @@ export const AppShotCapture = /* @__PURE__ */ defineSchema(() =>
               z
                 .object({
                   /** The attached browser's device id, as browser tools address it. */
-                  deviceId: primitives.uuid,
-                  name: primitives.string.trim().min(1).max(200),
+                  deviceId: z.string().uuid(),
+                  name: z.string().trim().min(1).max(200),
                 })
                 .strict(),
             )

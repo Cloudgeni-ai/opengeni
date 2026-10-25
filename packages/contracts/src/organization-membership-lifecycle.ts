@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { Permission } from "./permissions";
@@ -30,33 +29,33 @@ export type OrganizationUserSetupDeliveryState = z.infer<typeof OrganizationUser
 
 export const OrganizationUserSetupDelivery = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
+    id: z.string().uuid(),
     state: OrganizationUserSetupDeliveryState,
-    attemptCount: primitives.nonnegativeInteger,
-    revision: primitives.positiveInteger,
+    attemptCount: z.number().int().nonnegative(),
+    revision: z.number().int().positive(),
     errorClass: z.string().min(1).max(64).nullable(),
     retryState: z.enum(["available", "reconciliation_required", "unavailable"]),
-    sentAt: primitives.string.datetime({ offset: true }).nullable(),
-    updatedAt: primitives.string.datetime({ offset: true }),
+    sentAt: z.string().datetime({ offset: true }).nullable(),
+    updatedAt: z.string().datetime({ offset: true }),
   }),
 );
 export type OrganizationUserSetupDelivery = z.infer<typeof OrganizationUserSetupDelivery>;
 
 export const OrganizationInvitation = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    organizationId: primitives.uuid,
-    organizationName: primitives.string.trim().min(1).max(120).nullable().default(null),
+    id: z.string().uuid(),
+    organizationId: z.string().uuid(),
+    organizationName: z.string().trim().min(1).max(120).nullable().default(null),
     targetEmail: z.string().email(),
-    targetName: primitives.string.trim().min(1).max(120).nullable().default(null),
-    initialWorkspaceIds: z.array(primitives.uuid).max(100).default([]),
+    targetName: z.string().trim().min(1).max(120).nullable().default(null),
+    initialWorkspaceIds: z.array(z.string().uuid()).max(100).default([]),
     role: OrganizationMembershipRole,
     status: OrganizationInvitationStatus,
-    revision: primitives.positiveInteger,
-    expiresAt: primitives.string.datetime({ offset: true }),
-    acceptedMembershipId: primitives.nullableUuid,
-    createdAt: primitives.string.datetime({ offset: true }),
-    updatedAt: primitives.string.datetime({ offset: true }),
+    revision: z.number().int().positive(),
+    expiresAt: z.string().datetime({ offset: true }),
+    acceptedMembershipId: z.string().uuid().nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
     delivery: OrganizationUserSetupDelivery.nullable().default(null),
   }),
 );
@@ -64,30 +63,30 @@ export type OrganizationInvitation = z.infer<typeof OrganizationInvitation>;
 
 export const OrganizationMember = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    organizationId: primitives.uuid,
+    id: z.string().uuid(),
+    organizationId: z.string().uuid(),
     subjectId: z.string().min(1).max(1024),
     name: z.string().min(1).max(1024).nullable().default(null),
     email: z.string().email().max(320).nullable().default(null),
     role: OrganizationMembershipRole,
     status: z.enum(["provisioning", "active", "suspended", "revoked"]),
-    authorizationRevision: primitives.positiveInteger,
-    personalWorkspaceId: primitives.nullableUuid,
-    revokedAt: primitives.string.datetime({ offset: true }).nullable(),
-    personalRetentionUntil: primitives.string.datetime({ offset: true }).nullable(),
-    createdAt: primitives.string.datetime({ offset: true }),
-    updatedAt: primitives.string.datetime({ offset: true }),
+    authorizationRevision: z.number().int().positive(),
+    personalWorkspaceId: z.string().uuid().nullable(),
+    revokedAt: z.string().datetime({ offset: true }).nullable(),
+    personalRetentionUntil: z.string().datetime({ offset: true }).nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
   }),
 );
 export type OrganizationMember = z.infer<typeof OrganizationMember>;
 
 export const OrganizationAdministrationMemberWorkspaceAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    workspaceId: primitives.uuid,
+    workspaceId: z.string().uuid(),
     workspaceName: z.string().min(1).max(255),
-    membershipId: primitives.uuid,
+    membershipId: z.string().uuid(),
     role: WorkspaceMemberRole,
-    updatedAt: primitives.string.datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
   }),
 );
 export type OrganizationAdministrationMemberWorkspaceAccess = z.infer<
@@ -97,40 +96,40 @@ export type OrganizationAdministrationMemberWorkspaceAccess = z.infer<
 /** Safe admin projection. Personal-workspace and personal-resource metadata are absent. */
 export const OrganizationAdministrationMember = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    organizationId: primitives.uuid,
+    id: z.string().uuid(),
+    organizationId: z.string().uuid(),
     subjectId: z.string().min(1).max(1024),
     name: z.string().min(1).max(1024).nullable(),
     email: z.string().email().max(320).nullable(),
     role: OrganizationMembershipRole,
     status: z.enum(["provisioning", "active", "suspended", "revoked"]),
-    authorizationRevision: primitives.positiveInteger,
+    authorizationRevision: z.number().int().positive(),
     sharedWorkspaceAccess: z.array(OrganizationAdministrationMemberWorkspaceAccess).max(500),
-    revokedAt: primitives.string.datetime({ offset: true }).nullable(),
-    createdAt: primitives.string.datetime({ offset: true }),
-    updatedAt: primitives.string.datetime({ offset: true }),
+    revokedAt: z.string().datetime({ offset: true }).nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
   }),
 );
 export type OrganizationAdministrationMember = z.infer<typeof OrganizationAdministrationMember>;
 
 export const OrganizationSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    name: primitives.string.trim().min(1).max(120),
-    createdAt: primitives.string.datetime({ offset: true }),
-    updatedAt: primitives.string.datetime({ offset: true }),
+    id: z.string().uuid(),
+    name: z.string().trim().min(1).max(120),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
   }),
 );
 export type OrganizationSummary = z.infer<typeof OrganizationSummary>;
 
 export const OrganizationPrivateSessionSettings = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    organizationId: primitives.uuid,
-    enabled: primitives.boolean,
-    available: primitives.boolean,
-    version: primitives.nonnegativeInteger,
-    updatedAt: primitives.string.datetime({ offset: true }),
-    changed: primitives.optionalBoolean,
+    organizationId: z.string().uuid(),
+    enabled: z.boolean(),
+    available: z.boolean(),
+    version: z.number().int().nonnegative(),
+    updatedAt: z.string().datetime({ offset: true }),
+    changed: z.boolean().optional(),
   }),
 );
 export type OrganizationPrivateSessionSettings = z.infer<typeof OrganizationPrivateSessionSettings>;
@@ -138,9 +137,9 @@ export type OrganizationPrivateSessionSettings = z.infer<typeof OrganizationPriv
 export const UpdateOrganizationPrivateSessionSettingsRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      enabled: primitives.boolean,
-      expectedVersion: primitives.nonnegativeInteger,
-      operationId: primitives.uuid,
+      enabled: z.boolean(),
+      expectedVersion: z.number().int().nonnegative(),
+      operationId: z.string().uuid(),
     })
     .strict(),
 );
@@ -155,22 +154,22 @@ export type UpdateOrganizationPrivateSessionSettingsRequest = z.infer<
  */
 export const OrganizationPrivacySettings = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    organizationId: primitives.uuid,
+    organizationId: z.string().uuid(),
     /** Who can see new chats and schedules unless the person picks otherwise. */
     defaultVisibility: z.enum(["private", "workspace"]),
     /** Whether people have their own Personal workspace to see and work in. */
     personalWorkspaces: z.boolean(),
     /** Whether admins see that other people's Only me schedules exist, and can pause them. */
-    adminsSeePrivateSchedules: primitives.boolean,
+    adminsSeePrivateSchedules: z.boolean(),
     limits: z.object({
       /** False when this deployment turns Only me off in shared workspaces. */
-      onlyMeAllowed: primitives.boolean,
+      onlyMeAllowed: z.boolean(),
       /** True when new chats and schedules always start as Workspace. */
-      defaultVisibilityLocked: primitives.boolean,
+      defaultVisibilityLocked: z.boolean(),
       /** True when admins always see that other people's Only me schedules exist. */
-      adminsSeePrivateSchedulesLocked: primitives.boolean,
+      adminsSeePrivateSchedulesLocked: z.boolean(),
     }),
-    updatedAt: primitives.string.datetime({ offset: true }).nullable(),
+    updatedAt: z.string().datetime({ offset: true }).nullable(),
   }),
 );
 export type OrganizationPrivacySettings = z.infer<typeof OrganizationPrivacySettings>;
@@ -179,7 +178,7 @@ export const UpdateOrganizationPrivacySettingsRequest = /* @__PURE__ */ defineSc
   z
     .object({
       defaultVisibility: z.enum(["private", "workspace"]).optional(),
-      adminsSeePrivateSchedules: primitives.optionalBoolean,
+      adminsSeePrivateSchedules: z.boolean().optional(),
       personalWorkspaces: z.boolean().optional(),
     })
     .strict()
@@ -197,8 +196,8 @@ export type UpdateOrganizationPrivacySettingsRequest = z.infer<
 
 export const OrganizationWorkspaceAccessMember = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    membershipId: primitives.uuid,
-    organizationMembershipId: primitives.nullableUuid,
+    membershipId: z.string().uuid(),
+    organizationMembershipId: z.string().uuid().nullable(),
     subjectId: z.string().min(1).max(1024),
     name: z.string().min(1).max(1024).nullable(),
     email: z.string().email().max(320).nullable(),
@@ -207,19 +206,19 @@ export const OrganizationWorkspaceAccessMember = /* @__PURE__ */ defineSchema(()
     organizationRole: OrganizationMembershipRole.nullable(),
     role: WorkspaceMemberRole,
     permissions: z.array(z.string().min(1).max(128)),
-    createdAt: primitives.string.datetime({ offset: true }),
-    updatedAt: primitives.string.datetime({ offset: true }),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
   }),
 );
 export type OrganizationWorkspaceAccessMember = z.infer<typeof OrganizationWorkspaceAccessMember>;
 
 export const OrganizationWorkspaceAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    name: primitives.nonEmptyString,
-    slug: primitives.nullableString,
-    createdAt: primitives.string.datetime({ offset: true }),
-    updatedAt: primitives.string.datetime({ offset: true }),
+    id: z.string().uuid(),
+    name: z.string().min(1),
+    slug: z.string().nullable(),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
     members: z.array(OrganizationWorkspaceAccessMember).max(1000),
   }),
 );
@@ -249,8 +248,8 @@ export type OrganizationAdministrationOverview = z.infer<typeof OrganizationAdmi
 export const CreateOrganizationWorkspaceRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      name: primitives.string.trim().min(1).max(120),
-      operationId: primitives.uuid,
+      name: z.string().trim().min(1).max(120),
+      operationId: z.string().uuid(),
     })
     .strict(),
 );
@@ -259,9 +258,9 @@ export type CreateOrganizationWorkspaceRequest = z.infer<typeof CreateOrganizati
 export const UpdateOrganizationWorkspaceRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      name: primitives.string.trim().min(1).max(120),
-      expectedUpdatedAt: primitives.string.datetime({ offset: true }),
-      operationId: primitives.uuid,
+      name: z.string().trim().min(1).max(120),
+      expectedUpdatedAt: z.string().datetime({ offset: true }),
+      operationId: z.string().uuid(),
     })
     .strict(),
 );
@@ -272,16 +271,16 @@ export const PutOrganizationWorkspaceMemberRequest = /* @__PURE__ */ defineSchem
     z
       .object({
         role: AssignableWorkspaceMemberRole,
-        expectedUpdatedAt: primitives.string.datetime({ offset: true }).nullable(),
-        operationId: primitives.uuid,
+        expectedUpdatedAt: z.string().datetime({ offset: true }).nullable(),
+        operationId: z.string().uuid(),
       })
       .strict(),
     z
       .object({
         role: z.literal("custom"),
         permissions: z.array(Permission).max(128),
-        expectedUpdatedAt: primitives.string.datetime({ offset: true }).nullable(),
-        operationId: primitives.uuid,
+        expectedUpdatedAt: z.string().datetime({ offset: true }).nullable(),
+        operationId: z.string().uuid(),
       })
       .strict(),
   ]),
@@ -293,8 +292,8 @@ export type PutOrganizationWorkspaceMemberRequest = z.infer<
 export const RevokeOrganizationWorkspaceMemberRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      expectedUpdatedAt: primitives.string.datetime({ offset: true }),
-      operationId: primitives.uuid,
+      expectedUpdatedAt: z.string().datetime({ offset: true }),
+      operationId: z.string().uuid(),
     })
     .strict(),
 );
@@ -305,8 +304,8 @@ export type RevokeOrganizationWorkspaceMemberRequest = z.infer<
 export const RevokeOrganizationWorkspaceMemberResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      removed: primitives.boolean,
-      replay: primitives.boolean,
+      removed: z.boolean(),
+      replay: z.boolean(),
     })
     .strict(),
 );
@@ -316,8 +315,8 @@ export type RevokeOrganizationWorkspaceMemberResponse = z.infer<
 
 export const CreateOrganizationRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    name: primitives.string.trim().min(1).max(120),
-    operationId: primitives.uuid,
+    name: z.string().trim().min(1).max(120),
+    operationId: z.string().uuid(),
   }),
 );
 export type CreateOrganizationRequest = z.infer<typeof CreateOrganizationRequest>;
@@ -325,7 +324,7 @@ export type CreateOrganizationRequest = z.infer<typeof CreateOrganizationRequest
 export const CreateOrganizationResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     organization: OrganizationSummary,
-    workspaceId: primitives.uuid,
+    workspaceId: z.string().uuid(),
   }),
 );
 export type CreateOrganizationResponse = z.infer<typeof CreateOrganizationResponse>;
@@ -333,9 +332,9 @@ export type CreateOrganizationResponse = z.infer<typeof CreateOrganizationRespon
 export const CreateAdditionalOrganizationRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      name: primitives.string.trim().min(1).max(120),
-      workspaceName: primitives.string.trim().min(1).max(120),
-      operationId: primitives.uuid,
+      name: z.string().trim().min(1).max(120),
+      workspaceName: z.string().trim().min(1).max(120),
+      operationId: z.string().uuid(),
     })
     .strict(),
 );
@@ -346,8 +345,8 @@ export type CreateAdditionalOrganizationRequest = z.infer<
 export const CreateAdditionalOrganizationResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     organization: OrganizationSummary,
-    workspaceId: primitives.uuid,
-    personalWorkspaceId: primitives.uuid,
+    workspaceId: z.string().uuid(),
+    personalWorkspaceId: z.string().uuid(),
   }),
 );
 export type CreateAdditionalOrganizationResponse = z.infer<
@@ -356,9 +355,9 @@ export type CreateAdditionalOrganizationResponse = z.infer<
 
 export const UpdateOrganizationNameRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    name: primitives.string.trim().min(1).max(120),
-    expectedUpdatedAt: primitives.string.datetime({ offset: true }),
-    operationId: primitives.uuid,
+    name: z.string().trim().min(1).max(120),
+    expectedUpdatedAt: z.string().datetime({ offset: true }),
+    operationId: z.string().uuid(),
   }),
 );
 export type UpdateOrganizationNameRequest = z.infer<typeof UpdateOrganizationNameRequest>;
@@ -366,11 +365,11 @@ export type UpdateOrganizationNameRequest = z.infer<typeof UpdateOrganizationNam
 export const OrganizationRetentionPolicy = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      organizationId: primitives.uuid,
+      organizationId: z.string().uuid(),
       mode: z.enum(["retain", "delete_after"]),
       retentionDays: z.number().int().min(30).max(90).nullable(),
-      version: primitives.positiveInteger,
-      updatedAt: primitives.string.datetime({ offset: true }),
+      version: z.number().int().positive(),
+      updatedAt: z.string().datetime({ offset: true }),
     })
     .superRefine((value, context) => {
       if ((value.mode === "retain") !== (value.retentionDays === null)) {
@@ -386,14 +385,14 @@ export type OrganizationRetentionPolicy = z.infer<typeof OrganizationRetentionPo
 
 export const OrganizationRetentionDeletionClaim = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    organizationId: primitives.uuid,
-    membershipId: primitives.uuid,
-    operationId: primitives.uuid,
-    retentionUntil: primitives.string.datetime({ offset: true }),
-    claimExpiresAt: primitives.string.datetime({ offset: true }),
-    personalWorkspaceId: primitives.nullableUuid,
-    objectCount: primitives.nonnegativeInteger,
-    deletedObjectCount: primitives.nonnegativeInteger,
+    organizationId: z.string().uuid(),
+    membershipId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    retentionUntil: z.string().datetime({ offset: true }),
+    claimExpiresAt: z.string().datetime({ offset: true }),
+    personalWorkspaceId: z.string().uuid().nullable(),
+    objectCount: z.number().int().nonnegative(),
+    deletedObjectCount: z.number().int().nonnegative(),
   }),
 );
 export type OrganizationRetentionDeletionClaim = z.infer<typeof OrganizationRetentionDeletionClaim>;
@@ -424,14 +423,14 @@ export type OrganizationRetentionDeletionObject = z.infer<
 
 export const OrganizationRetentionDatabaseFinalization = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    organizationId: primitives.uuid,
-    membershipId: primitives.uuid,
-    operationId: primitives.uuid,
+    organizationId: z.string().uuid(),
+    membershipId: z.string().uuid(),
+    operationId: z.string().uuid(),
     outcome: z.literal("cleanup_pending"),
     objectBucket: z.string().min(1).max(1024),
-    objectCount: primitives.nonnegativeInteger,
-    deletedResources: z.record(primitives.string, primitives.nonnegativeInteger),
-    databaseFinalizedAt: primitives.string.datetime({ offset: true }),
+    objectCount: z.number().int().nonnegative(),
+    deletedResources: z.record(z.string(), z.number().int().nonnegative()),
+    databaseFinalizedAt: z.string().datetime({ offset: true }),
   }),
 );
 export type OrganizationRetentionDatabaseFinalization = z.infer<
@@ -440,12 +439,12 @@ export type OrganizationRetentionDatabaseFinalization = z.infer<
 
 export const OrganizationRetentionDeletionResult = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    organizationId: primitives.uuid,
-    membershipId: primitives.uuid,
-    operationId: primitives.uuid,
+    organizationId: z.string().uuid(),
+    membershipId: z.string().uuid(),
+    operationId: z.string().uuid(),
     outcome: z.enum(["completed", "already_completed"]),
-    deletedResources: z.record(primitives.string, primitives.nonnegativeInteger),
-    completedAt: primitives.string.datetime({ offset: true }),
+    deletedResources: z.record(z.string(), z.number().int().nonnegative()),
+    completedAt: z.string().datetime({ offset: true }),
   }),
 );
 export type OrganizationRetentionDeletionResult = z.infer<
@@ -454,11 +453,11 @@ export type OrganizationRetentionDeletionResult = z.infer<
 
 export const OrganizationRetentionDeletionPreview = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    membershipId: primitives.uuid,
-    retentionUntil: primitives.string.datetime({ offset: true }),
-    personalWorkspaceId: primitives.nullableUuid,
-    resourceCount: primitives.nonnegativeInteger,
-    objectCount: primitives.nonnegativeInteger,
+    membershipId: z.string().uuid(),
+    retentionUntil: z.string().datetime({ offset: true }),
+    personalWorkspaceId: z.string().uuid().nullable(),
+    resourceCount: z.number().int().nonnegative(),
+    objectCount: z.number().int().nonnegative(),
   }),
 );
 export type OrganizationRetentionDeletionPreview = z.infer<
@@ -468,11 +467,11 @@ export type OrganizationRetentionDeletionPreview = z.infer<
 export const CreateOrganizationInvitationRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     email: z.string().email().max(320),
-    name: primitives.string.trim().min(1).max(120).optional(),
-    initialWorkspaceIds: z.array(primitives.uuid).max(100).default([]),
+    name: z.string().trim().min(1).max(120).optional(),
+    initialWorkspaceIds: z.array(z.string().uuid()).max(100).default([]),
     role: OrganizationMembershipRole.default("member"),
-    expiresAt: primitives.string.datetime({ offset: true }),
-    operationId: primitives.uuid,
+    expiresAt: z.string().datetime({ offset: true }),
+    operationId: z.string().uuid(),
   }),
 );
 export type CreateOrganizationInvitationRequest = z.infer<
@@ -488,9 +487,9 @@ export type CreateOrganizationInvitationRequest = z.infer<
 export const CompleteOrganizationUserSetupRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     token: z.string().min(32).max(2048),
-    name: primitives.string.trim().min(1).max(120),
+    name: z.string().trim().min(1).max(120),
     password: z.string().min(8).max(128),
-    operationId: primitives.uuid,
+    operationId: z.string().uuid(),
   }),
 );
 export type CompleteOrganizationUserSetupRequest = z.infer<
@@ -515,7 +514,7 @@ export type PreviewOrganizationUserSetupRequest = z.infer<
 
 export const OrganizationUserSetupPreviewWorkspace = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    workspaceId: primitives.uuid,
+    workspaceId: z.string().uuid(),
     workspaceName: z.string().min(1).max(255),
     role: AssignableWorkspaceMemberRole,
   }),
@@ -532,13 +531,13 @@ const OrganizationUserSetupPreviewUnavailable = /* @__PURE__ */ defineSchema(() 
 const OrganizationUserSetupPreviewPending = /* @__PURE__ */ defineSchema(() =>
   z.object({
     state: z.literal("pending"),
-    organizationId: primitives.uuid,
-    organizationName: primitives.string.trim().min(1).max(120),
+    organizationId: z.string().uuid(),
+    organizationName: z.string().trim().min(1).max(120),
     targetEmail: z.string().email().max(320),
-    targetName: primitives.string.trim().min(1).max(120).nullable(),
+    targetName: z.string().trim().min(1).max(120).nullable(),
     organizationRole: OrganizationMembershipRole,
     sharedWorkspaceAccess: z.array(OrganizationUserSetupPreviewWorkspace).max(100),
-    expiresAt: primitives.string.datetime({ offset: true }),
+    expiresAt: z.string().datetime({ offset: true }),
   }),
 );
 export const OrganizationUserSetupPreview = /* @__PURE__ */ defineSchema(() =>
@@ -550,7 +549,7 @@ export const OrganizationUserSetupPreview = /* @__PURE__ */ defineSchema(() =>
 export type OrganizationUserSetupPreview = z.infer<typeof OrganizationUserSetupPreview>;
 
 export const RetryOrganizationUserSetupDeliveryRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ operationId: primitives.uuid }).strict(),
+  z.object({ operationId: z.string().uuid() }).strict(),
 );
 export type RetryOrganizationUserSetupDeliveryRequest = z.infer<
   typeof RetryOrganizationUserSetupDeliveryRequest
@@ -559,8 +558,8 @@ export type RetryOrganizationUserSetupDeliveryRequest = z.infer<
 /** Authenticated organization-name-only setup after ordinary account creation. */
 export const CompleteSelfServiceOrganizationSetupRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    organizationName: primitives.string.trim().min(1).max(120),
-    operationId: primitives.uuid,
+    organizationName: z.string().trim().min(1).max(120),
+    operationId: z.string().uuid(),
     /**
      * The signup answer to "How do you want to use Opengeni?": add AI agents to
      * a product (`embed`) or run agents in the cloud (`cloud`). Stored once per
@@ -576,8 +575,8 @@ export type CompleteSelfServiceOrganizationSetupRequest = z.infer<
 export const CompleteSelfServiceOrganizationSetupResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     status: z.literal("complete"),
-    organizationId: primitives.uuid,
-    personalWorkspaceId: primitives.uuid,
+    organizationId: z.string().uuid(),
+    personalWorkspaceId: z.string().uuid(),
   }),
 );
 export type CompleteSelfServiceOrganizationSetupResponse = z.infer<
@@ -595,8 +594,8 @@ export type SelfServiceOrganizationOnboardingStatus = z.infer<
 
 export const AcceptOrganizationInvitationRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    expectedRevision: primitives.positiveInteger,
-    operationId: primitives.uuid,
+    expectedRevision: z.number().int().positive(),
+    operationId: z.string().uuid(),
   }),
 );
 export type AcceptOrganizationInvitationRequest = z.infer<
@@ -618,9 +617,9 @@ export const UpdateOrganizationMemberRequest = /* @__PURE__ */ defineSchema(() =
     .object({
       kind: OrganizationMemberTransitionKind,
       role: OrganizationMembershipRole.optional(),
-      expectedAuthorizationRevision: primitives.positiveInteger,
-      operationId: primitives.uuid,
-      reason: primitives.string.trim().min(1).max(512).optional(),
+      expectedAuthorizationRevision: z.number().int().positive(),
+      operationId: z.string().uuid(),
+      reason: z.string().trim().min(1).max(512).optional(),
     })
     .superRefine((value, context) => {
       if ((value.kind === "change_role") !== (value.role !== undefined)) {
@@ -639,8 +638,8 @@ export const UpdateOrganizationRetentionPolicyRequest = /* @__PURE__ */ defineSc
     .object({
       mode: z.enum(["retain", "delete_after"]),
       retentionDays: z.number().int().min(30).max(90).nullable(),
-      expectedVersion: primitives.positiveInteger,
-      operationId: primitives.uuid,
+      expectedVersion: z.number().int().positive(),
+      operationId: z.string().uuid(),
     })
     .superRefine((value, context) => {
       if ((value.mode === "retain") !== (value.retentionDays === null)) {
@@ -663,7 +662,7 @@ export const ListOrganizationInvitationsResponse = /* @__PURE__ */ defineSchema(
 );
 export const ListOrganizationInvitationsPageQuery = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    cursor: primitives.optionalUuid,
+    cursor: z.string().uuid().optional(),
     limit: z.coerce.number().int().min(1).max(100).default(50),
   }),
 );
@@ -673,7 +672,7 @@ export type ListOrganizationInvitationsPageQuery = z.infer<
 export const ListOrganizationInvitationsPageResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     invitations: z.array(OrganizationInvitation).max(100),
-    nextCursor: primitives.nullableUuid,
+    nextCursor: z.string().uuid().nullable(),
   }),
 );
 export type ListOrganizationInvitationsPageResponse = z.infer<

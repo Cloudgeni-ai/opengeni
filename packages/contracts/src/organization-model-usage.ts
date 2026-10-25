@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 // Server-parsed only; kept off the root contracts index so browser bundles that
 // import the root never carry these schemas.
@@ -6,7 +5,7 @@ import { z } from "zod";
 
 import { OrganizationUsagePeriod, OrganizationUsageQuery } from "./organization-usage";
 
-const BigIntString = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^\d+$/));
+const BigIntString = /* @__PURE__ */ defineSchema(() => z.string().regex(/^\d+$/));
 const OrganizationModelUsageBillingPath = /* @__PURE__ */ defineSchema(() =>
   z.enum(["opengeni_credits", "external"]),
 );
@@ -33,16 +32,16 @@ export type OrganizationModelUsageTotals = z.infer<typeof OrganizationModelUsage
 
 export const OrganizationModelUsageQuery = /* @__PURE__ */ defineSchema(() =>
   OrganizationUsageQuery.extend({
-    afterWorkspaceId: primitives.optionalUuid,
+    afterWorkspaceId: z.string().uuid().optional(),
   }),
 );
 
 export const OrganizationModelUsage = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    accountId: primitives.uuid,
+    accountId: z.string().uuid(),
     period: OrganizationUsagePeriod,
-    since: primitives.dateTime,
-    until: primitives.dateTime,
+    since: z.string().datetime(),
+    until: z.string().datetime(),
     billing: z.array(OrganizationModelUsageTotals).max(2),
     /** Exact uncapped per-fact payer split; independent of the top-model list. */
     payers: z
@@ -55,18 +54,18 @@ export const OrganizationModelUsage = /* @__PURE__ */ defineSchema(() =>
     models: z
       .array(
         z.object({
-          provider: primitives.string,
-          model: primitives.string,
+          provider: z.string(),
+          model: z.string(),
           totals: OrganizationModelUsageTotals,
         }),
       )
       .max(50),
-    modelsTruncated: primitives.boolean,
+    modelsTruncated: z.boolean(),
     workspaces: z
       .array(
         z.object({
-          workspaceId: primitives.uuid,
-          name: primitives.nullableString,
+          workspaceId: z.string().uuid(),
+          name: z.string().nullable(),
           billing: z.array(OrganizationModelUsageTotals).max(2),
         }),
       )
@@ -76,7 +75,7 @@ export const OrganizationModelUsage = /* @__PURE__ */ defineSchema(() =>
       workspacesWithUsage: BigIntString,
       billing: z.array(OrganizationModelUsageTotals).max(2),
     }),
-    nextWorkspaceCursor: primitives.nullableUuid,
+    nextWorkspaceCursor: z.string().uuid().nullable(),
   }),
 );
 export type OrganizationModelUsage = z.infer<typeof OrganizationModelUsage>;

@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -13,7 +12,7 @@ const RedirectUri = /* @__PURE__ */ defineSchema(() => z.string().url().max(2_04
 export const McpOAuthClientRegistrationRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     redirect_uris: z.array(RedirectUri).min(1).max(16),
-    client_name: primitives.string.trim().min(1).max(200).optional(),
+    client_name: z.string().trim().min(1).max(200).optional(),
     application_type: z.enum(["native", "web"]).optional(),
     token_endpoint_auth_method: z.literal("none").default("none"),
     scope: z.literal(MCP_OAUTH_SCOPE).optional(),
@@ -33,16 +32,16 @@ export type McpOAuthClientRegistrationRequest = z.infer<typeof McpOAuthClientReg
 export const McpOAuthClientRegistrationResponse = /* @__PURE__ */ defineSchema(() =>
   McpOAuthClientRegistrationRequest.extend({
     client_id: z.string().min(1).max(256),
-    client_id_issued_at: primitives.nonnegativeInteger,
+    client_id_issued_at: z.number().int().nonnegative(),
   }),
 );
 export type McpOAuthClientRegistrationResponse = z.infer<typeof McpOAuthClientRegistrationResponse>;
 
 export const McpOAuthTokenResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    access_token: primitives.nonEmptyString,
+    access_token: z.string().min(1),
     token_type: z.literal("Bearer"),
-    expires_in: primitives.positiveInteger,
+    expires_in: z.number().int().positive(),
     refresh_token: z.string().min(1).optional(),
     scope: z.literal(MCP_OAUTH_SCOPE),
   }),

@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -16,7 +15,8 @@ export const MCP_MUTATION_RECEIPT_MAX_BYTES = 64 * 1024;
 const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).byteLength;
 
 function boundedUtf8String(maxBytes: number, minLength = 0) {
-  return primitives.string
+  return z
+    .string()
     .min(minLength)
     .max(maxBytes)
     .superRefine((value, context) => {
@@ -56,7 +56,7 @@ export const McpMutationResource = /* @__PURE__ */ defineSchema(() =>
     .object({
       type: boundedUtf8String(128, 1),
       id: boundedUtf8String(256, 1),
-      version: z.union([primitives.nonnegativeInteger, boundedUtf8String(128, 1)]).optional(),
+      version: z.union([z.number().int().nonnegative(), boundedUtf8String(128, 1)]).optional(),
       etag: boundedUtf8String(512, 1).optional(),
       state: boundedUtf8String(128, 1).optional(),
     })
@@ -65,7 +65,7 @@ export const McpMutationResource = /* @__PURE__ */ defineSchema(() =>
 export type McpMutationResource = z.infer<typeof McpMutationResource>;
 
 const McpMutationReceiptFact = /* @__PURE__ */ defineSchema(() =>
-  z.union([boundedUtf8String(512), z.number().finite(), primitives.boolean, z.null()]),
+  z.union([boundedUtf8String(512), z.number().finite(), z.boolean(), z.null()]),
 );
 
 const McpMutationReceiptFacts = /* @__PURE__ */ defineSchema(() =>
@@ -100,10 +100,10 @@ export const McpMutationReceipt = /* @__PURE__ */ defineSchema(() =>
       // committed=false results.
       committed: z.literal(true),
       outcome: McpMutationReceiptOutcome,
-      changed: primitives.boolean,
+      changed: z.boolean(),
       resource: McpMutationResource,
       relatedResources: z.array(McpMutationResource).max(8).optional(),
-      timestamp: primitives.string.datetime({ offset: true }),
+      timestamp: z.string().datetime({ offset: true }),
       idempotency: z
         .object({
           status: McpMutationReceiptIdempotencyStatus,
@@ -112,7 +112,7 @@ export const McpMutationReceipt = /* @__PURE__ */ defineSchema(() =>
       partialFailure: z
         .object({
           stage: boundedUtf8String(128, 1),
-          retryable: primitives.boolean,
+          retryable: z.boolean(),
         })
         .strict()
         .optional(),

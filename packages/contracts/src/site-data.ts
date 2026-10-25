@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -26,7 +25,8 @@ export const SiteDataGuestAccess = /* @__PURE__ */ defineSchema(() =>
 );
 export type SiteDataGuestAccess = z.infer<typeof SiteDataGuestAccess>;
 
-const CollectionName = primitives.string
+const CollectionName = z
+  .string()
   .regex(/^[A-Za-z][A-Za-z0-9_-]{0,63}$/)
   .describe("Collection name: a letter, then letters, digits, - or _ (up to 64).");
 const FieldPath = z
@@ -37,9 +37,9 @@ const FieldPath = z
     "A data field as a dotted path (up to 4 levels), or a system field: $id, $key, $owner, $createdAt, $updatedAt, $version.",
   );
 const RecordKey = z.string().min(1).max(256).describe("Your own stable record key.");
-const Scalar = z.union([z.string().max(1024), z.number(), primitives.boolean, z.null()]);
+const Scalar = z.union([z.string().max(1024), z.number(), z.boolean(), z.null()]);
 const RecordData = z
-  .record(primitives.string, z.unknown())
+  .record(z.string(), z.unknown())
   .describe("The record's JSON object (at most 256 KB by default).");
 
 export const SiteDataFilter = /* @__PURE__ */ defineSchema(() =>
@@ -77,7 +77,7 @@ export const SiteDataQueryRequest = /* @__PURE__ */ defineSchema(() =>
       .describe("Up to two sort keys. Defaults to newest first."),
     limit: z.number().int().min(1).max(200).optional().describe("Page size, 50 by default."),
     cursor: z.string().max(4096).nullable().optional().describe("nextCursor from the last page."),
-    count: primitives.optionalBoolean.describe("Also return the total number of matches."),
+    count: z.boolean().optional().describe("Also return the total number of matches."),
     scope: z
       .enum(["own", "all"])
       .optional()
@@ -90,7 +90,7 @@ export const SiteDataGetRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       collection: CollectionName,
-      id: primitives.optionalUuid.describe("Record id."),
+      id: z.string().uuid().optional().describe("Record id."),
       key: RecordKey.optional(),
     })
     .refine((value) => (value.id === undefined) !== (value.key === undefined), {
@@ -100,7 +100,7 @@ export const SiteDataGetRequest = /* @__PURE__ */ defineSchema(() =>
 export type SiteDataGetRequest = z.infer<typeof SiteDataGetRequest>;
 
 const RecordRef = {
-  id: primitives.optionalUuid.describe("Record id; give id or key."),
+  id: z.string().uuid().optional().describe("Record id; give id or key."),
   key: RecordKey.optional(),
 };
 const ExpectedVersion = z
@@ -163,14 +163,15 @@ export type SiteDataWriteRequest = z.infer<typeof SiteDataWriteRequest>;
 export const SiteDataCollectionDefinitionRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     accessMode: SiteDataAccessMode,
-    privateRecords: primitives.optionalBoolean.describe(
-      "per_viewer only: keep records private even from the Site's managers.",
-    ),
+    privateRecords: z
+      .boolean()
+      .optional()
+      .describe("per_viewer only: keep records private even from the Site's managers."),
     guestAccess: SiteDataGuestAccess.optional().describe(
       "Anonymous guests of a public published Site; omitted keeps the current rule (none for a new collection).",
     ),
     jsonSchema: z
-      .record(primitives.string, z.unknown())
+      .record(z.string(), z.unknown())
       .nullable()
       .optional()
       .describe("Optional JSON Schema every written record must match."),
@@ -209,7 +210,8 @@ export const SiteDataImportRequest = /* @__PURE__ */ defineSchema(() =>
         .max(1000)
         .optional()
         .describe("JSON format: the records to import."),
-      csv: primitives.string
+      csv: z
+        .string()
         .max(2 * 1024 * 1024)
         .optional()
         .describe("CSV format: a header row, then one record per row. Values import as text."),

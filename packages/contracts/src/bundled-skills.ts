@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -107,7 +106,7 @@ export function withBundledSkillSelectionMetadata(
  * stored selection and never turns it back into defaults. Input stays strict,
  * and a value that is not a list of id strings still fails.
  */
-const StoredBundledSkillSelection = /* @__PURE__ */ defineSchema(() => z.array(primitives.string));
+const StoredBundledSkillSelection = /* @__PURE__ */ defineSchema(() => z.array(z.string()));
 const knownBundledSkillIds: ReadonlySet<string> = new Set(CURRENT_BUNDLED_SKILL_IDS);
 /**
  * Exact stored selection for keyed create replay identity. Unlike the

@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -13,20 +12,23 @@ export const TASK_NOTE_LIST_RESPONSE_MAX_BYTES = 96 * 1_024;
 const utf8Bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
 
 export function boundedTaskNoteText(maxBytes: number, label: string) {
-  return primitives.nonEmptyString.superRefine((value, ctx) => {
-    if (value !== value.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must not have leading or trailing whitespace`,
-      });
-    }
-    if (utf8Bytes(value) > maxBytes) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
-      });
-    }
-  });
+  return z
+    .string()
+    .min(1)
+    .superRefine((value, ctx) => {
+      if (value !== value.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${label} must not have leading or trailing whitespace`,
+        });
+      }
+      if (utf8Bytes(value) > maxBytes) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${label} must be at most ${maxBytes} UTF-8 bytes`,
+        });
+      }
+    });
 }
 
 export const TaskNoteText = boundedTaskNoteText(TASK_NOTE_TEXT_MAX_BYTES, "task note text");
@@ -48,20 +50,20 @@ export type TaskNoteActorKind = z.infer<typeof TaskNoteActorKind>;
 
 export const TaskNote = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    rootSessionId: primitives.uuid,
+    id: z.string().uuid(),
+    rootSessionId: z.string().uuid(),
     kind: TaskNoteKind,
     text: TaskNoteText,
     status: TaskNoteStatus,
-    version: primitives.positiveInteger,
-    expiresAt: primitives.string.datetime({ offset: true }),
-    createdAt: primitives.string.datetime({ offset: true }),
-    updatedAt: primitives.string.datetime({ offset: true }),
-    archivedAt: primitives.string.datetime({ offset: true }).nullable(),
+    version: z.number().int().positive(),
+    expiresAt: z.string().datetime({ offset: true }),
+    createdAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+    archivedAt: z.string().datetime({ offset: true }).nullable(),
     provenance: z.object({
       actorKind: TaskNoteActorKind,
-      sourceSessionId: primitives.uuid,
-      sourceTurnId: primitives.uuid,
+      sourceSessionId: z.string().uuid(),
+      sourceTurnId: z.string().uuid(),
     }),
   }),
 );
@@ -70,7 +72,7 @@ export type TaskNote = z.infer<typeof TaskNote>;
 export const TaskNoteMutationResult = /* @__PURE__ */ defineSchema(() =>
   z.object({
     note: TaskNote,
-    replayed: primitives.boolean,
+    replayed: z.boolean(),
   }),
 );
 export type TaskNoteMutationResult = z.infer<typeof TaskNoteMutationResult>;
@@ -78,14 +80,14 @@ export type TaskNoteMutationResult = z.infer<typeof TaskNoteMutationResult>;
 /** Atomic correction lineage: archive one exact v1 note and create one v1 replacement. */
 export const TaskNoteReplacementResult = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: primitives.uuid,
-    inputHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+    operationId: z.string().uuid(),
+    inputHash: z.string().regex(/^[0-9a-f]{64}$/),
     replaces: z.object({
-      noteId: primitives.uuid,
+      noteId: z.string().uuid(),
       archivedVersion: z.literal(2),
     }),
     replacement: TaskNote,
-    replayed: primitives.boolean,
+    replayed: z.boolean(),
   }),
 );
 export type TaskNoteReplacementResult = z.infer<typeof TaskNoteReplacementResult>;

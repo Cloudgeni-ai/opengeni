@@ -1,18 +1,15 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 const PositiveSafeInteger = /* @__PURE__ */ defineSchema(() =>
-  primitives.positiveInteger.max(Number.MAX_SAFE_INTEGER),
+  z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
 );
 /**
  * Canonical lowercase UUID, matching PostgreSQL uuid::text and the
  * session_turns CHECK, so an accepted snapshot can never silently mismatch.
  */
 const CanonicalUuid = /* @__PURE__ */ defineSchema(() =>
-  primitives.string.regex(
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
-  ),
+  z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
 );
 
 /**

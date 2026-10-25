@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -11,9 +10,9 @@ export type FeedbackSentiment = z.infer<typeof FeedbackSentiment>;
 export const CreateFeedbackRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      idempotencyKey: primitives.uuid,
-      sessionId: primitives.optionalUuid,
-      turnId: primitives.optionalUuid,
+      idempotencyKey: z.string().uuid(),
+      sessionId: z.string().uuid().optional(),
+      turnId: z.string().uuid().optional(),
       sentiment: FeedbackSentiment.optional(),
       comment: z.string().max(4000).optional(),
     })
@@ -35,19 +34,19 @@ export type CreateFeedbackRequest = z.infer<typeof CreateFeedbackRequest>;
 
 export const Feedback = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    workspaceId: primitives.uuid,
-    subjectId: primitives.string,
-    principalKind: primitives.nullableString,
-    sessionId: primitives.nullableUuid,
-    turnId: primitives.nullableUuid,
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    subjectId: z.string(),
+    principalKind: z.string().nullable(),
+    sessionId: z.string().uuid().nullable(),
+    turnId: z.string().uuid().nullable(),
     sentiment: FeedbackSentiment.nullable(),
-    comment: primitives.nullableString,
-    createdAt: primitives.dateTime,
+    comment: z.string().nullable(),
+    createdAt: z.string().datetime(),
   }),
 );
 export type Feedback = z.infer<typeof Feedback>;
 export const FeedbackSubmissionResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ feedback: Feedback, replayed: primitives.boolean }),
+  z.object({ feedback: Feedback, replayed: z.boolean() }),
 );
 export type FeedbackSubmissionResponse = z.infer<typeof FeedbackSubmissionResponse>;

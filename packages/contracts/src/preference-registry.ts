@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -60,7 +59,9 @@ export const PreferenceRegistryEventType = /* @__PURE__ */ defineSchema(() =>
 export type PreferenceRegistryEventType = z.infer<typeof PreferenceRegistryEventType>;
 
 export const PreferenceRegistryStableKey = /* @__PURE__ */ defineSchema(() =>
-  primitives.nonEmptyString
+  z
+    .string()
+    .min(1)
     .max(PREFERENCE_REGISTRY_STABLE_KEY_MAX_CHARS)
     .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/),
 );
@@ -71,25 +72,23 @@ export function normalizePreferenceRegistryStableKey(value: string): string {
 }
 
 const RequestStableKey = /* @__PURE__ */ defineSchema(() =>
-  primitives.string
-    .transform(normalizePreferenceRegistryStableKey)
-    .pipe(PreferenceRegistryStableKey),
+  z.string().transform(normalizePreferenceRegistryStableKey).pipe(PreferenceRegistryStableKey),
 );
 
-const hash = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^[0-9a-f]{64}$/));
-const boundedActor = /* @__PURE__ */ defineSchema(() => primitives.string.trim().min(1).max(1_024));
+const hash = /* @__PURE__ */ defineSchema(() => z.string().regex(/^[0-9a-f]{64}$/));
+const boundedActor = /* @__PURE__ */ defineSchema(() => z.string().trim().min(1).max(1_024));
 const boundedReason = /* @__PURE__ */ defineSchema(() =>
-  primitives.string.trim().min(1).max(PREFERENCE_REGISTRY_REASON_MAX_CHARS),
+  z.string().trim().min(1).max(PREFERENCE_REGISTRY_REASON_MAX_CHARS),
 );
 const descriptorText = /* @__PURE__ */ defineSchema(() =>
-  primitives.nonEmptyString.max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+  z.string().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
 );
 
 export const PreferenceRegistryScopeTarget = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       scope: PreferenceRegistryScope,
-      workspaceId: primitives.nullableUuid,
+      workspaceId: z.string().uuid().nullable(),
       subjectId: z.string().min(1).max(1_024).nullable(),
     })
     .superRefine((value, context) => {
@@ -125,7 +124,7 @@ export type PreferenceRegistryPrecedence = z.infer<typeof PreferenceRegistryPrec
 export const PreferenceRegistryProvenance = /* @__PURE__ */ defineSchema(() =>
   z.object({
     source: PreferenceRegistryProvenanceSource,
-    sourceId: primitives.nonEmptyString.max(PREFERENCE_REGISTRY_SOURCE_ID_MAX_CHARS).nullable(),
+    sourceId: z.string().min(1).max(PREFERENCE_REGISTRY_SOURCE_ID_MAX_CHARS).nullable(),
     trust: PreferenceRegistryTrust,
   }),
 );
@@ -144,55 +143,55 @@ export type PreferenceRegistryDescriptorProvenance = z.infer<
 
 export const PreferenceRegistryRevisionSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    preferenceId: primitives.uuid,
-    revision: primitives.positiveInteger,
+    id: z.string().uuid(),
+    preferenceId: z.string().uuid(),
+    revision: z.number().int().positive(),
     contentHash: hash,
-    title: primitives.nonEmptyString.max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+    title: z.string().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
     description: descriptorText,
     precedence: PreferenceRegistryPrecedence,
     provenance: PreferenceRegistryProvenance,
     expiresAt: z.string().datetime().nullable(),
-    correctsRevisionId: primitives.nullableUuid,
+    correctsRevisionId: z.string().uuid().nullable(),
     createdBySubjectId: boundedActor,
-    createdAt: primitives.dateTime,
+    createdAt: z.string().datetime(),
   }),
 );
 export type PreferenceRegistryRevisionSummary = z.infer<typeof PreferenceRegistryRevisionSummary>;
 
 export const PreferenceRegistryRecord = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    accountId: primitives.uuid,
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
     stableKey: PreferenceRegistryStableKey,
     target: PreferenceRegistryScopeTarget,
     status: PreferenceRegistryStatus,
-    scopeVersion: primitives.positiveInteger,
-    activationVersion: primitives.nonnegativeInteger,
+    scopeVersion: z.number().int().positive(),
+    activationVersion: z.number().int().nonnegative(),
     activeRevision: PreferenceRegistryRevisionSummary.nullable(),
-    supersededByPreferenceId: primitives.nullableUuid,
+    supersededByPreferenceId: z.string().uuid().nullable(),
     createdBySubjectId: boundedActor,
-    createdAt: primitives.dateTime,
-    updatedAt: primitives.dateTime,
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
   }),
 );
 export type PreferenceRegistryRecord = z.infer<typeof PreferenceRegistryRecord>;
 
 export const PreferenceRegistryEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    accountId: primitives.uuid,
-    preferenceId: primitives.uuid,
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    preferenceId: z.string().uuid(),
     type: PreferenceRegistryEventType,
-    version: primitives.positiveInteger,
-    oldRevisionId: primitives.nullableUuid,
-    newRevisionId: primitives.nullableUuid,
+    version: z.number().int().positive(),
+    oldRevisionId: z.string().uuid().nullable(),
+    newRevisionId: z.string().uuid().nullable(),
     oldTarget: PreferenceRegistryScopeTarget.nullable(),
     newTarget: PreferenceRegistryScopeTarget.nullable(),
-    relatedPreferenceId: primitives.nullableUuid,
+    relatedPreferenceId: z.string().uuid().nullable(),
     actorSubjectId: boundedActor,
     reason: boundedReason,
-    createdAt: primitives.dateTime,
+    createdAt: z.string().datetime(),
   }),
 );
 export type PreferenceRegistryEvent = z.infer<typeof PreferenceRegistryEvent>;
@@ -206,13 +205,13 @@ export type PreferenceRegistryActivationAuthority = z.infer<
 
 export const PreferenceRegistryDescriptor = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
+    id: z.string().uuid(),
     stableKey: PreferenceRegistryStableKey,
-    title: primitives.nonEmptyString.max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+    title: z.string().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
     description: descriptorText,
     scope: PreferenceRegistryScope,
-    activeVersion: primitives.positiveInteger,
-    revisionId: primitives.uuid,
+    activeVersion: z.number().int().positive(),
+    revisionId: z.string().uuid(),
     contentHash: hash,
     precedence: PreferenceRegistryPrecedence,
     provenance: PreferenceRegistryDescriptorProvenance,
@@ -236,19 +235,19 @@ export type PreferenceRegistryDescriptor = z.infer<typeof PreferenceRegistryDesc
 
 export const PreferenceRegistrySnapshot = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    workspaceId: primitives.uuid,
-    sessionId: primitives.uuid,
-    turnId: primitives.uuid,
-    attemptId: primitives.uuid,
-    executionGeneration: primitives.positiveInteger,
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    attemptId: z.string().uuid(),
+    executionGeneration: z.number().int().positive(),
     initiatingHumanSubjectId: boundedActor,
     descriptorHash: hash,
     descriptors: z
       .array(PreferenceRegistryDescriptor)
       .max(PREFERENCE_REGISTRY_DESCRIPTOR_MAX_COUNT),
-    truncated: primitives.boolean,
-    createdAt: primitives.dateTime,
+    truncated: z.boolean(),
+    createdAt: z.string().datetime(),
   }),
 );
 export type PreferenceRegistrySnapshot = z.infer<typeof PreferenceRegistrySnapshot>;
@@ -256,24 +255,23 @@ export type PreferenceRegistrySnapshot = z.infer<typeof PreferenceRegistrySnapsh
 export const PreferenceRegistryFullContent = /* @__PURE__ */ defineSchema(() =>
   z.object({
     descriptor: PreferenceRegistryDescriptor,
-    content: primitives.nonEmptyString.max(PREFERENCE_REGISTRY_CONTENT_MAX_CHARS),
+    content: z.string().min(1).max(PREFERENCE_REGISTRY_CONTENT_MAX_CHARS),
   }),
 );
 export type PreferenceRegistryFullContent = z.infer<typeof PreferenceRegistryFullContent>;
 
 const revisionInput = {
-  title: primitives.string.trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
-  description: primitives.string
-    .trim()
+  title: z.string().trim().min(1).max(PREFERENCE_REGISTRY_TITLE_MAX_CHARS),
+  description: z.string().trim().min(1).max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
+  content: z
+    .string()
     .min(1)
-    .max(PREFERENCE_REGISTRY_DESCRIPTOR_DESCRIPTION_MAX_CHARS),
-  content: primitives.nonEmptyString
     .max(PREFERENCE_REGISTRY_CONTENT_MAX_CHARS)
     .refine((value) => value.trim().length > 0, "preference content must not be blank"),
   precedenceRank: z.number().int().min(-1_000).max(1_000).default(0),
   conflictStrategy: PreferenceRegistryConflictStrategy.default("override"),
   conflictsWith: z.array(RequestStableKey).max(32).default([]),
-  expiresAt: primitives.string.datetime({ offset: true }).nullable().default(null),
+  expiresAt: z.string().datetime({ offset: true }).nullable().default(null),
 };
 
 const importedSources = new Set<PreferenceRegistryProvenanceSource>([
@@ -291,7 +289,9 @@ export const CreatePreferenceRegistryProposalRequest = /* @__PURE__ */ defineSch
       scope: PreferenceRegistryScope,
       ...revisionInput,
       provenanceSource: PreferenceRegistryProvenanceSource.default("human"),
-      provenanceSourceId: primitives.nonEmptyString
+      provenanceSourceId: z
+        .string()
+        .min(1)
         .max(PREFERENCE_REGISTRY_SOURCE_ID_MAX_CHARS)
         .nullable()
         .default(null),
@@ -312,9 +312,9 @@ export type CreatePreferenceRegistryProposalRequest = z.infer<
 
 export const ActivatePreferenceRegistryRevisionRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    revisionId: primitives.uuid,
-    expectedCurrentRevisionId: primitives.nullableUuid,
-    expectedScopeVersion: primitives.positiveInteger,
+    revisionId: z.string().uuid(),
+    expectedCurrentRevisionId: z.string().uuid().nullable(),
+    expectedScopeVersion: z.number().int().positive(),
     reason: boundedReason,
   }),
 );
@@ -324,8 +324,8 @@ export type ActivatePreferenceRegistryRevisionRequest = z.infer<
 
 export const CorrectPreferenceRegistryRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    expectedCurrentRevisionId: primitives.uuid,
-    expectedScopeVersion: primitives.positiveInteger,
+    expectedCurrentRevisionId: z.string().uuid(),
+    expectedScopeVersion: z.number().int().positive(),
     ...revisionInput,
     reason: boundedReason,
   }),
@@ -334,8 +334,8 @@ export type CorrectPreferenceRegistryRequest = z.infer<typeof CorrectPreferenceR
 
 export const DeactivatePreferenceRegistryRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    expectedCurrentRevisionId: primitives.uuid,
-    expectedScopeVersion: primitives.positiveInteger,
+    expectedCurrentRevisionId: z.string().uuid(),
+    expectedScopeVersion: z.number().int().positive(),
     reason: boundedReason,
   }),
 );
@@ -346,7 +346,7 @@ export type DeactivatePreferenceRegistryRequest = z.infer<
 export const ChangePreferenceRegistryScopeRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     scope: PreferenceRegistryScope,
-    expectedScopeVersion: primitives.positiveInteger,
+    expectedScopeVersion: z.number().int().positive(),
     reason: boundedReason,
   }),
 );
@@ -356,9 +356,9 @@ export type ChangePreferenceRegistryScopeRequest = z.infer<
 
 export const SupersedePreferenceRegistryRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    replacementPreferenceId: primitives.uuid,
-    expectedCurrentRevisionId: primitives.uuid,
-    expectedScopeVersion: primitives.positiveInteger,
+    replacementPreferenceId: z.string().uuid(),
+    expectedCurrentRevisionId: z.string().uuid(),
+    expectedScopeVersion: z.number().int().positive(),
     reason: boundedReason,
   }),
 );
@@ -366,8 +366,8 @@ export type SupersedePreferenceRegistryRequest = z.infer<typeof SupersedePrefere
 
 export const RejectPreferenceRegistryProposalRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    revisionId: primitives.uuid,
-    expectedScopeVersion: primitives.positiveInteger,
+    revisionId: z.string().uuid(),
+    expectedScopeVersion: z.number().int().positive(),
     reason: boundedReason,
   }),
 );
@@ -411,8 +411,8 @@ export type PreferenceRegistryMutationResponse = z.infer<typeof PreferenceRegist
 export const PreferenceRegistryConflictResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     code: z.literal("PREFERENCE_REGISTRY_CONFLICT"),
-    message: primitives.string,
-    currentRevisionId: primitives.nullableUuid,
+    message: z.string(),
+    currentRevisionId: z.string().uuid().nullable(),
     scopeVersion: z.number().int().positive().nullable(),
   }),
 );

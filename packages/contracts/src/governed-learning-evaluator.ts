@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { WorkspaceLearningMode } from "./workspace-learning-policy";
@@ -38,8 +37,8 @@ export const GovernedLearningDecisionFacts = /* @__PURE__ */ defineSchema(() =>
       effectiveMode: WorkspaceLearningMode,
       confidenceBps: z.number().int().min(0).max(10_000),
       conflictCount: z.number().int().min(0).max(GOVERNED_LEARNING_MAX_CONFLICT_COUNT),
-      stale: primitives.boolean,
-      revoked: primitives.boolean,
+      stale: z.boolean(),
+      revoked: z.boolean(),
     })
     .strict(),
 );
@@ -53,7 +52,7 @@ export const GovernedLearningDecision = /* @__PURE__ */ defineSchema(() =>
         .array(GovernedLearningDecisionReason)
         .min(1)
         .max(GOVERNED_LEARNING_REASON_ORDER.length),
-      automaticEligible: primitives.boolean,
+      automaticEligible: z.boolean(),
       confidenceFloorBps: z.literal(GOVERNED_LEARNING_AUTOMATIC_CONFIDENCE_FLOOR_BPS),
     })
     .strict()
@@ -82,12 +81,12 @@ export type GovernedLearningDecision = z.infer<typeof GovernedLearningDecision>;
 export const GovernedLearningEvaluationAttempt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      workspaceId: primitives.uuid,
-      subjectId: primitives.string.trim().min(1).max(1_024),
-      sessionId: primitives.uuid,
-      turnId: primitives.uuid,
-      attemptId: primitives.uuid,
-      executionGeneration: primitives.positiveInteger,
+      workspaceId: z.string().uuid(),
+      subjectId: z.string().trim().min(1).max(1_024),
+      sessionId: z.string().uuid(),
+      turnId: z.string().uuid(),
+      attemptId: z.string().uuid(),
+      executionGeneration: z.number().int().positive(),
     })
     .strict(),
 );
@@ -96,11 +95,11 @@ export type GovernedLearningEvaluationAttempt = z.infer<typeof GovernedLearningE
 export const EvaluateGovernedLearningProposalRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.uuid,
-      policySnapshotId: primitives.uuid,
-      proposalId: primitives.uuid,
-      claimId: primitives.uuid,
-      evidenceId: primitives.uuid,
+      operationId: z.string().uuid(),
+      policySnapshotId: z.string().uuid(),
+      proposalId: z.string().uuid(),
+      claimId: z.string().uuid(),
+      evidenceId: z.string().uuid(),
     })
     .strict(),
 );
@@ -108,7 +107,7 @@ export type EvaluateGovernedLearningProposalRequest = z.infer<
   typeof EvaluateGovernedLearningProposalRequest
 >;
 
-const sha256 = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^[0-9a-f]{64}$/));
+const sha256 = /* @__PURE__ */ defineSchema(() => z.string().regex(/^[0-9a-f]{64}$/));
 
 /**
  * Content-free immutable evidence. Hashes and bounded enums identify exactly
@@ -117,32 +116,32 @@ const sha256 = /* @__PURE__ */ defineSchema(() => primitives.string.regex(/^[0-9
 export const GovernedLearningDecisionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      operationId: primitives.uuid,
+      id: z.string().uuid(),
+      operationId: z.string().uuid(),
       inputHash: sha256,
-      accountId: primitives.uuid,
-      workspaceId: primitives.uuid,
-      sessionId: primitives.uuid,
-      turnId: primitives.uuid,
-      attemptId: primitives.uuid,
-      executionGeneration: primitives.positiveInteger,
+      accountId: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      sessionId: z.string().uuid(),
+      turnId: z.string().uuid(),
+      attemptId: z.string().uuid(),
+      executionGeneration: z.number().int().positive(),
       initiatingHumanSubjectId: z.string().min(1).max(1_024),
-      policySnapshotId: primitives.uuid,
+      policySnapshotId: z.string().uuid(),
       policySnapshotHash: sha256,
-      policyRevisionId: primitives.nullableUuid,
-      policyActivationVersion: primitives.nonnegativeInteger,
+      policyRevisionId: z.string().uuid().nullable(),
+      policyActivationVersion: z.number().int().nonnegative(),
       sourceKind: z.enum(["scoped-knowledge-evidence", "task-note"]),
-      sourceId: primitives.uuid,
-      proposalId: primitives.uuid,
+      sourceId: z.string().uuid(),
+      proposalId: z.string().uuid(),
       proposalInputHash: sha256,
       proposalContentHash: sha256,
-      claimId: primitives.uuid,
+      claimId: z.string().uuid(),
       claimInputHash: sha256,
-      evidenceId: primitives.uuid,
+      evidenceId: z.string().uuid(),
       evidenceInputHash: sha256,
       evidenceContentHash: sha256,
       evidenceAuthorityHash: sha256,
-      reviewRevision: primitives.positiveInteger,
+      reviewRevision: z.number().int().positive(),
       reviewState: z.enum(["proposed", "approved", "rejected", "revoked"]),
       effectiveMode: WorkspaceLearningMode,
       confidenceBps: z.number().int().min(0).max(10_000),
@@ -152,9 +151,9 @@ export const GovernedLearningDecisionReceipt = /* @__PURE__ */ defineSchema(() =
         .array(GovernedLearningDecisionReason)
         .min(1)
         .max(GOVERNED_LEARNING_REASON_ORDER.length),
-      automaticEligible: primitives.boolean,
+      automaticEligible: z.boolean(),
       confidenceFloorBps: z.literal(GOVERNED_LEARNING_AUTOMATIC_CONFIDENCE_FLOOR_BPS),
-      createdAt: primitives.dateTime,
+      createdAt: z.string().datetime(),
     })
     .strict()
     .superRefine((receipt, context) => {

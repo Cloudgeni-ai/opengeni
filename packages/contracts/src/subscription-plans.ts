@@ -1,17 +1,16 @@
-import * as primitives from "./primitives";
 import { z } from "zod";
 
 /** Operator-managed catalog; monetary amounts are USD micro-units. */
 export const SubscriptionPlan = z.strictObject({
-  key: primitives.string.regex(/^[a-z][a-z0-9_-]{0,39}$/),
-  label: primitives.string.trim().min(1).max(120),
-  stripePriceId: primitives.string.trim().min(1).max(200).nullable(),
+  key: z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/),
+  label: z.string().trim().min(1).max(120),
+  stripePriceId: z.string().trim().min(1).max(200).nullable(),
   /** Existing subscriptions only; checkout and plan changes use stripePriceId. */
-  legacyStripePriceIds: z.array(primitives.string.trim().min(1).max(200)).max(100).optional(),
-  monthlyPriceMicros: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER).nullable(),
-  monthlyCreditMicros: primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+  legacyStripePriceIds: z.array(z.string().trim().min(1).max(200)).max(100).optional(),
+  monthlyPriceMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+  monthlyCreditMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   seatLimit: z.number().int().positive().max(1_000_000).nullable(),
-  freeCredit: primitives.boolean,
+  freeCredit: z.boolean(),
 });
 export type SubscriptionPlan = z.infer<typeof SubscriptionPlan>;
 
@@ -34,18 +33,18 @@ export const SubscriptionPlanCatalog = z
 export type SubscriptionPlanCatalog = z.infer<typeof SubscriptionPlanCatalog>;
 
 export const BillingPlanBalance = z.object({
-  key: primitives.string,
-  label: primitives.string,
-  status: primitives.string,
-  creditGrantedMicros: primitives.nonnegativeInteger,
-  creditRemainingMicros: primitives.nonnegativeInteger,
+  key: z.string(),
+  label: z.string(),
+  status: z.string(),
+  creditGrantedMicros: z.number().int().nonnegative(),
+  creditRemainingMicros: z.number().int().nonnegative(),
   /** Already unavailable, but not yet removed from the physical ledger. */
   creditPendingExpiryMicros: z.number().int().nonnegative().optional(),
   /** The granted period is model-scoped, rather than part of general credit. */
-  creditScoped: primitives.optionalBoolean,
-  periodResetAt: primitives.nullableString,
+  creditScoped: z.boolean().optional(),
+  periodResetAt: z.string().nullable(),
   seatLimit: z.number().int().positive().nullable(),
-  seatsUsed: primitives.nonnegativeInteger,
-  cancelAtPeriodEnd: primitives.boolean,
+  seatsUsed: z.number().int().nonnegative(),
+  cancelAtPeriodEnd: z.boolean(),
 });
 export type BillingPlanBalance = z.infer<typeof BillingPlanBalance>;

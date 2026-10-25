@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -6,9 +5,9 @@ import { z } from "zod";
 export const SessionTargetContext = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      version: primitives.nonnegativeInteger,
-      sessionId: primitives.nullableUuid,
-      operationId: primitives.nullableUuid,
+      version: z.number().int().nonnegative(),
+      sessionId: z.string().uuid().nullable(),
+      operationId: z.string().uuid().nullable(),
     })
     .strict(),
 );
@@ -17,9 +16,9 @@ export type SessionTargetContext = z.infer<typeof SessionTargetContext>;
 export const SetSessionTargetRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      sessionId: primitives.nullableUuid,
-      expectedVersion: primitives.nonnegativeInteger,
-      operationId: primitives.uuid,
+      sessionId: z.string().uuid().nullable(),
+      expectedVersion: z.number().int().nonnegative(),
+      operationId: z.string().uuid(),
     })
     .strict(),
 );

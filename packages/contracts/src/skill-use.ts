@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -31,16 +30,19 @@ const skillUseFields = {
   source: SkillUseSource,
   label: z.string().min(1).max(128).optional(),
   /** Whole-artifact digest, for a Skill without a ledger revision. */
-  contentSha256: primitives.string.regex(/^[0-9a-f]{64}$/u).optional(),
+  contentSha256: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/u)
+    .optional(),
   /** Ledger revision of a workspace, organization, or personal Skill. */
   revisionId: z.string().min(1).max(128).optional(),
   kind: SkillReadKind.exclude(["refused"]),
   /** UTF-8 bytes of the result text the read returned, before model tool-output truncation. */
-  bytes: primitives.nonnegativeInteger,
+  bytes: z.number().int().nonnegative(),
   /** The Skill appeared in the Skill index the model saw this turn. */
-  inIndex: primitives.boolean,
+  inIndex: z.boolean(),
   /** skill_search returned this Skill earlier in the same turn attempt. */
-  searchedThisTurn: primitives.boolean,
+  searchedThisTurn: z.boolean(),
 };
 const oneProvenance = (use: {
   contentSha256?: string | undefined;

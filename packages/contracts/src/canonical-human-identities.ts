@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -19,16 +18,16 @@ export type CanonicalHumanRecoveryState = z.infer<typeof CanonicalHumanRecoveryS
 
 export const CanonicalHumanLoginBinding = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
+    id: z.string().uuid(),
     providerId: z.string().min(1).max(128),
     providerAccountId: z.string().min(1).max(1024),
     status: CanonicalHumanLoginBindingStatus,
-    revision: primitives.positiveInteger,
-    verifiedAt: primitives.dateTime,
-    lastVerifiedAt: primitives.dateTime,
+    revision: z.number().int().positive(),
+    verifiedAt: z.string().datetime(),
+    lastVerifiedAt: z.string().datetime(),
     revokedAt: z.string().datetime().nullable(),
-    createdAt: primitives.dateTime,
-    updatedAt: primitives.dateTime,
+    createdAt: z.string().datetime(),
+    updatedAt: z.string().datetime(),
   }),
 );
 export type CanonicalHumanLoginBinding = z.infer<typeof CanonicalHumanLoginBinding>;
@@ -36,15 +35,15 @@ export type CanonicalHumanLoginBinding = z.infer<typeof CanonicalHumanLoginBindi
 export const CanonicalHumanIdentityProjection = /* @__PURE__ */ defineSchema(() =>
   z.object({
     activeIdentity: z.object({
-      id: primitives.uuid,
+      id: z.string().uuid(),
       displayName: z.string().min(1).max(256),
       status: CanonicalHumanIdentityStatus,
-      identityRevision: primitives.positiveInteger,
-      authRevision: primitives.positiveInteger,
-      activeLoginBindingId: primitives.nullableUuid,
+      identityRevision: z.number().int().positive(),
+      authRevision: z.number().int().positive(),
+      activeLoginBindingId: z.string().uuid().nullable(),
       recoveryState: CanonicalHumanRecoveryState,
-      createdAt: primitives.dateTime,
-      updatedAt: primitives.dateTime,
+      createdAt: z.string().datetime(),
+      updatedAt: z.string().datetime(),
     }),
     loginBindings: z.array(CanonicalHumanLoginBinding).max(64),
   }),
@@ -52,16 +51,16 @@ export const CanonicalHumanIdentityProjection = /* @__PURE__ */ defineSchema(() 
 export type CanonicalHumanIdentityProjection = z.infer<typeof CanonicalHumanIdentityProjection>;
 
 const OperationFields = {
-  operationId: primitives.optionalUuid,
-  expectedIdentityRevision: primitives.positiveInteger,
-  reason: primitives.string.trim().min(1).max(512),
+  operationId: z.string().uuid().optional(),
+  expectedIdentityRevision: z.number().int().positive(),
+  reason: z.string().trim().min(1).max(512),
 } as const;
 
 export const LinkCanonicalHumanLoginBindingRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     ...OperationFields,
-    providerId: primitives.string.trim().min(1).max(128),
-    providerAccountId: primitives.string.trim().min(1).max(1024),
+    providerId: z.string().trim().min(1).max(128),
+    providerAccountId: z.string().trim().min(1).max(1024),
   }),
 );
 export type LinkCanonicalHumanLoginBindingRequest = z.infer<
@@ -87,7 +86,7 @@ export type CanonicalHumanIdentityMutationOutcome = z.infer<
 export const CanonicalHumanIdentityMutationResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     outcome: CanonicalHumanIdentityMutationOutcome,
-    operationId: primitives.uuid,
+    operationId: z.string().uuid(),
     identity: CanonicalHumanIdentityProjection,
   }),
 );

@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -7,18 +6,18 @@ export const ManagedSignInProvider = /* @__PURE__ */ defineSchema(() =>
 );
 export const ManagedSignInMethods = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    identityId: primitives.uuid,
+    identityId: z.string().uuid(),
     email: z.string().email(),
-    emailVerified: primitives.boolean,
-    identityRevision: primitives.positiveInteger,
-    freshAuthenticationRequired: primitives.boolean,
+    emailVerified: z.boolean(),
+    identityRevision: z.number().int().positive(),
+    freshAuthenticationRequired: z.boolean(),
     methods: z.array(
       z.object({
         provider: z.enum(["credential", "google", "github"]),
-        connected: primitives.boolean,
-        available: primitives.boolean,
-        canDisconnect: primitives.boolean,
-        implicitRelinkingSuppressed: primitives.boolean,
+        connected: z.boolean(),
+        available: z.boolean(),
+        canDisconnect: z.boolean(),
+        implicitRelinkingSuppressed: z.boolean(),
       }),
     ),
   }),
@@ -26,9 +25,9 @@ export const ManagedSignInMethods = /* @__PURE__ */ defineSchema(() =>
 export type ManagedSignInMethods = z.infer<typeof ManagedSignInMethods>;
 export const ManagedSignInMutation = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    expectedIdentityId: primitives.uuid,
-    operationId: primitives.uuid,
-    expectedIdentityRevision: primitives.positiveInteger,
+    expectedIdentityId: z.string().uuid(),
+    operationId: z.string().uuid(),
+    expectedIdentityRevision: z.number().int().positive(),
   }),
 );
 export const ManagedSignInProviderMutation = /* @__PURE__ */ defineSchema(() =>

@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -35,9 +34,21 @@ export type TranscriptionRecordingSegmentState = z.infer<typeof TranscriptionRec
 export const ClientResumableVoiceInputConfig = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      maxDurationSeconds: primitives.positiveInteger.max(8 * 60 * 60),
-      maxSizeBytes: primitives.positiveInteger.max(512 * 1024 * 1024),
-      maxChunkSizeBytes: primitives.positiveInteger.max(25 * 1024 * 1024),
+      maxDurationSeconds: z
+        .number()
+        .int()
+        .positive()
+        .max(8 * 60 * 60),
+      maxSizeBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(512 * 1024 * 1024),
+      maxChunkSizeBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(25 * 1024 * 1024),
       providerSegmentSeconds: z.number().int().positive().max(600),
     })
     .strict(),
@@ -47,8 +58,8 @@ export type ClientResumableVoiceInputConfig = z.infer<typeof ClientResumableVoic
 export const CreateTranscriptionRecordingRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      recordingId: primitives.uuid,
-      mimeType: primitives.string.trim().min(1).max(128),
+      recordingId: z.string().uuid(),
+      mimeType: z.string().trim().min(1).max(128),
     })
     .strict(),
 );
@@ -60,8 +71,16 @@ export const FinalizeTranscriptionRecordingRequest = /* @__PURE__ */ defineSchem
   z
     .object({
       chunkCount: z.number().int().positive().max(100_000),
-      totalBytes: primitives.positiveInteger.max(512 * 1024 * 1024),
-      totalDurationMilliseconds: primitives.positiveInteger.max(8 * 60 * 60 * 1_000),
+      totalBytes: z
+        .number()
+        .int()
+        .positive()
+        .max(512 * 1024 * 1024),
+      totalDurationMilliseconds: z
+        .number()
+        .int()
+        .positive()
+        .max(8 * 60 * 60 * 1_000),
     })
     .strict(),
 );
@@ -72,12 +91,12 @@ export type FinalizeTranscriptionRecordingRequest = z.infer<
 export const TranscriptionRecordingChunk = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      chunkNumber: primitives.nonnegativeInteger,
-      byteLength: primitives.positiveInteger,
-      sha256: primitives.string.regex(/^[0-9a-f]{64}$/),
-      startMilliseconds: primitives.nonnegativeInteger,
-      durationMilliseconds: primitives.nonnegativeInteger,
-      deduplicated: primitives.boolean,
+      chunkNumber: z.number().int().nonnegative(),
+      byteLength: z.number().int().positive(),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/),
+      startMilliseconds: z.number().int().nonnegative(),
+      durationMilliseconds: z.number().int().nonnegative(),
+      deduplicated: z.boolean(),
     })
     .strict(),
 );
@@ -86,13 +105,13 @@ export type TranscriptionRecordingChunk = z.infer<typeof TranscriptionRecordingC
 export const TranscriptionRecordingSegment = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      segmentNumber: primitives.nonnegativeInteger,
+      segmentNumber: z.number().int().nonnegative(),
       state: TranscriptionRecordingSegmentState,
-      startMilliseconds: primitives.nonnegativeInteger,
-      durationMilliseconds: primitives.positiveInteger,
-      byteLength: primitives.positiveInteger,
+      startMilliseconds: z.number().int().nonnegative(),
+      durationMilliseconds: z.number().int().positive(),
+      byteLength: z.number().int().positive(),
       errorCode: TranscriptionRecordingErrorCode.nullable(),
-      retryable: primitives.boolean,
+      retryable: z.boolean(),
     })
     .strict(),
 );
@@ -101,24 +120,24 @@ export type TranscriptionRecordingSegment = z.infer<typeof TranscriptionRecordin
 export const TranscriptionRecording = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      id: primitives.uuid,
-      workspaceId: primitives.uuid,
-      mimeType: primitives.string.trim().min(1).max(128),
+      id: z.string().uuid(),
+      workspaceId: z.string().uuid(),
+      mimeType: z.string().trim().min(1).max(128),
       state: TranscriptionRecordingState,
-      nextChunkNumber: primitives.nonnegativeInteger,
-      chunkCount: primitives.nonnegativeInteger,
-      totalBytes: primitives.nonnegativeInteger,
-      totalDurationMilliseconds: primitives.nonnegativeInteger,
-      segmentCount: primitives.nonnegativeInteger,
-      completedSegmentCount: primitives.nonnegativeInteger,
+      nextChunkNumber: z.number().int().nonnegative(),
+      chunkCount: z.number().int().nonnegative(),
+      totalBytes: z.number().int().nonnegative(),
+      totalDurationMilliseconds: z.number().int().nonnegative(),
+      segmentCount: z.number().int().nonnegative(),
+      completedSegmentCount: z.number().int().nonnegative(),
       transcriptText: z.string().max(1_000_000).nullable(),
-      languages: z.array(primitives.string.trim().min(1).max(64)).max(64),
+      languages: z.array(z.string().trim().min(1).max(64)).max(64),
       errorCode: TranscriptionRecordingErrorCode.nullable(),
-      retryable: primitives.boolean,
-      objectsCleaned: primitives.boolean,
-      createdAt: primitives.dateTime,
-      updatedAt: primitives.dateTime,
-      expiresAt: primitives.dateTime,
+      retryable: z.boolean(),
+      objectsCleaned: z.boolean(),
+      createdAt: z.string().datetime(),
+      updatedAt: z.string().datetime(),
+      expiresAt: z.string().datetime(),
     })
     .strict(),
 );

@@ -1,11 +1,10 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 const ModalOutputCursor = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      batchIndex: primitives.nonnegativeInteger.safe(),
+      batchIndex: z.number().int().nonnegative().safe(),
       utf8Remainder: z
         .string()
         .max(8)
@@ -24,7 +23,7 @@ export const ModalLegacyProviderCommand = /* @__PURE__ */ defineSchema(() =>
       sandboxId: z.string().min(1).max(200),
       taskId: z.string().min(1).max(200),
       execId: z.string().min(1).max(200),
-      pty: primitives.optionalBoolean,
+      pty: z.boolean().optional(),
       streams: z.object({ stdout: ModalOutputCursor, stderr: ModalOutputCursor }).strict(),
     })
     .strict(),
@@ -34,12 +33,12 @@ export type ModalLegacyProviderCommand = z.infer<typeof ModalLegacyProviderComma
 const ModalByteCursor = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      byteOffset: primitives.nonnegativeInteger.safe(),
+      byteOffset: z.number().int().nonnegative().safe(),
       utf8Remainder: z
         .string()
         .max(8)
         .regex(/^[A-Za-z0-9+/]*={0,2}$/u),
-      eof: primitives.boolean,
+      eof: z.boolean(),
       exitCode: z.number().int().nullable(),
     })
     .strict()
@@ -52,9 +51,9 @@ export const CommandSupervisionDescriptor = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       protocol: z.literal("native-subreaper-v1"),
-      invocationId: primitives.uuid,
-      nonce: primitives.string.regex(/^[a-f0-9]{64}$/u),
-      controlPath: primitives.string.regex(/^\/tmp\/opengeni-supervision\/[a-f0-9-]{36}\.sock$/u),
+      invocationId: z.string().uuid(),
+      nonce: z.string().regex(/^[a-f0-9]{64}$/u),
+      controlPath: z.string().regex(/^\/tmp\/opengeni-supervision\/[a-f0-9-]{36}\.sock$/u),
     })
     .strict(),
 );
@@ -64,8 +63,8 @@ export const CommandSupervisionReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       protocol: z.literal("native-subreaper-v1"),
-      invocationId: primitives.uuid,
-      receiptId: primitives.uuid,
+      invocationId: z.string().uuid(),
+      receiptId: z.string().uuid(),
       leaderExitCode: z.number().int(),
     })
     .strict(),
@@ -78,8 +77,8 @@ export const ModalRouterProviderCommand = /* @__PURE__ */ defineSchema(() =>
       kind: z.literal("modal-router-v1"),
       sandboxId: z.string().min(1).max(200),
       taskId: z.string().min(1).max(200),
-      execId: primitives.uuid,
-      pty: primitives.optionalBoolean,
+      execId: z.string().uuid(),
+      pty: z.boolean().optional(),
       supervision: CommandSupervisionDescriptor.optional(),
       streams: z.object({ stdout: ModalByteCursor, stderr: ModalByteCursor }).strict(),
     })

@@ -1,15 +1,14 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 // Deliberately exported only from @opengeni/contracts/insights-usage. Importing
 // these schemas must not pull in the root contracts index or its browser graph.
 import { z } from "zod";
 
 const SafeCount = /* @__PURE__ */ defineSchema(() =>
-  primitives.nonnegativeInteger.max(Number.MAX_SAFE_INTEGER),
+  z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
 );
-const UtcDateTime = /* @__PURE__ */ defineSchema(() => primitives.dateTime);
-const Identifier = /* @__PURE__ */ defineSchema(() => primitives.uuid);
-const OpaqueKey = /* @__PURE__ */ defineSchema(() => primitives.nonEmptyString);
+const UtcDateTime = /* @__PURE__ */ defineSchema(() => z.string().datetime());
+const Identifier = /* @__PURE__ */ defineSchema(() => z.string().uuid());
+const OpaqueKey = /* @__PURE__ */ defineSchema(() => z.string().min(1));
 
 export const InsightsUsageRange = /* @__PURE__ */ defineSchema(() =>
   z.enum(["today", "week", "month", "30d", "90d", "ytd", "custom"]),
@@ -27,7 +26,7 @@ export const InsightsSiteUsageRow = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       siteId: Identifier.nullable(),
-      title: primitives.string,
+      title: z.string(),
       kind: z.enum(["site", "restricted", "other"]),
       calls: SafeCount,
       pricedCalls: SafeCount,
@@ -78,14 +77,17 @@ export const InsightsUsageSource = /* @__PURE__ */ defineSchema(() =>
 export type InsightsUsageSource = z.infer<typeof InsightsUsageSource>;
 
 const UtcDay = /* @__PURE__ */ defineSchema(() =>
-  primitives.string.regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
-    const instant = Date.parse(`${value}T00:00:00Z`);
-    return (
-      !value.startsWith("0000-") &&
-      Number.isFinite(instant) &&
-      new Date(instant).toISOString().slice(0, 10) === value
-    );
-  }, "Expected a real UTC calendar date in years 0001 through 9999 (YYYY-MM-DD)"),
+  z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .refine((value) => {
+      const instant = Date.parse(`${value}T00:00:00Z`);
+      return (
+        !value.startsWith("0000-") &&
+        Number.isFinite(instant) &&
+        new Date(instant).toISOString().slice(0, 10) === value
+      );
+    }, "Expected a real UTC calendar date in years 0001 through 9999 (YYYY-MM-DD)"),
 );
 const CustomUtcDateTime = /* @__PURE__ */ defineSchema(() =>
   UtcDateTime.refine(
@@ -168,13 +170,13 @@ export type InsightsUsagePayer = z.infer<typeof InsightsUsagePayer>;
 
 /** Split at the FIRST slash: model IDs themselves may contain slashes. */
 export const InsightsUsageModelKey = /* @__PURE__ */ defineSchema(() =>
-  primitives.string.regex(/^[^/\s]+\/\S+$/),
+  z.string().regex(/^[^/\s]+\/\S+$/),
 );
 export type InsightsUsageModelKey = z.infer<typeof InsightsUsageModelKey>;
 
 function repeated<T extends z.ZodType>(item: T) {
   return z
-    .union([primitives.string, z.array(primitives.string).min(1)])
+    .union([z.string(), z.array(z.string()).min(1)])
     .transform((value, context) => {
       const entries = (Array.isArray(value) ? value : [value]).flatMap((part) =>
         part.split(",").map((entry) => entry.trim()),
@@ -193,14 +195,14 @@ function repeated<T extends z.ZodType>(item: T) {
 
 function queryLimit(max: number) {
   return z
-    .union([z.number(), primitives.string.regex(/^\d+$/).transform(Number)])
+    .union([z.number(), z.string().regex(/^\d+$/).transform(Number)])
     .pipe(SafeCount.min(1).max(max))
     .default(50);
 }
 
 const QueryBoolean = /* @__PURE__ */ defineSchema(() =>
   z
-    .union([primitives.boolean, z.enum(["true", "false"])])
+    .union([z.boolean(), z.enum(["true", "false"])])
     .transform((value) => value === true || value === "true"),
 );
 
@@ -345,7 +347,7 @@ export const InsightsUsageMeasures = /* @__PURE__ */ defineSchema(() =>
       listMicros: SafeCount,
       listByClassMicros: InsightsUsageClassMicros.nullable(),
       /** True when any covered class values allocate a historical recorded total. */
-      listByClassApprox: primitives.boolean,
+      listByClassApprox: z.boolean(),
       pricedCalls: SafeCount,
       byPayer: z
         .object({
@@ -437,13 +439,13 @@ export const InsightsUsageGroup = /* @__PURE__ */ defineSchema(() =>
         "service",
         "restricted",
       ]),
-      label: primitives.string,
+      label: z.string(),
       provider: OpaqueKey.optional(),
       model: OpaqueKey.optional(),
       workspaceId: Identifier.optional(),
       /** Only an already-authorized people facet key; permits person-only amount selection. */
       personKey: OpaqueKey.optional(),
-      you: primitives.optionalBoolean,
+      you: z.boolean().optional(),
       measures: InsightsUsageMeasures,
     })
     .strict(),
@@ -484,7 +486,7 @@ export const InsightsUsageSeriesPoint = /* @__PURE__ */ defineSchema(() =>
       measures: InsightsUsageMeasures,
       /** Top six active groups plus remainder; source uses other:folded to avoid other collisions. */
       groups: z
-        .record(primitives.string, SeriesGroup)
+        .record(z.string(), SeriesGroup)
         .refine(
           (value) =>
             Object.keys(value).length <= 7 &&
@@ -505,9 +507,7 @@ export const InsightsUsageFacets = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       workspaces: z.array(
-        z
-          .object({ id: Identifier, name: primitives.string, personal: primitives.boolean })
-          .strict(),
+        z.object({ id: Identifier, name: z.string(), personal: z.boolean() }).strict(),
       ),
       providers: z.array(OpaqueKey),
       models: z.array(z.object({ provider: OpaqueKey, model: OpaqueKey }).strict()),
@@ -516,13 +516,11 @@ export const InsightsUsageFacets = /* @__PURE__ */ defineSchema(() =>
       plans: z.array(OpaqueKey).default([]),
       /** Capability marker: omit until source/custom support is actually implemented. */
       sources: z.array(InsightsUsageSource).optional(),
-      projects: z.array(z.object({ id: Identifier, name: primitives.string }).strict()),
+      projects: z.array(z.object({ id: Identifier, name: z.string() }).strict()),
       people: z.array(
-        z
-          .object({ key: OpaqueKey, name: primitives.nullableString, you: primitives.boolean })
-          .strict(),
+        z.object({ key: OpaqueKey, name: z.string().nullable(), you: z.boolean() }).strict(),
       ),
-      schedules: z.array(z.object({ id: Identifier, name: primitives.string }).strict()),
+      schedules: z.array(z.object({ id: Identifier, name: z.string() }).strict()),
     })
     .strict(),
 );
@@ -546,7 +544,7 @@ export const InsightsUsageResponse = /* @__PURE__ */ defineSchema(() =>
       groupBy: InsightsUsageGroupBy,
       groups: z.array(InsightsUsageGroup),
       groupCount: SafeCount,
-      groupsTruncated: primitives.boolean,
+      groupsTruncated: z.boolean(),
       series: z.array(InsightsUsageSeriesPoint),
       facets: InsightsUsageFacets,
     })
@@ -718,7 +716,7 @@ export const InsightsCall = /* @__PURE__ */ defineSchema(() =>
       occurredAt: UtcDateTime,
       workspaceId: Identifier,
       sessionId: Identifier.nullable(),
-      sessionTitle: primitives.nullableString,
+      sessionTitle: z.string().nullable(),
       sessionKind: z.enum(["visible", "private", "deleted"]),
       personKey: OpaqueKey.nullable(),
       provider: OpaqueKey,

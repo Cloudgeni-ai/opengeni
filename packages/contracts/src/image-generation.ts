@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { RETAINED_OUTPUT_MAX_PAGE_BYTES, RetainedArtifactReferenceSchema } from "./retained-output";
@@ -37,13 +36,13 @@ export const ImageGenerationReferenceSchema = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         kind: z.literal("file"),
-        fileId: primitives.uuid,
+        fileId: z.string().uuid(),
       })
       .strict(),
     z
       .object({
         kind: z.literal("artifact"),
-        artifactId: primitives.uuid,
+        artifactId: z.string().uuid(),
       })
       .strict(),
   ]),
@@ -54,7 +53,7 @@ export type ImageGenerationReference = z.infer<typeof ImageGenerationReferenceSc
 export const GenerateImageToolInput = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      prompt: primitives.string.trim().min(1).max(32_000),
+      prompt: z.string().trim().min(1).max(32_000),
       references: z
         .array(ImageGenerationReferenceSchema)
         .max(IMAGE_GENERATION_MAX_REFERENCES)

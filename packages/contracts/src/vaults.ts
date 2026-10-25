@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 /**
  * Vaults: the Opengeni secrets model (replaces variable sets).
@@ -40,19 +39,19 @@ export const VaultProviderOperations = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       createItemTypes: z.array(VaultItemType).max(5),
-      updateItem: primitives.boolean,
-      removeField: primitives.boolean,
-      archiveItem: primitives.boolean,
+      updateItem: z.boolean(),
+      removeField: z.boolean(),
+      archiveItem: z.boolean(),
       archiveKind: z.enum(["archive", "trash", "none"]),
       /** Permanent provider deletion is deliberately not exposed. */
       deleteItem: z.literal(false),
-      restoreItem: primitives.boolean,
-      readFiles: primitives.boolean,
-      writeFiles: primitives.boolean,
-      createTotp: primitives.boolean,
-      updateTotp: primitives.boolean,
-      createVault: primitives.boolean,
-      restoreFieldHistory: primitives.boolean,
+      restoreItem: z.boolean(),
+      readFiles: z.boolean(),
+      writeFiles: z.boolean(),
+      createTotp: z.boolean(),
+      updateTotp: z.boolean(),
+      createVault: z.boolean(),
+      restoreFieldHistory: z.boolean(),
     })
     .strict(),
 );
@@ -149,9 +148,7 @@ export function isReservedVaultFieldName(name: string): boolean {
 }
 
 export const VaultName = /* @__PURE__ */ defineSchema(() =>
-  primitives.nonEmptyString
-    .max(VAULT_LIMITS.nameMaxChars)
-    .refine(isValidSecretName, "invalid_secret_name"),
+  z.string().min(1).max(VAULT_LIMITS.nameMaxChars).refine(isValidSecretName, "invalid_secret_name"),
 );
 export const VaultFieldName = /* @__PURE__ */ defineSchema(() =>
   VaultName.refine((name) => !isReservedVaultFieldName(name), "invalid_secret_name"),
@@ -163,7 +160,7 @@ export const VaultPolicy = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         mode: z.literal("selected"),
-        vaultIds: z.array(primitives.uuid).max(VAULT_LIMITS.policyVaultIdsMax),
+        vaultIds: z.array(z.string().uuid()).max(VAULT_LIMITS.policyVaultIdsMax),
       })
       .strict(),
   ]),
@@ -186,8 +183,8 @@ export function intersectVaultPolicies(a: VaultPolicy, b: VaultPolicy): VaultPol
 export const VaultAvailability = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      allowedWorkspaceIds: z.array(primitives.uuid).max(500).nullable(), // null = every workspace
-      allowPersonalWorkspaces: primitives.boolean,
+      allowedWorkspaceIds: z.array(z.string().uuid()).max(500).nullable(), // null = every workspace
+      allowPersonalWorkspaces: z.boolean(),
     })
     .strict(),
 );
@@ -195,61 +192,61 @@ export type VaultAvailability = z.infer<typeof VaultAvailability>;
 
 export const VaultSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    workspaceId: primitives.uuid,
+    id: z.string().uuid(),
+    workspaceId: z.string().uuid(),
     ownerKind: VaultOwnerKind,
     /** "Only me" | workspace name | organization name | "This task" */
-    ownerLabel: primitives.string,
-    rootSessionId: primitives.nullableUuid,
-    name: primitives.string,
-    description: primitives.nullableString,
+    ownerLabel: z.string(),
+    rootSessionId: z.string().uuid().nullable(),
+    name: z.string(),
+    description: z.string().nullable(),
     source: VaultSource,
     mode: VaultMode,
     syncStatus: VaultSyncStatus,
-    syncErrorCode: primitives.nullableString,
-    syncErrorMessage: primitives.nullableString,
-    lastSyncedAt: primitives.nullableString,
-    rateLimitedUntil: primitives.nullableString,
-    providerConnectionId: primitives.nullableUuid,
+    syncErrorCode: z.string().nullable(),
+    syncErrorMessage: z.string().nullable(),
+    lastSyncedAt: z.string().nullable(),
+    rateLimitedUntil: z.string().nullable(),
+    providerConnectionId: z.string().uuid().nullable(),
     providerOperations: VaultProviderOperations.optional(),
     freshness: VaultProviderFreshness.optional(),
     /** Organization and Only-me vaults; null for workspace and task vaults. */
     availability: VaultAvailability.nullable(),
-    isDefault: primitives.boolean,
+    isDefault: z.boolean(),
     itemCount: z.number().int(),
-    canWrite: primitives.boolean,
-    canManage: primitives.boolean,
+    canWrite: z.boolean(),
+    canManage: z.boolean(),
     generation: z.number().int(),
-    createdAt: primitives.string,
-    updatedAt: primitives.string,
+    createdAt: z.string(),
+    updatedAt: z.string(),
   }),
 );
 export type VaultSummary = z.infer<typeof VaultSummary>;
 
 export const VaultItemReferences = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    primary: primitives.nullableString,
-    otp: primitives.nullableString,
-    byField: z.record(primitives.string, primitives.string),
+    primary: z.string().nullable(),
+    otp: z.string().nullable(),
+    byField: z.record(z.string(), z.string()),
   }),
 );
 export type VaultItemReferences = z.infer<typeof VaultItemReferences>;
 
 export const VaultItemSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    vaultId: primitives.uuid,
+    id: z.string().uuid(),
+    vaultId: z.string().uuid(),
     type: VaultItemType,
-    name: primitives.string,
-    websites: z.array(primitives.string),
+    name: z.string(),
+    websites: z.array(z.string()),
     /** Value of a text field named "username". */
-    username: primitives.nullableString,
-    hasTotp: primitives.boolean,
-    hasPasskey: primitives.boolean,
-    expiresAt: primitives.nullableString,
-    archivedAt: primitives.nullableString,
-    lastUsedAt: primitives.nullableString,
-    updatedAt: primitives.string,
+    username: z.string().nullable(),
+    hasTotp: z.boolean(),
+    hasPasskey: z.boolean(),
+    expiresAt: z.string().nullable(),
+    archivedAt: z.string().nullable(),
+    lastUsedAt: z.string().nullable(),
+    updatedAt: z.string(),
     references: VaultItemReferences,
   }),
 );
@@ -257,31 +254,31 @@ export type VaultItemSummary = z.infer<typeof VaultItemSummary>;
 
 export const VaultItemField = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    name: primitives.string,
+    id: z.string().uuid(),
+    name: z.string(),
     kind: VaultFieldKind,
     position: z.number().int(),
     /** null for provider fields */
     currentVersion: z.number().int().nullable(),
     /** Plaintext ONLY for kind "text"; null otherwise. */
-    value: primitives.nullableString,
-    fileName: primitives.nullableString,
+    value: z.string().nullable(),
+    fileName: z.string().nullable(),
     fileSize: z.number().int().nullable(),
-    reference: primitives.string,
-    updatedAt: primitives.string,
+    reference: z.string(),
+    updatedAt: z.string(),
   }),
 );
 export type VaultItemField = z.infer<typeof VaultItemField>;
 
 export const PasskeySummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    rpId: primitives.string,
-    userName: primitives.nullableString,
+    rpId: z.string(),
+    userName: z.string().nullable(),
     /** Last 8 characters of the credential ID. */
-    credentialIdSuffix: primitives.string,
+    credentialIdSuffix: z.string(),
     signCount: z.number().int(),
-    leasedUntil: primitives.nullableString,
-    lastUsedAt: primitives.nullableString,
+    leasedUntil: z.string().nullable(),
+    lastUsedAt: z.string().nullable(),
   }),
 );
 export type PasskeySummary = z.infer<typeof PasskeySummary>;
@@ -290,10 +287,10 @@ export const VaultItem = /* @__PURE__ */ defineSchema(() =>
   VaultItemSummary.extend({
     fields: z.array(VaultItemField),
     passkey: PasskeySummary.nullable(),
-    aliases: z.array(primitives.string),
-    primaryFieldId: primitives.nullableUuid,
-    createdBySubjectId: primitives.nullableString,
-    createdAt: primitives.string,
+    aliases: z.array(z.string()),
+    primaryFieldId: z.string().uuid().nullable(),
+    createdBySubjectId: z.string().nullable(),
+    createdAt: z.string(),
     generation: z.number().int(),
   }),
 );
@@ -307,10 +304,10 @@ export type VaultVersionCreatedByKind = z.infer<typeof VaultVersionCreatedByKind
 export const VaultFieldVersionMeta = /* @__PURE__ */ defineSchema(() =>
   z.object({
     version: z.number().int(),
-    current: primitives.boolean,
-    createdAt: primitives.string,
+    current: z.boolean(),
+    createdAt: z.string(),
     createdByKind: VaultVersionCreatedByKind,
-    createdBySubjectId: primitives.nullableString,
+    createdBySubjectId: z.string().nullable(),
   }),
 );
 export type VaultFieldVersionMeta = z.infer<typeof VaultFieldVersionMeta>;
@@ -323,7 +320,7 @@ export const CreateVaultRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       name: VaultName,
-      description: primitives.string.max(VAULT_LIMITS.descriptionMaxChars).optional(),
+      description: z.string().max(VAULT_LIMITS.descriptionMaxChars).optional(),
       ownerKind: z.enum(["user", "workspace", "organization"]),
       availability: VaultAvailability.optional(),
     })
@@ -336,7 +333,7 @@ export const UpdateVaultRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       expectedGeneration: z.number().int(),
       name: VaultName.optional(),
-      description: primitives.string.max(VAULT_LIMITS.descriptionMaxChars).nullable().optional(),
+      description: z.string().max(VAULT_LIMITS.descriptionMaxChars).nullable().optional(),
       availability: VaultAvailability.optional(),
     })
     .strict(),
@@ -344,7 +341,7 @@ export const UpdateVaultRequest = /* @__PURE__ */ defineSchema(() =>
 export type UpdateVaultRequest = z.infer<typeof UpdateVaultRequest>;
 
 export const DeleteVaultRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ confirmName: primitives.nonEmptyString }).strict(),
+  z.object({ confirmName: z.string().min(1) }).strict(),
 );
 export type DeleteVaultRequest = z.infer<typeof DeleteVaultRequest>;
 
@@ -367,13 +364,13 @@ export function exactlyOneValueSource(
 export const VaultFieldInput = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      fieldId: primitives.optionalUuid,
+      fieldId: z.string().uuid().optional(),
       name: VaultFieldName,
       /** Default concealed; a field named "username" defaults to text. */
       kind: VaultFieldKind.optional(),
       value: z.string().optional(),
       generate: GeneratePasswordSpec.optional(),
-      fromReference: primitives.string.max(VAULT_LIMITS.referenceMaxChars).optional(),
+      fromReference: z.string().max(VAULT_LIMITS.referenceMaxChars).optional(),
       fileBase64: z.string().optional(),
       fileName: z.string().max(255).optional(),
       restoreVersion: z.number().int().optional(),
@@ -393,10 +390,10 @@ const CreateVaultItemShape = /* @__PURE__ */ defineSchema(() =>
       type: VaultItemType,
       name: VaultName,
       websites: z
-        .array(primitives.string.max(VAULT_LIMITS.websiteMaxChars))
+        .array(z.string().max(VAULT_LIMITS.websiteMaxChars))
         .max(VAULT_LIMITS.websitesPerItem)
         .optional(),
-      expiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
+      expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
       fields: z.array(VaultFieldInput).max(VAULT_LIMITS.fieldsPerItem),
       primaryFieldName: z.string().optional(),
     })
@@ -413,7 +410,7 @@ export type UpdateVaultItemRequest = z.infer<typeof UpdateVaultItemRequest>;
 export const MoveVaultItemRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      targetVaultId: primitives.uuid,
+      targetVaultId: z.string().uuid(),
       mode: z.enum(["move", "copy"]),
       newName: VaultName.optional(),
     })
@@ -428,29 +425,25 @@ export type RevealVaultFieldRequest = z.infer<typeof RevealVaultFieldRequest>;
 
 export const RevealVaultFieldResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    value: primitives.string,
+    value: z.string(),
     encoding: z.enum(["utf8", "base64"]),
     version: z.number().int().nullable(),
     totp: z
-      .object({
-        code: primitives.string,
-        periodSeconds: z.number().int(),
-        expiresAt: primitives.string,
-      })
+      .object({ code: z.string(), periodSeconds: z.number().int(), expiresAt: z.string() })
       .nullable(),
   }),
 );
 export type RevealVaultFieldResponse = z.infer<typeof RevealVaultFieldResponse>;
 
 export const RestoreVaultFieldVersionRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ version: primitives.positiveInteger }).strict(),
+  z.object({ version: z.number().int().positive() }).strict(),
 );
 export type RestoreVaultFieldVersionRequest = z.infer<typeof RestoreVaultFieldVersionRequest>;
 
 const QueryBoolean = /* @__PURE__ */ defineSchema(() =>
   z.preprocess(
     (value) => (value === "true" ? true : value === "false" ? false : value),
-    primitives.boolean,
+    z.boolean(),
   ),
 );
 const QueryInt = /* @__PURE__ */ defineSchema(() =>
@@ -479,7 +472,7 @@ export type ListVaultsResponse = z.infer<typeof ListVaultsResponse>;
 export const ListVaultItemsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(VaultItemSummary),
-    nextCursor: primitives.nullableString,
+    nextCursor: z.string().nullable(),
   }),
 );
 export type ListVaultItemsResponse = z.infer<typeof ListVaultItemsResponse>;
@@ -497,15 +490,15 @@ export type SetSessionVaultPolicyRequest = z.infer<typeof SetSessionVaultPolicyR
 
 export const SessionSecretsView = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    capabilityEnabled: primitives.boolean,
+    capabilityEnabled: z.boolean(),
     policy: VaultPolicy,
-    effectiveVaultIds: z.array(primitives.uuid),
+    effectiveVaultIds: z.array(z.string().uuid()),
     /** Nearest ancestor that narrowed, if any. */
-    narrowedBySessionId: primitives.nullableUuid,
+    narrowedBySessionId: z.string().uuid().nullable(),
     taskVault: VaultSummary.nullable(),
     taskItems: z.array(VaultItemSummary),
     reachableVaults: z.array(
-      VaultSummary.extend({ selected: primitives.boolean, selectable: primitives.boolean }),
+      VaultSummary.extend({ selected: z.boolean(), selectable: z.boolean() }),
     ),
   }),
 );
@@ -515,7 +508,7 @@ export const InstallOnePasswordRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       // Real service-account tokens are long; the dev fakes (ops_fake_healthy) are 16 chars.
-      token: primitives.string.trim().min(16).max(4_096),
+      token: z.string().trim().min(16).max(4_096),
       ownership: z.enum(["user", "workspace", "organization"]),
       planTier: z.enum(["family", "teams", "business"]).default("teams"),
       label: z.string().max(120).optional(),
@@ -526,10 +519,10 @@ export type InstallOnePasswordRequest = z.infer<typeof InstallOnePasswordRequest
 
 export const ProviderVaultMeta = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    externalVaultId: primitives.string,
-    name: primitives.string,
+    externalVaultId: z.string(),
+    name: z.string(),
     itemCount: z.number().int().nullable(),
-    linkedVaultId: primitives.nullableUuid,
+    linkedVaultId: z.string().uuid().nullable(),
     /** Unknown means the provider does not expose the grant; writes still check upstream. */
     writeAccess: z.enum(["read_only", "read_write", "unknown"]).optional(),
     operations: VaultProviderOperations.optional(),
@@ -539,8 +532,8 @@ export type ProviderVaultMeta = z.infer<typeof ProviderVaultMeta>;
 
 export const InstallOnePasswordResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    connectionId: primitives.uuid,
-    accountName: primitives.nullableString,
+    connectionId: z.string().uuid(),
+    accountName: z.string().nullable(),
     vaults: z.array(ProviderVaultMeta),
   }),
 );
@@ -549,19 +542,19 @@ export type InstallOnePasswordResponse = z.infer<typeof InstallOnePasswordRespon
 /** A 1Password service account connected in a workspace. Never carries the token. */
 export const OnePasswordConnectionSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
+    id: z.string().uuid(),
     /** Who can use the vaults linked through it. */
     ownership: z.enum(["user", "workspace", "organization"]),
     /** Sign-in host from the token, for example "my.1password.com". */
-    accountName: primitives.nullableString,
-    label: primitives.nullableString,
+    accountName: z.string().nullable(),
+    label: z.string().nullable(),
     planTier: z.enum(["family", "teams", "business"]),
     /** When the current token was last checked against 1Password. */
-    verifiedAt: primitives.string,
-    createdAt: primitives.string,
-    createdBySubjectId: primitives.nullableString,
+    verifiedAt: z.string(),
+    createdAt: z.string(),
+    createdBySubjectId: z.string().nullable(),
     /** The caller can link vaults, replace the token and disconnect it. */
-    canManage: primitives.boolean,
+    canManage: z.boolean(),
   }),
 );
 export type OnePasswordConnectionSummary = z.infer<typeof OnePasswordConnectionSummary>;
@@ -577,7 +570,7 @@ export type ListOnePasswordConnectionsResponse = z.infer<typeof ListOnePasswordC
 export const ReplaceOnePasswordTokenRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      token: primitives.string.trim().min(16).max(4_096),
+      token: z.string().trim().min(16).max(4_096),
       planTier: z.enum(["family", "teams", "business"]).optional(),
     })
     .strict(),
@@ -587,7 +580,7 @@ export type ReplaceOnePasswordTokenRequest = z.infer<typeof ReplaceOnePasswordTo
 export const DisconnectOnePasswordResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** The Opengeni vaults that were unlinked. Nothing is deleted in 1Password. */
-    unlinkedVaultIds: z.array(primitives.uuid),
+    unlinkedVaultIds: z.array(z.string().uuid()),
   }),
 );
 export type DisconnectOnePasswordResponse = z.infer<typeof DisconnectOnePasswordResponse>;
@@ -645,7 +638,7 @@ export const InstallVaultProviderRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       credentials: VaultProviderCredentials,
       ownership: z.enum(["user", "workspace", "organization"]),
-      label: primitives.string.trim().min(1).max(120).optional(),
+      label: z.string().trim().min(1).max(120).optional(),
     })
     .strict(),
 );
@@ -661,20 +654,20 @@ export type ReplaceVaultProviderCredentialsRequest = z.infer<
 /** Includes legacy 1Password connections; existing 1Password routes remain supported. */
 export const VaultProviderConnectionSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
+    id: z.string().uuid(),
     provider: z.enum(["onepassword", "external", "protonpass", "keeper", "bitwarden"]),
     ownership: z.enum(["user", "workspace", "organization"]),
-    accountName: primitives.nullableString,
-    label: primitives.nullableString,
-    verifiedAt: primitives.string,
-    createdAt: primitives.string,
-    createdBySubjectId: primitives.nullableString,
-    canManage: primitives.boolean,
+    accountName: z.string().nullable(),
+    label: z.string().nullable(),
+    verifiedAt: z.string(),
+    createdAt: z.string(),
+    createdBySubjectId: z.string().nullable(),
+    canManage: z.boolean(),
     operations: VaultProviderOperations,
     /** Only 1Password uses a plan tier. */
     planTier: z.enum(["family", "teams", "business"]).optional(),
     /** Unavailable means this deployment cannot run the adapter, not bad credentials. */
-    available: primitives.boolean,
+    available: z.boolean(),
     /** Setup material is saved, but provider verification has not completed. */
     verificationStatus: z.enum(["ready", "pending"]).optional(),
   }),
@@ -685,7 +678,7 @@ export type VaultProviderConnectionSummary = z.infer<typeof VaultProviderConnect
 export const VaultProviderAvailability = /* @__PURE__ */ defineSchema(() =>
   z.object({
     provider: VaultProviderConnectionSummary.shape.provider,
-    available: primitives.boolean,
+    available: z.boolean(),
     reason: z.enum(["not_enabled"]).nullable(),
   }),
 );
@@ -704,20 +697,20 @@ export type ListVaultProviderConnectionsResponse = z.infer<
 
 export const InstallVaultProviderResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    connectionId: primitives.uuid,
-    accountName: primitives.nullableString,
+    connectionId: z.string().uuid(),
+    accountName: z.string().nullable(),
     provider: ExternalVaultProviderKind,
     operations: VaultProviderOperations,
     vaults: z.array(ProviderVaultMeta),
     /** Retry verification on this connection; never replay a consumed bootstrap token. */
-    discoveryPending: primitives.optionalBoolean,
+    discoveryPending: z.boolean().optional(),
     errorCode: z.string().max(100).optional(),
   }),
 );
 export type InstallVaultProviderResponse = z.infer<typeof InstallVaultProviderResponse>;
 
 export const DisconnectVaultProviderResponse = /* @__PURE__ */ defineSchema(() =>
-  z.object({ unlinkedVaultIds: z.array(primitives.uuid) }),
+  z.object({ unlinkedVaultIds: z.array(z.string().uuid()) }),
 );
 export type DisconnectVaultProviderResponse = z.infer<typeof DisconnectVaultProviderResponse>;
 
@@ -726,8 +719,8 @@ export const LinkProviderVaultRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       provider: z.enum(["onepassword", "host", "external", "protonpass", "keeper", "bitwarden"]),
       /** Required except for an in-process host provider. */
-      connectionId: primitives.optionalUuid,
-      externalVaultId: primitives.string,
+      connectionId: z.string().uuid().optional(),
+      externalVaultId: z.string(),
       ownerKind: z.enum(["user", "workspace", "organization"]),
       mode: VaultMode,
       name: VaultName.optional(),
@@ -788,8 +781,8 @@ export type VaultErrorCode = z.infer<typeof VaultErrorCode>;
 export const VaultApiError = /* @__PURE__ */ defineSchema(() =>
   z.object({
     error: VaultErrorCode,
-    message: primitives.string,
-    details: z.record(primitives.string, z.unknown()).optional(),
+    message: z.string(),
+    details: z.record(z.string(), z.unknown()).optional(),
   }),
 );
 export type VaultApiError = z.infer<typeof VaultApiError>;
@@ -846,15 +839,15 @@ export const SecretSearchInput = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       query: z.string().max(200).optional(),
-      website: primitives.string.max(VAULT_LIMITS.websiteMaxChars).optional(),
+      website: z.string().max(VAULT_LIMITS.websiteMaxChars).optional(),
       type: VaultItemType.optional(),
       /** Vault name or ID. */
       vault: z.string().max(200).optional(),
       limit: z.number().int().min(1).max(VAULT_LIMITS.searchResultsMax).default(20),
       /** `nextCursor` from the previous call with the same filters. */
-      cursor: primitives.string.max(VAULT_LIMITS.searchCursorMaxChars).optional(),
+      cursor: z.string().max(VAULT_LIMITS.searchCursorMaxChars).optional(),
       /** Refresh provider metadata and subsequent value reads; never bypass rate limits. */
-      refresh: primitives.optionalBoolean,
+      refresh: z.boolean().optional(),
     })
     .strict(),
 );
@@ -863,35 +856,35 @@ export type SecretSearchInput = z.infer<typeof SecretSearchInput>;
 export const SecretSearchResult = /* @__PURE__ */ defineSchema(() =>
   z.object({
     vault: z.object({
-      id: primitives.uuid,
-      name: primitives.string,
+      id: z.string().uuid(),
+      name: z.string(),
       ownerKind: VaultOwnerKind,
       source: VaultSource,
       mode: VaultMode,
     }),
     item: z.object({
-      id: primitives.uuid,
-      name: primitives.string,
+      id: z.string().uuid(),
+      name: z.string(),
       type: VaultItemType,
-      websites: z.array(primitives.string),
-      username: primitives.nullableString,
-      hasTotp: primitives.boolean,
-      hasPasskey: primitives.boolean,
-      expiresAt: primitives.nullableString,
+      websites: z.array(z.string()),
+      username: z.string().nullable(),
+      hasTotp: z.boolean(),
+      hasPasskey: z.boolean(),
+      expiresAt: z.string().nullable(),
     }),
-    fields: z.array(z.object({ name: primitives.string, kind: VaultFieldKind })),
+    fields: z.array(z.object({ name: z.string(), kind: VaultFieldKind })),
     references: VaultItemReferences,
   }),
 );
 export type SecretSearchResult = z.infer<typeof SecretSearchResult>;
 export const SecretSearchVault = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    name: primitives.string,
+    id: z.string().uuid(),
+    name: z.string(),
     ownerKind: VaultOwnerKind,
     source: VaultSource,
     mode: VaultMode,
-    itemCount: primitives.nonnegativeInteger,
+    itemCount: z.number().int().nonnegative(),
     freshness: VaultProviderFreshness.optional(),
   }),
 );
@@ -900,17 +893,17 @@ export const SecretSearchOutput = /* @__PURE__ */ defineSchema(() =>
   z.object({
     items: z.array(SecretSearchResult),
     /** True when more matches remain; pass `nextCursor` to continue. */
-    truncated: primitives.boolean,
-    nextCursor: primitives.nullableString,
+    truncated: z.boolean(),
+    nextCursor: z.string().nullable(),
     /** Every vault the caller can reach, on the first page only. */
     vaults: z.array(SecretSearchVault).optional(),
     /** False when a reachable provider could not be checked; empty items are not proof of absence. */
-    complete: primitives.optionalBoolean,
+    complete: z.boolean().optional(),
     /** Included on every page so failures are not lost after page one. */
     sources: z
       .array(
         z.object({
-          vaultId: primitives.uuid,
+          vaultId: z.string().uuid(),
           freshness: VaultProviderFreshness,
         }),
       )
@@ -926,7 +919,7 @@ export const SecretSaveFieldInput = /* @__PURE__ */ defineSchema(() =>
       kind: VaultFieldKind.optional(),
       value: z.string().optional(),
       generate: GeneratePasswordSpec.optional(),
-      fromReference: primitives.string.max(VAULT_LIMITS.referenceMaxChars).optional(),
+      fromReference: z.string().max(VAULT_LIMITS.referenceMaxChars).optional(),
       restoreVersion: z.number().int().optional(),
     })
     .strict()
@@ -943,7 +936,7 @@ export const SecretSaveInput = /* @__PURE__ */ defineSchema(() =>
       saveTo: SECRET_SAVE_TO.optional(),
       type: VaultItemType.default("login"),
       websites: z
-        .array(primitives.string.max(VAULT_LIMITS.websiteMaxChars))
+        .array(z.string().max(VAULT_LIMITS.websiteMaxChars))
         .max(VAULT_LIMITS.websitesPerItem)
         .optional(),
       username: z.string().max(512).optional(),
@@ -957,7 +950,7 @@ export const SecretSaveOutput = /* @__PURE__ */ defineSchema(() =>
   z.object({
     item: VaultItemSummary,
     references: VaultItemReferences,
-    generatedFields: z.array(primitives.string),
+    generatedFields: z.array(z.string()),
   }),
 );
 export type SecretSaveOutput = z.infer<typeof SecretSaveOutput>;
@@ -965,7 +958,7 @@ export type SecretSaveOutput = z.infer<typeof SecretSaveOutput>;
 export const SecretGetInput = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      reference: primitives.nonEmptyString.max(VAULT_LIMITS.referenceMaxChars),
+      reference: z.string().min(1).max(VAULT_LIMITS.referenceMaxChars),
       version: z.number().int().optional(),
     })
     .strict(),
@@ -977,7 +970,7 @@ export type SecretGetOutput = RevealVaultFieldResponse;
 export const SecretMoveInput = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      reference: primitives.nonEmptyString.max(VAULT_LIMITS.referenceMaxChars),
+      reference: z.string().min(1).max(VAULT_LIMITS.referenceMaxChars),
       /** Vault name or ID. */
       toVault: z.string().min(1).max(200),
       mode: z.enum(["move", "copy"]).default("move"),
@@ -995,11 +988,11 @@ export const SecretMoveOutput = /* @__PURE__ */ defineSchema(() =>
 export type SecretMoveOutput = z.infer<typeof SecretMoveOutput>;
 
 export const SecretDeleteInput = /* @__PURE__ */ defineSchema(() =>
-  z.object({ reference: primitives.nonEmptyString.max(VAULT_LIMITS.referenceMaxChars) }).strict(),
+  z.object({ reference: z.string().min(1).max(VAULT_LIMITS.referenceMaxChars) }).strict(),
 );
 export type SecretDeleteInput = z.infer<typeof SecretDeleteInput>;
 export const SecretDeleteOutput = /* @__PURE__ */ defineSchema(() =>
-  z.object({ archived: z.literal(true), restoreHint: primitives.string }),
+  z.object({ archived: z.literal(true), restoreHint: z.string() }),
 );
 export type SecretDeleteOutput = z.infer<typeof SecretDeleteOutput>;
 

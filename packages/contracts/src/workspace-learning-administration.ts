@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import {
@@ -30,7 +29,7 @@ export type WorkspaceLearningPolicyHistoryQuery = z.infer<
 export const CreateWorkspaceLearningPolicyRevisionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.optionalUuid,
+      operationId: z.string().uuid().optional(),
       workspaceMode: WorkspaceLearningMode,
       sourceOverrides: z.array(WorkspaceLearningSourceOverrideInput).optional().default([]),
       supersedesRevisionId: z.string().uuid().nullable().optional().default(null),
@@ -44,10 +43,10 @@ export type CreateWorkspaceLearningPolicyRevisionRequest = z.infer<
 export const ActivateWorkspaceLearningPolicyRevisionRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      operationId: primitives.optionalUuid,
-      expectedCurrentRevisionId: primitives.nullableUuid,
-      expectedActivationVersion: primitives.nonnegativeInteger,
-      reason: primitives.string.trim().min(1).max(WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS),
+      operationId: z.string().uuid().optional(),
+      expectedCurrentRevisionId: z.string().uuid().nullable(),
+      expectedActivationVersion: z.number().int().nonnegative(),
+      reason: z.string().trim().min(1).max(WORKSPACE_LEARNING_POLICY_REASON_MAX_CHARS),
     })
     .strict(),
 );
@@ -58,8 +57,8 @@ export type ActivateWorkspaceLearningPolicyRevisionRequest = z.infer<
 export const RollbackWorkspaceLearningPolicyRevisionRequest =
   /* @__PURE__ */ defineSchema(() =>
     ActivateWorkspaceLearningPolicyRevisionRequest.extend({
-      targetRevisionId: primitives.uuid,
-      expectedCurrentRevisionId: primitives.uuid,
+      targetRevisionId: z.string().uuid(),
+      expectedCurrentRevisionId: z.string().uuid(),
     }).strict(),
   );
 export type RollbackWorkspaceLearningPolicyRevisionRequest = z.infer<
@@ -94,7 +93,7 @@ export const WorkspaceLearningHistoryResponse = /* @__PURE__ */ defineSchema(() 
       decisions: z.array(GovernedLearningDecisionReceipt),
       activations: z.array(GovernedLearningActivationReceipt),
       undos: z.array(GovernedLearningActivationUndoReceipt),
-      truncated: primitives.boolean,
+      truncated: z.boolean(),
       effectiveBoundary: z.literal("next_accepted_attempt"),
     })
     .strict(),

@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -17,12 +16,12 @@ export const ScopedKnowledgeScope = /* @__PURE__ */ defineSchema(() =>
     }),
     z.object({
       kind: z.literal("workspace"),
-      workspaceId: primitives.uuid,
+      workspaceId: z.string().uuid(),
       subjectId: z.null(),
     }),
     z.object({
       kind: z.literal("personal"),
-      workspaceId: primitives.nullableUuid,
+      workspaceId: z.string().uuid().nullable(),
       subjectId: z.string().min(1).max(1024),
     }),
   ]),

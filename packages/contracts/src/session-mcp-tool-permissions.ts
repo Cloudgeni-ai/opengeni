@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { ConnectorToolPermission } from "./connector-tool-permissions";
@@ -70,12 +69,12 @@ export type SessionMcpToolPermissionsQuery = z.infer<typeof SessionMcpToolPermis
  * `_meta`, or the attaching session's `requireApproval`), then Allow. */
 export const SessionMcpToolPermissionsResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    connectionId: primitives.string,
-    serverId: primitives.string,
+    connectionId: z.string(),
+    serverId: z.string(),
     defaultPermission: ConnectorToolPermission.nullable(),
-    tools: z.array(z.object({ toolName: primitives.string, permission: ConnectorToolPermission })),
-    revision: primitives.string,
-    canManage: primitives.boolean,
+    tools: z.array(z.object({ toolName: z.string(), permission: ConnectorToolPermission })),
+    revision: z.string(),
+    canManage: z.boolean(),
     appliesTo: z.literal("next_attempt"),
   }),
 );

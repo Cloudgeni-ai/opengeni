@@ -1,14 +1,13 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 export const ClaudeSubscriptionSetupTokenRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      token: primitives.string.trim().min(1).max(16384),
+      token: z.string().trim().min(1).max(16384),
       scope: z.enum(["workspace", "user"]).default("workspace"),
-      label: primitives.string.trim().max(200).nullable().optional(),
-      reconnectAccountId: primitives.optionalUuid,
+      label: z.string().trim().max(200).nullable().optional(),
+      reconnectAccountId: z.string().uuid().optional(),
       expectedCredentialVersion: z.number().int().positive().optional(),
     })
     .strict()
@@ -26,7 +25,7 @@ export const ClaudeSubscriptionOAuthStartRequest = /* @__PURE__ */ defineSchema(
   z
     .object({
       scope: z.enum(["workspace", "user"]).default("workspace"),
-      reconnectAccountId: primitives.optionalUuid,
+      reconnectAccountId: z.string().uuid().optional(),
     })
     .strict(),
 );
@@ -37,9 +36,9 @@ export type ClaudeSubscriptionOAuthStartRequest = z.infer<
 export const ClaudeSubscriptionOAuthStartResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      attemptId: primitives.uuid,
+      attemptId: z.string().uuid(),
       authorizationUrl: z.string().url(),
-      expiresAt: primitives.dateTime,
+      expiresAt: z.string().datetime(),
     })
     .strict(),
 );
@@ -50,8 +49,8 @@ export type ClaudeSubscriptionOAuthStartResponse = z.infer<
 export const ClaudeSubscriptionOAuthCompleteRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      attemptId: primitives.uuid,
-      code: primitives.string.trim().min(1).max(4096),
+      attemptId: z.string().uuid(),
+      code: z.string().trim().min(1).max(4096),
     })
     .strict(),
 );
@@ -63,9 +62,9 @@ export const ClaudeSubscriptionOAuthCompleteResponse = /* @__PURE__ */ defineSch
   z
     .object({
       connected: z.literal(true),
-      accountId: primitives.uuid,
+      accountId: z.string().uuid(),
       scope: z.enum(["organization", "workspace", "user"]),
-      credentialVersion: primitives.positiveInteger,
+      credentialVersion: z.number().int().positive(),
     })
     .strict(),
 );

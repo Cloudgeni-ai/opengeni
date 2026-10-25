@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -24,6 +23,6 @@ export type SessionGoalStatus = z.infer<typeof SessionGoalStatus>;
 /** Physical ceiling of the PostgreSQL integer columns that persist depth policy. */
 export const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
 export const NestedAgentDepthValue = /* @__PURE__ */ defineSchema(() =>
-  primitives.nonnegativeInteger.max(MAX_NESTED_AGENT_DEPTH),
+  z.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH),
 );
 export type NestedAgentDepthValue = z.infer<typeof NestedAgentDepthValue>;

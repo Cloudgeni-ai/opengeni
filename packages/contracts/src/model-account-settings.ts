@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -30,7 +29,10 @@ export type ModelAccountSettingSource = z.infer<typeof ModelAccountSettingSource
 const SAFE_KEY = (key: string) => !["__proto__", "constructor", "prototype"].includes(key);
 const ModelId = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(200).refine(SAFE_KEY));
 const ProviderId = /* @__PURE__ */ defineSchema(() =>
-  primitives.string.regex(/^[a-z][a-z0-9_]{1,31}$/).refine(SAFE_KEY),
+  z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{1,31}$/)
+    .refine(SAFE_KEY),
 );
 
 export const ModelAccountRotationMode = /* @__PURE__ */ defineSchema(() =>
@@ -48,26 +50,26 @@ export const ModelAccountFallbackOrder = /* @__PURE__ */ defineSchema(() =>
 export const ModelAccountSettingValues = /* @__PURE__ */ defineSchema(() =>
   z.object({
     rotation: z.record(
-      primitives.string,
+      z.string(),
       z.object({
         mode: ModelAccountRotationMode,
         primaryConnectionId: z.string().nullable().optional(),
       }),
     ),
     providers: z.record(
-      primitives.string,
+      z.string(),
       z.object({
         /** Deprecated and never set: every account that reaches a workspace serves it. */
         inferenceSource: z.enum(["automatic", "workspace", "organization"]).optional(),
         /** Deprecated: always true. Every account that reaches a workspace serves it. */
-        useOrganizationAccounts: primitives.boolean.default(true),
-        enabled: primitives.boolean,
+        useOrganizationAccounts: z.boolean().default(true),
+        enabled: z.boolean(),
       }),
     ),
-    crossProviderFailover: primitives.boolean,
-    fallbackOrder: z.record(primitives.string, z.array(primitives.string)),
-    personalConnectionsAllowed: primitives.boolean,
-    personalFallbackAllowed: primitives.boolean,
+    crossProviderFailover: z.boolean(),
+    fallbackOrder: z.record(z.string(), z.array(z.string())),
+    personalConnectionsAllowed: z.boolean(),
+    personalFallbackAllowed: z.boolean(),
   }),
 );
 export type ModelAccountSettingValues = z.infer<typeof ModelAccountSettingValues>;
@@ -84,7 +86,7 @@ const ModelAccountSettingSources = /* @__PURE__ */ defineSchema(() =>
 );
 
 const EntrySource = /* @__PURE__ */ defineSchema(() =>
-  z.record(primitives.string, z.enum(["organization", "workspace"])),
+  z.record(z.string(), z.enum(["organization", "workspace"])),
 );
 
 /** Effective values with one source per setting and, for map-valued settings, per entry. */
@@ -102,12 +104,12 @@ const ModelAccountSettingsView = /* @__PURE__ */ defineSchema(() =>
 
 export const OrganizationModelAccountSettings = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    organizationId: primitives.string,
+    organizationId: z.string(),
     values: ModelAccountSettingValues,
     locked: z.array(ModelAccountSettingKey),
     /** Pass back as `expectedVersion` to refuse a write over a concurrent change. */
-    version: primitives.nonnegativeInteger,
-    updatedAt: primitives.nullableString,
+    version: z.number().int().nonnegative(),
+    updatedAt: z.string().nullable(),
   }),
 );
 export type OrganizationModelAccountSettings = z.infer<typeof OrganizationModelAccountSettings>;
@@ -121,10 +123,10 @@ export type OrganizationModelAccountSettings = z.infer<typeof OrganizationModelA
 export const UpdateOrganizationModelAccountSettingsRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      crossProviderFailover: primitives.optionalBoolean,
+      crossProviderFailover: z.boolean().optional(),
       fallbackOrder: ModelAccountFallbackOrder.optional(),
-      personalConnectionsAllowed: primitives.optionalBoolean,
-      personalFallbackAllowed: primitives.optionalBoolean,
+      personalConnectionsAllowed: z.boolean().optional(),
+      personalFallbackAllowed: z.boolean().optional(),
       rotation: z
         .record(ProviderId, z.object({ mode: ModelAccountRotationMode }).strict())
         .optional(),
@@ -140,10 +142,10 @@ export type UpdateOrganizationModelAccountSettingsRequest = z.infer<
 /** A workspace's stored overrides: null follows the organization. */
 export const ModelAccountSettingOverrides = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    rotation: z.record(primitives.string, z.unknown()).nullable(),
-    providers: z.record(primitives.string, z.unknown()).nullable(),
+    rotation: z.record(z.string(), z.unknown()).nullable(),
+    providers: z.record(z.string(), z.unknown()).nullable(),
     crossProviderFailover: z.boolean().nullable(),
-    fallbackOrder: z.record(primitives.string, z.array(primitives.string)).nullable(),
+    fallbackOrder: z.record(z.string(), z.array(z.string())).nullable(),
     personalConnectionsAllowed: z.boolean().nullable(),
     personalFallbackAllowed: z.boolean().nullable(),
   }),
@@ -151,13 +153,13 @@ export const ModelAccountSettingOverrides = /* @__PURE__ */ defineSchema(() =>
 
 export const WorkspaceModelAccountSettings = /* @__PURE__ */ defineSchema(() =>
   ModelAccountSettingsView.extend({
-    workspaceId: primitives.string,
+    workspaceId: z.string(),
     locked: z.array(ModelAccountSettingKey),
     overrides: ModelAccountSettingOverrides,
-    version: primitives.nonnegativeInteger,
-    updatedAt: primitives.nullableString,
+    version: z.number().int().nonnegative(),
+    updatedAt: z.string().nullable(),
     /** Whether the caller may change this workspace's overrides. */
-    canEdit: primitives.boolean,
+    canEdit: z.boolean(),
   }),
 );
 export type WorkspaceModelAccountSettings = z.infer<typeof WorkspaceModelAccountSettings>;
@@ -193,8 +195,8 @@ export type UpdateWorkspaceModelAccountSettingsRequest = z.infer<
 
 export const ModelAccountSettingsOverviewWorkspace = /* @__PURE__ */ defineSchema(() =>
   ModelAccountSettingsView.extend({
-    workspaceId: primitives.string,
-    name: primitives.string,
+    workspaceId: z.string(),
+    name: z.string(),
   }),
 );
 
@@ -204,7 +206,7 @@ export const ModelAccountSettingsOverview = /* @__PURE__ */ defineSchema(() =>
     organization: OrganizationModelAccountSettings,
     workspaces: z.array(ModelAccountSettingsOverviewWorkspace),
     /** Pass as `after` for the next page; null after the last workspace. */
-    nextCursor: primitives.nullableString,
+    nextCursor: z.string().nullable(),
   }),
 );
 export type ModelAccountSettingsOverview = z.infer<typeof ModelAccountSettingsOverview>;

@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import {
@@ -91,7 +90,7 @@ export const GenerateVideoToolInput = /* @__PURE__ */ defineSchema(() =>
       durationSeconds: z.number().int().min(4).max(30).optional(),
       aspectRatio: VideoGenerationAspectRatio.optional(),
       resolution: VideoGenerationResolution.optional(),
-      generateAudio: primitives.optionalBoolean,
+      generateAudio: z.boolean().optional(),
     })
     .strict(),
 );
@@ -115,13 +114,13 @@ export const VideoGenerationModelCapability = /* @__PURE__ */ defineSchema(() =>
       aspectRatios: z.array(VideoGenerationAspectRatio).min(1).max(7),
       duration: z
         .object({
-          minSeconds: primitives.positiveInteger,
-          maxSeconds: primitives.positiveInteger,
-          stepSeconds: primitives.positiveInteger,
+          minSeconds: z.number().int().positive(),
+          maxSeconds: z.number().int().positive(),
+          stepSeconds: z.number().int().positive(),
         })
         .strict()
         .refine((value) => value.maxSeconds >= value.minSeconds),
-      supportsAudio: primitives.boolean,
+      supportsAudio: z.boolean(),
     })
     .strict(),
 );
@@ -160,7 +159,7 @@ export const VideoGenerationPolicy = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
-      revision: primitives.nonnegativeInteger.safe(),
+      revision: z.number().int().nonnegative().safe(),
       fundingSource: VideoGenerationFundingSource,
       enabledModelIds: z.array(z.string().min(1).max(256)).max(16),
       defaultModelId: z.string().min(1).max(256).nullable(),
@@ -189,7 +188,7 @@ export type VideoGenerationPolicy = z.infer<typeof VideoGenerationPolicy>;
 export const UpdateVideoGenerationPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      expectedRevision: primitives.nonnegativeInteger.safe(),
+      expectedRevision: z.number().int().nonnegative().safe(),
       fundingSource: VideoGenerationFundingSource,
       enabledModelIds: z.array(z.string().min(1).max(256)).max(16),
       defaultModelId: z.string().min(1).max(256).nullable(),
@@ -204,7 +203,7 @@ export const VideoGenerationFundingOption = /* @__PURE__ */ defineSchema(() =>
       source: VideoGenerationFundingSource,
       label: z.string().min(1).max(128),
       description: z.string().min(1).max(256),
-      available: primitives.boolean,
+      available: z.boolean(),
       unavailableReason: z.string().min(1).max(256).nullable(),
     })
     .strict()
@@ -268,7 +267,7 @@ export const VideoGenerationAcceptedReceipt = /* @__PURE__ */ defineSchema(() =>
     .object({
       schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
       status: z.literal("accepted"),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
     })
     .strict(),
 );
@@ -311,7 +310,7 @@ export const GeneratedVideoFacts = /* @__PURE__ */ defineSchema(() =>
       width: z.number().int().positive().max(8_192),
       height: z.number().int().positive().max(8_192),
       fps: z.number().positive().max(120),
-      hasAudio: primitives.boolean,
+      hasAudio: z.boolean(),
       videoCodec: z.literal("h264"),
       audioCodec: z.literal("aac").nullable(),
     })
@@ -324,7 +323,7 @@ export const GeneratedVideoReceipt = /* @__PURE__ */ defineSchema(() =>
     .object({
       type: z.literal("generated_video"),
       schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
       artifact: RetainedArtifactReferenceSchema,
       video: GeneratedVideoFacts,
       sandboxPath: z
@@ -388,7 +387,7 @@ export const MediaGenerationResult = /* @__PURE__ */ defineSchema(() =>
         type: z.literal("media_generation_result"),
         schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
         status: z.literal("ready"),
-        operationId: primitives.uuid,
+        operationId: z.string().uuid(),
         receipt: GeneratedVideoReceipt,
       })
       .strict()
@@ -401,7 +400,7 @@ export const MediaGenerationResult = /* @__PURE__ */ defineSchema(() =>
         type: z.literal("media_generation_result"),
         schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
         status: VideoGenerationTerminalFailureStatus,
-        operationId: primitives.uuid,
+        operationId: z.string().uuid(),
         boundedPublicReason: z.string().min(1).max(1_000),
       })
       .strict(),
@@ -429,11 +428,11 @@ export const VideoGenerationOperationSummary = /* @__PURE__ */ defineSchema(() =
   z
     .object({
       schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
-      operationId: primitives.uuid,
+      operationId: z.string().uuid(),
       modelId: z.string().min(1).max(256),
       status: VideoGenerationPublicStatus,
-      createdAt: primitives.string.datetime({ offset: true }),
-      updatedAt: primitives.string.datetime({ offset: true }),
+      createdAt: z.string().datetime({ offset: true }),
+      updatedAt: z.string().datetime({ offset: true }),
       terminal: MediaGenerationResult.nullable(),
     })
     .strict(),
@@ -444,12 +443,12 @@ export const VideoArtifactPlaybackSource = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       schemaVersion: z.literal(VIDEO_GENERATION_SCHEMA_VERSION),
-      artifactId: primitives.uuid,
+      artifactId: z.string().uuid(),
       url: z.string().url().max(8_192),
-      expiresAt: primitives.string.datetime({ offset: true }),
+      expiresAt: z.string().datetime({ offset: true }),
       contentType: z.literal("video/mp4"),
-      sizeBytes: primitives.positiveInteger.max(GENERATED_VIDEO_MAX_BYTES),
-      sha256: primitives.string.regex(/^[0-9a-f]{64}$/),
+      sizeBytes: z.number().int().positive().max(GENERATED_VIDEO_MAX_BYTES),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/),
       acceptRanges: z.literal("bytes"),
     })
     .strict(),

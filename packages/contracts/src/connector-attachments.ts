@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -33,7 +32,7 @@ function utf8Bytes(value: string): number {
 }
 
 function boundedString(maxUtf8Bytes: number) {
-  return primitives.string.refine((value) => utf8Bytes(value) <= maxUtf8Bytes, {
+  return z.string().refine((value) => utf8Bytes(value) <= maxUtf8Bytes, {
     message: `must be at most ${maxUtf8Bytes} UTF-8 bytes`,
   });
 }
@@ -151,7 +150,7 @@ export const ConnectorAttachmentMediaType = boundedString(
   });
 
 export const ConnectorAttachmentSha256 = /* @__PURE__ */ defineSchema(() =>
-  primitives.string.regex(SHA256_PATTERN),
+  z.string().regex(SHA256_PATTERN),
 );
 
 export const ConnectorAttachmentPrivateSource = /* @__PURE__ */ defineSchema(() =>

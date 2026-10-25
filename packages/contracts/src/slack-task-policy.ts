@@ -1,4 +1,3 @@
-import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -7,7 +6,7 @@ export const SLACK_TASK_POLICY_REASON_MAX_CHARS = 4_096;
 export const SLACK_TASK_POLICY_MAX_IDS = 256;
 
 const SlackOpaqueId = /* @__PURE__ */ defineSchema(() =>
-  primitives.nonEmptyString.max(SLACK_TASK_POLICY_ID_MAX_CHARS),
+  z.string().min(1).max(SLACK_TASK_POLICY_ID_MAX_CHARS),
 );
 
 export const SlackSharedConversationMode = /* @__PURE__ */ defineSchema(() =>
@@ -35,9 +34,9 @@ export const SlackTaskPolicyContent = /* @__PURE__ */ defineSchema(() =>
         .array(SlackOpaqueId)
         .max(SLACK_TASK_POLICY_MAX_IDS)
         .transform(uniqueSortedIds),
-      allowGuestInitiators: primitives.boolean,
-      allowExternalInitiators: primitives.boolean,
-      allowMpim: primitives.boolean,
+      allowGuestInitiators: z.boolean(),
+      allowExternalInitiators: z.boolean(),
+      allowMpim: z.boolean(),
       sharedConversationMode: SlackSharedConversationMode,
       resultPublicationMode: SlackResultPublicationMode,
     })
@@ -70,51 +69,51 @@ export function canonicalizeSlackTaskPolicy(value: SlackTaskPolicyContent): Slac
 
 export const SlackTaskPolicyRevisionIdentity = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    revision: primitives.positiveInteger,
-    policyHash: primitives.string.regex(/^[0-9a-f]{64}$/),
+    id: z.string().uuid(),
+    revision: z.number().int().positive(),
+    policyHash: z.string().regex(/^[0-9a-f]{64}$/),
   }),
 );
 export type SlackTaskPolicyRevisionIdentity = z.infer<typeof SlackTaskPolicyRevisionIdentity>;
 
 export const SlackTaskPolicyRevision = /* @__PURE__ */ defineSchema(() =>
   SlackTaskPolicyRevisionIdentity.extend({
-    operationId: primitives.uuid,
-    accountId: primitives.uuid,
-    workspaceId: primitives.uuid,
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
     policy: SlackTaskPolicyContent,
-    supersedesRevisionId: primitives.nullableUuid,
+    supersedesRevisionId: z.string().uuid().nullable(),
     createdBySubjectId: z.string().min(1).max(1_024),
-    createdAt: primitives.dateTime,
+    createdAt: z.string().datetime(),
   }),
 );
 export type SlackTaskPolicyRevision = z.infer<typeof SlackTaskPolicyRevision>;
 
 export const SlackTaskPolicyHead = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    accountId: primitives.uuid,
-    workspaceId: primitives.uuid,
-    revisionId: primitives.uuid,
-    revision: primitives.positiveInteger,
-    policyHash: primitives.string.regex(/^[0-9a-f]{64}$/),
-    activationVersion: primitives.positiveInteger,
-    activatedAt: primitives.dateTime,
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    revisionId: z.string().uuid(),
+    revision: z.number().int().positive(),
+    policyHash: z.string().regex(/^[0-9a-f]{64}$/),
+    activationVersion: z.number().int().positive(),
+    activatedAt: z.string().datetime(),
   }),
 );
 export type SlackTaskPolicyHead = z.infer<typeof SlackTaskPolicyHead>;
 
 export const SlackTaskPolicyActivationEvent = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: primitives.uuid,
-    operationId: primitives.uuid,
-    accountId: primitives.uuid,
-    workspaceId: primitives.uuid,
-    activationVersion: primitives.positiveInteger,
+    id: z.string().uuid(),
+    operationId: z.string().uuid(),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    activationVersion: z.number().int().positive(),
     oldRevision: SlackTaskPolicyRevisionIdentity.nullable(),
     newRevision: SlackTaskPolicyRevisionIdentity,
     actorSubjectId: z.string().min(1).max(1_024),
-    reason: primitives.nonEmptyString.max(SLACK_TASK_POLICY_REASON_MAX_CHARS),
-    createdAt: primitives.dateTime,
+    reason: z.string().min(1).max(SLACK_TASK_POLICY_REASON_MAX_CHARS),
+    createdAt: z.string().datetime(),
   }),
 );
 export type SlackTaskPolicyActivationEvent = z.infer<typeof SlackTaskPolicyActivationEvent>;
@@ -131,11 +130,11 @@ export type SlackTaskPolicyListResponse = z.infer<typeof SlackTaskPolicyListResp
 
 export const UpdateSlackTaskPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    operationId: primitives.optionalUuid,
+    operationId: z.string().uuid().optional(),
     policy: SlackTaskPolicyContent,
-    expectedCurrentRevisionId: primitives.nullableUuid,
-    expectedActivationVersion: primitives.nonnegativeInteger,
-    reason: primitives.string.trim().min(1).max(SLACK_TASK_POLICY_REASON_MAX_CHARS),
+    expectedCurrentRevisionId: z.string().uuid().nullable(),
+    expectedActivationVersion: z.number().int().nonnegative(),
+    reason: z.string().trim().min(1).max(SLACK_TASK_POLICY_REASON_MAX_CHARS),
   }),
 );
 export type UpdateSlackTaskPolicyRequest = z.infer<typeof UpdateSlackTaskPolicyRequest>;
