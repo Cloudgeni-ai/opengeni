@@ -185,7 +185,7 @@ describe("shared credential resolver forced refresh", () => {
     const connectionId = crypto.randomUUID();
     const store = { generation: 1, expiresAt: new Date(Date.now() + 3_600_000) };
     const rotations: string[] = [];
-    const resolverFor = (holderKey: string) =>
+    const holderResolver = (holderKey: string) =>
       buildSubscriptionCoreCredentialResolver({
         flightNamespace: `resolver-test-${connectionId}`,
         connectionId,
@@ -217,8 +217,8 @@ describe("shared credential resolver forced refresh", () => {
           accessLost: () => new Error("access lost"),
         },
       });
-    const mine = resolverFor("mine");
-    const other = resolverFor("other");
+    const mine = holderResolver("mine");
+    const other = holderResolver("other");
     expect(await mine.getToken()).toBe(1);
     // Another holder (turn, operation or replica) rotates after mine was issued.
     expect(await other.refresh()).toBe(2);
