@@ -12,27 +12,37 @@ import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
-// A native range input in steps of 5, and custom sliders that move only with
-// their arrow keys: one the usual way, one reversed, one that ignores keys.
+// Native range inputs, and custom sliders that move only with their arrow
+// keys: the usual way, reversed, ignoring keys, in tenths, up and down only,
+// and right to left sitting at its minimum.
 const fixture = `data:text/html,${encodeURIComponent(`<!doctype html><html lang="en-US">
 <label>Volume <input type="range" min="0" max="100" step="5" value="50" data-testid="volume"></label>
-<div role="slider" tabindex="0" aria-label="Level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" data-step="1"></div>
-<div role="slider" tabindex="0" aria-label="Depth" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" data-step="-1"></div>
+<label>Opacity <input type="range" min="0" max="1" step="0.1" value="0.3"></label>
+<fieldset disabled><label>Locked <input type="range" min="0" max="100" value="10" data-testid="locked"></label></fieldset>
+<div role="slider" tabindex="0" aria-label="Level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" data-step="1" data-up="ArrowRight" data-down="ArrowLeft"></div>
+<div role="slider" tabindex="0" aria-label="Depth" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" data-step="-1" data-up="ArrowRight" data-down="ArrowLeft"></div>
 <div role="slider" tabindex="0" aria-label="Stuck" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"></div>
+<div role="slider" tabindex="0" aria-label="Gain" aria-valuemin="0" aria-valuemax="1" aria-valuenow="0.2" data-step="0.1" data-up="ArrowRight" data-down="ArrowLeft"></div>
+<div role="slider" tabindex="0" aria-label="Height" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" data-step="1" data-up="ArrowUp" data-down="ArrowDown"></div>
+<div role="slider" tabindex="0" aria-label="Balance" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" data-step="1" data-up="ArrowLeft" data-down="ArrowRight"></div>
 <output aria-label="Changes"></output>
 <script>
   const log = document.querySelector("output");
   const volume = document.querySelector("[data-testid=volume]");
   for (const type of ["input", "change"])
     volume.addEventListener(type, () => { log.textContent += type + "=" + volume.value + ";"; });
+  const locked = document.querySelector("[data-testid=locked]");
+  locked.addEventListener("input", () => { log.textContent += "locked=" + locked.value + ";"; });
   for (const slider of document.querySelectorAll("[data-step]")) {
     const step = Number(slider.dataset.step);
+    const min = Number(slider.getAttribute("aria-valuemin"));
+    const max = Number(slider.getAttribute("aria-valuemax"));
     slider.addEventListener("keydown", (event) => {
       const now = Number(slider.getAttribute("aria-valuenow"));
-      const delta = event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0;
+      const delta = event.key === slider.dataset.up ? step : event.key === slider.dataset.down ? -step : 0;
       if (!delta) return;
       event.preventDefault();
-      slider.setAttribute("aria-valuenow", String(Math.max(0, Math.min(100, now + delta))));
+      slider.setAttribute("aria-valuenow", String(Math.max(min, Math.min(max, now + delta))));
     });
   }
 </script>`)}`;
@@ -128,6 +138,28 @@ e2e(
       await expect(fill(observed, "Stuck", "40")).rejects.toMatchObject({
         message: expect.stringContaining("did not move"),
       });
+
+      // A fractional value reads as the page set it, not as a 32-bit float.
+      expect(node(observed, "slider", "Opacity").value).toBe("0.3");
+
+      // A range input in a disabled fieldset is refused and left alone.
+      await expect(fill(observed, "Locked", "70")).rejects.toMatchObject({
+        code: "invalid_action",
+        message: expect.stringContaining("disabled"),
+      });
+
+      // Steps of a tenth reach their value despite floating-point sums.
+      await fill(observed, "Gain", "0.5");
+      // A slider that listens only for up and down still moves.
+      await fill(observed, "Height", "53");
+      // A right-to-left slider at its minimum finds its raising key.
+      await fill(observed, "Balance", "4");
+      observed = await fresh(observed);
+      expect(Number(node(observed, "slider", "Gain").value)).toBeCloseTo(0.5, 9);
+      expect(node(observed, "slider", "Height").value).toBe("53");
+      expect(node(observed, "slider", "Balance").value).toBe("4");
+      expect(node(observed, "slider", "Locked").value).toBe("10");
+      expect(nodes(observed).some((item) => item.name?.includes("locked=") === true)).toBe(false);
     } finally {
       await driver.close().catch(() => undefined);
       await rm(directory, { recursive: true, force: true });

@@ -5884,6 +5884,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         { potentialEffect: true },
       );
       if (!isRecord(result) || result.kind !== "set") {
+        if (isRecord(result) && result.kind === "disabled") {
+          throw new InteractionDefiniteDriverError("invalid_action", "this slider is disabled");
+        }
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
           "browser set the slider's value but the page did not keep it; check the current page before continuing",
@@ -5897,13 +5900,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "this slider does not report its value; drag its handle or press its keys and check the page",
       );
     }
-    if (initial.value === target) return true;
+    if (sameSliderValue(initial.value, target)) return true;
     await this.focusNode(state, backendDOMNodeId);
     let current = initial.value;
-    // Some sliders run the other way (right to left, or larger values at
-    // the bottom); the first press shows which arrow raises the value.
-    let reversed = false;
-    for (let presses = 0; current !== target; presses++) {
+    let presses = 0;
+    const press = async (key: string): Promise<number | null> => {
+      presses += 1;
+      await this.pressKey(state, this.parseActionKey(key));
+      let next = (await read())?.value ?? null;
+      if (next !== null && sameSliderValue(next, current)) {
+        await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
+        next = (await read())?.value ?? null;
+      }
+      return next !== null && sameSliderValue(next, current) ? null : next;
+    };
+    // Which arrow raises the value depends on the slider: a vertical one may
+    // listen only for up and down, and a right-to-left one lowers with the
+    // right arrow. Learn it from the first press that moves the slider.
+    const [primary, secondary] = initial.vertical
+      ? [SLIDER_VERTICAL_KEYS, SLIDER_HORIZONTAL_KEYS]
+      : [SLIDER_HORIZONTAL_KEYS, SLIDER_VERTICAL_KEYS];
+    let keys: { raise: string; lower: string } | null = null;
+    while (!sameSliderValue(current, target)) {
       if (presses >= SLIDER_MAX_KEY_PRESSES) {
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
@@ -5911,33 +5929,48 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
       }
       const up = current < target;
-      await this.pressKey(state, this.parseActionKey(up !== reversed ? "ArrowRight" : "ArrowLeft"));
-      let next = (await read())?.value ?? null;
-      if (next === current) {
-        await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
-        next = (await read())?.value ?? null;
-      }
-      if (next === null || next === current) {
-        throw new InteractionOutcomeUnknownDriverError(
-          "outcome_unknown",
-          `this slider did not move when its arrow key was pressed (it is at ${current}); drag its handle or click its track instead`,
-        );
-      }
-      if (up ? next < current : next > current) {
-        if (reversed || presses > 0) {
+      let next: number | null = null;
+      if (keys === null) {
+        const candidates = up
+          ? [primary.raise, secondary.raise, primary.lower]
+          : [primary.lower, secondary.lower, primary.raise];
+        for (const key of candidates) {
+          next = await press(key);
+          if (next === null) continue;
+          const opposite = SLIDER_OPPOSITE_KEY[key] ?? key;
+          keys = next > current ? { raise: key, lower: opposite } : { raise: opposite, lower: key };
+          break;
+        }
+        if (next === null) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider did not move when its arrow keys were pressed (it is at ${current}); drag its handle or click its track instead`,
+          );
+        }
+        // A first press the wrong way only taught which key is which.
+        if (up ? next < current : next > current) {
+          current = next;
+          continue;
+        }
+      } else {
+        next = await press(up ? keys.raise : keys.lower);
+        if (next === null) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider did not move when its arrow key was pressed (it is at ${current}); drag its handle or click its track instead`,
+          );
+        }
+        if (up ? next < current : next > current) {
           throw new InteractionOutcomeUnknownDriverError(
             "outcome_unknown",
             `this slider moved away from ${target} when its arrow keys were pressed; it is now at ${next}`,
           );
         }
-        reversed = true;
-        current = next;
-        continue;
       }
-      if (up ? next > target : next < target) {
+      if (!sameSliderValue(next, target) && (up ? next > target : next < target)) {
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
-          `this slider moves in steps of ${Math.abs(next - current)} and cannot be set to ${target}; it is now at ${next}`,
+          `this slider moves in steps of ${Number(Math.abs(next - current).toPrecision(12))} and cannot be set to ${target}; it is now at ${next}`,
         );
       }
       current = next;
@@ -8266,6 +8299,21 @@ const FILL_TARGET_FUNCTION = `function() {
 // Enough arrow presses for a 0 to 100 slider end to end, twice over.
 const SLIDER_MAX_KEY_PRESSES = 250;
 
+const SLIDER_HORIZONTAL_KEYS = { raise: "ArrowRight", lower: "ArrowLeft" };
+const SLIDER_VERTICAL_KEYS = { raise: "ArrowUp", lower: "ArrowDown" };
+const SLIDER_OPPOSITE_KEY: Record<string, string> = {
+  ArrowRight: "ArrowLeft",
+  ArrowLeft: "ArrowRight",
+  ArrowUp: "ArrowDown",
+  ArrowDown: "ArrowUp",
+};
+
+// Page sliders often step in tenths, which add up to values like
+// 0.30000000000000004; those count as the value asked for.
+function sameSliderValue(a: number, b: number): boolean {
+  return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+}
+
 type SliderState = {
   kind: "range" | "aria";
   value: number | null;
@@ -8274,6 +8322,8 @@ type SliderState = {
   /** For a range input, the value it would take for the requested one. */
   nearest: number | null;
   disabled: boolean;
+  /** The slider says it runs up and down. */
+  vertical: boolean;
 };
 
 function sliderState(value: unknown): SliderState | null {
@@ -8287,10 +8337,13 @@ function sliderState(value: unknown): SliderState | null {
     max: number(value.max),
     nearest: number(value.nearest),
     disabled: value.disabled === true,
+    vertical: value.vertical === true,
   };
 }
 
-// A native range input, or an element with role slider and its ARIA value.
+// A native range input, or an element with role slider and its ARIA value. A
+// control is disabled the way a person meets it: disabled itself or by a
+// disabled fieldset, or marked aria-disabled on itself or an ancestor.
 const SLIDER_STATE_FUNCTION = `function(expected) {
   if (!(this instanceof Element) || !this.isConnected) return { kind: "other" };
   const number = (text) => {
@@ -8298,6 +8351,7 @@ const SLIDER_STATE_FUNCTION = `function(expected) {
     const parsed = Number(text);
     return Number.isFinite(parsed) ? parsed : null;
   };
+  const disabled = this.matches(":disabled") || this.closest('[aria-disabled="true"]') !== null;
   if (String(this.tagName || "").toLowerCase() === "input" && String(this.type).toLowerCase() === "range") {
     let nearest = null;
     if (typeof expected === "number") {
@@ -8313,7 +8367,8 @@ const SLIDER_STATE_FUNCTION = `function(expected) {
       min: number(this.min) ?? 0,
       max: number(this.max) ?? 100,
       nearest,
-      disabled: this.disabled === true,
+      disabled,
+      vertical: false,
     };
   }
   if (String(this.getAttribute("role") || "").toLowerCase() !== "slider") return { kind: "other" };
@@ -8322,7 +8377,8 @@ const SLIDER_STATE_FUNCTION = `function(expected) {
     value: number(this.getAttribute("aria-valuenow")),
     min: number(this.getAttribute("aria-valuemin")),
     max: number(this.getAttribute("aria-valuemax")),
-    disabled: String(this.getAttribute("aria-disabled") || "").toLowerCase() === "true",
+    disabled,
+    vertical: String(this.getAttribute("aria-orientation") || "").toLowerCase() === "vertical",
   };
 }`;
 
@@ -8331,6 +8387,7 @@ const SLIDER_STATE_FUNCTION = `function(expected) {
 // a drag does.
 const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
   if (!(this instanceof HTMLInputElement) || !this.isConnected) return { kind: "gone" };
+  if (this.matches(":disabled") || this.closest('[aria-disabled="true"]') !== null) return { kind: "disabled" };
   const view = this.ownerDocument.defaultView;
   const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
   this.focus();

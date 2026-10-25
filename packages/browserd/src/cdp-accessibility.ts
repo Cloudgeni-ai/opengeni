@@ -259,7 +259,7 @@ function safeValue(
   // Sliders, progress bars and meters report a number.
   const raw = node.value?.value;
   const value =
-    typeof raw === "number" && Number.isFinite(raw) ? String(raw) : stringValue(node.value);
+    typeof raw === "number" && Number.isFinite(raw) ? numericText(raw) : stringValue(node.value);
   if (!value) return {};
   // Chromium exposes a password field's value as one mask character per
   // character typed. Report it as redacted rather than as dots. Other form
@@ -344,6 +344,19 @@ export function semanticRef(
   return usedRefs.has(short) ? `${kind}${digest}` : short;
 }
 
+/**
+ * Chromium keeps these values as 32-bit floats, so a slider at 0.3 arrives
+ * as 0.30000001192092896. Print the shortest number that is the same float.
+ */
+function numericText(value: number): string {
+  if (Number.isInteger(value) || Math.fround(value) !== value) return String(value);
+  for (let digits = 1; digits <= 9; digits++) {
+    const shortest = Number(value.toPrecision(digits));
+    if (Math.fround(shortest) === value) return String(shortest);
+  }
+  return String(value);
+}
+
 function propertyStates(properties: unknown, numericValue: unknown = undefined): string[] {
   if (!Array.isArray(properties)) return [];
   const states: string[] = [];
@@ -358,7 +371,8 @@ function propertyStates(properties: unknown, numericValue: unknown = undefined):
     if (
       property.name === "valuetext" &&
       typeof numericValue === "number" &&
-      String(value) === String(numericValue)
+      Number.isFinite(numericValue) &&
+      String(value) === numericText(numericValue)
     )
       continue;
     if (value === true || value === "true") states.push(property.name.slice(0, 128));
