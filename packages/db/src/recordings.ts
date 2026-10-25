@@ -2788,7 +2788,10 @@ export async function saveRecordingNote(
       eq(schema.recordingNotes.kind, input.kind),
     );
     const [existing] = await tx.select().from(schema.recordingNotes).where(where);
-    if (input.expectedRevision !== undefined && (existing?.revision ?? 0) !== input.expectedRevision) {
+    if (
+      input.expectedRevision !== undefined &&
+      (existing?.revision ?? 0) !== input.expectedRevision
+    ) {
       throw new RecordingConflictError(
         "Someone saved newer notes. Load them and try again",
         "notes_changed",

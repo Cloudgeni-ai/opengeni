@@ -1050,7 +1050,10 @@ describe("recordings", () => {
     expect(edited.revision).toBe(2);
 
     // Anyone who can see the meeting reads and writes its notes; a private one stays hidden.
-    const memberView = await listRecordingNotes(db, { ...memberActor, recordingId: ours.recordingId });
+    const memberView = await listRecordingNotes(db, {
+      ...memberActor,
+      recordingId: ours.recordingId,
+    });
     expect(memberView.map((note) => [note.kind, note.revision])).toEqual([
       ["notepad", 2],
       ["notes", 1],
@@ -1059,7 +1062,12 @@ describe("recordings", () => {
       listRecordingNotes(db, { ...memberActor, recordingId: mine.recordingId }),
     ).rejects.toBeInstanceOf(RecordingNotFoundError);
     await expect(
-      saveRecordingNote(db, { ...memberActor, recordingId: mine.recordingId, kind: "notes", body: "x" }),
+      saveRecordingNote(db, {
+        ...memberActor,
+        recordingId: mine.recordingId,
+        kind: "notes",
+        body: "x",
+      }),
     ).rejects.toBeInstanceOf(RecordingNotFoundError);
 
     // Only the notes are an event, once per change.
