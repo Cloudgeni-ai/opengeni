@@ -93,7 +93,11 @@ describe("portable compaction operator verification", () => {
       azureOpenaiAdToken: "synthetic-ad-token",
     });
     expect(deployment.baseURL).toBe("https://fixture.invalid/openai/deployments/fixture");
-    for (const azureOpenaiAuthMode of ["workload_identity", "managed_identity"] as const) {
+    for (const azureOpenaiAuthMode of [
+      "deployment_identity",
+      "workload_identity",
+      "managed_identity",
+    ] as const) {
       const identity = createVerificationClient({
         ...base,
         azureOpenaiAuthMode,
@@ -101,7 +105,9 @@ describe("portable compaction operator verification", () => {
         azureOpenaiBaseUrl: "https://fixture.invalid/openai/v1",
         azureTenantId: "tenant",
         azureClientId: "client",
-        azureFederatedTokenFile: "/projected/token",
+        azureFederatedTokenFile:
+          azureOpenaiAuthMode === "deployment_identity" ? undefined : "/projected/token",
+        azureClientSecret: "fake-client-secret",
       });
       expect(identity.baseURL).toBe("https://fixture.invalid/openai/v1");
     }

@@ -53,7 +53,7 @@ export async function inspectIdentityBackfill(sql: Sql) {
   if (!role || !(role.rolsuper || role.rolbypassrls))
     throw Error("Maintenance requires an existing superuser or BYPASSRLS operator connection");
   const [state] =
-    await sql`select (select id::text from session_events order by id desc limit 1) as upper_id,
+    await sql`select (select id from session_events order by id desc limit 1) as upper_id,
     pg_current_wal_insert_lsn()::text as wal_lsn`;
   return {
     database: String(role.database),
@@ -94,7 +94,9 @@ export async function backfillIdentityBatch(
     // Walk the primary key, including rows with no identity. A NULL result is
     // not a completion marker; checkpoint the scanned frontier, not only updates.
     // No SKIP LOCKED: a failed/blocked batch must never advance past missed rows.
-    const ids = await tx`select id::text from session_events
+    // Keep the UUID output type: `id::text` would make ORDER BY id resolve to
+    // the cast output alias and sort the entire range instead of walking its index.
+    const ids = await tx`select id from session_events
       where id<=${state.upperId}::uuid ${state.afterId ? tx`and id>${state.afterId}::uuid` : tx``}
       order by id limit ${options.batchSize}`;
     if (ids.length === 0)
@@ -184,7 +186,12 @@ export async function runIdentityBackfill(args: string[], env: NodeJS.ProcessEnv
   const sql = postgres(env.OPENGENI_MAINTENANCE_DATABASE_URL, {
     max: 1,
     prepare: false,
-    connection: { application_name: "opengeni-event-identity-backfill", row_security: "off" },
+    connection: {
+      application_name: "opengeni-event-identity-backfill",
+      row_security: "off",
+      statement_timeout: options.statementTimeoutMs,
+      lock_timeout: options.lockTimeoutMs,
+    },
   });
   let stop = false;
   const stopAfterBatch = () => {
