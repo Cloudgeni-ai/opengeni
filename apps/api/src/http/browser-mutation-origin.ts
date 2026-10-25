@@ -3,13 +3,43 @@ import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { isAgentActingAsPerson } from "./acting-person";
 
+type TrustedBrowserOriginSettings = Pick<
+  ApiRouteDeps["settings"],
+  "publicBaseUrl" | "webBaseUrl" | "betterAuthTrustedOrigins"
+>;
+
+/**
+ * The browser origins an operator has configured for this deployment: the
+ * public base URL, the web base URL and every trusted auth origin. A
+ * deployment reachable under more than one hostname lists the extra ones as
+ * trusted auth origins, so a person signed in on any of them can also change
+ * their own settings there.
+ */
+export function trustedBrowserOrigins(settings: TrustedBrowserOriginSettings): string[] {
+  const origins = new Set<string>();
+  for (const candidate of [
+    settings.publicBaseUrl,
+    settings.webBaseUrl,
+    ...(settings.betterAuthTrustedOrigins ?? "").split(","),
+  ]) {
+    if (!candidate?.trim()) continue;
+    try {
+      const origin = new URL(candidate.trim()).origin;
+      if (origin !== "null") origins.add(origin);
+    } catch {
+      continue;
+    }
+  }
+  return [...origins];
+}
+
 /**
  * The one browser-origin rule for cookie-authenticated state changes (model
  * and subscription connections, organization settings, site publishing).
  *
  * Managed and configured access modes accept only a JSON request whose
- * `Origin` is the configured public base URL and whose fetch metadata says
- * `same-origin`. Local access mode (the `bun run dev` stack) has no public
+ * `Origin` is one of the deployment's trusted browser origins and whose fetch
+ * metadata says `same-origin`. Local access mode (the `bun run dev` stack) has no public
  * base URL and serves the web app and the API on different loopback ports,
  * so it accepts this stack's own browser origin instead, as the local
  * browser boundary does.
@@ -35,7 +65,7 @@ export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps)
   if (
     deps.settings.productAccessMode === "local"
       ? !localOriginMatches
-      : origin !== new URL(deps.settings.publicBaseUrl!).origin
+      : !origin || !trustedBrowserOrigins(deps.settings).includes(origin)
   ) {
     throw new HTTPException(403, {
       message: "same-origin browser request required",
