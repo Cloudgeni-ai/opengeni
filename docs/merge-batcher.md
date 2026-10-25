@@ -275,7 +275,7 @@ service does not interpret an incomplete observation as an empty queue.
 
 ## Admission and FIFO
 
-The GitHub-only admission contract is an open, non-draft PR with `queue-ready`
+The GitHub-only admission contract is an open, non-draft PR with `queue-ready` or a current native auto-merge request,
 and successful configured required GitHub-hosted checks on its exact current head.
 The admission workflow is fast lint, types and selected units, not the full PR
 suite; full main CI remains the independent post-merge backstop. These instructions
@@ -293,20 +293,31 @@ For a parked singleton, open the failed GitHub check and its logs, fix the cause
 push a new head and let required checks finish before signalling readiness. A
 label toggle alone does not retry the same parked head. Parking comments identify
 the failed check without assigning blame; do not rerun/cancel Batch CI manually.
+Parking also durably requests disabling native auto-merge. Explicitly re-enabling
+auto-merge after parking creates a new retry request for the unchanged head.
+Changed heads still require fresh exact-head checks. Disable observes current
+head and enable time before submission; GitHub provides no atomic expected-head
+condition for that mutation. Ambiguous submissions are held, never blindly replayed.
 
 FIFO uses actual GraphQL ready timeline events, never PR creation time or the
 time a controller first saw it. Turning readiness off then on creates a new
-event, but does not release a parked unchanged head.
+event. Label churn does not release a parked unchanged head; a new native enable
+event after parking does. Current native request events take precedence over labels.
 Missing/partial event history prevents admission with an explicit reason.
 `changeset-release/main` is a barrier: earlier PRs batch first, Version is a
 singleton, and later work does not speculate across it.
 
-Use `queue-ready`, not native auto-merge, for the normal queue path. Protections
+Use native auto-merge (for example `gh merge --auto`) or `queue-ready`. Protections
 must prevent native/direct auto-merge from bypassing this batcher. Only the
 authorized batcher principal may normally update queue/state refs; PR authors must not
 be able to forge those refs or the trusted candidate workflow/result artifact.
 The batch CI workflow must be trusted policy, not replaced by PR-controlled
 workflow changes. The parent owns that workflow/ruleset enforcement.
+Repository auto-merge enablement and the guiding required check must be coordinated
+with that policy; this source change alone does not enable them or waive any check.
+Batch merge commits retain each admitted head as a parent. Native GitHub `merged`
+readback is recorded separately from main-tip landing; `closed` alone is not merge
+proof and no close-PR write substitutes for native MERGED recognition.
 
 ## Immutable candidates and CI result contract
 
@@ -623,8 +634,8 @@ admission backpressure, including latency policy, still applies to those exits.
 Other failed cohorts split sequentially and failed singleton heads are durably
 parked, never blamed or ejected. Each parking record binds the PR head, tested base,
 batch, original cohort, run and attempt, with a durable non-blaming PR comment.
-Other ready heads proceed. Readiness churn and main advancement do not retry a
-parked head; a genuinely different head may re-enter. Historical parking evidence
+Other ready heads proceed. Label churn and main advancement do not retry a
+parked head; a changed head or explicit native auto-merge enable may re-enter. Historical parking evidence
 is retained. Legacy bisection groups use the same parking policy; pending legacy
 code-blame comments remain held. No base-only workflow is invoked.
 

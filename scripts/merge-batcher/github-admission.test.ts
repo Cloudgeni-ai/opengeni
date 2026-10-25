@@ -1,5 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { admitGitHub, type GitHubAdmissionInput, type HostedCheck } from "./github-admission";
+import {
+  admitGitHub,
+  appOnlyGuidanceContext,
+  type GitHubAdmissionInput,
+  type HostedCheck,
+} from "./github-admission";
 const head = "a".repeat(40);
 const check: HostedCheck = {
   id: 100,
@@ -30,18 +35,78 @@ const input = (): GitHubAdmissionInput => ({
   conversationResolutionRequired: false,
 });
 describe("GitHub-only admission", () => {
+  test("only the exact configured App guidance pair is a routing fence, never CI proof", () => {
+    const value = input();
+    value.expectedBatcherAppId = 5425399;
+    value.required = [{ context: appOnlyGuidanceContext, integrationId: 5425399 }];
+    expect(admitGitHub(value).ready).not.toBeNull();
+    expect(admitGitHub(value).ready?.binding.evidenceId).toBe("github-ci:100");
+    value.checks[0]!.conclusion = "failure";
+    expect(admitGitHub(value).ready).toBeNull();
+  });
+  test("unknown context, wrong App and unbound guidance requirements remain required", () => {
+    for (const requirement of [
+      { context: `${appOnlyGuidanceContext}!`, integrationId: 5425399 },
+      { context: appOnlyGuidanceContext, integrationId: 123 },
+      { context: appOnlyGuidanceContext, integrationId: null },
+      { context: appOnlyGuidanceContext, integrationId: -1 },
+    ]) {
+      const value = input();
+      value.expectedBatcherAppId = 5425399;
+      value.required = [requirement];
+      expect(admitGitHub(value).ready).toBeNull();
+    }
+    for (const expectedBatcherAppId of [undefined, 0, -1, NaN]) {
+      const value = input();
+      value.expectedBatcherAppId = expectedBatcherAppId;
+      value.required = [{ context: appOnlyGuidanceContext, integrationId: 5425399 }];
+      expect(admitGitHub(value).ready).toBeNull();
+    }
+  });
   test("label and hosted exact-head CI suffice without comments, VM evidence or reviewer IDs", () => {
     const admitted = admitGitHub(input());
     expect(admitted.ready?.headSha).toBe(head);
     expect(admitted.ready?.binding.evidenceId).toBe("github-ci:100");
   });
-  test("only the queue-ready event admits; auto-merge does not", () => {
+  test("auto-merge admits with a current native request and genuine enable event", () => {
     const value = input();
     value.queueReady = false;
     expect(admitGitHub(value).ready).toBeNull();
     value.queueReady = true;
     value.events[0]!.source = "auto-merge";
     expect(admitGitHub(value).ready).toBeNull();
+    value.autoMerge = true;
+    value.queueReady = false;
+    expect(admitGitHub(value).ready?.binding.source).toBe("auto-merge");
+    value.checks[0]!.conclusion = "failure";
+    expect(admitGitHub(value).ready).toBeNull();
+  });
+  test("disable and re-enable create a fresh native binding without label churn", () => {
+    const value = input();
+    value.autoMerge = true;
+    value.events.push({
+      id: "auto1",
+      at: "2026-10-23T00:01:00Z",
+      source: "auto-merge",
+      enabled: true,
+    });
+    expect(admitGitHub(value).ready?.binding.eventId).toBe("auto1");
+    value.events.push({
+      id: "disable",
+      at: "2026-10-23T00:02:00Z",
+      source: "auto-merge",
+      enabled: false,
+    });
+    value.autoMerge = false;
+    expect(admitGitHub(value).ready?.binding.eventId).toBe("label-1");
+    value.autoMerge = true;
+    value.events.push({
+      id: "auto2",
+      at: "2026-10-23T00:03:00Z",
+      source: "auto-merge",
+      enabled: true,
+    });
+    expect(admitGitHub(value).ready?.binding.eventId).toBe("auto2");
   });
   test("unlabel/relabel changes readiness binding, unrelated comment churn cannot", () => {
     const value = input(),

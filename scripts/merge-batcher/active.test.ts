@@ -36,6 +36,106 @@ afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
 
+describe("parked native auto-merge effects", () => {
+  type Mode = "ok" | "lost-applied" | "lost-unapplied" | "errors" | "forbidden";
+  const setup = async (mode: Mode) => {
+    const f = await fixture();
+    const request = {
+      id: "PR_x",
+      headSha: f.head,
+      enabledAt: new Date(Date.parse(NOW) - 3600000).toISOString() as string | null,
+    };
+    const calls = { reads: 0, mutations: 0, failReadAt: -1 };
+    f.api.autoMergeState = async () => {
+      if (++calls.reads === calls.failReadAt) throw Error("observation unavailable");
+      return { ...request };
+    };
+    const original = f.api.transport;
+    const transport: typeof fetch = (async (url, init) => {
+      if (!String(url).endsWith("/graphql")) return original(url, init);
+      expect(JSON.parse(String(init?.body)).query).toStartWith("mutation");
+      calls.mutations++;
+      if (mode === "forbidden") return new Response("", { status: 403 });
+      if (mode === "errors") return Response.json({ errors: [{ message: "rejected" }] });
+      if (mode === "lost-unapplied") throw Error("transport lost before apply");
+      request.enabledAt = null;
+      if (mode === "lost-applied") throw Error("response lost after apply");
+      return Response.json({
+        data: { disablePullRequestAutoMerge: { pullRequest: { id: "PR_x" } } },
+      });
+    }) as typeof fetch;
+    Object.defineProperty(f.api, "transport", { value: transport });
+    const manifest = await f.publish();
+    f.verdict(manifest, "code_failure").attempt = 2;
+    await f.controller().step();
+    expect((await f.controller().step()).action.kind).toBe("park");
+    const effect = async () =>
+      Object.values((await f.state()).ledger.effects).find((e) => e.kind === "disable-auto-merge")!;
+    expect(await effect()).toBeDefined();
+    const drive = async (count: number) => {
+      for (let i = 0; i < count; i++) {
+        await f.executor().maintain();
+        f.advance();
+      }
+    };
+    return { f, request, calls, effect, drive };
+  };
+  test("successful submission stays uncertain until provider observation", async () => {
+    const x = await setup("ok");
+    await x.drive(1);
+    expect(x.calls.mutations).toBe(1);
+    expect((await x.effect()).status).toBe("uncertain");
+    await x.drive(4);
+    expect((await x.effect()).status).toBe("done");
+    expect(x.calls.mutations).toBe(1);
+  });
+  for (const mode of ["lost-applied", "lost-unapplied", "errors", "forbidden"] as const) {
+    test(`${mode} is reconciled without mutation replay`, async () => {
+      const x = await setup(mode);
+      await x.drive(14);
+      expect(x.calls.mutations).toBe(1);
+      expect((await x.effect()).status).toBe(mode === "lost-applied" ? "done" : "blocked");
+    });
+  }
+  test("a failed pre-submit observation safely retries before the first mutation", async () => {
+    const x = await setup("ok");
+    x.calls.failReadAt = 2;
+    await x.drive(1);
+    expect(x.calls.mutations).toBe(0);
+    expect((await x.effect()).status).toBe("pending");
+    await x.drive(5);
+    expect(x.calls.mutations).toBe(1);
+    expect((await x.effect()).status).toBe("done");
+  });
+  test("changed head suppresses disable", async () => {
+    const x = await setup("ok");
+    x.request.headSha = "b".repeat(40);
+    await x.drive(4);
+    expect(x.calls.mutations).toBe(0);
+    expect((await x.effect()).status).toBe("done");
+  });
+  test("newer enable is preserved; only a new post-park native event retries", async () => {
+    const x = await setup("ok");
+    const parked = (await x.f.state()).ledger.parked![0]!;
+    const later = new Date(Date.parse(parked.parkedAt) + 60000).toISOString();
+    x.request.enabledAt = later;
+    await x.drive(4);
+    expect(x.calls.mutations).toBe(0);
+    expect((await x.effect()).status).toBe("done");
+    const pull = x.f.api.pulls[0]!;
+    for (const binding of [
+      { ...pull.binding, source: "queue-ready" as const, eventId: "label-new", at: later },
+      { ...pull.binding, source: "auto-merge" as const, eventId: "old", at: parked.parkedAt },
+      { ...parked.pull.binding, source: "auto-merge" as const, at: later },
+    ]) {
+      pull.binding = binding;
+      expect((await x.f.controller().step()).action.kind).not.toBe("build");
+    }
+    pull.binding = { ...pull.binding, source: "auto-merge", eventId: "auto-new", at: later };
+    expect((await x.f.controller().step()).action.kind).toBe("build");
+  });
+});
+
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "batcher-active-"));
   roots.push(root);
@@ -148,6 +248,9 @@ async function fixture() {
     override async pullSnapshot(_number: number) {
       this.onSnapshot?.();
       return { ...this.snapshot };
+    }
+    override async autoMergeState(_number: number): Promise<import("./github").AutoMergeState> {
+      return { id: "PR_fixture", headSha: this.snapshot.headSha, enabledAt: null };
     }
     override async findFollowup(request: FollowupRequest) {
       const matches = this.followups.filter(
@@ -612,13 +715,28 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(f.api.calls).toHaveLength(0);
     expect((await f.git.remoteRefs(f.origin.dir)).has(f.cfg.stateRef)).toBe(false);
   });
+  test.each([false, true])("native MERGED is distinct from CLOSED (merged=%s)", async (merged) => {
+    const f = await fixture(),
+      m = await f.publish();
+    f.verdict(m);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    f.api.snapshot.state = "closed";
+    f.api.snapshot.merged = merged;
+    f.advance();
+    await f.executor().maintain();
+    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe(
+      merged ? "native-merged" : "closed-unmerged",
+    );
+  });
   test("publishes create-only, lands exact tested tip, reconstructs without duplicate landing", async () => {
     const f = await fixture(),
       m = await f.publish();
     f.verdict(m);
     expect((await f.controller().step()).action.kind).toBe("land");
     expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
-    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe("unchanged");
+    expect((await f.state()).ledger.landings[`${m.batchId}:1`]?.status).toBe(
+      "awaiting-native-merge",
+    );
     expect(f.api.comments[0]).toContain(f.head);
     expect(f.api.comments[0]).toContain(m.tipSha);
     expect((await f.controller().step()).action.kind).toBe("wait");
@@ -1194,8 +1312,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect((await f.controller().step()).action.kind).toBe("park");
       expect(f.api.calls).toEqual([]);
       await f.controller().step();
+      await f.executor().maintain(); // Reconcile native disable before the parking comment.
       expect(f.api.comments).toHaveLength(1);
-      expect(f.api.comments[0]).toContain("not a culprit attribution");
+      expect(f.api.comments[0]).toContain("singleton Batch CI failed");
       await f.origin.exec(["update-ref", "refs/heads/main", f.divergent]);
       f.api.baseStatus = "green";
       expect((await f.controller().step()).action.kind).toBe("wait");
@@ -1220,6 +1339,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     f.verdict(m, "code_failure").attempt = 2;
     await f.controller().step();
     expect((await f.controller().step()).action.kind).toBe("park");
+    await f.executor().maintain(); // Already-disabled native request is reconciled first.
     f.api.response = "lost";
     await f.executor().maintain();
     expect(f.api.calls).toHaveLength(1);

@@ -367,7 +367,7 @@ export class Controller {
         kind: "park",
         number: item.pull.number,
         key: item.batchId,
-        body: `Merge batcher parked exact head ${item.pull.headSha}: Batch CI failed for singleton batch ${item.batchId} on base ${item.baseSha}. Failed check and logs: https://github.com/${this.config.repository}/actions/runs/${item.runId}/attempts/${item.attempt}. Push a fix to re-queue. This is not a culprit attribution or ejection. Other ready heads may proceed; relabeling the same head does not retry it.\n\n<!-- batcher-parking:${item.batchId} -->`,
+        body: `Parked ${item.pull.headSha}: singleton Batch CI failed. Auto-merge disable requested. Push a fix or explicitly re-enable auto-merge to retry; label toggles do not retry. Logs: https://github.com/${this.config.repository}/actions/runs/${item.runId}/attempts/${item.attempt}.\n\n<!-- batcher-parking:${item.batchId} -->`,
       };
     } else if (action.kind === "announce") {
       const key = bindingKey(action.ejection.pull);
