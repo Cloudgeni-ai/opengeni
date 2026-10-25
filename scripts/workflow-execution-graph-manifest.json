@@ -33,6 +33,10 @@
       "sha256": "dda481c98d50b45fc04a3ecc2a2c315ad79d80b63dc7e0325cdfdc2b38f538f1"
     },
     {
+      "path": ".github/workflows/compact-session-view.yml",
+      "sha256": "7415baedd4c81423664e7d7e2947958d97a7cb1c8e3ea70798167b40cc805786"
+    },
+    {
       "path": ".github/workflows/compute-ci.yml",
       "sha256": "d459027f6a9669b83ec4eb6cb1587d055383e1ce7d8e06d3945283350b34fc89"
     },
@@ -1070,6 +1074,18 @@
       "job": "unit-shards",
       "step": "Install dependencies",
       "sha256": "e4fcbcf8dfa696270d7185fee7c21706af0a4b314368f407203418f3493dbeb2"
+    },
+    {
+      "workflow": ".github/workflows/compact-session-view.yml",
+      "job": "browser",
+      "step": "Install dependencies",
+      "sha256": "c3a63454e0528ab2b3f6911cb1f0f6fb7c279381906bfea438bcb84418f41a50"
+    },
+    {
+      "workflow": ".github/workflows/compact-session-view.yml",
+      "job": "browser",
+      "step": "Run the complete compact session view regression",
+      "sha256": "22e84a65e30eba9c209185abb3a3ff11a1e3c931d1c127d626156cc3304ef545"
     },
     {
       "workflow": ".github/workflows/compute-ci.yml",
