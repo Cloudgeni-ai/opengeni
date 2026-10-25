@@ -785,6 +785,8 @@ export class GitHubActiveExecutor implements Executor {
       .filter(([, item]) => Date.parse(item.nextCheckAt) <= Date.parse(this.now()))
       .sort(([, a], [, b]) => Date.parse(a.nextCheckAt) - Date.parse(b.nextCheckAt))[0];
     if (entry) messages.push(await this.reconcile(entry[0], entry[1]));
+    state = await this.load();
+    if (this.available(state)) await this.git.maintainLocal(state.ledger, this.now());
     return messages.join("; ") || null;
   }
   async recoverMissingRun(

@@ -22,6 +22,8 @@ export class MergeConflict extends Error {
   }
 }
 export class GitStore {
+  private readonly promisors = new Map<string, string>();
+  private lastMaintenance = 0;
   constructor(
     readonly dir: string,
     readonly authEnv: Record<string, string> = {},
@@ -66,6 +68,17 @@ export class GitStore {
     refs: string[],
     cache: "state" | "candidate" | "objects" = "objects",
   ): Promise<void> {
+    // Keep each source distinct: fork reads must not replace the source needed
+    // for lazy retrieval of previously promised blobs. No wildcard fetch map.
+    let source = this.promisors.get(remote);
+    if (!source) {
+      source = `batcher-${digest(remote).slice(0, 24)}`;
+      await this.exec(["config", `remote.${source}.url`, remote]);
+      await this.exec(["config", `remote.${source}.promisor`, "true"]);
+      await this.exec(["config", `remote.${source}.partialclonefilter`, "blob:none"]);
+      await this.exec(["config", `remote.${source}.tagOpt`, "--no-tags"]);
+      this.promisors.set(remote, source);
+    }
     // Raw-SHA fetches without refs cannot advertise their existing history on
     // the next fetch. Main churn then downloads the full history repeatedly.
     // These bounded LOCAL refs are negotiation hints, never queue/state proof.
@@ -80,9 +93,49 @@ export class GitStore {
       "--atomic",
       "--no-tags",
       "--no-write-fetch-head",
-      remote,
+      "--filter=blob:none",
+      "--no-auto-maintenance",
+      source,
       ...targets,
     ]);
+  }
+  /** Local disposable pins only; called by the serialized active controller. */
+  async maintainLocal(ledger: Ledger, now: string): Promise<void> {
+    const at = Date.parse(now);
+    if (!Number.isFinite(at) || at - this.lastMaintenance < 3600_000) return;
+    // Unknown effects and recovery keep every local root, including blocked
+    // effects whose provider outcome may still be unknown. No pruning guesses.
+    if (
+      Object.values(ledger.effects).some((effect) => effect.status !== "done") ||
+      Object.values(ledger.missingRuns).some((run) => run.status !== "released") ||
+      ledger.recovery.length
+    )
+      return;
+    const terminal = new Set([...ledger.landed, ...(ledger.parked ?? []).map((p) => p.batchId)]);
+    const refs = await this.exec([
+      "for-each-ref",
+      "--format=%(refname) %(objectname)",
+      "refs/batcher-local/",
+    ]);
+    for (const row of refs.split("\n").filter(Boolean)) {
+      const [ref, sha] = row.split(" ");
+      const id = ref?.slice("refs/batcher-local/".length);
+      if (id && /^[a-f0-9]{64}$/.test(id) && terminal.has(id))
+        await this.exec(["update-ref", "-d", ref!, assertSha(sha!)]);
+    }
+    // Foreground, bounded by exec's timeout; preserve Git's normal grace period.
+    // No prune-now, remote refs, ledger, checkpoint or operator evidence writes.
+    // A partial pack intentionally lacks blob closure; full-closure bitmaps
+    // cannot be generated for that pack alongside locally authored commits.
+    await this.exec([
+      "-c",
+      "gc.autoDetach=false",
+      "-c",
+      "repack.writeBitmaps=false",
+      "gc",
+      "--prune=2.weeks.ago",
+    ]);
+    this.lastMaintenance = at;
   }
   async ancestor(base: string, tip: string): Promise<boolean> {
     try {
