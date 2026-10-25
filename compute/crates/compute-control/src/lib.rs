@@ -138,7 +138,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
         .validate()
         .map_err(|error| anyhow::anyhow!("lease terms: {error}"))?;
     let give_up_after = config.settings.give_up_after;
-    let view = Arc::new(View::new(config.seed));
+    let view = Arc::new(View::new(config.seed, terms.term));
     let service = Arc::new(Service::new(
         Arc::clone(&store),
         Arc::clone(&view),

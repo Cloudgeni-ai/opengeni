@@ -205,10 +205,25 @@ pub struct Leading<L> {
     again_at: HashMap<HostId, Instant>,
     /// How long a silent host holding sandboxes is waited for.
     give_up_after: Duration,
-    /// The silent hosts it waits for, and when it last asked the cloud
-    /// about each one's instance.
-    waiting: HashMap<HostId, Option<Instant>>,
+    /// The silent hosts it waits for, and what it knows of each one's
+    /// instance.
+    waiting: HashMap<HostId, Look>,
+    /// The asks about those instances under way, apart from the ticks so
+    /// that a slow answer holds up nothing else.
+    looks: JoinSet<(HostId, Option<bool>)>,
     metrics: Arc<Metrics>,
+}
+
+/// What the leader knows of the instance of a silent host it waits for.
+#[derive(Debug, Default)]
+struct Look {
+    /// When it last asked the cloud about it.
+    asked: Option<Instant>,
+    /// Whether an ask is under way.
+    asking: bool,
+    /// Whether the instance may still hold its memory, as last answered;
+    /// until the cloud says it does not, it may.
+    holds: Option<bool>,
 }
 
 type FenceResult = (HostId, Result<Option<usize>, String>);
@@ -237,6 +252,7 @@ impl<L: Leases> Leading<L> {
             again_at: HashMap::new(),
             give_up_after: Duration::ZERO,
             waiting: HashMap::new(),
+            looks: JoinSet::new(),
             metrics: Arc::default(),
         }
     }
@@ -330,7 +346,7 @@ impl<L: Leases> Leading<L> {
                 give_up_after = ?self.give_up_after,
                 "a host holding sandboxes stopped renewing; waiting for it before giving up on it"
             );
-            self.waiting.insert(host, None);
+            self.waiting.insert(host, Look::default());
         }
         let Some(group) = self.group.clone() else {
             return if waits { Lapse::Later } else { Lapse::GiveUp };
@@ -356,7 +372,7 @@ impl<L: Leases> Leading<L> {
             .as_deref()
             .is_some_and(|prefix| name.starts_with(prefix))
         {
-            if waits && self.may_hold_memory(host, &group, &name).await {
+            if waits && self.may_hold_memory(host, &group, &name) {
                 return Lapse::Later;
             }
             Lapse::Fence(group, name)
@@ -368,25 +384,43 @@ impl<L: Leases> Leading<L> {
     }
 
     /// Whether the instance `name` of silent host `host` may still hold
-    /// its memory, asking the cloud at most every [`LOOK_EVERY`]: until it
-    /// answers that the instance is stopped or gone, it may.
-    async fn may_hold_memory(&mut self, host: HostId, group: &GcpGroup, name: &str) -> bool {
-        let looked = self.waiting.entry(host).or_insert(None);
-        if looked.is_some_and(|at| at.elapsed() < LOOK_EVERY) {
-            return true;
+    /// its memory, as the cloud last answered; it asks again, apart from
+    /// the tick, at most every [`LOOK_EVERY`]. Until it answers that the
+    /// instance is stopped or gone, it may.
+    fn may_hold_memory(&mut self, host: HostId, group: &Arc<GcpGroup>, name: &str) -> bool {
+        let look = self.waiting.entry(host).or_default();
+        if look.holds == Some(false) {
+            return false;
         }
-        *looked = Some(Instant::now());
-        match group.may_hold_memory(name).await {
-            Ok(holds) => holds,
-            Err(error) => {
-                tracing::warn!(%error, %name, "reading a silent host's instance failed");
-                true
-            }
+        if !look.asking && look.asked.is_none_or(|at| at.elapsed() >= LOOK_EVERY) {
+            look.asking = true;
+            look.asked = Some(Instant::now());
+            let group = Arc::clone(group);
+            let name = name.to_owned();
+            self.looks.spawn(async move {
+                match group.may_hold_memory(&name).await {
+                    Ok(holds) => (host, Some(holds)),
+                    Err(error) => {
+                        tracing::warn!(%error, %name, "reading a silent host's instance failed");
+                        (host, None)
+                    }
+                }
+            });
         }
+        true
     }
 
-    /// Takes in the fences that ended.
+    /// Takes in the fences and asks about instances that ended.
     fn reap(&mut self) {
+        while let Some(joined) = self.looks.try_join_next() {
+            // An ask that panicked leaves its host asking: it is then
+            // given up on once the wait ends.
+            let Ok((host, holds)) = joined else { continue };
+            if let Some(look) = self.waiting.get_mut(&host) {
+                look.asking = false;
+                look.holds = holds.or(look.holds);
+            }
+        }
         while let Some(joined) = self.fences.try_join_next_with_id() {
             let (id, result) = match joined {
                 Ok((id, (_, result))) => (id, result),
@@ -749,7 +783,7 @@ mod tests {
             delays: Mutex::new(vec![slow]),
             given_up: Mutex::new(None),
         });
-        let view = View::new(1);
+        let view = View::new(1, terms.term);
         let mut leading = Leading::new(Arc::clone(&leases), terms, None);
         let begun = Instant::now();
         // The host renews once, just before the slow read returns, and
@@ -816,7 +850,7 @@ mod tests {
     async fn a_host_the_reads_no_longer_list_is_neither_watched_nor_tried_again() {
         let terms = terms();
         let leases = Arc::new(AnswerLost::default());
-        let view = View::new(1);
+        let view = View::new(1, terms.term);
         let mut leading = Leading::new(Arc::clone(&leases), terms, None);
         while leases.give_ups.load(Ordering::SeqCst) == 0 {
             leading.tick(&view).await;

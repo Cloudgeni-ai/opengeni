@@ -68,9 +68,11 @@ can be built and tested.
   whose instance the cloud reports stopped or gone holds nothing to wait
   for and goes at once, and so does a host that holds no sandbox. The
   leader asks the cloud about a waited-for instance at most every five
-  seconds, and a failed read counts as still running. Meanwhile the
-  host's sandboxes stay its own: a wake retries until its own deadline,
-  and new sandboxes go to other hosts. The wait trades a truly hung
+  seconds, apart from its own rounds so a slow answer holds up no other
+  host, and a failed read counts as still running. Meanwhile the host's
+  sandboxes stay its own: a wake retries until its own deadline. New
+  sandboxes go to other hosts, since every replica's placement passes
+  over a host it has read no renewal from for T. The wait trades a truly hung
   host's recovery time (up to two minutes, not T plus margin) for keeping
   every program on a host that was only out of reach.
 - **A cut-off host stops its VMs, with or without its agent.** The host's
