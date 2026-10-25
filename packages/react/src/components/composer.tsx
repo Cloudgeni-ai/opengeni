@@ -1623,9 +1623,11 @@ export function Status() {
     <>
       <AnimatePresence>
         {controller.activeNotice ? (
+          // Visible only: the composer root's ComposerAnnouncements region
+          // already announces this notice, so a second live region here would
+          // make screen readers read it twice.
           <motion.p
             key="notice"
-            role="status"
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
