@@ -3727,15 +3727,24 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
   return identity?.modelName === modelName ? identity.callId : undefined;
 }
 
-/** First-party tools that move this chat to another machine. computer_open
- * and browser_open move it when they name a Connected Machine the chat is not
- * on. */
-const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
-  "sandbox_swap",
-  "sandbox_attach",
+/** First-party tools that move this chat to another machine. */
+const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set(["sandbox_swap", "sandbox_attach"]);
+/** First-party tools that move this chat only when a call names a Connected
+ * Machine placement (one the chat may not be on); other calls stay parallel. */
+const PLACEMENT_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
   "computer_open",
   "browser_open",
 ]);
+
+/** Whether one call's arguments name a Connected Machine placement. */
+export function callNamesConnectedMachine(toolCall: { arguments: string }): boolean {
+  try {
+    const parsed = JSON.parse(toolCall.arguments) as { placement?: { kind?: unknown } } | null;
+    return parsed?.placement?.kind === "connected_machine";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Run the tools that move this chat to another machine in model order. A
@@ -3744,7 +3753,10 @@ const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
  * but calls of one response otherwise start together: the later call would
  * read the chat's route before the swap committed and act on, or be refused
  * by, the machine the chat was leaving. Earlier calls of the response finish
- * on the old machine first; later ones start after the move. Reinstalled on
+ * on the old machine first; later ones start after the move. computer_open
+ * and browser_open are ordered the same way only for a call that names a
+ * Connected Machine placement, the only kind that can move the chat; an open
+ * without one stays parallel with the response's other calls. Reinstalled on
  * every clone like the other MCP projections. A `tool_invoke` of a swap is
  * rewritten to the swap's own call before the runner orders the response, so
  * it is ordered the same way. A swap inside a Code Mode program is one step of
@@ -3754,12 +3766,14 @@ const ROUTE_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
 export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) =>
-    (await listMcpTools(resolutionContext)).map((tool) =>
-      tool.type === "function" &&
-      ROUTE_MOVING_TOOL_FAMILIES.has(toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "")
-        ? { ...tool, exclusiveExecution: true }
-        : tool,
-    );
+    (await listMcpTools(resolutionContext)).map((tool) => {
+      if (tool.type !== "function") return tool;
+      const family = toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "";
+      if (ROUTE_MOVING_TOOL_FAMILIES.has(family)) return { ...tool, exclusiveExecution: true };
+      if (PLACEMENT_MOVING_TOOL_FAMILIES.has(family))
+        return { ...tool, exclusiveExecution: callNamesConnectedMachine };
+      return tool;
+    });
   const clone = agent.clone?.bind(agent);
   if (clone) {
     agent.clone = (config: unknown) => {

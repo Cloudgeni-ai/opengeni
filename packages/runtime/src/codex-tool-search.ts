@@ -301,12 +301,29 @@ function toolShortName(name: string): string {
   return separator >= 0 ? name.slice(separator + MCP_TOOL_NAME_SEPARATOR.length) : name;
 }
 
+/** The server prefix of Opengeni's own tools, preferred among same-named tools. */
+const FIRST_PARTY_TOOL_PREFIX = "opengeni__";
+
+/** Every tool whose name after its server separator is exactly `name`, first-party first. */
+function toolsWithShortName<T extends Tool & { name: string }>(
+  tools: readonly T[],
+  name: string,
+): T[] {
+  const matches = tools.filter((tool) => toolShortName(tool.name) === name);
+  return [
+    ...matches.filter((tool) => tool.name.startsWith(FIRST_PARTY_TOOL_PREFIX)),
+    ...matches.filter((tool) => !tool.name.startsWith(FIRST_PARTY_TOOL_PREFIX)),
+  ];
+}
+
 /**
  * The tools one exact-name lookup entry names: the tool with that full model
- * name, or else every tool whose name after its server separator is exactly
+ * name, or else one tool whose name after its server separator is exactly
  * that name. Agents often load a tool by the name it has in a description or
  * another tool's result (`sandboxes_list` for `opengeni__sandboxes_list`),
- * and a lookup that matched only full names returned nothing for it.
+ * and a lookup that matched only full names returned nothing for it. When
+ * several servers share the short name, Opengeni's own tool (else the first)
+ * is the one loaded; shortNameAlternatives names the others.
  */
 export function toolsWithExactName<T extends Tool & { name: string }>(
   tools: readonly T[],
@@ -314,7 +331,16 @@ export function toolsWithExactName<T extends Tool & { name: string }>(
 ): T[] {
   const full = tools.filter((tool) => tool.name === name);
   if (full.length > 0 || name.includes(MCP_TOOL_NAME_SEPARATOR)) return full;
-  return tools.filter((tool) => toolShortName(tool.name) === name);
+  return toolsWithShortName(tools, name).slice(0, 1);
+}
+
+/** The other tools sharing a short exact-name lookup entry with the one it loads. */
+export function shortNameAlternatives<T extends Tool & { name: string }>(
+  tools: readonly T[],
+  name: string,
+): T[] {
+  if (name.includes(MCP_TOOL_NAME_SEPARATOR) || tools.some((tool) => tool.name === name)) return [];
+  return toolsWithShortName(tools, name).slice(1);
 }
 
 /** Exact-name lookup entries no tool in the pool answers. */

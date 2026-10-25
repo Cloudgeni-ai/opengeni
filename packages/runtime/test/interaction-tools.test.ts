@@ -614,13 +614,19 @@ describe("interaction attempt tools", () => {
     const stale = discoveredComputerSession(randomUUID(), sessionId);
     stale.placement = { kind: "connected_machine", sandboxId: windowsPc };
     const home = discoveredComputerSession(randomUUID(), sessionId);
+    // A machine missing from the list is not known to be offline: its session stays.
+    const unlistedMachine = discoveredComputerSession(randomUUID(), sessionId);
+    unlistedMachine.placement = { kind: "connected_machine", sandboxId: randomUUID() };
     const machineRequests: unknown[] = [];
     let machinesFail = false;
     const definitions = createInteractionAttemptToolDefinitions({
       transport: {
         ...partialTransport({
           listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
-          listComputerSessions: async () => ({ revision: 1, sessions: [stale, home] }),
+          listComputerSessions: async () => ({
+            revision: 1,
+            sessions: [stale, home, unlistedMachine],
+          }),
           listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
           listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices: [] }),
         }),
@@ -678,17 +684,19 @@ describe("interaction attempt tools", () => {
       computers: Array<{ id: string }>;
     };
     expect(compact.machines).toEqual(machines);
-    expect(compact.computers.map((computer) => computer.id)).toEqual([home.id]);
+    expect(compact.computers.map((computer) => computer.id).sort()).toEqual(
+      [home.id, unlistedMachine.id].sort(),
+    );
     expect((model.structuredContent as { machines: unknown[] }).machines).toEqual(machines);
     expect((model.content[1] as { text: string }).text).toBe(
-      "Left out 1 browser and computer sessions on machines that are offline or no longer available. machines lists the person's computers this chat can use; open one with computer_open or browser_open and its placement.",
+      "Left out 1 browser and computer sessions on offline machines. machines lists the person's computers this chat can use; open one with computer_open or browser_open and its placement.",
     );
 
     // Code Mode keeps every record, with the machines.
     const codemode = await discover("codemode");
     const full = codemode.structuredContent as { machines: unknown[]; computers: unknown[] };
     expect(full.machines).toEqual(machines);
-    expect(full.computers).toHaveLength(2);
+    expect(full.computers).toHaveLength(3);
 
     // Without a machine list nothing is known to be offline, and the rest of
     // the discovery still answers.
@@ -696,7 +704,7 @@ describe("interaction attempt tools", () => {
     const unlisted = await discover("model");
     expect(unlisted.isError).not.toBe(true);
     expect(unlisted.structuredContent).not.toHaveProperty("machines");
-    expect((unlisted.structuredContent as { computers: unknown[] }).computers).toHaveLength(2);
+    expect((unlisted.structuredContent as { computers: unknown[] }).computers).toHaveLength(3);
     expect(unlisted.content).toHaveLength(1);
   });
 
@@ -7809,10 +7817,15 @@ describe("open reuses only a session on the chat's current machine", () => {
     expect(result.isError).not.toBe(true);
     expect(swaps).toEqual([oldMachine]);
     expect((result.structuredContent as { session: ComputerSession }).session.id).toBe(old.id);
+    // The result says the chat moved: its commands and files run there now.
+    const movedNote =
+      "This chat moved to the requested machine; its commands and files now run there too.";
+    expect(result.content.map((part) => (part as { text?: string }).text)).toContain(movedNote);
 
-    // Already there: no second move.
-    await definitions[0]!.execute({ placement }, context());
+    // Already there: no second move, and no moved note.
+    const again = await definitions[0]!.execute({ placement }, context());
     expect(swaps).toEqual([oldMachine]);
+    expect(again.content.map((part) => (part as { text?: string }).text)).not.toContain(movedNote);
   });
 
   test("browser_open naming another machine moves the chat there before creating", async () => {
@@ -7826,7 +7839,12 @@ describe("open reuses only a session on the chat's current machine", () => {
             // The chat is on the machine before the session is created there.
             expect(swaps).toEqual([oldMachine]);
             createRequests.push(request);
-            return { session: { lifecycle: "starting" } } as never;
+            return {
+              session: {
+                ...discoveredBrowserSession(randomUUID(), sessionId),
+                lifecycle: "starting",
+              },
+            } as never;
           },
         }),
         getSession: sessionRead(swappedMachine),
@@ -7841,9 +7859,12 @@ describe("open reuses only a session on the chat's current machine", () => {
       permissions: ["sessions:read", "sessions:control"],
     });
     const placement = { kind: "connected_machine", sandboxId: oldMachine } as const;
-    await definitions[0]!.execute({ placement }, context());
+    const result = await definitions[0]!.execute({ placement }, context());
     expect(swaps).toEqual([oldMachine]);
     expect(createRequests).toEqual([expect.objectContaining({ placement })]);
+    expect(result.content.map((part) => (part as { text?: string }).text)).toContain(
+      "This chat moved to the requested machine; its commands and files now run there too.",
+    );
   });
 
   test("a personal machine not yet allowed shows its card from computer_open in one call", async () => {

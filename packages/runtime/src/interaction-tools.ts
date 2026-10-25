@@ -1850,6 +1850,7 @@ export function createInteractionAttemptToolDefinitions(
       return browserOpenText(output);
     },
     execute: async (value, context) => {
+      const chatMove: ChatMoveRecord = { moved: false };
       const opened = await withSessionHint(
         "BrowserSession",
         value.browserSessionId,
@@ -1867,6 +1868,7 @@ export function createInteractionAttemptToolDefinitions(
                 value,
                 context,
                 extension.installUrl,
+                chatMove,
               ),
           ),
       );
@@ -1875,11 +1877,16 @@ export function createInteractionAttemptToolDefinitions(
         opened.targets.find((target) => target.selected)?.id ??
         null;
       currentTab.use(opened.session.id, openedTargetId);
-      if (!value.includeScreenshot) return opened;
+      const notes: Array<{ type: "text"; text: string }> = chatMove.moved
+        ? [{ type: "text", text: CHAT_MOVED_NOTE }]
+        : [];
+      if (!value.includeScreenshot)
+        return notes.length ? new InteractionExecutionResult(opened, notes) : opened;
       // The browser is already open. A failed capture must not turn its result
       // into an error the model could answer by opening another browser.
       if (!openedTargetId)
         return new InteractionExecutionResult(opened, [
+          ...notes,
           {
             type: "text" as const,
             text: "The browser opened, but it has no tab to capture a screenshot of.",
@@ -1893,13 +1900,16 @@ export function createInteractionAttemptToolDefinitions(
         );
         if (!screenshotShowsObservedDocument(opened.observation, frame))
           return new InteractionExecutionResult(opened, [
+            ...notes,
             { type: "text" as const, text: BROWSER_OPEN_SCREENSHOT_NEWER_DOCUMENT },
           ]);
         return new InteractionExecutionResult(opened, [
+          ...notes,
           browserToolImageContent(frame.data, frame.mediaType),
         ]);
       } catch (error) {
         return new InteractionExecutionResult(opened, [
+          ...notes,
           {
             type: "text" as const,
             text: `The browser opened, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
@@ -2689,24 +2699,36 @@ export function createInteractionAttemptToolDefinitions(
       return `${opened}\n${computerActionText(launch)}`;
     },
     execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
+      const chatMove: ChatMoveRecord = { moved: false };
       const { unavailable, ...opened } = await withSessionHint(
         "ComputerSession",
         value.computerSessionId,
         "open",
         async () =>
-          await openComputer(input.transport, input.workspaceId, input.sessionId, value, context),
+          await openComputer(
+            input.transport,
+            input.workspaceId,
+            input.sessionId,
+            value,
+            context,
+            chatMove,
+          ),
       );
       currentComputer.use(opened.session.id);
+      // The computer is already open. A failed launch or capture must not turn
+      // its result into an error the model could answer by opening another
+      // computer: the result says what failed instead. A move of the chat to
+      // this machine has already happened, so every result says so.
+      const notes: Array<{ type: "text"; text: string }> = chatMove.moved
+        ? [{ type: "text", text: CHAT_MOVED_NOTE }]
+        : [];
       // Its screen is locked or shows another user's session: nothing on it
       // can be read, launched, captured or clicked, so say why and do nothing.
       if (unavailable)
         return new InteractionExecutionResult(opened, [
+          ...notes,
           { type: "text" as const, text: unavailable },
         ]);
-      // The computer is already open. A failed launch or capture must not turn
-      // its result into an error the model could answer by opening another
-      // computer: the result says what failed instead.
-      const notes: Array<{ type: "text"; text: string }> = [];
       let result: z.input<typeof ComputerOpenOutput> = opened;
       let appWindow: { id: string; targetGeneration: string } | null = null;
       if (applicationId) {
@@ -3348,18 +3370,19 @@ async function discoverMachines(
 }
 
 /**
- * Whether a session runs on a Connected Machine discovery found unusable:
- * offline, or not among the machines this chat can use. Such a session is not
- * one of the person's computers to offer; it only becomes usable again when
- * its machine is back. Without a machine list, nothing is known to be gone.
+ * Whether a session runs on a Connected Machine discovery lists as offline.
+ * Such a session is not one of the person's computers to offer; it only
+ * becomes usable again when its machine is back. A machine missing from the
+ * list (for example one listed for another subject) is not known to be gone,
+ * so its sessions stay; without a machine list nothing is hidden.
  */
-function onUnavailableMachine(
+function onOfflineMachine(
   placement: z.infer<typeof InteractionPlacement>,
   machines: ReadonlyArray<z.infer<typeof AgentMachine>> | undefined,
 ): boolean {
   if (!machines || placement.kind !== "connected_machine") return false;
   const machine = machines.find((entry) => entry.placement.sandboxId === placement.sandboxId);
-  return !machine || machine.state === "offline";
+  return machine?.state === "offline";
 }
 
 /** The most records of each kind the model sees from one discovery. */
@@ -3439,7 +3462,7 @@ function modelDiscoverySelection(
   // person's computers to offer; the machines list shows what is.
   const usable = <T extends { placement: z.infer<typeof InteractionPlacement> }>(
     sessions: readonly T[],
-  ) => sessions.filter((session) => !onUnavailableMachine(session.placement, output.machines));
+  ) => sessions.filter((session) => !onOfflineMachine(session.placement, output.machines));
   const usableBrowsers = usable(output.browsers);
   const usableComputers = usable(output.computers);
   const leftOnOfflineMachines =
@@ -3538,7 +3561,7 @@ function modelDiscoverySelection(
   if (leftOnOfflineMachines > 0)
     notes.push({
       type: "text",
-      text: `Left out ${leftOnOfflineMachines} browser and computer sessions on machines that are offline or no longer available. machines lists the person's computers this chat can use; open one with computer_open or browser_open and its placement.`,
+      text: `Left out ${leftOnOfflineMachines} browser and computer sessions on offline machines. machines lists the person's computers this chat can use; open one with computer_open or browser_open and its placement.`,
     });
   return notes.length > 0 ? new InteractionExecutionResult(selection, notes) : selection;
 }
@@ -4027,6 +4050,7 @@ async function openBrowser(
   value: z.output<typeof BrowserOpenInput>,
   context: AttemptToolExecutionContext,
   extensionUrl: string,
+  chatMove: ChatMoveRecord = { moved: false },
 ): Promise<z.input<typeof BrowserOpenOutput>> {
   let session: z.infer<typeof BrowserSession>;
   let created = false;
@@ -4047,7 +4071,13 @@ async function openBrowser(
       value.placement?.kind === "attached_device" && !("deviceId" in value.placement);
     const moved =
       value.placement?.kind === "connected_machine"
-        ? await moveChatToRequestedMachine(transport, workspaceId, sourceSessionId, value.placement)
+        ? await moveChatToRequestedMachine(
+            transport,
+            workspaceId,
+            sourceSessionId,
+            value.placement,
+            chatMove,
+          )
         : null;
     const [listed, attachedInventory, currentPlacement] = await Promise.all([
       value.mode === "new"
@@ -4426,6 +4456,7 @@ async function openComputer(
   sourceSessionId: string,
   value: z.output<typeof ComputerOpenInput>,
   context: AttemptToolExecutionContext,
+  chatMove: ChatMoveRecord = { moved: false },
 ): Promise<z.input<typeof ComputerOpenOutput> & { unavailable?: string }> {
   let session: z.infer<typeof ComputerSession>;
   if (value.computerSessionId) {
@@ -4436,6 +4467,7 @@ async function openComputer(
       workspaceId,
       sourceSessionId,
       value.placement,
+      chatMove,
     );
     const [listed, currentPlacement] = await Promise.all([
       value.mode === "new"
@@ -4699,6 +4731,14 @@ class MachineMoveRefusedError extends OpenGeniApiError {
   }
 }
 
+/** Whether an open moved this chat to the machine it named. */
+type ChatMoveRecord = { moved: boolean };
+
+/** The line an open's result adds when it moved this chat to another machine:
+ * the move outlasts the open, so later commands and files run there too. */
+const CHAT_MOVED_NOTE =
+  "This chat moved to the requested machine; its commands and files now run there too.";
+
 /**
  * Move this chat to the Connected Machine an open names when it runs on
  * another one, so computer_open and browser_open reach any of the person's
@@ -4709,13 +4749,15 @@ class MachineMoveRefusedError extends OpenGeniApiError {
  * allow it. Returns the chat's placement after the move, or null when there
  * was nothing to move (another placement, a transport that cannot read or
  * move the chat, or a failed read, which leaves the server to say where the
- * chat is).
+ * chat is). Records in `chatMove` whether the chat actually moved, so the
+ * open's result can say so.
  */
 async function moveChatToRequestedMachine(
   transport: InteractionPlacementTransport,
   workspaceId: string,
   sessionId: string,
   placement: z.infer<typeof BrowserOpenPlacement> | undefined,
+  chatMove: ChatMoveRecord,
 ): Promise<z.infer<typeof InteractionPlacement> | null> {
   if (placement?.kind !== "connected_machine" || !transport.swapActiveSandbox) return null;
   const current = await readCurrentInteractionPlacement(transport, workspaceId, sessionId).catch(
@@ -4728,6 +4770,7 @@ async function moveChatToRequestedMachine(
   });
   if (!moved.swapped)
     throw new MachineMoveRefusedError(placement.sandboxId, moved.code, moved.reason);
+  chatMove.moved = true;
   return { kind: "connected_machine", sandboxId: moved.activeSandboxId ?? placement.sandboxId };
 }
 

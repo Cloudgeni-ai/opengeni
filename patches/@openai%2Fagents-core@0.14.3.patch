@@ -2182,7 +2182,7 @@ index e512db81769570ddd61957d4c6e12835025559f1..ef1024121867d155415264c4f1314c89
 + * calls still run concurrently with each other.
 + */
 +function orderExclusiveToolRuns(toolRuns, executeToolRun) {
-+    if (!toolRuns.some((toolRun) => toolRun.tool?.exclusiveExecution === true)) {
++    if (!toolRuns.some((toolRun) => (toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true)))) {
 +        return executeToolRun;
 +    }
 +    const gates = new Map();
@@ -2195,7 +2195,7 @@ index e512db81769570ddd61957d4c6e12835025559f1..ef1024121867d155415264c4f1314c89
 +            markSettled = resolve;
 +        });
 +        settle.set(toolRun, markSettled);
-+        if (toolRun.tool?.exclusiveExecution === true) {
++        if ((toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true))) {
 +            gates.set(toolRun, Promise.all([barrier, ...sinceBarrier]));
 +            barrier = settled;
 +            sinceBarrier = [];
@@ -2242,7 +2242,7 @@ index afe9d23168c0aff1474008da0b267a04312b2c12..847ce99450b9ec1c4f83f7c25ddc7375
 + * calls still run concurrently with each other.
 + */
 +function orderExclusiveToolRuns(toolRuns, executeToolRun) {
-+    if (!toolRuns.some((toolRun) => toolRun.tool?.exclusiveExecution === true)) {
++    if (!toolRuns.some((toolRun) => (toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true)))) {
 +        return executeToolRun;
 +    }
 +    const gates = new Map();
@@ -2255,7 +2255,7 @@ index afe9d23168c0aff1474008da0b267a04312b2c12..847ce99450b9ec1c4f83f7c25ddc7375
 +            markSettled = resolve;
 +        });
 +        settle.set(toolRun, markSettled);
-+        if (toolRun.tool?.exclusiveExecution === true) {
++        if ((toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true))) {
 +            gates.set(toolRun, Promise.all([barrier, ...sinceBarrier]));
 +            barrier = settled;
 +            sinceBarrier = [];
@@ -4158,9 +4158,9 @@ index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..ef965a36fe56c8419ab99d49d96b26b0
      deferLoading?: boolean;
 +    /**
 +     * Run this tool in model order: it starts after every earlier call from the
-+     * same model response has settled, and later calls start after it settles.
++     * same model response has settled, and later calls start after it settles; a function orders only the calls it returns true for.
 +     */
-+    exclusiveExecution?: boolean;
++    exclusiveExecution?: boolean | ((toolCall: { name: string; arguments: string }) => boolean);
      /**
       * Additional provider-specific metadata forwarded with the function tool definition.
       */

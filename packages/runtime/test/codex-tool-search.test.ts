@@ -15,6 +15,7 @@ import {
   rankToolPool,
   searchToolPool,
   toolsNamedInQuery,
+  shortNameAlternatives,
   unresolvedToolNames,
 } from "../src/codex-tool-search";
 import { MCP_MAX_TOOL_DEFINITION_BYTES } from "../src/mcp-network";
@@ -256,6 +257,22 @@ describe("searchToolPool disclosure bounds", () => {
     // A prefixed name never falls back to another server's tool of that name.
     expect(searchToolPool(pool, { query: "", names: ["other__sandboxes_list"] })).toEqual([]);
     expect(unresolvedToolNames(pool, ["sandboxes_list", "missing_tool"])).toEqual(["missing_tool"]);
+  });
+
+  test("a short name several servers share loads one tool, Opengeni's own first", () => {
+    const named = (name: string) =>
+      ({ ...connectorTool("x", `Search ${name}`), name }) as unknown as Tool;
+    const docs = named("docs__search");
+    const own = named("opengeni__search");
+    const mail = named("mail__search");
+    const pool = [docs, own, mail];
+    expect(searchToolPool(pool, { query: "", names: ["search"] })).toEqual([own]);
+    expect(rankToolPool(pool, { query: "", names: ["search"] })).toEqual([own]);
+    expect(shortNameAlternatives(pool as never, "search")).toEqual([docs, mail]);
+    // Without a first-party match the first one loads; a full name stays exact.
+    expect(rankToolPool([docs, mail], { query: "", names: ["search"] })).toEqual([docs]);
+    expect(rankToolPool(pool, { query: "", names: ["mail__search"] })).toEqual([mail]);
+    expect(shortNameAlternatives(pool as never, "mail__search")).toEqual([]);
   });
 
   test("backfills rank-limited results after rejecting an oversized definition", () => {

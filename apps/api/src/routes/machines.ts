@@ -51,7 +51,7 @@ import {
   SessionAuthorizationUnavailableError,
 } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { swapActiveSandbox } from "@opengeni/core";
+import { buildFleetContextForSession, swapActiveSandbox } from "@opengeni/core";
 import {
   isAgentAttemptOnOwnSession,
   machineSubjectForCaller,
@@ -484,9 +484,17 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     const body = await parseRequestJson(c, SwapActiveSandboxRequest);
-    // An agent moves its chat for the person who started its turn, exactly as
-    // its sandbox_swap tool does; a person moves it for themselves.
-    const ctx = await sessionFleetContextForCaller(deps, grant, sessionId, grant.subjectId);
+    // An agent moves its own chat for the person who started its turn, exactly
+    // as its sandbox_swap tool does. Any other caller, including an agent
+    // repointing another chat it may control, moves it as its own subject.
+    const ctx = isAgentAttemptOnOwnSession(grant, sessionId)
+      ? await sessionFleetContextForCaller(deps, grant, sessionId, grant.subjectId)
+      : await buildFleetContextForSession(deps, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        });
     ctx.consentToCurrentTurn = !grantHasAgentAttemptAuthority(grant);
     const result = await swapActiveSandbox(
       {
