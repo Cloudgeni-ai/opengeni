@@ -24,10 +24,12 @@ beforeAll(async () => {
   shared = acquired;
   db = createDb(shared.appUrl);
 }, 180_000);
+// Releasing the shared database can take longer than the default hook timeout
+// on a busy machine.
 afterAll(async () => {
   await db?.close();
   await shared?.release();
-});
+}, 60_000);
 
 const noop = async () => undefined;
 const encryptionKey = Buffer.alloc(32, 7);
