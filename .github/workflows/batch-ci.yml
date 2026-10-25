@@ -138,6 +138,14 @@ jobs:
           bun test --max-concurrency=1 packages/db/test/runtime-posture-compatibility-postgres.test.ts
           } </dev/null
           CHECK
+      # Main's web image runs this exact bundle step; its chunk-cycle guard must
+      # fail the batch, not main. Runs in parallel with the longer unit shards.
+      - name: Production web bundle
+        env:
+          NODE_ENV: production
+        run: >-
+          bun scripts/ci/batch-result.ts run --job source --output "$RUNNER_TEMP/receipt-source.json" --
+          bash -euo pipefail -c 'bun run --cwd apps/web build && bun build apps/web/src/server.ts --target=bun --outfile="$RUNNER_TEMP/web-server/server.ts"'
       - uses: actions/upload-artifact@v7.0.1
         if: ${{ always() }}
         with:
