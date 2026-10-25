@@ -42,7 +42,7 @@ BEGIN
     suffix_count :=
       (length(definition) - length(replace(definition, catalog_suffix, ''))) / length(catalog_suffix);
     IF prefix_count <> suffix_count THEN
-      RAISE EXCEPTION 'skill catalog fork predicate of % changed before 0967', target;
+      RAISE EXCEPTION 'skill catalog fork predicate of % changed before 0980', target;
     END IF;
     CONTINUE WHEN prefix_count = 0;
     -- The suffix check moves next to its prefix, so either marker pair passes.
@@ -55,7 +55,7 @@ BEGIN
     patched_any := true;
   END LOOP;
   IF NOT patched_any THEN
-    RAISE EXCEPTION 'no fork routine carries the skill catalog predicate before 0967';
+    RAISE EXCEPTION 'no fork routine carries the skill catalog predicate before 0980';
   END IF;
 END
 $governance_forks$;

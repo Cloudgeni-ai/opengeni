@@ -13296,7 +13296,7 @@ export const modelCallFacts = pgTable(
     timeToFirstTextMs: integer("time_to_first_text_ms"),
     durationMs: integer("duration_ms"),
     // Prompt-cache observation and warm-miss classification (see
-    // PromptCacheDiagnostics); null before 0966 and for repaired facts.
+    // PromptCacheDiagnostics); null before 0979 and for repaired facts.
     promptCacheDiagnostics: jsonb("prompt_cache_diagnostics").$type<PromptCacheDiagnostics>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
