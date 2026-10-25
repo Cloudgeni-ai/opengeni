@@ -3,7 +3,7 @@
  * newest first. A row opens the meeting's own page. Rows still uploading or
  * transcribing say so and update on their own.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import type { Recording } from "@opengeni/contracts";
 import {
@@ -32,7 +32,7 @@ import { StatusBadge } from "@opengeni/react/ui/status-badge";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { RecorderPanel } from "./recorder-panel";
-import { useMeetingRecorder } from "./recorder-context";
+import { useMeetingRecorder, usePendingMeetingStart } from "./recorder-context";
 
 const COLUMNS: RowListColumn[] = [
   { id: "length", label: "Length", width: 96 },
@@ -90,6 +90,13 @@ export function MeetingsListPage({
   const { recorder, finished } = useMeetingRecorder();
   const models = useRecordingModels(override);
   const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
+  // A desktop call notification's Record waits for the live model list, so
+  // the recording gets the same live-preview default as a click on Start.
+  const pendingStart = usePendingMeetingStart();
+  const autoStart = useMemo(
+    () => ({ pending: pendingStart.request !== null && !models.loading, take: pendingStart.take }),
+    [pendingStart.request, pendingStart.take, models.loading],
+  );
   const narrow = useNarrow();
   const [pendingDelete, setPendingDelete] = useState<Recording | null>(null);
 
@@ -124,6 +131,7 @@ export function MeetingsListPage({
           recorder={recorder}
           onStopped={onOpen}
           defaultLanguage={defaultLanguage}
+          autoStart={autoStart}
           liveTranscript={
             liveModel
               ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }

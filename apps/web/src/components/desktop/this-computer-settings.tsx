@@ -11,6 +11,7 @@
 import type {
   DesktopComputerCapabilities,
   DesktopComputerSettings,
+  DesktopMeetingDetectionStatus,
   ThisComputerPermission,
   ThisComputerPermissionId,
   ThisComputerStatus,
@@ -456,14 +457,52 @@ export function ThisComputerAgentSettings({ className }: { className?: string })
   );
 }
 
+/** Whether the app offers to record when a call starts, kept current while the page is open. */
+function useMeetingDetection() {
+  const bridge = desktopCapability("meetingDetection")?.meetingDetection ?? null;
+  const [status, setStatus] = useState<DesktopMeetingDetectionStatus | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const refresh = useCallback(() => {
+    if (!bridge) return;
+    void bridge
+      .status()
+      .then(setStatus)
+      .catch(() => undefined);
+  }, [bridge]);
+  useEffect(() => {
+    if (!bridge) return;
+    refresh();
+    return bridge.onChange(refresh);
+  }, [bridge, refresh]);
+  const update = useCallback(
+    async (enabled: boolean) => {
+      if (!bridge) return;
+      setSaving(true);
+      setFailed(null);
+      try {
+        setStatus(await bridge.update({ enabled }));
+      } catch {
+        setFailed("Couldn't save the change. Try again.");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [bridge],
+  );
+  return { bridge, status, saving, failed, update };
+}
+
 /** The app's own use of the microphone, for dictation, voice chats and meeting recordings. */
 export function ThisComputerMicrophoneSettings({ className }: { className?: string }) {
   const caps = useComputerCapabilities();
+  const meetings = useMeetingDetection();
   const platform = desktopBridge?.platform ?? "macos";
   if (!caps.bridge || !caps.capabilities) return null;
   const on = caps.capabilities.settings.microphone;
   const permission = caps.capabilities.microphone;
   const pending = caps.saving === "microphone";
+  const detection = meetings.status;
   return (
     <Section variant="group" title="Voice" className={className}>
       <SettingRow
@@ -503,6 +542,24 @@ export function ThisComputerMicrophoneSettings({ className }: { className?: stri
           />
         ) : null}
       </SettingRow>
+      {meetings.bridge && detection?.available ? (
+        <SettingRow
+          label="Offer to record calls"
+          description={
+            detection.enabled
+              ? "When Zoom, Teams, Slack, or a meeting in your browser starts using the microphone, a notification asks whether to record it."
+              : "Off. Start meeting recordings yourself from Meetings."
+          }
+          error={meetings.saving ? undefined : (meetings.failed ?? detection.problem)}
+          control={
+            <Switch
+              checked={detection.enabled}
+              pending={meetings.saving}
+              onCheckedChange={(next) => void meetings.update(next)}
+            />
+          }
+        />
+      ) : null}
     </Section>
   );
 }
