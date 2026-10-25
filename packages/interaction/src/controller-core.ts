@@ -725,6 +725,14 @@ function safePredispatchError(error: unknown, resourceLabel: string): Interactio
       retryable: error.retryable,
     };
   }
+  // The driver knows the target is gone and why; nothing ran.
+  if (error instanceof InteractionDefiniteDriverError && error.code === "target_not_found") {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: error.retryable,
+    };
+  }
   return {
     code: "driver_failed",
     message: `${resourceLabel} command failed before dispatch`,
