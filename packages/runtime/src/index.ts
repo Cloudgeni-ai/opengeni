@@ -225,6 +225,12 @@ import {
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
 import {
+  GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
+  googleCalendarRestResultOutcome,
+  isOfficialGoogleCalendarMcpConfig,
+  type GoogleCalendarRestMcpBridgeContext,
+} from "./google-calendar-rest-mcp";
+import {
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   type SlackApiRateLimiter,
   type SlackRestMcpBridgeContext,
@@ -273,6 +279,16 @@ export {
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
+export {
+  GOOGLE_CALENDAR_REST_API_BASE,
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
+  GoogleCalendarRestMcpServer,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+  googleCalendarRestToolIsMutation,
+  googleCalendarToolSupportsScopes,
+  isOfficialGoogleCalendarMcpConfig,
+  type GoogleCalendarRestMcpServerOptions,
+} from "./google-calendar-rest-mcp";
 export {
   SLACK_REST_API_BASE,
   SLACK_REST_MCP_TOOLS,
@@ -909,6 +925,7 @@ export type {
 ensureReadableStreamFrom();
 
 type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext &
+  GoogleCalendarRestMcpBridgeContext &
   SlackRestMcpBridgeContext &
   DriveMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
@@ -916,6 +933,7 @@ const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   BuiltInMcpBridgeContext
 >[] = Object.freeze([
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  GOOGLE_CALENDAR_REST_MCP_BRIDGE_ADAPTER,
   SLACK_REST_MCP_BRIDGE_ADAPTER,
   DRIVE_MCP_BRIDGE_ADAPTER,
 ]);
@@ -6248,7 +6266,9 @@ function installAttemptConnectorActionGatewayLifecycle(
           ? { resultOutcome: binding.resultOutcome }
           : config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
             ? { resultOutcome: gmailRestResultOutcome }
-            : {}),
+            : config && isOfficialGoogleCalendarMcpConfig(config.url ?? "", config.connectionRef)
+              ? { resultOutcome: googleCalendarRestResultOutcome }
+              : {}),
         ...(connectorActionPolicy ? { connectorActionPolicy } : {}),
       }),
     };

@@ -181,6 +181,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     onePasswordFakeTokens: false,
     googleConnectorSetupEnabled: true,
     googleDriveMcpEnabled: false,
+    googleCalendarEnabled: false,
     integrationsEnabled: false,
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,

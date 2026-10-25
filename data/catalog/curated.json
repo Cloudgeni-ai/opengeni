@@ -528,6 +528,76 @@
       "notes": [
         "Google remote tools/list verified 2026-10-22. Official server remains Developer Preview; supplemental REST tools share the same personal grant. Disabled by deployment until preview, API enablement and OAuth verification are complete."
       ]
+    },
+    {
+      "mcpUrl": "https://calendarmcp.googleapis.com/mcp/v1",
+      "name": "Google Calendar",
+      "description": "See what's on your calendar, check when you're free, and add, move or cancel events in your Google Calendar.",
+      "category": "productivity",
+      "featured": true,
+      "official": false,
+      "tier": "verified",
+      "provenance": "first-party:opengeni-google-calendar-rest",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.freebusy"
+      ],
+      "allowedTools": [
+        "list_calendars",
+        "list_events",
+        "get_event",
+        "find_free_busy",
+        "create_event",
+        "update_event",
+        "delete_event"
+      ],
+      "requireApproval": ["create_event", "update_event", "delete_event"],
+      "defaultConnectionOwnership": "personal",
+      "presentation": {
+        "providerName": "Google",
+        "icon": "calendar",
+        "introduction": "Let agents work with the Google Calendar you choose.",
+        "capabilities": [
+          {
+            "title": "Answer questions about your schedule",
+            "description": "See what's on today, tomorrow or any week, in your own time zone."
+          },
+          {
+            "title": "Find free time",
+            "description": "Check when you, or people who share their calendar with you, are free."
+          },
+          {
+            "title": "Add and change events",
+            "description": "Create, move, update or delete events. You choose which actions need approval."
+          }
+        ],
+        "permissionSummary": "Google asks to see your list of calendars, see and edit events, and see when you are free or busy. Choose Allow, Ask first, or Block for each tool in Approvals.",
+        "scopeLabels": {
+          "https://www.googleapis.com/auth/calendar.calendarlist.readonly": {
+            "label": "See your list of calendars",
+            "description": "See which calendars you have and their time zones."
+          },
+          "https://www.googleapis.com/auth/calendar.events": {
+            "label": "See and edit events",
+            "description": "Read events and add, change or delete them using your approval settings."
+          },
+          "https://www.googleapis.com/auth/calendar.freebusy": {
+            "label": "See when you're free or busy",
+            "description": "Check free and busy times on calendars you can see."
+          }
+        }
+      },
+      "logoSourceUrl": null,
+      "homepageUrl": "https://developers.google.com/workspace/calendar/api/v3/reference",
+      "installUrl": "https://developers.google.com/identity/protocols/oauth2/web-server",
+      "documentationUrl": "https://developers.google.com/workspace/calendar/api/v3/reference",
+      "notes": [
+        "scopesHint is the least-privilege set for the reviewed tools: calendar-list read, events read/write and free/busy. The broad calendar and calendar.readonly scopes are deliberately not requested. OAuth discovery uses pinned Google metadata and verifies the consenting account with calendarList/primary. Google Calendar connections are personal-only; every member connects their own calendar.",
+        "allowedTools freezes the reviewed tool surface. Every tool call executes through Opengeni's first-party Calendar REST bridge (packages/runtime/src/google-calendar-rest-mcp.ts) against the Calendar v3 API, never Google's hosted Calendar MCP endpoint, whose URL is kept only as the connection identity. create_event, update_event and delete_event use the selected account's approval choices; requireApproval supplies the recommendation when no choice is saved.",
+        "logoSourceUrl is null because Google has not published a reusable Calendar MCP logo asset. Keep the self-hosted icon rather than hotlinking a brand asset."
+      ]
     }
   ]
 }
