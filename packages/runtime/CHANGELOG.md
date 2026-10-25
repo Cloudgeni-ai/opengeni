@@ -1,5 +1,99 @@
 # @opengeni/runtime
 
+## 5.3.1
+
+### Patch Changes
+
+- f6f112a: Saving a browser recording now works when the browser runs on a machine with a slow link to storage. Previously a save waited for the whole recording to upload inside one request; anything that took longer than a minute failed, and every retry started the upload from scratch.
+
+  The browser host now uploads the recording in the background. A save waits up to 45 seconds and then answers `202` with `retryAfterMs`. Repeating the save with the same `operationId` joins the upload that is already running. The SDK's `saveBrowserRecording` repeats the request until the save completes, or until its signal aborts.
+
+  Staged recording objects are scheduled for deletion on a durable deadline, so a save that is never repeated leaves nothing behind. Controllers that predate background uploads are still waited on in a single request.
+
+- 2ae88c7: browser_act now tells the agent to run the remaining records of a repeated procedure several to a batch, or in one Code Mode loop, instead of one batch per record.
+- 6e50f56: browser_act and computer_act accept `role:name` as a bare locator string (`"link:Sign in"`, `"push button:Save"`), meaning the element with that role and exact name, next to a bare element ref. In browser_act, `label:` and `placeholder:` name those locator kinds instead. computer_act actions may also leave out `type`: an action with a locator is semantic and one with actions is a batch. Exact names now compare whole names in any case and spacing, the same way in the browser and in computer readings. A repeated form fill needs about a third fewer output tokens per record.
+- 8b08c70: Computer readings on Linux and Windows now show whether a checkbox or switch is on (value "1" or "0", as on macOS); before, browserd dropped the state CUA reports, so agents could not see it and set_value true or false on one was refused. Linux switches and toggle buttons now report their state too. The computer_act description says that set_value true or false on a checkbox or switch leaves it in that state and presses it only when needed, so one batch can cover a whole record without reading the checkbox first.
+- 7023400: computer_act batches on a computer that runs them as one operation no longer read two recorded receipts before every batch (each one a 404 on a first try); a retry is answered by the computer's journal, or by its recorded receipt when the journal refuses the retry's new fence or the window is gone. CUA batch steps named by role and name now find their element again when the page re-renders just before the press, and several matches of the named role wait for the window to settle before they are reported (without searching other windows), so a list a search is still filtering narrows to the one meant; a later action of a batch whose name its observation shows on several elements now reaches that wait instead of failing at once. computer_act's description mentions looping over many records in one Code Mode program once one has worked.
+- cccd692: Computer tools that omit targetId now keep working in the window the computer was last observed or acted on in, also in a later turn. The remembered window lived for one turn attempt, so the first such call of a follow-up turn ("do the rest") failed with computer_target_required and the agent had to resend both identifiers. A computer's target list now marks that window with `current: true`, and a call that omits targetId before its attempt used a window of the computer uses it. A window this attempt used still wins, and when the computer has no current window the call still asks for targetId.
+- 3e52c3c: Computer tools may omit `computerSessionId` and `targetId` to keep working in the computer and window the agent used last, the way browser tools keep using the current tab. With nothing used yet in the turn, `computerSessionId` resolves to the session's most recently used live computer; a window must be named once. An action that opens a window makes that window the current one. `computer_act` also takes a bare element ref as a locator, including inside a batch. Fewer identifiers per step means fewer output tokens and faster steps.
+- 7ccc761: computer_observe without a targetId on a computer the agent has not used yet starts in its focused window, or its only screen when no window is focused, instead of failing. Actions still need a window the agent has seen or named.
+
+  On macOS and isolated Linux desktops, the frontmost ordinary window (highest stacking order, menus, overlays and minimized windows aside) is now marked focused in computer target lists. Windows desktops mark none yet, because their window listing stacks cloaked and always-on-top windows as ordinary ones.
+
+- f8ed9e5: When a computer call that relied on the remembered window finds the computer itself gone, the next call without identifiers now resolves the computer afresh, instead of answering that no window of the gone computer has been used yet. A call that finds only its window gone keeps the computer, as before.
+- 22cfb09: Computer readings list a macOS menu bar's plain items on one line (`- AXMenuBarItem "Apple" [e3], "File" [e5], …`) instead of one line each. An item with a state, value or action of its own keeps its own line.
+- a59ecc1: A macOS table no longer reads as three tables. macOS lists every cell again under each AXColumn, as new elements with the same role, label and bounds. A computer reading now lists such an element once, and a step that names it by role and name finds one element instead of an ambiguous pair. This holds in browserd's own lookup and in CUA's (fork pin 7e98e221e). Same-named elements at different places still count as separate elements.
+- 392db50: Native CUA run_steps calls work again on macOS and Linux: their bundled tool definitions now include the `toggle_to` step field the pinned CUA worker publishes, so the worker's schema matches this release instead of every run_steps call being refused as a version mismatch. Windows runs the published driver, which has no such field, so its definitions are unchanged.
+
+  The model's one native run_steps schema merges a step field only some platforms have into the step schema, instead of repeating the whole steps schema once per platform.
+
+- ae5963e: `computer_open` and `browser_open` with a placement naming a Connected Machine reuse an earlier session there only while the chat is working on that machine. Before, they reused a session left on a machine the chat had moved away from, and the agent got "This Desktop belonged to a previous task placement and was retired. Open a new Desktop.", which a new open could not fix. Now the open goes straight to the message that says to move the chat to that machine first.
+- 8bd2c99: macOS asks about fewer privacy permissions. The desktop window grants the microphone (dictation, voice chats and meeting recordings) but no longer the camera, refuses USB, serial, HID and Bluetooth devices, and turns off Web Bluetooth; the app's own local pages get no permissions. On a Connected Mac whose agent works from the home folder, code search skips Library, Music, Pictures, Movies and the Trash unless a path names them, and each of Desktop, Documents and Downloads until the owner has allowed the app to open it. Repository discovery does the same as a safeguard. The Connected Machine instructions tell the agent not to scan those folders unasked.
+- e0f94c2: Record credential preparation, client publication and sandbox client readiness in startup timings. Overlap independent lazy post-provision prerequisites while awaiting all started work before failure or cleanup. Batch timing receipts without changing model input or credential authority.
+- f3d19a2: Vault items, or single fields of them, can be marked "ask me each time". Agents still see and reference a marked item, but a use that no approval covers stops before any value is read and fails with the new `approval_required` code and an `approvalCard`, a ready `request_human_input` call. Opengeni stores the card with its own description of the blocked use (item and field, surface, tool and destination), only the person the run acts for can answer it, and the answer becomes a grant: allow once, allow in this chat, allow for an hour across the person's chats in the workspace, or deny. The check runs in the shared resolver, so hosted and connected vaults and every surface behave the same. New routes `GET`/`PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval` and `POST …/approval/grants/:grantId/revoke` (people only for changes), SDK methods `getItemApproval`, `setItemApproval` and `revokeItemGrant`, an "Ask before each use" section on the item page, and migration 0952 (rolling) adding the `secret_approval_rules` and `secret_use_approvals` tables. `SecretUseContext` gains optional `destination` and `lookupDestination`, and secret-use audit rows list the approvals a use relied on.
+- 1a7c434: An answer the agent gives before waiting is now shown exactly as written. `wait_for_input` takes a `reply` argument that becomes the agent's message, and agents are told to use it whenever the turn answers someone. Before, Claude Opus 5.5 and Sonnet 5.5 returned an answer written just before the wait as a progress update, so people saw only a one-paragraph summary of it, without its images or tables.
+- Updated dependencies [e0b3ccf]
+- Updated dependencies [c5974ea]
+- Updated dependencies [15b4701]
+- Updated dependencies [eb30cb4]
+- Updated dependencies [ce72530]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [cccd692]
+- Updated dependencies [dca33ef]
+- Updated dependencies [392db50]
+- Updated dependencies [dcbe25d]
+- Updated dependencies [1d5bc4e]
+- Updated dependencies [fb90446]
+- Updated dependencies [0826dfd]
+- Updated dependencies [c307566]
+- Updated dependencies [a97c71b]
+- Updated dependencies [8bd2c99]
+- Updated dependencies [406d1b9]
+- Updated dependencies [2c34440]
+- Updated dependencies [c992791]
+- Updated dependencies [87d1b8a]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [68b195d]
+- Updated dependencies [75348a5]
+- Updated dependencies [cc319f3]
+- Updated dependencies [314522c]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [ee4df07]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [b7a14bd]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+- Updated dependencies [286058a]
+  - @opengeni/observability@5.3.0
+  - @opengeni/config@5.3.0
+  - @opengeni/sdk@5.3.0
+  - @opengeni/contracts@5.3.0
+  - @opengeni/vaults@5.3.0
+  - @opengeni/capabilities@5.3.0
+  - @opengeni/tool-gateway@5.3.0
+  - @opengeni/codemode@5.3.0
+  - @opengeni/codex@5.3.0
+  - @opengeni/interaction@5.3.0
+  - @opengeni/agent-proto@5.3.0
+  - @opengeni/decisions@5.3.0
+  - @opengeni/network@5.3.0
+  - @opengeni/xai-subscription@5.3.0
+
 ## 5.2.1
 
 ### Patch Changes

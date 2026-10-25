@@ -1,5 +1,45 @@
 # @opengeni/config
 
+## 5.3.1
+
+### Minor Changes
+
+- e0b3ccf: API request traces can now be followed across service boundaries and show where a request spends its time. A request's W3C `traceparent` header is no longer ignored: by default the request span keeps its own trace and links to the caller's span, and a deployment whose callers are all trusted can set `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` to make the request span a child in the caller's trace. Request spans are now SERVER spans with child spans for each database statement and transaction, each outbound HTTP call, and each object storage and workflow client call, within a budget of 256 per request. Span attributes carry only the statement's operation and table or routine name, row counts, SQLSTATE codes, HTTP methods and statuses: never SQL text, parameters, URLs or messages. Telemetry export no longer runs inside the trace it exports. New observability exports: `startChildSpan`, `childSpanRecordingActive`, `withoutTraceContext`, `traceFetch` and `traceClientCalls`, plus `kind` and `childSpanLimit` options on `startSpan`.
+- 119f33d: Add independently gated Microsoft Teams agent tools and linked Teams conversations, with durable admission and delivery, private-message authority checks, and workspace setup APIs. Both integrations remain disabled by default.
+
+### Patch Changes
+
+- e5446f1: Recordings can tell speakers apart without the transcription model's help: the worker runs its own CPU diarizer (pyannote segmentation and CAM++ voice vectors on ONNX Runtime), chosen with `diarizer: "ours"` per request or in workspace recording settings, and used automatically when the model has no diarization.
+- 286058a: New optional `OPENGENI_WEBHOOK_BASE_URL`: the public address other services send webhooks to, when it is not `OPENGENI_PUBLIC_BASE_URL`. Event source webhook URLs, the GitHub App's webhook URL and MCP Events callback URLs use it, so a deployment whose console is reachable only on a private network can publish just the signed webhook paths at another address. Unset, everything uses `OPENGENI_PUBLIC_BASE_URL` as before.
+- Updated dependencies [ce72530]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [cccd692]
+- Updated dependencies [392db50]
+- Updated dependencies [c307566]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [cc319f3]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [c194abb]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/codex@5.3.0
+  - @opengeni/xai-subscription@5.3.0
+
 ## 5.2.1
 
 ### Patch Changes

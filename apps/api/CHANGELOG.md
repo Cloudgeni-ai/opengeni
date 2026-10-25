@@ -1,5 +1,119 @@
 # @opengeni/api-router
 
+## 5.3.1
+
+### Minor Changes
+
+- f3d19a2: Bitwarden and Vaultwarden connect directly, like the other password managers. A new package, `@opengeni/vaults-bitwarden`, talks to the server's client API with the account's personal API key and decrypts items itself, so connecting needs only the server address, the API key and the master password, entered once. No bridge program or Bitwarden CLI runs anywhere, and nothing has to be unlocked by hand. Opengeni stores the API key, the server's addresses and the account's user key; the master password is used during setup and never stored. Works with Bitwarden Cloud (US and EU), self-hosted Bitwarden and Vaultwarden.
+
+  The account sees My vault and every organization collection it belongs to, each as its own vault, read-only where the collection is. A hide-passwords collection allows plain fields but refuses passwords, one-time passwords and files. Values are read live on every use and never cached. Writes create logins and notes, patch fields and move items to Bitwarden's trash, and a write that raced another client is a conflict instead of an overwrite.
+
+  Breaking for Bitwarden connections only: the Bitwarden credential is now `{ provider: "bitwarden", serverUrl, clientId, clientSecret, masterPassword }`, Bitwarden is no longer a remote provider on the signed `opengeni.vault.v1` protocol (`VaultProviderWireProvider` is `"external"` only), and a connection saved with the old bridge settings reports that it must be removed and connected again. The bridge package is gone. The shared provider operation helpers Keeper and Proton Pass used now live in `@opengeni/vaults`.
+
+- 119f33d: Add independently gated Microsoft Teams agent tools and linked Teams conversations, with durable admission and delivery, private-message authority checks, and workspace setup APIs. Both integrations remain disabled by default.
+
+### Patch Changes
+
+- 75dcbac: Batch concurrently pending command-completion lookups for the same runner process using the existing inventory classifier. This reduces database round trips for completion bursts without caching authority, changing collector concurrency, or suppressing retries for exits that race background adoption. Notification receipts and output custody are unchanged.
+- f6f112a: Saving a browser recording now works when the browser runs on a machine with a slow link to storage. Previously a save waited for the whole recording to upload inside one request; anything that took longer than a minute failed, and every retry started the upload from scratch.
+
+  The browser host now uploads the recording in the background. A save waits up to 45 seconds and then answers `202` with `retryAfterMs`. Repeating the save with the same `operationId` joins the upload that is already running. The SDK's `saveBrowserRecording` repeats the request until the save completes, or until its signal aborts.
+
+  Staged recording objects are scheduled for deletion on a durable deadline, so a save that is never repeated leaves nothing behind. Controllers that predate background uploads are still waited on in a single request.
+
+- 2dc5e41: An agent's browser recording is now a recording, so it is stored, owned, shared and deleted like any other. Saving one makes a recording whose purpose is `browser`, with one video track from the browser tab whose chunk is the frame bundle the browser host uploads. The worker encodes the MP4 and its action log in the background instead of the API encoding it inside the save request, then the save copies both into the chat's files and publishes the video as before. While the video is being made, the save answers 202 with `state: "encoding"`, and the SDK keeps repeating it as it does while uploading. The recording follows the chat: a private chat's recording is its owner's and private; a shared chat's belongs to the person the agent acts for. Meeting lists show meetings only, and browser recordings have no transcripts. A recording's tracks now say their `kind` (`audio` or `video`) and, for a video, its size and frame count; a recording says its `purpose` and, if its video failed, an `errorCode`. Migration 0945 adds the columns.
+- 41bff65: Event source routing keeps no provider identity. The route table has no tenant RLS, so a GitHub route is now keyed by an HMAC of the installation under a secret derived from the deployment's encryption key, and Slack and Gmail sources need no route at all: Slack callbacks already arrive resolved to their workspace and Gmail is read, not delivered. Migration 0941 removes the old plain routes; adding a GitHub source again recomputes its routes. The GitHub binding writers take the route secret as `eventRouteSecret` (`eventRouteSecret(settings)` from `@opengeni/core`). A deployment without `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` can't add a GitHub source.
+- 92d7a2e: Reuse one fresh tenant-scoped public metadata read for the HTTP model catalog, removing redundant transaction setup without caching authorization or provider readiness.
+- 826b002: Agents can find and read recorded meetings with two new first-party tools. `meetings_search` finds the meetings the person can see by words said or in the title, a named speaker, a start-time range or a product's reference, newest first, with each meeting's speakers and the transcript lines that matched. `meeting_read` reads one meeting's details and its transcript as speaker-named, timestamped lines with names and corrections applied, in parts or for a stretch such as 12:00 to 15:00, and reads the live preview while a meeting is still being recorded. Both are searchable (deferred) tools in the knowledge group and need `sessions:read`. The recordings list in the API and SDK also gains `person`, `startedFrom` and `startedTo` filters.
+- e5446f1: Recordings can tell speakers apart without the transcription model's help: the worker runs its own CPU diarizer (pyannote segmentation and CAM++ voice vectors on ONNX Runtime), chosen with `diarizer: "ours"` per request or in workspace recording settings, and used automatically when the model has no diarization.
+- 83682c3: Meetings can recognize people by voice. It is off by default. When a workspace turns on `settings.recordings.voiceprints`, each diarized speaker's voice vector is kept with the transcript. People who agreed to be remembered get a voiceprint learned from the speakers named as them, and new transcripts suggest them by name with a confidence. The new routes are `PUT` and `DELETE /v1/workspaces/:workspaceId/recording-people/:personId/voice`. A member agrees with `self` consent, and someone from outside the workspace with `attested` consent. Turning the setting off forgets every voice. `PATCH …/speakers` takes `rejectSuggestions` to turn a suggestion down. The SDK adds `rememberRecordingPersonVoice` and `forgetRecordingPersonVoice`, `useRecordingPeople` adds `rememberVoice` and `forgetVoice`, and `useTranscript` adds `rejectSuggestion`.
+- efd5e62: Repeating event triggers keep an automation running after its schedule's last run: a spent one-time date or an ended interval no longer pauses an automation that still listens for events (migration 0951). A blocked run's owner notice now says whether more runs follow from the automation's triggers too, so a finished run-once automation no longer claims it keeps trying. Blocker review facts carry the automation's event policy as `task.events`.
+- 1a7c434: An answer the agent gives before waiting is now shown exactly as written. `wait_for_input` takes a `reply` argument that becomes the agent's message, and agents are told to use it whenever the turn answers someone. Before, Claude Opus 5.5 and Sonnet 5.5 returned an answer written just before the wait as a progress update, so people saw only a one-paragraph summary of it, without its images or tables.
+- 1e30d5c: Reuse the verified workspace account when client config checks subscription-backed voice readiness, avoiding redundant workspace hydration while retaining fresh provider checks.
+- 286058a: New optional `OPENGENI_WEBHOOK_BASE_URL`: the public address other services send webhooks to, when it is not `OPENGENI_PUBLIC_BASE_URL`. Event source webhook URLs, the GitHub App's webhook URL and MCP Events callback URLs use it, so a deployment whose console is reachable only on a private network can publish just the signed webhook paths at another address. Unset, everything uses `OPENGENI_PUBLIC_BASE_URL` as before.
+- Updated dependencies [de7e142]
+- Updated dependencies [e0b3ccf]
+- Updated dependencies [0676499]
+- Updated dependencies [ce72530]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [2ae88c7]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [6e50f56]
+- Updated dependencies [8b08c70]
+- Updated dependencies [7023400]
+- Updated dependencies [cccd692]
+- Updated dependencies [3e52c3c]
+- Updated dependencies [7ccc761]
+- Updated dependencies [f8ed9e5]
+- Updated dependencies [22cfb09]
+- Updated dependencies [a59ecc1]
+- Updated dependencies [226bb1d]
+- Updated dependencies [392db50]
+- Updated dependencies [f6f3ed1]
+- Updated dependencies [41bff65]
+- Updated dependencies [0854838]
+- Updated dependencies [2c34440]
+- Updated dependencies [ae5963e]
+- Updated dependencies [c307566]
+- Updated dependencies [8bd2c99]
+- Updated dependencies [e9dae07]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [baf128f]
+- Updated dependencies [fa00bb2]
+- Updated dependencies [e0f94c2]
+- Updated dependencies [cc319f3]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [efd5e62]
+- Updated dependencies [67f9ca6]
+- Updated dependencies [2b72f7c]
+- Updated dependencies [acac580]
+- Updated dependencies [eafdd84]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [7c9904b]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+- Updated dependencies [c665cd4]
+- Updated dependencies [1a7c434]
+- Updated dependencies [1e30d5c]
+- Updated dependencies [286058a]
+  - @opengeni/db@5.3.0
+  - @opengeni/observability@5.3.0
+  - @opengeni/config@5.3.0
+  - @opengeni/core@5.3.0
+  - @opengeni/contracts@5.3.0
+  - @opengeni/vaults-bitwarden@5.3.0
+  - @opengeni/vaults@5.3.0
+  - @opengeni/vaults-keeper@5.3.0
+  - @opengeni/vaults-protonpass@5.3.0
+  - @opengeni/runtime@5.3.0
+  - @opengeni/events@5.3.0
+  - @opengeni/capabilities@5.3.0
+  - @opengeni/documents@5.3.0
+  - @opengeni/tool-gateway@5.3.0
+  - @opengeni/github@5.3.0
+  - @opengeni/storage@5.3.0
+  - @opengeni/codemode@5.3.0
+  - @opengeni/artifact-tool@5.3.0
+  - @opengeni/codex@5.3.0
+  - @opengeni/interaction@5.3.0
+  - @opengeni/vaults-onepassword@5.3.0
+  - @opengeni/agent-proto@5.3.0
+  - @opengeni/network@5.3.0
+  - @opengeni/xai-subscription@5.3.0
+
 ## 5.2.1
 
 ### Patch Changes

@@ -1,5 +1,67 @@
 # @opengeni/browserd
 
+## 0.4.9
+
+### Patch Changes
+
+- ab5fcc1: Attached Chrome no longer loses a tab when another extension puts its own frame in the page, as password managers do for their inline menus. Chrome ends and refuses debugging of a tab that holds another extension's page, so the extension now removes those frames from tabs it controls (including inside closed shadow roots) and attaches again, using the new `scripting` permission with access to all sites; Chrome's permission warnings are unchanged because the debugger permission already covers all sites. When the page keeps adding the frame back, the tab fails with a clear error that names the password manager and says to turn off its inline menu for the site or use a managed browser. Each attachment now has a number, so a late command for an ended attachment is refused instead of reaching its replacement and a detach reported after its replacement attached no longer ends it; input that Chrome ends part way is reported as outcome unknown without making the tab unusable, and the extension accepts `Inspector.enable`, which browserd sends on every attach.
+- c0c50f3: A browser action's result now includes the response to a request its page handler started only after awaiting something (reading the chosen file, hashing, a validation promise). After a click, key press, typed text, choice, check, upload or pointer action, the driver gives the page one frame to start such a request and settles it like the others, so the agent no longer has to observe again to see "Imported" or "Submitted".
+- f6f112a: Saving a browser recording now works when the browser runs on a machine with a slow link to storage. Previously a save waited for the whole recording to upload inside one request; anything that took longer than a minute failed, and every retry started the upload from scratch.
+
+  The browser host now uploads the recording in the background. A save waits up to 45 seconds and then answers `202` with `retryAfterMs`. Repeating the save with the same `operationId` joins the upload that is already running. The SDK's `saveBrowserRecording` repeats the request until the save completes, or until its signal aborts.
+
+  Staged recording objects are scheduled for deletion on a durable deadline, so a save that is never repeated leaves nothing behind. Controllers that predate background uploads are still waited on in a single request.
+
+- e79e020: A browser whose saved process had exited is relaunched on its profile when it is next used. If that start failed partway (for example because a restored tab had no JavaScript context yet), the browser service detached from the new browser instead of stopping it. The browser kept running with nothing tracking it, and every later attempt to open the session was refused because the profile could not be proven unused. Now a failed relaunch closes the browser it started, so the next attempt relaunches the same profile with its tabs. The start also no longer fails when a restored tab has no JavaScript context yet: the optional viewport reading is skipped, and the user-agent reading uses its hidden page, as it already does when the page returns nothing.
+- 48e5c71: Browser `fill` sets sliders: a native range input takes the value directly (a value between its steps is refused with the nearest one it takes), and a custom `role="slider"` element is moved with its arrow keys until it reports the value. Page readings show a slider's or progress bar's numeric value and no longer list empty properties.
+- 6e50f56: browser_act and computer_act accept `role:name` as a bare locator string (`"link:Sign in"`, `"push button:Save"`), meaning the element with that role and exact name, next to a bare element ref. In browser_act, `label:` and `placeholder:` name those locator kinds instead. computer_act actions may also leave out `type`: an action with a locator is semantic and one with actions is a batch. Exact names now compare whole names in any case and spacing, the same way in the browser and in computer readings. A repeated form fill needs about a third fewer output tokens per record.
+- 8b08c70: Computer readings on Linux and Windows now show whether a checkbox or switch is on (value "1" or "0", as on macOS); before, browserd dropped the state CUA reports, so agents could not see it and set_value true or false on one was refused. Linux switches and toggle buttons now report their state too. The computer_act description says that set_value true or false on a checkbox or switch leaves it in that state and presses it only when needed, so one batch can cover a whole record without reading the checkbox first.
+- ee7d19c: On macOS, the buttons and fields of a bubble a window shows (Chrome's "Save password?", translate, site permission and download bubbles) can now be used through that window, instead of every action on them being refused: invoke and set_value on their refs work, while pointer and key input to them is refused with a message saying so, since it would land on the page under the bubble. An element of another window of the app is still refused, and the failure names that window when it is a target that can be observed.
+- a573319: Computer-use action batches spend less time on fixed waits. Lookups inside a batch no longer walk every menu of the app's menu bar, a step picks its element from the read its wait just made, batched steps no longer wait for the cursor glide, polls run every 100 ms, and text-field writes poll their read-back instead of sleeping. Setting a dropdown to the value it already shows no longer empties it.
+- 7023400: computer_act batches on a computer that runs them as one operation no longer read two recorded receipts before every batch (each one a 404 on a first try); a retry is answered by the computer's journal, or by its recorded receipt when the journal refuses the retry's new fence or the window is gone. CUA batch steps named by role and name now find their element again when the page re-renders just before the press, and several matches of the named role wait for the window to settle before they are reported (without searching other windows), so a list a search is still filtering narrows to the one meant; a later action of a batch whose name its observation shows on several elements now reaches that wait instead of failing at once. computer_act's description mentions looping over many records in one Code Mode program once one has worked.
+- 68bcc7a: Computer use: `set_value` true or false (or on, off, checked, 1, 0), `select` and `deselect` on a checkbox or switch press it only when it reads the other state, so a form with checkboxes fills in one batch. A checkbox acted on after another action of a batch is read as its step runs (CUA fork `toggle_to`, pinned at 11b06dbb4), never from the observation taken before the batch, and a press that does not take is reported either way. A mixed (indeterminate) checkbox counts as neither state, and a later batch step may select or deselect a checkbox or switch the batch does not show yet.
+- c84e6ed: On macOS, the first computer-use reading of a Chrome window now includes the page. Chrome accepts the driver's accessibility switch but reports an error, so the driver used to skip waiting for the page and kept re-sending the switch, which stopped Chrome from ever building the page tree while reads came quickly. A dropdown menu that is really open is also closed at once instead of after a wait Chrome ignores.
+- cccd692: Computer tools that omit targetId now keep working in the window the computer was last observed or acted on in, also in a later turn. The remembered window lived for one turn attempt, so the first such call of a follow-up turn ("do the rest") failed with computer_target_required and the agent had to resend both identifiers. A computer's target list now marks that window with `current: true`, and a call that omits targetId before its attempt used a window of the computer uses it. A window this attempt used still wins, and when the computer has no current window the call still asks for targetId.
+- 7ccc761: computer_observe without a targetId on a computer the agent has not used yet starts in its focused window, or its only screen when no window is focused, instead of failing. Actions still need a window the agent has seen or named.
+
+  On macOS and isolated Linux desktops, the frontmost ordinary window (highest stacking order, menus, overlays and minimized windows aside) is now marked focused in computer target lists. Windows desktops mark none yet, because their window listing stacks cloaked and always-on-top windows as ordinary ones.
+
+- 070b4f8: A desktop observation names its window by the title its reading shows, not the title the window had when the windows were last listed, so after an action opens another page the receipt's window line names that page instead of the one before.
+- 4f98128: On macOS and Linux computer use, refs now carry over between two readings of the same page after an action opened it. Whether two readings show the same document was judged by the window's listed title, which still names the previous page until the windows are listed again, so the reading after a navigation and the next one compared unlike and every ref of the new page changed: an action naming a ref from the action's own receipt failed as stale although the element had not changed. Readings now compare the title of the window element they carry themselves, and fall back to the listed title when they carry none. A window that shows another document still keeps none of its refs.
+- cef4c08: On macOS and Linux computer use, the window reading an action returns now waits while the action has started work the page shows in progress: for up to 5 seconds while a busy element or spinner shows, and for up to 2.5 seconds while a short text ending in an ellipsis, such as "Saving..." or "Loading…", shows on a text, label, status or disabled control that the window did not show before the action. This includes a disabled "Saving..." button that Chrome on macOS shows only within the page's description. The agent then sees the result of a save or load in the action's own receipt instead of observing again. Menu items such as "Move to…", typed field values, a control that only turns disabled, and longer texts cut short with "…" do not count, so such an action reads the window once, as before. The readings taken while waiting do not replace the ones the agent planned from, so their refs still act.
+- a59ecc1: A macOS table no longer reads as three tables. macOS lists every cell again under each AXColumn, as new elements with the same role, label and bounds. A computer reading now lists such an element once, and a step that names it by role and name finds one element instead of an ambiguous pair. This holds in browserd's own lookup and in CUA's (fork pin 7e98e221e). Same-named elements at different places still count as separate elements.
+- b171834: Desktop computer use: set_value on a web date or time field in a browser that is not the active app now fills it, by focusing each of its parts through accessibility before typing it. Before, pressing the field focused no part in the background, so every key was dropped. A field's "Show date picker" button now points to the field instead of opening a menu that would bring the browser in front, and a refused web dropdown menu says to choose its option with set_value instead of naming an input mode the tool does not offer.
+- 17cb8b9: Computer batch actions that name an element by role and exact name now ignore runs of whitespace in the name, as the first action of a batch already does.
+- 5adf6e5: A computer's first reading no longer picks a small untitled window stacked above an app's window, such as Chrome's link status bubble or an emulator's side toolbar, as the window in front.
+- dca33ef: On macOS a computer-use batch step that names a button or link by name, when the control has the other of those two roles, now presses or checks the one element of that name once the window's complete reading has settled, and says which element it used, instead of waiting out its timeout and failing. Toggles never stand in, several such elements fail as ambiguous, and a window that never settles fails as before. A computer action receipt lists such actions in its optional `roleStandIns`.
+- Updated dependencies [ce72530]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [cccd692]
+- Updated dependencies [392db50]
+- Updated dependencies [c307566]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [cc319f3]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [c194abb]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/interaction@5.3.0
+
 ## 0.4.8
 
 ### Patch Changes

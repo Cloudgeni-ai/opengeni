@@ -1,5 +1,50 @@
 # @opengeni/example-chat-quickstart
 
+## 0.0.55
+
+### Patch Changes
+
+- Updated dependencies [c5974ea]
+- Updated dependencies [15b4701]
+- Updated dependencies [eb30cb4]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [6f6c356]
+- Updated dependencies [cccd692]
+- Updated dependencies [dca33ef]
+- Updated dependencies [dcbe25d]
+- Updated dependencies [1d5bc4e]
+- Updated dependencies [fb90446]
+- Updated dependencies [0826dfd]
+- Updated dependencies [c307566]
+- Updated dependencies [a97c71b]
+- Updated dependencies [8bd2c99]
+- Updated dependencies [406d1b9]
+- Updated dependencies [2c34440]
+- Updated dependencies [c992791]
+- Updated dependencies [87d1b8a]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [68b195d]
+- Updated dependencies [75348a5]
+- Updated dependencies [cc319f3]
+- Updated dependencies [314522c]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [ee4df07]
+- Updated dependencies [7d419e2]
+- Updated dependencies [83682c3]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [b7a14bd]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+  - @opengeni/sdk@5.3.0
+
 ## 0.0.54
 
 ### Patch Changes
