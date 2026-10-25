@@ -11,6 +11,7 @@ import {
 } from "./model-catalog";
 import {
   mapOrganizationModelProviderCustomModel,
+  type OrganizationModelProviderAuthMethod,
   type OrganizationModelProviderCustomModel,
   type OrganizationModelCatalogProviderKind,
 } from "./organization-model-providers";
@@ -29,6 +30,8 @@ export type ModelProviderExecutionInputs = {
   encryptedCredentials: Partial<Record<OrganizationModelCatalogProviderKind, string>>;
   /** Azure OpenAI's non-secret resource endpoint, beside its encrypted key. */
   organizationEndpoints: Partial<Record<"azure_openai", string>>;
+  /** Azure OpenAI's sign-in method, when it is Microsoft Entra ID instead of a key. */
+  organizationAuthMethods: Partial<Record<"azure_openai", OrganizationModelProviderAuthMethod>>;
 };
 
 /**
@@ -88,12 +91,14 @@ export async function loadModelProviderExecutionInputs(
     }
     const encryptedCredentials: ModelProviderExecutionInputs["encryptedCredentials"] = {};
     const organizationEndpoints: ModelProviderExecutionInputs["organizationEndpoints"] = {};
+    const organizationAuthMethods: ModelProviderExecutionInputs["organizationAuthMethods"] = {};
     if (input.loadOrganizationCredentials) {
       const rows = await scopedDb
         .select({
           providerKind: schema.organizationModelProviderConnections.providerKind,
           credentialEncrypted: schema.organizationModelProviderConnections.credentialEncrypted,
           endpoint: schema.organizationModelProviderConnections.endpoint,
+          authMethod: schema.organizationModelProviderConnections.authMethod,
         })
         .from(schema.organizationModelProviderConnections)
         .where(
@@ -117,6 +122,9 @@ export async function loadModelProviderExecutionInputs(
         if (row.providerKind === "azure_openai" && row.endpoint) {
           organizationEndpoints.azure_openai = row.endpoint;
         }
+        if (row.providerKind === "azure_openai" && row.authMethod !== "api_key") {
+          organizationAuthMethods.azure_openai = row.authMethod;
+        }
       }
     }
     return {
@@ -127,6 +135,7 @@ export async function loadModelProviderExecutionInputs(
       organizationModels,
       encryptedCredentials,
       organizationEndpoints,
+      organizationAuthMethods,
     };
   });
 }

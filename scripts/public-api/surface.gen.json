@@ -13337,6 +13337,7 @@
         "$.auth|mode=managedSession.session": "const!=[\"\\\"cookie\\\"\"]",
         "$.auth|mode=managedSession.socialProviders": "array!",
         "$.auth|mode=managedSession.socialProviders[]": "ref(ManagedSignInProvider)",
+        "$.azureOpenAIDeploymentIdentity": "boolean?",
         "$.billingMode": "enum!=[\"\\\"disabled\\\"\",\"\\\"stripe\\\"\"]",
         "$.browserExtension": "object?",
         "$.browserExtension.installUrl": "string!",
@@ -22068,6 +22069,21 @@
         "$.updatedAt": "string! null"
       }
     },
+    "OrganizationModelProviderEntraAuthentication": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"method=entra_client_secret\",\"method=entra_deployment_identity\"]",
+        "$|method=entra_client_secret": "object",
+        "$|method=entra_client_secret.clientId": "string!",
+        "$|method=entra_client_secret.clientSecret": "string!",
+        "$|method=entra_client_secret.method": "const!=[\"\\\"entra_client_secret\\\"\"]",
+        "$|method=entra_client_secret.tenantId": "string!",
+        "$|method=entra_deployment_identity": "object",
+        "$|method=entra_deployment_identity.method": "const!=[\"\\\"entra_deployment_identity\\\"\"]"
+      }
+    },
     "OrganizationModelProviderKind": {
       "io": [
         "input"
@@ -30323,7 +30339,8 @@
       ],
       "shape": {
         "$": "object",
-        "$.apiKey": "string!",
+        "$.apiKey": "string?",
+        "$.authentication": "ref(OrganizationModelProviderEntraAuthentication)?",
         "$.claudeIdentity": "object?",
         "$.claudeIdentity.accountUuid": "string!",
         "$.claudeIdentity.deviceId": "string!",
@@ -33684,7 +33701,9 @@
       "OrganizationModelAccountSettings": "type",
       "OrganizationModelCatalogProviderKind": "type",
       "OrganizationModelDefaults": "type",
+      "OrganizationModelProviderAuthMethod": "type",
       "OrganizationModelProviderConnection": "type",
+      "OrganizationModelProviderEntraAuthentication": "type",
       "OrganizationModelProviderKind": "type",
       "OrganizationPrivacySettings": "type",
       "OrganizationPrivateSessionSettings": "type",

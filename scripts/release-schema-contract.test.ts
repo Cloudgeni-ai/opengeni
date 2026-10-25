@@ -2340,6 +2340,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0965_organization_azure_openai_entra_auth.sql",
       "0964_session_event_tool_call_fallback_pages.sql",
       "0963_session_event_tool_call_pages.sql",
       "0962_dictation_recordings.sql",

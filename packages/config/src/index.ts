@@ -1272,6 +1272,22 @@ const SettingsSchema = z.object({
   azureOpenaiApiVersion: z.string().optional(),
   azureOpenaiApiKey: z.string().optional(),
   azureOpenaiAdToken: z.string().optional(),
+  /**
+   * Let organization admins connect Azure OpenAI as this deployment's own
+   * Microsoft Entra identity instead of a key or their own app. Off by
+   * default: on a shared deployment every organization would sign in as the
+   * same identity, so only an operator whose identity may serve all of them
+   * turns it on. The identity is the standard AZURE_TENANT_ID and
+   * AZURE_CLIENT_ID, with AZURE_FEDERATED_TOKEN_FILE (a workload identity) or
+   * AZURE_CLIENT_SECRET.
+   */
+  azureOpenaiDeploymentIdentityEnabled: EnvBoolean.default(false), // OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED
+  /** Microsoft Entra ID application identity, as the Azure SDKs read it. */
+  azureTenantId: z.string().trim().min(1).optional(),
+  azureClientId: z.string().trim().min(1).optional(),
+  azureFederatedTokenFile: z.string().trim().min(1).optional(),
+  azureClientSecret: z.string().trim().min(1).optional(),
+  azureAuthorityHost: z.string().trim().url().optional(),
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
   dockerImage: z.string().default("opengeni-sandbox:local"),
@@ -3345,6 +3361,25 @@ const AnthropicProviderOptions = z.object({
   streamIdleTimeoutMs: z.number().int().positive().default(600000),
 });
 
+/**
+ * How an organization Azure OpenAI route signs in with Microsoft Entra ID
+ * instead of an `api-key`: the organization's own app registration and its
+ * client secret, or this deployment's identity (only when the operator
+ * enabled it). The runtime turns it into a bearer token per request.
+ */
+export const AzureEntraProviderCredential = z.discriminatedUnion("source", [
+  z
+    .object({
+      source: z.literal("client_secret"),
+      tenantId: z.string().min(1),
+      clientId: z.string().min(1),
+      clientSecret: z.string().min(1),
+    })
+    .strict(),
+  z.object({ source: z.literal("deployment_identity") }).strict(),
+]);
+export type AzureEntraProviderCredential = z.infer<typeof AzureEntraProviderCredential>;
+
 const RegistryProviderSchema = z
   .object({
     kind: RegistryProviderKind.default("api-key"),
@@ -3370,6 +3405,8 @@ const RegistryProviderSchema = z
     baseUrl: z.string().url(),
     apiKey: z.string().optional(), // inline key (pragmatic) ...
     apiKeyEnv: z.string().optional(), // ... OR name of the env var holding the key (preferred)
+    // Organization Azure OpenAI only: Microsoft Entra ID instead of a key.
+    azureEntra: AzureEntraProviderCredential.optional(),
     defaultQuery: z.record(z.string(), z.string()).optional(),
     defaultHeaders: z.record(z.string(), z.string()).optional(),
     publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
@@ -3381,6 +3418,22 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    if (provider.azureEntra !== undefined) {
+      if (provider.kind !== "direct-azure-organization") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["azureEntra"],
+          message: "only organization Azure OpenAI providers sign in with Microsoft Entra ID",
+        });
+      }
+      if (provider.apiKey !== undefined || provider.apiKeyEnv !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["azureEntra"],
+          message: "a provider signs in with Microsoft Entra ID or a key, not both",
+        });
+      }
+    }
     if (provider.kind !== "anonymous") {
       return;
     }
@@ -4010,6 +4063,8 @@ export interface ResolvedModelProvider {
   builtin: boolean;
   baseUrl?: string | undefined;
   apiKey?: string | undefined;
+  /** Organization Azure OpenAI signed in with Microsoft Entra ID instead of `apiKey`. */
+  azureEntra?: AzureEntraProviderCredential | undefined;
   defaultQuery?: Record<string, string> | undefined;
   defaultHeaders?: Record<string, string> | undefined;
   publicDefaultQueryNames?: string[] | undefined;
@@ -5437,6 +5492,14 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     azureOpenaiApiVersion: optional("OPENGENI_AZURE_OPENAI_API_VERSION"),
     azureOpenaiApiKey: optional("OPENGENI_AZURE_OPENAI_API_KEY"),
     azureOpenaiAdToken: optional("OPENGENI_AZURE_OPENAI_AD_TOKEN"),
+    azureOpenaiDeploymentIdentityEnabled: optional(
+      "OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED",
+    ),
+    azureTenantId: optional("AZURE_TENANT_ID"),
+    azureClientId: optional("AZURE_CLIENT_ID"),
+    azureFederatedTokenFile: optional("AZURE_FEDERATED_TOKEN_FILE"),
+    azureClientSecret: optional("AZURE_CLIENT_SECRET"),
+    azureAuthorityHost: optional("AZURE_AUTHORITY_HOST"),
     disableOpenaiTracing: optional("OPENGENI_DISABLE_OPENAI_TRACING"),
     sandboxBackend: optional("OPENGENI_SANDBOX_BACKEND"),
     dockerImage: optional("OPENGENI_DOCKER_IMAGE"),
@@ -7128,6 +7191,7 @@ function organizationDirectRegistryProvider(
     endpoint?: string | null | undefined;
     models: readonly { upstreamModelId: string; label?: string | null }[];
     apiKey?: string;
+    azureEntra?: AzureEntraProviderCredential;
   },
 ): InternalRegistryProvider | null {
   const route = ORGANIZATION_DIRECT_ROUTES[provider];
@@ -7164,6 +7228,7 @@ function organizationDirectRegistryProvider(
     wireProfile: route.wireProfile,
     baseUrl,
     ...(input.apiKey ? { apiKey: input.apiKey } : {}),
+    ...(input.azureEntra && provider === "azure_openai" ? { azureEntra: input.azureEntra } : {}),
     models,
   };
 }
@@ -7261,6 +7326,87 @@ export function withOrganizationAzureOpenAICredential(
   },
 ): Settings {
   return withOrganizationDirectCredential(settings, "azure_openai", apiKey, input);
+}
+
+/**
+ * Runtime overlay for an organization Azure OpenAI connection that signs in
+ * with Microsoft Entra ID. Deployment identity is installed only when the
+ * operator enabled it and configured the identity; otherwise the route keeps
+ * no credential and fails closed like a revoked connection.
+ */
+export function withOrganizationAzureOpenAIEntraCredential(
+  settings: Settings,
+  azureEntra: AzureEntraProviderCredential,
+  input: {
+    endpoint: string | null | undefined;
+    models: readonly { upstreamModelId: string; label?: string | null }[];
+  },
+): Settings {
+  const credential = AzureEntraProviderCredential.parse(azureEntra);
+  return withOrganizationDirectProvider(
+    settings,
+    "azure_openai",
+    organizationDirectRegistryProvider(settings, "azure_openai", {
+      ...input,
+      ...(credential.source === "client_secret" || azureOpenAIDeploymentIdentityAvailable(settings)
+        ? { azureEntra: credential }
+        : {}),
+    }),
+  );
+}
+
+/** The deployment's own Microsoft Entra identity, from the standard Azure SDK variables. */
+export function deploymentAzureEntraCredential(
+  settings: Pick<
+    Settings,
+    | "azureTenantId"
+    | "azureClientId"
+    | "azureFederatedTokenFile"
+    | "azureClientSecret"
+    | "azureAuthorityHost"
+  >,
+): {
+  tenantId: string;
+  clientId: string;
+  federatedTokenFile?: string;
+  clientSecret?: string;
+  authorityHost?: string;
+} | null {
+  if (
+    !settings.azureTenantId ||
+    !settings.azureClientId ||
+    !(settings.azureFederatedTokenFile || settings.azureClientSecret)
+  )
+    return null;
+  return {
+    tenantId: settings.azureTenantId,
+    clientId: settings.azureClientId,
+    ...(settings.azureFederatedTokenFile
+      ? { federatedTokenFile: settings.azureFederatedTokenFile }
+      : { clientSecret: settings.azureClientSecret! }),
+    ...(settings.azureAuthorityHost ? { authorityHost: settings.azureAuthorityHost } : {}),
+  };
+}
+
+/**
+ * Whether organizations may connect Azure OpenAI as this deployment's own
+ * identity: the operator turned it on and the identity is configured.
+ */
+export function azureOpenAIDeploymentIdentityAvailable(
+  settings: Pick<
+    Settings,
+    | "azureOpenaiDeploymentIdentityEnabled"
+    | "azureTenantId"
+    | "azureClientId"
+    | "azureFederatedTokenFile"
+    | "azureClientSecret"
+    | "azureAuthorityHost"
+  >,
+): boolean {
+  return (
+    settings.azureOpenaiDeploymentIdentityEnabled === true &&
+    deploymentAzureEntraCredential(settings) !== null
+  );
 }
 
 /** Secret-free organization Vercel AI Gateway catalog overlay. */
@@ -8134,6 +8280,7 @@ export function configuredProviders(
       builtin: false,
       baseUrl: provider.baseUrl,
       apiKey: resolveProviderApiKey(provider, source),
+      ...(provider.azureEntra ? { azureEntra: provider.azureEntra } : {}),
       defaultQuery: provider.defaultQuery,
       defaultHeaders: provider.defaultHeaders,
       publicDefaultQueryNames: provider.publicDefaultQueryNames,
@@ -11269,6 +11416,11 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (!settings.azureOpenaiApiKey && !settings.azureOpenaiAdToken) {
       throw new Error("Azure OpenAI requires an API key or AD token");
     }
+  }
+  if (settings.azureOpenaiDeploymentIdentityEnabled && !deploymentAzureEntraCredential(settings)) {
+    throw new Error(
+      "OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED needs AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
+    );
   }
   // The Modal token is a both-or-neither pair regardless of the active backend
   // (a half-configured token is always a misconfiguration). This is orthogonal

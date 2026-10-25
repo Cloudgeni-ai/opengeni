@@ -4532,14 +4532,34 @@ export type OrganizationModelProviderConnection = {
   version: number;
   /** Azure OpenAI only: the non-secret `https://<resource>.openai.azure.com/openai/v1` endpoint. */
   endpoint?: string | undefined;
+  /** Azure OpenAI only: how the connection signs in. */
+  authMethod?: OrganizationModelProviderAuthMethod | undefined;
   createdAt: string;
   updatedAt: string;
 };
 
+/**
+ * How an organization connection signs in: an API key, or for Azure OpenAI
+ * Microsoft Entra ID as the organization's own app or this deployment's
+ * identity (only when the deployment operator offers it).
+ */
+export type OrganizationModelProviderAuthMethod =
+  | "api_key"
+  | "entra_client_secret"
+  | "entra_deployment_identity";
+
+/** Azure OpenAI only: a Microsoft Entra ID sign-in sent instead of `apiKey`. */
+export type OrganizationModelProviderEntraAuthentication =
+  | { method: "entra_client_secret"; tenantId: string; clientId: string; clientSecret: string }
+  | { method: "entra_deployment_identity" };
+
 export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
-  apiKey: string;
+  /** The provider key. Send it, or `authentication`, not both. */
+  apiKey?: string | undefined;
+  /** Azure OpenAI only: sign in with Microsoft Entra ID instead of `apiKey`. */
+  authentication?: OrganizationModelProviderEntraAuthentication | undefined;
   /** Required for `azure_openai` (its resource endpoint); refused for every other kind. */
   endpoint?: string | undefined;
   claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
@@ -5394,6 +5414,11 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /**
+   * Organization admins may connect Azure OpenAI as this deployment's own
+   * Microsoft Entra identity (the operator offers it). Absent otherwise.
+   */
+  azureOpenAIDeploymentIdentity?: boolean | undefined;
   /** Whether people can connect their own computers; absent on older servers. */
   connectedMachines?: boolean | undefined;
   /**

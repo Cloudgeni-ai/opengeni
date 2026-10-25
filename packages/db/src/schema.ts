@@ -15379,6 +15379,11 @@ export const organizationModelProviderConnections = pgTable(
     credentialEncrypted: text("credential_encrypted").notNull(),
     /** Azure OpenAI only: non-secret `https://<resource>.openai.azure.com/openai/v1`. */
     endpoint: text("endpoint"),
+    /** How the connection signs in; Microsoft Entra ID methods are Azure OpenAI only. */
+    authMethod: text("auth_method")
+      .$type<OrganizationModelProviderAuthMethod>()
+      .notNull()
+      .default("api_key"),
     claudeUsageSnapshot:
       jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     version: integer("version").notNull().default(1),
@@ -15422,6 +15427,10 @@ export const organizationModelProviderConnections = pgTable(
       "organization_model_provider_connections_endpoint_chk",
       sql`(${table.providerKind} = 'azure_openai') = (${table.endpoint} is not null) and (${table.endpoint} is null or ${table.endpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
     ),
+    authMethodCheck: check(
+      "organization_model_provider_connections_auth_method_chk",
+      sql`${table.authMethod} in ('api_key', 'entra_client_secret', 'entra_deployment_identity') and (${table.authMethod} = 'api_key' or ${table.providerKind} = 'azure_openai')`,
+    ),
   }),
 );
 
@@ -15449,6 +15458,10 @@ export const organizationModelProviderConnectionOperations = pgTable(
     resultStatus: text("result_status").$type<"active" | "revoked">().notNull(),
     resultVersion: integer("result_version").notNull(),
     resultEndpoint: text("result_endpoint"),
+    resultAuthMethod: text("result_auth_method")
+      .$type<OrganizationModelProviderAuthMethod>()
+      .notNull()
+      .default("api_key"),
     resultCreatedAt: timestamp("result_created_at", {
       withTimezone: true,
     }).notNull(),
@@ -15483,8 +15496,18 @@ export const organizationModelProviderConnectionOperations = pgTable(
       "organization_model_provider_connection_operations_endpoint_chk",
       sql`(${table.providerKind} = 'azure_openai') = (${table.resultEndpoint} is not null) and (${table.resultEndpoint} is null or ${table.resultEndpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
     ),
+    authMethodCheck: check(
+      "organization_model_provider_connection_operations_auth_chk",
+      sql`${table.resultAuthMethod} in ('api_key', 'entra_client_secret', 'entra_deployment_identity') and (${table.resultAuthMethod} = 'api_key' or ${table.providerKind} = 'azure_openai')`,
+    ),
   }),
 );
+
+/** How an organization model provider connection signs in. */
+export type OrganizationModelProviderAuthMethod =
+  | "api_key"
+  | "entra_client_secret"
+  | "entra_deployment_identity";
 
 export const organizationModelProviderCustomModels = pgTable(
   "organization_model_provider_custom_models",

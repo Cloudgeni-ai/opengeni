@@ -14,6 +14,8 @@ import type {
 import {
   DirectModelName,
   WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH,
+  type OrganizationModelProviderAuthMethod,
+  type OrganizationModelProviderEntraAuthentication,
 } from "@opengeni/contracts";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -33,7 +35,9 @@ import {
 // OpenAI) shared with the organization's workspaces. Returns the same view as the
 // workspace hook, so Organization settings > Models reuses the row and the
 // provider's page. Azure OpenAI saves its resource endpoint with the key, and its
-// custom models are deployment names the API checks against that endpoint.
+// custom models are deployment names the API checks against that endpoint. It
+// can also sign in with Microsoft Entra ID instead of a key: the organization's
+// own app, or this deployment's identity when the operator offers it.
 
 /** Whether `slug` is an upstream id this provider accepts. */
 function upstreamIdValid(providerKind: ProviderKind, slug: string): boolean {
@@ -52,12 +56,15 @@ export function useOrganizationProviderConnection({
   client,
   enabled = true,
   catalogConnection,
+  azureDeploymentIdentity = false,
 }: {
   organizationId: string;
   providerKind: ProviderKind;
   client: OpenGeniBrowserClient;
   enabled?: boolean;
   catalogConnection?: { connected: boolean; loaded: boolean; error: Error | null };
+  /** Azure OpenAI: the deployment offers its own identity to organizations. */
+  azureDeploymentIdentity?: boolean;
 }): ProviderConnectionView {
   const meta = ORGANIZATION_PROVIDER_META[providerKind];
   const hasCatalogConnection = Boolean(catalogConnection);
@@ -209,14 +216,19 @@ export function useOrganizationProviderConnection({
 
   async function saveKey(
     apiKey: string,
-    options?: { endpoint?: string | undefined },
+    options?: {
+      endpoint?: string | undefined;
+      authentication?: OrganizationModelProviderEntraAuthentication | undefined;
+    },
   ): Promise<boolean> {
     const key = apiKey.trim();
     const endpoint = azure ? options?.endpoint?.trim() : undefined;
-    if (!epoch.active || !enabled || !key || catalogConnection || connectionBusy) return false;
+    const authentication = azure ? options?.authentication : undefined;
+    if (!epoch.active || !enabled || catalogConnection || connectionBusy) return false;
+    if (!key && !authentication) return false;
     if (azure && !endpoint) return false;
     const write = sharedQueryWriter(client);
-    const credentialIdentity = key;
+    const credentialIdentity = authentication ? JSON.stringify(authentication) : key;
     const version = connection?.version ?? 0;
     const pending = pendingSaveRef.current;
     // A changed endpoint is a different request, so it gets its own operation.
@@ -230,13 +242,13 @@ export function useOrganizationProviderConnection({
     setConnectionBusy(true);
     const journey = beginIntegrationConnect(
       modelConnectionClass(providerKind) ?? "other",
-      "api_key",
+      authentication ? "custom" : "api_key",
     );
     const mutate = () =>
       client.upsertOrganizationModelProviderConnection(organizationId, providerKind, {
         operationId,
         expectedVersion: version,
-        apiKey: key,
+        ...(authentication ? { authentication } : { apiKey: key }),
         ...(endpoint ? { endpoint } : {}),
       });
     const commit = (saved: Connection) => {
@@ -448,6 +460,14 @@ export function useOrganizationProviderConnection({
     canManageCustomModels: enabled,
     connected,
     endpoint: connection?.status === "active" ? connection.endpoint : undefined,
+    authMethod: connection?.status === "active" ? connection.authMethod : undefined,
+    signInMethods: azure
+      ? ([
+          "api_key",
+          "entra_client_secret",
+          ...(azureDeploymentIdentity ? (["entra_deployment_identity"] as const) : []),
+        ] satisfies OrganizationModelProviderAuthMethod[])
+      : undefined,
     settled: !enabled || ((catalogConnection?.loaded ?? loaded) && modelsLoaded),
     hidden: !enabled || Boolean(catalogConnection),
     error: catalogConnection?.error ?? connectionQuery.error,

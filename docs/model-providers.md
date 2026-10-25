@@ -234,6 +234,39 @@ deployment's own OpenAI/Azure credentials. The endpoint is part of each model's
 definition version, so an accepted turn never silently moves to another
 resource.
 
+**Microsoft Entra ID sign-in (Azure OpenAI only).** Azure resources that turn
+key authentication off (`disableLocalAuth`) accept only Entra ID bearer tokens,
+so the Azure connection has an `authMethod`:
+
+- `api_key` (the default, unchanged): the encrypted key, sent as `api-key`.
+- `entra_client_secret`: the organization's own app registration. Admins enter
+  the directory (tenant) ID, application (client) ID and a client secret; the
+  secret is stored in the same encrypted credential column as a key and is
+  never returned.
+- `entra_deployment_identity`: the deployment's own workload identity (the
+  standard `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_FEDERATED_TOKEN_FILE`
+  or `AZURE_CLIENT_SECRET` variables, as set by AKS workload identity). It is
+  off unless the operator sets `OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED=true`;
+  only then does the console offer it and the API accept it, and the runtime
+  refuses it again at use time if the operator later turns it off. On a shared
+  deployment this lends one identity to every organization that selects it, so
+  operators enable it only where that is intended. Startup fails if it is
+  enabled without an identity.
+
+Tokens come from the Entra v2 token endpoint with scope
+`https://cognitiveservices.azure.com/.default` (client credentials with a
+secret, or a client assertion from the federated token file, which is re-read
+on every request). `@opengeni/network/azure-entra` caches one token per exact
+credential per process and renews it five minutes before expiry (or at half
+the lifetime of a shorter token), so long turns, compaction and title
+generation keep working. Every request (HTTP and the Responses WebSocket
+upgrade) carries `Authorization: Bearer …` and no `api-key`. A token Azure
+refuses is discarded so the next request signs in again; a credential Entra
+refuses fails as `OrganizationAzureOpenAIUnavailableError`. Saving a connection
+signs in once first and returns a safe 422 if Entra refuses it; the identity
+needs the `Cognitive Services OpenAI User` role on the resource. Ownership,
+reach and administration are the same as for a key connection.
+
 Canonical: `packages/contracts/src/direct-model-provider.ts`,
 `packages/core/src/domain/direct-model-provider.ts` for the setup check,
 `withDirectModelProviders` in `packages/config/src/index.ts`,

@@ -55,6 +55,7 @@ import { registerModelConnectionAccessRoutes } from "./routes/model-connection-a
 import {
   codeSearchDeploymentPolicy,
   agentConfigDeploymentPolicy,
+  azureOpenAIDeploymentIdentityAvailable,
   canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
@@ -1533,6 +1534,9 @@ export function createAppComposition(deps: AppDependencies): {
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
+        ...(azureOpenAIDeploymentIdentityAvailable(deps.settings)
+          ? { azureOpenAIDeploymentIdentity: true }
+          : {}),
         connectedMachines: deps.settings.sandboxSelfhostedEnabled,
         browserExtension: browserExtension(deps.settings),
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,

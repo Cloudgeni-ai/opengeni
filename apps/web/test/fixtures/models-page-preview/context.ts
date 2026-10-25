@@ -6,6 +6,9 @@
 // `claude=1` turns Claude subscriptions on. Its sign-in is synthetic: start
 // returns a claude.com URL (the browser test stubs that page), and complete
 // accepts only "preview-code" and holds for 1.5s when `slow=1`.
+// `azureAuth=entra_client_secret` (or `entra_deployment_identity`) starts the
+// Azure connection signed in with Microsoft Entra ID, and `azureIdentity=1`
+// offers this deployment's identity to the organization.
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { createElement, type ReactNode } from "react";
 import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
@@ -14,6 +17,8 @@ const params = new URLSearchParams(window.location.search);
 const many = params.get("many") === "1";
 const claudeOn = many || params.get("claude") === "1";
 const slow = params.get("slow") === "1";
+const azureAuth = params.get("azureAuth") ?? "api_key";
+const azureIdentity = params.get("azureIdentity") === "1";
 const receipts: unknown[] = [];
 (window as unknown as { modelsReceipts: unknown[] }).modelsReceipts = receipts;
 
@@ -23,6 +28,7 @@ type Connection = {
   status: "active" | "revoked";
   version: number;
   endpoint?: string | null;
+  authMethod?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -40,6 +46,7 @@ const connections: Record<string, Connection | null> = {
           status: "active",
           version: 1,
           endpoint: "https://acme.openai.azure.com/openai/v1",
+          authMethod: azureAuth,
           createdAt: now,
           updatedAt: now,
         }
@@ -324,15 +331,34 @@ const known: Record<string, (...args: any[]) => Promise<unknown>> = {
   upsertOrganizationModelProviderConnection: async (
     _org: string,
     kind: string,
-    request: { endpoint?: string },
+    request: {
+      endpoint?: string;
+      authentication?: { method: string; clientSecret?: string };
+    },
   ) => {
-    receipts.push({ upsert: kind, request: { ...request, apiKey: "redacted" } });
+    receipts.push({
+      upsert: kind,
+      request: {
+        ...request,
+        ...(request.authentication
+          ? {
+              authentication: {
+                ...request.authentication,
+                ...(request.authentication.clientSecret ? { clientSecret: "redacted" } : {}),
+              },
+            }
+          : { apiKey: "redacted" }),
+      },
+    });
     const saved: Connection = {
       id: `org-${kind}`,
       providerKind: kind,
       status: "active",
       version: (connections[kind]?.version ?? 0) + 1,
       ...(request.endpoint ? { endpoint: `${request.endpoint.replace(/\/+$/, "")}/openai/v1` } : {}),
+      ...(kind === "azure_openai"
+        ? { authMethod: request.authentication?.method ?? "api_key" }
+        : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -400,6 +426,7 @@ const appContext = {
       defaultModel: "codex/sol",
       defaultReasoningEffort: "medium",
       ...(claudeOn ? { claudeSubscriptionEnabled: true } : {}),
+      ...(azureIdentity ? { azureOpenAIDeploymentIdentity: true } : {}),
     },
     accessContext: null,
     workspaces: [
