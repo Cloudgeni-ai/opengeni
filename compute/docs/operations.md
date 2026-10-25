@@ -400,9 +400,14 @@ authority alone for agent links.
   hand, except replacing the machine where no group does it.
   If the host comes back, its guard has already stopped its VMs (its
   lease ran out), and it registers again; the raised epochs keep it from
-  running any sandbox that moved (ADR 18). A host whose fence
-  keeps failing is not given up on: alert on hosts in state `lost` for
-  more than a few minutes and fence them by hand (stop the machine).
+  running any sandbox that moved (ADR 18). A host given up on stays in
+  `GET /v1/hosts` as `lost` for a day, then the service forgets it, so
+  machines replaced over months do not pile up there or in the metrics;
+  if it comes back after that, it registers as a new host. A host whose
+  fence keeps failing is not given up on and stays `live` with a growing
+  `compute_fleet_host_renewal_age_seconds`: alert on that, or on
+  `compute_control_give_up_failures_total`, and fence it by hand (stop
+  the machine).
 
 ## Keys and certificates
 

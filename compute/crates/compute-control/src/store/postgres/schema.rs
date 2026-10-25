@@ -8,7 +8,7 @@ use crate::store::Result;
 /// The schema, one migration for each version, applied in order by
 /// [`migrate`]. A released migration is never changed: a change to the
 /// schema is a new one at the end.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3];
 
 /// Version 1: the tables, made if missing.
 const MIGRATION_1: &str = "
@@ -81,6 +81,14 @@ create index if not exists compute_create_requests_gone_ms on compute_create_req
 /// files.
 const MIGRATION_2: &str = "
 alter table compute_sandboxes add column if not exists whole_epoch bigint;
+";
+
+/// Version 3: when a host was given up on (`gone_ms`), so hosts given up on
+/// are forgotten after a while (`Store::prune_hosts`, which also dates the
+/// hosts given up on before this, or by an older build, from when it first
+/// sees them).
+const MIGRATION_3: &str = "
+alter table compute_hosts add column if not exists gone_ms bigint;
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

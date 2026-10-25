@@ -261,7 +261,11 @@ can be built and tested.
   write checks the owner host's state in the same statement, under a
   share lock on its row, so it is refused (`owner lost`) if the leader
   marked the host lost after the view placed on it, and the service
-  places the sandbox again elsewhere.
+  places the sandbox again elsewhere. A write naming a host the store
+  does not have is refused the same way, so a host given up on is
+  forgotten a day later (its row deleted; replicas' views drop it at
+  their next full read) without anything coming to name it again; a
+  machine that comes back under a forgotten name registers as a new host.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
   and the host must register again), it raises the owner epoch of each of
   its sandboxes and clears their owner. Each comes back on its next wake,

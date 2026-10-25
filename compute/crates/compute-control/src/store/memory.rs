@@ -20,6 +20,8 @@ struct Host {
     row: HostRow,
     attempt: u64,
     answer: Vec<Ruling>,
+    /// When it was given up on, while it is.
+    gone_ms: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -52,12 +54,14 @@ impl Inner {
         .then_some(row)
     }
 
-    /// Whether `row` names as owner a host given up on.
+    /// Whether `row` names as owner a host given up on, or one this store
+    /// does not have.
     fn owner_lost(&self, row: &SandboxRow) -> bool {
-        row.ownership
-            .owner
-            .and_then(|owner| self.hosts.get(&owner))
-            .is_some_and(|host| host.row.state == HostState::Lost)
+        row.ownership.owner.is_some_and(|owner| {
+            self.hosts
+                .get(&owner)
+                .is_none_or(|host| host.row.state == HostState::Lost)
+        })
     }
 
     fn insert(&mut self, row: &SandboxRow) -> Write {
@@ -157,6 +161,7 @@ impl MemoryStore {
                 },
                 attempt: register.attempt,
                 answer: rulings.clone(),
+                gone_ms: None,
             },
         );
         Admission::Registered {
@@ -220,7 +225,7 @@ impl MemoryStore {
             .collect()
     }
 
-    fn give_up_now(&self, host: HostId, renewals: u64) -> Option<usize> {
+    fn give_up_now(&self, host: HostId, renewals: u64, at_ms: u64) -> Option<usize> {
         let mut inner = self.lock();
         let changed = inner.changes + 1;
         let entry = inner.hosts.get_mut(&host)?;
@@ -229,6 +234,7 @@ impl MemoryStore {
         }
         entry.row.state = HostState::Lost;
         entry.row.changed = changed;
+        entry.gone_ms = Some(at_ms);
         inner.changes = changed;
         let mut cleared = 0;
         for sandbox in inner.sandboxes.values_mut() {
@@ -239,6 +245,18 @@ impl MemoryStore {
             }
         }
         Some(cleared)
+    }
+
+    fn prune_hosts_now(&self, before_ms: u64) -> u64 {
+        let mut inner = self.lock();
+        let inner = &mut *inner;
+        let before = inner.hosts.len();
+        inner
+            .hosts
+            .retain(|_, host| host.gone_ms.is_none_or(|at| at >= before_ms));
+        let hosts = &inner.hosts;
+        inner.by_name.retain(|_, id| hosts.contains_key(id));
+        u64::try_from(before - inner.hosts.len()).unwrap_or(u64::MAX)
     }
 
     fn set_state_now(&self, host: HostId, from: HostState, to: HostState) -> bool {
@@ -486,8 +504,13 @@ impl Store for MemoryStore {
         &self,
         host: HostId,
         renewals: u64,
+        at_ms: u64,
     ) -> impl Future<Output = Result<Option<usize>>> + Send {
-        ready(Ok(self.give_up_now(host, renewals)))
+        ready(Ok(self.give_up_now(host, renewals, at_ms)))
+    }
+
+    fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send {
+        ready(Ok(self.prune_hosts_now(before_ms)))
     }
 
     fn set_state(

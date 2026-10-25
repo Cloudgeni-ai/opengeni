@@ -65,6 +65,10 @@ use crate::view::View;
 /// gone, counted from the deletion.
 pub const REQUESTS_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
+/// How long a host given up on stays listed (`GET /v1/hosts`, state
+/// `lost`) before the service forgets it, counted from the give-up.
+pub const LOST_HOSTS_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// How a replica runs.
 #[derive(Debug)]
 pub struct Config {
@@ -180,7 +184,7 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
             config.api_tls,
             "the public API",
         )),
-        tokio::spawn(prune_requests(Arc::clone(&service))),
+        tokio::spawn(prune(Arc::clone(&service))),
     ];
     let metrics = match config.metrics {
         Some(address) => {
@@ -223,10 +227,12 @@ pub async fn start<S: Store>(store: Arc<S>, config: Config) -> anyhow::Result<Ru
 }
 
 /// Forgets, once an hour, the requests whose sandboxes were deleted more
-/// than [`REQUESTS_KEPT`] ago. Every replica does it; deleting twice is
+/// than [`REQUESTS_KEPT`] ago, and the hosts given up on more than
+/// [`LOST_HOSTS_KEPT`] ago. Every replica does it; deleting twice is
 /// harmless.
-async fn prune_requests<S: Store>(service: Arc<Service<S>>) {
+async fn prune<S: Store>(service: Arc<Service<S>>) {
     let keep = u64::try_from(REQUESTS_KEPT.as_millis()).unwrap_or(u64::MAX);
+    let keep_hosts = u64::try_from(LOST_HOSTS_KEPT.as_millis()).unwrap_or(u64::MAX);
     let mut every = tokio::time::interval(Duration::from_secs(60 * 60));
     every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -235,6 +241,11 @@ async fn prune_requests<S: Store>(service: Arc<Service<S>>) {
             Ok(0) => {}
             Ok(pruned) => tracing::info!(pruned, "forgot old create requests"),
             Err(error) => tracing::warn!(%error, "forgetting old create requests failed"),
+        }
+        match service.prune_hosts(keep_hosts).await {
+            Ok(0) => {}
+            Ok(pruned) => tracing::info!(pruned, "forgot hosts given up on"),
+            Err(error) => tracing::warn!(%error, "forgetting hosts given up on failed"),
         }
     }
 }

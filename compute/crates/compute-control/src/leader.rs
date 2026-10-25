@@ -80,7 +80,7 @@ impl<S: Store> Leases for S {
         host: HostId,
         renewals: u64,
     ) -> impl Future<Output = store::Result<Option<usize>>> + Send {
-        Store::give_up(self, host, renewals)
+        Store::give_up(self, host, renewals, crate::service::now_ms())
     }
 }
 
