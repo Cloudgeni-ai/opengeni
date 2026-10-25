@@ -1339,7 +1339,7 @@ const SettingsSchema = z.object({
   azureOpenaiApiKey: z.string().optional(),
   azureOpenaiAdToken: z.string().optional(),
   azureOpenaiAuthMode: z
-    .enum(["static", "workload_identity", "managed_identity"])
+    .enum(["static", "deployment_identity", "workload_identity", "managed_identity"])
     .default("static"),
   /**
    * Let organization admins connect Azure OpenAI as this deployment's own
@@ -11595,6 +11595,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (settings.azureOpenaiApiKey || settings.azureOpenaiAdToken) {
       throw new Error(
         "Azure OpenAI identity authentication cannot be combined with an API key or AD token",
+      );
+    }
+    if (
+      settings.azureOpenaiAuthMode === "deployment_identity" &&
+      !deploymentAzureEntraCredential(settings)
+    ) {
+      throw new Error(
+        "Azure OpenAI deployment_identity needs AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
       );
     }
     if (

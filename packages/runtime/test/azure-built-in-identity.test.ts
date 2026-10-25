@@ -138,6 +138,92 @@ test("a refused built-in token is discarded without replaying the model request"
   expect(requests[1]!.headers.get("authorization")).toBe("Bearer token-2");
 });
 
+test("client-secret deployment identity refreshes bearer tokens without a token file or API key", async () => {
+  const start = new Date("2026-10-25T12:00:00Z").getTime();
+  setSystemTime(start);
+  const identitySettings = {
+    ...settings,
+    azureOpenaiAuthMode: "deployment_identity" as const,
+    azureFederatedTokenFile: undefined,
+    azureClientSecret: "fake-deployment-client-secret",
+  };
+  const provider = configuredProviders(identitySettings)[0]!;
+  expect(provider.apiKey).toBeUndefined();
+  expect(identitySettings.azureOpenaiDeploymentIdentityEnabled).toBe(false);
+  const client = buildProviderClient(provider, identitySettings);
+  const send = () =>
+    client.responses.create({
+      model: "reasoning-deployment",
+      input: "hello",
+      reasoning: { effort: "high" },
+    });
+  await send();
+  setSystemTime(start + 54 * 60_000);
+  await send();
+  setSystemTime(start + 55 * 60_000);
+  await send();
+  setSystemTime(start + 3 * 3_600_000);
+  await buildOpenAIClientFromSettings(identitySettings).responses.create({
+    model: "reasoning-deployment",
+    input: "summary",
+  });
+  expect(tokenRequests).toHaveLength(3);
+  for (const body of tokenRequests) {
+    expect(Object.fromEntries(body)).toEqual({
+      grant_type: "client_credentials",
+      client_id: "client",
+      client_secret: identitySettings.azureClientSecret,
+      scope: "https://cognitiveservices.azure.com/.default",
+    });
+  }
+  expect(requests.map(({ headers }) => headers.get("authorization"))).toEqual([
+    "Bearer token-1",
+    "Bearer token-1",
+    "Bearer token-2",
+    "Bearer token-3",
+  ]);
+  expect(requests.every(({ headers }) => !headers.has("api-key"))).toBe(true);
+  expect(requests[0]!.body.reasoning).toEqual({ effort: "high" });
+  expect(JSON.stringify(requests)).not.toContain(identitySettings.azureClientSecret);
+});
+
+test("client-secret rotation creates a fresh built-in client and token source", async () => {
+  const firstSettings = {
+    ...settings,
+    azureOpenaiAuthMode: "deployment_identity" as const,
+    azureFederatedTokenFile: undefined,
+    azureClientSecret: "first-secret",
+  };
+  const secondSettings = { ...firstSettings, azureClientSecret: "replacement-secret" };
+  const first = buildProviderClient(configuredProviders(firstSettings)[0]!, firstSettings);
+  const second = buildProviderClient(configuredProviders(secondSettings)[0]!, secondSettings);
+  expect(first).not.toBe(second);
+  await first.responses.create({ model: "reasoning-deployment", input: "a" });
+  await second.responses.create({ model: "reasoning-deployment", input: "b" });
+  expect(tokenRequests.map((body) => body.get("client_secret"))).toEqual([
+    "first-secret",
+    "replacement-secret",
+  ]);
+  expect(requests.map(({ headers }) => headers.get("authorization"))).toEqual([
+    "Bearer token-1",
+    "Bearer token-2",
+  ]);
+});
+
+test("deployment identity uses the shared federated-file precedence rather than the client secret", async () => {
+  const identitySettings = {
+    ...settings,
+    azureOpenaiAuthMode: "deployment_identity" as const,
+    azureClientSecret: "unused-secret",
+  };
+  await buildOpenAIClientFromSettings(identitySettings).responses.create({
+    model: "reasoning-deployment",
+    input: "hello",
+  });
+  expect(tokenRequests[0]!.get("client_assertion")).toBe("projected-assertion-1");
+  expect(tokenRequests[0]!.has("client_secret")).toBe(false);
+});
+
 test("changing identity invalidates the built-in client cache", async () => {
   const first = buildProviderClient(configuredProviders(settings)[0]!, settings);
   const otherSettings = { ...settings, azureClientId: "other-client" };
@@ -239,7 +325,7 @@ test("system and user-assigned managed identities use the SDK endpoint, Cognitiv
   }
 });
 
-test.each(["builtin", "organization-key", "organization-entra"] as const)(
+test.each(["builtin", "builtin-client-secret", "organization-key", "organization-entra"] as const)(
   "%s keeps high reasoning in the agent and title request",
   async (kind) => {
     const input = {
@@ -260,9 +346,16 @@ test.each(["builtin", "organization-key", "organization-entra"] as const)(
               },
               input,
             )
-          : settings;
+          : kind === "builtin-client-secret"
+            ? {
+                ...settings,
+                azureOpenaiAuthMode: "deployment_identity" as const,
+                azureFederatedTokenFile: undefined,
+                azureClientSecret: "fake-deployment-secret",
+              }
+            : settings;
     const modelId =
-      kind === "builtin"
+      kind === "builtin" || kind === "builtin-client-secret"
         ? "reasoning-deployment"
         : "organization-azure-openai/reasoning-deployment";
     const { provider, model } = resolveModelProvider(routedSettings, modelId);
