@@ -107,8 +107,19 @@ class FencedBridge extends DetachmentBridge {
   readonly attachments = new Map<string, number>();
 
   override detach(tabId: string, reason: "target_closed" | "canceled_by_user"): void {
+    const attachment = this.attachments.get(tabId);
     this.attachments.delete(tabId);
-    super.detach(tabId, reason);
+    this.attached.delete(tabId);
+    this.event(tabId, "OpenGeni.debuggerDetached", { reason, attachment });
+  }
+
+  /** Chrome ends the tab's attachment, but its detach event is reported
+   * only later. */
+  detachSilently(tabId: string): number | undefined {
+    const attachment = this.attachments.get(tabId);
+    this.attachments.delete(tabId);
+    this.attached.delete(tabId);
+    return attachment;
   }
 
   override async request<T>(payload: Readonly<Record<string, unknown>>): Promise<T> {
@@ -733,6 +744,32 @@ test("a late command for an ended attachment is refused and leaves its replaceme
   } finally {
     held.release();
     await pending;
+    connection.close();
+  }
+});
+
+test("a detach reported after its replacement attached leaves the replacement working", async () => {
+  const bridge = new FencedBridge();
+  const connection = new AttachedChromeCdpConnection(bridge, {
+    browserName: "Chrome",
+    browserVersion: "151.0.0.0",
+  });
+  const detached: unknown[] = [];
+  connection.on("Target.detachedFromTarget", (event) => detached.push(event.params));
+  try {
+    await connection.send("Target.attachToTarget", { targetId: "7" });
+    const ended = bridge.detachSilently("7");
+    const second = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: "7",
+    });
+    expect(bridge.attachments.get("7")).not.toBe(ended);
+    bridge.event("7", "OpenGeni.debuggerDetached", { reason: "target_closed", attachment: ended });
+    await drainDetach(bridge);
+    expect(detached).toEqual([]);
+    await expect(
+      connection.send("Page.getFrameTree", {}, { sessionId: second.sessionId }),
+    ).resolves.toHaveProperty("frameTree");
+  } finally {
     connection.close();
   }
 });

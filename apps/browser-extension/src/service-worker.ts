@@ -83,7 +83,9 @@ const debuggerEvents: BridgeDebuggerEvent[] = [];
 // name an attachment are refused once it has ended, so a late one can never
 // run under a newer attachment of the same tab.
 const attachedDebuggerTabs = new Map<number, number>();
-let lastAttachment = 0;
+// Starts at a random number, so a number from before this worker restarted
+// does not name one of its attachments.
+let lastAttachment = Math.floor(Math.random() * 2 ** 40);
 // Removals of other extensions' frames still running, and when each tab's
 // recent removals started.
 const frameRemovals = new Map<number, Promise<readonly string[] | null>>();
@@ -498,7 +500,8 @@ async function attachDebugger(tabId: number): Promise<void> {
     try {
       await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
     } catch (retry) {
-      throw otherExtensionFrameRefusal(retry) ? otherExtensionFramesError(tabId) : retry;
+      if (!otherExtensionFrameRefusal(retry)) throw retry;
+      throw removed.length > 0 ? otherExtensionFramesError(tabId) : unremovableFrameError();
     }
   }
   // Another attach of this tab may have finished first; keep its number.
@@ -521,6 +524,15 @@ function otherExtensionFramesError(tabId: number): BridgeCommandError {
     `${culprit} keeps adding its own frame to this page (password managers do this for ` +
       `their inline menu), and Chrome does not let ${BRAND.product} control a tab while it ` +
       "has one. Turn off that extension's inline menu for this site, or use a managed browser",
+  );
+}
+
+function unremovableFrameError(): BridgeCommandError {
+  return new BridgeCommandError(
+    "tab_unavailable",
+    "This page holds another browser extension's page, which Chrome does not let " +
+      `${BRAND.product} control a tab with, and it could not be removed. Turn off that ` +
+      "extension for this site, or use a managed browser",
   );
 }
 
@@ -750,12 +762,15 @@ chrome.debugger.onEvent.addListener((source, method, params = {}) => {
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
-  if (source.tabId === undefined || !attachedDebuggerTabs.delete(source.tabId)) return;
+  if (source.tabId === undefined) return;
+  const attachment = attachedDebuggerTabs.get(source.tabId);
+  if (attachment === undefined) return;
+  attachedDebuggerTabs.delete(source.tabId);
   appendDebuggerEvent({
     tabId: String(source.tabId),
     sessionId: null,
     method: "OpenGeni.debuggerDetached",
-    params: { reason },
+    params: { reason, attachment },
   });
   // Chrome reports a tab it stopped debugging because another extension
   // added a frame as closed, though it stays open. Remove such frames, so

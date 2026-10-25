@@ -1105,6 +1105,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   private emit(input: BridgeDebuggerEvent): void {
     if (input.method === "OpenGeni.debuggerDetached") {
+      // A detach of an attachment this connection has already replaced
+      // (reported after the replacement attached) leaves the new one be.
+      const ended = input.params.attachment;
+      const current = this.tabAttachments.get(input.tabId);
+      if (typeof ended === "number" && current !== undefined && ended !== current) return;
       this.detachLocally(input.tabId, input.params.reason, { synthetic: false });
       return;
     }
