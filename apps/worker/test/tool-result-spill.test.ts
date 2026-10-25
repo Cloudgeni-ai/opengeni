@@ -328,7 +328,7 @@ describe("tool result spill receipt path", () => {
   test("a Connected Machine copies into its working directory and reports the cwd-relative path", async () => {
     filesById.clear();
     mutationCalls = 0;
-    const machine = shellSession("/Users/someone/projects/app");
+    const machine = shellSession("/Users/user/projects/app");
     const port = spill("selfhosted", objectStorage(), {
       resolved: () => resolvedSandbox(machine.session),
       setupSession: () => machine.session,
@@ -337,14 +337,14 @@ describe("tool result spill receipt path", () => {
     expect((receipt.structuredContent as { sandboxPath: string }).sandboxPath).toBe(shellPath);
     expect(mutationCalls).toBe(1);
     expect(machine.calls).toHaveLength(1);
-    expect(machine.calls[0]!.workdir).toBe("/Users/someone/projects/app");
+    expect(machine.calls[0]!.workdir).toBe("/Users/user/projects/app");
     expect(machine.calls[0]!.cmd).toContain(shellPath);
     expect(machine.calls[0]!.cmd).not.toContain("/workspace/");
   });
 
   test("a failed copy into a live sandbox reports no path", async () => {
     filesById.clear();
-    const machine = shellSession("/Users/someone/projects/app", 1);
+    const machine = shellSession("/Users/user/projects/app", 1);
     const port = spill("selfhosted", objectStorage(), {
       resolved: () => resolvedSandbox(machine.session),
       setupSession: () => machine.session,
