@@ -15,8 +15,11 @@ import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.util.Locale
 import kotlin.math.max
@@ -28,6 +31,10 @@ object AudioCapture {
   private const val SAMPLE_RATE = 48_000
   private const val SAMPLES_PER_FRAME = 1_024L
   private const val MIME = MediaFormat.MIMETYPE_AUDIO_AAC
+  // The live transcript's copy of the audio: 16 kHz 16-bit PCM in blocks of a tenth of a second.
+  private const val LIVE_SAMPLE_RATE = 16_000
+  private const val LIVE_RATIO = SAMPLE_RATE / LIVE_SAMPLE_RATE
+  private const val LIVE_BLOCK_SAMPLES = LIVE_SAMPLE_RATE / 10
 
   @Volatile var emit: ((String, Map<String, Any?>) -> Unit)? = null
 
@@ -57,7 +64,22 @@ object AudioCapture {
   private var chunkPart: File? = null
   private var chunkStream: FileOutputStream? = null
 
+  // Touched only by the capture thread, except that setLivePcm flips the flag.
+  @Volatile private var livePcm = false
+  @Volatile private var liveReset = false
+  private val liveCarry = IntArray(LIVE_RATIO)
+  private var liveCarryCount = 0
+  private val liveBlock =
+    ByteBuffer.allocate(LIVE_BLOCK_SAMPLES * 2).order(ByteOrder.LITTLE_ENDIAN)
+  private var liveBlockStartMilliseconds = 0.0
+
   fun recordingId(): String? = active
+
+  /** Start or stop sending the live transcript's copy of the audio as `onPcm`. */
+  fun setLivePcm(enabled: Boolean) {
+    livePcm = enabled
+    liveReset = true
+  }
 
   fun level(): Double = if (active == null || pausedByPerson || silenced) 0.0 else currentLevel
 
@@ -120,6 +142,8 @@ object AudioCapture {
       record = audio
       codec = encoder
       samplesFed = 0
+      livePcm = false
+      liveReset = true
       samplesEncoded = 0
       chunkNumber = 0
       pausedByPerson = false
@@ -223,6 +247,12 @@ object AudioCapture {
         sum += sample * sample
       }
       currentLevel = min(1.0, sqrt(sum / read) * 4)
+      if (liveReset) {
+        liveReset = false
+        liveCarryCount = 0
+        liveBlock.clear()
+      }
+      if (livePcm) tapLive(buffer, read, samplesFed)
       var offset = 0
       while (offset < read) {
         val inputIndex = encoder.dequeueInputBuffer(10_000)
@@ -240,6 +270,34 @@ object AudioCapture {
         samplesFed += samples
       }
       drain(encoder, endOfStream = false)
+    }
+  }
+
+  /**
+   * Average each three 48 kHz samples into one 16 kHz sample (enough of a
+   * low-pass for speech) and send whole blocks with where they start in the
+   * recording, excluding pauses.
+   */
+  private fun tapLive(buffer: ShortArray, read: Int, startSample: Long) {
+    val id = active ?: return
+    if (liveBlock.position() == 0) {
+      liveBlockStartMilliseconds = (startSample - liveCarryCount) * 1_000.0 / SAMPLE_RATE
+    }
+    for (index in 0 until read) {
+      liveCarry[liveCarryCount++] = buffer[index].toInt()
+      if (liveCarryCount < LIVE_RATIO) continue
+      liveCarryCount = 0
+      liveBlock.putShort((liveCarry.sum() / LIVE_RATIO).toShort())
+      if (liveBlock.position() < liveBlock.capacity()) continue
+      send(
+        "onPcm",
+        mapOf(
+          "recordingId" to id,
+          "data" to Base64.encodeToString(liveBlock.array(), 0, liveBlock.position(), Base64.NO_WRAP),
+          "sampleRate" to LIVE_SAMPLE_RATE,
+          "recordedMilliseconds" to liveBlockStartMilliseconds))
+      liveBlock.clear()
+      liveBlockStartMilliseconds = (startSample + index + 1) * 1_000.0 / SAMPLE_RATE
     }
   }
 

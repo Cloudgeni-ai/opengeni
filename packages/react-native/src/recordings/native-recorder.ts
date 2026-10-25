@@ -1,11 +1,13 @@
 import type {
+  LiveTranscriber,
+  LiveTranscriptTransport,
   Recorder,
   RecorderErrorCode,
   RecorderOptions,
   RecorderSnapshot,
   RecordingUploadStatus,
 } from "@opengeni/sdk/recordings";
-import { RecordingUploader } from "@opengeni/sdk/recordings";
+import { createLiveTranscriber, RecordingUploader } from "@opengeni/sdk/recordings";
 import type { FileRecordingChunkStore, RecordingFileSystem } from "./file-store";
 
 /** A chunk file the native recorder finished, already in the recording's directory. */
@@ -27,6 +29,18 @@ export type NativeAudioStateEvent = {
 };
 
 export type NativeAudioErrorEvent = { recordingId: string; code: string; message: string };
+
+/**
+ * The live transcript's copy of the microphone while it is asked for: 16-bit
+ * little-endian mono PCM, base64, starting `recordedMilliseconds` into the
+ * recording (excluding pauses).
+ */
+export type NativeAudioPcmEvent = {
+  recordingId: string;
+  data: string;
+  sampleRate: number;
+  recordedMilliseconds: number;
+};
 
 /**
  * The native capture module (`OpenGeniAudioCapture`): the microphone encoded
@@ -59,6 +73,8 @@ export interface NativeAudioCapture {
   level(): number;
   /** The recording being captured now, also across a JavaScript reload. */
   activeRecordingId(): string | null;
+  /** Start or stop sending the live transcript's copy of the audio as `onPcm`. Older builds lack it. */
+  setLivePcm?(enabled: boolean): void;
   addListener(
     event: "onChunk",
     listener: (event: NativeAudioChunkEvent) => void,
@@ -71,6 +87,7 @@ export interface NativeAudioCapture {
     event: "onError",
     listener: (event: NativeAudioErrorEvent) => void,
   ): { remove(): void };
+  addListener(event: "onPcm", listener: (event: NativeAudioPcmEvent) => void): { remove(): void };
 }
 
 export const NATIVE_RECORDING_MIME_TYPE = "audio/aac";
@@ -89,6 +106,17 @@ export type NativeRecorderOptions = RecorderOptions & {
 };
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+
+/** Little-endian 16-bit samples from base64. */
+function decodePcm(data: string): Int16Array {
+  const binary = atob(data);
+  const samples = new Int16Array(binary.length >> 1);
+  for (let index = 0; index < samples.length; index += 1) {
+    const value = binary.charCodeAt(index * 2) | (binary.charCodeAt(index * 2 + 1) << 8);
+    samples[index] = value >= 0x8000 ? value - 0x10000 : value;
+  }
+  return samples;
+}
 
 /** A {@link Recorder} on the phone's microphone, with the same lifecycle as the browser one. */
 export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
@@ -118,6 +146,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
   let unsubscribe: (() => void) | null = null;
   let subscriptions: Array<{ remove(): void }> = [];
   let ticker: ReturnType<typeof setInterval> | null = null;
+  let live: LiveTranscriber | null = null;
   let writes: Promise<void> = Promise.resolve();
   // Chunks already handed to the uploader, so the final one is saved once
   // whether its event or stop()'s result arrives first.
@@ -132,10 +161,38 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
   };
 
   const release = () => {
+    native.setLivePcm?.(false);
     for (const subscription of subscriptions) subscription.remove();
     subscriptions = [];
     if (ticker) clearInterval(ticker);
     ticker = null;
+  };
+
+  /** Stream the microphone to the live transcript. Recording never waits on it. */
+  const startLive = (recordingId: string) => {
+    const client = options.client as Partial<LiveTranscriptTransport>;
+    if (!options.liveTranscript || !native.setLivePcm) return;
+    if (!client.createRecordingLiveSession || !client.appendRecordingLiveSegments) return;
+    const transcriber = createLiveTranscriber({
+      client: client as LiveTranscriptTransport,
+      workspaceId: options.workspaceId,
+      recordingId,
+      trackNumber: 0,
+      ...(options.liveWebSocket ? { WebSocket: options.liveWebSocket } : {}),
+      onChange: (track) => {
+        if (live === transcriber) emit({ live: [track] });
+      },
+    });
+    live = transcriber;
+    emit({ live: [transcriber.snapshot] });
+    subscriptions.push(
+      native.addListener("onPcm", (event) => {
+        // Paused audio is not recorded, so it is not transcribed either.
+        if (event.recordingId !== recordingId || snapshot.state !== "recording") return;
+        transcriber.push(decodePcm(event.data), event.sampleRate, event.recordedMilliseconds);
+      }),
+    );
+    native.setLivePcm(true);
   };
 
   const saveChunk = async (event: NativeAudioChunkEvent) => {
@@ -192,7 +249,8 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
             : {}),
         });
       });
-      emit({ recordingId, title: options.title ?? null });
+      live = null;
+      emit({ recordingId, title: options.title ?? null, live: null });
       await uploader.begin({
         workspaceId: options.workspaceId,
         recordingId,
@@ -257,6 +315,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
         pauseReason: null,
         tracks: [{ trackNumber: 0, source: "microphone", label: input.inputName || "Microphone" }],
       });
+      startLive(recordingId);
     },
 
     pause() {
@@ -291,7 +350,10 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
       }
       await writes;
       release();
+      // The live transcript finishes its last words while the upload completes.
+      const liveClosed = live?.close();
       const status = await uploader.finish(recordingId, { ...stopOptions, endedAt: new Date() });
+      await liveClosed?.catch(() => undefined);
       emit({
         state: status.failed ? "failed" : "stopped",
         pauseReason: null,
@@ -306,6 +368,8 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
     async discard() {
       const recordingId = snapshot.recordingId;
       release();
+      live?.abort();
+      live = null;
       await native.cancel().catch(() => undefined);
       await writes;
       if (recordingId) await uploader.discard(recordingId);
@@ -316,6 +380,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
         elapsedMilliseconds: 0,
         tracks: [],
         upload: null,
+        live: null,
       });
     },
 
