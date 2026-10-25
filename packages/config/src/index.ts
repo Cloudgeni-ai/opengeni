@@ -502,13 +502,16 @@ const SettingsSchema = z.object({
     .string()
     .url()
     .default("https://github.com/Cloudgeni-ai/opengeni/releases"),
-  // Explicit operator-controlled promotion pointer for `/agent/latest/*`.
-  // Versioned agent releases are immutable; changing this setting promotes or
-  // rolls back the stable channel without moving or deleting a provider tag.
+  // Optional operator promotion pointer for `/agent/latest/*` and the stable
+  // update channel. Versioned agent releases are immutable; setting this pins,
+  // promotes or rolls back the stable channel without moving or deleting a
+  // provider tag. Unset, the API serves the agent release of its own source
+  // tree (agent/Cargo.toml), so the stable agent advances with the control
+  // plane instead of staying at whatever version a default once named.
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.54"),
+    .optional(),
   // Optional pin for the desktop app served by /desktop/latest/*. When unset,
   // the newest desktop-v release on the agent release repository is served.
   desktopStableVersion: z
