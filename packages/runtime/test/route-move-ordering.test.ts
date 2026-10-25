@@ -12,6 +12,11 @@ import {
 } from "@openai/agents";
 import { z } from "zod";
 import { installRouteMoveOrdering, PrefixedMcpServer } from "../src/index";
+import {
+  createResolveMissingFunctionTool,
+  installLazyToolRuntime,
+  LazyToolModelProvider,
+} from "../src/lazy-tool-transport";
 
 class ScriptedModel implements Model {
   calls = 0;
@@ -139,6 +144,64 @@ describe("route-moving tools", () => {
     });
     installRouteMoveOrdering(agent as never);
     const result = await new Runner({ tracingDisabled: true }).run(agent, "Open the Mac screen");
+    expect(result.finalOutput).toBe("Done.");
+    expect(log).toEqual([
+      "computer_targets:start",
+      "computer_targets:end",
+      "sandbox_swap:start",
+      "sandbox_swap:end",
+      "computer_open:start",
+      "computer_open:end",
+    ]);
+  });
+
+  test("a swap called through tool_invoke runs in the same model order", async () => {
+    const log: string[] = [];
+    const model = new ScriptedModel([
+      [
+        call("before", "computer_targets"),
+        call("swap", "tool_invoke", {
+          name: "opengeni__sandbox_swap",
+          arguments: { target: "machine" },
+        }),
+        call("after", "computer_open"),
+      ],
+      [
+        {
+          type: "message",
+          id: "done",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "Done." }],
+        },
+      ],
+    ]);
+    const recorded = (name: string) =>
+      tool({
+        name,
+        description: name,
+        parameters: z.object({}),
+        execute: async () => {
+          log.push(`${name}:start`);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          log.push(`${name}:end`);
+          return "ok";
+        },
+      });
+    const agent = new Agent({
+      name: "Test",
+      model: "scripted",
+      tools: [recorded("computer_targets"), recorded("computer_open")],
+      mcpServers: [firstPartyServer(log)],
+    });
+    installRouteMoveOrdering(agent as never);
+    const runtime = installLazyToolRuntime(agent as never, "generic_dispatch", new Set());
+    const result = await new Runner({
+      tracingDisabled: true,
+      modelProvider: new LazyToolModelProvider({ getModel: () => model }, runtime),
+    }).run(agent, "Open the Mac screen", {
+      resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+    });
     expect(result.finalOutput).toBe("Done.");
     expect(log).toEqual([
       "computer_targets:start",

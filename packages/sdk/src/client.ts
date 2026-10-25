@@ -5469,6 +5469,17 @@ export class OpenGeniClient {
         );
       }
       query.set("region", [x, y, width, height].join(","));
+      if (captureOptions.regionFrame !== undefined) {
+        const frame = captureOptions.regionFrame;
+        if (
+          ![frame.width, frame.height].every((value) => Number.isSafeInteger(value) && value > 0)
+        ) {
+          throw new RangeError(
+            "computer screenshot regionFrame must be a positive whole width and height",
+          );
+        }
+        query.set("regionFrame", [frame.width, frame.height].join(","));
+      }
     }
     const suffix = query.size > 0 ? `?${query}` : "";
     const response = await this.requestResponse(

@@ -4,6 +4,7 @@ import {
   captureZoomedComputerFrame,
   decodeZoomedFrameId,
   parseComputerFrameRegionQuery,
+  parseComputerFrameSizeQuery,
   translateZoomedComputerAction,
   zoomedFrameId,
 } from "../src/computer-frame-zoom";
@@ -23,7 +24,7 @@ async function nativeWindow(width: number, height: number): Promise<Buffer> {
     .toBuffer();
 }
 
-function fakeClient(generations: string[] = ["g1", "g1"]) {
+function fakeClient() {
   const requests: Array<{ maxWidth?: number; maxHeight?: number }> = [];
   return {
     requests,
@@ -50,7 +51,7 @@ function fakeClient(generations: string[] = ["g1", "g1"]) {
         computerSessionId: "00000000-0000-4000-8000-000000000001",
         controllerGeneration: "controller-1",
         targetId,
-        targetGeneration: generations[requests.length - 1]!,
+        targetGeneration: "g1",
         sequence: 0,
         mediaType: "image/png" as const,
         width,
@@ -74,6 +75,11 @@ describe("zoomed computer frames", () => {
     });
     for (const bad of ["", "1,2,3", "1,2,3,4,5", "a,2,3,4", "-1,0,3,4", "0,0,0,4", "0,,3,4"]) {
       expect(() => parseComputerFrameRegionQuery(bad)).toThrow();
+    }
+    expect(parseComputerFrameSizeQuery(undefined)).toBeNull();
+    expect(parseComputerFrameSizeQuery("640,352")).toEqual({ width: 640, height: 352 });
+    for (const bad of ["", "640", "640,352,1", "640.5,352", "0,352", "640,-1", "99999,1"]) {
+      expect(() => parseComputerFrameSizeQuery(bad)).toThrow();
     }
   });
 
@@ -141,19 +147,20 @@ describe("zoomed computer frames", () => {
       client,
       "cua:window:1:2",
       { x: 800, y: 40, width: 40, height: 40 },
+      null,
       256 * 1024,
       (frame) => frame,
     );
-    expect(client.requests).toEqual([
-      { maxWidth: 1_024, maxHeight: 768 },
-      { maxWidth: 4_096, maxHeight: 4_096 },
-    ]);
+    // One native capture; without a measured size the region is in the
+    // regular 1024x768-bounded screenshot's pixels.
+    expect(client.requests).toEqual([{ maxWidth: 4_096, maxHeight: 4_096 }]);
     expect(zoomed.mediaType).toBe("image/jpeg");
     expect(zoomed.metadata).toMatchObject({
-      frameId: "session-1:capture-2:zoom.2000.100.100.100.100.100",
+      frameId: "session-1:capture-1:zoom.2000.100.100.100.100.100",
       width: 100,
       height: 100,
       region: { x: 800, y: 40, width: 40, height: 40 },
+      regionFrame: { width: 1_024, height: 564 },
       targetGeneration: "g1",
     });
     expect(JSON.parse(Buffer.from(zoomed.metadataHeader, "base64url").toString())).toEqual(
@@ -169,7 +176,7 @@ describe("zoomed computer frames", () => {
       expectedFrameId: null,
       action: { type: "pointer", frameId: zoomed.metadata.frameId, action: "click", x: 50, y: 50 },
     });
-    expect(click.action).toMatchObject({ frameId: "session-1:capture-2", x: 2_050, y: 150 });
+    expect(click.action).toMatchObject({ frameId: "session-1:capture-1", x: 2_050, y: 150 });
   });
 
   test("keeps a large zoom within the model's image bounds and clips to the screenshot", async () => {
@@ -177,6 +184,7 @@ describe("zoomed computer frames", () => {
       fakeClient(),
       "cua:window:1:2",
       { x: 0, y: 0, width: 5_000, height: 5_000 },
+      null,
       256 * 1024,
       (frame) => frame,
     );
@@ -189,21 +197,45 @@ describe("zoomed computer frames", () => {
         fakeClient(),
         "cua:window:1:2",
         { x: 2_000, y: 0, width: 10, height: 10 },
+        null,
         256 * 1024,
         (frame) => frame,
       ),
     ).rejects.toThrow("outside the 1024x564 screenshot");
   });
 
-  test("refuses a zoom when the window changed between its two captures", async () => {
+  test("measures the region on the screenshot the model saw, such as the 640x480 fallback", async () => {
+    // The red square at 2000,100 native is at 500,25 size 25 in a 640x352 screenshot.
+    const zoomed = await captureZoomedComputerFrame(
+      fakeClient(),
+      "cua:window:1:2",
+      { x: 500, y: 25, width: 25, height: 25 },
+      { width: 640, height: 352 },
+      256 * 1024,
+      (frame) => frame,
+    );
+    expect(zoomed.metadata).toMatchObject({
+      // 352 rows show 1410: the crop rounds outward to whole native pixels.
+      frameId: "session-1:capture-1:zoom.2000.100.100.101.100.101",
+      region: { x: 500, y: 25, width: 25, height: 25 },
+      regionFrame: { width: 640, height: 352 },
+    });
+    const { data, info } = await sharp(zoomed.data).raw().toBuffer({ resolveWithObject: true });
+    const center = (50 * info.width + 50) * info.channels;
+    expect(data[center]!).toBeGreaterThan(230);
+    expect(data[center + 1]!).toBeLessThan(30);
+  });
+
+  test("refuses a region measured on a screenshot of another window shape", async () => {
     await expect(
       captureZoomedComputerFrame(
-        fakeClient(["g1", "g2"]),
+        fakeClient(),
         "cua:window:1:2",
         { x: 0, y: 0, width: 10, height: 10 },
+        { width: 1_024, height: 768 },
         256 * 1024,
         (frame) => frame,
       ),
-    ).rejects.toThrow("changed while it was being zoomed");
+    ).rejects.toThrow("no longer the shape of the 1024x768 screenshot");
   });
 });

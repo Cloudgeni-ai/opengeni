@@ -115,6 +115,7 @@ import { connectedMachineComputerAccessError } from "../connected-machine-comput
 import {
   captureZoomedComputerFrame,
   parseComputerFrameRegionQuery,
+  parseComputerFrameSizeQuery,
   translateZoomedComputerAction,
 } from "../computer-frame-zoom";
 import {
@@ -625,6 +626,9 @@ export function registerComputerSessionRoutes(
       );
       const targetId = requireOpaqueParam(context, "targetId");
       const region = parseComputerFrameRegionQuery(context.req.query("region"));
+      const regionFrame = region
+        ? parseComputerFrameSizeQuery(context.req.query("regionFrame"))
+        : null;
       const frame = await withActiveComputerController(
         context,
         grant,
@@ -644,6 +648,7 @@ export function registerComputerSessionRoutes(
                   sessionClient,
                   targetId,
                   region,
+                  regionFrame,
                   MODEL_COMPUTER_FRAME_MAX_BYTES,
                   (captured) => validateComputerFrameForApi(captured, expected),
                 )

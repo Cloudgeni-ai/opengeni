@@ -248,11 +248,16 @@ impl DesktopBackend for MacosDesktop {
                 return Some("This Mac is locked. Unlock it to use desktop capture.".into())
             }
             Err(_) => {
+                // The session dictionary is missing both when no one is signed
+                // in and when the agent runs outside the signed-in user's
+                // window-server session (for example as a system daemon).
                 return Some(
-                    "No one is signed in to this Mac's desktop. Sign in at the Mac to use desktop \
-                     capture."
+                    "No desktop login session is available to this agent: no one is signed in to \
+                     this Mac, or the agent runs outside the signed-in user's session. Sign in at \
+                     the Mac and run the agent as that user's LaunchAgent (the default install) \
+                     to use desktop capture."
                         .into(),
-                )
+                );
             }
             Ok(false) => {}
         }

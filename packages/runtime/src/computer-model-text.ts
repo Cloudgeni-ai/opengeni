@@ -43,8 +43,10 @@ export type ComputerTextObservation = {
     | {
         width: number;
         height: number;
-        /** A zoomed frame: the rectangle of the regular screenshot it shows. */
+        /** A zoomed frame: the rectangle it shows, in the pixels of the
+         *  `regionFrame` screenshot it was measured on. */
         region?: { x: number; y: number; width: number; height: number } | undefined;
+        regionFrame?: { width: number; height: number } | undefined;
       }
     | undefined;
   semantic:
@@ -394,7 +396,7 @@ function pixels(value: number): string {
   return String(Math.round(value * 10) / 10);
 }
 
-/** How many zoomed pixels show one regular-screenshot pixel. */
+/** How many zoomed pixels show one pixel of the measured screenshot. */
 function zoomFactor(zoomedWidth: number, regionWidth: number): string {
   return String(Math.round((zoomedWidth / regionWidth) * 10) / 10);
 }
@@ -418,10 +420,13 @@ export function computerObservationText(observation: ComputerTextObservation): s
   if (observation.frameId) fence.push(`frame ${observation.frameId}`);
   lines.push(fence.join(", "));
   if (observation.capturedFrame) {
-    const { width, height, region } = observation.capturedFrame;
+    const { width, height, region, regionFrame } = observation.capturedFrame;
+    const measuredOn = regionFrame
+      ? `the ${regionFrame.width}x${regionFrame.height} screenshot`
+      : "the full screenshot";
     lines.push(
       region
-        ? `Zoomed screenshot ${width}x${height} pixels of the regular screenshot's region at ${pixels(region.x)},${pixels(region.y)} size ${pixels(region.width)}x${pixels(region.height)} (${zoomFactor(width, region.width)}x); pointer x,y on frame ${observation.frameId} use these zoomed pixels.`
+        ? `Zoomed screenshot ${width}x${height} pixels of ${measuredOn}'s region at ${pixels(region.x)},${pixels(region.y)} size ${pixels(region.width)}x${pixels(region.height)} (${zoomFactor(width, region.width)}x); pointer x,y on frame ${observation.frameId} use these zoomed pixels.`
         : `Screenshot ${width}x${height} pixels; pointer x,y use these pixels.`,
     );
   }

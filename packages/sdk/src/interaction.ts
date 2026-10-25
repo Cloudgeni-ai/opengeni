@@ -2834,21 +2834,31 @@ export type ComputerFrameMetadata = {
   height: number;
   capturedAt: string;
   sha256: string;
-  /** On a zoomed frame: the rectangle of the target's regular screenshot it
-   *  shows, in that screenshot's pixels. Its own pixels are `width`x`height`. */
+  /** On a zoomed frame: the rectangle it shows, in the pixels of the
+   *  `regionFrame` screenshot it was measured on. Its own pixels are
+   *  `width`x`height`. */
   region?: ComputerFrameRegion;
+  /** On a zoomed frame: the size of the screenshot `region` is measured in. */
+  regionFrame?: ComputerFrameSize;
 };
 
 export type ComputerFrame = ComputerFrameMetadata & { data: Uint8Array };
 
-/** A rectangle in the pixels of a target's regular screenshot. */
+/** A rectangle in the pixels of a screenshot of a target. */
 export type ComputerFrameRegion = { x: number; y: number; width: number; height: number };
 
+/** The pixel size of a screenshot of a target. */
+export type ComputerFrameSize = { width: number; height: number };
+
 export type ComputerScreenshotOptions = {
-  /** Zoom: capture only this rectangle of the target's regular screenshot, at
-   *  up to the target's full resolution. The result is its own frame; pointer
-   *  actions on it use its pixels. */
+  /** Zoom: capture only this rectangle of a screenshot of the target, at up to
+   *  the target's full resolution. The result is its own frame; pointer
+   *  actions on it use its pixels. A server without zoom ignores it and
+   *  returns the regular screenshot, whose metadata then has no `region`. */
   region?: ComputerFrameRegion;
+  /** The size of the screenshot `region` was measured on. Defaults to the
+   *  regular screenshot (the target fitted within 1024x768). */
+  regionFrame?: ComputerFrameSize;
 };
 
 export type BrowserFrameStreamOptions = InteractionFrameStreamOptions;
@@ -3083,6 +3093,7 @@ export function parseComputerFrameMetadata(value: unknown): ComputerFrameMetadat
     "capturedAt",
     "sha256",
     "region",
+    "regionFrame",
   ]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     throw new Error("computer frame metadata contains unknown fields");
@@ -3132,7 +3143,20 @@ export function parseComputerFrameMetadata(value: unknown): ComputerFrameMetadat
   if (metadata.region !== undefined && !isComputerFrameRegion(metadata.region)) {
     throw new Error("computer frame region is invalid");
   }
+  if (metadata.regionFrame !== undefined && !isComputerFrameSize(metadata.regionFrame)) {
+    throw new Error("computer frame region size is invalid");
+  }
   return metadata;
+}
+
+function isComputerFrameSize(value: unknown): value is ComputerFrameSize {
+  if (!isRecord(value)) return false;
+  return (
+    Object.keys(value).length === 2 &&
+    (["width", "height"] as const).every(
+      (key) => typeof value[key] === "number" && Number.isSafeInteger(value[key]) && value[key] > 0,
+    )
+  );
 }
 
 function isComputerFrameRegion(value: unknown): value is ComputerFrameRegion {

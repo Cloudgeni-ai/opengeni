@@ -907,9 +907,12 @@ const ComputerObserveInput = z
       .strict()
       .optional()
       .describe(
-        "Zoom: return only this rectangle of the target's regular screenshot (in that screenshot's pixels) at up to full resolution, to read small text and controls. It is its own frame: pointer x,y on it use the zoomed screenshot's pixels.",
+        "Zoom: return only this rectangle of the target's last full screenshot (in that screenshot's pixels) at up to full resolution, to read small text and controls. It is its own frame: pointer x,y on it use the zoomed screenshot's pixels.",
       ),
   })
+  .strict();
+const ComputerFrameSize = z
+  .object({ width: z.number().int().positive(), height: z.number().int().positive() })
   .strict();
 const CapturedComputerFrame = z
   .object({
@@ -924,6 +927,7 @@ const CapturedComputerFrame = z
       })
       .strict()
       .optional(),
+    regionFrame: ComputerFrameSize.optional(),
   })
   .strict();
 const ComputerObserveOutput = ComputerObservation.extend({
@@ -1135,6 +1139,23 @@ export function createInteractionAttemptToolDefinitions(
     computerSeen.delete(key);
     computerSeen.set(key, observation);
     while (computerSeen.size > 32) computerSeen.delete(computerSeen.keys().next().value!);
+  };
+  // The size of the last full (not zoomed) screenshot of each computer target
+  // this attempt captured: a zoom region is measured on it, which is not
+  // always 1024x768-bounded (a busy screen falls back to a smaller image).
+  const fullFrameSizes = new Map<string, { width: number; height: number }>();
+  const fullFrameKey = (computerSessionId: string, targetId: string) =>
+    `${computerSessionId}\u0000${targetId}`;
+  const rememberFullFrame = (
+    computerSessionId: string,
+    targetId: string,
+    frame: { width: number; height: number; region?: unknown },
+  ) => {
+    if (frame.region !== undefined) return;
+    const key = fullFrameKey(computerSessionId, targetId);
+    fullFrameSizes.delete(key);
+    fullFrameSizes.set(key, { width: frame.width, height: frame.height });
+    while (fullFrameSizes.size > 32) fullFrameSizes.delete(fullFrameSizes.keys().next().value!);
   };
   const browserSeen = new Map<string, BrowserTextObservation>();
   const rememberBrowserReading = (
@@ -2535,6 +2556,7 @@ export function createInteractionAttemptToolDefinitions(
               text: "The computer opened, but its screen changed while it was captured; observe it for a current screenshot.",
             },
           ]);
+        rememberFullFrame(opened.session.id, target.id, frame);
         const image = await compactComputerImage(frame.data, frame.mediaType);
         return new InteractionExecutionResult(opened, [
           {
@@ -2608,13 +2630,18 @@ export function createInteractionAttemptToolDefinitions(
           // a generation mismatch below re-reads the tree once. An app target
           // spans several windows, so most adapters cannot photograph it; its
           // tree is then the whole observation instead of a failed read.
+          const regionFrame = requested.region
+            ? fullFrameSizes.get(fullFrameKey(value.computerSessionId, value.targetId))
+            : undefined;
           const capture = input.transport
             .captureComputerTarget(
               input.workspaceId,
               value.computerSessionId,
               value.targetId,
               {},
-              requested.region ? { region: requested.region } : {},
+              requested.region
+                ? { region: requested.region, ...(regionFrame ? { regionFrame } : {}) }
+                : {},
             )
             .then(
               (frame) => ({ frame, error: null as unknown }),
@@ -2640,6 +2667,10 @@ export function createInteractionAttemptToolDefinitions(
           if (observation.target.targetGeneration !== frame.targetGeneration) {
             throw new Error("computer target changed while its visual observation was captured");
           }
+          rememberFullFrame(value.computerSessionId, value.targetId, frame);
+          // A server without zoom ignores the region and returns the full
+          // screenshot; say so instead of presenting it as the zoom.
+          const notZoomed = requested.region !== undefined && frame.region === undefined;
           const image = await compactComputerImage(frame.data, frame.mediaType);
           return new InteractionExecutionResult(
             {
@@ -2649,9 +2680,18 @@ export function createInteractionAttemptToolDefinitions(
                 width: frame.width,
                 height: frame.height,
                 ...(frame.region ? { region: frame.region } : {}),
+                ...(frame.region && frame.regionFrame ? { regionFrame: frame.regionFrame } : {}),
               },
             },
             [
+              ...(notZoomed
+                ? [
+                    {
+                      type: "text" as const,
+                      text: "Not zoomed: this Opengeni server does not support region, so this is the full screenshot of the target.",
+                    },
+                  ]
+                : []),
               {
                 type: "image",
                 data: Buffer.from(image.data).toString("base64"),
