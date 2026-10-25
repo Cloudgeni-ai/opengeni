@@ -326,7 +326,8 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       await w.mark(w.login.id, { item: false, fields: [] });
       expect(await w.attempt(a.principal, ["GitHub/password"])).toEqual({ values: ["hunter2"] });
 
-      // Unknown fields are refused; nobody but a signed-in person changes marks.
+      // Unknown fields are refused. Anyone who may write the item can add
+      // marks; only the signed-in person can lift one.
       await expect(w.mark(w.login.id, { item: false, fields: ["pin"] })).rejects.toMatchObject({
         code: "vault_field_not_found",
       });
@@ -337,19 +338,39 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       // An agent or personal key acting as the person resolves as their human
       // session, but not as their own sign-in.
       const actingAsPerson = { ...w.person, personSignedIn: false };
+      const setAs = (caller: typeof apiKey, request: { item: boolean; fields: string[] }) =>
+        setVaultItemApproval(
+          { db: w.db, encryptionKey: key },
+          caller,
+          w.scope.workspaceId,
+          w.login.id,
+          request,
+        );
       for (const caller of [apiKey, actingAsPerson]) {
-        await expect(
-          setVaultItemApproval(
+        expect(await setAs(caller, { item: false, fields: ["password"] })).toMatchObject({
+          item: false,
+          fields: ["password"],
+        });
+        expect(await setAs(caller, { item: true, fields: ["password", "username"] })).toMatchObject(
+          { item: true, fields: ["password", "username"] },
+        );
+        for (const lift of [
+          { item: false, fields: ["password", "username"] },
+          { item: true, fields: ["password"] },
+          { item: false, fields: [] },
+        ]) {
+          await expect(setAs(caller, lift)).rejects.toMatchObject({
+            code: "human_auth_required",
+          });
+        }
+        expect(
+          await getVaultItemApproval(
             { db: w.db, encryptionKey: key },
-            caller,
+            w.person,
             w.scope.workspaceId,
             w.login.id,
-            {
-              item: true,
-              fields: [],
-            },
           ),
-        ).rejects.toMatchObject({ code: "human_auth_required" });
+        ).toMatchObject({ item: true, fields: ["password", "username"] });
         expect(
           (
             await getVaultItemApproval(
@@ -360,6 +381,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
             )
           ).canChange,
         ).toBe(false);
+        await w.mark(w.login.id, { item: false, fields: [] });
       }
     });
 
@@ -506,18 +528,10 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
           expiresAt: null,
         }),
       ]);
-      await expect(
-        revokeVaultItemGrant(
-          deps,
-          { ...w.person, personSignedIn: false },
-          w.scope.workspaceId,
-          w.login.id,
-          chatGrant,
-        ),
-      ).rejects.toMatchObject({ code: "human_auth_required" });
+      // Revoking only makes use stricter, so an agent acting as the person may.
       const revoked = await revokeVaultItemGrant(
         deps,
-        w.person,
+        { ...w.person, personSignedIn: false },
         w.scope.workspaceId,
         w.login.id,
         chatGrant,

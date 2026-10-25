@@ -186,7 +186,8 @@ vault name.
 ## Approval for each use
 
 A person can mark an item, or single fields of it by name, as "ask me each
-time" on the item's page. Agents still list the item, see its fields and write
+time" on the item's page, and an agent can add marks for them. Agents still
+list the item, see its fields and write
 references to it; only the use of a marked value waits for a person. The same
 rules apply to hosted and connected vaults and to every surface, because the
 check sits in the one resolver (`createSecretResolver`), after the references
@@ -237,12 +238,13 @@ Who is asked and who can change the rules:
   `secrets:read`; the agent uses the reference where the value is needed.
 - Marks and grants are listed with `GET …/items/:itemId/approval`. Changing the
   marks (`PUT …/approval`) and revoking a grant
-  (`POST …/approval/grants/:grantId/revoke`) need the person signed in to
-  Opengeni themselves, with `secrets:write` and access to the item. API keys,
-  agents and anything acting as the person (a connected agent, an agent with
-  admin access, a personal API key) get `human_auth_required`, so an agent can
-  never lift its own approval. The organization MCP action catalog marks both
-  actions as browser-only.
+  (`POST …/approval/grants/:grantId/revoke`) need `secrets:write` and access
+  to the item. Adding marks and revoking grants only make use stricter, so API
+  keys, agents and anything acting as the person (a connected agent, an agent
+  with admin access, a personal API key) can do both. Removing a mark (turning
+  off "every field" or unmarking a field) needs the person signed in to
+  Opengeni themselves; anyone else gets `human_auth_required`, so an agent can
+  never lift its own approval.
 - The secret-use audit row of an approved use lists the approvals it relied on
   (`approvalIds`) and its `destination`.
 
