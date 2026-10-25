@@ -930,6 +930,9 @@
 :where(.og-root).top-0\.5,:where(.og-root) .top-0\.5 {
     top: calc(var(--spacing) * 0.5);
   }
+:where(.og-root).top-1,:where(.og-root) .top-1 {
+    top: calc(var(--spacing) * 1);
+  }
 :where(.og-root).top-1\.5,:where(.og-root) .top-1\.5 {
     top: calc(var(--spacing) * 1.5);
   }
@@ -2653,6 +2656,9 @@
   }
 :where(.og-root).grid-cols-2,:where(.og-root) .grid-cols-2 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+:where(.og-root).grid-cols-3,:where(.og-root) .grid-cols-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 :where(.og-root).grid-cols-7,:where(.og-root) .grid-cols-7 {
     grid-template-columns: repeat(7, minmax(0, 1fr));
