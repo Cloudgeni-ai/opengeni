@@ -20,7 +20,15 @@ function navigationFixture() {
   const pages: Record<string, Document> = {
     a: { loaderId: "loader-a", url: "https://example.test/a", button: "Grant access" },
     b: { loaderId: "loader-b", url: "https://example.test/b", button: "Grant access" },
+    /** Another document with the same button, as a page that reloads. */
+    b2: { loaderId: "loader-b2", url: "https://example.test/b2", button: "Grant access" },
+    /** A document without that button. */
+    c: { loaderId: "loader-c", url: "https://example.test/c", button: "Something else" },
   };
+  /** document.readyState of every document. */
+  let readyState = "complete";
+  /** URLs whose response the browser turns into a download. */
+  const downloads = new Set<string>();
   let current = pages.a!;
   /** Commits that happen when the frame tree has been read this many times. */
   const scheduled: Array<{ reads: number; page: Document; event: boolean }> = [];
@@ -83,7 +91,11 @@ function navigationFixture() {
       }
       case "Page.navigate": {
         const page = Object.values(pages).find((entry) => entry.url === command.params?.url);
-        result = { frameId: "frame-1", loaderId: page?.loaderId ?? "loader-unknown" };
+        result = {
+          frameId: "frame-1",
+          loaderId: page?.loaderId ?? "loader-unknown",
+          ...(downloads.has(String(command.params?.url)) ? { isDownload: true } : {}),
+        };
         if (commitOnNavigate)
           scheduled.push({
             reads: frameTreeReads + commitOnNavigate.afterReads,
@@ -125,7 +137,7 @@ function navigationFixture() {
                 },
               },
             }
-          : { result: { value: "complete" } };
+          : { result: { value: readyState } };
         break;
       }
       case "Accessibility.getFullAXTree":
@@ -147,7 +159,14 @@ function navigationFixture() {
               role: { type: "role", value: "button" },
               name: { type: "computedString", value: current.button },
               childIds: [],
-              backendDOMNodeId: current === pages.a ? 10 : 20,
+              backendDOMNodeId:
+                current === pages.a
+                  ? 10
+                  : current === pages.b
+                    ? 20
+                    : current === pages.b2
+                      ? 30
+                      : 40,
             },
           ],
         };
@@ -281,13 +300,36 @@ function navigationFixture() {
       commitOnNavigate = null;
       cancelNavigation = true;
     },
-    /** Commit `page` silently (its event still in flight) once `method` is sent. */
-    commitSilentlyOn(method: string, page: Document) {
+    /** Commit `page` silently (its event still in flight) once `method` is
+     * sent, and each further page the next times it is sent. */
+    commitSilentlyOn(method: string, page: Document, ...more: Document[]) {
+      const queue = [page, ...more];
       onCommand = (call) => {
         if (call.method !== method) return;
-        onCommand = () => {};
-        current = page;
+        const next = queue.shift();
+        if (queue.length === 0) onCommand = () => {};
+        if (next) current = next;
       };
+    },
+    /** Start a request in the current document that never finishes. */
+    holdRequest(requestId: string) {
+      emit({
+        method: "Network.requestWillBeSent",
+        sessionId: "session-1",
+        params: {
+          requestId,
+          loaderId: current.loaderId,
+          type: "Fetch",
+          request: { method: "GET", url: `${current.url}/poll` },
+          initiator: { type: "script" },
+        },
+      });
+    },
+    setReadyState(value: string) {
+      readyState = value;
+    },
+    downloadOn(url: string) {
+      downloads.add(url);
     },
     /** Commit `page` silently so that the `reads`-th next frame-tree read is
      * the first to show it. */
@@ -391,7 +433,7 @@ test("a navigation the browser cancels after answering fails at once on the page
   }
 });
 
-test("input is refused when the document changed after the action found its element", async () => {
+test("an action whose document changed after it found its element finds it again on the new page", async () => {
   const fixture = navigationFixture();
   try {
     await fixture.driver.start();
@@ -402,10 +444,165 @@ test("input is refused when the document changed after the action found its elem
       // Pointer input lands on whatever page the tab shows at its coordinates.
       await fixture.command({ type: "hover", locator: grantAccess }),
     );
+    expect(receipt.error ?? null).toBeNull();
+    expect(receipt.state).toBe("completed");
+    expect(receipt.observation?.target.url).toBe(fixture.pages.b!.url);
+    // Input went out only after the new page's button (node 20) was measured.
+    const firstInput = fixture.calls.findIndex((call) => call.method.startsWith("Input."));
+    expect(firstInput).toBeGreaterThan(-1);
+    const measured = fixture.calls
+      .slice(0, firstInput)
+      .filter((call) => call.method === "DOM.getBoxModel")
+      .map((call) => call.params?.backendNodeId);
+    expect(measured.at(-1)).toBe(20);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("input is refused when the new page does not have the element", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.c!);
+    const receipt = await fixture.controller.run(
+      await fixture.command({ type: "hover", locator: grantAccess }),
+    );
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error?.code).toBe("document_stale");
+    expect(receipt.error?.message).toContain("its element was not found on the new page");
+    expect(receipt.error?.message).toContain("no input was sent");
+    expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+}, 20_000);
+
+test("input is refused when the document changes again while the element is found once more", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.b!, fixture.pages.b2!);
+    const receipt = await fixture.controller.run(
+      await fixture.command({ type: "hover", locator: grantAccess }),
+    );
     expect(receipt.state).toBe("failed");
     expect(receipt.error?.code).toBe("document_stale");
     expect(receipt.error?.message).toContain("no input was sent");
     expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a fenceEachAction batch never moves an action to another page", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.b!);
+    const receipt = await fixture.controller.run(
+      await fixture.command({
+        type: "batch",
+        fenceEachAction: true,
+        actions: [{ type: "hover", locator: grantAccess }],
+      }),
+    );
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error?.code).toBe("document_stale");
+    expect(receipt.error?.message).toBe(
+      "browser document changed after the action found its element; no input was sent",
+    );
+    expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("an element named by ref is never looked for on another page", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    const observed = await fixture.driver.observe("target-1");
+    const ref = JSON.stringify(observed.semantic).match(/"ref":"([^"]+)","role":"button"/)?.[1];
+    expect(ref).toBeDefined();
+    fixture.commitSilentlyOn("DOM.getBoxModel", fixture.pages.b!);
+    const receipt = await fixture.controller.run(
+      await fixture.command({ type: "hover", locator: { kind: "ref", ref: ref! } }),
+    );
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error?.code).toBe("document_stale");
+    expect(receipt.error?.message).toBe(
+      "browser document changed after the action found its element; no input was sent",
+    );
+    expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a network_idle wait on a loaded page whose network stays busy completes and says so", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    fixture.holdRequest("poll-1");
+    const started = Date.now();
+    const receipt = await fixture.controller.run(
+      await fixture.command({
+        type: "batch",
+        actions: [
+          { type: "wait", condition: "network_idle", timeoutMs: 400 },
+          { type: "hover", locator: grantAccess },
+        ],
+      }),
+    );
+    expect(Date.now() - started).toBeGreaterThanOrEqual(380);
+    expect(receipt.error ?? null).toBeNull();
+    expect(receipt.state).toBe("completed");
+    // The batch carried on after the wait.
+    expect(inputCalls(fixture.calls).length).toBeGreaterThan(0);
+    expect(receipt.notes).toEqual([
+      {
+        actionIndex: 0,
+        kind: "network_busy",
+        message:
+          "page loaded; its network was still busy after 0.4 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there",
+      },
+    ]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a network_idle wait on a page that never loaded still fails", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    fixture.setReadyState("loading");
+    fixture.holdRequest("poll-1");
+    const receipt = await fixture.controller.run(
+      await fixture.command({ type: "wait", condition: "network_idle", timeoutMs: 400 }),
+    );
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error?.code).toBe("timeout");
+    expect(receipt.error?.message).toBe("browser wait condition timed out");
+    expect(receipt.notes).toBeUndefined();
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a navigation the browser turns into a download ends at once and keeps the page", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    const url = "https://example.test/report.csv";
+    fixture.downloadOn(url);
+    fixture.neverCommitNavigation();
+    const receipt = await fixture.controller.run(await fixture.command({ type: "navigate", url }));
+    expect(receipt.error ?? null).toBeNull();
+    expect(receipt.state).toBe("completed");
+    expect(receipt.observation?.target.url).toBe(fixture.pages.a!.url);
+    expect(fixture.calls.some((call) => call.method === "Page.stopLoading")).toBe(false);
   } finally {
     await fixture.driver.close();
   }

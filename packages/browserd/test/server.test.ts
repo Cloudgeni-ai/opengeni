@@ -795,8 +795,10 @@ describe("BrowserControlServer", () => {
       expect(acted.status).toBe(200);
       const actedBody = await json(acted);
       expect(actedBody.data.state).toBe("completed");
-      // Callers that did not ask for resolved targets may parse strictly.
+      // Callers that did not ask for resolved targets or notes may parse
+      // strictly.
       expect(actedBody.data).not.toHaveProperty("targets");
+      expect(actedBody.data).not.toHaveProperty("notes");
       const traced = await json(
         await request(
           server,
@@ -812,6 +814,22 @@ describe("BrowserControlServer", () => {
           role: "button",
           name: "Close",
           container: { role: "dialog", name: "Edit item" },
+        },
+      ]);
+      expect(traced.data).not.toHaveProperty("notes");
+      const noted = await json(
+        await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/actions?receiptTargets=1&receiptNotes=1`,
+          { method: "POST", token: controlToken, body: command(observation) },
+        ),
+      );
+      expect(noted.data.targets).toHaveLength(1);
+      expect(noted.data.notes).toEqual([
+        {
+          actionIndex: 0,
+          kind: "network_busy",
+          message: "page loaded; its network was still busy after 30 s, so the wait ended there",
         },
       ]);
 
@@ -1685,6 +1703,11 @@ function fakeDriver(
         role: "button",
         name: "Close",
         container: { role: "dialog", name: "Edit item" },
+      });
+      trace?.record({
+        actionIndex: 0,
+        kind: "network_busy",
+        message: "page loaded; its network was still busy after 30 s, so the wait ended there",
       });
       return observation();
     },

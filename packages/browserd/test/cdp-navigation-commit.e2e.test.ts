@@ -93,22 +93,28 @@ e2e(
     try {
       targetId = (await driver.start(`${origin}/page/a`)).target.id;
 
-      // network_idle on a page that never idles: the navigation committed, so
-      // the receipt is definite and shows the new page, and the wait says
-      // that the network did not go idle instead of reporting success.
+      // network_idle on a page that never idles: the page loaded, so the wait
+      // ends at its timeout and the batch carries on, and the receipt says the
+      // network was still busy instead of reporting an idle network.
       const started = Date.now();
       const idle = await run({
         type: "batch",
         actions: [
           { type: "navigate", url: `${origin}/page/b` },
           { type: "wait", condition: "network_idle", timeoutMs: 2_000 },
+          { type: "hover", locator: { kind: "role", role: "button", name: "Grant access" } },
         ],
       });
       expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
-      expect(idle.state).toBe("failed");
-      expect(idle.error?.code).toBe("timeout");
-      expect(idle.error?.message).toContain("after the preceding navigation committed");
-      expect(idle.error?.message).toContain("network did not go idle within 2 s");
+      expect(idle.error ?? null).toBeNull();
+      expect(idle.state).toBe("completed");
+      expect(idle.notes).toEqual([
+        {
+          actionIndex: 1,
+          kind: "network_busy",
+          message: expect.stringContaining("its network was still busy after 2 s"),
+        },
+      ]);
       expect(idle.observation?.target.url).toBe(`${origin}/page/b`);
       expect(await heading()).toBe("Page b");
 
@@ -232,9 +238,15 @@ e2e(
       const status = await supervisor.createSession(open(`http://127.0.0.1:${server.port}/`));
       expect(status.observation.target.url).toStartWith("chrome-error:");
       expect(JSON.stringify(status.observation.semantic)).toContain("HTTP ERROR 503");
+      // The site answered with its status: that is a page, not a load error.
+      expect(status.notice ?? "").not.toContain("did not load");
       const unreachable = await supervisor.createSession(open(refused));
       expect(unreachable.observation.target.url).toStartWith("chrome-error:");
       expect(JSON.stringify(unreachable.observation.semantic)).toContain("ERR_CONNECTION_REFUSED");
+      // The result names the load error in plain words.
+      expect(unreachable.notice).toContain(
+        "initialUrl did not load (net::ERR_CONNECTION_REFUSED); the tab shows the browser's error page.",
+      );
     } finally {
       await supervisor.close();
       server.stop(true);

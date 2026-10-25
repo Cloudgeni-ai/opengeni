@@ -41,6 +41,7 @@ import {
   BrowserIdentityListResponse,
   BrowserIdentityMutationResponse,
   BrowserObservation,
+  BrowserActionNote,
   BrowserActionResolvedTarget,
   BrowserDialog,
   InteractionDiagnosticSummary,
@@ -254,6 +255,7 @@ const CompactBrowserActionReceipt = z
     state: InteractionOperationState,
     error: InteractionError.optional(),
     targets: z.array(BrowserActionResolvedTarget).optional(),
+    notes: z.array(BrowserActionNote).optional(),
     observation: CompactBrowserObservation.optional(),
   })
   .strict();
@@ -5067,6 +5069,7 @@ function compactActionReceipt(
     state: receipt.state,
     ...(receipt.error ? { error: receipt.error } : {}),
     ...(receipt.targets && receipt.targets.length > 0 ? { targets: receipt.targets } : {}),
+    ...(receipt.notes && receipt.notes.length > 0 ? { notes: receipt.notes } : {}),
     ...(receipt.observation
       ? {
           observation: projectBrowserObservation(
@@ -5209,6 +5212,7 @@ function agentActionText(receipt: z.infer<typeof BrowserAgentActionReceipt>): st
       state: receipt.state,
       error: receipt.error,
       ...(receipt.targets ? { targets: receipt.targets } : {}),
+      ...(receipt.notes ? { notes: receipt.notes } : {}),
     });
     return receipt.observation ? `${text}\n${fullObservationText(receipt.observation)}` : text;
   }

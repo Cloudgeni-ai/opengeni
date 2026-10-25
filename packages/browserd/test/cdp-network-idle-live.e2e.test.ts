@@ -147,7 +147,8 @@ e2e(
       expect(await output()).toContain("loaded");
 
       // A loaded page whose long poll never ends never goes idle. The wait
-      // runs its full time and then says so instead of reporting idle.
+      // runs its full time and then completes, and its receipt says the
+      // network was still busy instead of reporting idle.
       const navigated = await controller.run(
         command(await driver.observe(initial.target.id), {
           type: "navigate",
@@ -164,9 +165,10 @@ e2e(
         }),
       );
       expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
-      expect(pollWait.state).toBe("failed");
-      expect(pollWait.error?.code).toBe("timeout");
-      expect(pollWait.error?.message).toContain("network did not go idle within 2 s");
+      expect(pollWait.error ?? null).toBeNull();
+      expect(pollWait.state).toBe("completed");
+      expect(pollWait.notes?.[0]?.kind).toBe("network_busy");
+      expect(pollWait.notes?.[0]?.message).toContain("its network was still busy after 2 s");
       expect(await output()).toContain("ready");
     } finally {
       await driver.close();

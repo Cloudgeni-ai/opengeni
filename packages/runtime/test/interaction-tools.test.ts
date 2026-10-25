@@ -208,6 +208,51 @@ describe("interaction attempt tools", () => {
     },
   );
 
+  test("browser_act passes on a wait that ended on a page whose network stayed busy", async () => {
+    const target = browserTarget();
+    const note = {
+      actionIndex: 1,
+      kind: "network_busy" as const,
+      message:
+        "page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there",
+    };
+    let dispatched: unknown = null;
+    const definitions = createInteractionAttemptToolDefinitions({
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_act"],
+      permissions: ["sessions:control"],
+      transport: partialTransport({
+        actInBrowser: async (_workspaceId, _browserSessionId, request) => {
+          dispatched = request.action;
+          return {
+            ...browserReceipt(request.operationId, browserObservation(target)),
+            notes: [note],
+          };
+        },
+      }),
+    });
+    const caller = { kind: "model" as const, subjectId: "model:test" };
+    const result = await definitions[0]!.execute(
+      {
+        browserSessionId,
+        targetId: target.id,
+        action: { type: "navigate", url: "https://example.test/", waitUntil: "network_idle" },
+      },
+      { operationId: randomUUID(), caller },
+    );
+    expect(dispatched).toEqual({
+      type: "batch",
+      actions: [
+        { type: "navigate", url: "https://example.test/" },
+        { type: "wait", condition: "network_idle" },
+      ],
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ state: "completed", notes: [note] });
+    expect((result.content[0] as { text: string }).text).toContain(`\nNote: ${note.message}.\n`);
+  });
+
   test("browser_act tells the model where upload workspace File IDs come from", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       workspaceId,

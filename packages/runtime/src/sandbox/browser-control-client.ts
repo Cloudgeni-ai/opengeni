@@ -9,6 +9,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
 import {
+  BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
@@ -2304,8 +2305,9 @@ export class BrowserControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate resolved targets ignore this parameter.
-            path: `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1`,
+            // Controllers that predate resolved targets or notes ignore these
+            // parameters.
+            path: `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=1`,
             token: this.controlToken,
             body: parsed,
             timeoutMs,

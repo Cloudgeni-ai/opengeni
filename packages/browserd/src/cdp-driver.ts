@@ -43,6 +43,7 @@ import {
   type BrowserTargetState as BrowserTargetStateValue,
   type BrowserObservation as BrowserObservationValue,
   type BrowserTarget as BrowserTargetValue,
+  type BrowserActionNote as BrowserActionNoteValue,
   type BrowserActionResolvedTarget as BrowserActionResolvedTargetValue,
   type InteractionSemanticNodeValue,
   INTERACTION_MAX_RESOLVED_TARGET_TEXT,
@@ -465,6 +466,9 @@ type TargetState = {
   /** The document an input action resolved its element in. The action's first
    * input event goes out only while that document is still the current one. */
   inputFence: string | null;
+  /** When set, the current action's locator waits end here instead of
+   * LOCATOR_WAIT_MS after they start: a re-find keeps the action's deadline. */
+  locatorDeadline?: number | null;
   accessibility: CdpAccessibilitySnapshot | null;
   /** When Chromium's accessibility tree for this tab was last rebuilt, how
    * many nodes its last read had, and whether the next read is the first of a
@@ -717,6 +721,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   get networkNotice(): string | null {
     return this.runner.networkNotice ?? null;
   }
+  /** The load error of the page start() opened and kept on the browser's
+   * error page (keepTabOnLoadError), such as net::ERR_CONNECTION_REFUSED. */
+  startLoadError: string | null = null;
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
@@ -963,7 +970,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         this.selectedTargetId = target.targetId;
         this.ownedTabsChanged();
         if (deferNavigation)
-          await this.navigate(await this.ensureTargetState(target), url, options);
+          this.startLoadError = await this.navigate(
+            await this.ensureTargetState(target),
+            url,
+            options,
+          );
         this.windowParking?.arm();
         return await this.observe(target.targetId);
       } catch (error) {
@@ -1011,7 +1022,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.selectedTargetId = target.targetId;
     if (deferNavigation) {
-      await this.navigate(await this.ensureTargetState(target), url, options);
+      this.startLoadError = await this.navigate(await this.ensureTargetState(target), url, options);
     }
     this.windowParking?.arm();
     return await this.observe(target.targetId);
@@ -2112,7 +2123,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 await this.refreshFrame(state);
                 this.assertExpectedGenerations(command, state);
               }
-              await this.dispatchAction(state, action, command.operationId);
+              await this.dispatchAction(state, action, command.operationId, {
+                // A fenceEachAction batch acts only on the document it was
+                // checked against, so its actions never move to another one.
+                refindAfterDocumentChange: !(
+                  command.action.type === "batch" && command.action.fenceEachAction
+                ),
+              });
             });
           }
           state.nodeRoute = null;
@@ -4428,6 +4445,51 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     action: BrowserAction,
     operationId: string,
+    options: { refindAfterDocumentChange?: boolean } = {},
+  ): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      await this.dispatchActionOnce(state, action, operationId);
+      return;
+    } catch (error) {
+      // The page moved to a new document after the action found its element,
+      // just before its first input event (which would have landed on the new
+      // page at the old element's position). An element named by role, text
+      // or another locator may well be on the new page too, so look for it
+      // there once, within the action's own locator deadline. A ref names an
+      // element of the page the caller saw, so it never moves to another. A
+      // document change while the action still waits for its element stays a
+      // refusal: an action fenced to its document does not follow the page.
+      const locators = actionLocators(action);
+      if (
+        options.refindAfterDocumentChange !== true ||
+        !(error instanceof DocumentMovedBeforeInputError) ||
+        locators.length === 0 ||
+        locators.some((locator) => locator.kind === "ref")
+      )
+        throw error;
+      state.locatorDeadline = startedAt + LOCATOR_WAIT_MS;
+    }
+    try {
+      await this.refreshFrame(state);
+      await this.dispatchActionOnce(state, action, operationId);
+    } catch (error) {
+      if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
+        throw new InteractionDefiniteDriverError(
+          "document_stale",
+          `browser document changed before the action sent input, and its element was not found on the new page (${error.message}); no input was sent`,
+        );
+      }
+      throw error;
+    } finally {
+      state.locatorDeadline = null;
+    }
+  }
+
+  private async dispatchActionOnce(
+    state: TargetState,
+    action: BrowserAction,
+    operationId: string,
   ): Promise<void> {
     state.nodeRoute = null;
     state.inputFence = null;
@@ -5256,7 +5318,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options: { input?: boolean } = {},
   ): Promise<CdpAccessibilityEntry> {
     const input = options.input ?? true;
-    const deadline = Date.now() + LOCATOR_WAIT_MS;
+    const deadline = state.locatorDeadline ?? Date.now() + LOCATOR_WAIT_MS;
     const fence = state.locatorFollowsNavigation
       ? null
       : { document: state.documentGeneration, frame: state.frameGeneration };
@@ -6724,18 +6786,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     url: string,
     options: BrowserTabNavigationOptions = {},
-  ): Promise<void> {
+  ): Promise<string | null> {
     this.connection?.assertNavigable?.(url);
     const startedAt = Date.now();
     const loaderBefore = state.frame.loaderId;
-    let result: { errorText?: unknown; loaderId?: unknown };
+    let result: { errorText?: unknown; loaderId?: unknown; isDownload?: unknown };
     try {
-      result = await this.sendActionTarget<{ errorText?: unknown; loaderId?: unknown }>(
-        state,
-        "Page.navigate",
-        { url },
-        { timeoutMs: this.navigationCommitTimeoutMs },
-      );
+      result = await this.sendActionTarget<{
+        errorText?: unknown;
+        loaderId?: unknown;
+        isDownload?: unknown;
+      }>(state, "Page.navigate", { url }, { timeoutMs: this.navigationCommitTimeoutMs });
     } catch (error) {
       if (!(error instanceof CdpCommandTimeoutError)) throw error;
       // The server never answered. Stop the pending navigation so the tab
@@ -6763,10 +6824,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // still shows the previous document. Until the new document commits, a
     // readiness check or a locator would read the page being left. A failed
     // load commits the browser's error page under the same loader, except an
-    // aborted one (a download, an empty response), which commits nothing.
+    // aborted one (a download, an empty response), which commits nothing. A
+    // response the browser turned into a download never commits either: the
+    // tab keeps its page, and the navigation is over once Chromium says so.
     const loaderId =
       typeof result.loaderId === "string" && result.loaderId ? result.loaderId : null;
-    if (loaderId !== null && this.engine !== "lightpanda" && errorText !== "net::ERR_ABORTED") {
+    if (
+      loaderId !== null &&
+      this.engine !== "lightpanda" &&
+      errorText !== "net::ERR_ABORTED" &&
+      result.isDownload !== true
+    ) {
       const committed = () => state.committedLoaders.includes(loaderId);
       const outcome = await this.waitForCommit(
         state,
@@ -6798,6 +6866,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
+    // The caller asked to keep the tab on the browser's error page.
+    return errorText;
   }
 
   /**
@@ -6973,15 +7043,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (action.condition === "visible" ? visible : !visible) return;
     }
     // Some live pages never go quiet: a long poll or a request the page keeps
-    // open is indistinguishable from a slow fetch until it ends. Say so rather
-    // than report an idle network that never came. After a navigation, the
-    // batch reports that the navigation itself committed.
+    // open is indistinguishable from a slow fetch until it ends. A loaded page
+    // is ready to use, so the wait ends here and the batch carries on, and the
+    // receipt says the network never went idle rather than claim it did.
     if (action.condition === "network_idle" && loaded) {
-      throw new InteractionDefiniteDriverError(
-        "timeout",
-        `browser page loaded, but its network did not go idle within ${formatSeconds(timeoutMs)}: it kept requests open or kept starting new ones, as pages that poll continuously do; waitUntil 'load' waits only for the page itself`,
-        true,
-      );
+      state.actionTrace?.trace.record({
+        actionIndex: state.actionTrace.actionIndex,
+        kind: "network_busy",
+        message: `page loaded; its network was still busy after ${formatSeconds(timeoutMs)} (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there`,
+      } satisfies BrowserActionNoteValue);
+      return;
     }
     throw new InteractionDefiniteDriverError("timeout", "browser wait condition timed out", true);
   }
@@ -7312,8 +7383,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // itself: a commit whose event is still in flight counts too.
       await this.refreshFrame(state);
       if (fence !== state.documentGeneration) {
-        throw new InteractionDefiniteDriverError(
-          "document_stale",
+        throw new DocumentMovedBeforeInputError(
           "browser document changed after the action found its element; no input was sent",
         );
       }
@@ -9508,6 +9578,25 @@ function isNavigationTimeout(error: unknown): boolean {
 
 /** The server never answered and the tab stopped loading: unlike a slow
  * page, nothing will appear in it later. */
+/** The page committed a new document after an action found its element and
+ * before its first input event: nothing was sent to either document. */
+class DocumentMovedBeforeInputError extends InteractionDefiniteDriverError {
+  constructor(message: string) {
+    super("document_stale", message);
+    this.name = "DocumentMovedBeforeInputError";
+  }
+}
+
+/** The locators an action resolves before it sends input. */
+function actionLocators(action: BrowserAction): BrowserLocator[] {
+  const locators: Array<BrowserLocator | undefined> = [];
+  if (action.type === "wait") return [];
+  if ("locator" in action) locators.push(action.locator);
+  if ("from" in action) locators.push(action.from);
+  if ("to" in action) locators.push(action.to);
+  return locators.filter((locator): locator is BrowserLocator => locator !== undefined);
+}
+
 class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
   constructor(timeoutMs: number) {
     super(
