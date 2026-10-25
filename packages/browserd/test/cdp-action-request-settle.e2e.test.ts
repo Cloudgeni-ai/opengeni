@@ -40,7 +40,7 @@ e2e(
         // Never answers: an open stream or a stalled server.
         if (path === "/stalled") return new Response(new ReadableStream({ start() {} }));
         return new Response(
-          '<!doctype html><title>Request settle</title><button id="save">Save</button><button id="stall">Stall</button><div role="status" id="result"></div><script>save.onclick=async()=>{const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Submitted. Thank you!":"Failed"};stall.onclick=()=>{fetch("/stalled");result.textContent="Waiting for partner"}</script>',
+          '<!doctype html><title>Request settle</title><button id="save">Save</button><button id="stall">Stall</button><button id="late">Import</button><div role="status" id="result"></div><script>save.onclick=async()=>{const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Submitted. Thank you!":"Failed"};stall.onclick=()=>{fetch("/stalled");result.textContent="Waiting for partner"};late.onclick=async()=>{await crypto.subtle.digest("SHA-256",new TextEncoder().encode("contacts"));await new Promise((r)=>setTimeout(r,0));const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Imported 3 contacts":"Failed"}</script>',
           { headers: { "content-type": "text/html" } },
         );
       },
@@ -88,6 +88,12 @@ e2e(
       expect(stalled.state).toBe("completed");
       expect(Date.now() - startedAt).toBeLessThan(5_000);
       expect(texts(stalled.observation)).toContain("Waiting for partner");
+
+      // A handler that awaits work before its request (reading a file,
+      // hashing) still has its response in the result.
+      const imported = await controller.run(command(stalled.observation!, "Import"));
+      expect(imported.state).toBe("completed");
+      expect(texts(imported.observation)).toContain("Imported 3 contacts");
     } finally {
       await driver.close();
       server.stop(true);

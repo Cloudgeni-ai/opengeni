@@ -2054,6 +2054,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             if (last !== "navigate" && last !== "history" && last !== "wait")
               await this.settleActionRequests(state, requestsBeforeActions);
             await this.settleFiniteAnimations(state);
+            if (last !== undefined && LATE_REQUEST_ACTIONS.has(last)) {
+              await this.settleLateActionRequests(state);
+            }
             const currentInfo = await this.requireTargetInfo(
               await this.ensureConnection(),
               info.targetId,
@@ -6490,6 +6493,45 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    */
   private async settleFiniteAnimations(state: TargetState): Promise<void> {
     if (this.engine !== "chromium" || state.dialog) return;
+    await this.evaluateForSettle(
+      state,
+      SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+      ANIMATION_SETTLE_LIMIT_MS + 1_000,
+    );
+  }
+
+  /**
+   * Many handlers await something before their request: reading the chosen
+   * file, hashing a password, a validation promise. When the action's first
+   * settle ran, that request had not started, so the result would show the
+   * page before the response the agent is waiting for. Give such a handler
+   * one frame (at most 50 ms in a tab that does not animate) to start its
+   * request, and settle it like the others. A page that starts nothing pays
+   * only that frame.
+   */
+  private async settleLateActionRequests(state: TargetState): Promise<void> {
+    if (this.engine !== "chromium" || state.dialog) return;
+    const later: ActionSettleBaseline = {
+      open: new Set(state.inflightRequests),
+      activity: state.networkActivitySequence,
+      navigation: state.navigationSequence,
+    };
+    await this.evaluateForSettle(state, AFTER_KEY_EFFECTS_EXPRESSION, 1_000);
+    await this.settleActionRequests(state, later);
+    if (
+      state.networkActivitySequence !== later.activity ||
+      state.navigationSequence !== later.navigation
+    ) {
+      await this.settleFiniteAnimations(state);
+    }
+  }
+
+  /** Evaluates a settle wait where page scripts cannot see or stall it. */
+  private async evaluateForSettle(
+    state: TargetState,
+    expression: string,
+    timeoutMs: number,
+  ): Promise<void> {
     try {
       const world = await this.sendTarget<{ executionContextId?: unknown }>(
         state,
@@ -6501,12 +6543,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state,
         "Runtime.evaluate",
         {
-          expression: SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+          expression,
           contextId: world.executionContextId,
           returnByValue: true,
           awaitPromise: true,
         },
-        { timeoutMs: ANIMATION_SETTLE_LIMIT_MS + 1_000 },
+        { timeoutMs },
       );
     } catch {
       // Settling only improves the snapshot; it never decides the outcome.
@@ -7517,6 +7559,17 @@ const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
 // result on the page as it is, still loading.
 const ACTION_NAVIGATION_SETTLE_LIMIT_MS = 10_000;
 const ACTION_REQUEST_POLL_MS = 20;
+// Input after which a page handler commonly starts a request: a click or
+// key that submits, a choice, a chosen file, a click at a point.
+const LATE_REQUEST_ACTIONS: ReadonlySet<string> = new Set([
+  "click",
+  "double_click",
+  "press",
+  "select",
+  "check",
+  "upload",
+  "pointer",
+]);
 // The response handler runs after the network layer reports the load finished.
 const ACTION_RESPONSE_APPLY_MS = 50;
 
