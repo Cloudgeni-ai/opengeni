@@ -28,6 +28,7 @@ const CURRENT_BUNDLED_SKILL_IDS = [
   "builtin:skill-management",
   "builtin:projects",
   "builtin:schedules",
+  "builtin:event-triggers",
   "builtin:documents",
   "builtin:spreadsheets",
   "builtin:presentations",

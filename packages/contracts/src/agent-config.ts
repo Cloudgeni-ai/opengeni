@@ -479,6 +479,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   scheduled_tasks_trigger: "schedules",
   scheduled_tasks_delete: "schedules",
   scheduled_task_runs_list: "schedules",
+  event_sources_list: "schedules",
+  events_get: "schedules",
 
   artifacts_list: "artifacts",
   artifacts_get_source: "artifacts",

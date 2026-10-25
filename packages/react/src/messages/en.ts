@@ -4434,6 +4434,8 @@ export const englishMessages = {
   "timeline.toolStep.checkChats.running": "Checking other chats",
   "timeline.toolStep.checkDocuments.done": "Checked documents",
   "timeline.toolStep.checkDocuments.running": "Checking documents",
+  "timeline.toolStep.checkEvents.done": "Checked events",
+  "timeline.toolStep.checkEvents.running": "Checking events",
   "timeline.toolStep.checkModels.done": "Checked available models",
   "timeline.toolStep.checkModels.running": "Checking available models",
   "timeline.toolStep.checkMeetings.done": "Checked meetings",

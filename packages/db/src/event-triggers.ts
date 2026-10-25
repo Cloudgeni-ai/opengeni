@@ -1947,6 +1947,36 @@ export async function getScheduledTaskRunEventOccurrences(
   return result;
 }
 
+/** One event run's automation and the events it carried; null for any other run. */
+export async function getEventRunOccurrence(
+  db: Database,
+  workspaceId: string,
+  runId: string,
+): Promise<{ taskId: string; occurrence: ScheduledTaskRunEventOccurrence } | null> {
+  const [row] = await withWorkspaceRls(db, workspaceId, (scoped) =>
+    rawRows<{ task_id: string; trigger_ids: string[]; event_count: number; events: unknown }>(
+      scoped,
+      sql`select run.task_id, occurrence.trigger_ids, occurrence.event_count, occurrence.events
+        from scheduled_task_runs run
+        join scheduled_task_event_occurrences occurrence
+          on occurrence.workspace_id = run.workspace_id and occurrence.task_id = run.task_id
+          and run.producer_key = 'scheduled-task-event:' || occurrence.id::text
+        where run.workspace_id = ${workspaceId} and run.trigger_type = 'event'
+          and run.id = ${runId}::uuid`,
+    ),
+  );
+  if (!row) return null;
+  const summaries = storedSummaries.safeParse(row.events);
+  return {
+    taskId: row.task_id,
+    occurrence: {
+      triggerIds: row.trigger_ids,
+      eventCount: row.event_count,
+      events: summaries.success ? summaries.data : [],
+    },
+  };
+}
+
 /** Retention: one bounded pass; returns how many rows changed so callers can repeat. */
 export async function pruneEventIntake(
   db: Database,
