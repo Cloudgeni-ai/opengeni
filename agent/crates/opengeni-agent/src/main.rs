@@ -873,7 +873,11 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
 }
 
 /// Releases the single-process lock, then starts the verified successor with
-/// whatever this image hands over.
+/// whatever this image hands over. The guest init signals this process with
+/// `SIGUSR1` whenever the host loses its connections, and an exec resets a
+/// handled signal to its default, which ends the process: so the successor
+/// starts with it blocked, and one that arrives before it handles it waits
+/// for it (see [`spawn_reconnect_handler`]).
 fn exec_verified_successor<P: Platform + 'static>(
     supervisor: &Supervisor<P>,
     instance_lock: Option<instance_lock::InstanceLock>,
@@ -886,7 +890,50 @@ fn exec_verified_successor<P: Platform + 'static>(
         let _ = supervisor;
         None::<()>
     };
-    restart_after_verified_update(&handover)
+    exec_successor_holding_reconnect(&handover)
+}
+
+/// [`restart_after_verified_update`] with `SIGUSR1` blocked across the exec
+/// (see [`exec_verified_successor`]). Returns only if the exec failed, and
+/// this image handles the signal again then.
+fn exec_successor_holding_reconnect(handover: &CarriedHandover) -> anyhow_lite::Result {
+    #[cfg(unix)]
+    let _held = reconnect_signal::Held::new().map_err(to_boxed)?;
+    restart_after_verified_update(handover)
+}
+
+/// The signal the guest init sends to have the agent reconnect at once.
+#[cfg(unix)]
+mod reconnect_signal {
+    use nix::sys::signal::{pthread_sigmask, SigSet, SigmaskHow, Signal};
+
+    fn usr1() -> SigSet {
+        let mut set = SigSet::empty();
+        set.add(Signal::SIGUSR1);
+        set
+    }
+
+    /// Blocks `SIGUSR1` on this thread until dropped. An exec keeps the
+    /// block, and a signal that arrives meanwhile stays pending.
+    pub(crate) struct Held(());
+
+    impl Held {
+        pub(crate) fn new() -> nix::Result<Self> {
+            pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&usr1()), None)?;
+            Ok(Self(()))
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = release();
+        }
+    }
+
+    /// Unblocks `SIGUSR1` on this thread: one pending is delivered now.
+    pub(crate) fn release() -> nix::Result<()> {
+        pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&usr1()), None)
+    }
 }
 
 /// Continues the commands a previous agent image handed over, and readies
@@ -916,22 +963,35 @@ fn carry_on_handed_over<P: Platform + 'static>(
 /// Wires `SIGUSR1` to an immediate reconnect: the guest init sends it when
 /// the sandbox's host has no stream for the agent's connections (after a
 /// move, a recovery on another host or a restart of the host agent).
+///
+/// An image this one replaced blocked it across the exec (see
+/// [`exec_verified_successor`]), so it is unblocked only once handled; one
+/// that came meanwhile reconnects this image at once. Called on the main
+/// thread, which lives as long as the process: the threads it started
+/// before, which keep it blocked, leave it to this one.
 fn spawn_reconnect_handler(reconnect: supervisor::ReconnectSignal) {
     #[cfg(unix)]
-    tokio::spawn(async move {
+    {
         use tokio::signal::unix::{signal, SignalKind};
         let mut restored = match signal(SignalKind::user_defined1()) {
             Ok(restored) => restored,
             Err(error) => {
+                // Still blocked, as it may be, it waits rather than ends
+                // this process.
                 warn!(%error, "could not install the SIGUSR1 handler; reconnects after the host loses the link wait for back-off");
                 return;
             }
         };
-        while restored.recv().await.is_some() {
-            info!("the host lost this sandbox's connections; reconnecting at once");
-            reconnect.request();
+        if let Err(error) = reconnect_signal::release() {
+            warn!(%error, "could not unblock SIGUSR1; reconnects after the host loses the link wait for back-off");
         }
-    });
+        tokio::spawn(async move {
+            while restored.recv().await.is_some() {
+                info!("the host lost this sandbox's connections; reconnecting at once");
+                reconnect.request();
+            }
+        });
+    }
     #[cfg(not(unix))]
     drop(reconnect);
 }
@@ -947,19 +1007,47 @@ fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Res
     info!(path = %executable.display(), "starting verified self-update successor");
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt as _;
-        let mut command = std::process::Command::new(executable);
-        command.args(&args);
+        use std::ffi::{CString, OsStr, OsString};
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+        let c_string = |bytes: Vec<u8>| CString::new(bytes).map_err(to_boxed);
+        let program = c_string(executable.as_os_str().as_bytes().to_vec())?;
+        let mut command_line = vec![program.clone()];
+        for arg in args {
+            command_line.push(c_string(arg.into_vec())?);
+        }
+        let carried = handover
+            .as_ref()
+            .map(|handover| (OsStr::new(handover::HANDOVER_ENV), &handover.env_value));
+        let mut envp = Vec::new();
+        for (key, value) in std::env::vars_os() {
+            if carried.is_some_and(|(name, _)| key.as_os_str() == name) {
+                continue;
+            }
+            let mut entry = key.into_vec();
+            entry.push(b'=');
+            entry.extend(value.into_vec());
+            envp.push(c_string(entry)?);
+        }
+        if let Some((name, value)) = carried {
+            let mut entry = OsString::from(name).into_vec();
+            entry.push(b'=');
+            entry.extend(value.as_bytes());
+            envp.push(c_string(entry)?);
+        }
         if let Some(handover) = handover {
             // Last step before exec: nothing else spawns from here, so only
             // the successor image inherits the carried descriptors.
             for exec in &handover.execs {
                 exec.prepare_exec().map_err(to_boxed)?;
             }
-            command.env(handover::HANDOVER_ENV, &handover.env_value);
         }
-        let error = command.exec();
-        return Err(to_boxed(error));
+        // Not `std::process::Command::exec`, which clears the signal mask:
+        // the successor keeps this thread's (see `exec_verified_successor`).
+        let error = match nix::unistd::execve(&program, &command_line, &envp) {
+            Ok(never) => match never {},
+            Err(error) => error,
+        };
+        return Err(to_boxed(std::io::Error::from(error)));
     }
     #[cfg(windows)]
     {

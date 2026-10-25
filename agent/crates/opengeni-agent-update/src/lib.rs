@@ -330,15 +330,21 @@ impl PendingUpdate {
 
     /// Applies verified bytes to the captured Unix running-executable install path.
     /// Preserves the copied backup and single atomic replacement used by live updates.
+    /// `preflight` checks the staged binary before it replaces the install (see
+    /// [`replace_running_exe_at`]).
     ///
     /// # Errors
     ///
-    /// Returns an I/O error if backup or replacement fails.
+    /// Returns `preflight`'s error, or an I/O error if backup or replacement fails.
     #[cfg(unix)]
-    pub fn apply_running_at(&self, install_path: &Path) -> UpdateResult<PathBuf> {
+    pub fn apply_running_at(
+        &self,
+        install_path: &Path,
+        preflight: impl FnOnce(&Path) -> UpdateResult<()>,
+    ) -> UpdateResult<PathBuf> {
         #[cfg(target_os = "macos")]
         reject_bundle_binary_replacement(install_path)?;
-        replace_running_exe_at(install_path, &self.bytes)
+        replace_running_exe_at(install_path, &self.bytes, preflight)
     }
 
     /// Applies the verified update to the CURRENTLY-RUNNING executable (the live

@@ -62,9 +62,13 @@ fn apply_verified_update(
 ) -> UpdateResult<PathBuf> {
     // Unix permits replacing the running file using the captured pathname.
     // Windows still needs self-replace's running-image lock handling.
+    // On Unix the candidate passes its startup check before it replaces the
+    // install (see `replace_running_exe_at`), and again once installed.
     #[cfg(unix)]
     {
-        pending.apply_running_at(install_path)
+        pending.apply_running_at(install_path, |staged| {
+            verify_installed_binary(staged, &pending.version)
+        })
     }
     #[cfg(not(unix))]
     {
@@ -505,9 +509,11 @@ fn managed_fetch_failure(
     error_code
 }
 
-/// Executes the newly-swapped binary through the smallest stable startup surface.
-/// If the loader, executable bit, CLI wiring, or embedded version is wrong, the
-/// updater rolls back atomically before reporting success.
+/// Executes the binary at `install_path` through the smallest stable startup
+/// surface: on Unix the candidate staged beside the install before it replaces
+/// it, then the newly-swapped binary. If the loader, executable bit, CLI
+/// wiring, or embedded version is wrong, the updater leaves or rolls back the
+/// install before reporting success.
 fn verify_installed_binary(install_path: &std::path::Path, version: &str) -> UpdateResult<()> {
     let output = std::process::Command::new(install_path)
         .arg("--version")
@@ -750,15 +756,19 @@ mod tests {
             let captured = installed_executable().unwrap();
             assert_eq!(captured, installed);
             let bytes = std::fs::read(captured).unwrap();
-            opengeni_agent_update::replace_running_exe_at(captured, &bytes).unwrap();
+            opengeni_agent_update::replace_running_exe_at(captured, &bytes, |_| Ok(())).unwrap();
             assert_ne!(std::env::current_exe().unwrap(), captured);
             opengeni_agent_update::rollback(captured).unwrap();
             // Rollback restores a copied binary; our running inode remains deleted.
             assert_ne!(std::env::current_exe().unwrap(), captured);
             // Retry must continue using the same canonical install identity.
             assert_eq!(installed_executable().unwrap(), installed);
-            opengeni_agent_update::replace_running_exe_at(installed_executable().unwrap(), &bytes)
-                .unwrap();
+            opengeni_agent_update::replace_running_exe_at(
+                installed_executable().unwrap(),
+                &bytes,
+                |_| Ok(()),
+            )
+            .unwrap();
             opengeni_agent_update::finalize_update(captured, Ok(())).unwrap();
             assert_ne!(std::env::current_exe().unwrap(), captured);
             assert_eq!(installed_executable().unwrap(), installed);
@@ -785,6 +795,62 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(directory.path().join("ready-for-successor").exists());
+    }
+
+    /// The guest init signals the agent's process to reconnect whenever its
+    /// host loses the link, and may do so while a verified successor image is
+    /// still starting, before it handles the signal: the successor reconnects
+    /// at once then, rather than ending, with every command it carries.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reconnect_signal_during_the_exec_reconnects_the_successor() {
+        use nix::sys::signal::{kill, Signal};
+        const CHILD_DIR: &str = "OPENGENI_TEST_RECONNECT_SUCCESSOR_DIR";
+        if let Some(directory) = std::env::var_os(CHILD_DIR) {
+            let directory = PathBuf::from(directory);
+            let execed = directory.join("execed");
+            if !execed.exists() {
+                std::fs::write(&execed, b"").unwrap();
+                crate::exec_successor_holding_reconnect(&None).expect("successor exec");
+                panic!("successful Unix exec never returns");
+            }
+            // The successor, not yet handling it.
+            kill(nix::unistd::Pid::this(), Signal::SIGUSR1).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let reconnect = crate::supervisor::ReconnectSignal::default();
+                let mut requests = reconnect.subscribe();
+                crate::spawn_reconnect_handler(reconnect);
+                tokio::time::timeout(std::time::Duration::from_secs(5), requests.changed())
+                    .await
+                    .expect("the signal sent during the exec reconnects")
+                    .unwrap();
+            });
+            std::fs::write(directory.join("reconnected"), b"").unwrap();
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update::tests::a_reconnect_signal_during_the_exec_reconnects_the_successor",
+                "--nocapture",
+            ])
+            .env(CHILD_DIR, directory.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(directory.path().join("reconnected").exists());
     }
 
     #[test]

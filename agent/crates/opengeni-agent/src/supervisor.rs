@@ -512,7 +512,7 @@ impl ReconnectSignal {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
         self.generation.subscribe()
     }
 }

@@ -277,6 +277,11 @@ contract is `compute/docs/agent-link.md`.
   supervises it sees the same process carry on, under the same connection
   instance. The download and the swap count as work in the activity file, so
   the sandbox does not sleep in the middle of them; waiting for idle does not.
+  A checkpoint or a guest reboot can still come at any moment, so the release
+  passes its startup check beside the installed binary before it replaces it:
+  any copy of the disk holds either the old agent or a checked new one. The
+  reconnect signal the guest init sends stays blocked across the exec, so one
+  that arrives while the new image starts reconnects it instead of ending it.
   A sandbox heartbeats only while it runs, so Opengeni asks one that sleeps
   when it next wakes. Agents from before this refuse with `update_unsupported`.
 
