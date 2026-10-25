@@ -93,6 +93,11 @@ function objectStorage(): ObjectStorage {
 function spill(
   backend: Settings["sandboxBackend"],
   storage: ObjectStorage | null = objectStorage(),
+  live: {
+    resolved?: () => unknown;
+    setupSession?: () => unknown;
+    sdkOwnedSession?: () => unknown;
+  } = {},
 ) {
   return new ToolResultSpill({
     db: fakeDb as Database,
@@ -105,9 +110,9 @@ function spill(
     getSandboxFileDownloadBackend: () => backend,
     getPublish: () => null,
     toolCancellationFenceRef: { current: null },
-    getResolvedSandbox: () => null,
-    getSetupBoxSession: () => null,
-    getSdkOwnedSandboxSession: () => null,
+    getResolvedSandbox: () => (live.resolved?.() ?? null) as never,
+    getSetupBoxSession: () => live.setupSession?.() ?? null,
+    getSdkOwnedSandboxSession: () => live.sdkOwnedSession?.() ?? null,
     getSandboxGroupId: () => null,
     runWorkspaceMutation: async (_sandbox, _operation, mutation) => {
       mutationCalls += 1;
@@ -200,5 +205,109 @@ describe("tool result spill port", () => {
         result: { content: [{ type: "text", text: "huge" }] },
       }),
     ).rejects.toThrow(/object storage/);
+  });
+});
+
+type ExecCall = { cmd: string; workdir?: string };
+
+function shellSession(root: string, exitCode = 0) {
+  const calls: ExecCall[] = [];
+  return {
+    calls,
+    session: {
+      state: { manifest: { root } },
+      exec: async (input: ExecCall) => {
+        calls.push(input);
+        return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode };
+      },
+    },
+  };
+}
+
+function resolvedSandbox(session: unknown) {
+  return {
+    established: { instanceId: "instance-1", session },
+    leaseEpoch: 1,
+  };
+}
+
+describe("tool result spill receipt path", () => {
+  const shellPath = `tool-results/${OPERATION_ID}.json`;
+  const result = {
+    content: [{ type: "text" as const, text: "huge" }],
+    structuredContent: { tree: "x".repeat(64) },
+  };
+
+  test("a sandbox route that has not started yet gets the path its first shell will have", async () => {
+    filesById.clear();
+    mutationCalls = 0;
+    let live: ReturnType<typeof shellSession> | null = null;
+    const port = spill("modal", objectStorage(), {
+      resolved: () => (live ? resolvedSandbox(live.session) : null),
+      setupSession: () => live?.session ?? null,
+    });
+    const receipt = await port.spill({ operationId: OPERATION_ID, result });
+    expect(receipt.structuredContent).toMatchObject({
+      type: "tool_result_spilled",
+      sandboxPath: shellPath,
+    });
+    expect(JSON.parse((receipt.content[0] as { text: string }).text).sandboxPath).toBe(shellPath);
+    expect(mutationCalls).toBe(0);
+
+    // The lazy sandbox start runs this before it releases the first sandbox
+    // operation, so the copy exists before the agent's next shell command.
+    live = shellSession("/workspace");
+    await port.materializeDeferred();
+    expect(mutationCalls).toBe(1);
+    expect(live.calls).toHaveLength(1);
+    expect(live.calls[0]!.workdir).toBe("/workspace");
+    expect(live.calls[0]!.cmd).toContain(shellPath);
+  });
+
+  test("the legacy SDK-owned sandbox also receives the deferred copy when it becomes ready", async () => {
+    filesById.clear();
+    let owned: ReturnType<typeof shellSession> | null = null;
+    const port = spill("docker", objectStorage(), { sdkOwnedSession: () => owned?.session });
+    const receipt = await port.spill({ operationId: OPERATION_ID, result });
+    expect((receipt.structuredContent as { sandboxPath: string }).sandboxPath).toBe(shellPath);
+    owned = shellSession("/workspace");
+    await port.materializeDeferred();
+    expect(owned.calls).toHaveLength(1);
+    expect(owned.calls[0]!.cmd).toContain(shellPath);
+  });
+
+  test("no sandbox backend means no shell will ever have the file", async () => {
+    filesById.clear();
+    const port = spill("none");
+    const receipt = await port.spill({ operationId: OPERATION_ID, result });
+    expect((receipt.structuredContent as { sandboxPath: string | null }).sandboxPath).toBeNull();
+  });
+
+  test("a Connected Machine copies into its working directory and reports the cwd-relative path", async () => {
+    filesById.clear();
+    mutationCalls = 0;
+    const machine = shellSession("/Users/someone/projects/app");
+    const port = spill("selfhosted", objectStorage(), {
+      resolved: () => resolvedSandbox(machine.session),
+      setupSession: () => machine.session,
+    });
+    const receipt = await port.spill({ operationId: OPERATION_ID, result });
+    expect((receipt.structuredContent as { sandboxPath: string }).sandboxPath).toBe(shellPath);
+    expect(mutationCalls).toBe(1);
+    expect(machine.calls).toHaveLength(1);
+    expect(machine.calls[0]!.workdir).toBe("/Users/someone/projects/app");
+    expect(machine.calls[0]!.cmd).toContain(shellPath);
+    expect(machine.calls[0]!.cmd).not.toContain("/workspace/");
+  });
+
+  test("a failed copy into a live sandbox reports no path", async () => {
+    filesById.clear();
+    const machine = shellSession("/Users/someone/projects/app", 1);
+    const port = spill("selfhosted", objectStorage(), {
+      resolved: () => resolvedSandbox(machine.session),
+      setupSession: () => machine.session,
+    });
+    const receipt = await port.spill({ operationId: OPERATION_ID, result });
+    expect((receipt.structuredContent as { sandboxPath: string | null }).sandboxPath).toBeNull();
   });
 });

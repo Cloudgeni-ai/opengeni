@@ -34,6 +34,17 @@ const UPLOAD_INTENT_TTL_MS = 60 * 60_000;
 
 export type ToolResultSpillReceipt = ToolResultSpilledReceipt;
 
+/**
+ * Where the spilled copy is for the shell of this attempt:
+ * - `materialized`: copied into the live sandbox now;
+ * - `deferred`: this attempt has a sandbox route but no live sandbox yet. Every
+ *   sandbox start of the attempt runs `materializeDeferred` before it releases
+ *   the first sandbox operation, so the copy lands before any shell command;
+ * - `unavailable`: no shell can have it (no sandbox route, or the copy into
+ *   the live sandbox failed).
+ */
+type SpillMaterialization = "materialized" | "deferred" | "unavailable";
+
 export type ToolResultSpillDeps = {
   db: Database;
   objectStorage: ObjectStorage | null;
@@ -108,10 +119,10 @@ export class ToolResultSpill {
       }
       file = await completeFileUpload(this.deps.db, this.deps.workspaceId, identity.uploadId);
     }
-    const materialized = await this.materializeFile(file);
+    const materialization = await this.materializeFile(file);
     const receipt: ToolResultSpillReceipt = {
       type: "tool_result_spilled",
-      sandboxPath: materialized ? intendedSandboxPath : null,
+      sandboxPath: materialization === "unavailable" ? null : intendedSandboxPath,
       fileId: file.id,
       byteSize: file.sizeBytes,
       mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
@@ -130,26 +141,30 @@ export class ToolResultSpill {
     }
   };
 
-  private async materializeFile(file: FileAsset): Promise<boolean> {
-    if (this.deps.getSandboxFileDownloadBackend() === "none") return false;
+  private async materializeFile(file: FileAsset): Promise<SpillMaterialization> {
+    if (this.deps.getSandboxFileDownloadBackend() === "none") return "unavailable";
     try {
       const sandbox = this.deps.getResolvedSandbox();
       const setupBoxSession = this.deps.getSetupBoxSession();
       if (sandbox && setupBoxSession) {
-        return await this.materializeInSandbox(file, sandbox, setupBoxSession);
+        return (await this.materializeInSandbox(file, sandbox, setupBoxSession))
+          ? "materialized"
+          : "unavailable";
       }
       const sdkOwned = this.deps.getSdkOwnedSandboxSession();
       if (sdkOwned) {
-        return await this.writeDownload(sdkOwned, await this.prepareDownload(file));
+        return (await this.writeDownload(sdkOwned, await this.prepareDownload(file)))
+          ? "materialized"
+          : "unavailable";
       }
-      return false;
+      return "deferred";
     } catch (error) {
       this.deps.observability.warn("Tool result spill sandbox materialization deferred", {
         errorClass: error instanceof Error ? error.name : "UnknownError",
         errorCode: "worker_operation_failed",
         origin: "worker",
       });
-      return false;
+      return "unavailable";
     }
   }
 

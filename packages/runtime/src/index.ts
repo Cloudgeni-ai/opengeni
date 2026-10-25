@@ -83,6 +83,7 @@ export {
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
+  isLocalMcpBridgeServer,
   type LocalMcpBridgeAdapter,
 } from "@opengeni/capabilities";
 import {
@@ -238,6 +239,7 @@ import {
   type ConnectorFileMaterializationRequest,
 } from "./connector-attachments";
 import {
+  modelToolTextBudgetBytes,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
   type SpillOversizedModelToolResult,
@@ -245,10 +247,12 @@ import {
 export {
   modelToolResultFits,
   modelToolResultOverflowError,
+  modelToolTextBudgetBytes,
   projectAttemptToolResultForCaller,
   spilledModelToolResult,
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
+  type ProjectModelToolResult,
   type SpillOversizedModelToolResult,
 } from "./tool-result-spill";
 export {
@@ -4914,6 +4918,12 @@ export type PrepareToolsOptions = {
    */
   spillOversizedModelToolResult?: SpillOversizedModelToolResult;
   /**
+   * The current model's tool-output truncation policy in tokens, read for each
+   * call so a mid-attempt model change is honoured. Local bridge projections
+   * size their model-visible copy to it. Defaults to the settings value.
+   */
+  modelToolOutputTruncationTokens?: () => number;
+  /**
    * Private exact-byte connector attachment bridge. Source URLs are passed only
    * through this host callback and never included in the returned MCP result.
    */
@@ -5767,6 +5777,7 @@ export async function prepareAgentTools(
             registry,
             resolvedMcpConnectionIds,
             options,
+            settings.modelToolOutputTruncationTokens,
           ),
         execution,
       );
@@ -6063,6 +6074,7 @@ async function prepareAttemptToolEnvironment(
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   options: PrepareToolsOptions,
+  defaultModelToolOutputTruncationTokens: number,
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
@@ -6080,16 +6092,31 @@ async function prepareAttemptToolEnvironment(
     options.sessionAttachedRemoteMcpTargets,
     options.runMcpCredentials,
   );
+  const serversByRegistryId = new Map(
+    prepared.servers.map(({ server }) => [server.registryId, server]),
+  );
+  const modelToolOutputBudget = () => ({
+    maxTextBytes: modelToolTextBudgetBytes(
+      options.modelToolOutputTruncationTokens?.() ?? defaultModelToolOutputTruncationTokens,
+    ),
+  });
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
-      ...prepared.definitions.map((definition) => ({
-        ...definition,
-        execute: wrapAttemptToolExecute(
-          async (argumentsValue, context) => await definition.execute(argumentsValue, context),
-          options.spillOversizedModelToolResult,
-          definition.identity,
-        ),
-      })),
+      ...prepared.definitions.map((definition) => {
+        const server = serversByRegistryId.get(definition.identity.serverId);
+        const toolName = definition.identity.toolName;
+        return {
+          ...definition,
+          execute: wrapAttemptToolExecute(
+            async (argumentsValue, context) => await definition.execute(argumentsValue, context),
+            options.spillOversizedModelToolResult,
+            definition.identity,
+            server?.hasModelToolResultProjection()
+              ? (result) => server.projectModelToolResult(toolName, result, modelToolOutputBudget())
+              : undefined,
+          ),
+        };
+      }),
       ...wrapAttemptToolDefinitions(
         options.attemptToolDefinitions ?? [],
         options.spillOversizedModelToolResult,
@@ -8889,6 +8916,29 @@ export class PrefixedMcpServer implements MCPServer {
     return typeof bridge.reviewContext === "function"
       ? await bridge.reviewContext(toolName, args)
       : {};
+  }
+
+  /** True when the wrapped local bridge supplies its own model-visible result copy. */
+  hasModelToolResultProjection(): boolean {
+    if (this.inner instanceof PrefixedMcpServer) return this.inner.hasModelToolResultProjection();
+    return (
+      isLocalMcpBridgeServer(this.inner) && typeof this.inner.projectModelToolResult === "function"
+    );
+  }
+
+  /** The wrapped local bridge's model-visible copy of one exact result (unprefixed tool name). */
+  projectModelToolResult(
+    toolName: string,
+    result: AttemptToolResultValue,
+    budget: { readonly maxTextBytes: number },
+  ): AttemptToolResultValue {
+    if (this.inner instanceof PrefixedMcpServer) {
+      return this.inner.projectModelToolResult(toolName, result, budget);
+    }
+    if (isLocalMcpBridgeServer(this.inner) && this.inner.projectModelToolResult) {
+      return this.inner.projectModelToolResult(toolName, result, budget);
+    }
+    return result;
   }
 
   catalogEffectAuthority(toolName: string): unknown {
