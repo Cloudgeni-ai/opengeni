@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { createHash, randomBytes } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AccessGrant } from "@opengeni/contracts";
+import { appActionChangesState, findAppAction } from "@opengeni/contracts/app-actions";
+import { stampWorkspacePersonAuthorization } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -9,8 +11,11 @@ import {
   createOrganizationApiKey,
   createSession,
   ensureExternalIdentity,
+  externalPersonPersonalWorkspaceId,
+  grantSessionAdminAccess,
   recordTurnAppActionGrant,
   submitHumanPromptInTransaction,
+  withAccountRls,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
   type Database,
@@ -25,6 +30,7 @@ import {
   createSessionAdminReach,
   registerSessionAdminAccessTools,
 } from "../src/mcp/session-admin-access-tools";
+import { reachSessionInOtherWorkspace } from "../src/mcp/session-other-workspace";
 
 /* A person using a product that embeds the chat is an external user of the
    organization, not a native Opengeni account. Their app actions run as them
@@ -72,6 +78,14 @@ async function appActionTools(
   if (claim.action !== "claimed") throw new Error(`claim failed: ${claim.reason}`);
   const handlers = new Map<string, Handler>();
   const grant = { accountId: input.accountId, workspaceId: input.workspaceId } as AccessGrant;
+  const reach = createSessionAdminReach({
+    db,
+    grant,
+    sessionId: input.sessionId,
+    turnId: claim.turn.id,
+    access: { origin, dispatch: async (request) => await app.fetch(request) },
+    authorize: async () => undefined,
+  });
   registerSessionAdminAccessTools({
     server: {
       registerTool: (name: string, _config: unknown, handler: Handler) => {
@@ -82,16 +96,11 @@ async function appActionTools(
     grant,
     sessionId: input.sessionId,
     attempt: { turnId: claim.turn.id, attemptId },
-    reach: createSessionAdminReach({
-      db,
-      grant,
-      sessionId: input.sessionId,
-      turnId: claim.turn.id,
-      access: { origin, dispatch: async (request) => await app.fetch(request) },
-      authorize: async () => undefined,
-    }),
+    reach,
   });
   return {
+    sessionId: input.sessionId,
+    reach,
     turnId: claim.turn.id,
     call: handlers.get("admin_action_call")!,
     search: handlers.get("admin_actions_search")!,
@@ -295,6 +304,38 @@ describe("app actions for a person in an embedded chat", () => {
       textOf(await embedded.search({ query: "", limit: 50, offset: 0 })),
     ) as { total: number };
 
+    // ...and only what this message's access can run: reads, and only those
+    // whose route's first check their access passes. Changes that need
+    // organization-level authority for some inputs (createRig, addDocument,
+    // updateMachineAgent) and reads needing a permission the embed didn't
+    // give (listRigs, listDocumentBases) aren't offered.
+    const offered: string[] = [];
+    for (let offset = 0; offset < everything.total; offset += 50) {
+      const page = JSON.parse(textOf(await embedded.search({ query: "", limit: 50, offset }))) as {
+        actions: { id: string }[];
+      };
+      offered.push(...page.actions.map((action) => action.id));
+    }
+    expect(offered).toHaveLength(everything.total);
+    expect(offered).toEqual(
+      expect.arrayContaining(["getMyUsage", "getWorkspace", "listSessionPage"]),
+    );
+    for (const id of [
+      "createRig",
+      "addDocument",
+      "updateMachineAgent",
+      "listRigs",
+      "listDocumentBases",
+    ])
+      expect(offered).not.toContain(id);
+    for (const id of offered) {
+      const entry = findAppAction(id)!;
+      expect(appActionChangesState(entry), id).toBe(false);
+      expect([undefined, "workspace:read", "sessions:create", "sessions:read"], id).toContain(
+        entry.permission,
+      );
+    }
+
     // Organization-wide actions and other workspaces are refused in one step,
     // before anything runs, naming the one workspace they can use and no page.
     const reach = `Nothing was run: this person uses Opengeni through another product, so app actions reach only this chat's workspace (workspaceId ${workspaceId}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`;
@@ -348,5 +389,119 @@ describe("app actions for a person in an embedded chat", () => {
       textOf(await native.search({ query: "", limit: 50, offset: 0 })),
     ) as { total: number };
     expect(nativeEverything.total).toBeGreaterThan(everything.total);
+
+    // With full access the person can do everything they can in this
+    // workspace, and every path gives the same answer: search, a call, and a
+    // session tool reaching another workspace.
+    const trusted = await chatTurn({
+      subjectId,
+      changes: "none",
+      permissions: ["workspace:read", "sessions:create", "sessions:read"],
+    });
+    // An owner allowed full access for the organization's sessions.
+    await shared.admin`
+      insert into organization_agent_admin_access (account_id, session_admin_access_allowed)
+      values (${organizationId}::uuid, true)
+      on conflict (account_id) do update set session_admin_access_allowed = true`;
+    await grantSessionAdminAccess(db, {
+      organizationId,
+      workspaceId,
+      sessionId: trusted.sessionId,
+      actorSubjectId: subjectId,
+      durationHours: 1,
+    });
+    const trustedSearch = JSON.parse(
+      textOf(await trusted.search({ query: "", limit: 50, offset: 0 })),
+    ) as { total: number; actions: { path: string }[] };
+    expect(trustedSearch.total).toBeGreaterThan(everything.total);
+    expect(trustedSearch.total).toBeLessThan(nativeEverything.total);
+    for (const action of trustedSearch.actions)
+      expect(action.path).toMatch(/^\/v1\/workspaces\/:workspaceId(\/|$)/u);
+    const trustedUsage = await trusted.call({
+      id: "getMyUsage",
+      pathParameters: { workspaceId },
+      query: {},
+    });
+    expect(JSON.parse(textOf(trustedUsage)).status, textOf(trustedUsage)).toBe(200);
+    const trustedElsewhere = await trusted.call({
+      id: "getMyUsage",
+      pathParameters: { workspaceId: sharedWorkspaceId },
+      query: {},
+    });
+    expect(textOf(trustedElsewhere)).toBe(reach);
+    const otherWorkspaceChat = await reachSessionInOtherWorkspace({
+      reach: trusted.reach,
+      workspaceId: sharedWorkspaceId,
+      toolName: "session_get",
+      arguments: { sessionId: crypto.randomUUID() },
+    });
+    expect(otherWorkspaceChat.isError).toBe(true);
+    expect(textOf(otherWorkspaceChat)).toBe(reach);
+  });
+
+  test("reach the person's own workspace only as their organization membership names it", async () => {
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: shared.adminUrl,
+        productAccessMode: "managed",
+        betterAuthSecret: "session-app-actions-embedded-secret-32",
+        publicBaseUrl: origin,
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {} as never,
+    });
+    const db = client.db;
+    const ownerSubjectId = `user:${crypto.randomUUID()}`;
+    const access = await bootstrapWorkspace(db, {
+      accountExternalSource: "test",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Host Product",
+      workspaceExternalSource: "test",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Shared",
+      subjectId: ownerSubjectId,
+    });
+    const organizationId = access.workspaceGrants[0]!.accountId;
+    const sharedWorkspaceId = access.workspaceGrants[0]!.workspaceId;
+    const [person, someoneElse] = await Promise.all(
+      [1, 2].map(() =>
+        ensureExternalIdentity(db, {
+          accountId: organizationId,
+          externalId: `end-user-${crypto.randomUUID()}`,
+        }),
+      ),
+    );
+
+    // The explicit pointer: an external person's own workspace, and nothing
+    // for anyone else.
+    const pointer = (subject: string) =>
+      withAccountRls(db, organizationId, (tx) =>
+        externalPersonPersonalWorkspaceId(tx, { accountId: organizationId, subjectId: subject }),
+      );
+    expect(await pointer(person!.subjectId)).toBe(person!.personalWorkspaceId);
+    expect(await pointer(someoneElse!.subjectId)).toBe(someoneElse!.personalWorkspaceId);
+    expect(await pointer(ownerSubjectId)).toBeNull();
+
+    // A request as this person in one workspace, as an app action makes it.
+    const ask = async (workspaceId: string) => {
+      const request = new Request(`${origin}/v1/workspaces/${workspaceId}`);
+      stampWorkspacePersonAuthorization(request, {
+        organizationId,
+        workspaceId,
+        subjectId: person!.subjectId,
+        permissions: ["workspace:read"],
+      });
+      const response = await app.fetch(request);
+      return { status: response.status, body: await response.text() };
+    };
+    expect((await ask(person!.personalWorkspaceId)).status).toBe(200);
+    // A shared workspace they aren't a member of, and someone else's own
+    // workspace, are refused.
+    for (const elsewhere of [sharedWorkspaceId, someoneElse!.personalWorkspaceId]) {
+      const refused = await ask(elsewhere);
+      expect(refused.status).toBe(403);
+      expect(refused.body).toContain("this person can no longer use this workspace");
+    }
   });
 });

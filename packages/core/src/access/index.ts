@@ -45,6 +45,7 @@ import {
   requireWorkspace,
   getWorkspace,
   resolveNamedManagedPersonalWorkspaceGrant,
+  externalPersonPersonalWorkspaceId,
   type Database,
 } from "@opengeni/db";
 import type { Context } from "hono";
@@ -1649,9 +1650,16 @@ async function resolveDelegatedHumanAccessContext(
           principalKind: "human_session",
         });
         if (membership) return membership;
-        // Live authority without a membership row is the person's own active
-        // workspace, granted by their organization membership: the same
-        // access their own requests get there.
+        // Otherwise only the person's own workspace, as their active
+        // organization membership names it: the same access their own
+        // requests get there.
+        if (
+          (await externalPersonPersonalWorkspaceId(tx, {
+            accountId: proof.organizationId,
+            subjectId: proof.subjectId,
+          })) !== workspaceId
+        )
+          return null;
         const own: AccessGrant = {
           accountId: proof.organizationId,
           workspaceId,

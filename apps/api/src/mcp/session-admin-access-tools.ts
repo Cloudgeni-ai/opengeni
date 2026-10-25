@@ -5,14 +5,16 @@ import {
   normalizeOrganizationAccessPolicy,
   organizationAccessPresetPermissions,
   type AccessGrant,
+  type Permission,
 } from "@opengeni/contracts";
 import {
   APP_ACTION_CALL_TOOL_NAME,
   appActionChangesState,
   appActionCallCarriesSecrets,
   findAppAction,
+  type ActionCatalogEntry,
 } from "@opengeni/contracts/app-actions";
-
+import { hasPermission } from "@opengeni/core";
 import {
   listConfirmedAppActionChanges,
   resolveSessionAppActionAuthority,
@@ -130,6 +132,24 @@ function isExternalPerson(subjectId: string): boolean {
 }
 
 /**
+ * Whether an action can succeed for someone who uses Opengeni through another
+ * product, as far as is known before asking the route: it works inside this
+ * chat's one workspace, this turn may run it (a change, a secret), and their
+ * access includes the permission the route checks first. The route's own
+ * checks still decide everything else.
+ */
+function externalPersonCanRun(entry: ActionCatalogEntry, authority: ActingAuthority): boolean {
+  if (!actionInOneWorkspace(entry)) return false;
+  if (authority.kind === "full_access") return true;
+  if (authority.kind === "read_only" && appActionChangesState(entry)) return false;
+  if (appActionCallCarriesSecrets(entry, undefined)) return false;
+  return (
+    entry.permission === undefined ||
+    hasPermission(authority.permissions, entry.permission as Permission, "explicit")
+  );
+}
+
+/**
  * The one authority path for what a session does as a person: the app-action
  * tools, and the ordinary session tools when they reach a chat in another
  * workspace. Everything is checked live, on every call.
@@ -180,8 +200,11 @@ export function createSessionAdminReach(input: {
       // message itself could do when it was sent (frozen with the turn,
       // so an embed's narrower token stays narrow) in this chat's
       // workspace, so steps that widen an agent's access stay refused.
+      // Someone who uses Opengeni through another product has exactly one
+      // workspace, so full access for them means everything they can do in
+      // this chat's workspace: every path then asks the same question.
       access:
-        acting.kind === "full_access"
+        acting.kind === "full_access" && !isExternalPerson(acting.subjectId)
           ? {
               preset: "full",
               permissions: organizationAccessPresetPermissions("full"),
@@ -189,7 +212,10 @@ export function createSessionAdminReach(input: {
             }
           : normalizeOrganizationAccessPolicy({
               preset: "custom",
-              permissions: acting.permissions,
+              permissions:
+                acting.kind === "full_access"
+                  ? organizationAccessPresetPermissions("full")
+                  : acting.permissions,
               workspaceScope: { kind: "selected", workspaceIds: [grant.workspaceId] },
             }),
     },
@@ -246,13 +272,15 @@ export function registerSessionAdminAccessTools(input: {
       const authority = await currentAuthority();
       if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
       // Offer only what can succeed: someone who uses Opengeni through another
-      // product reaches this chat's workspace and nothing beyond it.
+      // product reaches this chat's workspace, within this turn's access.
       return text(
         searchActions({
           query,
           limit,
           offset,
-          ...(isExternalPerson(authority.subjectId) ? { reachable: actionInOneWorkspace } : {}),
+          ...(isExternalPerson(authority.subjectId)
+            ? { reachable: (entry: ActionCatalogEntry) => externalPersonCanRun(entry, authority) }
+            : {}),
         }),
       );
     },
