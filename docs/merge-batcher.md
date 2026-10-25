@@ -299,11 +299,15 @@ Changed heads still require fresh exact-head checks. Disable observes current
 head and enable time before submission; GitHub provides no atomic expected-head
 condition for that mutation. Ambiguous submissions are held, never blindly replayed.
 
-FIFO uses actual GraphQL ready timeline events, never PR creation time or the
-time a controller first saw it. Turning readiness off then on creates a new
-event. Label churn does not release a parked unchanged head; a new native enable
-event after parking does. Current native request events take precedence over labels.
-Missing/partial event history prevents admission with an explicit reason.
+FIFO uses actual GraphQL label timeline events or the current native
+`autoMergeRequest.enabledAt`, never PR creation or observation time. GitHub may
+return a current native request without a timeline event. Native readiness uses
+the PR node ID plus enabledAt as its stable request identity, after checking the
+observed head matches the open-PR inventory. Disabling or changing the head during
+observation excludes that candidate. Re-enabling creates a new timestamp identity;
+label churn does not release a parked unchanged head. Native requests take
+precedence over labels. Missing/malformed current request evidence or incomplete
+label history is not permission to admit. Historical bindings remain immutable.
 `changeset-release/main` is a barrier: earlier PRs batch first, Version is a
 singleton, and later work does not speculate across it.
 

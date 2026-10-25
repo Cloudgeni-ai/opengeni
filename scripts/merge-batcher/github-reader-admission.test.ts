@@ -56,6 +56,10 @@ async function fixture() {
     classic: false,
     queueReady: true,
     autoEnabled: false,
+    autoTimeline: true,
+    autoCurrentHead: sha,
+    autoCurrentAt: "2026-10-23T00:01:00Z" as string | null,
+    autoReadStatus: 200,
     staleAutoEvent: false,
     protected: false,
     secondRulePage: false,
@@ -116,14 +120,29 @@ async function fixture() {
             },
           },
         };
-      else if (query.includes("ReadyTimeline"))
+      else if (query.includes("autoMergeRequest{enabledAt}")) {
+        if (state.autoReadStatus !== 200)
+          return Response.json({}, { status: state.autoReadStatus });
+        body = {
+          data: {
+            repository: {
+              pullRequest: {
+                id: "PR_fixture",
+                headRefOid: state.autoCurrentHead,
+                autoMergeRequest:
+                  state.autoCurrentAt === null ? null : { enabledAt: state.autoCurrentAt },
+              },
+            },
+          },
+        };
+      } else if (query.includes("ReadyTimeline"))
         body = {
           data: {
             repository: {
               pullRequest: {
                 timelineItems: {
                   nodes: [
-                    ...(state.autoEnabled || state.staleAutoEvent
+                    ...((state.autoEnabled && state.autoTimeline) || state.staleAutoEvent
                       ? [
                           {
                             __typename: "AutoMergeEnabledEvent",
@@ -314,7 +333,7 @@ test("native ruleset and classic review requirements both apply without added re
     expect((await f.reader.ready()).ready).toHaveLength(1);
   }
 });
-test("auto-merge requires the actual enable event and exact-head CI", async () => {
+test("auto-merge requires the current native request and exact-head CI", async () => {
   const f = await fixture();
   f.state.queueReady = false;
   expect((await f.reader.ready()).ready).toHaveLength(0);
@@ -323,6 +342,38 @@ test("auto-merge requires the actual enable event and exact-head CI", async () =
   f.state.jobCheckId = 999;
   expect((await f.reader.ready()).ready).toHaveLength(0);
   expect(f.state.commentsRead).toBe(false);
+});
+test("native auto request admits without a timeline event and keeps a stable identity when it appears", async () => {
+  const f = await fixture();
+  f.state.queueReady = false;
+  f.state.autoEnabled = true;
+  f.state.autoTimeline = false;
+  const first = (await f.reader.ready()).ready[0]!;
+  expect(first.binding.source).toBe("auto-merge");
+  expect(first.binding.eventId).toBe("auto-merge:PR_fixture:2026-10-23T00:01:00Z");
+  f.state.autoTimeline = true;
+  expect((await f.reader.ready()).ready[0]!.binding).toEqual(first.binding);
+  f.state.autoCurrentAt = "2026-10-23T00:02:00Z";
+  expect((await f.reader.ready()).ready[0]!.binding.eventId).not.toBe(first.binding.eventId);
+});
+test("disabled, changed-head and malformed current requests cannot use stale timeline proof", async () => {
+  const f = await fixture();
+  f.state.queueReady = false;
+  f.state.autoEnabled = true;
+  f.state.autoCurrentAt = null;
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.autoCurrentAt = "2026-10-23T00:01:00Z";
+  f.state.autoCurrentHead = "b".repeat(40);
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+  f.state.autoCurrentHead = sha;
+  f.state.autoCurrentAt = "invalid";
+  expect((await f.reader.ready()).ready).toHaveLength(0);
+});
+test("native request authorization errors abort observation rather than using timeline proof", async () => {
+  const f = await fixture();
+  f.state.autoEnabled = true;
+  f.state.autoReadStatus = 403;
+  await expect(f.reader.ready()).rejects.toThrow();
 });
 test("a stale timeline enable without current REST auto_merge cannot admit", async () => {
   const f = await fixture();

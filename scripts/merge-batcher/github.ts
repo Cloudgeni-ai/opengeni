@@ -530,6 +530,25 @@ export class GitHubReader {
       let events: ReadyEvent[];
       try {
         events = await this.timeline(number);
+        if (autoMerge) {
+          // GitHub can expose a current native request with no corresponding
+          // timeline node. Bind to that request, never PR creation/read time.
+          const current = await this.autoMergeState(number);
+          if (current.headSha !== pull.head?.sha || current.enabledAt === null) {
+            excluded.push({
+              number,
+              reason: "Native auto-merge request changed during observation",
+            });
+            continue;
+          }
+          events = events.filter((event) => event.source !== "auto-merge");
+          events.push({
+            id: `auto-merge:${current.id}:${current.enabledAt}`,
+            at: current.enabledAt,
+            source: "auto-merge",
+            enabled: true,
+          });
+        }
       } catch (error) {
         // An unavailable/malformed per-PR timeline is an explicit admission exclusion.
         // Authentication/rate-limit failures abort the whole observation instead.
