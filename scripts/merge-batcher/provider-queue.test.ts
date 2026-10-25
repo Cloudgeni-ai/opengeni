@@ -10,6 +10,7 @@ function reader(
     error?: boolean;
     invalidCapacity?: boolean;
     maxInflight?: number;
+    withMain?: boolean;
   } = {},
 ) {
   const cfg = config({
@@ -42,6 +43,14 @@ function reader(
             },
           ]
         : [];
+    if (status === "in_progress" && options.withMain)
+      runs.push({
+        id: 2,
+        status,
+        path: ".github/workflows/ci.yml",
+        head_branch: "main",
+        event: "push",
+      });
     return Response.json({ total_count: runs.length, workflow_runs: runs });
   }) as typeof fetch;
   return new GitHubReader(cfg, new GitHubAuth({}), transport);
@@ -81,6 +90,34 @@ test("queued main demand and queue-wait telemetry remain informational", async (
     capacity: { hold: "main-queued", mainQueuedJobs: 1, latestMain: { queuedJobs: 1 } },
   });
   expect(live.lastHeadroom!.capacity!.latestMain!.oldestQueuedSeconds).toBeGreaterThan(0);
+});
+
+test("second slot holds on queued main while landing remains slot-neutral", async () => {
+  const live = reader(
+    [
+      { status: "queued", created_at: "2026-01-01T00:00:00Z" },
+      ...Array.from({ length: 4 }, () => ({ status: "completed" })),
+    ],
+    { batch: true, withMain: true, maxInflight: 2 },
+  );
+  expect(await live.mainBusy("publish")).toBe(true);
+  expect(live.lastHeadroom).toMatchObject({
+    occupiedBatchSlots: 1,
+    publicationBlocked: true,
+    capacityInformational: false,
+    capacity: { hold: "main-queued" },
+  });
+  expect(await live.mainBusy("observe")).toBe(false);
+  expect(live.lastHeadroom?.publicationBlocked).toBe(true);
+  expect(await live.mainBusy("land")).toBe(false);
+});
+
+test("unseen reservation makes queued main capacity binding for slot two", async () => {
+  const live = reader([{ status: "queued" }], { maxInflight: 2 });
+  expect(
+    await live.mainBusy("publish", [{ branch: "queue/unseen", headSha: "a".repeat(40) }]),
+  ).toBe(true);
+  expect(live.lastHeadroom).toMatchObject({ occupiedBatchSlots: 1, publicationBlocked: true });
 });
 
 test("provider and repository demand are truthful observations, not a capacity promise", async () => {

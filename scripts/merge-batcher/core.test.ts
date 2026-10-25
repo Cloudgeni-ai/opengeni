@@ -46,6 +46,30 @@ const NOW = "2026-10-21T11:00:00.000Z";
 const SHA = "a".repeat(40);
 const cfg = config({});
 const roots: string[] = [];
+test("foreign provider slots prevent repeated builds but never a tested root landing", () => {
+  const settings = { ...cfg, maxInflight: 2 };
+  const o = observation([pull(1)], []);
+  o.headroom = {
+    allowed: true,
+    reason: "complete inventory",
+    budget: 52,
+    occupied: 2,
+    reservedMain: 0,
+    candidateSlots: 18,
+    occupiedBatchSlots: 2,
+    publicationBlocked: true,
+  };
+  expect(plan(o, settings).kind).toBe("wait");
+  const green = candidate();
+  green.runs = [run(green, "success")];
+  o.candidates = [green];
+  expect(plan(o, settings).kind).toBe("land");
+  green.runs = [run(green, "code_failure")];
+  expect(plan(o, settings).kind).toBe("wait");
+  o.headroom.occupiedBatchSlots = 0;
+  o.headroom.publicationBlocked = false;
+  expect(plan(o, settings).kind).toBe("retry");
+});
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });

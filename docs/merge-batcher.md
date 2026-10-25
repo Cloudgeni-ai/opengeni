@@ -458,6 +458,20 @@ remain reservations. Historical reads reuse conservative cached observations;
 the normal bounded historical refresh retires those reservations only on evidence.
 Final slot contention defers publication without a Git transaction or an unsafe
 write-outcome classification.
+
+Slot one treats valid capacity estimates as informational so recovery cannot
+deadlock behind main demand. Additional speculative slots require a clear
+capacity decision, including no queued or pre-fan-out main work. Complete
+provider occupancy and unseen reservations reach the planner before building;
+landing and bookkeeping remain independent of that publication-only gate.
+Every landing starts a main workflow: the measured baseline is about 57 jobs
+and 370 job-minutes on main, in addition to 149 Batch job-minutes. With a
+60-job ceiling and 28-job foreign allowance, 1,920 available job-minutes/hour
+supports about 3.70 batches/hour, or 29.6 PR/hour at full cap 8 (about 710/day).
+This saturated model excludes failures, partial batches and downtime; two
+slots alone do not increase that runner-budget ceiling. Main complete-unit
+reuse, if independently qualified, would lower the modeled combined cost
+from 519 to 369 job-minutes, not make runner capacity unlimited.
 Failed or changed predecessors invalidate descendants without cancelling their
 runs. Version/control-plane barriers and sequential bisection remain unchanged.
 Full-main capacity estimates remain observable rather than reserving runners.
@@ -506,9 +520,10 @@ concurrency group (`pending`), completed jobs, and runs without materialized job
 (for example a run held by its concurrency group) are not demand; a run is a
 placeholder, not a runner. Required
 capacity is other job demand plus the larger of configured main reserve and
-observed main demand, plus **18 candidate slots**. It proceeds only when that fits
-BATCHER_RUNNER_BUDGET and no other Batch CI run occupies the single candidate
-slot. Missing budget/reserve or any unrecognized or missing job status holds
+observed main demand, plus **18 candidate slots**. Extra speculative slots proceed
+only when that fits BATCHER_RUNNER_BUDGET and the configured hosted slot budget
+has room. The first slot keeps valid capacity observations advisory. Missing
+budget/reserve or any unrecognized or missing job status holds
 rather than inventing capacity. Waiting, pending and job-less runs can start
 requesting runners after observation.
 
@@ -602,7 +617,7 @@ admission excludes exact `pr-ci.yml` pull-request and workflow-dispatch runs fro
 PR demand, including legacy definitions, so five or more PR jobs do not withhold
 submission. Non-PR demand remains measured and completeness safeguards still
 apply. GitHub queues submitted work when provider capacity is busy; neither
-capacity nor fairness is guaranteed. Preserve max-inflight1, exact tree/provenance,
+capacity nor fairness is guaranteed. Preserve the configured max-inflight bound, exact tree/provenance,
 CAS and unknown-effect holds. Measure actual Batch wait from run creation to the
 first runner job start, separately from CI execution and landing; do not report
 submission as execution or a landing.

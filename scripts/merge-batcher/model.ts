@@ -239,8 +239,12 @@ export interface Headroom {
   cachedApprovalOnlyRuns?: number;
   /** Provider capacity fields; see `capacityDecision`. */
   capacity?: CapacityObservation;
-  /** Live admission uses provider queueing; valid capacity holds are telemetry only. */
+  /** Slot one uses provider queueing; extra slots require clear capacity. */
   capacityInformational?: boolean;
+  /** Complete union of provider Batch runs and unseen durable reservations. */
+  occupiedBatchSlots?: number;
+  /** Publication/retry only; never a veto on landing or recovery bookkeeping. */
+  publicationBlocked?: boolean;
 }
 // GitHub job statuses. Only jobs that hold or are about to request a hosted
 // runner are demand: queued and in_progress jobs, plus requested jobs (created
@@ -350,6 +354,7 @@ export type RunnerScan =
       cachedApprovalOnlyRuns: number;
       runnerRelevantRuns: number;
       activeBatchRuns: number;
+      occupiedBatchSlots: number;
       /** Newest active full-main push CI run (highest run ID), or null when none is active. */
       latestMain: LatestMainObservation | null;
       /** Jobs `queued` or `requested` for a runner across every active full-main run. */
@@ -672,6 +677,7 @@ export async function scanRunnerDemand(input: {
     cachedApprovalOnlyRuns,
     runnerRelevantRuns,
     activeBatchRuns,
+    occupiedBatchSlots: activeBatchRuns + unseen.size,
     latestMain: latestMain ? observeMainQueue(latestMain.id, latestMain.jobs, finished) : null,
     mainQueuedJobs,
     preFanoutMainRuns: preFanoutMainRuns.sort((a, b) => a - b),

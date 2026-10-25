@@ -495,6 +495,32 @@ async function mergedOriginalWithDelta() {
 }
 
 describe("actual active executor with local bare Git and mocked GitHub", () => {
+  test("observation binds unseen candidate reservations and foreign slots before planning", async () => {
+    const f = await fixture();
+    f.cfg.maxInflight = 2;
+    const root = await f.publish();
+    let checked = false;
+    f.api.mainBusy = async (purpose, reservations) => {
+      expect(purpose).toBe("observe");
+      expect(reservations).toEqual([{ branch: `${f.cfg.branchPrefix}${root.batchId}`, headSha: root.tipSha }]);
+      checked = true;
+      f.api.lastHeadroom = { allowed: true, reason: "foreign run plus invisible reservation", budget: 52, occupied: 1, reservedMain: 0, candidateSlots: 18, occupiedBatchSlots: 2, publicationBlocked: true };
+      return false;
+    };
+    f.api.pulls.push({ ...f.makePull(f.newer), number: 2 });
+    const observation = await f.controller().reader.observe();
+    expect(checked).toBe(true);
+    expect(observation.headroom?.occupiedBatchSlots).toBe(2);
+  });
+  test("malformed owned-looking queue refs do not block unrelated publication", async () => {
+    const f = await fixture();
+    const foreign = `refs/heads/${f.cfg.branchPrefix}${"f".repeat(64)}`;
+    await f.git.exec(["push", f.origin.dir, `${f.base}:${foreign}`]);
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("build");
+    expect(result.manifest).not.toBeNull();
+    expect((await f.git.remoteRefs(f.origin.dir)).get(foreign)).toBe(f.base);
+  });
   test("publication passes invisible predecessor reservation to the final provider slot check", async () => {
     const f = await fixture();
     f.cfg.maxInflight = 2;
@@ -2291,6 +2317,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(await scan(ok.get)).toEqual({
         ok: true,
         activeBatchRuns: 0,
+        occupiedBatchSlots: 0,
         mainDemand: 0,
         otherDemand: 0,
         scannedRuns: 10,
@@ -2343,6 +2370,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(raced).toEqual({
         ok: true,
         activeBatchRuns: 0,
+        occupiedBatchSlots: 0,
         mainDemand: 1,
         otherDemand: 0,
         scannedRuns: 1,

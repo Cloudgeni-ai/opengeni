@@ -386,15 +386,20 @@ export class GitHubReader {
     });
     result.reservedMain = decision.reservedMain;
     result.capacity = decision.capacity;
-    // Complete evidence remains mandatory. Publication/retry reserves one of
-    // the configured slots; landing does not consume an additional slot.
-    // Valid runner-demand estimates do not withhold submission: GitHub queues
-    // the one candidate. This does not promise capacity or scheduling fairness.
-    result.capacityInformational = decision.capacity.hold !== "invalid-capacity";
-    result.allowed = result.capacityInformational;
+    // Slot one remains advisory for liveness. Speculative slots must fit the
+    // observed capacity budget; landing/observation never consume another slot.
+    result.occupiedBatchSlots = scan.occupiedBatchSlots;
+    result.capacityInformational =
+      decision.capacity.hold !== "invalid-capacity" && scan.occupiedBatchSlots === 0;
+    result.publicationBlocked =
+      scan.occupiedBatchSlots >= this.config.maxInflight ||
+      (scan.occupiedBatchSlots > 0 && decision.capacity.hold !== null);
+    result.allowed =
+      decision.capacity.hold !== "invalid-capacity" &&
+      (purpose !== "publish" || !result.publicationBlocked);
     result.reason = result.allowed
       ? `Batch ${purpose}; ${scan.activeBatchRuns}/${this.config.maxInflight} active provider slots; capacity observation: ${decision.capacity.hold ? CAPACITY_HOLD_REASONS[decision.capacity.hold] : "observed demand fits configured estimates"}`
-      : CAPACITY_HOLD_REASONS["invalid-capacity"];
+      : CAPACITY_HOLD_REASONS[decision.capacity.hold ?? "invalid-capacity"];
     return result;
   }
   async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {

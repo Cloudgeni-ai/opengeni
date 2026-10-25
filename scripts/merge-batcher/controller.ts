@@ -76,6 +76,10 @@ export class LiveReader implements Reader {
     const stateSha = refs.get(this.config.stateRef) ?? null;
     if (this.config.mode === "active" && !stateSha) requireInitializedState(null, emptyLedger());
     const observationWarnings: string[] = [];
+    if (this.config.maxInflight > this.config.speculationDepth)
+      observationWarnings.push(
+        "Configured max-inflight exceeds speculation depth; extra hosted slots cannot be filled by this chain",
+      );
     const queue = [...refs]
       .filter(([ref]) => ref.startsWith(`refs/heads/${this.config.branchPrefix}`))
       .filter(([ref]) => {
@@ -216,7 +220,32 @@ export class LiveReader implements Reader {
       // The planner separately counts live runs and durable missing-run
       // reservations. A full provider slot must not veto a safe root landing.
       // Publication/retry rechecks provider capacity at the effect boundary.
-      mainBusy: this.config.mode === "shadow" ? false : await this.github.mainBusy("observe"),
+      mainBusy:
+        this.config.mode === "shadow"
+          ? false
+          : await this.github.mainBusy(
+              "observe",
+              candidates.flatMap((candidate) => {
+                const reservations = candidate.runs
+                  .filter(
+                    (run) => run.workflow === this.config.workflow && run.status !== "completed",
+                  )
+                  .map((run) => ({
+                    branch: candidate.branch,
+                    headSha: candidate.manifest.tipSha,
+                    runId: run.id,
+                  }));
+                if (
+                  !latestRun(candidate, this.config) &&
+                  ledger.missingRuns[candidate.manifest.batchId]?.status !== "released"
+                )
+                  return [
+                    ...reservations,
+                    { branch: candidate.branch, headSha: candidate.manifest.tipSha },
+                  ];
+                return reservations;
+              }),
+            ),
       headroom: this.github.lastHeadroom,
     };
   }

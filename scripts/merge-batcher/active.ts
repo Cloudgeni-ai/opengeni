@@ -351,10 +351,17 @@ export class GitHubActiveExecutor implements Executor {
     );
     const reservations: BatchReservation[] = [];
     for (const [ref, sha] of queue) {
-      const manifest = await this.git.inspect(sha);
+      let manifest: Manifest;
+      try {
+        manifest = await this.git.inspect(sha);
+      } catch {
+        // Match candidate discovery: unrelated malformed refs are not trusted
+        // reservations. Any actual provider run still occupies a provider slot.
+        continue;
+      }
       const branch = ref.slice("refs/heads/".length);
       if (branch !== `${this.config.branchPrefix}${manifest.batchId}` || manifest.tipSha !== sha)
-        throw new Error("Capacity reservation manifest identity changed");
+        continue;
       const archived =
         ledger.landed.includes(manifest.batchId) || ledger.invalidated.includes(manifest.batchId);
       const runs = this.reads.observedRuns
