@@ -516,7 +516,12 @@ describe("event sources", () => {
       headers: f.owner.headers,
       body: JSON.stringify({ status: "disabled" }),
     });
-    expect(await f.json(off)).toMatchObject({ status: "disabled", statusReason: "Turned off" });
+    expect(await f.json(off)).toMatchObject({
+      status: "disabled",
+      statusReason: "Turned off",
+      statusReasonCode: "turned_off",
+      statusReasonDetail: null,
+    });
     const body = JSON.stringify({ type: "order.created", data: { id: "ord_9" } });
     const ignored = await f.deliver(source.webhookUrl, signingSecret, body);
     expect(await f.json(ignored)).toMatchObject({ status: "ignored" });
@@ -566,6 +571,10 @@ describe("event sources", () => {
       awaitingSigningSecret: true,
     });
     expect(pending.statusReason).toContain("Paste the signing secret Linear shows");
+    expect(pending).toMatchObject({
+      statusReasonCode: "awaiting_secret",
+      statusReasonDetail: null,
+    });
     const early = await f.app.request(new URL(pending.webhookUrl).pathname, {
       method: "POST",
       headers: { "content-type": "application/json", "linear-event": "Issue" },
@@ -593,6 +602,7 @@ describe("event sources", () => {
     expect(await f.json(pasted)).toMatchObject({
       status: "active",
       statusReason: null,
+      statusReasonCode: null,
       awaitingSigningSecret: false,
     });
 
@@ -1130,11 +1140,17 @@ describe("MCP event sources", () => {
     const blocked = await f.task(automation.id);
     expect(blocked.events.triggers[0]).toMatchObject({ status: "blocked" });
     expect(blocked.events.triggers[0].statusReason).toContain("Queue is private");
+    expect(blocked.events.triggers[0]).toMatchObject({
+      statusReasonCode: "forbidden",
+      statusReasonDetail: "Queue is private",
+    });
 
     await f.pump();
     expect((await f.task(automation.id)).events.triggers[0]).toMatchObject({
       status: "active",
       statusReason: null,
+      statusReasonCode: null,
+      statusReasonDetail: null,
     });
 
     const paused = await f.app.request(`${f.tasks}/${automation.id}`, {
@@ -1982,6 +1998,7 @@ describe("Gmail event sources", () => {
     expect(blocked.events.triggers[0]).toMatchObject({
       status: "blocked",
       statusReason: "Reconnect Gmail to keep its mail coming",
+      statusReasonCode: "reconnect",
     });
 
     f.gmail.revoke(false);
@@ -1989,6 +2006,7 @@ describe("Gmail event sources", () => {
     expect((await f.task(automation.id)).events.triggers[0]).toMatchObject({
       status: "active",
       statusReason: null,
+      statusReasonCode: null,
     });
 
     const paused = await f.app.request(`${f.tasks}/${automation.id}`, {

@@ -8,7 +8,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Link } from "@tanstack/react-router";
 import { LayoutTemplateIcon, LockIcon, PlusIcon, RadioTowerIcon, ZapIcon } from "lucide-react";
 
-import type { AutomationTemplate } from "@opengeni/react/automations";
+import { eventStatusReasonText, type AutomationTemplate } from "@opengeni/react/automations";
+import { t } from "@opengeni/react/app/lib/console-text";
+import type { EventSource } from "@opengeni/sdk";
 
 import { Button } from "@opengeni/react/ui/button";
 import {
@@ -488,6 +490,7 @@ export function SchedulesListPage({
                       attention: list.attention[task.id] ?? null,
                       own: perms.own,
                       workspaceId,
+                      sources,
                     })}
                     description={
                       // A phone shows one fact: the next run, or the events it
@@ -586,11 +589,13 @@ function accessBadge({
   attention,
   own,
   workspaceId,
+  sources,
 }: {
   task: ScheduledTask;
   attention: ScheduledTaskAccessAttention | null;
   own: boolean;
   workspaceId: string;
+  sources: readonly EventSource[] | undefined;
 }): ReactNode {
   const attentionText = scheduledTaskAttentionText(attention);
   if (attentionText) {
@@ -609,7 +614,17 @@ function accessBadge({
       <StatusBadge
         variant="dot"
         status="needs_you"
-        reason={held.statusReason ?? "One of its event sources can't deliver events."}
+        reason={
+          eventStatusReasonText(
+            t,
+            {
+              text: held.statusReason,
+              code: held.statusReasonCode,
+              detail: held.statusReasonDetail,
+            },
+            sources?.find((source) => source.id === held.sourceId)?.name,
+          ) ?? "One of its event sources can't deliver events."
+        }
       >
         Needs attention
       </StatusBadge>

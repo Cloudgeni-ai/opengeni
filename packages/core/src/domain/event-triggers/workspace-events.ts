@@ -93,6 +93,8 @@ export function workspaceEventTypeCatalog(): EventTypeDescriptor[] {
     argumentsSchema: null,
     available: true,
     unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
   }));
 }
 

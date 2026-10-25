@@ -28,6 +28,7 @@ import {
   updateEventSource,
   type Database,
   type EventSourceRecord,
+  type EventStatusReason,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { scheduledTaskAccess, type ScheduledTaskViewer } from "../scheduled-task-audience";
@@ -38,6 +39,7 @@ import {
   type DeliveryOutcome,
 } from "./delivery-intake";
 import { webhookEventTypeCatalog } from "./event-type-catalog";
+import { eventStatusReason } from "./status-reason";
 import {
   createGitHubEventSource,
   githubSourceEventTypes,
@@ -141,6 +143,8 @@ export function eventSourceForClient(source: EventSourceRecord, baseUrl: string)
     visibility: source.visibility,
     status: source.status,
     statusReason: source.statusReason,
+    statusReasonCode: source.statusReasonCode,
+    statusReasonDetail: source.statusReasonDetail,
     webhookUrl:
       source.kind === "webhook" && source.routeId
         ? eventSourceWebhookUrl(baseUrl, source.routeId)
@@ -239,9 +243,12 @@ export async function createEventSourceForViewer(
 }
 
 /** Why a pasted webhook waits: the sending app's secret is not pasted yet. */
-function awaitingSecretReason(adapter: WebhookEventAdapter): string {
+function awaitingSecretReason(adapter: WebhookEventAdapter): EventStatusReason {
   const app = adapter === "linear" ? "Linear" : adapter === "sentry" ? "Sentry" : "the sending app";
-  return `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`;
+  return eventStatusReason(
+    "awaiting_secret",
+    `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`,
+  );
 }
 
 /** Network access for MCP sources; tests replace the transport. */
@@ -383,7 +390,8 @@ export async function updateEventSourceForViewer(input: {
     ...(status !== undefined
       ? {
           status,
-          statusReason: status === "disabled" ? "Turned off" : null,
+          statusReason:
+            status === "disabled" ? eventStatusReason("turned_off", "Turned off") : null,
         }
       : {}),
     ...(request.signingSecret !== undefined
@@ -722,5 +730,7 @@ export async function listEventSourceTypes(
     argumentsSchema: null,
     available: true,
     unavailableReason: null,
+    unavailableReasonCode: null,
+    unavailableReasonDetail: null,
   }));
 }

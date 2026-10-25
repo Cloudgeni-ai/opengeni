@@ -15,6 +15,7 @@ export * from "./occurrence-payload";
 export * from "./slack-events";
 export * from "./slack-source";
 export * from "./sources";
+export * from "./status-reason";
 export * from "./trigger-notices";
 export * from "./webhook-adapters";
 export * from "./webhook-signatures";

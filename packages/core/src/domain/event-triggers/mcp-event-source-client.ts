@@ -20,6 +20,7 @@ import {
   MCP_EVENTS_CLIENT_CAPABILITIES,
   withMcpEventNameHeader,
 } from "./mcp-events-protocol";
+import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 
 /**
  * Connects to the MCP server behind an event source as the source's owner:
@@ -36,10 +37,10 @@ export type McpEventSourceClientDeps = {
   fetch?: McpEventsFetch;
 };
 
-/** The source cannot reach its server until a person acts; the message says what to do. */
-export class McpEventSourceUnavailableError extends Error {
-  constructor(message: string) {
-    super(message);
+/** The source cannot reach its server until a person acts; its reason says what to do. */
+export class McpEventSourceUnavailableError extends EventSourceBlockedError {
+  constructor(...reason: Parameters<typeof eventStatusReason>) {
+    super(eventStatusReason(...reason));
     this.name = "McpEventSourceUnavailableError";
   }
 }
@@ -133,7 +134,9 @@ export function ownerConnectionHeaders(
       destinationUrl: request.destinationUrl,
       ...(forceRefresh ? { forceRefresh: true } : {}),
     });
-    if (result.status !== "ok") throw new McpEventSourceUnavailableError(request.reconnect);
+    if (result.status !== "ok") {
+      throw new McpEventSourceUnavailableError("reconnect", request.reconnect);
+    }
     return { ...server.headers, ...result.headers };
   };
 }
@@ -145,11 +148,12 @@ async function resolveServer(
   const serverId = source.mcpServerId;
   const owner = source.ownerSubjectId;
   if (source.kind !== "mcp" || !serverId || !owner) {
-    throw new McpEventSourceUnavailableError("This source is not an MCP connector");
+    throw new McpEventSourceUnavailableError("unavailable", "This source is not an MCP connector");
   }
   const [server] = await workspaceMcpServers(deps, source.workspaceId, { serverIds: [serverId] });
   if (!server) {
     throw new McpEventSourceUnavailableError(
+      "connector_removed",
       "The connector this source listens to is no longer added to the workspace",
     );
   }
@@ -165,6 +169,7 @@ async function resolveServer(
   const reconnect = `Reconnect ${mcpServerDisplayName(server)} to keep its events coming`;
   if (ref.authoritySource === "host") {
     throw new McpEventSourceUnavailableError(
+      "host_sign_in",
       `${mcpServerDisplayName(server)} signs in through the app Opengeni runs in, which automations can't use for events`,
     );
   }
@@ -177,7 +182,7 @@ async function resolveServer(
   const binding = source.connectionId
     ? bindings.find((candidate) => candidate.connectionId === source.connectionId)
     : bindings[0];
-  if (!binding) throw new McpEventSourceUnavailableError(reconnect);
+  if (!binding) throw new McpEventSourceUnavailableError("reconnect", reconnect);
   return {
     server,
     connectionId: binding.connectionId,

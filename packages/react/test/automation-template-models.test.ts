@@ -35,6 +35,8 @@ function source(overrides: Partial<EventSource>): EventSource {
     visibility: "workspace",
     status: "active",
     statusReason: null,
+    statusReasonCode: null,
+    statusReasonDetail: null,
     webhookUrl: null,
     awaitingSigningSecret: false,
     mcp: null,

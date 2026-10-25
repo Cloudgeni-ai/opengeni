@@ -8,6 +8,7 @@ import {
   type EventSourceKind,
   type EventSourceStatus,
   type EventSourceVisibility,
+  type EventStatusReasonCode,
   type EventTrigger,
   type InboundEvent,
   type ParsedEventTriggerInput,
@@ -32,6 +33,50 @@ type DeliveryRow = typeof schema.eventDeliveries.$inferSelect;
 type EventRow = typeof schema.inboundEvents.$inferSelect;
 type TriggerRow = typeof schema.eventTriggers.$inferSelect;
 
+/**
+ * Why a source or trigger is not active: the English sentence people and
+ * agents read, a code (`EVENT_STATUS_REASON_CODES`) clients word in their own
+ * language, and what the app or server said, when it said something.
+ */
+export type EventStatusReason = {
+  text: string;
+  code: EventStatusReasonCode;
+  detail?: string | null;
+};
+
+const STATUS_REASON_MAX_CHARS = 500;
+
+function storedStatusReason(status: string, reason: EventStatusReason | null | undefined) {
+  if (status === "active" || !reason) {
+    return {
+      statusReason: status === "active" ? null : "Blocked",
+      statusReasonCode: null,
+      statusReasonDetail: null,
+    };
+  }
+  const detail = reason.detail?.trim().slice(0, STATUS_REASON_MAX_CHARS) || null;
+  return {
+    statusReason: reason.text.trim().slice(0, STATUS_REASON_MAX_CHARS) || "Blocked",
+    statusReasonCode: reason.code,
+    statusReasonDetail: detail,
+  };
+}
+
+/** The stored reason as clients read it: none while active. */
+function statusReasonFields(row: {
+  status: string;
+  statusReason: string | null;
+  statusReasonCode: string | null;
+  statusReasonDetail: string | null;
+}) {
+  const active = row.status === "active";
+  return {
+    statusReason: active ? null : row.statusReason,
+    statusReasonCode: active ? null : row.statusReasonCode,
+    statusReasonDetail: active || !row.statusReasonCode ? null : row.statusReasonDetail,
+  };
+}
+
 /** The Temporal workflow id, and so the run producer key, of an occurrence's run. */
 export function eventOccurrenceProducerKey(occurrenceId: string): string {
   return `scheduled-task-event:${occurrenceId}`;
@@ -48,6 +93,8 @@ export type EventSourceRecord = {
   visibility: EventSourceVisibility;
   status: EventSourceStatus;
   statusReason: string | null;
+  statusReasonCode: string | null;
+  statusReasonDetail: string | null;
   secretEncrypted: string | null;
   externalKey: string | null;
   mcpServerId: string | null;
@@ -71,7 +118,7 @@ function mapSource(row: SourceRow, routeId: string | null): EventSourceRecord {
     ownerSubjectId: row.ownerSubjectId,
     visibility: row.visibility as EventSourceVisibility,
     status: row.status as EventSourceStatus,
-    statusReason: row.statusReason,
+    ...statusReasonFields(row),
     secretEncrypted: row.secretEncrypted,
     externalKey: row.externalKey,
     mcpServerId: row.mcpServerId,
@@ -125,7 +172,7 @@ export type CreateEventSourceInput = {
   secretEncrypted?: string | null;
   /** Defaults to active; a pasted webhook waiting for its secret starts blocked. */
   status?: EventSourceStatus;
-  statusReason?: string | null;
+  statusReason?: EventStatusReason | null;
   externalKey?: string | null;
   mcpServerId?: string | null;
   connectionId?: string | null;
@@ -155,7 +202,9 @@ export async function createEventSource(
         ownerSubjectId: input.ownerSubjectId,
         visibility: input.visibility,
         secretEncrypted: input.secretEncrypted ?? null,
-        ...(input.status ? { status: input.status, statusReason: input.statusReason ?? null } : {}),
+        ...(input.status
+          ? { status: input.status, ...storedStatusReason(input.status, input.statusReason) }
+          : {}),
         externalKey: input.externalKey ?? null,
         mcpServerId: input.mcpServerId ?? null,
         connectionId: input.connectionId ?? null,
@@ -415,7 +464,7 @@ export async function updateEventSource(
     name?: string;
     visibility?: EventSourceVisibility;
     status?: EventSourceStatus;
-    statusReason?: string | null;
+    statusReason?: EventStatusReason | null;
     secretEncrypted?: string;
   },
 ): Promise<EventSourceRecord | null> {
@@ -426,10 +475,7 @@ export async function updateEventSource(
         ...(patch.name !== undefined ? { name: patch.name } : {}),
         ...(patch.visibility !== undefined ? { visibility: patch.visibility } : {}),
         ...(patch.status !== undefined
-          ? {
-              status: patch.status,
-              statusReason: patch.status === "active" ? null : (patch.statusReason ?? null),
-            }
+          ? { status: patch.status, ...storedStatusReason(patch.status, patch.statusReason) }
           : {}),
         ...(patch.secretEncrypted !== undefined ? { secretEncrypted: patch.secretEncrypted } : {}),
         updatedAt: sql`now()`,
@@ -1128,7 +1174,7 @@ function mapTrigger(row: TriggerRow, sourceKind: EventSourceKind): EventTrigger 
     includeOwnEvents: row.includeOwnEvents,
     arguments: row.arguments ?? null,
     status: row.status as EventTrigger["status"],
-    statusReason: row.statusReason,
+    ...statusReasonFields(row),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -1282,6 +1328,8 @@ export async function setScheduledTaskEvents(
           streamKey: trigger.streamKey ?? "",
           status: "active",
           statusReason: null,
+          statusReasonCode: null,
+          statusReasonDetail: null,
         };
         const current = byPosition.get(position);
         if (current) {
@@ -1419,31 +1467,6 @@ export async function wakeScheduledTaskEventSubscriptions(
   );
 }
 
-/** Mark a trigger blocked (or active again) with a plain-language reason. */
-export async function setEventTriggerStatus(
-  db: Database,
-  workspaceId: string,
-  triggerId: string,
-  status: EventTrigger["status"],
-  statusReason: string | null,
-): Promise<void> {
-  await withWorkspaceRls(db, workspaceId, (scoped) =>
-    scoped
-      .update(schema.eventTriggers)
-      .set({
-        status,
-        statusReason: status === "active" ? null : statusReason,
-        updatedAt: sql`now()`,
-      })
-      .where(
-        and(
-          eq(schema.eventTriggers.workspaceId, workspaceId),
-          eq(schema.eventTriggers.id, triggerId),
-        ),
-      ),
-  );
-}
-
 /** An automation whose trigger changed state because its source or stream did. */
 export type EventTriggerNotice = {
   taskId: string;
@@ -1463,9 +1486,9 @@ export async function setEventStreamTriggerStatus(
   workspaceId: string,
   stream: { sourceId: string; streamKey: string },
   status: "active" | "blocked",
-  reason: string | null,
+  reason: EventStatusReason | null,
 ): Promise<EventTriggerNotice[]> {
-  const statusReason = status === "active" ? null : (reason ?? "Blocked").slice(0, 500);
+  const stored = storedStatusReason(status, reason);
   return await withWorkspaceRls(db, workspaceId, async (scoped) => {
     const changed = await rawRows<{ task_id: string; was: string }>(
       scoped,
@@ -1476,10 +1499,15 @@ export async function setEventStreamTriggerStatus(
           for update
         )
         update event_triggers trigger
-        set status = ${status}, status_reason = ${statusReason}, updated_at = now()
+        set status = ${status}, status_reason = ${stored.statusReason},
+          status_reason_code = ${stored.statusReasonCode},
+          status_reason_detail = ${stored.statusReasonDetail}, updated_at = now()
         from previous
         where trigger.id = previous.id
-          and (trigger.status <> ${status} or trigger.status_reason is distinct from ${statusReason})
+          and (trigger.status <> ${status}
+            or trigger.status_reason is distinct from ${stored.statusReason}
+            or trigger.status_reason_code is distinct from ${stored.statusReasonCode}
+            or trigger.status_reason_detail is distinct from ${stored.statusReasonDetail})
         returning trigger.task_id, previous.status as was`,
     );
     const transitioned = [

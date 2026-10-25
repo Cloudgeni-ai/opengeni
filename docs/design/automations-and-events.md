@@ -446,6 +446,19 @@ the owner explicitly narrows them.
   run, the event and source the earliest listening automation waits for, and
   how many automations wait. It counts only automations the reader can see,
   and leaves out a source that is private to someone else.
+- **Status reasons.** A source or trigger that is blocked or off, and an event
+  type a source can't send, say why three ways: `statusReason` (or
+  `unavailableReason`), an English sentence naming the app; `…Code`, one of
+  `EVENT_STATUS_REASON_CODES` (`reconnect`, `forbidden`, `not_answering`,
+  `github_event_not_subscribed` and so on); and `…Detail`, what the app or
+  server said, or the account or GitHub App event the reason names. Clients
+  word known codes in their own language and show the sentence for a code
+  they don't know, so a newer server never leaves an older client blank.
+  `eventStatusReasonText` in `@opengeni/react/automations` does this for the
+  panel, the web app and embedders. Agents keep reading the sentence alone:
+  their tools never show the code. The codes are stored next to the sentence
+  (`status_reason_code`, `status_reason_detail`) and only read while the row
+  is not active.
 - **UI.** Schedules become Automations. The editor has a "When" section with a
   schedule and event triggers; each run shows the events that caused it.
   Event sources have a page with their endpoint, status and delivery log. Chats

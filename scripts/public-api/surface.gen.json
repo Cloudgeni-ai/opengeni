@@ -16480,6 +16480,8 @@
         "$.ownerSubjectId": "string! null",
         "$.status": "ref(EventSourceStatus)!",
         "$.statusReason": "string! null",
+        "$.statusReasonCode": "string! null",
+        "$.statusReasonDetail": "string! null",
         "$.updatedAt": "string!",
         "$.viewerAccess": "enum?=[\"\\\"manage\\\"\",\"\\\"use\\\"\"]",
         "$.visibility": "ref(SessionVisibility)!",
@@ -16533,6 +16535,8 @@
         "$.sourceKind": "ref(EventSourceKind)!",
         "$.status": "ref(EventTriggerStatus)!",
         "$.statusReason": "string! null",
+        "$.statusReasonCode": "string! null",
+        "$.statusReasonDetail": "string! null",
         "$.updatedAt": "string!"
       }
     },
@@ -16575,7 +16579,9 @@
         "$.fields[].description": "string!",
         "$.fields[].field": "string!",
         "$.type": "string!",
-        "$.unavailableReason": "string! null"
+        "$.unavailableReason": "string! null",
+        "$.unavailableReasonCode": "string! null",
+        "$.unavailableReasonDetail": "string! null"
       }
     },
     "ExternalAuthInteractiveRequest": {
@@ -36990,6 +36996,8 @@
       "eventSourceStatusBadge": "value",
       "eventSourceSubjectOfChoice": "value",
       "EventSourceTile": "value",
+      "EventStatusReasonParts": "type",
+      "eventStatusReasonText": "value",
       "EventTriggerDraft": "type",
       "eventTriggerDraftFrom": "value",
       "EventTriggerEditor": "value",
