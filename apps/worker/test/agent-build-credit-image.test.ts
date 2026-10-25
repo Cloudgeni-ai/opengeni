@@ -53,6 +53,9 @@ async function creditTurnImageGeneration(input: {
       defaultModelId: null,
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, value) => value.catalog),
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
+      async (_db, value) => value.governance,
+    ),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
   );
   const remembered: GeneratedImageReceipt[] = [];

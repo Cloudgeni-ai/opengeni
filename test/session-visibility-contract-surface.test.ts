@@ -97,6 +97,10 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   // Weakens only the membership fence in the visibility transition and fork
   // bodies from FOR UPDATE to FOR NO KEY UPDATE; same boundary otherwise.
   "packages/db/drizzle/0925_membership_fences_allow_key_checks.sql",
+  // Lets message forks copy marked workspace-governance developer messages at
+  // fractional positions, like 0487's Skill catalog; same fork bodies,
+  // owner-only boundary and locks.
+  "packages/db/drizzle/0980_workspace_governance_context_forks.sql",
   "packages/db/src/session-tenancy.ts",
   // Reads the owner-only foreign-authority counts for the preview and consent.
   "packages/db/src/session-visibility-work.ts",
