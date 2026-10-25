@@ -34,7 +34,9 @@ impl PostgresStore {
     ) -> Result<ImageId> {
         // Separate statements: one alone would not see a row another
         // recorded while it waited on it. The use comes after the image it
-        // names, which is never deleted.
+        // names, which is never deleted. A use only moves forward: this one
+        // drew its number before it waited on the row, so a use recorded
+        // meanwhile may be the later one.
         let client = self.client().await?;
         client
             .execute(
@@ -48,7 +50,8 @@ impl PostgresStore {
             .execute(
                 "insert into compute_image_names (name, source, used) \
                  values ($1, $2, nextval('compute_image_uses')) \
-                 on conflict (name, source) do update set used = excluded.used",
+                 on conflict (name, source) do update \
+                 set used = greatest(compute_image_names.used, excluded.used)",
                 &[&name, &source],
             )
             .await

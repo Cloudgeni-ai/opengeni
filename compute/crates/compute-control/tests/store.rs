@@ -572,6 +572,95 @@ async fn the_first_image_recorded_for_a_source_is_the_one_kept() {
     each(images, images).await;
 }
 
+/// A use of a name's source that waited on its row while later uses were
+/// recorded does not undo them: a rollback to that source, recorded
+/// meanwhile, stays the name's latest.
+#[tokio::test]
+async fn a_delayed_use_does_not_undo_a_later_one() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let (watch, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_uses_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    // The store's connections carry the schema's name, so the wait below
+    // sees only this check's writes, not another run's on the same server.
+    let scoped = format!("{url} options='-c search_path={schema}' application_name={schema}");
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let name = "sandbox";
+    let old = "registry.example/sandbox@sha256:01";
+    let new = "registry.example/sandbox@sha256:02";
+    let first = image_id();
+    store.record_built(old, name, first, 1).await.unwrap();
+
+    // Another write of the old source draws its number, then waits on the
+    // row this transaction holds.
+    let holder = client.transaction().await.unwrap();
+    holder
+        .execute(
+            &format!(
+                "select 1 from {schema}.compute_image_names \
+                 where name = $1 and source = $2 for update"
+            ),
+            &[&name, &old],
+        )
+        .await
+        .unwrap();
+    let delayed = {
+        let store = store.clone();
+        tokio::spawn(async move { store.record_built(old, name, image_id(), 2).await })
+    };
+    let waiting = "select count(*) from pg_stat_activity where application_name = $1 \
+                   and wait_event_type = 'Lock' and query like 'insert into compute_image_names%'";
+    let mut waited = 0;
+    while watch
+        .query_one(waiting, &[&schema])
+        .await
+        .unwrap()
+        .get::<_, i64>(0)
+        == 0
+    {
+        assert!(waited < 500, "the delayed write never waited on the row");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waited += 1;
+    }
+
+    // Meanwhile the name moves to a new source and rolls back to the old
+    // one: the rollback is recorded by the transaction holding the row.
+    let next = image_id();
+    assert_eq!(store.record_built(new, name, next, 3).await.unwrap(), next);
+    holder
+        .execute(
+            &format!(
+                "update {schema}.compute_image_names \
+                 set used = nextval('{schema}.compute_image_uses') \
+                 where name = $1 and source = $2"
+            ),
+            &[&name, &old],
+        )
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    assert_eq!(delayed.await.unwrap().unwrap(), first);
+    assert_eq!(store.latest_built(name).await.unwrap(), Some(first));
+
+    drop(store);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
+
 async fn keys<S: Store>(store: S) {
     let digest = format!("{:x}", random());
     assert_eq!(store.team_of(&digest).await.unwrap(), None);
