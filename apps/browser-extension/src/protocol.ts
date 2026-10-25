@@ -89,6 +89,10 @@ export type BridgeCommand =
       type: "debugger.command";
       tabId: string;
       sessionId?: string;
+      /** The attachment `debugger.attach` reported. A command naming an
+       * attachment that has since ended is refused, so a late command can
+       * never run under a newer attachment of the same tab. */
+      attachment?: number;
       method: string;
       params: Record<string, unknown>;
     }
@@ -140,7 +144,8 @@ const DEBUGGER_DOMAINS = new Set([
 // a background tab rendering and acknowledging input without activating it or
 // raising Chrome; without it Chrome holds every mouse event sent to a hidden
 // tab for about five seconds. Chrome clears it when the debugger detaches.
-const DEBUGGER_METHODS = new Set(["Emulation.setFocusEmulationEnabled"]);
+// Inspector.enable only reports a crashed tab, so the agent stops waiting on it.
+const DEBUGGER_METHODS = new Set(["Emulation.setFocusEmulationEnabled", "Inspector.enable"]);
 
 export function isAllowedDebuggerMethod(method: string): boolean {
   return DEBUGGER_METHODS.has(method) || DEBUGGER_DOMAINS.has(method.slice(0, method.indexOf(".")));
@@ -263,16 +268,21 @@ function parseBridgeCommand(value: unknown): BridgeCommand {
       exactKeys(command, ["type", "tabId"]);
       return { type: command.type, tabId: requireTabId(command.tabId) };
     case "debugger.command": {
-      exactKeys(command, ["type", "tabId", "sessionId", "method", "params"]);
+      exactKeys(command, ["type", "tabId", "sessionId", "attachment", "method", "params"]);
       const params = requireRecord(command.params, "debugger command parameters");
       const sessionId =
         command.sessionId === undefined
           ? undefined
           : boundedString(command.sessionId, 1, 512, "debugger session id");
+      const attachment =
+        command.attachment === undefined
+          ? undefined
+          : boundedInteger(command.attachment, 1, Number.MAX_SAFE_INTEGER);
       return {
         type: command.type,
         tabId: requireTabId(command.tabId),
         ...(sessionId ? { sessionId } : {}),
+        ...(attachment === undefined ? {} : { attachment }),
         method: debuggerMethod(command.method),
         params,
       };
