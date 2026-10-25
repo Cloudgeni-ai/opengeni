@@ -1040,6 +1040,88 @@ describe("searches that name an integration the person can connect", () => {
     });
   }
 
+  test("one-word names the ranker reads as operations never name an integration", async () => {
+    const verbs = [
+      { capabilityId: "registry:send", name: "Send" },
+      { capabilityId: "registry:make", name: "Make" },
+      { capabilityId: "registry:tool", name: "Tool" },
+    ];
+    for (const query of [
+      "send message to another session",
+      "send message to another session; read session events",
+      "make a new recurring reminder",
+      "send an email",
+      "find a tool for this",
+    ])
+      expect(connectableIntegrationsNamedIn(query, verbs)).toEqual([]);
+    // Product names and multi-word names that contain an operation still count.
+    expect(
+      connectableIntegrationsNamedIn("send it with sendgrid, then use make com", [
+        { capabilityId: "registry:sendgrid", name: "SendGrid" },
+        { capabilityId: "registry:make-com", name: "Make.com" },
+      ]).map((m) => m.name),
+    ).toEqual(["SendGrid", "Make.com"]);
+    for (const transport of ["generic_dispatch", "openai_native"] as const) {
+      const runtime = runtimeWith(transport, async () => verbs);
+      const result = await runtime.prepareSearch({ query: "make a new recurring reminder" });
+      expect(loaded(result)).not.toContain(CARD);
+      expect(JSON.parse(result.output).notConnected).toBeUndefined();
+    }
+  });
+
+  test("only Connect cards the person completes are named, with wording for several", () => {
+    const match = (capabilityId: string, name: string, action: string) => ({
+      capabilityId,
+      name,
+      approximate: false,
+      setup: {
+        status: "authorization_required",
+        action,
+        nextAction: { toolName: "capability_authorization_request", capabilityId },
+      },
+    });
+    const content = [
+      {
+        type: "text",
+        text: JSON.stringify({
+          matches: [
+            match("api:gmail", "Gmail", "connect"),
+            match("registry:weather", "Weather", "add_credentials"),
+            match("registry:archive", "Archive", "enable"),
+          ],
+        }),
+      },
+    ];
+    expect(connectableIntegrationsFromCatalogResult({ content })).toEqual([
+      GMAIL,
+      { capabilityId: "registry:weather", name: "Weather" },
+    ]);
+    expect(connectableIntegrationNotice([GMAIL, CALENDAR])).toBe(
+      'Not connected yet: Gmail (capabilityId "api:gmail"), Google Calendar (capabilityId "api:google-calendar"). If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.',
+    );
+  });
+
+  test("the catalog read runs alongside the decision model", async () => {
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const lookup: ConnectableIntegrationLookup = async (query) => {
+      events.push("lookup:start");
+      await gate;
+      events.push("lookup:end");
+      return fakeLookup().lookup(query);
+    };
+    const runtime = runtimeWith("generic_dispatch", lookup, async () => {
+      events.push("decision");
+      release();
+      return ["opengeni__knowledge_search"];
+    });
+    const result = await runtime.prepareSearch({ query: "find my gmail stuff" });
+    expect(events).toEqual(["lookup:start", "decision", "lookup:end"]);
+    expect(loaded(result)).toEqual(["opengeni__knowledge_search", CARD]);
+    expect(JSON.parse(result.output).notConnected).toBe(GMAIL_NOTICE);
+  });
+
   test("decision-model selections and their fallback carry the card tool and notice", async () => {
     let consulted = 0;
     const selected = runtimeWith("generic_dispatch", fakeLookup().lookup, async () => {

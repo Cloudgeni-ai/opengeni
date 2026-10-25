@@ -25,7 +25,7 @@ import {
   parseSearchArgs,
   toolsNamedInQuery,
 } from "./codex-tool-search";
-import { ToolSearchIndex } from "./tool-discovery-ranking";
+import { isOperationWord, ToolSearchIndex } from "./tool-discovery-ranking";
 import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
 import { toolDisclosureItem } from "./provider-history-adapter";
@@ -174,7 +174,9 @@ function normalizedWords(text: string): string {
 /**
  * The catalog matches the query actually names: the whole integration name as
  * words of the query ("Gmail", "Google Calendar"), never a description or
- * spelling-similarity hit. At most three, in catalog order.
+ * spelling-similarity hit. A one-word name the ranker reads as an operation
+ * ("Send", "Make") names nothing: the query means the verb. At most three, in
+ * catalog order.
  */
 export function connectableIntegrationsNamedIn(
   query: string,
@@ -186,6 +188,7 @@ export function connectableIntegrationsNamedIn(
     const name = normalizedWords(match.name);
     if (
       name.trim() &&
+      !isOperationWord(match.name) &&
       words.includes(name) &&
       !named.some((n) => n.capabilityId === match.capabilityId)
     )
@@ -205,12 +208,16 @@ export function connectableIntegrationNotice(
         `${integration.name} (capabilityId ${JSON.stringify(integration.capabilityId)})`,
     )
     .join(", ");
-  return `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`;
+  return integrations.length === 1
+    ? `Not connected yet: ${listed}. If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.`
+    : `Not connected yet: ${listed}. If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.`;
 }
 
 /**
  * The exact (not spelling-approximate) capability_catalog_search matches whose
- * next step is a Connect card. Accepts the MCP content array or a full result.
+ * next step is a Connect card the person completes themselves (connect or add
+ * credentials), not one a workspace admin must enable. Accepts the MCP content
+ * array or a full result.
  */
 export function connectableIntegrationsFromCatalogResult(
   result: unknown,
@@ -236,6 +243,7 @@ export function connectableIntegrationsFromCatalogResult(
       const setup = isRecord(match.setup) ? match.setup : null;
       const next = setup && isRecord(setup.nextAction) ? setup.nextAction : null;
       if (next?.toolName !== "capability_authorization_request") continue;
+      if (setup!.action === "enable") continue;
       if (typeof match.capabilityId !== "string" || typeof match.name !== "string") continue;
       found.push({ capabilityId: match.capabilityId, name: match.name });
     }
@@ -740,16 +748,19 @@ export class LazyToolRuntime {
     // Either integration setup tool brings the other. A search no installed
     // tool clearly matches, which names an integration the person can connect,
     // also loads the Connect card tool and names that integration plainly, so
-    // the card is the next call.
+    // the card is the next call. The catalog read runs alongside ranking and
+    // any decision model; only the companions wait for it.
     const setup = integrationSetupToolNames(pool);
-    const connectable =
+    const lookup: Promise<ConnectableIntegration[]> =
       named.length || strong.length || setup.length < 2
-        ? []
-        : await this.connectableIntegrations(query, signal);
-    const setupFor = (chosen: readonly string[]) =>
+        ? Promise.resolve([])
+        : this.connectableIntegrations(query, signal);
+    // Rejects only on cancellation, which the search itself observes.
+    lookup.catch(() => undefined);
+    const setupFor = async (chosen: readonly string[]) =>
       (chosen.some(isIntegrationSetupToolName)
         ? setup
-        : connectable.length
+        : (await lookup).length
           ? [INTEGRATION_CARD_TOOL_NAME]
           : []
       ).filter((name) => !chosen.includes(name));
@@ -759,6 +770,7 @@ export class LazyToolRuntime {
       setupFor,
       signal,
     );
+    const connectable = await lookup;
     return connectable.length ? this.withConnectableNotice(result, connectable) : result;
   }
 
@@ -798,13 +810,13 @@ export class LazyToolRuntime {
       clear: readonly string[];
       strongest: readonly string[];
     },
-    setupFor: (chosen: readonly string[]) => string[],
+    setupFor: (chosen: readonly string[]) => Promise<string[]>,
     signal?: AbortSignal,
   ): Promise<GenericSearchMarker> {
     const { query, limit, named, clear, strongest } = search;
     if (named.length || clear.length || !this.decisionModel) {
       const chosen = named.length ? named : clear.length ? clear : strongest;
-      const companions = setupFor(chosen);
+      const companions = await setupFor(chosen);
       return chosen.length || companions.length
         ? this.selectedSearch(chosen, rawArguments, true, companions)
         : {
@@ -816,7 +828,7 @@ export class LazyToolRuntime {
     // Wider recall than the model-facing result page, not an execution quota.
     const candidates = this.searchIndex!.rank(query, Math.max(40, limit));
     if (!candidates.length) {
-      const companions = setupFor([]);
+      const companions = await setupFor([]);
       return companions.length
         ? this.selectedSearch([], rawArguments, false, companions)
         : {
@@ -847,7 +859,7 @@ export class LazyToolRuntime {
     } catch {
       // Cancellation belongs to the owning turn, not the recovery path.
       signal?.throwIfAborted();
-      const companions = setupFor(strongest);
+      const companions = await setupFor(strongest);
       const fallback =
         strongest.length || companions.length
           ? this.selectedSearch(strongest, rawArguments, true, companions)
@@ -865,7 +877,7 @@ export class LazyToolRuntime {
       };
     }
     signal?.throwIfAborted();
-    return this.selectedSearch(chosen, rawArguments, false, setupFor(chosen));
+    return this.selectedSearch(chosen, rawArguments, false, await setupFor(chosen));
   }
 
   private selectedSearch(
