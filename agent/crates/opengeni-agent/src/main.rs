@@ -95,6 +95,11 @@ const CONNECTION_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// Process entry point. Parses the CLI, initializes tracing, and dispatches to
 /// the selected subcommand. Returns a non-zero exit code on a fatal error.
 fn main() -> std::process::ExitCode {
+    // First, before any thread exists: an image this one replaced blocked
+    // the reconnect signal across the exec, and every thread started with
+    // it blocked would keep it so, as would every command it starts.
+    #[cfg(unix)]
+    let caught = reconnect_signal::catch_until_handled();
     if browser_bridge::is_native_host_invocation() {
         init_native_host_tracing();
         return match browser_bridge::run_native_host() {
@@ -114,6 +119,10 @@ fn main() -> std::process::ExitCode {
     // print to the terminal and must not interleave with the service's file.
     let persistent = matches!(cli.command, None | Some(Command::Run(_)));
     init_tracing(persistent);
+    #[cfg(unix)]
+    if let Err(error) = caught {
+        error!(%error, "could not catch SIGUSR1 while this image starts: it stays blocked, in the commands this agent runs too");
+    }
     #[cfg(unix)]
     match inherited {
         Ok(true) => info!("continuing commands handed over by the previous agent image"),
@@ -747,17 +756,23 @@ fn operation_cgroups(
 /// one link, dialed through the sandbox's host with no credential, and keeps
 /// the relay credential the host sends in memory. It reports what it has in
 /// use as the guest's activity file, reconnects at once on `SIGUSR1` (sent
-/// when its host has lost its connections), and never enrolls, renews,
-/// updates itself or installs
-/// a service: Opengeni compute owns the sandbox's enrollment and image.
+/// when its host has lost its connections), and never enrolls, renews or
+/// installs a service: Opengeni compute owns the sandbox's enrollment. It
+/// does update itself, as a connected machine does: a sandbox keeps its disk
+/// for as long as it lives, so the agent its image carried would otherwise
+/// run for good. The verified release replaces the binary on that disk and
+/// this process execs it, handing its commands over, so the guest init that
+/// supervises it sees the same process carry on.
 async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
+    // Capture before any update replaces the running executable inode.
+    update::installed_executable().map_err(string_err)?;
     let link_config = compute::ComputeConfig::load(link_file).map_err(to_boxed)?;
     std::fs::create_dir_all(&link_config.workspace_root).map_err(to_boxed)?;
     std::env::set_current_dir(&link_config.workspace_root).map_err(to_boxed)?;
 
     // One agent serves a sandbox: a second would be a duplicate responder for
     // the same subjects (see `run`).
-    let _instance_lock = match instance_lock::acquire() {
+    let instance_lock_guard = match instance_lock::acquire() {
         Ok(lock) => Some(lock),
         Err(instance_lock::LockError::Contended { holder_pid }) => {
             let pid = holder_pid.map_or_else(|| "unknown".to_owned(), |p| p.to_string());
@@ -771,7 +786,12 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         }
     };
 
-    let op_cgroups = operation_cgroups(&[])?;
+    // Leaves of commands handed over by the previous image stay in place.
+    #[cfg(unix)]
+    let handed_over_cgroups = handover::inherited_cgroup_dirs();
+    #[cfg(not(unix))]
+    let handed_over_cgroups: Vec<std::path::PathBuf> = Vec::new();
+    let op_cgroups = operation_cgroups(&handed_over_cgroups)?;
     let _virtual_desktop = maybe_spawn_virtual_desktop(args);
     // The link file names the root explicitly, `/` included: no fallback to
     // the home directory as for a working directory a user started in.
@@ -794,9 +814,22 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     });
     let streams = hub.activity().clone();
     let link_platform = Arc::new(platform.with_stream_registry(Arc::new(hub)));
-    let link = SupervisorLink::new(link_config.connection_id(), link_platform, credentials)
-        .with_connection_instance_id(uuid::Uuid::new_v4().to_string())
-        .with_compute(supervisor::ComputeLink { relay });
+    // A successor image keeps its predecessor's connection instance: the host
+    // takes the same session up again, and the op subjects of the commands it
+    // continues stay valid.
+    #[cfg(unix)]
+    let inherited_instance = handover::inherited_connection_instance();
+    #[cfg(not(unix))]
+    let inherited_instance: Option<String> = None;
+    let connection_instance_id =
+        inherited_instance.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let link = SupervisorLink::new(
+        link_config.connection_id(),
+        link_platform.clone(),
+        credentials,
+    )
+    .with_connection_instance_id(connection_instance_id.clone())
+    .with_compute(supervisor::ComputeLink { relay });
     let links = vec![link];
     let (_keep_links, updates_rx) = tokio::sync::watch::channel(links.clone());
 
@@ -806,7 +839,17 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
     supervisor = supervisor.with_update_drain(update_drain);
-    spawn_signal_handler(supervisor.shutdown_handle());
+    #[cfg(unix)]
+    {
+        supervisor = carry_on_handed_over(
+            supervisor,
+            config_dir.as_deref(),
+            &link_platform,
+            connection_instance_id,
+        );
+    }
+    let shutdown_status = supervisor.shutdown_handle();
+    spawn_signal_handler(shutdown_status.clone());
     spawn_reconnect_handler(supervisor.reconnect_handle());
 
     let silence = link_config.stream_silence;
@@ -829,29 +872,176 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         sidecars.shutdown().await;
     }
     supervisor_result.map_err(to_boxed)?;
+    if shutdown_status.is_update() {
+        // The binary on the sandbox's disk has already been atomically
+        // replaced and health-gated: exec it in this same process.
+        exec_verified_successor(&supervisor, instance_lock_guard)?;
+    }
     info!("agent stopped");
     Ok(())
+}
+
+/// Releases the single-process lock, then starts the verified successor with
+/// whatever this image hands over. The guest init signals this process with
+/// `SIGUSR1` whenever the host loses its connections, and an exec resets a
+/// handled signal to its default, which ends the process: so the successor
+/// starts with it blocked, and catches it from the start of its `main` until
+/// it handles it (see [`reconnect_signal::catch_until_handled`]).
+fn exec_verified_successor<P: Platform + 'static>(
+    supervisor: &Supervisor<P>,
+    instance_lock: Option<instance_lock::InstanceLock>,
+) -> anyhow_lite::Result {
+    drop(instance_lock);
+    #[cfg(unix)]
+    let handover = supervisor.take_pending_handover();
+    #[cfg(not(unix))]
+    let handover = {
+        let _ = supervisor;
+        None::<()>
+    };
+    exec_successor_holding_reconnect(&handover)
+}
+
+/// [`restart_after_verified_update`] with `SIGUSR1` blocked across the exec
+/// (see [`exec_verified_successor`]). Returns only if the exec failed, and
+/// this image handles the signal again then.
+fn exec_successor_holding_reconnect(handover: &CarriedHandover) -> anyhow_lite::Result {
+    #[cfg(unix)]
+    let _held = reconnect_signal::Held::new().map_err(to_boxed)?;
+    restart_after_verified_update(handover)
+}
+
+/// The signal the guest init sends to have the agent reconnect at once.
+#[cfg(unix)]
+mod reconnect_signal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use nix::sys::signal::{pthread_sigmask, SigSet, SigmaskHow, Signal};
+
+    fn usr1() -> SigSet {
+        let mut set = SigSet::empty();
+        set.add(Signal::SIGUSR1);
+        set
+    }
+
+    /// What catches `SIGUSR1` until it is handled: the flag it sets.
+    static CAUGHT: Mutex<Option<(signal_hook::SigId, Arc<AtomicBool>)>> = Mutex::new(None);
+
+    /// Blocks `SIGUSR1` on this thread until dropped. An exec keeps the
+    /// block, and a signal that arrives meanwhile stays pending.
+    pub(crate) struct Held(());
+
+    impl Held {
+        pub(crate) fn new() -> nix::Result<Self> {
+            pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&usr1()), None)?;
+            Ok(Self(()))
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = release();
+        }
+    }
+
+    /// Unblocks `SIGUSR1` on this thread: one pending is delivered now.
+    pub(crate) fn release() -> nix::Result<()> {
+        pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&usr1()), None)
+    }
+
+    /// In an image that another replaced, which blocked `SIGUSR1` across the
+    /// exec ([`Held`]): catches it with a flag until
+    /// [`crate::spawn_reconnect_handler`] handles it, and unblocks it. Called
+    /// first in `main`, before this process starts any thread, since a
+    /// thread started with it blocked keeps it blocked, and so does every
+    /// process such a thread starts, the user's commands among them, which
+    /// then never receive it. One pending since the exec sets the flag now.
+    /// An image started otherwise does not have it blocked, and this leaves
+    /// it as it is.
+    pub(crate) fn catch_until_handled() -> std::io::Result<()> {
+        if !SigSet::thread_get_mask()?.contains(Signal::SIGUSR1) {
+            return Ok(());
+        }
+        let came = Arc::new(AtomicBool::new(false));
+        let id = signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&came))?;
+        *CAUGHT.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, came));
+        release()?;
+        Ok(())
+    }
+
+    /// Ends [`catch_until_handled`]'s catching, now that `SIGUSR1` is
+    /// handled: whether it came meanwhile.
+    pub(crate) fn handled() -> bool {
+        let caught = CAUGHT.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let Some((id, came)) = caught else {
+            return false;
+        };
+        signal_hook::low_level::unregister(id);
+        came.load(Ordering::SeqCst)
+    }
+}
+
+/// Continues the commands a previous agent image handed over, and readies
+/// this one to hand its own over when a verified update replaces it. The
+/// handover manifest lives in the config dir, so without one this image can
+/// still continue what it was given but hands nothing over itself.
+#[cfg(unix)]
+fn carry_on_handed_over<P: Platform + 'static>(
+    mut supervisor: Supervisor<P>,
+    config_dir: Option<&Path>,
+    platform: &P,
+    connection_instance_id: String,
+) -> Supervisor<P> {
+    let inherited = handover::take_inherited();
+    if let Some(dir) = config_dir {
+        handover::remove_stray_frames(&dir.join("spool"), inherited.as_ref());
+        supervisor = supervisor
+            .with_update_handover(dir.join(handover::MANIFEST_FILE), connection_instance_id);
+    }
+    if let Some(inherited) = inherited {
+        supervisor.restore_lost_markers(inherited.lost_markers);
+        supervisor.adopt_handed_over(platform, inherited.ops);
+    }
+    supervisor
 }
 
 /// Wires `SIGUSR1` to an immediate reconnect: the guest init sends it when
 /// the sandbox's host has no stream for the agent's connections (after a
 /// move, a recovery on another host or a restart of the host agent).
+///
+/// An image this one replaced blocked it across the exec (see
+/// [`exec_verified_successor`]), and `main` caught it from its start
+/// ([`reconnect_signal::catch_until_handled`]); one that came meanwhile
+/// reconnects this image at once.
 fn spawn_reconnect_handler(reconnect: supervisor::ReconnectSignal) {
     #[cfg(unix)]
-    tokio::spawn(async move {
+    {
         use tokio::signal::unix::{signal, SignalKind};
         let mut restored = match signal(SignalKind::user_defined1()) {
             Ok(restored) => restored,
             Err(error) => {
+                // Still caught or blocked, it waits rather than ends this
+                // process.
                 warn!(%error, "could not install the SIGUSR1 handler; reconnects after the host loses the link wait for back-off");
                 return;
             }
         };
-        while restored.recv().await.is_some() {
-            info!("the host lost this sandbox's connections; reconnecting at once");
+        if reconnect_signal::handled() {
+            info!("the host lost this sandbox's connections while this image started; reconnecting at once");
             reconnect.request();
         }
-    });
+        // Unblocked already, unless `main` could not catch it.
+        if let Err(error) = reconnect_signal::release() {
+            warn!(%error, "could not unblock SIGUSR1; reconnects after the host loses the link wait for back-off");
+        }
+        tokio::spawn(async move {
+            while restored.recv().await.is_some() {
+                info!("the host lost this sandbox's connections; reconnecting at once");
+                reconnect.request();
+            }
+        });
+    }
     #[cfg(not(unix))]
     drop(reconnect);
 }
@@ -867,19 +1057,47 @@ fn restart_after_verified_update(handover: &CarriedHandover) -> anyhow_lite::Res
     info!(path = %executable.display(), "starting verified self-update successor");
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt as _;
-        let mut command = std::process::Command::new(executable);
-        command.args(&args);
+        use std::ffi::{CString, OsStr, OsString};
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+        let c_string = |bytes: Vec<u8>| CString::new(bytes).map_err(to_boxed);
+        let program = c_string(executable.as_os_str().as_bytes().to_vec())?;
+        let mut command_line = vec![program.clone()];
+        for arg in args {
+            command_line.push(c_string(arg.into_vec())?);
+        }
+        let carried = handover
+            .as_ref()
+            .map(|handover| (OsStr::new(handover::HANDOVER_ENV), &handover.env_value));
+        let mut envp = Vec::new();
+        for (key, value) in std::env::vars_os() {
+            if carried.is_some_and(|(name, _)| key.as_os_str() == name) {
+                continue;
+            }
+            let mut entry = key.into_vec();
+            entry.push(b'=');
+            entry.extend(value.into_vec());
+            envp.push(c_string(entry)?);
+        }
+        if let Some((name, value)) = carried {
+            let mut entry = OsString::from(name).into_vec();
+            entry.push(b'=');
+            entry.extend(value.as_bytes());
+            envp.push(c_string(entry)?);
+        }
         if let Some(handover) = handover {
             // Last step before exec: nothing else spawns from here, so only
             // the successor image inherits the carried descriptors.
             for exec in &handover.execs {
                 exec.prepare_exec().map_err(to_boxed)?;
             }
-            command.env(handover::HANDOVER_ENV, &handover.env_value);
         }
-        let error = command.exec();
-        return Err(to_boxed(error));
+        // Not `std::process::Command::exec`, which clears the signal mask:
+        // the successor keeps this thread's (see `exec_verified_successor`).
+        let error = match nix::unistd::execve(&program, &command_line, &envp) {
+            Ok(never) => match never {},
+            Err(error) => error,
+        };
+        return Err(to_boxed(std::io::Error::from(error)));
     }
     #[cfg(windows)]
     {

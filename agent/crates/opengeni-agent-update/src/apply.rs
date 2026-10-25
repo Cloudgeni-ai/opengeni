@@ -162,12 +162,22 @@ pub fn replace_running_exe(new_bytes: &[u8]) -> UpdateResult<PathBuf> {
 /// Unlike a late current_exe lookup, this remains valid after a prior apply or
 /// rollback in the same process.
 ///
+/// `preflight` checks the new binary staged beside the install path, with the
+/// install's permissions, before anything replaces it, so the install path only
+/// ever holds the old binary or one that passed it. A copy of the disk taken at
+/// any moment (a checkpoint, a reboot, a power loss) then never starts a binary
+/// the startup check would have rolled back, with nothing left to roll it back.
+///
 /// # Errors
 ///
-/// Returns an I/O error if the existing install cannot be inspected, backed up,
-/// or atomically replaced.
+/// Returns `preflight`'s error, the install unchanged, or an I/O error if the
+/// existing install cannot be inspected, backed up, or atomically replaced.
 #[cfg(unix)]
-pub fn replace_running_exe_at(install_path: &Path, new_bytes: &[u8]) -> UpdateResult<PathBuf> {
+pub fn replace_running_exe_at(
+    install_path: &Path,
+    new_bytes: &[u8],
+    preflight: impl FnOnce(&Path) -> UpdateResult<()>,
+) -> UpdateResult<PathBuf> {
     let permissions = std::fs::metadata(install_path)
         .map_err(|error| UpdateError::io(install_path.display().to_string(), error))?
         .permissions();
@@ -177,6 +187,7 @@ pub fn replace_running_exe_at(install_path: &Path, new_bytes: &[u8]) -> UpdateRe
     let result = (|| {
         std::fs::set_permissions(&tmp, permissions)
             .map_err(|error| UpdateError::io(tmp.display().to_string(), error))?;
+        preflight(&tmp)?;
         let _ = std::fs::remove_file(&backup);
         std::fs::copy(install_path, &backup)
             .map_err(|error| UpdateError::io(backup.display().to_string(), error))?;
@@ -236,7 +247,18 @@ mod tests {
         let bin = dir.path().join("agent");
         fs::write(&bin, b"old").unwrap();
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o750)).unwrap();
-        let backup = replace_running_exe_at(&bin, b"new").unwrap();
+        let backup = replace_running_exe_at(&bin, b"new", |staged| {
+            // The candidate as it will be installed, beside the install.
+            assert_eq!(read(staged), b"new");
+            assert_eq!(staged.parent(), bin.parent());
+            assert_eq!(
+                fs::metadata(staged).unwrap().permissions().mode() & 0o777,
+                0o750
+            );
+            assert_eq!(read(&bin), b"old");
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(read(&bin), b"new");
         assert_eq!(read(&backup), b"old");
         assert_eq!(
@@ -245,10 +267,34 @@ mod tests {
         );
         rollback(&bin).unwrap();
         assert_eq!(read(&bin), b"old");
-        replace_running_exe_at(&bin, b"retry").unwrap();
+        replace_running_exe_at(&bin, b"retry", |_| Ok(())).unwrap();
         promote(&bin).unwrap();
         assert_eq!(read(&bin), b"retry");
         assert!(!backup.exists());
+        assert!(!temp_sibling(&bin).exists());
+    }
+
+    /// A candidate the startup check rejects never reaches the install path,
+    /// so no copy of the disk, whenever it is taken, can start it: the install
+    /// stays the old binary, with no backup or staged file left beside it.
+    #[cfg(unix)]
+    #[test]
+    fn a_candidate_rejected_by_its_preflight_never_replaces_the_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("agent");
+        fs::write(&bin, b"old").unwrap();
+        let error = replace_running_exe_at(&bin, b"broken", |staged| {
+            assert_eq!(read(&bin), b"old", "replaced before its preflight");
+            assert!(!backup_path(&bin).exists());
+            Err(UpdateError::HealthCheck(format!(
+                "{} does not start",
+                staged.display()
+            )))
+        })
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::HealthCheck(_)), "{error}");
+        assert_eq!(read(&bin), b"old");
+        assert!(!backup_path(&bin).exists());
         assert!(!temp_sibling(&bin).exists());
     }
 

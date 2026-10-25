@@ -1867,6 +1867,114 @@ describe("Connected Machine signed self-update orchestration", () => {
     expect(updateRequests()).toHaveLength(2);
   }, 90_000);
 
+  test("a compute sandbox's agent follows promotions from its heartbeat, and an agent that cannot update is asked once per promotion", async () => {
+    if (!available) return;
+    // A compute sandbox's own enrollment. Its disk lives as long as the
+    // sandbox, so its agent follows promotions as a machine's does.
+    const sandboxAgent = async (updateRefusal?: { failureCode: string; retryable: boolean }) => {
+      const { accountId, workspaceId, session } = await seed();
+      const agentId = crypto.randomUUID();
+      await createSandboxEnrollment(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        enrollmentId: agentId,
+        hasDisplay: false,
+        workspaceRoot: "/workspace",
+      });
+      await claimConnection(workspaceId, agentId);
+      const subject = `agent.${workspaceId}.${agentId}.connection.${CONNECTION_INSTANCE_ID}`;
+      await handleHelloPayload(
+        db,
+        undefined,
+        Hello.encode(
+          Hello.fromPartial({
+            agentId,
+            workspaceId,
+            agentVersion: "0.1.15",
+            binarySha256: "ab".repeat(32),
+            updateChannel: "stable",
+            capabilities: { opRelease: true },
+          }),
+        ).finish(),
+        `${subject}.hello`,
+      );
+      expect((await getEnrollment(db, workspaceId, agentId))?.kind).toBe("sandbox");
+      const requests: ControlRequest[] = [];
+      const bus = busWithAgent({
+        workspaceId,
+        agentId,
+        online: true,
+        onRequest: (request) => requests.push(request),
+        ...(updateRefusal ? { updateRefusal } : {}),
+      });
+      const heartbeat = (promoted: string) =>
+        handleAgentEventPayload(
+          db,
+          undefined,
+          AgentEvent.encode(
+            AgentEvent.fromPartial({ agentId, event: { $case: "heartbeat", heartbeat: {} } }),
+          ).finish(),
+          `${subject}.events`,
+          bus,
+          createAutomaticAgentUpdater({
+            db,
+            bus,
+            settings: {
+              ...settings,
+              agentAutoUpdate: true,
+              agentStableVersion: promoted,
+              publicBaseUrl: "https://dev.opengeni.example",
+            },
+          })!,
+        );
+      return {
+        heartbeat,
+        updateRequests: () =>
+          requests.filter((request) => request.op?.$case === "agentUpdateApply"),
+        status: async () => (await getEnrollment(db, workspaceId, agentId))?.agentUpdate,
+      };
+    };
+
+    const current = await sandboxAgent();
+    await current.heartbeat("0.1.16");
+    await waitForValue(
+      current.status,
+      (update) => update?.status === "accepted",
+      "the sandbox agent's automatic update",
+    );
+    expect(current.updateRequests()).toHaveLength(1);
+    expect(current.updateRequests()[0]!.op).toMatchObject({
+      agentUpdateApply: {
+        targetVersion: "0.1.16",
+        expectedCurrentVersion: "0.1.15",
+        releaseBaseUrl: "https://dev.opengeni.example",
+      },
+    });
+
+    // An agent from before compute self-update refuses for good: it is not
+    // asked again for the same promotion, and is asked once for the next.
+    const old = await sandboxAgent({ failureCode: "update_unsupported", retryable: false });
+    await old.heartbeat("0.1.16");
+    await waitForValue(
+      old.status,
+      (update) => update?.status === "failed" && update.targetVersion === "0.1.16",
+      "the refused sandbox agent update",
+    );
+    expect(old.updateRequests()).toHaveLength(1);
+    await old.heartbeat("0.1.16");
+    await old.heartbeat("0.1.16");
+    await Bun.sleep(50);
+    expect(old.updateRequests()).toHaveLength(1);
+    await old.heartbeat("0.1.17");
+    await waitForValue(
+      old.status,
+      (update) => update?.status === "failed" && update.targetVersion === "0.1.17",
+      "the next promotion's request",
+    );
+    expect(old.updateRequests()).toHaveLength(2);
+  }, 90_000);
+
   test("a machine whose agent is already installing another update is postponed, not failed", async () => {
     if (!available) return;
     const { workspaceId, enrollment } = await seed();
