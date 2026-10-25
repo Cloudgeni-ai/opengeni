@@ -1124,7 +1124,7 @@ export class CuaComputerBackend implements ComputerBackend {
     if (cuaCode === "select_menu_would_raise_window")
       return new ComputerBackendError(
         code,
-        "Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent: choose an option with set_value on its ref and the option's text",
+        "Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
         false,
         false,
       );
