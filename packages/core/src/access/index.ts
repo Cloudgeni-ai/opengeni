@@ -909,6 +909,42 @@ export function requireAccountAdminAuthorizationStamp(
 }
 
 /**
+ * This request's account:admin proof for one account and subject, or null
+ * when the request did not authenticate as an administrator of that account.
+ * Uses only the request's already-resolved access context: the canonical
+ * resolver's grants (configured key, account-scoped key, signed delegation
+ * or a person) decide, never the caller's input. Organization-membership
+ * administrators also receive a proof; the database needs it only for
+ * administrators without such a membership.
+ */
+export async function resolveAccountAdminAuthorizationStamp(
+  c: Context,
+  deps: AccessDeps,
+  input: { accountId: string; subjectId: string },
+): Promise<AccountAdminAuthorizationStamp | null> {
+  let context: AccessContext;
+  try {
+    context = await requireAccessContext(c, deps);
+  } catch (error) {
+    if (error instanceof HTTPException) return null;
+    throw error;
+  }
+  if (context.subjectId !== input.subjectId) return null;
+  const grant = context.workspaceGrants.find(
+    (candidate) => candidate.accountId === input.accountId,
+  );
+  if (!grant) return null;
+  try {
+    return requireAccountAdminAuthorizationStamp(
+      accessGrantAuthorizationFromContext(context, grant),
+    );
+  } catch (error) {
+    if (error instanceof HTTPException) return null;
+    throw error;
+  }
+}
+
+/**
  * Verify that an access authorization was minted by the canonical request
  * resolver for this exact subject and workspace.
  *

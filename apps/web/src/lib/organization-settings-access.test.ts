@@ -85,6 +85,42 @@ describe("organization settings access", () => {
     expect(visible(undefined, ["account:read"])).toEqual(["identity", "security"]);
   });
 
+  test("the deployment's access key administers the organization's model accounts", () => {
+    // A configured key is an account owner with account:admin but no person:
+    // it is not an owner-or-admin session, yet the API and the database
+    // accept it for the organization's subscription accounts, so Models opens.
+    const deploymentKey = { productAccessMode: "managed", auth: { mode: "deploymentKey" } };
+    const access = (permissions: string[]) =>
+      organizationSettingsAccess({
+        accessContext: context("owner", permissions),
+        clientConfig: deploymentKey as never,
+        accountId: "acme",
+      });
+    const key = access(["account:read", "account:admin"]);
+    expect(key.administrator).toBe(false);
+    expect(key.modelsAdministrator).toBe(true);
+    expect(key.visibleSections.has("models")).toBe(true);
+    // A key without account:admin still gets no Models page.
+    const reader = access(["account:read"]);
+    expect(reader.modelsAdministrator).toBe(false);
+    expect(reader.visibleSections.has("models")).toBe(false);
+  });
+
+  test("a member without account:admin is no models administrator", () => {
+    const member = organizationSettingsAccess({
+      accessContext: context("member", ["account:read"]),
+      clientConfig: managed as never,
+      accountId: "acme",
+    });
+    expect(member.modelsAdministrator).toBe(false);
+    const owner = organizationSettingsAccess({
+      accessContext: context("owner", ["account:read", "account:admin"]),
+      clientConfig: managed as never,
+      accountId: "acme",
+    });
+    expect(owner).toMatchObject({ administrator: true, modelsAdministrator: true });
+  });
+
   test("a workspace admin also sees Models, for the workspaces they administer", () => {
     const grants = [
       { workspaceId: "ws-team", accountId: "acme", permissions: ["workspace:admin"] },
