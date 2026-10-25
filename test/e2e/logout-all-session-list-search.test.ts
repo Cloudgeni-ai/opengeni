@@ -150,3 +150,30 @@ test("logout-all fence admits the current project-grouped rail root page and Def
     false,
   );
 });
+
+test("logout-all fence admits the current rail reads that carry Site conversations", () => {
+  // The exact pin-section read main CI saw fenced (run 40161676403).
+  const pinPage = "?view=page&limit=1&projection=summary&pinsOnly=true&siteConversations=include";
+  const rootPage =
+    "?view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includeTotals=true&includePinned=false&siteConversations=group";
+  for (const search of [pinPage, rootPage, rootPage.replace("limit=4", "limit=50")])
+    expect(exactLogoutAllSessionListSearch(search)).toBe(true);
+
+  for (const search of [
+    // Wrong value for the read, repeated key, or a pin read without the summary projection.
+    pinPage.replace("siteConversations=include", "siteConversations=group"),
+    `${pinPage}&siteConversations=include`,
+    pinPage.replace("&projection=summary", ""),
+    rootPage.replace("siteConversations=group", "siteConversations=include"),
+    `${rootPage}&siteConversations=group`,
+    // Search, archived and filtered reads stay user-driven and out of the fence.
+    `${pinPage}&includeTotals=true`,
+    `${pinPage}&search=tenant`,
+    `${rootPage}&search=tenant`,
+    rootPage.replace("archiveStatus=active", "archiveStatus=archived"),
+    `${rootPage}&needsYouOnly=true`,
+    // The Default project window does not carry Site conversations.
+    "?view=page&limit=4&parentSessionId=null&projection=summary&channelId=null&sortBy=updatedAt&archiveStatus=active&includePinned=false&siteConversations=group",
+  ])
+    expect(exactLogoutAllSessionListSearch(search)).toBe(false);
+});
