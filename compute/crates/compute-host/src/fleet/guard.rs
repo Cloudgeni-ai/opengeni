@@ -509,13 +509,13 @@ mod tests {
         let lock = working.lock.clone();
         std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
         // One look, held for longer than a moment.
-        let look = File::create(ready_lock(&lock)).unwrap();
-        flock(&look, FlockOperation::NonBlockingLockShared).unwrap();
+        let watcher = File::create(ready_lock(&lock)).unwrap();
+        flock(&watcher, FlockOperation::NonBlockingLockShared).unwrap();
         let guard = std::thread::spawn(move || run_guard(&working));
         std::thread::sleep(STEP * 3);
         assert!(!guard.is_finished(), "the guard runs on");
         assert!(!guard_ready(&lock).unwrap(), "not ready while looked at");
-        drop(look);
+        drop(watcher);
         let started = std::time::Instant::now();
         while !guard_ready(&lock).unwrap() {
             assert!(started.elapsed() < Duration::from_secs(5), "never ready");
