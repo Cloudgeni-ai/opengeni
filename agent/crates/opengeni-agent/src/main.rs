@@ -95,6 +95,11 @@ const CONNECTION_RELOAD_INTERVAL: std::time::Duration = std::time::Duration::fro
 /// Process entry point. Parses the CLI, initializes tracing, and dispatches to
 /// the selected subcommand. Returns a non-zero exit code on a fatal error.
 fn main() -> std::process::ExitCode {
+    // First, before any thread exists: an image this one replaced blocked
+    // the reconnect signal across the exec, and every thread started with
+    // it blocked would keep it so, as would every command it starts.
+    #[cfg(unix)]
+    let caught = reconnect_signal::catch_until_handled();
     if browser_bridge::is_native_host_invocation() {
         init_native_host_tracing();
         return match browser_bridge::run_native_host() {
@@ -114,6 +119,10 @@ fn main() -> std::process::ExitCode {
     // print to the terminal and must not interleave with the service's file.
     let persistent = matches!(cli.command, None | Some(Command::Run(_)));
     init_tracing(persistent);
+    #[cfg(unix)]
+    if let Err(error) = caught {
+        error!(%error, "could not catch SIGUSR1 while this image starts: it stays blocked, in the commands this agent runs too");
+    }
     #[cfg(unix)]
     match inherited {
         Ok(true) => info!("continuing commands handed over by the previous agent image"),
@@ -876,8 +885,8 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
 /// whatever this image hands over. The guest init signals this process with
 /// `SIGUSR1` whenever the host loses its connections, and an exec resets a
 /// handled signal to its default, which ends the process: so the successor
-/// starts with it blocked, and one that arrives before it handles it waits
-/// for it (see [`spawn_reconnect_handler`]).
+/// starts with it blocked, and catches it from the start of its `main` until
+/// it handles it (see [`reconnect_signal::catch_until_handled`]).
 fn exec_verified_successor<P: Platform + 'static>(
     supervisor: &Supervisor<P>,
     instance_lock: Option<instance_lock::InstanceLock>,
@@ -905,6 +914,9 @@ fn exec_successor_holding_reconnect(handover: &CarriedHandover) -> anyhow_lite::
 /// The signal the guest init sends to have the agent reconnect at once.
 #[cfg(unix)]
 mod reconnect_signal {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
+
     use nix::sys::signal::{pthread_sigmask, SigSet, SigmaskHow, Signal};
 
     fn usr1() -> SigSet {
@@ -912,6 +924,9 @@ mod reconnect_signal {
         set.add(Signal::SIGUSR1);
         set
     }
+
+    /// What catches `SIGUSR1` until it is handled: the flag it sets.
+    static CAUGHT: Mutex<Option<(signal_hook::SigId, Arc<AtomicBool>)>> = Mutex::new(None);
 
     /// Blocks `SIGUSR1` on this thread until dropped. An exec keeps the
     /// block, and a signal that arrives meanwhile stays pending.
@@ -933,6 +948,37 @@ mod reconnect_signal {
     /// Unblocks `SIGUSR1` on this thread: one pending is delivered now.
     pub(crate) fn release() -> nix::Result<()> {
         pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&usr1()), None)
+    }
+
+    /// In an image that another replaced, which blocked `SIGUSR1` across the
+    /// exec ([`Held`]): catches it with a flag until
+    /// [`crate::spawn_reconnect_handler`] handles it, and unblocks it. Called
+    /// first in `main`, before this process starts any thread, since a
+    /// thread started with it blocked keeps it blocked, and so does every
+    /// process such a thread starts, the user's commands among them, which
+    /// then never receive it. One pending since the exec sets the flag now.
+    /// An image started otherwise does not have it blocked, and this leaves
+    /// it as it is.
+    pub(crate) fn catch_until_handled() -> std::io::Result<()> {
+        if !SigSet::thread_get_mask()?.contains(Signal::SIGUSR1) {
+            return Ok(());
+        }
+        let came = Arc::new(AtomicBool::new(false));
+        let id = signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&came))?;
+        *CAUGHT.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, came));
+        release()?;
+        Ok(())
+    }
+
+    /// Ends [`catch_until_handled`]'s catching, now that `SIGUSR1` is
+    /// handled: whether it came meanwhile.
+    pub(crate) fn handled() -> bool {
+        let caught = CAUGHT.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let Some((id, came)) = caught else {
+            return false;
+        };
+        signal_hook::low_level::unregister(id);
+        came.load(Ordering::SeqCst)
     }
 }
 
@@ -965,10 +1011,9 @@ fn carry_on_handed_over<P: Platform + 'static>(
 /// move, a recovery on another host or a restart of the host agent).
 ///
 /// An image this one replaced blocked it across the exec (see
-/// [`exec_verified_successor`]), so it is unblocked only once handled; one
-/// that came meanwhile reconnects this image at once. Called on the main
-/// thread, which lives as long as the process: the threads it started
-/// before, which keep it blocked, leave it to this one.
+/// [`exec_verified_successor`]), and `main` caught it from its start
+/// ([`reconnect_signal::catch_until_handled`]); one that came meanwhile
+/// reconnects this image at once.
 fn spawn_reconnect_handler(reconnect: supervisor::ReconnectSignal) {
     #[cfg(unix)]
     {
@@ -976,12 +1021,17 @@ fn spawn_reconnect_handler(reconnect: supervisor::ReconnectSignal) {
         let mut restored = match signal(SignalKind::user_defined1()) {
             Ok(restored) => restored,
             Err(error) => {
-                // Still blocked, as it may be, it waits rather than ends
-                // this process.
+                // Still caught or blocked, it waits rather than ends this
+                // process.
                 warn!(%error, "could not install the SIGUSR1 handler; reconnects after the host loses the link wait for back-off");
                 return;
             }
         };
+        if reconnect_signal::handled() {
+            info!("the host lost this sandbox's connections while this image started; reconnecting at once");
+            reconnect.request();
+        }
+        // Unblocked already, unless `main` could not catch it.
         if let Err(error) = reconnect_signal::release() {
             warn!(%error, "could not unblock SIGUSR1; reconnects after the host loses the link wait for back-off");
         }

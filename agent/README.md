@@ -281,7 +281,10 @@ contract is `compute/docs/agent-link.md`.
   passes its startup check beside the installed binary before it replaces it:
   any copy of the disk holds either the old agent or a checked new one. The
   reconnect signal the guest init sends stays blocked across the exec, so one
-  that arrives while the new image starts reconnects it instead of ending it.
+  that arrives while the new image starts reconnects it instead of ending it;
+  the new image catches it from the start of its `main` and unblocks it
+  before it starts any thread, so the commands it runs do not inherit the
+  block.
   A sandbox heartbeats only while it runs, so Opengeni asks one that sleeps
   when it next wakes. Agents from before this refuse with `update_unsupported`.
 

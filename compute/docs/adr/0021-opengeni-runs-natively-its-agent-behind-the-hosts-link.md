@@ -85,7 +85,8 @@ and 16.1).
   of them. A checkpoint or guest reboot may still copy the disk at any
   moment, so a release passes its startup check before it replaces the
   binary, and `SIGUSR1` stays blocked across the exec until the new image
-  handles it.)
+  catches it, before it starts any thread, so no command it runs inherits
+  the block.)
 - **The host speaks NATS to its guests and keeps their sessions.** The
   host agent answers each guest's NATS connection itself, knowing from the
   vsock socket which sandbox it is. For each sandbox it keeps one session
