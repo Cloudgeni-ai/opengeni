@@ -61,6 +61,10 @@
       "sha256": "fb1ee347cf037689810c03a4105bfc09de906fa19d1392484763f6b7d4a7b715"
     },
     {
+      "path": ".github/workflows/main-approval-superseded.yml",
+      "sha256": "6935fec912d1a238fb2bef0ed3ef803035a11051e45ef685ec08d5bbf44f1c41"
+    },
+    {
       "path": ".github/workflows/merge-content.yml",
       "sha256": "e73d479146d440c32179858f7ab8ea5e6fb7339262c7ab093fb552badc1e4a0b"
     },
@@ -1392,6 +1396,12 @@
       "job": "desktop-image",
       "step": "Install dependencies",
       "sha256": "13753204e14b60ac778c84fa19b0c08b7a529710253a322d3ef40f64119448fa"
+    },
+    {
+      "workflow": ".github/workflows/main-approval-superseded.yml",
+      "job": "superseded",
+      "step": "Cancel superseded parked main CI runs",
+      "sha256": "dfb80611efc20aca5e41c99c6495a4d828c15ea737f806f78397f761a297ab95"
     },
     {
       "workflow": ".github/workflows/merge-content.yml",
