@@ -517,12 +517,14 @@ export default defineConfig({
               priority: 20,
             },
             {
-              // The meeting recordings client and hooks load only with the
-              // lazy recorder host and the Meetings pages. Entry-aware merging
-              // otherwise folds them into the shared chunk that carries the
-              // session page's media icons, so a direct session downloads them.
+              // The Meetings hooks load only with the lazy recorder host and
+              // the Meetings pages. Entry-aware merging otherwise folds them
+              // into the shared chunk that carries the session page's media
+              // icons, so a direct session downloads them. The SDK recordings
+              // client stays out of this group: composer dictation uses it as
+              // soon as a session opens, so it belongs to the session graph.
               name: "recordings",
-              test: /packages[\\/](?:sdk[\\/]src[\\/]recordings|react[\\/]src[\\/](?:recordings|hooks[\\/]use-recordings))\.ts$/,
+              test: /packages[\\/]react[\\/]src[\\/](?:recordings|hooks[\\/]use-recordings)\.ts$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
