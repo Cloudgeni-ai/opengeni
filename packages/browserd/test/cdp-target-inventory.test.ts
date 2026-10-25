@@ -162,7 +162,7 @@ test("a continuing session whose empty tab was closed opens one and names it for
     );
     // Any other missing tab says how to carry on.
     await expect(fixture.driver.observe("never-seen")).rejects.toThrow(
-      /^browser target does not exist: no open tab in this browser has this ID; list the current tabs and use one of their IDs$/u,
+      /^browser target does not exist: this ID is not one of this browser's tabs; list the current tabs and use one of their IDs$/u,
     );
   } finally {
     await fixture.driver.close();
@@ -214,7 +214,7 @@ test("tabs of a browser this one replaced name the tab that shows their page now
 
 test("a missing tab's answer says why it is gone for every known cause", () => {
   expect(goneBrowserTargetMessage(null)).toBe(
-    "browser target does not exist: no open tab in this browser has this ID; list the current tabs and use one of their IDs",
+    "browser target does not exist: this ID is not one of this browser's tabs; list the current tabs and use one of their IDs",
   );
   expect(
     goneBrowserTargetMessage({ kind: "closed", at: "2026-01-02T03:04:05Z", byCloseCall: false }),

@@ -601,7 +601,7 @@ const LIST_CURRENT_TABS = "list the current tabs and use one of their IDs";
  * exist", which callers match. */
 export function goneBrowserTargetMessage(gone: GoneBrowserTarget | null): string {
   if (!gone) {
-    return `browser target does not exist: no open tab in this browser has this ID; ${LIST_CURRENT_TABS}`;
+    return `browser target does not exist: this ID is not one of this browser's tabs; ${LIST_CURRENT_TABS}`;
   }
   if (gone.kind === "closed") {
     const by = gone.byCloseCall

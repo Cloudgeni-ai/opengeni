@@ -85,7 +85,7 @@ e2e(
       );
       // An ID that never belonged to this browser.
       await expect(driver.observe("0123456789ABCDEF0123456789ABCDEF")).rejects.toThrow(
-        "browser target does not exist: no open tab in this browser has this ID; list the current tabs and use one of their IDs",
+        "browser target does not exist: this ID is not one of this browser's tabs; list the current tabs and use one of their IDs",
       );
     } finally {
       await driver.close();

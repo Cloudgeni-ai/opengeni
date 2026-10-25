@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isBlankTabUrl } from "./cdp-driver";
 
 /**
  * Why a managed browser's tabs got new IDs. The browser process stopped and a
@@ -28,7 +30,17 @@ export type BrowserRelaunchedTabs = {
   tabs: Array<{ targetId: string; replacementId: string | null }>;
 };
 
-export type StoppedBrowserTab = { targetId: string; url: string; selected: boolean };
+/** A tab of a stopped browser. Its page is kept only as a SHA-256 of its URL,
+ * enough to find the reopened tab showing the same page without writing page
+ * addresses to disk; null for a blank tab, which never identifies a page. */
+export type StoppedBrowserTab = { targetId: string; urlHash: string | null; selected: boolean };
+
+/** The key a tab's page is matched by: a SHA-256 of its exact URL, or null
+ * for a blank tab (a new tab, or a URL too long to report, which reads as
+ * about:blank), since any number of unrelated tabs show one. */
+export function tabUrlHash(url: string): string | null {
+  return isBlankTabUrl(url) ? null : createHash("sha256").update(url).digest("hex");
+}
 
 /**
  * The tabs a managed browser had when its controller stopped it or let it go,
@@ -37,7 +49,7 @@ export type StoppedBrowserTab = { targetId: string; url: string; selected: boole
  * is gone and which reopened tab shows its page.
  */
 export type StoppedBrowserTabsRecord = {
-  version: 1;
+  version: 2;
   reason: Extract<BrowserRelaunchReason, "idle_release" | "controller_restart">;
   idleReleaseMinutes?: number;
   stoppedAt: string;
@@ -47,6 +59,7 @@ export type StoppedBrowserTabsRecord = {
 const RECORD_NAME = "stopped-browser-tabs.json";
 const MAX_RECORD_BYTES = 256 * 1024;
 export const MAX_STOPPED_BROWSER_TABS = 64;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 export async function writeStoppedBrowserTabs(
   sessionDirectory: string,
@@ -83,19 +96,20 @@ export async function takeStoppedBrowserTabs(
 function parseStoppedBrowserTabs(value: unknown): StoppedBrowserTabsRecord | null {
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
-  if (record.version !== 1) return null;
+  if (record.version !== 2) return null;
   if (record.reason !== "idle_release" && record.reason !== "controller_restart") return null;
   if (typeof record.stoppedAt !== "string" || !Array.isArray(record.tabs)) return null;
   const tabs: StoppedBrowserTab[] = [];
   for (const tab of record.tabs.slice(0, MAX_STOPPED_BROWSER_TABS)) {
     if (typeof tab !== "object" || tab === null) return null;
-    const { targetId, url, selected } = tab as Record<string, unknown>;
-    if (typeof targetId !== "string" || !targetId || typeof url !== "string") return null;
-    tabs.push({ targetId, url, selected: selected === true });
+    const { targetId, urlHash, selected } = tab as Record<string, unknown>;
+    if (typeof targetId !== "string" || !targetId) return null;
+    if (urlHash !== null && (typeof urlHash !== "string" || !SHA256_HEX.test(urlHash))) return null;
+    tabs.push({ targetId, urlHash, selected: selected === true });
   }
   const minutes = record.idleReleaseMinutes;
   return {
-    version: 1,
+    version: 2,
     reason: record.reason,
     ...(typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0
       ? { idleReleaseMinutes: minutes }
@@ -109,14 +123,16 @@ function parseStoppedBrowserTabs(value: unknown): StoppedBrowserTabsRecord | nul
  * Pair each tab of the stopped browser with the reopened tab showing the same
  * page. Tabs are matched by exact URL, each reopened tab at most once, the
  * previously selected tab first so it gets the reopened selected tab when
- * several show the same page. A stopped tab whose ID still exists is the same
- * tab (the browser kept running) and is left out.
+ * several show the same page. Blank tabs never match. A stopped tab whose ID
+ * still exists is the same tab (the browser kept running) and is left out.
  */
 export function matchReopenedTabs(
   stopped: readonly StoppedBrowserTab[],
   reopened: ReadonlyArray<{ id: string; url: string; selected: boolean; kind: string }>,
 ): BrowserRelaunchedTabs["tabs"] {
-  const pages = reopened.filter((target) => target.kind === "page" || target.kind === "popup");
+  const pages = reopened
+    .filter((target) => target.kind === "page" || target.kind === "popup")
+    .map((target) => ({ ...target, urlHash: tabUrlHash(target.url) }));
   const live = new Set(pages.map((target) => target.id));
   const used = new Set<string>();
   const ordered = [
@@ -127,12 +143,14 @@ export function matchReopenedTabs(
   for (const tab of ordered) {
     if (live.has(tab.targetId) || matches.has(tab.targetId)) continue;
     const candidates = pages.filter(
-      (target) => !used.has(target.id) && !stopped.some((s) => s.targetId === target.id),
+      (target) =>
+        tab.urlHash !== null &&
+        target.urlHash === tab.urlHash &&
+        !used.has(target.id) &&
+        !stopped.some((s) => s.targetId === target.id),
     );
     const match =
-      candidates.find((target) => target.url === tab.url && target.selected === tab.selected) ??
-      candidates.find((target) => target.url === tab.url) ??
-      null;
+      candidates.find((target) => target.selected === tab.selected) ?? candidates[0] ?? null;
     if (match) used.add(match.id);
     matches.set(tab.targetId, match?.id ?? null);
   }

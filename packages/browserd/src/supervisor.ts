@@ -162,6 +162,7 @@ import {
 import { BROWSER_WINDOW_PARK_IDLE_MS } from "./window-parking";
 import {
   matchReopenedTabs,
+  tabUrlHash,
   takeStoppedBrowserTabs,
   writeStoppedBrowserTabs,
   type BrowserRelaunchedTabs,
@@ -2417,6 +2418,10 @@ export class BrowserSupervisor {
           recoveredReceipt?.operationId,
         );
       }
+      // The tabs the previous browser on this profile had when it was stopped
+      // or let go. Every launch takes the record, so it never outlives the
+      // launch right after the stop it describes.
+      const stoppedTabs = await takeStoppedBrowserTabs(sessionDirectory);
       driver = await this.createDriver(driverContext);
       const runtime: Runtime = {
         options: runtimeOptions(options),
@@ -2471,18 +2476,14 @@ export class BrowserSupervisor {
           runtime.lastTargets = [observation.target];
           runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
         }
-        if (recoveredReceipt) {
-          // The tabs the previous browser had when it was stopped or let go.
-          // A relaunch reopened them with new IDs; a reattached browser kept
-          // them, so the record no longer applies.
-          const stopped = await takeStoppedBrowserTabs(sessionDirectory);
-          if (stopped && relaunchesProfile && !restoredManifest) {
-            await noteRelaunchedTabs(driver, stopped.reason, stopped.tabs, {
-              ...(stopped.idleReleaseMinutes !== undefined
-                ? { idleReleaseMinutes: stopped.idleReleaseMinutes }
-                : {}),
-            });
-          }
+        // A relaunch reopened the stopped browser's tabs with new IDs; a
+        // reattached browser kept them, so the record no longer applies.
+        if (stoppedTabs && relaunchesProfile && !restoredManifest) {
+          await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
+            ...(stoppedTabs.idleReleaseMinutes !== undefined
+              ? { idleReleaseMinutes: stoppedTabs.idleReleaseMinutes }
+              : {}),
+          });
         }
       } finally {
         startupPresence();
@@ -3372,7 +3373,7 @@ export class BrowserSupervisor {
     }
     try {
       await writeStoppedBrowserTabs(runtime.sessionDirectory, {
-        version: 1,
+        version: 2,
         reason,
         ...(reason === "idle_release"
           ? { idleReleaseMinutes: Math.max(1, Math.round(this.idleReleaseMs / 60_000)) }
@@ -4762,7 +4763,11 @@ function profileManifest(
 function stoppedTabsOf(targets: readonly BrowserTarget[]): StoppedBrowserTab[] {
   return targets
     .filter((target) => target.kind === "page" || target.kind === "popup")
-    .map((target) => ({ targetId: target.id, url: target.url, selected: target.selected }));
+    .map((target) => ({
+      targetId: target.id,
+      urlHash: tabUrlHash(target.url),
+      selected: target.selected,
+    }));
 }
 
 /** Tell a relaunched browser's driver which of its tabs replaced each tab of

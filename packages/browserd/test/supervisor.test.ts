@@ -36,6 +36,7 @@ import {
 } from "../src/working-copy-adoption";
 import { UnsettledCleanupError } from "../src/cleanup-error";
 import type { BrowserRelaunchedTabs } from "../src/stopped-browser-tabs";
+import { tabUrlHash } from "../src/stopped-browser-tabs";
 
 describe("BrowserSupervisor", () => {
   test("propagates failed process cleanup during controller shutdown", async () => {
@@ -1696,6 +1697,8 @@ function fakeDriver(
     close?: (instance: number) => void;
     requiresExplicitProfileRestore?: boolean;
     noteRelaunchedTabs?: (instance: number, relaunched: BrowserRelaunchedTabs) => void;
+    /** The page a tab shows when started without a URL. */
+    tabUrl?: string;
   } = {},
   instance = 1,
 ): BrowserSupervisorDriver {
@@ -1707,7 +1710,7 @@ function fakeDriver(
     documentGeneration: `document-${instance}`,
     kind: "page",
     title: "Fixture",
-    url: "about:blank",
+    url: hooks.tabUrl ?? "about:blank",
     selected: true,
     attached: true,
     createdAt: "2026-08-09T12:00:00.000Z",
@@ -1747,7 +1750,7 @@ function fakeDriver(
     async start(url) {
       requireOpen();
       hooks.start?.(instance);
-      target.url = url ?? "about:blank";
+      target.url = url ?? hooks.tabUrl ?? "about:blank";
       return observation();
     },
     async target(targetId) {
@@ -3269,6 +3272,7 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
+  const RELAUNCH_FIXTURE_URL = "https://page.example.test/";
   /** A supervisor whose drivers each have their own tab IDs and report what a
    * relaunch tells them about the tabs of the browser before. */
   const relaunchFixture = async (rootDirectory: string, clock: () => number) => {
@@ -3295,6 +3299,7 @@ describe("same-working-directory controller restart", () => {
               {
                 noteRelaunchedTabs: (instance, relaunched) =>
                   state.noted.push({ instance, relaunched }),
+                tabUrl: RELAUNCH_FIXTURE_URL,
               },
               state.drivers,
             ),
@@ -3329,10 +3334,10 @@ describe("same-working-directory controller restart", () => {
           "stopped-browser-tabs.json",
         );
         expect(JSON.parse(await readFile(record, "utf8"))).toMatchObject({
-          version: 1,
+          version: 2,
           reason: "idle_release",
           idleReleaseMinutes: 1,
-          tabs: [{ targetId: oldTab, url: "about:blank", selected: true }],
+          tabs: [{ targetId: oldTab, urlHash: tabUrlHash(RELAUNCH_FIXTURE_URL), selected: true }],
         });
         expect(state.noted).toEqual([]);
         await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
@@ -3350,6 +3355,59 @@ describe("same-working-directory controller restart", () => {
         ]);
         // Used once: the record describes only that relaunch.
         await expect(readFile(record)).rejects.toThrow();
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("every launch takes the stopped-tabs record, and only a relaunch applies it", async () => {
+    const writeRecord = async (sessionDirectory: string) => {
+      await mkdir(sessionDirectory, { recursive: true });
+      await writeFile(
+        join(sessionDirectory, "stopped-browser-tabs.json"),
+        JSON.stringify({
+          version: 2,
+          reason: "idle_release",
+          stoppedAt: "2026-01-02T03:04:05.000Z",
+          tabs: [{ targetId: "old", urlHash: tabUrlHash(RELAUNCH_FIXTURE_URL), selected: true }],
+        }),
+      );
+    };
+    // A fresh launch relaunches no profile: the record is removed unapplied,
+    // so no later launch can misuse it.
+    const directory = await mkdtemp("/tmp/ogw-");
+    try {
+      const options = { ...reference(96), headed: false };
+      const sessionDirectory = join(directory, "sessions", options.browserSessionId);
+      await writeRecord(sessionDirectory);
+      const { state, open } = await relaunchFixture(directory, () => 1_000_000);
+      const supervisor = await open();
+      try {
+        await supervisor.createSession(options);
+        await expect(
+          readFile(join(sessionDirectory, "stopped-browser-tabs.json")),
+        ).rejects.toThrow();
+        expect(state.noted).toEqual([]);
+      } finally {
+        await supervisor.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+    // A recovered launch that reattaches the live browser takes it too.
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      await writeRecord(sessionDirectory);
+      const { state, open } = await relaunchFixture(rootDirectory, () => 1_000_000);
+      const supervisor = await open();
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        expect(state.processState).toBe("live");
+        await expect(
+          readFile(join(sessionDirectory, "stopped-browser-tabs.json")),
+        ).rejects.toThrow();
+        expect(state.noted).toEqual([]);
       } finally {
         await supervisor.close();
       }
