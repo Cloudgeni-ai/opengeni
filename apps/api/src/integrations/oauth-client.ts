@@ -849,6 +849,10 @@ async function completeMcpOAuthCallbackWithinDeadline(
   let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
   // A personal sign-in started with `connections:personal` finishes with it too.
   let ownerPermission: ReturnType<typeof connectSetupPermission> = "connections:write";
+  // Set once the signed state is bound to its stored attempt, and once this
+  // callback holds the attempt's operation. Failures after the match settle it.
+  let attemptMatched = false;
+  let operationClaimed = false;
   if (!input.state) {
     const error = new OAuthCallbackStageError(
       "state_verify",
@@ -905,6 +909,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state).digest("hex"),
       };
+      attemptMatched = true;
       integrationKey = integrationKeyForConnectProvider(stored.attempt.providerId);
       const claim = await claimOAuthAcquisition(
         db,
@@ -919,6 +924,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         Boolean(input.code),
       );
       if (claim.status === "replayed") return { redirectTo: stored.returnUrl, exactReturn: true };
+      operationClaimed = true;
     }
     // The callback enforces the signed start-time principal decision.
     // Workspace ownership requires no personal-owner claim.
@@ -966,7 +972,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       "state_verify",
       db,
       async (scopedDb) => {
-        await requireOAuthCallbackGrant(scopedDb, state!);
+        await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
         return await consumeIntegrationOAuthStateNonce(scopedDb, {
           accountId: state!.accountId,
           workspaceId: state!.workspaceId,
@@ -998,6 +1004,15 @@ async function completeMcpOAuthCallbackWithinDeadline(
           reason: staged.reason === "state_invalid" ? failure.reason : staged.reason,
         }),
       };
+    }
+    if (connectOperation && attemptMatched) {
+      // The attempt is known, so the card must not keep waiting on it.
+      await settleFailedConnectAttempt(deps, state, connectOperation, {
+        claimed: operationClaimed,
+        stage: staged,
+        message:
+          "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+      });
     }
     return callbackStateResult(state, "error", {
       stage: staged.stage,
@@ -1099,7 +1114,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
     const persist = async (scopedDb: Database) => {
-      await requireOAuthCallbackGrant(scopedDb, state!);
+      await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
       // Serialize the entire owner/resource bucket, including providers with no
       // identity proof. Locking only a known identity lets unknown callbacks race it.
       const bucket = JSON.stringify([
@@ -1227,50 +1242,85 @@ async function completeMcpOAuthCallbackWithinDeadline(
     if (connectOperation) {
       // The external return URL stays exact. Its caller reads the durable
       // attempt result, which must not remain in flight after a rejected grant.
-      try {
-        await withDatabaseStatementTimeout(db, OAUTH_CALLBACK_DB_STATEMENT_TIMEOUT_MS, (tx) =>
-          finishConnectOperation(tx, state!, {
-            ...connectOperation!,
-            authorize: (locked, _attempt, origin) =>
-              requireConnectOwnerAuthority(locked, state!, ownerPermission, origin),
-            commit: async (_locked, current) => ({
-              ...current,
-              revision: current.revision + 1,
-              state: "failed",
-              nextAction: { type: "none" },
-              error: {
-                code: staged.reason,
-                message:
-                  staged.reason === "setup_unavailable"
-                    ? "Google connector setup is currently unavailable. Your previous connection is unchanged. Try a new connection attempt after setup is enabled."
-                    : staged.reason === "account_mismatch"
-                      ? oauthAccountFailureMessage("account_mismatch")
-                      : staged.reason === "account_already_connected"
-                        ? oauthAccountFailureMessage("account_already_connected")
-                        : staged.reason === "account_identity_unavailable"
-                          ? oauthAccountFailureMessage("account_identity_unavailable")
-                          : staged.reason === "offline_access_unavailable"
-                            ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
-                            : staged.reason === "insufficient_scope"
-                              ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
-                              : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
-                retryable: true,
-              },
-            }),
-          }),
-        );
-      } catch (settlementError) {
-        logOAuthCallbackFailure(
-          observability,
-          new OAuthCallbackStageError("persist", "persist_failed", settlementError),
-          state,
-        );
-      }
+      await settleFailedConnectAttempt(deps, state, connectOperation, {
+        claimed: true,
+        stage: staged,
+        message:
+          staged.reason === "setup_unavailable"
+            ? "Google connector setup is currently unavailable. Your previous connection is unchanged. Try a new connection attempt after setup is enabled."
+            : staged.reason === "account_mismatch"
+              ? oauthAccountFailureMessage("account_mismatch")
+              : staged.reason === "account_already_connected"
+                ? oauthAccountFailureMessage("account_already_connected")
+                : staged.reason === "account_identity_unavailable"
+                  ? oauthAccountFailureMessage("account_identity_unavailable")
+                  : staged.reason === "offline_access_unavailable"
+                    ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
+                    : staged.reason === "insufficient_scope"
+                      ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
+                      : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+      });
     }
     return callbackStateResult(state, "error", {
       stage: staged.stage,
       reason: staged.reason,
     });
+  }
+}
+
+/**
+ * Settle a known connect attempt as failed after its callback could not finish.
+ *
+ * This deliberately skips the owner-authority check: a failure commits no
+ * credential or installation and only touches the signed state's own attempt,
+ * within its actor scope. Requiring the grant here would leave the attempt in
+ * flight exactly when the grant itself was the reason the callback failed.
+ * When this callback did not claim the operation, it claims it first, which
+ * refuses to take over another callback's in-flight operation.
+ */
+async function settleFailedConnectAttempt(
+  deps: OAuthClientDeps,
+  state: OAuthStatePayload,
+  operation: { attemptId: string; operationId: string; inputDigest: string },
+  input: { claimed: boolean; stage: OAuthCallbackStageError; message: string },
+): Promise<void> {
+  try {
+    await withDatabaseStatementTimeout(
+      deps.db,
+      OAUTH_CALLBACK_DB_STATEMENT_TIMEOUT_MS,
+      async (tx) => {
+        if (!input.claimed) {
+          const stored = await getConnectAttempt(tx, state, operation.attemptId);
+          if (
+            ["complete", "cancelled", "expired", "failed", "uncertain"].includes(
+              stored.attempt.state,
+            )
+          )
+            return;
+          const claim = await claimConnectOperation(tx, state, {
+            ...operation,
+            expectedRevision: stored.attempt.revision,
+          });
+          if (claim.status === "replayed") return;
+        }
+        await finishConnectOperation(tx, state, {
+          ...operation,
+          commit: async (_locked, current) => ({
+            ...current,
+            revision: current.revision + 1,
+            state: "failed",
+            nextAction: { type: "none" },
+            error: { code: input.stage.reason, message: input.message, retryable: true },
+          }),
+        });
+      },
+    );
+  } catch (settlementError) {
+    logOAuthCallbackFailure(
+      deps.observability,
+      new OAuthCallbackStageError(input.stage.stage, "persist_failed", settlementError),
+      state,
+    );
   }
 }
 
@@ -1318,8 +1368,12 @@ export function requireIntegrationsStateSecret(settings: Settings): string {
   return secret;
 }
 
-async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload): Promise<void> {
-  await requireConnectOwnerAuthority(db, state);
+async function requireOAuthCallbackGrant(
+  db: Database,
+  state: OAuthStatePayload,
+  permission: ReturnType<typeof connectSetupPermission>,
+): Promise<void> {
+  await requireConnectOwnerAuthority(db, state, permission);
 }
 
 /** The hosted-Slack profile's origin pins, kept exported for its tests. */
