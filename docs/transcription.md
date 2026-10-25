@@ -295,9 +295,10 @@ available independently when a provider is ready.
 | Runtime configuration | `packages/config/src/index.ts`, `.env.example` |
 | Service and segmenter ports | `packages/core/src/transcription.ts` |
 | FORCE-RLS schema, leases, provider pin, cleanup ledger, purge | `packages/db/drizzle/0170_resumable_transcription_recordings.sql`, `packages/db/src/transcription-recordings.ts` |
-| API routes and ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `apps/api/src/transcription/segmenter.ts` |
+| Deprecated API routes and the ffmpeg adapter | `apps/api/src/routes/transcription-recordings.ts`, `packages/core/src/transcription-service/segmenter.ts` |
 | SDK one-shot and resumable methods | `packages/sdk/src/client.ts`, `packages/sdk/src/types.ts` |
-| React capture/recovery/handoff | `packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/voice-recording-owner.ts`, `packages/react/src/voice-recording-store.ts` |
+| Dictation recordings (API, worker) | `apps/api/src/routes/recordings.ts`, `apps/worker/src/activities/recordings.ts` |
+| Web and phone dictation | `packages/react/src/hooks/use-voice-input.ts`, `packages/react-native/src/recordings/dictation.ts` |
 | Global provider-object reaper | `apps/worker/src/activities/file-upload-reaper.ts` |
 | Product controls | `packages/react/src/components/composer-transcription-control.tsx`, `packages/react/src/app/components/transcription-settings.tsx` |
 
