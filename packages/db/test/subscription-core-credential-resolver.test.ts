@@ -126,3 +126,58 @@ describe("shared credential resolver refresh policy", () => {
     await expect(forced.resolver.refresh()).rejects.toThrow("sign in again");
   });
 });
+
+describe("shared credential resolver forced refresh", () => {
+  test("concurrent forced refreshes rotate once even when one reads after the rotation (EP-N14)", async () => {
+    const store = { generation: 1 };
+    const rotations: number[] = [];
+    let loads = 0;
+    let rotated!: () => void;
+    const firstRotation = new Promise<void>((done) => (rotated = done));
+    const resolver = buildSubscriptionCoreCredentialResolver({
+      flightNamespace: `resolver-test-${crypto.randomUUID()}`,
+      connectionId: crypto.randomUUID(),
+      holderKey: "holder",
+      policy: () => ({ windowMs: 60_000, fallbackMs: 3_600_000 }),
+      load: async () => {
+        loads += 1;
+        // The second concurrent caller's credential read lands only after the
+        // first caller's rotation committed (a slow pool connection or runner).
+        if (loads === 3) await firstRotation;
+        return {
+          kind: "loaded",
+          credential: {
+            token: `token-${store.generation}`,
+            refreshGeneration: store.generation,
+            planType: null,
+            expiresAt: new Date(Date.now() + 3_600_000),
+            lastRefreshAt: null,
+          } satisfies Loaded,
+        };
+      },
+      embeddedExpiry: () => null,
+      // The store's generation-fenced rotation: a stale observation is superseded.
+      refresh: async (current) => {
+        rotations.push(current.refreshGeneration);
+        if (current.refreshGeneration !== store.generation) return { kind: "superseded" };
+        store.generation += 1;
+        rotated();
+        return { kind: "refreshed", refreshGeneration: store.generation };
+      },
+      snapshot: (current) => current.refreshGeneration,
+      refreshedSnapshot: (outcome) => outcome.refreshGeneration,
+      errors: {
+        relogin: (message) => new Relogin(message ?? "relogin"),
+        leaseLost: () => new Error("lease lost"),
+        accessLost: () => new Error("access lost"),
+      },
+    });
+    expect(await resolver.getToken()).toBe(1);
+    const [a, b] = await Promise.all([resolver.refresh(), resolver.refresh()]);
+    expect(rotations).toEqual([1]);
+    expect([a, b]).toEqual([2, 2]);
+    // A caller already holding the newest credential still forces a rotation.
+    expect(await resolver.refresh()).toBe(3);
+    expect(rotations).toEqual([1, 2]);
+  });
+});
