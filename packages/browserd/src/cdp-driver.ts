@@ -2053,7 +2053,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           return await this.untilDialog(state, async () => {
             if (last !== "navigate" && last !== "history" && last !== "wait")
               await this.settleActionRequests(state, requestsBeforeActions);
+            // Taken before animations settle: a handler may start its request
+            // while a click ripple or transition is still running.
+            const late =
+              last !== undefined && LATE_REQUEST_ACTIONS.has(last) ? settleBaseline(state) : null;
             await this.settleFiniteAnimations(state);
+            if (late) await this.settleLateActionRequests(state, late);
             const currentInfo = await this.requireTargetInfo(
               await this.ensureConnection(),
               info.targetId,
@@ -6636,6 +6641,43 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    */
   private async settleFiniteAnimations(state: TargetState): Promise<void> {
     if (this.engine !== "chromium" || state.dialog) return;
+    await this.evaluateForSettle(
+      state,
+      SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+      ANIMATION_SETTLE_LIMIT_MS + 1_000,
+    );
+  }
+
+  /**
+   * Many handlers await something before their request: reading the chosen
+   * file, hashing a password, a validation promise. When the action's first
+   * settle ran, that request had not started, so the result would show the
+   * page before the response the agent is waiting for. Give such a handler
+   * one frame to start its request, and settle every request started since
+   * `later` (taken before animations settled) like the others. A page that
+   * starts nothing pays only that frame.
+   */
+  private async settleLateActionRequests(
+    state: TargetState,
+    later: ActionSettleBaseline,
+  ): Promise<void> {
+    if (this.engine !== "chromium" || state.dialog) return;
+    await this.evaluateForSettle(state, LATE_REQUEST_FRAME_EXPRESSION, 1_000);
+    await this.settleActionRequests(state, later);
+    if (
+      state.networkActivitySequence !== later.activity ||
+      state.navigationSequence !== later.navigation
+    ) {
+      await this.settleFiniteAnimations(state);
+    }
+  }
+
+  /** Evaluates a settle wait where page scripts cannot see or stall it. */
+  private async evaluateForSettle(
+    state: TargetState,
+    expression: string,
+    timeoutMs: number,
+  ): Promise<void> {
     try {
       const world = await this.sendTarget<{ executionContextId?: unknown }>(
         state,
@@ -6647,12 +6689,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state,
         "Runtime.evaluate",
         {
-          expression: SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+          expression,
           contextId: world.executionContextId,
           returnByValue: true,
           awaitPromise: true,
         },
-        { timeoutMs: ANIMATION_SETTLE_LIMIT_MS + 1_000 },
+        { timeoutMs },
       );
     } catch {
       // Settling only improves the snapshot; it never decides the outcome.
@@ -7663,6 +7705,44 @@ const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
 // result on the page as it is, still loading.
 const ACTION_NAVIGATION_SETTLE_LIMIT_MS = 10_000;
 const ACTION_REQUEST_POLL_MS = 20;
+// Input after which a page handler commonly starts a request: a click or
+// key that submits, a choice, a chosen file, a click at a point, typed keys
+// (a code box that submits after its last digit).
+const LATE_REQUEST_ACTIONS: ReadonlySet<string> = new Set([
+  "click",
+  "double_click",
+  "press",
+  "type",
+  "select",
+  "check",
+  "upload",
+  "pointer",
+]);
+
+/** What an action's settle had seen, to tell later requests apart. */
+function settleBaseline(state: TargetState): ActionSettleBaseline {
+  return {
+    open: new Set(state.inflightRequests),
+    activity: state.networkActivitySequence,
+    navigation: state.navigationSequence,
+  };
+}
+
+/** Resolves after the next frame and the task after it, or within 50 ms when
+ * the page does not animate. A hidden tab neither draws frames nor runs short
+ * timers promptly, so there two message-channel tasks stand in for them. */
+const LATE_REQUEST_FRAME_EXPRESSION = `new Promise((resolve) => {
+  const done = () => resolve(true);
+  if (document.visibilityState === "hidden") {
+    const channel = new MessageChannel();
+    let turns = 0;
+    channel.port1.onmessage = () => (++turns >= 2 ? done() : channel.port2.postMessage(0));
+    channel.port2.postMessage(0);
+    return;
+  }
+  setTimeout(done, 50);
+  requestAnimationFrame(() => setTimeout(done, 0));
+})`;
 // The response handler runs after the network layer reports the load finished.
 const ACTION_RESPONSE_APPLY_MS = 50;
 
