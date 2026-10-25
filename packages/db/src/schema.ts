@@ -15673,6 +15673,10 @@ export const feedbackSubmissions = pgTable(
     sentiment: text("sentiment"),
     comment: losslessText("comment"),
     commentCodecVersion: losslessCodecVersion("comment_codec_version"),
+    /** App and device facts the report was sent with (FeedbackContext). */
+    context: jsonb("context").$type<Record<string, unknown>>(),
+    /** Screenshot metadata in send order (FeedbackScreenshot); bytes are in object storage. */
+    screenshots: jsonb("screenshots").$type<unknown[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

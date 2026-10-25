@@ -2413,6 +2413,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/feedback/:feedbackId/screenshots/:index",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/feedback/:feedbackId/screenshots/:index",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/github/installations/:installationId/configure",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/github/installations/:installationId/configure",

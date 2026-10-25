@@ -18,6 +18,8 @@ import {
 import { SettingsList } from "@/settings-list";
 import type { SettingsSection } from "@/settings-model";
 import { dismissToHome } from "@/navigation";
+import { startFeedback } from "@/feedback/draft";
+import { setShakeToSendFeedback, useShakeToSendFeedback } from "@/feedback/preference";
 import { AppThemeProvider } from "@/theme";
 import { openOnWeb, webPaths } from "@/web-links";
 
@@ -35,6 +37,7 @@ function Settings() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const appearance = useAppearancePreference();
+  const shakeToSendFeedback = useShakeToSendFeedback();
   const { target: outsideCallTarget, pinned: pinnedCallSession } = useOutsideCallPreferences();
   const { accounts, account, workspace, organizations, switchAccount, signOut } = useAccount();
   const inbox = useInboxSettings();
@@ -177,6 +180,27 @@ function Settings() {
     })),
   });
   if (account) {
+    sections.push({
+      id: "feedback",
+      title: "Feedback",
+      footer: "Shaking takes a screenshot of the screen you're on, which you can remove before sending.",
+      rows: [
+        {
+          kind: "action",
+          id: "send-feedback",
+          title: "Send feedback",
+          symbol: "bubble.left.and.exclamationmark.bubble.right",
+          onPress: () => void startFeedback("menu"),
+        },
+        {
+          kind: "toggle",
+          id: "shake-to-send-feedback",
+          title: "Shake to send feedback",
+          value: shakeToSendFeedback,
+          onChange: setShakeToSendFeedback,
+        },
+      ],
+    });
     sections.push({
       id: "you",
       title: account.email,

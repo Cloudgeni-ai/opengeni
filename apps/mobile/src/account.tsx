@@ -40,6 +40,7 @@ import {
   writeAccountToken,
 } from "@/account-store";
 import { openLinkFromApp } from "@/app-link-registry";
+import { recordingFailedRequests } from "@/feedback/recent-errors";
 import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
 
 /** The deployment a new account signs in to unless the person names another. */
@@ -80,7 +81,8 @@ const AccountContext = createContext<AccountState | null>(null);
 function newClient(baseUrl: string, token?: string | null): OpenGeniClient {
   return new OpenGeniClient({
     baseUrl,
-    fetch: expoStreamingFetch,
+    // Failed requests are remembered (in memory) so a feedback report can show them.
+    fetch: recordingFailedRequests(expoStreamingFetch),
     onDeprecation: false,
     ...(token ? { apiKey: token } : {}),
   });

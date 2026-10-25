@@ -1736,6 +1736,10 @@ export type {
   CreateFeedbackRequest,
   Feedback,
   FeedbackSubmissionResponse,
+  FeedbackContext,
+  FeedbackRecentError,
+  FeedbackScreenshot,
+  FeedbackScreenshotUpload,
 } from "./feedback";
 export type * from "./knowledge";
 export type {
