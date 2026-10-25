@@ -70,6 +70,61 @@ describe(".env.example", () => {
   });
 });
 
+describe("recording transcription settings", () => {
+  const endpoint = "https://speech.example.cognitiveservices.azure.com";
+
+  test("reads the deployment's Azure Speech account and its Entra identity", () => {
+    const settings = withEnv(
+      {
+        OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT: endpoint,
+        AZURE_TENANT_ID: "tenant",
+        AZURE_CLIENT_ID: "client",
+        AZURE_FEDERATED_TOKEN_FILE: "/var/run/secrets/azure/tokens/azure-identity-token",
+        AZURE_AUTHORITY_HOST: "https://login.microsoftonline.com/",
+      },
+      () => getSettings(),
+    );
+    expect(settings.recordingAzureSpeechEndpoint).toBe(endpoint);
+    expect(settings.azureTenantId).toBe("tenant");
+    expect(settings.azureFederatedTokenFile).toBe(
+      "/var/run/secrets/azure/tokens/azure-identity-token",
+    );
+  });
+
+  test("refuses an account it can't sign in to, a path in the endpoint and an unknown default", () => {
+    expect(() =>
+      withEnv({ OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT: endpoint }, () => getSettings()),
+    ).toThrow("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY");
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT: `${endpoint}/speechtotext`,
+          OPENGENI_RECORDING_AZURE_SPEECH_API_KEY: "key",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("HTTPS origin");
+    expect(() =>
+      withEnv({ OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT: "azure-speech/MAI-Transcribe-2" }, () =>
+        getSettings(),
+      ),
+    ).toThrow("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set");
+    expect(() =>
+      withEnv({ OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT: "acme/model" }, () => getSettings()),
+    ).toThrow("must name elevenlabs or azure-speech");
+    expect(
+      withEnv(
+        {
+          OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT: endpoint,
+          OPENGENI_RECORDING_AZURE_SPEECH_API_KEY: "key",
+          OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT: "elevenlabs/scribe_v2",
+        },
+        () => getSettings(),
+      ).recordingTranscriptionDefault,
+    ).toBe("elevenlabs/scribe_v2");
+  });
+});
+
 describe("optional resource credits and verified signup trial", () => {
   test("keeps every new charge and grant off by default", () => {
     const settings = withEnv({}, () => getSettings());

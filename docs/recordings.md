@@ -164,10 +164,32 @@ prints the averaged voice vector of each labelled set of segments.
 `cargo run --release --example der -- REF.rttm REF.uem HYP.json` scores
 output against a reference.
 
-Transcription uses the workspace's own provider key, or its organization's.
-ElevenLabs Scribe v2 is the first provider. `GET …/recording-models` lists the
-models, their capabilities and whether each is available here; a workspace
-can set its default in `settings.recordings.transcription`.
+Two providers transcribe recordings:
+
+- **ElevenLabs Scribe v2** ($0.22 an hour) uses the workspace's own
+  ElevenLabs key, or its organization's.
+- **Azure Speech with MAI-Transcribe-2** ($0.10 an hour at its launch price)
+  uses the deployment's own Azure Speech account. Audio is processed in the
+  account's region, so a deployment that must keep audio in the EU uses an
+  account there (MAI-Transcribe is offered in North Europe). Set
+  `OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT` to the account's origin, such as
+  `https://name.cognitiveservices.azure.com`. It authenticates with
+  `OPENGENI_RECORDING_AZURE_SPEECH_API_KEY` when set, otherwise with
+  Microsoft Entra ID through the standard `AZURE_TENANT_ID` and
+  `AZURE_CLIENT_ID`, plus `AZURE_FEDERATED_TOKEN_FILE` (an AKS workload
+  identity sets all three) or `AZURE_CLIENT_SECRET`. The identity needs the
+  Cognitive Services User role on the account. The model accepts FLAC, WAV
+  and MP3 and up to two hours per request, so the worker sends it 16 kHz mono
+  FLAC, in overlapping pieces for longer tracks. Speakers come from
+  Opengeni's diarizer, since the model's own diarization fails on recordings
+  longer than about a quarter of an hour during its preview.
+
+Recordings use Azure Speech when its account is configured, else ElevenLabs.
+`OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT` (`provider/model`, such as
+`elevenlabs/scribe_v2`) picks another default for the deployment, and a
+workspace can set its own in `settings.recordings.transcription`.
+`GET …/recording-models` lists the models, their capabilities and whether
+each is available here.
 
 ## Transcripts, speakers and edits
 

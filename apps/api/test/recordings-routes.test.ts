@@ -36,7 +36,12 @@ const encryptionKey = Buffer.alloc(32, 7);
 const memberPermissions = ["workspace:read", "sessions:read", "sessions:create"];
 type Started = Parameters<NonNullable<SessionWorkflowClient["startRecordingWorkflow"]>>[0];
 
-async function fixture(options: { transcription?: TranscriptionService } = {}) {
+async function fixture(
+  options: {
+    transcription?: TranscriptionService;
+    settings?: Parameters<typeof testSettings>[0];
+  } = {},
+) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Recording fixture') returning id`;
   const accountId = String(account!.id);
@@ -85,6 +90,7 @@ async function fixture(options: { transcription?: TranscriptionService } = {}) {
       sandboxBackend: "none",
       publicBaseUrl: "https://opengeni.example",
       environmentsEncryptionKey: encryptionKey.toString("base64"),
+      ...options.settings,
     }),
     objectStorage,
     ...(options.transcription ? { transcription: options.transcription } : {}),
@@ -574,6 +580,32 @@ describe("recording routes", () => {
         })
       ).status,
     ).toBe(400);
+  });
+
+  test("a deployment's own Azure Speech account is available to every workspace and is the default", async () => {
+    const scope = await fixture({
+      settings: {
+        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+        recordingAzureSpeechApiKey: "deployment-key",
+      },
+    });
+    const models = await scope.owner.call("GET", "/recording-models");
+    expect(models.body.default).toEqual({ providerId: "azure-speech", model: "MAI-Transcribe-2" });
+    expect(
+      models.body.models.find(
+        (model: { providerId: string }) => model.providerId === "azure-speech",
+      ),
+    ).toMatchObject({
+      providerName: "Azure Speech",
+      model: "MAI-Transcribe-2",
+      available: true,
+      usdPerHour: 0.1,
+      capabilities: { batch: true, live: false, diarization: false, wordTimestamps: true },
+    });
+    // Without a workspace key, ElevenLabs stays unavailable.
+    expect(
+      models.body.models.find((model: { model: string }) => model.model === "scribe_v2").available,
+    ).toBe(false);
   });
 
   test("the live preview: a single-use grant for the recorder, text for everyone who can see it", async () => {

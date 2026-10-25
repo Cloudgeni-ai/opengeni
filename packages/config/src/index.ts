@@ -992,6 +992,34 @@ const SettingsSchema = z.object({
    */
   recordingSpeakersBinaryPath: z.string().trim().min(1).max(1024).optional(),
   recordingSpeakerModelsDir: z.string().trim().min(1).max(1024).optional(),
+  /**
+   * The deployment's own Azure Speech account for meeting transcripts
+   * (MAI-Transcribe), as its HTTPS origin. Audio is processed in the
+   * account's region. It authenticates with the account key when one is set,
+   * otherwise with Microsoft Entra ID through the standard AZURE_TENANT_ID and
+   * AZURE_CLIENT_ID plus AZURE_FEDERATED_TOKEN_FILE (a workload identity) or
+   * AZURE_CLIENT_SECRET.
+   */
+  recordingAzureSpeechEndpoint: z
+    .string()
+    .trim()
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      return url.protocol === "https:" && (url.pathname === "/" || url.pathname === "");
+    }, "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT must be the HTTPS origin of an Azure Speech account")
+    .optional(),
+  recordingAzureSpeechApiKey: z.string().trim().min(1).optional(),
+  /**
+   * The transcription model recordings use unless a workspace or request
+   * picks one, as `provider/model`. Defaults to Azure Speech when its
+   * account is configured, else ElevenLabs Scribe v2.
+   */
+  recordingTranscriptionDefault: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u, "Use provider/model, such as elevenlabs/scribe_v2")
+    .optional(),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Connected subscription STT is preferred by default; operators can put
   // openai/azure-openai first explicitly.
@@ -5410,6 +5438,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
     recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
     recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
+    recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
+    recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
+    recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),
@@ -11060,6 +11091,30 @@ export function validateSitesDomain(
   }
 }
 
+/** A deployment's own transcription account must be usable, and the default must exist. */
+function validateRecordingTranscriptionSettings(settings: Settings): void {
+  if (
+    settings.recordingAzureSpeechEndpoint &&
+    !settings.recordingAzureSpeechApiKey &&
+    !deploymentAzureEntraCredential(settings)
+  ) {
+    throw new Error(
+      "OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT needs OPENGENI_RECORDING_AZURE_SPEECH_API_KEY, or AZURE_TENANT_ID and AZURE_CLIENT_ID with AZURE_FEDERATED_TOKEN_FILE or AZURE_CLIENT_SECRET",
+    );
+  }
+  const defaultProvider = settings.recordingTranscriptionDefault?.split("/")[0];
+  if (defaultProvider === "azure-speech" && !settings.recordingAzureSpeechEndpoint) {
+    throw new Error(
+      "OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT names azure-speech but OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT is not set",
+    );
+  }
+  if (defaultProvider && defaultProvider !== "azure-speech" && defaultProvider !== "elevenlabs") {
+    throw new Error(
+      "OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT must name elevenlabs or azure-speech",
+    );
+  }
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
@@ -11077,6 +11132,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       `OPENGENI_GOAL_IDLE_BACKOFF_MS entries must not exceed OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS (${settings.goalIdleBackoffMaxMs})`,
     );
   }
+  validateRecordingTranscriptionSettings(settings);
   const allowedFirstPartyMcpTools = new Set(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
   );
