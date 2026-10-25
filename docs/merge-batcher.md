@@ -441,11 +441,25 @@ never a blind replay; these observations do not make GitHub REST atomic with Git
 
 ## State machine and recovery
 
-With one hosted candidate running, the planner constructs one speculative
-successor **locally**, based on the predecessor tip, without publishing it and
-starting another CI run. A speculative candidate is deterministic and can be
-rebuilt after cache loss. The hosted runner guard permits only one Batch CI run,
-even if a higher legacy max-inflight planner setting is present.
+The planner constructs speculative successors on the exact predecessor tip.
+`BATCHER_MAX_INFLIGHT` bounds both planner reservations and the complete provider
+inventory check before publication or the existing single trusted retry. The
+default remains one hosted run; a qualified configuration of two permits a
+successor to run while its predecessor is tested. `BATCHER_SPECULATION_DEPTH`
+bounds the chain, including local unpublished candidates. Missing publication
+outcomes retain their reservation; foreign, invalidated and waiting Batch runs
+still consume provider slots. No running CI is cancelled. Only a tested root
+whose base is current main may land, with exact tree/provenance/CAS checks;
+landing consumes no additional hosted slot and does not wait for successor CI.
+At publication/retry, the slot budget is the union of exact published-candidate
+reservations and current provider runs, not two independent limits. A matching
+visible push run is counted once; missing, mismatched or unresolved histories
+remain reservations. Historical reads reuse conservative cached observations;
+the normal bounded historical refresh retires those reservations only on evidence.
+Final slot contention defers publication without a Git transaction or an unsafe
+write-outcome classification.
+Failed or changed predecessors invalidate descendants without cancelling their
+runs. Version/control-plane barriers and sequential bisection remain unchanged.
 Full-main capacity estimates remain observable rather than reserving runners.
 Before publication, the existing single trusted retry, and landing, the reader scans current
 repository runs and their latest jobs (100 entries per page, paginated through
@@ -548,7 +562,7 @@ success or blanket cancellation of main, Batch, Version or unrelated work.
 
 The following capacity observations remain visible but are **informational for
 live Batch submission, the existing single trusted retry, and landing**. After a
-complete valid inventory with no active Batch reservation, one ready candidate
+complete valid inventory with a free configured Batch slot, one ready candidate
 may enter GitHub's queue; a tested candidate need not wait for main capacity to
 land. `capacityInformational`
 marks this policy; `capacity.hold` retains the historical capacity heuristic for
@@ -556,7 +570,7 @@ diagnostics, not an admission rejection. Invalid capacity configuration and
 incomplete/unknown evidence still hold. Traffic-shadow capacity comparisons
 retain their existing conservative decisions.
 
-The exact tested tree, lease/CAS, provenance, max-inflight1 and unknown-outcome
+The exact tested tree, lease/CAS, provenance, configured in-flight limit and unknown-outcome
 checks still apply to those actions. Historical latency credit for a blocked
 main-capacity wait no longer accrues when capacity is informational; latency
 comparisons across this policy change are therefore not like-for-like.

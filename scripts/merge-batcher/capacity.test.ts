@@ -355,7 +355,7 @@ describe("batcher reader admission (stage.json headroom)", () => {
     // Main finished its fan-out tail: admitted again.
     const tail = reader([main], fanout(0, 3));
     expect(await tail.github.mainBusy()).toBe(false);
-    expect(tail.github.lastHeadroom?.reason).toContain("provider queue");
+    expect(tail.github.lastHeadroom?.reason).toContain("provider slots");
   });
 
   test("an approval-only newest main run is not runner demand and does not hold", async () => {

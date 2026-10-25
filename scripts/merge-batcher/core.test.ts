@@ -293,6 +293,28 @@ describe("readiness and deterministic planning", () => {
       expect(action.ledger.invalidated).toEqual([a.manifest.batchId, b.manifest.batchId]);
     expect(b.runs[0]!.status).toBe("in_progress");
   });
+  test("two hosted slots publish an exact predecessor successor and land only the tested root", () => {
+    const a = candidate();
+    a.runs = [{ ...run(a, "unknown"), status: "in_progress" }];
+    const settings = { ...cfg, maxInflight: 2, speculationDepth: 3 };
+    const building = plan(observation([pull(1), pull(2)], [a]), settings);
+    expect(building.kind).toBe("build");
+    if (building.kind !== "build") throw Error("expected build");
+    expect(building.publish).toBe(true);
+    expect(building.spec.baseSha).toBe(a.manifest.tipSha);
+    expect(building.spec.predecessor).toBe(a.manifest.batchId);
+    const b = candidate([pull(2)], a.manifest.tipSha, a.manifest.batchId);
+    b.runs = [{ ...run(b, "unknown"), status: "in_progress" }];
+    const full = plan(observation([pull(1), pull(2), pull(3)], [a, b]), settings);
+    expect(full.kind).toBe("build");
+    if (full.kind === "build") expect(full.publish).toBe(false);
+    a.runs = [run(a, "success")];
+    const landing = plan(observation([pull(1), pull(2)], [a, b]), settings);
+    expect(landing.kind).toBe("land");
+    if (landing.kind === "land")
+      expect(landing.candidate.manifest.batchId).toBe(a.manifest.batchId);
+    expect(b.runs[0]!.status).toBe("in_progress");
+  });
   test("edited evidence and removed ready signal invalidate a candidate", () => {
     const c = candidate();
     const p = pull(1);

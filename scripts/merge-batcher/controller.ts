@@ -37,6 +37,9 @@ export type Effect =
   | { kind: "retry"; run: Run }
   | { kind: "announce"; number: number; body: string; key: string }
   | { kind: "park"; number: number; body: string; key: string };
+/** Final read-only validation found contention; no transaction was attempted. */
+export class ReplanRequired extends Error {}
+
 export interface Transaction {
   expectedState: string | null;
   nextState: string;
@@ -210,7 +213,10 @@ export class LiveReader implements Reader {
       stateSha,
       ledger,
       observationWarnings,
-      mainBusy: this.config.mode === "shadow" ? false : await this.github.mainBusy(),
+      // The planner separately counts live runs and durable missing-run
+      // reservations. A full provider slot must not veto a safe root landing.
+      // Publication/retry rechecks provider capacity at the effect boundary.
+      mainBusy: this.config.mode === "shadow" ? false : await this.github.mainBusy("observe"),
       headroom: this.github.lastHeadroom,
     };
   }
@@ -405,15 +411,22 @@ export class Controller {
         }
         ledger = this.executor?.prepareLedger?.(ledger, effect, observation.now) ?? ledger;
         const nextState = await this.git.stateCommit(ledger, observation.stateSha, observation.now);
-        await this.executor!.transact({
-          expectedState: observation.stateSha,
-          nextState,
-          expectedLedger: observation.ledger,
-          nextLedger: ledger,
-          now: observation.now,
-          bindings,
-          effect,
-        });
+        try {
+          await this.executor!.transact({
+            expectedState: observation.stateSha,
+            nextState,
+            expectedLedger: observation.ledger,
+            nextLedger: ledger,
+            now: observation.now,
+            bindings,
+            effect,
+          });
+        } catch (error) {
+          if (!(error instanceof ReplanRequired)) throw error;
+          result.reason = error.message;
+          await this.stage(observation, result);
+          return result;
+        }
         if (effect.kind === "publish" || effect.kind === "land")
           await this.journal.event(
             effect.manifest,

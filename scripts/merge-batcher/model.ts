@@ -327,6 +327,12 @@ function publicReleaseApprovalJobs(run: unknown, jobs: unknown): jobs is unknown
   return waiting === 1;
 }
 
+export interface BatchReservation {
+  branch: string;
+  headSha: string;
+  runId?: number;
+}
+
 export type RunnerScanHold =
   | "incomplete-runs"
   | "invalid-run"
@@ -343,6 +349,7 @@ export type RunnerScan =
       approvalOnlyRuns: number;
       cachedApprovalOnlyRuns: number;
       runnerRelevantRuns: number;
+      activeBatchRuns: number;
       /** Newest active full-main push CI run (highest run ID), or null when none is active. */
       latestMain: LatestMainObservation | null;
       /** Jobs `queued` or `requested` for a runner across every active full-main run. */
@@ -397,6 +404,11 @@ export async function scanRunnerDemand(input: {
   baseBranch: string;
   /** PR fast checks use the provider queue, not Batch submission backpressure. */
   excludePrCiDemand?: boolean;
+  /** Complete provider inventory counts every active Batch, including foreign or obsolete runs. */
+  maxInflight?: number;
+  /** Landing/observation does not consume a new hosted slot. Unknown evidence still holds. */
+  requireFreeBatchSlot?: boolean;
+  reservations?: BatchReservation[];
   /** Run ID validator; return null to hold, or throw. Defaults to positive safe integers. */
   runId?: (value: unknown) => number | null;
   now?: () => number;
@@ -423,6 +435,9 @@ export async function scanRunnerDemand(input: {
     approvalOnlyRuns,
   });
   const runs = new Map<number, Record<string, unknown>>();
+  const maxInflight = input.maxInflight ?? 1;
+  if (!Number.isSafeInteger(maxInflight) || maxInflight < 1 || maxInflight > 16)
+    return hold("invalid-run");
   // IDs are mandatory across paginated responses so overlap cannot hide a gap.
   // Single-page job fixtures may omit IDs; run identities are always validated below.
   async function list(path: string, key: "workflow_runs" | "jobs") {
@@ -500,7 +515,29 @@ export async function scanRunnerDemand(input: {
       runs.set(id, record);
     }
   }
-  if ([...runs.values()].some((run) => run.path === input.batchWorkflow)) return hold("batch-slot");
+  const batchRuns = [...runs.values()].filter((run) => run.path === input.batchWorkflow);
+  const activeBatchRuns = batchRuns.length;
+  const unseen = new Set<string>();
+  for (const reservation of input.reservations ?? []) {
+    if (
+      !reservation.branch ||
+      !/^[a-f0-9]{40}$/.test(reservation.headSha) ||
+      (reservation.runId !== undefined && runId(reservation.runId) === null)
+    )
+      return hold("invalid-run");
+    if (
+      !batchRuns.some(
+        (run) =>
+          run.event === "push" &&
+          run.head_branch === reservation.branch &&
+          run.head_sha === reservation.headSha &&
+          (reservation.runId === undefined || run.id === reservation.runId),
+      )
+    )
+      unseen.add(`${reservation.branch}:${reservation.headSha}:${reservation.runId ?? "missing"}`);
+  }
+  if (input.requireFreeBatchSlot !== false && activeBatchRuns + unseen.size >= maxInflight)
+    return hold("batch-slot");
   if (input.excludePrCiDemand) {
     for (const [id, run] of runs) {
       if (
@@ -634,6 +671,7 @@ export async function scanRunnerDemand(input: {
     approvalOnlyRuns,
     cachedApprovalOnlyRuns,
     runnerRelevantRuns,
+    activeBatchRuns,
     latestMain: latestMain ? observeMainQueue(latestMain.id, latestMain.jobs, finished) : null,
     mainQueuedJobs,
     preFanoutMainRuns: preFanoutMainRuns.sort((a, b) => a - b),
