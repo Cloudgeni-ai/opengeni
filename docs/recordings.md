@@ -189,6 +189,27 @@ can set its default in `settings.recordings.transcription`.
 - `GET` and `POST /v1/workspaces/:workspaceId/recording-people` read and add
   people in the directory.
 
+## Notes
+
+A meeting has two Markdown documents beside its transcript. The `notepad` is
+what people jot down while it is recorded. The `notes` are the written-up
+summary, decisions and action items, by a person or by an agent afterwards
+(an automation that runs when `recording.transcript.ready` arrives is the
+usual way). Anyone who can see the meeting can read and replace both, as with
+its title and speakers; deleting the meeting deletes them.
+
+- `GET …/recordings/:recordingId/notes` returns the notes saved so far, each
+  with its `revision`, `updatedAt` and who saved it (`updatedBy.sessionId` is
+  the chat whose agent saved it).
+- `PUT …/recordings/:recordingId/notes/:kind` (`notepad` or `notes`) with
+  `{ "body": "…", "expectedRevision": 3 }` replaces it, up to 256 KiB. With
+  `expectedRevision` (0 when nothing was saved yet) a newer save made first
+  returns 409 with `details.code: "notes_changed"` instead of being
+  overwritten. Saving the same text again changes nothing.
+
+Saving the `notes` is a `recording.notes.updated` event; the notepad, which
+saves as people type, is not.
+
 ## Recognizing people by voice
 
 Off by default. A workspace admin turns it on with
@@ -239,9 +260,9 @@ Recording events go out through the existing signed
 [workspace and organization webhooks](workspace-integrations.md#webhooks):
 `recording.started`, `recording.finished`, `recording.transcript.ready`,
 `recording.transcript.failed`, `recording.transcript.current_changed`,
-`recording.speakers.updated` and `recording.deleted`. The payload carries ids
-and states (plus the product's own `externalRef`), never a title, audio or
-transcript text:
+`recording.speakers.updated`, `recording.notes.updated` and
+`recording.deleted`. The payload carries ids and states (plus the product's
+own `externalRef`), never a title, audio, transcript or note text:
 
 ```json
 { "id": "…", "type": "recording.transcript.ready", "lane": "workspace", "workspaceId": "…",

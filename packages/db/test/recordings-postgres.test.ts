@@ -36,6 +36,7 @@ import {
   listDeletingRecordingObjectKeys,
   listDueRecordingRetention,
   listRecordingLiveSegments,
+  listRecordingNotes,
   listRecordingPeople,
   listRecordings,
   listStalledRecordingWork,
@@ -47,6 +48,7 @@ import {
   RecordingNotFoundError,
   rememberRecordingPersonVoice,
   reserveRecordingChunks,
+  saveRecordingNote,
   setCurrentRecordingTranscriptVersion,
   startRecordingLiveTrack,
   updateRecordingSegments,
@@ -991,6 +993,89 @@ describe("recordings", () => {
         (select count(*)::int from recording_voice_rejections where workspace_id = ${scope.workspaceId}) as rejections,
         (select count(*)::int from recording_people where workspace_id = ${scope.workspaceId} and voice_consent is not null) as consents`;
     expect(afterOff).toEqual({ prints: 0, voices: 0, rejections: 0, consents: 0 });
+  });
+
+  test("notes: the notepad and the notes, revisions, conflicts and who can see them", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const ours = await finalizedRecording(scope, "workspace");
+    const mine = await finalizedRecording(scope, "private");
+    const memberActor = { workspaceId: scope.workspaceId, subjectId: scope.member };
+    const at = { ...ours.actor, recordingId: ours.recordingId };
+
+    expect(await listRecordingNotes(db, at)).toEqual([]);
+    const jotted = await saveRecordingNote(db, {
+      ...at,
+      kind: "notepad",
+      body: "- ask about the budget",
+      expectedRevision: 0,
+    });
+    expect(jotted).toMatchObject({
+      kind: "notepad",
+      revision: 1,
+      updatedBy: { subjectId: scope.owner, sessionId: null },
+    });
+    const sessionId = crypto.randomUUID();
+    const written = await saveRecordingNote(db, {
+      ...at,
+      kind: "notes",
+      body: "## Summary\n\nBudget approved.",
+      sessionId,
+    });
+    expect(written).toMatchObject({ kind: "notes", revision: 1, updatedBy: { sessionId } });
+
+    // A stale revision is refused; the same text again changes nothing.
+    const stale = saveRecordingNote(db, {
+      ...at,
+      kind: "notepad",
+      body: "- something else",
+      expectedRevision: 0,
+    });
+    await expect(stale).rejects.toBeInstanceOf(RecordingConflictError);
+    await expect(stale).rejects.toMatchObject({ code: "notes_changed" });
+    const same = await saveRecordingNote(db, {
+      ...at,
+      kind: "notepad",
+      body: "- ask about the budget",
+      expectedRevision: 1,
+    });
+    expect(same.revision).toBe(1);
+    const edited = await saveRecordingNote(db, {
+      ...at,
+      kind: "notepad",
+      body: "- ask about the budget\n- book the room",
+      expectedRevision: 1,
+    });
+    expect(edited.revision).toBe(2);
+
+    // Anyone who can see the meeting reads and writes its notes; a private one stays hidden.
+    const memberView = await listRecordingNotes(db, { ...memberActor, recordingId: ours.recordingId });
+    expect(memberView.map((note) => [note.kind, note.revision])).toEqual([
+      ["notepad", 2],
+      ["notes", 1],
+    ]);
+    await expect(
+      listRecordingNotes(db, { ...memberActor, recordingId: mine.recordingId }),
+    ).rejects.toBeInstanceOf(RecordingNotFoundError);
+    await expect(
+      saveRecordingNote(db, { ...memberActor, recordingId: mine.recordingId, kind: "notes", body: "x" }),
+    ).rejects.toBeInstanceOf(RecordingNotFoundError);
+
+    // Only the notes are an event, once per change.
+    const events = await shared!.admin<{ type: string; data: Record<string, unknown> }[]>`
+      select type, data from recording_events
+      where recording_id = ${ours.recordingId} and type = 'recording.notes.updated'`;
+    expect(events).toHaveLength(1);
+    expect(events[0]!.data).toMatchObject({ noteKind: "notes", noteRevision: 1, sessionId });
+    expect(JSON.stringify(events[0]!.data)).not.toContain("Budget");
+
+    // Deleting the meeting deletes its notes.
+    await markRecordingDeleting(db, at);
+    expect(await purgeDeletingRecording(db, at)).toBe(true);
+    const [left] = await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from recording_notes where recording_id = ${ours.recordingId}`;
+    expect(left!.count).toBe(0);
   });
 
   test("deleting the workspace removes its recordings", async () => {

@@ -22,6 +22,7 @@ export const WORKSPACE_WEBHOOK_EVENT_TYPES = [
   "recording.transcript.failed",
   "recording.transcript.current_changed",
   "recording.speakers.updated",
+  "recording.notes.updated",
   "recording.deleted",
 ] as const;
 

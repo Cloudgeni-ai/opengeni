@@ -899,6 +899,62 @@ export const ListRecordingLiveSegmentsResponse = /* @__PURE__ */ defineSchema(()
 );
 export type ListRecordingLiveSegmentsResponse = z.infer<typeof ListRecordingLiveSegmentsResponse>;
 
+/**
+ * A meeting's two Markdown documents. `notepad` is what people jot down
+ * while it is recorded; `notes` is the written-up summary, decisions and
+ * action items, by a person or an agent, afterwards.
+ */
+export const RECORDING_NOTE_KINDS = ["notepad", "notes"] as const;
+export const RecordingNoteKind = /* @__PURE__ */ defineSchema(() => z.enum(RECORDING_NOTE_KINDS));
+export type RecordingNoteKind = z.infer<typeof RecordingNoteKind>;
+
+/** Notes can hold about 50 pages of text. */
+export const RECORDING_NOTE_MAX_BYTES = 262_144;
+
+export const RecordingNote = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    kind: RecordingNoteKind,
+    /** Markdown. */
+    body: z.string(),
+    /** Goes up by one with every save; send it back as `expectedRevision`. */
+    revision: z.number().int().min(1),
+    updatedAt: z.string(),
+    updatedBy: z.object({
+      subjectId: z.string(),
+      /** The chat whose agent saved it, when an agent did. */
+      sessionId: z.string().uuid().nullable(),
+    }),
+  }),
+);
+export type RecordingNote = z.infer<typeof RecordingNote>;
+
+export const ListRecordingNotesResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** The notes saved so far; a kind nobody has written yet is absent. */
+    notes: z.array(RecordingNote),
+  }),
+);
+export type ListRecordingNotesResponse = z.infer<typeof ListRecordingNotesResponse>;
+
+/**
+ * Replace one of a meeting's notes. With `expectedRevision`, the save is
+ * refused (409 `notes_changed`) when someone saved a newer revision first;
+ * 0 means "nobody has written it yet". Without it, the save always wins.
+ */
+export const SaveRecordingNoteRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      body: z
+        .string()
+        .refine((body) => new TextEncoder().encode(body).length <= RECORDING_NOTE_MAX_BYTES, {
+          message: `Notes can be at most ${RECORDING_NOTE_MAX_BYTES} bytes`,
+        }),
+      expectedRevision: z.number().int().min(0).optional(),
+    })
+    .strict(),
+);
+export type SaveRecordingNoteRequest = z.infer<typeof SaveRecordingNoteRequest>;
+
 export const RECORDING_EVENT_TYPES = [
   "recording.started",
   "recording.finished",
@@ -906,6 +962,7 @@ export const RECORDING_EVENT_TYPES = [
   "recording.transcript.failed",
   "recording.transcript.current_changed",
   "recording.speakers.updated",
+  "recording.notes.updated",
   "recording.deleted",
 ] as const;
 export type RecordingEventType = (typeof RECORDING_EVENT_TYPES)[number];
@@ -930,4 +987,8 @@ export type RecordingEventData = {
   languages?: string[];
   errorCode?: string | null;
   previousVersionId?: string | null;
+  /** `recording.notes.updated`: which notes, their new revision, and the chat whose agent saved them. */
+  noteKind?: RecordingNoteKind;
+  noteRevision?: number;
+  sessionId?: string | null;
 };

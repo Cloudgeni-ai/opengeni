@@ -56,6 +56,8 @@ export const recordingEventTypeValues = [
   "recording.transcript.failed",
   "recording.transcript.current_changed",
   "recording.speakers.updated",
+  // Migration 0954.
+  "recording.notes.updated",
   "recording.deleted",
 ] as const;
 export const recordingDiarizationValues = ["provider", "ours", "tracks", "none"] as const;
@@ -350,6 +352,30 @@ export const recordingLiveSegments = pgTable(
       table.recordingId,
       table.sequence,
     ),
+  ],
+);
+
+// Migration 0954. A meeting's notepad (jotted while recording) and its notes
+// (written up afterwards), as Markdown, one row each.
+export const recordingNoteKindValues = ["notepad", "notes"] as const;
+
+export const recordingNotes = pgTable(
+  "recording_notes",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    recordingId: uuid("recording_id").notNull(),
+    kind: text("kind", { enum: recordingNoteKindValues }).notNull(),
+    body: text("body").notNull(),
+    revision: integer("revision").notNull().default(1),
+    updatedBySubjectId: text("updated_by_subject_id").notNull(),
+    updatedBySessionId: uuid("updated_by_session_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.recordingId, table.kind] }),
+    index("recording_notes_workspace_idx").on(table.workspaceId, table.recordingId),
   ],
 );
 

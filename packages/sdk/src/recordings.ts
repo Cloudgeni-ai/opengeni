@@ -29,11 +29,14 @@ import type {
   FinalizeRecordingResponse,
   ListRecordingModelsResponse,
   ListRecordingLiveSegmentsResponse,
+  ListRecordingNotesResponse,
   ListRecordingPeopleResponse,
   ListRecordingsResponse,
   ListRecordingTranscriptVersionsResponse,
   Recording,
   RecordingLiveSession,
+  RecordingNote,
+  RecordingNoteKind,
   RecordingPerson,
   RecordingCaptureSource,
   RecordingTrackAudio,
@@ -42,6 +45,7 @@ import type {
   RecordingTranscriptVersion,
   RecordingVisibility,
   RememberRecordingPersonVoiceRequest,
+  SaveRecordingNoteRequest,
   UpdateRecordingRequest,
   UpdateRecordingSegmentsRequest,
   UpdateRecordingSegmentsResponse,
@@ -405,6 +409,35 @@ export class OpenGeniRecordingsClient {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/live-segments`,
       undefined,
       options.after ? { after: String(options.after) } : {},
+    );
+  }
+
+  /** The meeting's notepad and written-up notes; a kind nobody has written is absent. */
+  async listRecordingNotes(
+    workspaceId: string,
+    recordingId: string,
+  ): Promise<ListRecordingNotesResponse> {
+    return await this.client.requestJson<ListRecordingNotesResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/notes`,
+    );
+  }
+
+  /**
+   * Replace the notepad or the notes. Pass the revision you loaded as
+   * `expectedRevision` (0 when there were none) to get 409 `notes_changed`
+   * instead of overwriting a newer save.
+   */
+  async saveRecordingNote(
+    workspaceId: string,
+    recordingId: string,
+    kind: RecordingNoteKind,
+    request: SaveRecordingNoteRequest,
+  ): Promise<RecordingNote> {
+    return await this.client.requestJson<RecordingNote>(
+      "PUT",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/notes/${encodeURIComponent(kind)}`,
+      request,
     );
   }
 }
