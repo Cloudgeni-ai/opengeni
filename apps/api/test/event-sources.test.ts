@@ -60,6 +60,7 @@ async function fixture(options: {
   }>;
   github?: { webhookSecret: string; appSlug: string; api: AppDependencies["githubAppApi"] };
   eventSourceFetch?: typeof fetch;
+  webhookBaseUrl?: string;
 }) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Event source fixture') returning id`;
@@ -90,6 +91,7 @@ async function fixture(options: {
     environmentsEncryptionKey: randomBytes(32).toString("base64"),
     eventTriggersEnabled: options.enabled,
     mcpServers: options.mcpServers ?? [],
+    ...(options.webhookBaseUrl ? { webhookBaseUrl: options.webhookBaseUrl } : {}),
     ...(options.github
       ? {
           githubWebhookSecret: options.github.webhookSecret,
@@ -660,7 +662,9 @@ describe("MCP event sources", () => {
     for (const fake of fakes) await fake.stop();
   });
 
-  async function mcpFixture(options: { profile?: FakeMcpEventsProfile } = {}) {
+  async function mcpFixture(
+    options: { profile?: FakeMcpEventsProfile; webhookBaseUrl?: string } = {},
+  ) {
     let app: { request: (path: string, init: RequestInit) => Promise<Response> } | null = null;
     const fake = startFakeMcpEventsServer({
       // A server built for ChatGPT offers webhook delivery only.
@@ -681,6 +685,7 @@ describe("MCP event sources", () => {
         { id: "events-fixture", name: "Events Fixture", url: fake.url },
         { id: "plain-fixture", name: "Plain Fixture", url: plain.url },
       ],
+      ...(options.webhookBaseUrl ? { webhookBaseUrl: options.webhookBaseUrl } : {}),
     });
     app = f.app;
     const started: EventOccurrenceToStart[] = [];
@@ -933,6 +938,20 @@ describe("MCP event sources", () => {
     expect(f.started.map((run) => run.taskId)).not.toContain(support.id);
   });
 
+  test("webhook delivery goes to the deployment's separate webhook address", async () => {
+    const f = await mcpFixture({ webhookBaseUrl: "https://hooks.opengeni.example:8443/" });
+    const source = await f.createSource();
+    await f.automation(source.id, "ticket.closed", { queue: "billing" });
+    await f.pump();
+    const [subscription] = await f.subscriptions();
+    expect(subscription).toMatchObject({ mode: "webhook", failures: 0 });
+    const url = f.fake.subscriptions.get(String(subscription!.server_subscription_id))!.url;
+    expect(url).toStartWith("https://hooks.opengeni.example:8443/v1/webhooks/events/");
+    expect(f.fake.posts.map((post) => [JSON.parse(post.body).type, post.status])).toEqual([
+      ["verification", 200],
+    ]);
+  });
+
   test("a webhook stream verifies, delivers, dedupes, reports gaps and resubscribes", async () => {
     const f = await mcpFixture();
     const source = await f.createSource();
@@ -1075,10 +1094,14 @@ describe("GitHub event sources", () => {
     };
   }
 
-  async function githubFixture(app: ReturnType<typeof fakeGitHubApp>) {
+  async function githubFixture(
+    app: ReturnType<typeof fakeGitHubApp>,
+    options: { webhookBaseUrl?: string } = {},
+  ) {
     const f = await fixture({
       enabled: true,
       github: { webhookSecret, appSlug: "opengeni-agent", api: app.api },
+      ...options,
     });
     const bind = async (installationId: number, repositoryIds: number[]) => {
       const checkedAt = new Date();
@@ -1338,6 +1361,27 @@ describe("GitHub event sources", () => {
     expect(message).toContain("https://ci.example/hooks/github");
     expect(message).toContain("https://opengeni.example/v1/webhooks/github");
     expect(github.setUrls).toEqual([]);
+  });
+
+  test("a deployment with a separate webhook address gives that address out", async () => {
+    const github = fakeGitHubApp(["pull_request"]);
+    const f = await githubFixture(github, {
+      webhookBaseUrl: "https://hooks.opengeni.example:8443",
+    });
+    await f.bind(installation(), [951]);
+    expect((await f.addSource()).status).toBe(201);
+    expect(github.setUrls).toEqual(["https://hooks.opengeni.example:8443/v1/webhooks/github"]);
+
+    const created = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({ kind: "webhook", adapter: "standard", name: "Orders" }),
+    });
+    expect(created.status).toBe(201);
+    const { source } = await f.json(created);
+    expect(source.webhookUrl).toStartWith(
+      "https://hooks.opengeni.example:8443/v1/webhooks/events/",
+    );
   });
 });
 

@@ -446,6 +446,12 @@ const SettingsSchema = z.object({
   // reason as the legal links.
   supportEmail: z.string().trim().email().max(254).optional(),
   publicBaseUrl: z.string().url().optional(),
+  // Where other services send webhooks (event sources, the GitHub App's event
+  // webhook, MCP Events webhook delivery), when that is a different public
+  // address than publicBaseUrl: for example a console reachable only on a
+  // private network, with just the signed webhook paths published. Absent
+  // means publicBaseUrl.
+  webhookBaseUrl: z.string().url().optional(),
   // Product documentation the web console links from its Help menu. Absent
   // means the public Opengeni docs; `none` hides the link for deployments that
   // publish no documentation of their own.
@@ -5156,6 +5162,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     legalTermsOfServiceUrl: optional("OPENGENI_LEGAL_TERMS_OF_SERVICE_URL"),
     supportEmail: optional("OPENGENI_SUPPORT_EMAIL"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    webhookBaseUrl: optional("OPENGENI_WEBHOOK_BASE_URL"),
     documentationUrl: optional("OPENGENI_DOCUMENTATION_URL"),
     mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
     apiTrustedProxyHops: optional("OPENGENI_API_TRUSTED_PROXY_HOPS"),

@@ -108,6 +108,12 @@ credentials; it selects the source, whose adapter and encrypted secret are read
 before the body is parsed. Unknown routes, and every route while the deployment
 has event triggers off, answer 404.
 
+Webhook URLs, the GitHub App's webhook URL and MCP Events callback URLs are
+built from `OPENGENI_WEBHOOK_BASE_URL` when it is set, else from
+`OPENGENI_PUBLIC_BASE_URL`. That lets a deployment whose console is reachable
+only on a private network publish just the signed webhook paths
+(`/v1/webhooks/events/*` and `/v1/webhooks/github`) at another public address.
+
 | Adapter | Verification | Event type | Dedupe key |
 | --- | --- | --- | --- |
 | `standard` | Standard Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature` v1 HMAC, 5 minute window) | body `type` | `webhook-id` |
@@ -233,7 +239,7 @@ delivery as `ignored`.
   5 minute lease (up to 32 per pass, 8 at a time, more passes while full
   batches come back) and runs one step for each.
 - **Mode.** Webhook when the event type offers it and the deployment has a
-  public https origin and an encryption key; otherwise poll. If the server
+  public https webhook address and an encryption key; otherwise poll. If the server
   can't reach the webhook address or refuses webhook delivery, the step falls
   back to polling at once when the type offers it, and polling then sticks.
   Push needs a held-open connection per subscription, which Opengeni does not

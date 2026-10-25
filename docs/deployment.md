@@ -28,8 +28,16 @@ no event runs start; stored deliveries and events still expire on schedule
 (delivery bodies after 7 days, events after 30). See
 [automations and events](design/automations-and-events.md).
 
+Webhook senders and the GitHub App are given addresses under
+`OPENGENI_PUBLIC_BASE_URL`. If the console is reachable only on a private
+network, publish just `POST /v1/webhooks/events/*` and `POST /v1/webhooks/github`
+at a public address and set `OPENGENI_WEBHOOK_BASE_URL` to it (for example
+`https://hooks.example.com`); webhook URLs, the GitHub App's webhook and MCP
+Events callbacks then use that address. Without a public https address, MCP
+event sources poll instead of receiving webhooks.
+
 GitHub event sources also need the platform GitHub App's webhook secret,
-`OPENGENI_GITHUB_WEBHOOK_SECRET`, and a public `OPENGENI_PUBLIC_BASE_URL`. The
+`OPENGENI_GITHUB_WEBHOOK_SECRET`, and a public webhook address. The
 App sends its webhooks to `/v1/webhooks/github`; adding a workspace's GitHub
 source points an App without a webhook URL there automatically. An App whose
 webhook already points elsewhere is left alone, and the person adding the
