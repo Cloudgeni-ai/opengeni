@@ -120,6 +120,7 @@ const { DirectModelProviderForm } = await import("@/components/direct-model-prov
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
 const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-token");
+const { clearPendingDeveloperSetup } = await import("@/lib/pending-developer-setup");
 const VALID_FRAGMENT_SETUP_TOKEN = "A".repeat(43);
 const VALID_QUERY_SETUP_TOKEN = "B".repeat(43);
 
@@ -428,7 +429,7 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("post-sign-in setup asks only for an organization name", async () => {
+  test("the developer path asks only for an organization name", async () => {
     const onComplete = mock(() => undefined);
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -437,8 +438,9 @@ describe("organization onboarding UI", () => {
       await act(async () =>
         root.render(
           <OrganizationOnboardingPanel
-            initialUseCase="cloud"
+            initialUseCase="embed"
             previewState="required"
+            activeName="Anna Berg"
             onComplete={onComplete}
           />,
         ),
@@ -448,6 +450,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).not.toContain("Workspace name");
       expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.querySelectorAll("input")).toHaveLength(1);
+      expect(completeSelfServiceSetup).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
@@ -455,7 +458,76 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("someone on their own gets an organization named after them without a form", async () => {
+    completeSelfServiceSetup.mockClear();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            initialUseCase="cloud"
+            client={setupClient as never}
+            activeName="Anna Berg"
+            activeEmail="anna@example.test"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      await flush();
+      expect(completeSelfServiceSetup).toHaveBeenCalledTimes(1);
+      expect(
+        (completeSelfServiceSetup.mock.calls.at(-1) as unknown as [Record<string, unknown>])[0],
+      ).toMatchObject({ organizationName: "Anna Berg", useCase: "cloud" });
+      expect(container.querySelector("#organization-onboarding-name")).toBeNull();
+      expect(container.textContent).not.toContain("Create your organization");
+      expect(container.textContent).toContain("Choose how to power your chats");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("if the automatic organization can't be created, the name form takes over prefilled", async () => {
+    completeSelfServiceSetup.mockClear();
+    completeSelfServiceSetup.mockImplementationOnce(async () => {
+      throw new Error("temporarily unavailable");
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            initialUseCase="cloud"
+            client={setupClient as never}
+            activeName={null}
+            activeEmail="anna.berg@example.test"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      await flush();
+      expect(completeSelfServiceSetup).toHaveBeenCalledTimes(1);
+      const name = container.querySelector<HTMLInputElement>("#organization-onboarding-name");
+      expect(name).not.toBeNull();
+      expect(name!.value).toBe("anna.berg");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(completeSelfServiceSetup).toHaveBeenCalledTimes(2);
+      expect(container.textContent).toContain("Choose how to power your chats");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("after organization create, the model-access step stays until skip", async () => {
+    completeSelfServiceSetup.mockClear();
     const onComplete = mock(() => undefined);
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -470,12 +542,11 @@ describe("organization onboarding UI", () => {
             codexEnabled
             supergrokEnabled
             previewState="required"
+            activeName="Northwind Research"
             onComplete={onComplete}
           />,
         ),
       );
-      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
-      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
       await flush();
       expect(completeSelfServiceSetup).not.toHaveBeenCalled();
       expect(container.textContent).toContain("Choose how to power your chats");
@@ -484,6 +555,9 @@ describe("organization onboarding UI", () => {
       expect(providerRow(container, "Opengeni credits")).not.toBeNull();
       expect(setupClient.getBilling).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
+      // The provider gateways sit behind one row, and stay one click away.
+      expect(providerRow(container, "Vercel AI Gateway")).toBeNull();
+      await act(async () => providerRow(container, "Use your own provider account")!.click());
       await act(async () => providerRow(container, "Vercel AI Gateway")!.click());
       await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
       await act(async () => providerRow(container, "OpenRouter")!.click());
@@ -511,12 +585,11 @@ describe("organization onboarding UI", () => {
             initialUseCase="cloud"
             client={setupClient as never}
             previewState="required"
+            activeName="Northwind Research"
             onComplete={() => undefined}
           />,
         ),
       );
-      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
-      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
       await flush();
       expect(container.textContent).toContain("Choose how to power your chats");
       expect(providerRow(container, "Codex")).toBeNull();
@@ -548,6 +621,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
+      await act(async () => providerRow(container, "Use your own provider account")!.click());
       await act(async () => providerRow(container, "Vercel AI Gateway")!.click());
       await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
       await act(async () =>
@@ -601,6 +675,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
+      await act(async () => providerRow(container, "Use your own provider account")!.click());
       await act(async () => providerRow(container, "Opper")!.click());
       expect(container.textContent).toContain("Create one at platform.opper.ai under API keys.");
       await enter(container.querySelector("#onboarding-provider-key")!, "opper-secret");
@@ -660,6 +735,7 @@ describe("organization onboarding UI", () => {
           />,
         ),
       );
+      await act(async () => providerRow(container, "Use your own provider account")!.click());
       expect(providerRow(container, "OpenAI")).not.toBeNull();
       await act(async () => providerRow(container, "Azure OpenAI")!.click());
       await enter(
@@ -1105,16 +1181,12 @@ describe("organization onboarding UI", () => {
               client={{ ...setupClient, getWorkspaceModelCatalog } as never}
               billingMode="stripe"
               modelDefaults={modelDefaults}
+              activeName="Northwind Research"
               onComplete={() => undefined}
             />,
           ),
         );
         await flush();
-        await enter(
-          container.querySelector("#organization-onboarding-name")!,
-          "Northwind Research",
-        );
-        await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
         await flush();
         await flush();
         const created = (await completeSelfServiceSetup.mock.results.at(-1)!.value) as {
@@ -1285,13 +1357,12 @@ describe("organization onboarding UI", () => {
             initialUseCase="cloud"
             client={{ ...setupClient, getWorkspaceModelCatalog, getBilling } as never}
             billingMode="stripe"
+            activeName="Monthly Research"
             onComplete={() => undefined}
           />,
         ),
       );
       await flush();
-      await enter(container.querySelector("#organization-onboarding-name")!, "Monthly Research");
-      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
       await flush();
       expect(container.querySelector("h1")!.textContent).toBe("Choose how to power your chats");
       expect(container.textContent).not.toContain("$10 in free credits every month");
@@ -1445,16 +1516,12 @@ describe("organization onboarding UI", () => {
               client={{ ...setupClient, getWorkspaceModelCatalog, getBilling } as never}
               billingMode={scenario.billingMode}
               modelDefaults={scenario.modelDefaults}
+              activeName="Northwind Research"
               onComplete={() => undefined}
             />,
           ),
         );
         await flush();
-        await enter(
-          container.querySelector("#organization-onboarding-name")!,
-          "Northwind Research",
-        );
-        await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
         await flush();
         await flush();
         const created = (await completeSelfServiceSetup.mock.results.at(-1)!.value) as {
@@ -1588,6 +1655,7 @@ describe("organization onboarding UI", () => {
             client={{ ...setupClient, createOrganizationApiKey } as never}
             previewState="required"
             includedModel={{ id: "free-model", label: "Free Model", free: true }}
+            activeName="Northwind Research"
             onComplete={onComplete}
           />,
         ),
@@ -1603,20 +1671,8 @@ describe("organization onboarding UI", () => {
           .find((button) => button.textContent?.includes("Run agents in the cloud"))!
           .click(),
       );
-      // Back returns to the question without creating anything.
-      await act(async () =>
-        Array.from(container.querySelectorAll("button"))
-          .find((button) => button.textContent?.trim() === "Back")!
-          .click(),
-      );
-      expect(container.querySelector("h1")!.textContent).toBe("How do you want to use Opengeni?");
-      await act(async () =>
-        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
-          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
-          .click(),
-      );
-      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
-      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      // No organization form: one named after the person is created right away.
+      expect(container.querySelector("#organization-onboarding-name")).toBeNull();
       await flush();
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
@@ -1627,6 +1683,69 @@ describe("organization onboarding UI", () => {
       expect(onComplete.mock.calls[0]).toEqual([]);
       expect(createOrganizationApiKey).not.toHaveBeenCalled();
     } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("Back from the cloud model step returns to the question and keeps the one organization", async () => {
+    completeSelfServiceSetup.mockClear();
+    const onComplete = mock((_destination?: unknown) => undefined);
+    const createOrganizationApiKey = mock(async (_organizationId: string, _request: unknown) => ({
+      apiKey: { id: "key-1", prefix: "ogk_setup12" },
+      token: "ogk_setup12_secret-token-value",
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={{ ...setupClient, createOrganizationApiKey } as never}
+            billingMode="stripe"
+            activeName="Anna Berg"
+            activeEmail="anna@example.test"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await flush();
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+          .click(),
+      );
+      await flush();
+      await flush();
+      expect(completeSelfServiceSetup).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Choose how to power your chats");
+      // The person is told what their organization is called and that it can change.
+      expect(container.textContent).toContain(
+        "Your organization is called Anna Berg. You can rename it any time in Organization settings.",
+      );
+      await clickButton(container, "Back");
+      expect(container.querySelector("h1")!.textContent).toBe("How do you want to use Opengeni?");
+      // Choosing the developer path now skips its name form: the organization exists.
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Add AI agents to my product"))!
+          .click(),
+      );
+      await flush();
+      expect(container.querySelector("#organization-onboarding-name")).toBeNull();
+      expect(container.textContent).toContain("Choose how to power your chats");
+      expect(completeSelfServiceSetup).toHaveBeenCalledTimes(1);
+      await clickButton(container, "Skip for now");
+      await flush();
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(container.querySelector("h1")!.textContent).toBe("Add AI agents to your product");
+      expect(createOrganizationApiKey).toHaveBeenCalledTimes(1);
+    } finally {
+      // The answer and the developer path were remembered for a reload;
+      // later tests start fresh.
+      clearPendingDeveloperSetup();
+      window.sessionStorage.clear();
       await act(async () => root.unmount());
       container.remove();
     }
@@ -1872,12 +1991,11 @@ describe("organization onboarding UI", () => {
               balance: { balanceMicros: 10_000_000, currency: "usd" },
               model: { id: "credits-model", label: "Credits Model", reasoningEffort: "none" },
             }}
+            activeName="Northwind"
             onComplete={onComplete}
           />,
         ),
       );
-      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind");
-      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
       await flush();
       expect(container.querySelector("h1")!.textContent).toBe("You got $10 in free credits");
       expect(container.querySelector("[data-slot=credits-prize]")).not.toBeNull();

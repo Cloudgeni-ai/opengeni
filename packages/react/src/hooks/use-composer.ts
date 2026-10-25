@@ -595,6 +595,12 @@ export type ComposerState = {
   draftLoading: boolean;
   draftSaving: boolean;
   draftConflict: Error | null;
+  /**
+   * Save the draft now instead of after the autosave pause, for example
+   * before the page leaves for checkout. Resolves once it is saved or
+   * nothing needed saving.
+   */
+  flushDraft?: (() => Promise<void>) | undefined;
   /** Exact policy owned by this actor/session composer. Null while hydrating. */
   policy?: ComposerPolicy | null | undefined;
   setModel?: ((model: string) => void) | undefined;
@@ -1489,6 +1495,13 @@ export function useComposer(
     },
     [adoptDraftBase, client, durableDrafts, sessionId, targetKey, workspaceId],
   );
+
+  const flushDraft = useCallback(async (): Promise<void> => {
+    if (draftLoading || sending || draftConflict) return;
+    const payload = currentDraftPayload();
+    if (!payload || draftSignature(payload) === lastSavedSignature.current) return;
+    await persistPayload(payload);
+  }, [currentDraftPayload, draftConflict, draftLoading, persistPayload, sending]);
 
   const replaceOptimisticSends = useCallback(
     (
@@ -3155,6 +3168,7 @@ export function useComposer(
     draftLoading: identityMatches ? draftLoading : Boolean(sessionId) && durableDrafts,
     draftSaving: identityMatches ? draftSaving : false,
     draftConflict: identityMatches ? draftConflict : null,
+    flushDraft,
     policy: identityMatches ? policy : null,
     setModel: updateModel,
     setReasoningEffort: updateReasoningEffort,

@@ -6,7 +6,8 @@ import type { PageHost } from "./navigation";
 // the person is on: checkout opens in a new tab, this page waits for the
 // credits to land, then celebrates with the real amount. When the browser
 // blocks the tab, checkout takes over this tab and returns to organization
-// billing, which waits and celebrates the same way.
+// billing, which waits and celebrates the same way. A purchase started from a
+// chat returns to that chat instead (`checkoutPageReturnUrl`).
 
 export type CreditCheckoutClient = Pick<
   OpenGeniBrowserClient,
@@ -30,6 +31,54 @@ export function billingCheckoutReturnUrl(
 /** The small static page a checkout tab lands on; it asks the person to go back. */
 export function checkoutTabReturnUrl(origin: string, outcome: "success" | "cancelled"): string {
   return `${origin}/checkout-complete.html?checkout=${outcome}`;
+}
+
+/**
+ * Query keys of a return to the page checkout started from. Organization
+ * billing reads `checkoutSession` only beside its own `checkout=success`, so
+ * it never handles this return a second time.
+ */
+export const CHECKOUT_RETURN_QUERY = {
+  outcome: "checkoutReturn",
+  account: "checkoutAccount",
+  session: "checkoutSession",
+} as const;
+
+/**
+ * The page checkout started from (a chat or the new-chat page), so paying
+ * lands back where the person was, with their draft, instead of in settings.
+ * The page confirms the credits from these query keys and removes them.
+ */
+export function checkoutPageReturnUrl(
+  href: string,
+  accountId: string,
+  outcome: "success" | "cancelled",
+): string {
+  const url = new URL(href);
+  url.hash = "";
+  for (const key of Object.values(CHECKOUT_RETURN_QUERY)) url.searchParams.delete(key);
+  url.searchParams.set(CHECKOUT_RETURN_QUERY.outcome, outcome);
+  url.searchParams.set(CHECKOUT_RETURN_QUERY.account, accountId);
+  // Appended raw: URL encoding would turn Stripe's placeholder into %7B…%7D.
+  return outcome === "success"
+    ? `${url.toString()}&${CHECKOUT_RETURN_QUERY.session}=${CHECKOUT_SESSION_PLACEHOLDER}`
+    : url.toString();
+}
+
+export type CheckoutPageReturn =
+  | { outcome: "success"; accountId: string; checkoutSessionId: string }
+  | { outcome: "cancelled" };
+
+/** The checkout return in a page query, or null when there is none or it is malformed. */
+export function readCheckoutPageReturn(query: URLSearchParams): CheckoutPageReturn | null {
+  const outcome = query.get(CHECKOUT_RETURN_QUERY.outcome);
+  if (outcome === "cancelled") return { outcome };
+  if (outcome !== "success") return null;
+  const accountId = query.get(CHECKOUT_RETURN_QUERY.account);
+  const checkoutSessionId = query.get(CHECKOUT_RETURN_QUERY.session);
+  if (!accountId || !checkoutSessionId || !/^cs_[A-Za-z0-9_]{1,250}$/u.test(checkoutSessionId))
+    return null;
+  return { outcome, accountId, checkoutSessionId };
 }
 
 /**

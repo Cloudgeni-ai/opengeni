@@ -1700,7 +1700,7 @@ describe("ordinary session Codex realtime control", () => {
     expect(reason()).toBeNull();
   });
 
-  test("keeps an unavailable provider quiet and explains why start is disabled", async () => {
+  test("shows no voice control while no voice model can run", async () => {
     await act(async () => {
       root.render(
         <RealtimeVoiceControl
@@ -1719,17 +1719,9 @@ describe("ordinary session Codex realtime control", () => {
       );
     });
 
-    const start = container.querySelector<HTMLButtonElement>(
-      '[data-testid="realtime-primary-action"]',
-    );
-    expect(start?.dataset.phase).toBe("unavailable");
-    expect(start?.disabled).toBe(true);
-    // The disabled control names its blocker instead of offering to start.
-    expect(start?.getAttribute("aria-label")).toBe(
-      "Voice model unavailable: Connect Codex to use this voice model.",
-    );
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(
-      "Voice model unavailable",
-    );
+    // A disabled button that explains a setup step greets people who never
+    // asked for voice; the control appears once a voice model is available.
+    expect(container.querySelector('[data-testid="realtime-primary-action"]')).toBeNull();
+    expect(container.textContent).not.toContain("Voice model unavailable");
   });
 });

@@ -3,7 +3,7 @@ import { DirectModelProviderForm } from "@/components/direct-model-provider-conn
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import type { BillingCheckoutStatus, CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { ArrowUpRightIcon, Loader2Icon } from "lucide-react";
+import { ArrowUpRightIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -25,6 +25,7 @@ import { Button } from "@opengeni/react/ui/button";
 import { ListRow } from "@opengeni/react/ui/list-row";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { Notice } from "@opengeni/react/ui/notice";
 import { validTopupAmount } from "@opengeni/react/app/lib/format";
 import { userErrorText } from "@opengeni/react/ui/api-error";
@@ -146,6 +147,7 @@ export function ModelAccessOnboardingPanel({
   includedModel = null,
   startingCredits = null,
   continueToNextStep = false,
+  footer,
   onComplete,
 }: {
   client?: OpenGeniBrowserClient;
@@ -163,6 +165,8 @@ export function ModelAccessOnboardingPanel({
    * my product"), so the primary action reads Continue instead of naming chat.
    */
   continueToNextStep?: boolean;
+  /** Shown at the end of the step, such as the organization's name and a way back. */
+  footer?: ReactNode;
   onComplete: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -172,6 +176,8 @@ export function ModelAccessOnboardingPanel({
   const [open, setOpen] = useState<ModelProviderId | "credits" | null>(
     !startingCredits && !includedModel && billingMode === "stripe" ? "credits" : null,
   );
+  // The "Use your own provider account" group, open to its provider rows.
+  const [providerAccountsOpen, setProviderAccountsOpen] = useState(false);
   const keyProvider: ProviderKey | null =
     open === "vercel" || open === "openrouter" || open === "opper" ? open : null;
   const connectedModelId = useRef<string | undefined>(undefined);
@@ -451,7 +457,12 @@ export function ModelAccessOnboardingPanel({
       const session = await client.createBillingCheckout({
         amountUsd,
         accountId: organizationId,
-        successUrl: creditCheckoutSuccessUrl(window.location.origin, workspaceId, creditsModel),
+        successUrl: creditCheckoutSuccessUrl(
+          window.location.origin,
+          workspaceId,
+          creditsModel,
+          organizationId,
+        ),
         cancelUrl: window.location.href,
       });
       onboardingJourney().completed("model_access", "checkout");
@@ -499,7 +510,9 @@ export function ModelAccessOnboardingPanel({
 
   const validAmount = validTopupAmount(topupAmount);
   const everyone = `For everyone in ${organizationName || "your organization"}`;
-  const providerChoices: ProviderConnectChoice[] = [
+  // Credits and plans people already pay for come first; pay-per-token
+  // provider accounts (API keys) sit behind one row, all still one click away.
+  const subscriptionChoices: ProviderConnectChoice[] = [
     ...(codexEnabled
       ? [
           {
@@ -520,20 +533,28 @@ export function ModelAccessOnboardingPanel({
           },
         ]
       : []),
-    ...(
-      [
-        ["openai", "OpenAI"],
-        ["azure_openai", "Azure OpenAI"],
-        ["openrouter", "OpenRouter"],
-        ["opper", "Opper"],
-        ["vercel", "Vercel AI Gateway"],
-      ] as const
-    ).map(([id, title]) => ({
-      id,
-      title,
-      summary: providerPaymentSummary(id, title),
-    })),
   ];
+  const providerAccountChoices: ProviderConnectChoice[] = (
+    [
+      ["openai", "OpenAI"],
+      ["azure_openai", "Azure OpenAI"],
+      ["openrouter", "OpenRouter"],
+      ["opper", "Opper"],
+      ["vercel", "Vercel AI Gateway"],
+    ] as const
+  ).map(([id, title]) => ({
+    id,
+    title,
+    summary: providerPaymentSummary(id, title),
+  }));
+  const openProviderAccount = providerAccountChoices.some((choice) => choice.id === open);
+  const providerAccountsExpanded = providerAccountsOpen || openProviderAccount;
+  /** Opens or closes the provider accounts group; closing it closes the provider open inside. */
+  const toggleProviderAccounts = () => {
+    if (busy) return;
+    if (providerAccountsExpanded && openProviderAccount) toggleRow(open as ModelProviderId);
+    setProviderAccountsOpen(!providerAccountsExpanded);
+  };
 
   function devicePanel(kind: DevicePending["kind"]): ReactNode {
     const name = kind === "codex" ? "ChatGPT" : "xAI";
@@ -693,11 +714,22 @@ export function ModelAccessOnboardingPanel({
   const connectOptions = (
     <ProviderConnectList
       label="Ways to pay"
-      choices={providerChoices}
+      choices={subscriptionChoices}
       expanded={open === "credits" ? null : open}
       panel={providerPanel}
       onOpen={(choice) => toggleRow(choice.id)}
       leadingRows={creditsRow}
+      groupRow={
+        <ListRow
+          leading={<LogoTile size="lg" icon={<KeyRoundIcon className="text-fg" />} />}
+          title="Use your own provider account"
+          meta={["OpenAI, Azure, OpenRouter and more"]}
+          indicator="expand"
+          expanded={providerAccountsExpanded}
+          onOpen={toggleProviderAccounts}
+        />
+      }
+      groupChoices={providerAccountsExpanded ? providerAccountChoices : []}
     />
   );
 
@@ -802,6 +834,7 @@ export function ModelAccessOnboardingPanel({
           {/* With credits there's no model to connect here; Models in
               Organization settings connects one later. */}
           {selectionRetryNotice}
+          {footer}
         </div>
       </section>
     );
@@ -843,6 +876,7 @@ export function ModelAccessOnboardingPanel({
             {selectionRetryNotice}
             {coupon ? <div className="mt-4 text-center">{coupon}</div> : null}
           </div>
+          {footer}
         </div>
       </section>
     );
@@ -853,8 +887,9 @@ export function ModelAccessOnboardingPanel({
       <div className="m-auto w-full max-w-lg rounded-xl border border-border bg-surface p-6 shadow-sm sm:p-8">
         <h1 className="text-xl font-semibold tracking-tight">Choose how to power your chats</h1>
         <p className="mt-2 text-sm leading-relaxed text-fg-muted">
-          Connect a service you already use
-          {billingMode === "stripe" ? ", or get started with Opengeni credits" : ""}.
+          {billingMode === "stripe"
+            ? "Opengeni credits are the simplest way to start. You can also use a plan or provider account you already have."
+            : "Connect a plan or provider account you already have."}
         </p>
 
         <div className="mt-6">{connectOptions}</div>
@@ -869,6 +904,7 @@ export function ModelAccessOnboardingPanel({
         >
           Skip for now
         </Button>
+        {footer}
       </div>
     </section>
   );

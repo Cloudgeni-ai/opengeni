@@ -55,6 +55,7 @@ import {
 import type { OrganizationInvitation } from "@opengeni/react/app/types";
 import { rememberPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 import { rememberSignupUseCase } from "@opengeni/react/app/lib/signup-starter-set";
+import { personalOrganizationName } from "@/lib/personal-organization-name";
 
 export function OrganizationOnboardingPanel({
   onComplete,
@@ -67,6 +68,7 @@ export function OrganizationOnboardingPanel({
   modelDefaults = null,
   previewState,
   activeEmail = null,
+  activeName = null,
   invitation = null,
   onUseInvitedAccount,
   onSignOut,
@@ -89,6 +91,8 @@ export function OrganizationOnboardingPanel({
   modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   previewState?: SelfServiceOrganizationOnboardingState;
   activeEmail?: string | null;
+  /** The signed-in person's name; an individual's organization is named after them. */
+  activeName?: string | null;
   invitation?: OrganizationInvitationContinuation | null;
   onUseInvitedAccount?: (targetEmail: string) => void;
   /** Leaves onboarding for the signed-out page, so the person can pick another account. */
@@ -108,6 +112,14 @@ export function OrganizationOnboardingPanel({
   const [statusRequest, setStatusRequest] = useState(0);
   const [organizationName, setOrganizationName] = useState("");
   const [busy, setBusy] = useState(false);
+  // Someone using Opengeni on their own ("Run agents in the cloud") is not
+  // asked to invent an organization: one named after them is created right
+  // away. The name form shows only for the developer path, or if that fails.
+  const personalSetupStarted = useRef(false);
+  const [personalSetupFailed, setPersonalSetupFailed] = useState(false);
+  // Named automatically, so the model step says what it's called and offers
+  // a way back to the first question.
+  const [personalOrganization, setPersonalOrganization] = useState(false);
   const [invitations, setInvitations] = useState<OrganizationInvitation[]>([]);
   const [invitationLoading, setInvitationLoading] = useState(false);
   const [invitationError, setInvitationError] = useState<string | null>(null);
@@ -296,11 +308,12 @@ export function OrganizationOnboardingPanel({
     }
   }
 
-  async function submit() {
-    const normalizedName = organizationName.trim();
+  /** Creates the organization; true once it exists. */
+  async function submit(name: string = organizationName): Promise<boolean> {
+    const normalizedName = name.trim();
     if (!normalizedName) {
       toast.error("Enter your organization name");
-      return;
+      return false;
     }
     setBusy(true);
     try {
@@ -332,20 +345,41 @@ export function OrganizationOnboardingPanel({
           organizationId: created.organizationId,
           personalWorkspaceId: created.personalWorkspaceId,
         });
-        return;
+        return true;
       }
       setCreatedSetup({
         organizationId: "preview-organization",
         personalWorkspaceId: "preview-workspace",
       });
+      return true;
     } catch (error) {
       toast.error("Couldn't set up the organization", {
         description: userErrorText(error),
       });
+      return false;
     } finally {
       setBusy(false);
     }
   }
+
+  const personalSetup =
+    state === "required" &&
+    useCase === "cloud" &&
+    !invitation &&
+    !createdSetup &&
+    !personalSetupFailed;
+  useEffect(() => {
+    if (!personalSetup || personalSetupStarted.current) return;
+    personalSetupStarted.current = true;
+    const name = personalOrganizationName(activeName, activeEmail);
+    setOrganizationName(name);
+    void submit(name).then((created) => {
+      if (created) setPersonalOrganization(true);
+      else setPersonalSetupFailed(true);
+    });
+    // `submit` reads only this render's values; it runs once per sign-in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [personalSetup]);
 
   const frame = (content: ReactNode) => (
     <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
@@ -501,7 +535,9 @@ export function OrganizationOnboardingPanel({
     );
   }
 
-  if (createdSetup) {
+  // Back from the model step shows the first question again; the
+  // organization stays, and the answer only shapes the steps after it.
+  if (createdSetup && useCase !== null) {
     const live =
       liveModelAccess?.key === liveCheckKey &&
       liveModelAccess.workspaceId === createdSetup.personalWorkspaceId
@@ -540,6 +576,26 @@ export function OrganizationOnboardingPanel({
         includedModel={effectiveIncludedModel}
         startingCredits={effectiveStartingCredits}
         continueToNextStep={developerSetup}
+        footer={
+          personalOrganization ? (
+            <div className="mt-5 grid justify-items-start gap-1 border-t border-border pt-4">
+              <p className="m-0 min-w-0 text-xs leading-5 text-fg-muted">
+                Your organization is called {organizationName.trim()}. You can rename it any time in
+                Organization settings.
+              </p>
+              {/* Flush with the line above: the ghost button's padding sits outside it. */}
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="-ml-3 text-fg-muted"
+                onClick={() => setUseCase(null)}
+              >
+                Back
+              </Button>
+            </div>
+          ) : undefined
+        }
         onComplete={developerSetup ? () => setModelStepDone(true) : () => onComplete()}
       />,
     );
@@ -567,9 +623,28 @@ export function OrganizationOnboardingPanel({
       <OnboardingUseCaseStep
         onChoose={(choice) => {
           if (!previewState) onboardingJourney().completed("use_case", choice);
+          // Back from the model step: the organization exists, so the
+          // developer path skips its name and resumes after a reload like
+          // one that started there.
+          if (createdSetup && choice === "embed" && activeEmail && !previewState) {
+            rememberPendingDeveloperSetup({
+              account: activeEmail,
+              organizationId: createdSetup.organizationId,
+              organizationName: organizationName.trim(),
+            });
+          }
           setUseCase(choice);
         }}
       />,
+    );
+  }
+
+  if (personalSetup) {
+    return frame(
+      <section className="flex flex-1 items-center justify-center gap-2" role="status">
+        <Loader2Icon className="size-5 animate-spin text-fg-subtle" />
+        <span className="text-sm text-fg-muted">Setting up your workspace…</span>
+      </section>,
     );
   }
 
@@ -588,7 +663,11 @@ export function OrganizationOnboardingPanel({
           </span>
           <div>
             <h1 className="text-base font-semibold">Create your organization</h1>
-            <p className="text-sm text-fg-subtle">This is the company or team you work with.</p>
+            <p className="text-sm text-fg-subtle">
+              {useCase === "embed"
+                ? "This is the company or team you work with."
+                : "Your own name works. You can rename it later."}
+            </p>
           </div>
         </div>
         <Label htmlFor="organization-onboarding-name">Organization name</Label>

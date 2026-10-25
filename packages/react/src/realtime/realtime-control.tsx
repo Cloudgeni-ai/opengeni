@@ -513,6 +513,13 @@ export function RealtimeVoiceControl(props: {
     if (!pickerOpen) setPickerProvider(selectedModel.provider);
   }, [pickerOpen, selectedModel.provider]);
 
+  // No voice model can run here yet (none is connected): show no control
+  // rather than a disabled one that explains a setup step to someone who
+  // never asked for voice. It appears once a voice model is available, and
+  // never hides a conversation or a failure that is still on screen.
+  if (!models.some((model) => model.available) && props.snapshot.status === "idle" && !modeOwned)
+    return null;
+
   return (
     <div
       ref={rootRef}

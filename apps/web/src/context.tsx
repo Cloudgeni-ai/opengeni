@@ -375,6 +375,7 @@ export function RootRouteComponent() {
         )}
         modelDefaults={clientConfig}
         activeEmail={authSession?.user.email ?? null}
+        activeName={authSession?.user.name ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={completeOrganizationOnboarding}
       />
@@ -389,6 +390,7 @@ export function RootRouteComponent() {
           )}
           modelDefaults={clientConfig}
           activeEmail={authSession?.user.email ?? null}
+          activeName={authSession?.user.name ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
             void handleManagedSignOut().catch((error) =>
