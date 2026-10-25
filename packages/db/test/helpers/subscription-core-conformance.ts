@@ -1189,7 +1189,12 @@ export function describeSubscriptionCoreConformance<Credential>(
         message?: unknown;
         cause?: unknown;
       };
-      parts.push([name, code, message].filter((part) => part !== undefined).map(String).join(" "));
+      parts.push(
+        [name, code, message]
+          .filter((part) => part !== undefined)
+          .map(String)
+          .join(" "),
+      );
       current = cause;
     }
     return parts.join(" <- ");
