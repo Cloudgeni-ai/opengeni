@@ -35,7 +35,8 @@ export const recordingTrackSourceValues = [
 ] as const;
 export const recordingTrackKindValues = ["audio", "video"] as const;
 // Migration 0945. "browser": an agent's browser recording, kept out of meeting lists.
-export const recordingPurposeValues = ["meeting", "browser"] as const;
+// Migration 0956. "dictation": speech recorded to type it; private and short-lived.
+export const recordingPurposeValues = ["meeting", "browser", "dictation"] as const;
 export const recordingChunkStateValues = ["pending", "uploaded"] as const;
 export const recordingTranscriptVersionStateValues = [
   "queued",
@@ -188,6 +189,8 @@ export const recordingTranscriptVersions = pgTable(
     segmentCount: integer("segment_count").notNull().default(0),
     costUsdMicros: bigint("cost_usd_micros", { mode: "number" }),
     requestedBySubjectId: text("requested_by_subject_id").notNull(),
+    // Migration 0956. The credit debit attribution of the request that asked for this version.
+    creditAttribution: jsonb("credit_attribution").$type<Record<string, unknown>>(),
     attemptCount: integer("attempt_count").notNull().default(0),
     processingOwner: uuid("processing_owner"),
     processingStartedAt: timestamp("processing_started_at", { withTimezone: true }),
