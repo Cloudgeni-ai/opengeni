@@ -70,6 +70,7 @@ export {
   coalesceSessionEventDeltas,
   coalesceSessionEventDeltasWithCoverage,
   reasoningDeltaSeparator,
+  canMergeReasoningDelta,
   type CoalescedSessionEventPage,
 } from "./coalesce";
 
