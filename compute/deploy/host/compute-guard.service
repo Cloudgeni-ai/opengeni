@@ -3,14 +3,25 @@
 # watchdog while it runs. If it ends, the watchdog resets the machine,
 # which is what keeps a host that lost its lease from running sandboxes
 # the fleet has already given to another host; so it is never restarted
-# on failure. An upgrade hands it over: install.sh restarts it when it
-# runs another binary. Stopping it closes the watchdog, which stays armed
-# (nowayout) and is fed once more as it closes, so asked to stop the guard
-# ends only at a step that may feed it: at once while the lease is valid,
+# on failure (an exit of its own does not stop the agent, which Requires=
+# it, but the reset follows within the watchdog's timeout).
+#
+# Opening or closing the watchdog, which stays armed (nowayout), feeds it.
+# So the guard opens it only at a step that may feed it (the lease valid or
+# the VMs stopped), and has systemd keep it in this service's file
+# descriptor store, which outlives the guard however it ends: the next
+# guard takes it over from the store without opening it. The store is
+# kept while the service is stopped or failed too, so a guard that crashed
+# never closes it.
+#
+# An upgrade hands it over: install.sh asks a guard running another binary
+# to stop, at a moment it may feed the watchdog (compute-host
+# hand-over-guard), then restarts the service. Asked to stop, a guard ends
+# only at such a step all the same: at once while the lease is valid,
 # otherwise once the VMs have stopped (if they never do, the watchdog
-# resets the machine, well before the stop times out). The new guard
-# reopens it and goes on from what the lease file and the freezer show,
-# as any guard starting does, well inside the watchdog's timeout.
+# resets the machine, well before the stop times out). The new guard goes
+# on from what the lease file and the freezer show, as any guard starting
+# does, well inside the watchdog's timeout.
 # Installed by install.sh.
 [Unit]
 Description=Opengeni compute host guard: stops the VMs when the fleet lease ends
@@ -21,6 +32,9 @@ Requires=compute-host-setup.service
 [Service]
 ExecStart=/opt/compute/current/compute-host guard
 Restart=no
+NotifyAccess=main
+FileDescriptorStoreMax=1
+FileDescriptorStorePreserve=yes
 # The guard holds no memory worth reclaiming and must never be the one the
 # kernel ends.
 OOMScoreAdjust=-1000

@@ -234,9 +234,12 @@ if [ -n "$start" ]; then
   systemctl start compute-host-setup.service
   # The guard runs the binary it was started from, so one running any
   # other file, of another release or replaced in this one, is handed over
-  # to this one's (see compute-guard.service). Files are told apart by
-  # device and inode, which a replaced binary's path does not change. The
-  # agent, restarted with it, joins once the new guard is ready.
+  # to this one's (see compute-guard.service): asked to stop at a moment it
+  # may feed the watchdog, which a guard of an earlier release, ending at
+  # once, needs, and then restarted (which waits for it to end, if it has
+  # not yet). Files are told apart by device and inode, which a replaced
+  # binary's path does not change. The agent, restarted with it, joins
+  # once the new guard is ready.
   if ! systemctl is-active -q compute-guard.service; then
     systemctl start compute-guard.service
   else
@@ -244,6 +247,8 @@ if [ -n "$start" ]; then
     guard_runs=$(stat -L -c %d:%i "/proc/$guard_pid/exe" 2>/dev/null || true)
     if [ "$guard_runs" != "$(stat -L -c %d:%i /opt/compute/current/compute-host)" ]; then
       log "handing the guard over to release $version"
+      /opt/compute/current/compute-host hand-over-guard --pid "$guard_pid" ||
+        fail "the guard was not handed over: its lease ran out with the VMs running"
       systemctl restart compute-guard.service
     fi
   fi

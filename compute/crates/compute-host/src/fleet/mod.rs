@@ -21,6 +21,7 @@
 
 mod gate;
 mod guard;
+mod kept;
 mod lease;
 mod leased;
 mod link;
@@ -45,7 +46,8 @@ use tokio_rustls::TlsAcceptor;
 pub use gate::Admission;
 pub use gate::{LeaseGate, boot_now, slept};
 pub use guard::{
-    Freezes, GuardConfig, STEP as GUARD_STEP, Said, guard_ready, hold_lock, ready_lock, run_guard,
+    Freezes, GuardConfig, STEP as GUARD_STEP, Said, guard_ready, hand_over, hold_lock, ready_lock,
+    run_guard,
 };
 pub use lease::{terms_of, wire_terms};
 pub use leased::Leased;

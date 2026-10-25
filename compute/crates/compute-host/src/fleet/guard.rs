@@ -12,28 +12,40 @@
 //! Beside its lock it keeps [`Freezes`], the count of what it did to the
 //! VMs' freezer, for the agent's checks of its guests.
 //!
-//! Asked to stop (as an upgrade hands it over to a new release's guard),
-//! it stops only at a step that may feed the watchdog, since closing the
-//! device feeds it once more: the watchdog stays armed (`nowayout`), and
-//! the kernel pings it as it stays so. A guard that ended at any other
-//! time, with the lease run out and the VMs still running, would give
-//! them one more watchdog timeout than the fleet's margin allows for.
+//! Opening the watchdog feeds it, and so does closing it: it stays armed
+//! (`nowayout`), and the kernel pings it as it stays so. A feed at any
+//! other step than one that may feed it, with the lease run out and the
+//! VMs still running, would give them one more watchdog timeout than the
+//! fleet's margin allows for. So the guard opens the device only at a step
+//! that may feed it, and has systemd keep it open beside it ([`kept`]):
+//! the guard that ends, however it ends, then does not close it, and the
+//! next one takes it over from systemd without opening it. Asked to stop
+//! (as an upgrade hands it over to a new release's guard), it stops only
+//! at a step that may feed it all the same, for a device systemd did not
+//! keep. [`hand_over`] asks a guard to stop at such a moment, for a guard
+//! of an earlier release that ends where the signal finds it.
+//!
+//! [`kept`]: super::kept
 
 use std::fs::File;
 use std::io;
+use std::os::fd::AsFd as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::Context as _;
+use anyhow::{Context as _, bail};
 use compute_core::At;
 use compute_engine::cgroup::Cgroup;
 use compute_engine::watchdog::Watchdog;
 use compute_fleet::{Guard, GuardAction, Observed};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{FlockOperation, flock};
+use rustix::process::{Pid, PidfdFlags, Signal, pidfd_open, pidfd_send_signal};
 
 use super::gate::boot_now;
 use super::gate::nanos;
+use super::kept;
 use super::record::LeaseFile;
 
 /// How often the guard steps.
@@ -237,16 +249,24 @@ fn held(path: &Path) -> io::Result<bool> {
 /// fails to feed the watchdog, which then reboots the machine; that is the
 /// point. Until it may stop it goes on as before, stopping the VMs, and if
 /// they never stop, the watchdog resets the machine.
+///
+/// It takes over the watchdog an earlier guard had systemd keep, armed;
+/// otherwise it opens it at its first step that may feed it, and has
+/// systemd keep it (see the module's documentation). It is ready once it
+/// holds the watchdog and has stepped.
 pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> {
     if let Some(dir) = config.lock.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     let _lock = hold_lock(&config.lock)?;
     let mut watchdog = if let Some((device, timeout)) = &config.watchdog {
-        Some(
-            Watchdog::open(device, *timeout)
-                .with_context(|| format!("opening the watchdog {}", device.display()))?,
-        )
+        let kept = kept::kept(device, *timeout).with_context(|| {
+            format!("taking over the watchdog {} systemd kept", device.display())
+        })?;
+        if kept.is_some() {
+            tracing::info!("took over the watchdog systemd kept");
+        }
+        kept
     } else {
         tracing::warn!("no watchdog: a stalled guard leaves VMs running past their lease");
         None
@@ -261,19 +281,27 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
     tracing::info!(cgroup = %config.cgroup.display(), "guard running");
     loop {
         let feed = step_once(&guard, &cgroup, config, &mut last, &mut saying);
-        if feed && let Some(watchdog) = &mut watchdog {
-            watchdog.feed().context("feeding the watchdog")?;
+        if feed {
+            if watchdog.is_none()
+                && let Some((device, timeout)) = &config.watchdog
+            {
+                watchdog = Some(open_and_keep(device, *timeout)?);
+            }
+            if let Some(watchdog) = &mut watchdog {
+                watchdog.feed().context("feeding the watchdog")?;
+            }
         }
-        if ready.is_none() {
+        if ready.is_none() && (watchdog.is_some() || config.watchdog.is_none()) {
             // Armed and stepped once: the VMs are guarded from here on. A
             // look at whether a guard is ready (the agent's, at its start)
             // holds the lock for a moment; then it is taken a step later.
             ready = try_hold_lock(&ready_lock(&config.lock))?;
         }
         if stop.load(Ordering::Relaxed) {
-            // Closing the watchdog now feeds it as this step just did. The
-            // lock goes last, so the next guard opens the watchdog only
-            // once this one has closed it.
+            // systemd keeps the watchdog open; if it could not, closing it
+            // now feeds it as this step just did. The lock goes last, so
+            // the next guard opens the watchdog only once this one has
+            // closed it.
             if feed {
                 tracing::info!("guard stopping");
                 return Ok(());
@@ -286,6 +314,105 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
             }
         }
         std::thread::sleep(STEP);
+    }
+}
+
+/// Opens the watchdog, which arms and feeds it, and has systemd keep it
+/// open, through the notification socket it gave the guard's service.
+fn open_and_keep(device: &Path, timeout: Duration) -> anyhow::Result<Watchdog> {
+    let watchdog = Watchdog::open(device, timeout)
+        .with_context(|| format!("opening the watchdog {}", device.display()))?;
+    let unkept = "a guard that ends closes the watchdog, which feeds it once more";
+    let Ok(socket) = std::env::var("NOTIFY_SOCKET") else {
+        tracing::warn!("not run by systemd, which would keep the watchdog: {unkept}");
+        return Ok(watchdog);
+    };
+    match kept::keep(&socket, kept::WATCHDOG, watchdog.as_fd()) {
+        Ok(()) => tracing::info!("systemd keeps the watchdog open"),
+        Err(error) => {
+            tracing::warn!(%error, "systemd could not be asked to keep the watchdog: {unkept}");
+        }
+    }
+    Ok(watchdog)
+}
+
+/// How far ahead the lease must hold for [`hand_over`] to ask a guard to
+/// stop: room for the signal to reach it.
+const AHEAD: Duration = Duration::from_secs(2);
+
+/// How long [`hand_over`] waits for a guard it asked to stop to end.
+const ENDING: Duration = Duration::from_secs(5);
+
+/// Hands the guard `pid` over to the next one: asks it to stop (`SIGTERM`)
+/// at a moment it may feed the watchdog, the lease holding for a while yet
+/// or the VMs stopped, waiting up to `patience` for one, and then a moment
+/// for it to end. A guard of an earlier release ends where the signal
+/// finds it and closes the watchdog, which feeds it: then that is a feed
+/// the guard might have made itself. One that ended already needs none.
+///
+/// # Errors
+///
+/// When no such moment came (the lease ran out with the VMs running), and
+/// the guard was left to run on, or the guard could not be asked.
+pub fn hand_over(config: &GuardConfig, pid: u32, patience: Duration) -> anyhow::Result<()> {
+    let raw = i32::try_from(pid).context("not a process id")?;
+    let process = Pid::from_raw(raw).context("not a process id")?;
+    let guard_process = match pidfd_open(process, PidfdFlags::empty()) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::SRCH) => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("finding the guard {pid}")),
+    };
+    let cgroup = Cgroup::at(&config.cgroup);
+    let guard = Guard::new();
+    let started = Instant::now();
+    loop {
+        if ended(&guard_process, Duration::ZERO)? {
+            return Ok(());
+        }
+        let deadline = LeaseFile::read(&config.lease_file).map_or(At::ZERO, LeaseFile::deadline);
+        // A freezer it cannot read shows nothing it may count on.
+        let may_feed = cgroup.freezer().is_ok_and(|state| {
+            let observed = Observed {
+                freezing: state.asked,
+                frozen: state.frozen,
+                empty: state.empty,
+                suspending: config.suspending.exists(),
+            };
+            guard.step(boot_now() + AHEAD, deadline, observed).feed
+        });
+        if may_feed {
+            pidfd_send_signal(&guard_process, Signal::TERM)
+                .with_context(|| format!("asking the guard {pid} to stop"))?;
+            if !ended(&guard_process, ENDING)? {
+                // One of this release stops at its next step that may feed
+                // the watchdog; its service's restart waits for that.
+                tracing::warn!(pid, "the guard asked to stop has not ended yet");
+            }
+            return Ok(());
+        }
+        if started.elapsed() >= patience {
+            bail!(
+                "the lease has run out with the VMs running: the guard {pid} runs on, stopping them"
+            );
+        }
+        std::thread::sleep(STEP);
+    }
+}
+
+/// Whether the process `pidfd` names has ended, waiting up to `wait`.
+fn ended(pidfd: &std::os::fd::OwnedFd, wait: Duration) -> io::Result<bool> {
+    let until = Instant::now() + wait;
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        let timeout = Timespec {
+            tv_sec: left.as_secs().try_into().unwrap_or(i64::MAX),
+            tv_nsec: left.subsec_nanos().into(),
+        };
+        match poll(&mut [PollFd::new(pidfd, PollFlags::IN)], Some(&timeout)) {
+            Ok(ready) => return Ok(ready > 0),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
+        }
     }
 }
 
@@ -610,5 +737,60 @@ mod tests {
             started.elapsed() < STEP * 5,
             "a valid lease, it stops at once"
         );
+    }
+
+    /// An upgrade asks a guard to stop only at a moment it may feed the
+    /// watchdog: never while the lease has run out with the VMs running,
+    /// and at once while the lease holds. A guard already ended needs none.
+    #[test]
+    fn a_guard_is_handed_over_only_at_a_moment_it_may_feed_the_watchdog() {
+        let dir = tempfile::tempdir().unwrap();
+        let group = dir.path().join("vms");
+        std::fs::create_dir(&group).unwrap();
+        std::fs::write(group.join("cgroup.freeze"), "0").unwrap();
+        std::fs::write(group.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        let mut config = config(dir.path(), None);
+        config.cgroup = group;
+        // A guard of an earlier release, which ends where a signal finds
+        // it.
+        let mut earlier = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+
+        // No lease file: the lease has run out, and the VMs run.
+        let patience = Duration::from_millis(300);
+        assert!(hand_over(&config, earlier.id(), patience).is_err());
+        assert!(earlier.try_wait().unwrap().is_none(), "it was left running");
+
+        // A lease, but one about to run out: not yet.
+        let lease = |left: Duration| LeaseFile {
+            host: Some(1),
+            epoch: Some(1),
+            deadline_ns: nanos(boot_now() + left),
+            seq: 1,
+        };
+        lease(Duration::from_secs(1))
+            .write(&config.lease_file)
+            .unwrap();
+        assert!(hand_over(&config, earlier.id(), patience).is_err());
+        assert!(earlier.try_wait().unwrap().is_none());
+
+        lease(Duration::from_secs(600))
+            .write(&config.lease_file)
+            .unwrap();
+        hand_over(&config, earlier.id(), patience).unwrap();
+        let status = earlier.try_wait().unwrap().expect("it ended");
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(15)
+        );
+
+        // One that ended already, whatever the lease.
+        std::fs::remove_file(&config.lease_file).unwrap();
+        let mut ended = std::process::Command::new("true").spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        hand_over(&config, ended.id(), patience).unwrap();
+        assert!(ended.wait().unwrap().success());
     }
 }
