@@ -727,8 +727,10 @@ worker construction, and live retained-memory growth contracts new slot
 availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
 active transcript above any of four materialization limits: 15 MiB UTF-8 JSON,
 8,192 rows, 131,072 decoded JSON nodes, or 65,536 object properties. It never
-silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. Pause stores only the open-suffix sentinel; the
+silently trims conversation truth for inference: proactive compaction runs when
+stored history reaches 60% of any of these limits, and a history already over
+them is only read as a bounded, payload-elided view for checkpointing (see
+[`context-compaction.md`](context-compaction.md)). Pause stores only the open-suffix sentinel; the
 approval/run-state serving envelope still rejects leftover SDK heaps above 3 MiB,
 65,536 nodes, or 32,768 properties so they cannot enter a serving worker. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never

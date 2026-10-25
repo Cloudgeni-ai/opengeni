@@ -26,6 +26,16 @@ import {
   withCurrentUserAttachmentRefs,
 } from "../src/activities/run-input";
 
+function activeHistoryRead(
+  items: opengeniDb.ActiveSessionHistoryRow[],
+): opengeniDb.ActiveSessionHistoryRead {
+  return {
+    items,
+    footprint: { jsonBytes: 0, rows: items.length, jsonNodes: 0, jsonProperties: 0 },
+    recovery: null,
+  };
+}
+
 const user = (content: string) => ({ type: "message", role: "user", content });
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 const ACCOUNT_ID = "00000000-0000-4000-8000-000000000000";
@@ -477,14 +487,15 @@ describe("turnInput attachment projection", () => {
           turnId: "00000000-0000-4000-8000-000000000033",
           fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
           providerApi: "responses",
-          loadActiveHistory: async () => [
-            {
-              id: "00000000-0000-4000-8000-000000000034",
-              position: 0,
-              item: user("measure history"),
-              providerArtifactInvalidatedAt: null,
-            },
-          ],
+          loadActiveHistory: async () =>
+            activeHistoryRead([
+              {
+                id: "00000000-0000-4000-8000-000000000034",
+                position: 0,
+                item: user("measure history"),
+                providerArtifactInvalidatedAt: null,
+              },
+            ]),
           onPreparationPhase: (measurement) => {
             phases.push(measurement.phase);
             expect(measurement.outcome).toBe("completed");
@@ -550,14 +561,15 @@ describe("turnInput attachment projection", () => {
           turnId: "00000000-0000-4000-8000-000000000043",
           fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
           providerApi: "responses",
-          loadActiveHistory: async () => [
-            {
-              id: "00000000-0000-4000-8000-000000000044",
-              position: 0,
-              item: storedUser,
-              providerArtifactInvalidatedAt: null,
-            },
-          ],
+          loadActiveHistory: async () =>
+            activeHistoryRead([
+              {
+                id: "00000000-0000-4000-8000-000000000044",
+                position: 0,
+                item: storedUser,
+                providerArtifactInvalidatedAt: null,
+              },
+            ]),
         },
       );
       expect(preparedInput?.historyItems).toEqual([storedUser]);
@@ -577,14 +589,16 @@ describe("turnInput attachment projection", () => {
     let preparedInput: AgentSegmentInput | undefined;
     const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([image]);
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
-      {
-        id: "00000000-0000-4000-8000-000000000054",
-        position: 0,
-        item: storedUser,
-        providerArtifactInvalidatedAt: null,
-      },
-    ]);
+    const getHistory = spyOn(opengeniDb, "readActiveSessionHistory").mockResolvedValue(
+      activeHistoryRead([
+        {
+          id: "00000000-0000-4000-8000-000000000054",
+          position: 0,
+          item: storedUser,
+          providerArtifactInvalidatedAt: null,
+        },
+      ]),
+    );
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
       prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
@@ -671,14 +685,16 @@ describe("turnInput attachment projection", () => {
         deliveredHistoryItemId: "00000000-0000-4000-8000-000000000056",
       } as never,
     ]);
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
-      {
-        id: "00000000-0000-4000-8000-000000000056",
-        position: 0,
-        item: storedUser,
-        providerArtifactInvalidatedAt: null,
-      },
-    ]);
+    const getHistory = spyOn(opengeniDb, "readActiveSessionHistory").mockResolvedValue(
+      activeHistoryRead([
+        {
+          id: "00000000-0000-4000-8000-000000000056",
+          position: 0,
+          item: storedUser,
+          providerArtifactInvalidatedAt: null,
+        },
+      ]),
+    );
     const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([image]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
@@ -749,14 +765,16 @@ describe("turnInput attachment projection", () => {
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockImplementation(
       async () => [],
     );
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
-      {
-        id: "00000000-0000-4000-8000-000000000064",
-        position: 0,
-        item: storedUser,
-        providerArtifactInvalidatedAt: null,
-      },
-    ]);
+    const getHistory = spyOn(opengeniDb, "readActiveSessionHistory").mockResolvedValue(
+      activeHistoryRead([
+        {
+          id: "00000000-0000-4000-8000-000000000064",
+          position: 0,
+          item: storedUser,
+          providerArtifactInvalidatedAt: null,
+        },
+      ]),
+    );
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
       prepareInput: async (agent: unknown, input: AgentSegmentInput) => {
@@ -812,12 +830,14 @@ describe("turnInput attachment projection", () => {
       // A retry/new turn retains the exact earlier notice, appending the fresh
       // durable warning instead of recomputing any earlier model-visible item.
       getHistory.mockResolvedValue(
-        warned.map((item, position) => ({
-          id: crypto.randomUUID(),
-          position,
-          item,
-          providerArtifactInvalidatedAt: null,
-        })),
+        activeHistoryRead(
+          warned.map((item, position) => ({
+            id: crypto.randomUUID(),
+            position,
+            item,
+            providerArtifactInvalidatedAt: null,
+          })),
+        ),
       );
       await prepareWithWarning();
       expect((modelInputs[3] as unknown[]).slice(0, warned.length)).toEqual(warned);
@@ -827,14 +847,16 @@ describe("turnInput attachment projection", () => {
       // Even if compaction replaces the active tail, the new attempt appends
       // the warning from its durable receipt without changing the summary.
       const summary = user("Earlier conversation summary");
-      getHistory.mockResolvedValue([
-        {
-          id: crypto.randomUUID(),
-          position: 4,
-          item: summary,
-          providerArtifactInvalidatedAt: null,
-        },
-      ]);
+      getHistory.mockResolvedValue(
+        activeHistoryRead([
+          {
+            id: crypto.randomUUID(),
+            position: 4,
+            item: summary,
+            providerArtifactInvalidatedAt: null,
+          },
+        ]),
+      );
       await prepareWithWarning();
       expect((modelInputs[4] as unknown[])[0]).toEqual(summary);
       expect(String((modelInputs[4] as Array<Record<string, unknown>>).at(-1)!.content)).toContain(

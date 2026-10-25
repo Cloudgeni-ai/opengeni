@@ -1,8 +1,8 @@
 import { readReasoningConfiguration } from "@opengeni/codex";
 import {
   applyContextCompaction,
-  getActiveSessionHistoryItemsPaged,
   getFiles,
+  readActiveSessionHistory,
   recordSkippedContextCompaction,
   recordStartedContextCompaction,
   type Database,
@@ -84,6 +84,17 @@ export type RemoteCompactionV2Requester = (
   input: CompactionItem[],
 ) => Promise<CompactionItem>;
 
+/**
+ * Present only when compaction read the bounded recovery view of an active
+ * history over its materialization guard: how many of the oldest rows were
+ * left out of the compaction input, and in how many rows inline base64
+ * payloads were replaced by a content-free note.
+ */
+type CompactionInputRecoveryPayload = {
+  compactionInputHistoryRowsOmitted?: number;
+  compactionInputInlinePayloadRowsElided?: number;
+};
+
 export async function maybeCompactContext(
   db: Database,
   settings: Settings,
@@ -157,7 +168,19 @@ export async function maybeCompactContext(
 
   // Preserve the complete ordered transcript while bounding each Postgres
   // driver result frame beside the decoded history already held by this turn.
-  const active = await getActiveSessionHistoryItemsPaged(db, scope.workspaceId, scope.sessionId);
+  // Over the materialization guard, compaction is the way out: it reads the
+  // bounded recovery view (oldest inline payloads, then oldest rows, left out
+  // in PostgreSQL) and checkpoints from that instead of failing permanently.
+  const activeHistory = await readActiveSessionHistory(db, scope.workspaceId, scope.sessionId, {
+    overLimit: "bounded_recovery",
+  });
+  const active = activeHistory.items;
+  const recoveryPayload: CompactionInputRecoveryPayload = activeHistory.recovery
+    ? {
+        compactionInputHistoryRowsOmitted: activeHistory.recovery.omittedRows,
+        compactionInputInlinePayloadRowsElided: activeHistory.recovery.elidedRows,
+      }
+    : {};
   if (active.length === 0) {
     let requestConsumed = false;
     if (options.clearRequestedCompaction) {
@@ -248,7 +271,7 @@ export async function maybeCompactContext(
       canonicalItems,
       items,
       decision,
-      options,
+      { ...options, inputRecoveryPayload: recoveryPayload },
       projectForWire,
     );
     return prependCompactionEvents(started.events, outcome);
@@ -262,7 +285,7 @@ export async function maybeCompactContext(
     items,
     decision,
     summarize,
-    options,
+    { ...options, inputRecoveryPayload: recoveryPayload },
     projectForWire,
   );
   return prependCompactionEvents(started.events, outcome);
@@ -410,6 +433,7 @@ async function compactContextRemoteV2(
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
     requestRemoteCompactionV2?: RemoteCompactionV2Requester;
+    inputRecoveryPayload?: CompactionInputRecoveryPayload;
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
@@ -475,6 +499,7 @@ async function compactContextRemoteV2(
       estimatedTokensAfter,
       compactionInputToolOutputsRewritten: rewrittenToolOutputs,
       compactionInputProviderCalls: providerCalls,
+      ...options.inputRecoveryPayload,
     },
   });
   if (!applied.applied) {
@@ -514,6 +539,7 @@ async function compactContextPortable(
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
     requestSizeRecovery?: { maxBytes: number };
+    inputRecoveryPayload?: CompactionInputRecoveryPayload;
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
 ): Promise<MaybeCompactResult> {
@@ -629,6 +655,7 @@ async function compactContextPortable(
       ...(summarize.measureInputBytes
         ? { compactionDeferredHistoryItems: deferredItems.length }
         : {}),
+      ...options.inputRecoveryPayload,
     },
   });
   if (!applied.applied) {

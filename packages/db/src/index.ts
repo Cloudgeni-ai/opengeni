@@ -22,6 +22,8 @@ export {
 } from "./scheduled-task-lifecycle";
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
+export * from "./active-session-history";
+import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
@@ -41106,18 +41108,25 @@ export async function appendSessionHistoryItems(
     items: Array<{ position: number; item: Record<string, unknown> }>;
     /** Tool outputs already have durable timeline events; retire their receipts with history. */
     completedToolCallIds?: string[];
+    /**
+     * Receives the stored footprint of the rows this call inserted, measured by
+     * PostgreSQL in the same statement, once the append has committed.
+     */
+    onAppendedFootprint?: (delta: ActiveSessionHistoryFootprint) => void;
   },
 ): Promise<boolean> {
   if (input.items.length === 0 && !input.completedToolCallIds?.length) {
     return true;
   }
+  let appendedFootprint: ActiveSessionHistoryFootprint | null = null;
   // One idempotent transaction: a deadlock/serialization victim rolled back
   // entirely, so it retries as a unit; it contains no external effect.
-  return await retryRlsPersistence(
+  const appended = await retryRlsPersistence(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (tx) => {
+      appendedFootprint = null;
       const allowed = await lockTurnAttemptWriteFenceTx(tx, {
         rowProjection: "event",
         workspaceId: input.workspaceId,
@@ -41127,7 +41136,7 @@ export async function appendSessionHistoryItems(
         attemptId: input.expectedAttemptId,
       });
       if (!allowed.allowed) return false;
-      const saved =
+      const inserted =
         input.items.length === 0
           ? []
           : await tx
@@ -41165,7 +41174,40 @@ export async function appendSessionHistoryItems(
                 turnId: schema.sessionHistoryItems.turnId,
                 item: schema.sessionHistoryItems.item,
                 itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+                // Measured exactly as the active-history guard measures:
+                // bytes of the ordered JSON text, shape of the jsonb projection
+                // the insert trigger maintains.
+                jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
+                jsonNodes: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(session_history_items.item, 'strict $.**')
+                )`,
+                jsonProperties: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(
+                    session_history_items.item,
+                    'strict $.** ? (@.type() == "object")'
+                  ) as object_value
+                  cross join lateral jsonb_object_keys(object_value) as property
+                )`,
               });
+      // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
+      // add to the active footprint.
+      appendedFootprint = inserted.reduce<ActiveSessionHistoryFootprint>(
+        (total, row) => ({
+          jsonBytes: total.jsonBytes + Number(row.jsonBytes) + 1,
+          rows: total.rows + 1,
+          jsonNodes: total.jsonNodes + Number(row.jsonNodes),
+          jsonProperties: total.jsonProperties + Number(row.jsonProperties),
+        }),
+        { jsonBytes: 0, rows: 0, jsonNodes: 0, jsonProperties: 0 },
+      );
+      const saved = inserted.map(({ position, turnId, item, itemCodecVersion }) => ({
+        position,
+        turnId,
+        item,
+        itemCodecVersion,
+      }));
       // A position conflict is idempotent only when the exact conversation
       // item is already there. Never acknowledge a different item as saved.
       // Fresh inserts already return their durable representation. Re-reading
@@ -41227,6 +41269,10 @@ export async function appendSessionHistoryItems(
       return true;
     },
   );
+  // Assigned inside the retried transaction callback; the last attempt wins.
+  const delta = appendedFootprint as ActiveSessionHistoryFootprint | null;
+  if (appended && delta) input.onAppendedFootprint?.(delta);
+  return appended;
 }
 
 export type PendingSessionToolCallInput = {
@@ -41916,270 +41962,6 @@ export async function getActiveSessionHistoryItems(
       item: fromPostgresLosslessJson(row.item, itemCodecVersion),
     }));
   });
-}
-
-/**
- * Profiled upper envelope for one session's complete active, model-facing
- * transcript. Bytes alone do not bound the decoded object graph, so rows, JSON
- * nodes, and object properties are independently limited. Normal token-driven
- * compaction keeps active history far below these boundaries. The limits are a
- * final materialization guard: a corrupt/imported/pathological transcript fails
- * deterministically before a Postgres driver decodes it instead of using the
- * pod OOM killer as admission.
- */
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES = 15 * 1024 * 1024;
-export const ACTIVE_SESSION_HISTORY_MAX_ROWS = 8_192;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_NODES = 131_072;
-export const ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES = 65_536;
-
-export type ActiveSessionHistoryLimitKind =
-  | "json_bytes"
-  | "rows"
-  | "json_nodes"
-  | "json_properties";
-
-export class ActiveSessionHistoryLimitExceededError extends Error {
-  readonly code = "active_history_too_large";
-
-  constructor(
-    readonly actualBytes: number,
-    readonly maximumBytes: number,
-    readonly limitKind: ActiveSessionHistoryLimitKind = "json_bytes",
-    readonly actual: number = actualBytes,
-    readonly maximum: number = maximumBytes,
-  ) {
-    super(activeSessionHistoryLimitMessage(limitKind, actual, maximum));
-    this.name = "ActiveSessionHistoryLimitExceededError";
-  }
-}
-
-function activeSessionHistoryLimitMessage(
-  kind: ActiveSessionHistoryLimitKind,
-  actual: number,
-  maximum: number,
-): string {
-  if (kind === "json_bytes") {
-    return `Active session history is ${actual} UTF-8 JSON bytes, exceeding the ${maximum}-byte materialization limit.`;
-  }
-  const label =
-    kind === "rows"
-      ? "rows"
-      : kind === "json_nodes"
-        ? "decoded JSON nodes"
-        : "decoded JSON object properties";
-  return `Active session history has ${actual} ${label}; the materialization limit is ${maximum}.`;
-}
-
-/**
- * Memory-bounded active-history read for model input and compaction. PostgreSQL
- * first measures the complete logical window without returning any JSONB item,
- * then keyset-pages the admitted rows on the same repeatable-read snapshot.
- */
-export async function getActiveSessionHistoryItemsPaged(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-  pageSize = ACTIVE_SESSION_HISTORY_MAX_ROWS,
-  maximumJsonBytes = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
-  maximumRows = ACTIVE_SESSION_HISTORY_MAX_ROWS,
-  maximumJsonNodes = ACTIVE_SESSION_HISTORY_MAX_JSON_NODES,
-  maximumJsonProperties = ACTIVE_SESSION_HISTORY_MAX_JSON_PROPERTIES,
-): Promise<
-  Array<{
-    id: string;
-    position: number;
-    item: Record<string, unknown>;
-    providerArtifactInvalidatedAt: Date | null;
-  }>
-> {
-  if (
-    !Number.isSafeInteger(pageSize) ||
-    pageSize < 1 ||
-    pageSize > ACTIVE_SESSION_HISTORY_MAX_ROWS
-  ) {
-    throw new Error(
-      `active session history page size must be an integer between 1 and ${ACTIVE_SESSION_HISTORY_MAX_ROWS}`,
-    );
-  }
-  if (!Number.isSafeInteger(maximumJsonBytes) || maximumJsonBytes < 1) {
-    throw new Error("active session history JSON limit must be a positive safe integer");
-  }
-  for (const [name, value] of [
-    ["row", maximumRows],
-    ["JSON node", maximumJsonNodes],
-    ["JSON property", maximumJsonProperties],
-  ] as const) {
-    if (!Number.isSafeInteger(value) || value < 1) {
-      throw new Error(`active session history ${name} limit must be a positive safe integer`);
-    }
-  }
-
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) => {
-      // Measure one logical JSON array. pg_column_size(jsonb) is deliberately
-      // insufficient because TOAST/compression could hide the decoded size.
-      const [size] = await scopedDb
-        .select({
-          bytes: sql<string>`case
-            when count(*) = 0 then 2
-            else sum(octet_length((${schema.sessionHistoryItems.item})::text)) + count(*) + 1
-          end`,
-          rows: sql<string>`count(*)`,
-        })
-        .from(schema.sessionHistoryItems)
-        .where(
-          and(
-            eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-            eq(schema.sessionHistoryItems.sessionId, sessionId),
-            eq(schema.sessionHistoryItems.active, true),
-          ),
-        );
-      const actualBytes = Number(size?.bytes ?? 0);
-      if (!Number.isSafeInteger(actualBytes) || actualBytes < 0) {
-        throw new Error(
-          `Active session history size is not a safe integer: ${String(size?.bytes)}`,
-        );
-      }
-      if (actualBytes > maximumJsonBytes) {
-        throw new ActiveSessionHistoryLimitExceededError(actualBytes, maximumJsonBytes);
-      }
-      const actualRows = Number(size?.rows ?? 0);
-      if (!Number.isSafeInteger(actualRows) || actualRows < 0) {
-        throw new Error(
-          `Active session history row count is not a safe integer: ${String(size?.rows)}`,
-        );
-      }
-      if (actualRows > maximumRows) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "rows",
-          actualRows,
-          maximumRows,
-        );
-      }
-
-      // Bound decoded shape independently from bytes. LIMIT maximum+1 keeps
-      // rejection work proportional to the admitted envelope.
-      const [nodeCount] = await rawRows<{ nodes: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as nodes
-          from (
-            select node
-            from session_history_items history
-            cross join lateral jsonb_path_query(history.item, 'strict $.**') as node
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and history.active = true
-            limit ${maximumJsonNodes + 1}
-          ) bounded_nodes
-        `,
-      );
-      const actualJsonNodes = Number(nodeCount?.nodes ?? 0);
-      if (!Number.isSafeInteger(actualJsonNodes) || actualJsonNodes < 0) {
-        throw new Error(
-          `Active session history JSON node count is not a safe integer: ${String(nodeCount?.nodes)}`,
-        );
-      }
-      if (actualJsonNodes > maximumJsonNodes) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "json_nodes",
-          actualJsonNodes,
-          maximumJsonNodes,
-        );
-      }
-
-      const [propertyCount] = await rawRows<{ properties: string }>(
-        scopedDb,
-        sql`
-          select count(*)::text as properties
-          from (
-            select property
-            from session_history_items history
-            cross join lateral jsonb_path_query(
-              history.item,
-              'strict $.** ? (@.type() == "object")'
-            ) as object_value
-            cross join lateral jsonb_object_keys(object_value) as property
-            where history.workspace_id = ${workspaceId}
-              and history.session_id = ${sessionId}
-              and history.active = true
-            limit ${maximumJsonProperties + 1}
-          ) bounded_properties
-        `,
-      );
-      const actualJsonProperties = Number(propertyCount?.properties ?? 0);
-      if (!Number.isSafeInteger(actualJsonProperties) || actualJsonProperties < 0) {
-        throw new Error(
-          `Active session history JSON property count is not a safe integer: ${String(propertyCount?.properties)}`,
-        );
-      }
-      if (actualJsonProperties > maximumJsonProperties) {
-        throw new ActiveSessionHistoryLimitExceededError(
-          actualBytes,
-          maximumJsonBytes,
-          "json_properties",
-          actualJsonProperties,
-          maximumJsonProperties,
-        );
-      }
-
-      const rows: Array<{
-        id: string;
-        position: number;
-        item: Record<string, unknown>;
-        providerArtifactInvalidatedAt: Date | null;
-      }> = [];
-      let afterPosition: number | null = null;
-      for (;;) {
-        const page: Array<{
-          id: string;
-          position: number;
-          item: Record<string, unknown>;
-          itemCodecVersion: number | null;
-          providerArtifactInvalidatedAt: Date | null;
-        }> = await scopedDb
-          .select({
-            id: schema.sessionHistoryItems.id,
-            position: schema.sessionHistoryItems.position,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-            providerArtifactInvalidatedAt: schema.sessionHistoryItems.providerArtifactInvalidatedAt,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, sessionId),
-              eq(schema.sessionHistoryItems.active, true),
-              ...(afterPosition === null
-                ? []
-                : [gt(schema.sessionHistoryItems.position, afterPosition)]),
-            ),
-          )
-          .orderBy(schema.sessionHistoryItems.position)
-          .limit(pageSize);
-        rows.push(
-          ...page.map(({ itemCodecVersion, ...row }) => ({
-            ...row,
-            item: fromPostgresLosslessJson(row.item, itemCodecVersion),
-          })),
-        );
-        if (rows.length === actualRows || page.length < pageSize) return rows;
-        const nextPosition = page.at(-1)!.position;
-        if (afterPosition !== null && nextPosition <= afterPosition) {
-          throw new Error("active session history keyset did not advance");
-        }
-        afterPosition = nextPosition;
-      }
-    },
-    { isolationLevel: "repeatable read" },
-  );
 }
 
 /** Bounded finalized voice turns used only to resume a later realtime call. */

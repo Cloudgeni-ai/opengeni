@@ -190,6 +190,8 @@ test("a reached limit refuses the first request and the parallel title request b
         eventing: { modelRunSettings: settings },
         historySink: {
           seedHistory: () => undefined,
+          seedHistoryFootprint: () => undefined,
+          historyFootprintCompactionSignal: () => null,
           reconcileConversationTruth: async () => undefined,
         },
         billingState: {

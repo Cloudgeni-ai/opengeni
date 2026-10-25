@@ -80,6 +80,8 @@ test("stream component retains the completed compaction checkpoint before refusi
         trigger: { type: "user.message" },
         eventing: { modelRunSettings: settings },
         historySink: {
+          seedHistoryFootprint: () => undefined,
+          historyFootprintCompactionSignal: () => null,
           seedHistory: (history: unknown) => {
             expect(history).toEqual(checkpoint);
             order.push("checkpoint");

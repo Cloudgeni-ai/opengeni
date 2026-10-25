@@ -163,6 +163,8 @@ for (const scenario of [
           },
           historySink: {
             seedHistory() {},
+            seedHistoryFootprint() {},
+            historyFootprintCompactionSignal: () => null,
             reconcileConversationTruth: async () => {
               order.push("history");
             },
