@@ -546,6 +546,7 @@ export type MachineInputMember = {
     | "agent_steer_instruction"
     | "child_terminal_result"
     | "media_generation_result"
+    | "secret_use_approval_decided"
     | "child_requires_action"
     | "child_requires_action_resolved"
     | "child_paused"
@@ -739,8 +740,10 @@ export type TimelineGroup =
           waitingOn?: "you";
         };
         /**
-         * Settled capacity-wait time inside this work span. It is not work:
-         * the worked duration and the live working clock exclude it.
+         * Settled time inside this work span in which the agent was not
+         * working: capacity waits, and the gap between a failed attempt and
+         * the Retry that reopened the turn. The worked duration and the live
+         * working clock exclude it.
          */
         pausedMs?: number;
         details: TimelineGroup[];

@@ -111,7 +111,7 @@ async function run(
 }
 
 describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
-  test("modes: every tool resolves except interaction tools and the secret tools", () => {
+  test("modes: delivery boundaries and secret tools preserve references", () => {
     const entry = (source: ToolGatewayDefinition["source"], toolName = "call") => ({
       source,
       identity: { serverId: source, toolName },
@@ -120,11 +120,18 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
       expect(secretArgumentMode(entry(source))).toBe("literal");
     }
     expect(secretArgumentMode(entry("interaction"))).toBe("preserve");
-    for (const toolName of ["secret_save", "secret_move", "secret_delete", "secret_get"]) {
+    for (const toolName of [
+      "secret_save",
+      "secret_move",
+      "secret_delete",
+      "secret_get",
+      "run_on",
+    ]) {
       expect(secretArgumentMode(entry("opengeni", toolName))).toBe("preserve");
     }
     // Only Opengeni's own secret tools are exempt, not a connector's tool that happens to share the prefix.
     expect(secretArgumentMode(entry("mcp", "secret_save"))).toBe("literal");
+    expect(secretArgumentMode(entry("mcp", "run_on"))).toBe("literal");
   });
 
   test("an MCP call gets the value; the persisted call keeps the reference", async () => {
@@ -168,15 +175,31 @@ describe("secret argument resolution (GW-1, GW-2, AG-4)", () => {
     expect(calls).toHaveLength(1);
   });
 
-  test("interaction tools and Opengeni's secret tools receive the reference verbatim", async () => {
+  test("delivery boundaries and secret tools receive the reference verbatim", async () => {
     const brace = "{";
     const ref = `${brace}${brace}secret:GitHub/token}}`;
     for (const [source, toolName] of [
       ["interaction", "call"],
       ["opengeni", "secret_save"],
+      ["opengeni", "run_on"],
     ] as const) {
       const { resolver, calls } = fakeResolver({ "GitHub/token": VALUE });
       const { seen } = await run(source, ref, resolver, "http", toolName);
+      expect(seen[0]).toEqual({ text: ref });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  test("run_on preserves references, file references and escapes without resolving", async () => {
+    const brace = "{";
+    const refs = [
+      `${brace}${brace}secret:Key}}`,
+      `${brace}${brace}secretfile:Key}}`,
+      `\\${brace}${brace}secret:Missing}}`,
+    ];
+    for (const ref of refs) {
+      const { resolver, calls } = fakeResolver({ Key: VALUE });
+      const { seen } = await run("opengeni", ref, resolver, "model", "run_on");
       expect(seen[0]).toEqual({ text: ref });
       expect(calls).toHaveLength(0);
     }

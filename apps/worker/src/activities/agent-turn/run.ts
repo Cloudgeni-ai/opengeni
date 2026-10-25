@@ -475,6 +475,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getSetupBoxSession: () => sandboxState.setupBoxSession,
       getSdkOwnedSandboxSession: () => media.sdkOwnedSandboxSession,
       getSandboxGroupId: () => sandboxState.sandboxGroupId,
+      getTurnSandboxProvisioner: () => sandboxState.turnSandboxProvisioner,
       runWorkspaceMutation: runWorkspaceMutationForSandbox,
     });
     const historySink = createTurnHistorySink({
@@ -1781,6 +1782,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             mcpServers: toolRuntime.mcpServers,
             input,
             db,
+            bus,
             runtime,
             objectStorage,
             observability,

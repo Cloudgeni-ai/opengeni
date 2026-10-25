@@ -351,8 +351,12 @@ Vault secrets reach a machine only per command. When an `exec_command` or
 `/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
-`ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
+`ExecRequest.env`. This also applies when the POSIX host's default login shell
+is zsh: a secret-bearing `run_on` exec explicitly selects `/bin/sh`, rather than
+letting the host choose a shell. The tool gateway preserves references and
+escapes until this delivery boundary, including for Codemode calls; it never
+substitutes values into `run_on` command text. `{{secretfile:…}}` files are written
+under the 0700 `/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
 end; terminal one-offs clean it on return, while yielded `run_on` commands retain
 it as described below. That best-effort cleanup
 first waits for any write still in flight from an exec that timed out during

@@ -296,7 +296,7 @@ export type TurnStreamAttemptDeps = {
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
-  turn: Pick<SessionTurn, "initiator" | "initiatorContext"> & {
+  turn: Pick<SessionTurn, "initiator" | "initiatorContext" | "resources"> & {
     initiatingHumanSubjectId: string | null;
     id: string;
     executionGeneration: number;
@@ -607,6 +607,7 @@ export async function runTurnStreamAttempt(
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
+        mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,
         ...(settings.subscriptionCrossProviderFailoverEnabled &&
         compactionModeOptions.codexCompactionMode === "portable" &&

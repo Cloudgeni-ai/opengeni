@@ -1,6 +1,6 @@
 // "Ask me each time" against PostgreSQL (0952): marked items and fields stop
-// an agent's use before any value is read and return a host-owned approval
-// card; the person's decision becomes a grant that is used up (once), stays in
+// an agent's use before any value is read and post Opengeni's own approval
+// card in the chat; the person's decision becomes a grant that is used up (once), stays in
 // one chat (session), or covers their chats for an hour (window). Revoked,
 // expired and denied approvals cover nothing. People resolving their own
 // references are not asked, a run that acts for nobody is refused, and a
@@ -9,8 +9,8 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   isSecretReferenceError,
   parseSecretReference,
-  secretUseApprovalIdFromQuestionId,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
+  type HumanInputQuestion,
   type SecretPrincipal,
   type SecretReferenceError,
   type SecretUseApprovalDecision,
@@ -182,10 +182,28 @@ async function world() {
   function approvalIdOf(outcome: Awaited<ReturnType<typeof attempt>>): string {
     if (!("error" in outcome)) throw new Error("the use was not stopped");
     expect(outcome.error.failures.map((failure) => failure.code)).toContain("approval_required");
-    const questionId = outcome.error.approvalCard?.questions[0]?.id ?? "";
-    const id = secretUseApprovalIdFromQuestionId(questionId);
-    if (!id) throw new Error(`no approval card: ${questionId}`);
-    return id;
+    const approval = outcome.error.approval;
+    if (!approval) throw new Error("no approval was requested");
+    expect(approval.asked).toBe(true);
+    return approval.approvalId;
+  }
+
+  /** The cards Opengeni posted in the chat for one request. */
+  async function cardsFor(approvalId: string) {
+    return [
+      ...(await shared!.admin<
+        Array<{ status: string; allow_skip: boolean; questions: HumanInputQuestion[] }>
+      >`
+        select status, allow_skip, questions from session_human_input_requests
+        where tool_call_id = ${`${SECRET_USE_APPROVAL_QUESTION_PREFIX}${approvalId}`}
+          and origin = 'secret_use_approval'`),
+    ];
+  }
+
+  async function promptOf(error: SecretReferenceError | null | undefined) {
+    const approvalId = error?.approval?.approvalId;
+    if (!approvalId) return null;
+    return (await cardsFor(approvalId))[0]?.questions[0]?.prompt ?? null;
   }
 
   async function decide(
@@ -232,6 +250,8 @@ async function world() {
     chat,
     attempt,
     approvalIdOf,
+    cardsFor,
+    promptOf,
     decide,
     mark,
     approvalRow,
@@ -261,16 +281,18 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       const blocked = await w.attempt(a.principal, ["GitHub/username", "GitHub/password"]);
       const approvalId = w.approvalIdOf(blocked);
       if (!("error" in blocked)) return;
-      // Only the marked reference is refused; the card is host-owned and names
-      // the item, field and surface, never a value.
+      // Only the marked reference is refused; Opengeni posts its own card in
+      // the chat, naming the item, field and surface, never a value.
       expect(blocked.error.failures).toEqual([
         expect.objectContaining({
           code: "approval_required",
           raw: expect.stringContaining("password"),
         }),
       ]);
-      const card = blocked.error.approvalCard!;
-      expect(card.allowSkip).toBe(false);
+      const cards = await w.cardsFor(approvalId);
+      expect(cards).toHaveLength(1);
+      const card = cards[0]!;
+      expect(card).toMatchObject({ status: "pending", allow_skip: false });
       expect(card.questions[0]).toMatchObject({
         id: `${SECRET_USE_APPROVAL_QUESTION_PREFIX}${approvalId}`,
         kind: "single_select",
@@ -286,15 +308,17 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         "Allow the agent to use GitHub › password in a shell command?",
       );
       const output = blocked.error.toModelOutput();
-      expect(JSON.parse(output)).toMatchObject({
-        approvalCard: JSON.parse(JSON.stringify(card)),
-        askCard: null,
-      });
+      // The agent is told the person was asked; the card never passes through it.
+      expect(Object.keys(JSON.parse(output))).toEqual(["error", "failures", "askCard", "hint"]);
+      expect(JSON.parse(output)).toMatchObject({ askCard: null });
+      expect(output).toContain("Opengeni has asked the person");
+      expect(output).not.toContain("request_human_input");
       expect(output).not.toContain("hunter2");
       expect(output).not.toContain('octo"');
 
-      // The same blocked use asks with the same pending request.
+      // The same blocked use reuses the pending request and posts no new card.
       expect(w.approvalIdOf(await w.attempt(a.principal, ["GitHub/password"]))).toBe(approvalId);
+      expect(await w.cardsFor(approvalId)).toHaveLength(1);
 
       // secret_get never shows a marked value to an agent, even with
       // secrets:read; an unmarked field of the same item still reads.
@@ -470,7 +494,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
         (caught: SecretReferenceError) => caught,
       );
       expect(lookups).toBe(1);
-      expect(error?.approvalCard?.questions[0]?.prompt).toBe(
+      expect(await w.promptOf(error)).toBe(
         "Allow the agent to use GitHub › password in the browser on github.com?",
       );
       const approvalId = w.approvalIdOf({ error: error! });
@@ -486,7 +510,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
           () => null,
           (caught: SecretReferenceError) => caught,
         );
-      expect(machine?.approvalCard?.questions[0]?.prompt).toBe(
+      expect(await w.promptOf(machine)).toBe(
         "Allow the agent to use GitHub › password in a command on build-box?",
       );
       // The lookup failing still asks, without a destination.
@@ -502,7 +526,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
           () => null,
           (caught: SecretReferenceError) => caught,
         );
-      expect(failing?.approvalCard?.questions[0]?.prompt).toBe(
+      expect(await w.promptOf(failing)).toBe(
         "Allow the agent to use GitHub › password in the browser?",
       );
     });
@@ -562,7 +586,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       expect("error" in refused && refused.error.failures.map((failure) => failure.code)).toEqual([
         "denied",
       ]);
-      expect("error" in refused && refused.error.approvalCard).toBeNull();
+      expect("error" in refused && refused.error.approval).toBeNull();
     });
 
     test("a connected vault's marked field is refused before the provider is read", async () => {
@@ -613,7 +637,7 @@ describe.skipIf(!process.env.OPENGENI_TEST_PG_URL && process.env.OPENGENI_REQUIR
       // Refused before any value was read from the password manager.
       expect(reads()).toBe(before);
       if ("error" in blocked) {
-        expect(blocked.error.approvalCard?.questions[0]?.prompt).toBe(
+        expect(await w.promptOf(blocked.error)).toBe(
           "Allow the agent to use Card › number in a shell command?",
         );
       }

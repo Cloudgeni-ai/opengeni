@@ -4641,7 +4641,13 @@ recovery replays the stored bytes. The instructions never contain a clock.
    durable rematerialization path remains the virtual
    `/workspace/tool-results/<operationId>.json`), and history/events keep the
    compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt whose
-   `sandboxPath` is that cwd-relative shell path. Later turns do not
+   `sandboxPath` is that cwd-relative shell path. The path is given only once
+   the copy is in the sandbox: a spill that finds the turn's lazy sandbox not
+   started yet joins it (as a shell command would; the start copies the
+   attempt's spilled files before releasing its first operation, and the spill
+   retries a failed copy once), so the receipt never promises a later copy. It
+   is `null` without a sandbox route, when the sandbox cannot start or the copy
+   fails, and on the SDK-owned path before its session exists. Later turns do not
    rematerialize; retrieve old bytes through Files MCP plus shell. Spill write
    failure is a bounded `result_too_large` error and never puts the huge payload
    in history.
@@ -4659,12 +4665,21 @@ recovery replays the stored bytes. The instructions never contain a clock.
    item and event record that copy, while Codemode receives the exact executor
    result. See
    [model-visible discovery results](knowledge.md#model-visible-discovery-results).
+   A local MCP bridge may also supply its own model-visible copy through
+   `LocalMcpBridgeServer.projectModelToolResult` (the Gmail bridge's compact
+   mail cards, see [Gmail](gmail.md#model-visible-results)); it runs before
+   the 1 MiB check, Codemode and the spill file keep the exact result, and a
+   projection that throws leaves the exact result in place.
    User attachment rows store stable file references, not inline bytes. Active
    messages reconstruct the same authorized receipt and supported image content
    across turns and before compaction. File metadata is batch-authorized once
    per turn and bytes are memoized; object reads have bounded concurrency.
    Historical images do not cause sandbox remounts. Each image retains the
    existing inline admission limit; adding an image does not evict older images.
+   Inline delivery needs the file's sha256: upload completion computes it from
+   the stored bytes when the client sent none (files up to
+   `MAX_INLINE_MODEL_ATTACHMENT_BYTES`), so a plain REST upload is inlined like
+   an SDK upload; a client digest is never replaced.
    Before blob reads, a 64 MiB raw-image transport limit bounds both accumulated
    per-turn bytes and repeated images in each request. Exceeding it fails the
    turn explicitly without altering history; compaction cannot bypass it.
@@ -5278,6 +5293,22 @@ directory. Resolving or renaming live file metadata does not rewrite that text,
 and losing it does so only as described below. Active image bytes still require
 current authorized metadata and checksum-valid content; compacted attachment
 catalogs remain receipt-only.
+
+Per-turn file attachments never change the system instructions. The modular
+contract has no attachment module, and the SDK-rendered remote mount policy and
+filesystem layout come from the agent's instruction manifest
+(`manifestWithoutFileResourceEntries`), which drops file resource entries,
+including files a resumed sandbox's manifest state still holds from earlier
+turns; the session still materializes the full manifest. Everything the model
+needs about the turn's files (paths, sizes, read-only handling, contents are
+data, an earlier attachment belongs to a request only when that message refers
+to it) is in the turn's "Attached files are available in the sandbox" notice,
+which follows history and is persisted with the turn. A turn with a file
+therefore shares the cached prefix of a turn without one and only the
+attachment tail is uncached.
+The notice lists every file mounted for the turn, including files supplied as
+session or API resources rather than attached to the message, each once; a
+mounted file the requester cannot read is left out without failing the turn.
 The receipt-format change incurs a one-time prefix change for existing histories.
 One exception: when this turn's file-authority lookup does not return an active
 reference (another participant's file in a shared session, or a file that is no

@@ -7,8 +7,12 @@ import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
    the one sentence, the publisher and the trust line a person reads.
    -------------------------------------------------------------------------- */
 
-/** Hosts whose connections always belong to one person (official Gmail, Slack's hosted MCP). */
-const PERSONAL_ONLY_HOSTS = new Set(["gmailmcp.googleapis.com", "mcp.slack.com"]);
+/** Hosts whose connections always belong to one person (Gmail, Google Calendar, Slack's hosted MCP). */
+const PERSONAL_ONLY_HOSTS = new Set([
+  "gmailmcp.googleapis.com",
+  "calendarmcp.googleapis.com",
+  "mcp.slack.com",
+]);
 
 /**
  * True for providers that only ever connect someone's own account. The
@@ -24,6 +28,8 @@ export function personalOnlyCapability(
 /** One outcome sentence per provider we know, where the catalog copy is written for the backend. */
 const DESCRIPTIONS: Record<string, string> = {
   "gmailmcp.googleapis.com": "Search, read, draft, and send email from your Gmail.",
+  "calendarmcp.googleapis.com":
+    "See your schedule, check when you're free, and add or move events in your Google Calendar.",
   "slack.com": "Let agents read and send Slack messages as you.",
   "reddit.com": "Search Reddit, read threads, and reply from your account.",
   "jira.com": "Read and update the Jira issues and Confluence pages you can already see.",

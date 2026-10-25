@@ -59,9 +59,22 @@ export type RecordingTrackKind = z.infer<typeof RecordingTrackKind>;
 /**
  * meeting: a recorded conversation, listed in Meetings. browser: an agent's
  * browser recording, a video of the tab with a log of what the agent did.
+ * dictation: speech someone records to type it, such as into the chat box;
+ * always private, never listed, and deleted a day after it is transcribed.
  */
-export const RecordingPurpose = /* @__PURE__ */ defineSchema(() => z.enum(["meeting", "browser"]));
+export const RecordingPurpose = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["meeting", "browser", "dictation"]),
+);
 export type RecordingPurpose = z.infer<typeof RecordingPurpose>;
+
+/** What a client may record: browser recordings are made by the server. */
+export const RecordingCapturePurpose = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["meeting", "dictation"]),
+);
+export type RecordingCapturePurpose = z.infer<typeof RecordingCapturePurpose>;
+
+/** How long a dictation is kept after it is transcribed, for the client to take its text. */
+export const DICTATION_RETENTION_MILLISECONDS = 24 * 60 * 60 * 1_000;
 
 export const RecordingTranscriptVersionState = /* @__PURE__ */ defineSchema(() =>
   z.enum(["queued", "processing", "complete", "failed"]),
@@ -251,6 +264,12 @@ export const CreateRecordingRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       /** Client-generated id; creating the same id again returns the existing recording. */
       recordingId: z.string().uuid(),
+      /**
+       * meeting (the default) or dictation. A dictation is private and has one
+       * microphone track; it is transcribed with the workspace's voice input
+       * model, as text without speakers.
+       */
+      purpose: RecordingCapturePurpose.optional(),
       title: z.string().trim().min(1).max(300).optional(),
       visibility: RecordingVisibility.optional(),
       startedAt: z.string().datetime({ offset: true }).optional(),

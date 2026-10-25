@@ -2342,6 +2342,11 @@ describe("release schema contract", () => {
     const appendedMigrationPaths = [
       "0958_session_event_tool_call_fallback_pages.sql",
       "0957_session_event_tool_call_pages.sql",
+      "0962_dictation_recordings.sql",
+      "0961_secret_use_approval_host_cards.sql",
+      "0960_event_status_reason_codes.sql",
+      "0959_automation_templates.sql",
+      "0958_workspace_event_source.sql",
       "0956_vault_username_hints.sql",
       "0955_recording_notes_event_types_validate.sql",
       "0954_recording_notes.sql",

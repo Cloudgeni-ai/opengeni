@@ -77,3 +77,22 @@ export function useAppLinkResolver(): OpenGeniLinkResolver {
     return chainLinkResolvers(host, console) ?? console;
   }, [dock, host, page]);
 }
+
+/**
+ * {@link useAppLinkResolver} inside one workspace's session: a workspace-less
+ * `artifact:` file link opens that workspace's file page, as it does in the
+ * agent's chat replies, so links in its questions and other session text
+ * resolve the same way. The host's resolver still sees the link first.
+ */
+export function useWorkspaceAppLinkResolver(workspaceId: string): OpenGeniLinkResolver {
+  const app = useAppLinkResolver();
+  return useMemo(
+    () =>
+      chainLinkResolvers(app, (target) =>
+        target.kind === "file" && target.workspaceId === null
+          ? app({ ...target, workspaceId })
+          : null,
+      ) ?? app,
+    [app, workspaceId],
+  );
+}

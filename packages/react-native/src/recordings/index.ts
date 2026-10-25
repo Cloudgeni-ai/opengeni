@@ -25,6 +25,7 @@ import {
 import { createNativeRecorder, type NativeAudioCapture } from "./native-recorder";
 
 export { readAdtsFrame, wholeAdtsFrames } from "./adts";
+export { useNativeDictation, type UseNativeDictationOptions } from "./dictation";
 export {
   createFileRecordingChunkStore,
   parseRecordingChunkFileName,

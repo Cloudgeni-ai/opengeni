@@ -323,7 +323,10 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
     void (async () => {
       // Save what a capture cut short left half-written, then finish everything.
       await platformRef.current.recover?.(store()).catch(() => undefined);
-      return await uploader().resume();
+      // Dictations are the composer's to finish; this hook finishes the rest.
+      return await uploader().resume({
+        only: (recording) => recording.create.purpose !== "dictation",
+      });
     })()
       .then((ids) => {
         if (cancelled) return;

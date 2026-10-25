@@ -322,7 +322,7 @@ test("the next run follows each schedule kind, time zone and daylight saving", (
   expect(next(null, now)).toBeNull();
 });
 
-test("a chat's wait says when the next run is and which event it waits for", async () => {
+test("a chat's wait says when the next run is and every event it waits for", async () => {
   const session = await fixture();
   const space = { accountId: session.accountId, workspaceId: session.workspaceId };
   const now = new Date("2026-10-22T08:00:00Z");
@@ -409,6 +409,7 @@ test("a chat's wait says when the next run is and which event it waits for", asy
   expect(await wait()).toEqual({
     nextRunAt: "2026-10-22T09:00:00.000Z",
     event: null,
+    events: [],
     automations: 2,
   });
   // Nothing private targets the chat, so the reader is not even asked.
@@ -432,6 +433,7 @@ test("a chat's wait says when the next run is and which event it waits for", asy
   expect(await wait("bob")).toEqual({
     nextRunAt: "2026-10-22T09:00:00.000Z",
     event: null,
+    events: [],
     automations: 2,
   });
   expect(viewerAsked).toBe(2);
@@ -452,6 +454,21 @@ test("a chat's wait says when the next run is and which event it waits for", asy
     source: null,
     eventTypes: ["message.received"],
   });
+  // Every source is named once, with all its event types; Bob's hidden one is unnamed.
+  expect((await wait("bob"))?.events).toEqual([
+    { source: null, eventTypes: ["message.received"] },
+    {
+      source: { kind: "webhook", name: "Deploys" },
+      eventTypes: ["deploy.finished", "deploy.failed"],
+    },
+  ]);
+  expect((await wait("alice"))?.events).toEqual([
+    { source: { kind: "webhook", name: "Alice's inbox" }, eventTypes: ["message.received"] },
+    {
+      source: { kind: "webhook", name: "Deploys" },
+      eventTypes: ["deploy.finished", "deploy.failed"],
+    },
+  ]);
   // A blocked trigger is skipped for the next active one.
   await shared.admin`update event_triggers set status = 'blocked', status_reason = 'The source was disconnected' where task_id = ${watcher.id} and position = 0`;
   expect(await wait("bob")).toEqual({
@@ -460,7 +477,36 @@ test("a chat's wait says when the next run is and which event it waits for", asy
       source: { kind: "webhook", name: "Deploys" },
       eventTypes: ["deploy.finished", "deploy.failed"],
     },
+    events: [
+      {
+        source: { kind: "webhook", name: "Deploys" },
+        eventTypes: ["deploy.finished", "deploy.failed"],
+      },
+    ],
     automations: 3,
   });
   expect((await wait(null))?.automations).toBe(3);
+
+  // A second automation on a source already named adds its event types to it,
+  // and one taking every event covers the rest.
+  await automation(
+    "Any deploy news",
+    { type: "manual" },
+    { triggers: [{ sourceId: deploys.id, eventTypes: ["deploy.started", "deploy.failed"] }] },
+  );
+  expect((await wait("bob"))?.events).toEqual([
+    {
+      source: { kind: "webhook", name: "Deploys" },
+      eventTypes: ["deploy.finished", "deploy.failed", "deploy.started"],
+    },
+  ]);
+  await automation(
+    "Everything from deploys",
+    { type: "manual" },
+    { triggers: [{ sourceId: deploys.id, eventTypes: ["*"] }] },
+  );
+  expect(await wait("bob")).toMatchObject({
+    events: [{ source: { kind: "webhook", name: "Deploys" }, eventTypes: ["*"] }],
+    automations: 5,
+  });
 }, 60_000);

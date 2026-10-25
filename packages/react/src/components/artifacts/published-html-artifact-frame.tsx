@@ -31,7 +31,14 @@ export const PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX = [
 
 export type PublishedHtmlArtifactFrameProps = {
   html: string;
+  /**
+   * Size the frame to the height its document reports (`opengeni.preview.height`),
+   * between 80 px and `maxAutoHeight` (default 1200 px). Taller content scrolls
+   * inside the frame.
+   */
   autoHeight?: boolean;
+  /** Upper bound for `autoHeight`, in CSS pixels. */
+  maxAutoHeight?: number;
   theme?: "light" | "dark";
   title: string;
   className?: string;
@@ -65,7 +72,11 @@ export function publishedHtmlArtifactDocument(html: string, toolBridgeEnabled: b
  */
 export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
-  const [height, setHeight] = useState<number>();
+  const [reportedHeight, setHeight] = useState<number>();
+  const height =
+    reportedHeight === undefined
+      ? undefined
+      : Math.min(props.maxAutoHeight ?? 1200, Math.max(80, Math.ceil(reportedHeight)));
   useEffect(() => {
     if (!props.autoHeight) return;
     const receive = (event: MessageEvent) => {
@@ -75,8 +86,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       )
         return;
       const value = event.data.height;
-      if (typeof value === "number" && Number.isFinite(value))
-        setHeight(Math.min(1200, Math.max(80, value)));
+      if (typeof value === "number" && Number.isFinite(value)) setHeight(value);
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);

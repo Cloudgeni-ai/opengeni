@@ -195,7 +195,7 @@ describe("skill_read gateway definition", () => {
               const rendered = JSON.parse(text.text).files[0].content as string;
               expect(rendered).toBe(markdown);
               const start = rendered.indexOf("## Make new Sites readable by default");
-              const build = rendered.indexOf("## Use normal Bun + React");
+              const build = rendered.indexOf("## Edit an existing Site");
               expect(start).toBeGreaterThan(-1);
               expect(start).toBeLessThan(build);
               const guidance = rendered.slice(start, build).replace(/\s+/gu, " ");

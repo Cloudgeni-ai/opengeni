@@ -43,6 +43,7 @@ const workspace = "/workspaces/11111111-1111-4111-8111-111111111111";
 const github = "5ce00000-0000-4000-8000-000000000001";
 const linear = "5ce00000-0000-4000-8000-000000000003";
 const prReview = "00000000-0000-4000-8000-000000000001";
+const releaseNotesTemplate = "7e3a0000-0000-4000-8000-000000000001";
 const finishedOnce = "00000000-0000-4000-8000-000000000004";
 
 const visible = (page: Page, text: string) =>
@@ -52,6 +53,9 @@ const visible = (page: Page, text: string) =>
 async function newChatAutomationOnProjectEvent(page: Page) {
   await expect(page.getByText("Nothing picks this chat up again yet.")).toBeVisible();
   await page.getByRole("button", { name: "New automation" }).click();
+  // The workspace has saved templates, so New automation offers them first.
+  await expect(page.getByText("Saved in this workspace")).toBeVisible();
+  await page.getByRole("button", { name: "Start from scratch" }).click();
   await page.getByLabel("Instructions").fill("Tell me what changed and whether it needs me.");
   await page.getByRole("button", { name: "Add an event" }).click();
   await page.getByRole("combobox").filter({ hasText: "Choose a source" }).click();
@@ -87,6 +91,7 @@ const pages: Array<{
       // A finished run-once automation reads Off, and turning it on re-arms it.
       const finished = page.getByRole("switch", { name: "Answer the first order from Norway" });
       await expect(finished).toHaveAttribute("aria-checked", "false");
+      await expect(page.getByRole("button", { name: "Templates" })).toBeVisible();
     },
   },
   {
@@ -126,6 +131,70 @@ const pages: Array<{
       await expect(page.getByLabel("Field for condition 1")).toHaveValue("data.pull_request.draft");
       // A GitHub trigger without repositories says so where they are added: the message.
       await expect(page.getByText(/A run can only open the repositories added here/)).toBeVisible();
+    },
+  },
+  {
+    name: "new-meeting-notes",
+    path: `${workspace}/automations/new?template=meeting-notes`,
+    tall: true,
+    check: async (page) => {
+      await expect(page.getByLabel("Message")).toHaveValue(/data\.recordingId/);
+      // Nobody has to add this workspace's events first: it is offered as a source.
+      await expect(visible(page, "This workspace")).toBeVisible();
+      await expect(page.getByText("recording.transcript.ready").first()).toBeVisible();
+      await expect(page.getByLabel("Field for condition 1")).toHaveValue("data.purpose");
+      // Each person's own meetings: a teammate's shared meeting is theirs to write up.
+      await expect(page.getByLabel("Field for condition 2")).toHaveValue("data.recordedByYou");
+      // Notes from someone's own meetings start out as theirs alone.
+      await expect(page.getByText(/^Only you can see this automation/)).toBeVisible();
+    },
+  },
+  {
+    name: "new-from-saved-template",
+    path: `${workspace}/automations/new?template=${releaseNotesTemplate}`,
+    tall: true,
+    check: async (page) => {
+      await expect(page.getByLabel("Message")).toHaveValue(/Draft release notes/);
+      await expect(visible(page, "Acme on GitHub")).toBeVisible();
+      await expect(page.getByLabel("Field for condition 1")).toHaveValue("data.ref");
+    },
+  },
+  {
+    name: "templates",
+    path: `${workspace}/automations/templates`,
+    tall: true,
+    check: async (page) => {
+      await expect(page.getByRole("heading", { name: "Templates", exact: true })).toBeVisible();
+      await expect(visible(page, "Meeting notes")).toBeVisible();
+      await expect(visible(page, "When a meeting's transcript is ready")).toBeVisible();
+      await expect(visible(page, "Release notes")).toBeVisible();
+      // Only the template the viewer saved has a menu.
+      await expect(
+        page.getByRole("button", { name: "More actions for the Release notes template" }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "More actions for the Friday wrap-up template" }),
+      ).toHaveCount(0);
+    },
+  },
+  {
+    name: "templates-none-saved",
+    path: `${workspace}/automations/templates`,
+    query: "templates=0",
+    check: async (page) => {
+      await expect(visible(page, "None yet.")).toBeVisible();
+    },
+  },
+  {
+    name: "detail-save-as-template",
+    path: `${workspace}/automations/${prReview}`,
+    check: async (page) => {
+      await page.getByRole("button", { name: /^More actions for/ }).click();
+      await page.getByRole("menuitem", { name: "Save as template" }).click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog.getByLabel("Name")).toHaveValue("Review new pull requests");
+      await dialog.getByRole("button", { name: "Save template" }).click();
+      await expect(visible(page, "Saved as a template")).toBeVisible();
     },
   },
   {
@@ -197,6 +266,31 @@ const pages: Array<{
     },
   },
   {
+    name: "panel-templates",
+    path: `${workspace}/panel?builtin=1`,
+    tall: true,
+    check: async (page) => {
+      await page.getByRole("button", { name: "New automation" }).click();
+      await expect(page.getByRole("heading", { name: "New automation" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Meeting notes" })).toBeVisible();
+      await expect(visible(page, "Saved in this workspace")).toBeVisible();
+    },
+  },
+  {
+    name: "panel-meeting-notes",
+    path: `${workspace}/panel?builtin=1`,
+    tall: true,
+    check: async (page) => {
+      await page.getByRole("button", { name: "New automation" }).click();
+      await page.getByRole("button", { name: "Meeting notes" }).click();
+      await expect(page.getByLabel("Instructions")).toHaveValue(/data\.recordingId/);
+      await expect(visible(page, "This workspace")).toBeVisible();
+      await page.getByRole("button", { name: "Create automation" }).click();
+      await expect(page.getByRole("heading", { name: "Meeting notes" })).toBeVisible();
+      await expect(visible(page, "Runs when a matching event arrives.")).toBeVisible();
+    },
+  },
+  {
     name: "panel-new-in-chat",
     path: `${workspace}/panel?chat=1`,
     tall: true,
@@ -238,6 +332,7 @@ try {
             "list",
             "detail",
             "new-pr-review",
+            "templates",
             "source-github",
             "panel-list",
             "panel-new-in-chat",
@@ -260,6 +355,19 @@ try {
         const label = `${entry.name} ${theme} ${width}`;
         try {
           await entry.check(page);
+          // Let entrances such as a toast finish, so contrast is read at rest.
+          await page.waitForFunction(
+            () =>
+              document
+                .getAnimations()
+                .every(
+                  (animation) =>
+                    animation.playState !== "running" ||
+                    animation.effect?.getTiming().iterations === Infinity,
+                ),
+            undefined,
+            { timeout: 5_000 },
+          );
           const overflow = await page.evaluate(
             () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
           );
@@ -267,7 +375,10 @@ try {
           if (theme === "light") {
             const axe = await new AxeBuilder({ page }).disableRules(["region"]).analyze();
             for (const violation of axe.violations) {
-              failures.push(`${label}: axe ${violation.id} (${violation.nodes.length})`);
+              const targets = violation.nodes.map((node) => node.target.join(" ")).join(", ");
+              failures.push(
+                `${label}: axe ${violation.id} (${violation.nodes.length}): ${targets}`,
+              );
             }
           }
         } catch (error) {

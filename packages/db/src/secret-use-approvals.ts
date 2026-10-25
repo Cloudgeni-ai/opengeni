@@ -23,9 +23,6 @@ export type SecretApprovalRuleRow = { itemId: string; fieldKey: string };
 
 export type SecretUseApprovalRow = typeof schema.secretUseApprovals.$inferSelect;
 
-/** A pending request is offered again for an identical blocked use this long. */
-const PENDING_REUSE_MS = 60 * 60 * 1000;
-
 /** The rules for these items: `fieldKey` is empty for the whole item. */
 export async function listSecretApprovalRules(
   db: Database,
@@ -145,7 +142,9 @@ function sameTargets(
 
 /**
  * Record a blocked use for the person to decide. An identical use still
- * pending in the same chat is returned instead of a new request.
+ * pending in the same chat is returned instead of a new request, however old,
+ * so the person is asked about it once; identical concurrent uses serialize
+ * on the chat and approver.
  */
 export async function requestSecretUseApproval(
   db: Database,
@@ -164,6 +163,9 @@ export async function requestSecretUseApproval(
   const destination = input.destination?.slice(0, 500) ?? null;
   const toolName = input.toolName.slice(0, 200) || "tool";
   return await withRlsContext(db, scope, async (scoped) => {
+    await scoped.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`secret-use-approval:${input.sessionId}:${input.approverSubjectId}`}, 0))`,
+    );
     const pending = await scoped
       .select()
       .from(schema.secretUseApprovals)
@@ -175,11 +177,10 @@ export async function requestSecretUseApproval(
           eq(schema.secretUseApprovals.approverSubjectId, input.approverSubjectId),
           eq(schema.secretUseApprovals.surface, input.surface),
           eq(schema.secretUseApprovals.toolName, toolName),
-          gt(schema.secretUseApprovals.createdAt, new Date(now.getTime() - PENDING_REUSE_MS)),
         ),
       )
       .orderBy(desc(schema.secretUseApprovals.createdAt))
-      .limit(20);
+      .limit(50);
     const reusable = pending.find(
       (row) => row.destination === destination && sameTargets(row.targets, input.targets),
     );

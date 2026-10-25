@@ -3,7 +3,7 @@ import { TranscriptionServiceError } from "@opengeni/core";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../src/codex-realtime";
-import { createCodexSubscriptionTranscriptionProvider } from "../src/transcription/providers/codex-subscription";
+import { createCodexSubscriptionTranscriptionProvider } from "@opengeni/core/transcription-service";
 
 // Transcription and realtime for an organization with a Codex cutover row.
 // Every legacy Codex accessor is poisoned: a core or maintenance path that

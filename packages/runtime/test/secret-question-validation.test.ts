@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { RequestHumanInputToolInput } from "@opengeni/contracts";
-import { secretQuestionRejection } from "../src/index";
+import { secretApprovalQuestionRejection, secretQuestionRejection } from "../src/index";
 
 function request(secret: Record<string, unknown> | null, kind = "secret") {
   return RequestHumanInputToolInput.parse({
@@ -114,5 +114,44 @@ describe("request_human_input secret questions (AC-1)", () => {
     );
     expect(reason).toContain("could not be checked");
     expect(reason).toContain("vault store is unavailable");
+  });
+});
+
+describe("request_human_input secret approval questions", () => {
+  const ask = (id: string) =>
+    RequestHumanInputToolInput.parse({
+      questions: [
+        {
+          id,
+          kind: "single_select",
+          prompt: "Allow the agent to use GitHub › password?",
+          label: null,
+          helpText: null,
+          skillReview: null,
+          options: [
+            { id: "once", label: "Allow once", description: null },
+            { id: "deny", label: "Deny", description: null },
+          ],
+          required: true,
+          allowOther: false,
+          validation: null,
+          secret: null,
+        },
+      ],
+      allowSkip: false,
+      expiresInSeconds: null,
+    });
+
+  test("an agent cannot ask with Opengeni's approval card; the person was already asked", () => {
+    const reason = secretApprovalQuestionRejection(
+      ask("secret-approval:0f8fad5b-d9cb-469f-a165-70867728950e"),
+    );
+    expect(reason).toBe(
+      "Nothing was asked. Opengeni already asked the person, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.",
+    );
+  });
+
+  test("ordinary questions pass", () => {
+    expect(secretApprovalQuestionRejection(ask("environment"))).toBeNull();
   });
 });

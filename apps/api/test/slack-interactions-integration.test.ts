@@ -39,6 +39,8 @@ import {
   getSlackBotUserLink,
   getSessionForSubject,
   getWorkspaceGrant,
+  postSecretUseApprovalCard,
+  requestSecretUseApproval,
   createWorkspace,
   getSlackChannelRoute,
   grantWorkspaceAccess,
@@ -5050,7 +5052,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(refusal.text).not.toContain(pasted);
   }, 60_000);
 
-  test("a secret approval card links to Opengeni, has no buttons and refuses thread replies", async () => {
+  test("Opengeni's secret approval card links to Opengeni, has no buttons and leaves the thread open", async () => {
     if (!available) return;
     const value = await fixture();
     const rootTimestamp = "1712700000.000001";
@@ -5083,15 +5085,14 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
       trigger: { kind: "next" },
     });
     if (claimed.action !== "claimed") throw new Error(`not claimable: ${claimed.reason}`);
-    const approvalId = crypto.randomUUID();
-    await shared!.admin`
-      insert into secret_use_approvals
-        (id, account_id, workspace_id, session_id, approver_subject_id, targets,
-         surface, tool_name)
-      values (${approvalId}::uuid, ${value.owner.accountId}::uuid,
-        ${value.owner.workspaceId}::uuid, ${interaction.session_id}::uuid,
-        ${value.owner.subjectId},
-        ${shared!.admin.json([
+    // A blocked use: the resolver records the request and posts the card.
+    const approval = await requestSecretUseApproval(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        sessionId: interaction.session_id,
+        approverSubjectId: value.owner.subjectId,
+        targets: [
           {
             vaultId: crypto.randomUUID(),
             itemId: crypto.randomUUID(),
@@ -5100,52 +5101,22 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
             itemName: "Deploy key",
             fieldName: "token",
           },
-        ])},
-        'shell', 'exec_command')`;
-    const requestId = crypto.randomUUID();
-    const questions: HumanInputQuestion[] = [
-      {
-        id: `secret-approval:${approvalId}`,
-        kind: "single_select",
-        prompt: "Allow?",
-        options: [
-          { id: "once", label: "Allow once" },
-          { id: "deny", label: "Deny" },
         ],
-        required: true,
-        allowOther: false,
+        surface: "shell",
+        toolName: "exec_command",
+        destination: null,
       },
-    ];
-    const settled = await applySessionTurnSettlement(client.db, value.owner.workspaceId, {
+    );
+    const posted = await postSecretUseApprovalCard(client.db, {
+      workspaceId: value.owner.workspaceId,
       sessionId: interaction.session_id,
       turnId: claimed.turn.id,
-      triggerEventId: claimed.turn.triggerEventId,
       attemptId,
-      turnStatus: "requires_action",
-      sessionStatus: "requires_action",
-      activeTurnId: claimed.turn.id,
-      runState: {
-        serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
-        pendingApprovals: [],
-        humanInputRequests: [
-          {
-            id: requestId,
-            toolCallId: "slack-approval",
-            questions,
-            allowSkip: false,
-            expiresAt: null,
-          },
-        ],
-      },
-      events: [
-        {
-          type: "session.humanInput.requested",
-          payload: { request: { id: requestId, questions, allowSkip: false, expiresAt: null } },
-        },
-        { type: "session.status.changed", payload: { status: "requires_action" } },
-      ],
+      executionGeneration: claimed.turn.executionGeneration,
+      approval,
     });
-    expect(settled.action).toBe("settled");
+    expect(posted.asked).toBe(true);
+    const requestId = posted.requestId!;
     await drainAll(value.deps);
     const card = value.slack.postAttempts.find((post) =>
       post.text.includes("Deploy key › token in a shell command"),
@@ -5177,12 +5148,15 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     const [request] = await shared!.admin<Array<{ status: string }>>`
       select status from session_human_input_requests where id = ${requestId}`;
     expect(request?.status).toBe("pending");
-    const [approval] = await shared!.admin<Array<{ status: string }>>`
-      select status from secret_use_approvals where id = ${approvalId}::uuid`;
-    expect(approval?.status).toBe("pending");
-    const refusal = value.slack.postAttempts.at(-1)!;
-    expect(refusal.threadTimestamp).toBe(rootTimestamp);
-    expect(refusal.text).toContain("Only you can allow an agent to use this secret");
+    const [stored] = await shared!.admin<Array<{ status: string }>>`
+      select status from secret_use_approvals where id = ${approval.id}::uuid`;
+    expect(stored?.status).toBe("pending");
+    // The thread reply is an ordinary message to the agent, not an answer.
+    const replies = await shared!.admin<Array<{ text: string }>>`
+      select payload ->> 'text' as text from session_events
+      where session_id = ${interaction.session_id}::uuid and type = 'user.message'
+        and payload ->> 'text' = 'Allow once'`;
+    expect(replies).toHaveLength(1);
   }, 60_000);
 
   test("ordinary Slack triggers retain sessions:create-only authorization", async () => {
