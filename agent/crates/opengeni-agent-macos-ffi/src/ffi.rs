@@ -169,7 +169,7 @@ pub(super) fn console_facts() -> Result<crate::MacConsoleFacts, MacFfiError> {
         unsafe { CFDictionary::wrap_under_create_rule(raw) };
     let flag = |key: &str| {
         session
-            .find(&CFString::new(key))
+            .find(CFString::new(key))
             .and_then(|value| value.downcast::<CFBoolean>())
             .map(bool::from)
     };

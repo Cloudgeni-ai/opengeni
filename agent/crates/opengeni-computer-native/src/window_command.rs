@@ -245,16 +245,14 @@ mod tests {
         r#"{"processId":42,"title":"Notes","bounds":{"x":213,"y":77,"width":656,"height":422}}"#;
 
     type Answer = Result<WindowPresence, String>;
+    type WindowFn = fn(&WindowQuery) -> Answer;
+    type ConsoleFn = fn() -> Result<ConsoleState, String>;
 
     fn natives(
-        presence: impl Fn(&WindowQuery) -> Answer,
-        restore: impl Fn(&WindowQuery) -> Answer,
-        console: impl Fn() -> Result<ConsoleState, String>,
-    ) -> WindowNative<
-        impl Fn(&WindowQuery) -> Answer,
-        impl Fn(&WindowQuery) -> Answer,
-        impl Fn() -> Result<ConsoleState, String>,
-    > {
+        presence: WindowFn,
+        restore: WindowFn,
+        console: ConsoleFn,
+    ) -> WindowNative<WindowFn, WindowFn, ConsoleFn> {
         WindowNative {
             presence,
             restore,
