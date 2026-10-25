@@ -49,6 +49,7 @@ import {
   type AnthropicRequestSizeError,
   ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
+  modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
   isPreemptedModelResponse,
@@ -188,6 +189,7 @@ import {
 } from "./quiescence";
 import {
   inputWaitReply,
+  inputWaitReplyMessage,
   inputWaitReplyRefusal,
   latestDurableTurnMessageText,
 } from "./input-wait-reply";
@@ -339,6 +341,58 @@ export async function attachPendingUpdatesBeforePreparingModelInput(input: {
   if (input.shouldAttach && !(await input.attachPendingUpdates())) return false;
   await input.prepareModelInput();
   return true;
+}
+
+/** History loads faster than this in nearly every turn; only slower loads get a visible phase. */
+export const HISTORY_STARTUP_PHASE_VISIBLE_AFTER_MS = 1_000;
+
+type HistoryStartupPhaseEvent = {
+  type: "turn.startup.phase.started" | "turn.startup.phase.completed" | "turn.startup.phase.failed";
+  payload: { phase: "history"; durationMs?: number };
+};
+
+/**
+ * Loads the conversation history for the first model request and, when that
+ * takes longer than `visibleAfterMs` (for example slow screenshot reads),
+ * shows it as the `history` startup phase. A fast load publishes nothing, so
+ * the common path adds no event and no timeline row.
+ */
+export async function prepareHistoryWithStartupPhase(input: {
+  publish: (events: HistoryStartupPhaseEvent[]) => Promise<unknown>;
+  prepare: () => Promise<void>;
+  visibleAfterMs?: number;
+}): Promise<void> {
+  const startedAt = performance.now();
+  const reveal: { published: Promise<unknown> | null } = { published: null };
+  const timer = setTimeout(() => {
+    reveal.published = input.publish([
+      { type: "turn.startup.phase.started", payload: { phase: "history" } },
+    ]);
+    // Awaited below; this only keeps an early rejection from being unhandled.
+    reveal.published.catch(() => undefined);
+  }, input.visibleAfterMs ?? HISTORY_STARTUP_PHASE_VISIBLE_AFTER_MS);
+  let outcome: "completed" | "failed" = "completed";
+  try {
+    await input.prepare();
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (reveal.published) {
+      await reveal.published;
+      await input.publish([
+        {
+          type:
+            outcome === "completed" ? "turn.startup.phase.completed" : "turn.startup.phase.failed",
+          payload: {
+            phase: "history",
+            durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+          },
+        },
+      ]);
+    }
+  }
 }
 
 export async function runTurnStreamAttempt(
@@ -703,6 +757,9 @@ export async function runTurnStreamAttempt(
   let latestAssistantMessageText: string | null = null;
   // Waits refused because they would leave a person's message unanswered.
   let inputWaitReplyRefusals = 0;
+  // The accepted wait's verbatim reply was handled once (published, or found
+  // to repeat the latest message), across every stream of this activity.
+  let waitReplyPublished = false;
   let workerPreparationTotalRecorded = false;
   let toolsExecuted = false;
   let finalReplyNudged = false;
@@ -1111,10 +1168,15 @@ export async function runTurnStreamAttempt(
     try {
       eventing.stream = await withProviderRequestContext(runStreamOnce);
       const stream = eventing.stream;
-      eventing.inputWaitReplyGuard = async () => {
+      eventing.inputWaitReplyGuard = async (request) => {
         const refusal = await inputWaitReplyRefusal({
           turn,
           refusalsSoFar: inputWaitReplyRefusals,
+          reply: request.reply,
+          hasProgressUpdate: () =>
+            modelResponseHasProgressUpdate(
+              (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
+            ),
           hasVisibleReply: async () =>
             Boolean(latestAssistantMessageText?.trim()) ||
             modelResponseHasVisibleText(
@@ -1678,6 +1740,25 @@ export async function runTurnStreamAttempt(
               : undefined;
           if (event.type === "agent.toolCall.output") {
             const batcher = eventing.batcher;
+            // An accepted wait's verbatim reply is made durable before the
+            // tool result that follows its acceptance, after the response's
+            // own text, so an approval pause or a retried activity cannot lose
+            // it. Settlement and later activities then find it as the turn's
+            // latest message and do not publish it again.
+            const acceptedReply = eventing.preparedTools?.inputWaitYield?.reply ?? null;
+            if (acceptedReply !== null && !waitReplyPublished) {
+              waitReplyPublished = true;
+              const message = inputWaitReplyMessage({
+                waitAccepted: true,
+                waitReply: acceptedReply,
+                latestAssistantMessageText,
+                attemptId: input.attemptId,
+              });
+              if (message) {
+                await batcher.push({ type: "agent.message.completed", payload: message });
+                latestAssistantMessageText = message.text;
+              }
+            }
             await withMcpCallIdentity((event.payload as { id: string }).id, () =>
               measureMcpPhase("event_persistence", () => batcher.push(event, checkpoint)),
             );
@@ -2285,9 +2366,18 @@ export async function runTurnStreamAttempt(
     // copy is published only when this stream did not complete that text.
     const finalOutputAlreadyCompleted = latestStreamedAssistantText === finalOutput;
     // A wait ends the turn with empty output; a human's message still gets
-    // its answer recorded for unread attention and Slack.
+    // its answer recorded for unread attention and Slack. A wait's own
+    // `reply` argument is that answer verbatim, shown as the agent's message.
+    const waitReply = eventing.preparedTools?.inputWaitYield?.reply ?? null;
+    const waitReplyMessage = inputWaitReplyMessage({
+      waitAccepted: inputWaitYielded,
+      waitReply,
+      latestAssistantMessageText,
+      attemptId: input.attemptId,
+    });
     const reply = await inputWaitReply({
       inputWaitYielded,
+      waitReply,
       turn,
       latestAssistantMessageText,
       readLatestDurableTurnMessage: async () =>
@@ -2316,6 +2406,9 @@ export async function runTurnStreamAttempt(
           ...(inputWaitYielded || finalOutputAlreadyCompleted
             ? []
             : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
+          ...(waitReplyMessage
+            ? [{ type: "agent.message.completed" as const, payload: waitReplyMessage }]
+            : []),
           {
             type: "turn.completed",
             payload: {
@@ -2413,7 +2506,11 @@ export async function runTurnStreamAttempt(
       shouldAttach:
         trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse",
       attachPendingUpdates: attachPendingUpdatesAfterOpenSuffix,
-      prepareModelInput: prepareRunAttemptInput,
+      prepareModelInput: () =>
+        prepareHistoryWithStartupPhase({
+          publish: eventing.publish!,
+          prepare: prepareRunAttemptInput,
+        }),
     }))
   ) {
     return claimedResult({ status: "cancelled" });

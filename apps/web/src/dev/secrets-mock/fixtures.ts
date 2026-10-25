@@ -152,7 +152,7 @@ export const MOCK_OPERATIONS: Record<
     createTotp: true,
     updateTotp: true,
   },
-  // Bridge: edits with revision checks, trash for removal, no attachment writes.
+  // Bitwarden: edits with revision checks, trash for removal, no attachment writes.
   bitwarden: {
     ...NONE,
     createItemTypes: ["login", "note"],
@@ -735,7 +735,7 @@ export function buildMockState(workspaceId: string): MockState {
       provider: "bitwarden",
       ownership: "user",
       accountName: "ola@example.com",
-      label: "Laptop bridge",
+      label: null,
       verifiedAt: iso(-2 * 60_000),
       createdAt: iso(-1 * DAY),
       createdBySubjectId: null,

@@ -27,7 +27,6 @@ describe("official Drive MCP setup", () => {
   test("scheduled Drive use requires offline consent and actual read/write grants", () => {
     const drive = builtInOAuthProfileFor({ mcpUrl: url });
     expect(drive).toMatchObject({
-      exactMcpBinding: true,
       defaultOwnership: "personal",
       sendResourceParameter: false,
       extraAuthorizeParams: { access_type: "offline", prompt: "consent" },

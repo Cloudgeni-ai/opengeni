@@ -1,5 +1,5 @@
 import type { HumanInputQuestion } from "@opengeni/sdk";
-import type { HumanInputAnswerDraft } from "./human-input-model";
+import { choiceOffersOther, type HumanInputAnswerDraft } from "./human-input-model";
 
 /**
  * Unsent answers to a structured human-input request, so navigating away from
@@ -131,8 +131,8 @@ function fitToQuestions(
     }
     const optionIds = new Set(question.options.map((option) => option.id));
     const values = draft.values.filter((value) => optionIds.has(value));
-    // The card offers Other on every choice question except a Skill review.
-    const otherOffered = !question.skillReview;
+    // The card offers Other on every choice question except host-owned ones.
+    const otherOffered = choiceOffersOther(question);
     fitted[question.id] = {
       values: question.kind === "single_select" ? values.slice(0, 1) : values,
       other: otherOffered ? draft.other : "",

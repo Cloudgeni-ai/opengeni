@@ -5,7 +5,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createSiteToolBridge } from "@opengeni/sdk/site";
 import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
-import { SITE_NO_ORIGIN_ID } from "@opengeni/contracts/site-session-http";
+import { SITE_NO_ORIGIN_ID, siteConversationContext } from "@opengeni/contracts/site-session-http";
 import {
   assertScheduledTaskMutationOwner,
   requireSessionAuthorization,
@@ -1409,4 +1409,68 @@ test("Site creation preserves normal defaults, workspace restrictions and truste
     workspaceAdmin: true,
     browser: true,
   });
+});
+
+test("a conversation started in the console's Site view begins knowing its Site; a Site page's does not", async () => {
+  const f = await fixture();
+  const site = await f.publish("Sales dashboard");
+  // The console's Site view names the Site and the version it shows, with no
+  // frame marker: it is the console, not Site code.
+  const siteView = {
+    "x-opengeni-site-id": site.siteId,
+    "x-opengeni-site-version": site.versionId,
+  };
+  const initialContext = async (sessionId: string) => {
+    const [row] = await shared.admin<{ initial_model_context: string | null }[]>`
+      select initial_model_context from sessions where id = ${sessionId}`;
+    return row!.initial_model_context;
+  };
+  const expected = siteConversationContext({
+    siteId: site.siteId,
+    title: "Sales dashboard",
+    versionId: site.versionId,
+    revision: 1,
+  });
+  expect(expected).toContain(`Site id ${site.siteId}`);
+  expect(await initialContext(await f.startSession(siteView))).toBe(expected);
+  // Site code (the bridge always marks its requests) and ordinary chats get none.
+  expect(await initialContext(await f.startSession(site.frame("frame-a")))).toBeNull();
+  expect(await initialContext(await f.startSession())).toBeNull();
+  // The caller still can't supply its own context there.
+  const forged = await f.call("POST", "/sessions", siteView, {
+    initialMessage: "Hello",
+    modelContext: "Hidden context",
+  });
+  expect(forged.status).toBe(403);
+
+  // Someone who may see the Site but not publish it starts without it.
+  const source = "example:instance";
+  const reader = await ensureExternalIdentity(db.db, {
+    accountId: f.accountId,
+    source,
+    externalId: crypto.randomUUID(),
+  });
+  const added = await f.app.request(`/v1/workspaces/${f.workspace.id}/external-members`, {
+    method: "POST",
+    headers: f.service,
+    body: JSON.stringify({
+      identity: { source, externalId: reader.externalId },
+      permissions: permissions.filter((permission) => permission !== "artifacts:publish"),
+      operationId: crypto.randomUUID(),
+    }),
+  });
+  expect(added.status).toBe(200);
+  const asReader = await f.app.request(`/v1/workspaces/${f.workspace.id}/sessions`, {
+    method: "POST",
+    headers: {
+      ...f.service,
+      ...siteView,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { source, externalId: reader.externalId } }),
+      ),
+    },
+    body: JSON.stringify({ initialMessage: "Hello" }),
+  });
+  expect(asReader.status, await asReader.clone().text()).toBe(202);
+  expect(await initialContext(((await asReader.json()) as { id: string }).id)).toBeNull();
 });

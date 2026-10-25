@@ -9,6 +9,16 @@ import type { UserResourceAuthoritySummary } from "./types";
 export type ThisComputerPlatform = "macos" | "windows" | "linux";
 
 /**
+ * Set by the desktop app on the agent it runs on a Mac: a directory holding
+ * one empty file per home folder (`Desktop`, `Documents`, `Downloads`) the
+ * person has allowed the app to open. The agent's automatic whole-folder
+ * walks from the home folder leave out every one of those folders without a
+ * file there, so they never put macOS's question up unasked or fail on a
+ * refused folder.
+ */
+export const MAC_FOLDERS_ALLOWED_ENV = "OPENGENI_MAC_FOLDERS_ALLOWED";
+
+/**
  * Where this computer stands for one workspace.
  *
  * - `unavailable`: the app can't connect computers on this platform.
@@ -117,6 +127,14 @@ export type ThisComputerErrorCode =
   | "connect_failed"
   /** The server or the network couldn't be reached. */
   | "offline"
+  /**
+   * The server no longer lists this computer (it was removed there), so its
+   * local connection is stale; connecting again enrolls it afresh. Comes
+   * with state `not_connected`.
+   */
+  | "removed"
+  /** The account in the app needs to sign in again. */
+  | "signed_out"
   /** This kind of computer can't be used yet. */
   | "unsupported"
   /** Another agent already serves this computer and couldn't be taken over. */
@@ -153,10 +171,22 @@ export interface ThisComputerStatus {
    */
   permissions?: ThisComputerPermission[];
   /**
+   * On a Mac without that list (screen control turned off, or connected
+   * without it): whether agents may read Desktop, Documents and Downloads,
+   * i.e. the `files` permission on its own. Absent elsewhere and from older apps.
+   */
+  folders?: boolean;
+  /**
    * The person started setting up and hasn't allowed every permission yet.
    * Screens reopen the steps, e.g. after macOS restarted the app for a grant.
    */
   setupPending?: boolean;
+  /**
+   * Permissions the system has already been asked for on this computer, so
+   * screens don't ask again unprompted after the person declined. Absent
+   * from older apps.
+   */
+  requestedPermissions?: ThisComputerPermissionId[];
   /**
    * Connected and not paused, but the app's agent isn't running right now and
    * is starting again, so agents can't use this computer until it is back.

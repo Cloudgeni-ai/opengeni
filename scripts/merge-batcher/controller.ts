@@ -21,9 +21,11 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { plan, infrastructureRetryReason, type Action } from "./planner";
+import { plan, latestRun, infrastructureRetryReason, type Action } from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
+import { proveHeadRefresh } from "./head-refresh";
+import type { HeadRefresh } from "./model";
 
 export interface Reader {
   observe(): Promise<Observation>;
@@ -31,7 +33,7 @@ export interface Reader {
 export type Effect =
   | { kind: "record" }
   | { kind: "publish"; branch: string; manifest: Manifest }
-  | { kind: "land"; manifest: Manifest; expectedBase: string }
+  | { kind: "land"; manifest: Manifest; expectedBase: string; headRefresh?: HeadRefresh }
   | { kind: "retry"; run: Run }
   | { kind: "announce"; number: number; body: string; key: string }
   | { kind: "park"; number: number; body: string; key: string };
@@ -82,14 +84,17 @@ export class LiveReader implements Reader {
       });
     // Exact SHAs, not mutable ref names: a racing fetch cannot silently change
     // the base or candidate bound by the remote-ref observation.
-    await this.git.fetch(remote, [
-      ...new Set([baseSha, ...(stateSha ? [stateSha] : []), ...queue.map(([, sha]) => sha)]),
-    ]);
+    await this.git.fetch(
+      remote,
+      [...new Set([baseSha, ...(stateSha ? [stateSha] : []), ...queue.map(([, sha]) => sha)])],
+      "state",
+    );
     const admission = await this.github.ready();
     if (admission.ready.length)
       await this.git.fetch(
         remote,
         admission.ready.map((p) => p.headSha),
+        "candidate",
       );
     const ledger = stateSha ? await this.git.readLedger(stateSha) : emptyLedger();
     if (this.config.mode === "active") requireInitializedState(stateSha, ledger);
@@ -167,6 +172,16 @@ export class LiveReader implements Reader {
         archived || this.config.mode !== "active",
         !archived || selected.has(candidate.manifest.batchId),
       );
+      const latest = latestRun(candidate, this.config);
+      if (
+        !archived &&
+        (!latest ||
+          latest.status !== "completed" ||
+          (latest.trusted && latest.outcome === "success"))
+      ) {
+        const refresh = await proveHeadRefresh(this.git, candidate.manifest, eligible, baseSha);
+        if (refresh) candidate.headRefresh = refresh;
+      }
     }
     if (historical.length)
       await this.manifestCache.set(cursorKey, (cursor + selected.size) % historical.length);
@@ -174,9 +189,20 @@ export class LiveReader implements Reader {
       observationWarnings.push(
         `Historical CI scan sampled ${selected.size}/${historical.length} refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
       );
+    const failedRoot = candidates.some((candidate) => {
+      const run = latestRun(candidate, this.config);
+      return (
+        !archivedIds.has(candidate.manifest.batchId) &&
+        candidate.manifest.baseSha === baseSha &&
+        run?.status === "completed" &&
+        run.trusted &&
+        run.outcome === "code_failure"
+      );
+    });
     return {
       now: new Date().toISOString(),
       baseSha,
+      ...(failedRoot ? { baseCI: await this.github.baseCI(baseSha) } : {}),
       // Do not make full-main-CI observation availability a hidden admission
       // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
@@ -310,8 +336,14 @@ export class Controller {
         await this.stage(fresh, result);
         return result;
       }
-      bindings = manifest.pulls;
-      effect = { kind: "land", manifest, expectedBase: observation.baseSha };
+      const headRefresh = replan.candidate.headRefresh;
+      bindings = headRefresh?.pulls ?? manifest.pulls;
+      effect = {
+        kind: "land",
+        manifest,
+        expectedBase: observation.baseSha,
+        ...(headRefresh ? { headRefresh } : {}),
+      };
       ledger.landed.push(manifest.batchId);
     } else if (action.kind === "retry") {
       const reason = infrastructureRetryReason(action.candidate, action.run, this.config);
@@ -335,7 +367,7 @@ export class Controller {
         kind: "park",
         number: item.pull.number,
         key: item.batchId,
-        body: `Merge batcher parked exact head ${item.pull.headSha} after singleton batch ${item.batchId} failed on base ${item.baseSha} (run ${item.runId}, attempt ${item.attempt}). This is not a culprit attribution or ejection. Other ready heads may proceed. This head will not automatically retry, including after a new ready event or main advancement; a changed head can re-enter. Comparable base evidence is unavailable; job names do not establish a common failure.\n\n<!-- batcher-parking:${item.batchId} -->`,
+        body: `Parked ${item.pull.headSha}: singleton Batch CI failed. Auto-merge disable requested. Push a fix or explicitly re-enable auto-merge to retry; label toggles do not retry. Logs: https://github.com/${this.config.repository}/actions/runs/${item.runId}/attempts/${item.attempt}.\n\n<!-- batcher-parking:${item.batchId} -->`,
       };
     } else if (action.kind === "announce") {
       const key = bindingKey(action.ejection.pull);
@@ -450,6 +482,8 @@ export class FencedGitExecutor implements Executor {
   }
   async transact(t: Transaction): Promise<void> {
     requireActiveCapabilities(this.capabilities);
+    if (t.effect.kind === "land" && t.effect.headRefresh)
+      throw new Error("This adapter does not implement verified head refresh landing");
     if (t.nextLedger.epoch !== t.expectedLedger.epoch + 1 || t.nextState === t.expectedState)
       throw new Error("Invalid fence transition");
     if (

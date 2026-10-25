@@ -132,7 +132,7 @@ page footer, or a menu.
   your first session"); the confirm of a non-destructive dialog or form page ("Create schedule",
   "Save"); the unblocking action in a notice, banner or menu ("Connect a model", "Open Models",
   "Reconnect", "Reload now").
-- Outline: row actions (Rename, Resume on a row, Make primary, Replace value), a second action
+- Outline: row actions (Rename, Make primary, Replace value), a second action
   next to a primary, Cancel and Back. Destructive confirms use the destructive variant; a delete
   entry point is outline with danger text.
 - Never two teal buttons in one region, and never an inverted (`fg`-filled) or near-black button.
@@ -306,7 +306,7 @@ them, so a call site sets a width and nothing else.
 
 | Control | Use when | Never |
 | --- | --- | --- |
-| Switch | One on/off setting that saves immediately. One exception: the single "all or pick" switch at the top of a form page that reveals the list below it ("Allow every model"); the page's Save commits it | Inside a form with a Save button otherwise |
+| Switch | One on/off setting that saves immediately, including pausing a row in a list (a schedule's switch, not a Resume button). One exception: the single "all or pick" switch at the top of a form page that reveals the list below it ("Allow every model"); the page's Save commits it | Inside a form with a Save button otherwise |
 | Segmented control | 2-4 mutually exclusive short options, always visible | More than 4 options, or long labels |
 | Choice cards | 2-3 options where each needs a consequence sentence | Simple filters |
 | Select (menu style) | 5+ options or a dynamic list; model and role pickers with descriptions and payment source | Actions |
@@ -582,7 +582,7 @@ Inside settings, pages are flush: `FLUSH_DETAIL_PAGE_CLASS` for `DetailPage`,
 back link, title and rows start where the section header does. Page actions use `RowButton` and
 `MoreMenu` from `@opengeni/react/ui/page-actions`.
 
-**Creating and editing is a page too.** New schedule (`/schedules/new`), Edit schedule, New
+**Creating and editing is a page too.** New automation (`/automations/new`), Edit automation, New
 variable set, Add variables, Create API key, Invite people, Connect account, New workspace, New
 knowledge entry. Use `FormPage` from `@opengeni/react/ui/form-dialog`: a back link, a 20/600
 title, one 640px column of fields, server errors inside the form, and a sticky footer with Cancel

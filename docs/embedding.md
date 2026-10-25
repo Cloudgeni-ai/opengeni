@@ -74,6 +74,35 @@ Stop, tool approvals, attachments, human-input forms, live voice, optimistic del
 `ChatComposer` alone is only the input surface. Hosts with deliberately custom
 flows can still compose the individual hooks and components.
 
+**Automations in the host.** `AutomationsPanel` from
+`@opengeni/react/automations` lists, creates and edits automations inside the
+host's own dialog or page, so people can have the agent pick a chat up again
+on a schedule or when something happens without leaving the product. Scoped to
+a chat, new automations continue that chat with its settings; without a chat,
+each run starts a new chat with the workspace's defaults and the owner's
+access. Event triggers show when the deployment runs them.
+
+```tsx
+import { AutomationsPanel } from "@opengeni/react/automations";
+
+<AutomationsPanel
+  client={client}
+  workspaceId={workspaceId}
+  sessionId={chatId}
+  // The host's own MCP server, offered before the person has a source for it.
+  eventServers={[{ serverId: "acme-mcp", name: "Acme" }]}
+  // Subscription arguments new triggers start with, such as the open project.
+  argumentDefaults={{ projectId }}
+  onOpenSession={(id) => openChat(id)}
+/>;
+```
+
+Its words come from the `automations.*` keys of the message catalog, so
+`OpenGeniMessagesProvider` translates it. `AutomationForm`,
+`AutomationWhenField` and the pure helpers behind them (`automationCreateRequest`,
+`automationWhenSentence` and the rest) are exported for hosts that build their
+own layout.
+
 `NewConversation` exposes the same new-chat flow that `OpenGeniChat` uses.
 For a persistent shell, `useNewConversation`/`NewConversationView` and
 `useSessionConversation`/`SessionConversationView` separate ownership from
@@ -116,7 +145,10 @@ import "@opengeni/react/compiled.css";
 `consoleUrl` is the Opengeni web app's origin, which the embed links to for
 pages it does not show. `sessionId` and `onSessionChange` let the page own
 which chat is open; `onSessionChange` runs only when the person opens another
-chat. `openUrl` receives everything that leaves the embed (app pages, provider
+chat. `onSessionState` follows the open chat: it receives the chat's status
+and the events the chat holds each time they change, read from the chat's own
+stream, so the page can show that the agent is working or refresh what a turn
+changed without a second connection. `openUrl` receives everything that leaves the embed (app pages, provider
 sign-in, checkout, files opened in full); a host that cannot open browser tabs,
 such as an Office add-in, passes its own. `onUnauthorized` runs on any 401,
 from the client or a raw app request. `compiled.css` is the only stylesheet
@@ -127,7 +159,7 @@ A preset decides which features show and single keys switch them:
 
 | Feature | `app` (web, desktop) | `companion` (first-party side panes) | `embed` (default; customer page) |
 | --- | --- | --- | --- |
-| `chatList`: search, filters, projects, pins, archive, subagent rows | on | on | on |
+| `chatList`: search, filters, projects, pins, archive, subagent rows; on the new-chat page, the project picker and recent chats | on | on | on |
 | `dock`: files, terminal, desktop, browser, artifacts, inspector | on | on | off |
 | `adminAccess`: workspace-admin access indicator and grant | on | off | off |
 | `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
@@ -149,6 +181,14 @@ their messages; a new label brings it back. Pass a new value whenever the
 context changes (the Excel add-in passes the current selection). A function is
 also accepted; it is read when each message is sent and shows no pill.
 With the dock off, entries that only open a dock panel hide with it.
+
+Links in agent messages to Opengeni objects (files, Sites, editable
+artifacts) open in the dock when it is on, and otherwise open the object's
+page in the web app through `openUrl`. `resolveLink` lets the host open them
+its own way, for example on its own page for that object: return
+`{ open }` (an action) or `{ href }` (a link) for the links it handles, and
+null for the rest. `renderLink` draws the host's own links (its scheme, its
+in-app paths). Both take the same functions as `OpenGeniLinkProvider`.
 
 The dock's heavier pieces are opt-in so a page that does not show them never
 downloads them. Call `enableWorkbench()` from `@opengeni/react/workbench` once
@@ -225,17 +265,15 @@ an Opengeni download, setup token, shell command, or model-supplied setup URL.
 
 | Default in `SessionConversation` / `OpenGeniChat` | How the host changes it |
 | --- | --- |
-| Live voice is off: a call spends the workspace's credits and asks for the microphone. | `realtimeVoice={true}` (or `conversationProps`), or `createSessionProxyHandler({ realtimeVoice: true })`, which reports `realtimeVoice: true` in the client config. Proxy `realtimeVoice: false` still refuses voice. |
+| Live voice is off: a call spends the workspace's credits and asks for the microphone. | `realtimeVoice={true}` (or `conversationProps`). A product that never offers voice can also `refuse` the realtime routes in the proxy. |
 | The working indicator says "Thinking…" with a "Show details" action, not the console's playful copy. | `genieLoading` (`phrases`, `messages`, `orb`, or `render`); omitted fields keep the neutral defaults. `MessageTimeline` keeps the console copy. |
-| Anonymous visitors (`resolve` returns `visitor: true`) get no attach button; the proxy reports `fileUploads.enabled: false` and refuses the upload routes. | Proxy `visitorUploads: true`. Signed-in users follow `files` (and `files: false` now also reports uploads off). Agent-produced media still loads for visitors. |
+| Anonymous visitors (`resolve` returns `visitor: true`) get no attach button; the proxy reports `fileUploads.enabled: false` and refuses the upload routes. | Proxy `visitorUploads: true`. Signed-in users follow their `files:write` permission, and `attachments={false}` hides the control. Agent-produced media still loads for visitors. |
 
 Live voice is the same realtime protocol the console uses, not a second
 transport. The proxy forwards the workspace realtime model catalog and the
 session `realtime` routes (begin, provider connect, heartbeat, connection
-activate, ledger sync, end) as the resolved user, after `authorizeSession`;
-`realtimeVoice: false` refuses them and reports `realtimeVoice: false` in the
-client config, while explicit `realtimeVoice: true` reports `true`, which also
-shows the stock voice button. Owner/connection/epoch proof, Steer-based delegation, transcript
+activate, ledger sync, end) as the resolved user, after `authorizeSession`,
+like every other Opengeni route. Owner/connection/epoch proof, Steer-based delegation, transcript
 truth, credit admission, and per-minute metering stay in the API exactly as for
 the console. `beforeForwardMessage` receives `delivery: "realtime"` once when a
 call starts (refusal, MCP credential rotation through the standalone rotate
@@ -244,8 +282,7 @@ delegation or finalized transcript entries (refusal, `modelContext` placed
 before the browser's on those entries; it must be stable across a retry,
 because ledger replay requires an identical entry). When voice is opted in
 (see the defaults table above), `SessionConversation` fetches the catalog and
-mounts the lazily loaded voice button only when a model is available;
-`realtimeVoice={false}` turns it off even when the proxy offers it.
+mounts the lazily loaded voice button only when a model is available.
 
 The host owns available space; `SessionConversation` fills its container by
 default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
@@ -259,32 +296,31 @@ displays generated images and video, published files, and screenshots through
 the same session scope (`createWorkspaceRetainedArtifactLoader`,
 `createSessionRetainedScreenshotLoader`, and
 `createWorkspaceRetainedVideoLoader` are its defaults and the web app's
-loaders); behind the proxy these need `files` (on by default) and an exact
-session association the API proves for every workspace-level artifact read.
-Sandbox paths require explicit proxy `sandboxFiles: true` and stay within the
-session working directory without following symlinks.
+loaders); behind the proxy these follow the user's `files:read` and
+`artifacts:read`, and the conversation names its session in
+`x-opengeni-session-id` so `authorizeSession` checks those reads too. Sandbox
+paths follow `files:read` and Opengeni's own session and Connected Machine
+checks.
 The session goal shows in the conversation chrome with Pause, Resume, and
-Clear; the proxy forwards only the goal read (with its `?absent=null` opt-in, so
-a goal-less chat reads a 200 `null` instead of logging a failed 404),
-`{ status: "paused" | "active" }` updates, and the clear, its only `DELETE`. Rows for spawning,
+Clear (the goal read uses its `?absent=null` opt-in, so a goal-less chat reads a
+200 `null` instead of logging a failed 404). Rows for spawning,
 messaging, and hearing from another agent call `onOpenSession`; `OpenGeniChat` opens the child
 chat in place. Those rows name the agent with the title it was spawned with; pass
 `resolveSessionTitle` to show current titles (the web app reads them from session lineage).
-The proxy's client config reports `sessionCreation`, `archive`, and
-`artifacts` (`false` when off), so the stock chat hides actions the proxy
-cannot serve; the composer microphone follows `voiceInput.available`
-(`voiceInput={false}` opts a conversation out).
+The host hides actions it does not offer with props (`newChat`, `listProps`,
+`attachments`, `voiceInput`, `realtimeVoice`); the composer microphone follows
+`voiceInput.available`. Older proxies that still report `sessionCreation`,
+`archive` or `realtimeVoice` as `false` keep hiding those actions.
 `opengeni-site` fences render the console's inline Site preview (a static
-"Site preview unavailable" card when the proxy reports `artifacts: false`), and
-`onOpenArtifact` plus `SessionArtifactViewer` (`@opengeni/react/artifacts`)
-open editable artifacts and Sites in a host container through the proxy's
-opt-in `artifacts: true`. The proxy checks exact session associations on every
-request and refreshes effective workspace grants for the browser cache
-partition. Live source authority is rechecked in the mutation commit transaction;
-lease expiry runs independently of pending authorization. Older APIs omit only
-artifact capability, leaving conversation bootstrap available.
-Its Site HTML delivery streams with cancellation and a 25 MiB
-actual-byte ceiling; server-side helpers live on `@opengeni/sdk/session-proxy`.
+"Site preview unavailable" card when the client config reports
+`artifacts: false`), and `onOpenArtifact` plus `SessionArtifactViewer`
+(`@opengeni/react/artifacts`) open editable artifacts and Sites in a host
+container through the proxy. The proxy's client config refreshes effective
+workspace grants for the browser cache partition. Live source authority is
+rechecked in the mutation commit transaction; lease expiry runs independently
+of pending authorization. Older APIs omit only artifact capability, leaving
+conversation bootstrap available. Site HTML keeps Opengeni's sandbox and
+download headers through the proxy.
 The proxy's `toolServer` option attaches a product MCP endpoint to every session
 it creates with a short-lived per-user token and rotates it on every message,
 approval, and answer; the endpoint checks it with `verifyToolRequest` from
@@ -1508,6 +1544,12 @@ approvals. Hooks outside that baseline export exact structural refinements:
 `FileAttachmentClientLike`. A host proxy therefore implements only the methods
 used by the mounted hooks; it does not stub workspace administration, billing,
 sandbox environment, connected-machine, or unrelated workbench APIs.
+
+Meeting recording embeds the same way: `@opengeni/sdk/recordings` gives a
+headless, local-first recorder and uploader, and `@opengeni/react/recordings`
+gives capture, list, transcript and speaker hooks over an explicit
+`recordings` client when the host proxies the API. See
+[`recordings.md`](recordings.md#embedding).
 
 Generated-image timeline rows carry a compact permanent artifact receipt. A
 host using the styled `MessageTimeline` can pass `loadRetainedArtifact`; the

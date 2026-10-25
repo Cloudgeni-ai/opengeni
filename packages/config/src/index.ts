@@ -413,6 +413,13 @@ const SettingsSchema = z.object({
   observabilityMetricsEnabled: EnvBoolean.default(true),
   observabilityOtlpEndpoint: z.string().url().optional(),
   observabilityOtlpHeaders: z.string().default(""),
+  /**
+   * Continue a request's incoming W3C `traceparent` as the parent of the API's
+   * request span. Off by default: the request span then starts its own trace
+   * and links to the caller's context. Turn it on only when every caller that
+   * can reach the API is trusted (behind an embedding backend or trusted edge).
+   */
+  observabilityTrustIncomingTraceContext: EnvBoolean.default(false),
   observabilityDiagnosticsEndpoint: z.string().url().optional(),
   observabilityDiagnosticsHeaders: z.string().default(""),
   analyticsEnabled: EnvBoolean.default(false),
@@ -588,6 +595,72 @@ const SettingsSchema = z.object({
   // Operator gate for unverified Gmail/Drive OAuth acquisition; sign-in and refresh are independent.
   googleConnectorSetupEnabled: EnvBoolean.default(true),
   googleDriveMcpEnabled: EnvBoolean.default(false),
+  microsoftTeamsToolsEnabled: EnvBoolean.default(false),
+  microsoftTeamsAllowedWorkspaceIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : value,
+    z.array(z.string().uuid()).default([]),
+  ),
+  teamsBotEnabled: EnvBoolean.default(false),
+  teamsBotAllowedTenantIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : value,
+    z.array(z.string().uuid()).default([]),
+  ),
+  teamsBotAllowedChannelIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim())
+            .filter(Boolean)
+        : value,
+    z
+      .array(
+        z
+          .string()
+          .max(550)
+          .refine(
+            (value) =>
+              value[36] === ":" &&
+              z.string().uuid().safeParse(value.slice(0, 36)).success &&
+              value.slice(37).length > 0,
+          ),
+      )
+      .default([]),
+  ),
+  teamsBotSetupAdminIds: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((id) => id.trim().toLowerCase())
+            .filter(Boolean)
+        : value,
+    z
+      .array(
+        z
+          .string()
+          .regex(/^[0-9a-f-]{36}:[0-9a-f-]{36}$/)
+          .refine((value) =>
+            value.split(":").every((id) => z.string().uuid().safeParse(id).success),
+          ),
+      )
+      .default([]),
+  ),
+  teamsBotClientId: z.string().uuid().optional(),
+  teamsBotClientSecret: z.string().min(1).optional(),
+  teamsBotTenantId: z.string().uuid().optional(),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   // Privacy limits a deployment (for example a product that embeds Opengeni)
@@ -713,6 +786,12 @@ const SettingsSchema = z.object({
   // to the installation's own workspace.
   // Env: OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED.
   slackWorkspaceRoutingEnabled: EnvBoolean.default(true),
+  // Event triggers for automations: event sources (webhook endpoints, apps,
+  // MCP servers), the public webhook intake and event runs. Off (default)
+  // refuses new sources and event triggers, answers the intake with 404 and
+  // pauses event dispatch; stored sources, triggers and events are kept.
+  // Env: OPENGENI_EVENT_TRIGGERS_ENABLED.
+  eventTriggersEnabled: EnvBoolean.default(false),
   // Per-segment ceiling on agent loop turns (model calls) within a single
   // session turn. Effectively unbounded by default for the same reason as
   // above; the graceful max-turns valve (idle + goal continuation, never a
@@ -884,6 +963,14 @@ const SettingsSchema = z.object({
     .max(7 * 24 * 60 * 60)
     .default(24 * 60 * 60),
   voiceInputFfmpegPath: z.string().trim().min(1).max(1024).default("ffmpeg"),
+  /**
+   * Our own CPU speaker models for meeting recordings (apps/worker/speakers):
+   * the `opengeni-speakers` executable and the directory holding its
+   * `segmentation.onnx` and `embedding.onnx`. Without both, transcripts use
+   * the transcription model's own diarization only.
+   */
+  recordingSpeakersBinaryPath: z.string().trim().min(1).max(1024).optional(),
+  recordingSpeakerModelsDir: z.string().trim().min(1).max(1024).optional(),
   // Preferred provider order (comma-separated ids). First configured+ready wins.
   // Connected subscription STT is preferred by default; operators can put
   // openai/azure-openai first explicitly.
@@ -5055,6 +5142,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     observabilityOtlpHeaders:
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
     observabilityDiagnosticsEndpoint: optional("OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT"),
+    observabilityTrustIncomingTraceContext: optional(
+      "OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT",
+    ),
     observabilityDiagnosticsHeaders: optional("OPENGENI_OBSERVABILITY_DIAGNOSTICS_HEADERS"),
     analyticsEnabled: optional("OPENGENI_ANALYTICS_ENABLED"),
     analyticsConsentRequired: optional("OPENGENI_ANALYTICS_CONSENT_REQUIRED"),
@@ -5110,6 +5200,15 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     googleConnectorSetupEnabled: optional("OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED"),
     googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
+    microsoftTeamsToolsEnabled: optional("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED"),
+    microsoftTeamsAllowedWorkspaceIds: optional("OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS"),
+    teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
+    teamsBotAllowedTenantIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS"),
+    teamsBotAllowedChannelIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS"),
+    teamsBotSetupAdminIds: optional("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS"),
+    teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
+    teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),
+    teamsBotTenantId: optional("OPENGENI_TEAMS_BOT_TENANT_ID"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
@@ -5161,6 +5260,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     childLifecycleNoticesEnabled: optional("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED"),
     sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
+    eventTriggersEnabled: optional("OPENGENI_EVENT_TRIGGERS_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
     contextEffectiveWindowTokens: optional("OPENGENI_CONTEXT_EFFECTIVE_WINDOW_TOKENS"),
@@ -5224,6 +5324,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_VOICE_INPUT_RESUMABLE_RETENTION_SECONDS",
     ),
     voiceInputFfmpegPath: optional("OPENGENI_VOICE_INPUT_FFMPEG_PATH"),
+    recordingSpeakersBinaryPath: optional("OPENGENI_RECORDING_SPEAKERS_BINARY_PATH"),
+    recordingSpeakerModelsDir: optional("OPENGENI_RECORDING_SPEAKER_MODELS_DIR"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
     voiceInputOpenaiApiKey: optional("OPENGENI_VOICE_INPUT_OPENAI_API_KEY"),

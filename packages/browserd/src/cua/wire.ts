@@ -39,6 +39,11 @@ export const Windows = z.object({
         // window server keeps ordered out (one no person ever sees).
         space_ids: z.array(id).max(1_024).nullish(),
         on_current_space: z.boolean().nullish(),
+        // Stacking order: the highest z_index is frontmost; null when the
+        // platform cannot tell. macOS also gives the window layer, where 0
+        // holds ordinary app windows and higher layers menus and overlays.
+        z_index: z.number().int().nullish(),
+        layer: z.number().int().nullish(),
       }),
     )
     .max(4096),
@@ -53,6 +58,8 @@ export const Element = z.object({
   value: z.union([text, z.number().finite(), z.boolean()]).optional(),
   enabled: z.boolean().optional(),
   focused: z.boolean().optional(),
+  // Whether a checkbox, switch, radio, tab or row is on or selected.
+  selected: z.boolean().optional(),
   frame: ElementRect.optional(),
   actions: z.array(text).max(64).default([]),
 });
@@ -106,6 +113,23 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // Background keys refused before any was sent: another window of the app
   // (a sheet, a dialog) has the keyboard focus.
   window_not_key: "invalid_action",
+  // Background input refused before anything was sent: the addressed element
+  // could not be proven to be in the addressed window.
+  element_outside_target_window: "invalid_action",
+  // Pointer or key input refused before anything was sent: the element is in
+  // a bubble or popover attached to the window, which takes accessibility
+  // actions only.
+  element_in_attached_window: "invalid_action",
+  // A value write the control did not apply: it holds what it held before
+  // (macOS set_value, effect not_applied).
+  write_not_applied: "driver_failed",
+  // A step that sets a checked state found an element that has none.
+  not_a_toggle: "invalid_action",
+  // A step's name fits several elements once the window settled; nothing ran.
+  ambiguous: "locator_ambiguous",
+  // A web <select> whose menu would bring the browser in front; nothing was
+  // sent, and set_value chooses its options.
+  select_menu_would_raise_window: "unsupported",
 };
 
 /** A failure CUA reported itself, with CUA's own code, so the backend can
@@ -140,15 +164,29 @@ const RunStepsReport = z.object({
         hint: z.unknown().optional(),
         /** The window-change report lines of the step's action. */
         window_changes: z.array(z.string().max(65_536)).max(16).optional(),
+        /** The element the step's lookup found. `stand_in` is set when no
+         * element had the role named and the one element of a role pressed
+         * alike with that exact name was used: its own role and label. */
+        target: z
+          .object({
+            stand_in: z
+              .object({ role: z.string().max(256), name: z.string().max(65_536).nullish() })
+              .optional(),
+          })
+          .optional(),
       }),
     )
     .max(64)
     .default([]),
 });
 
+/** A step of a run_steps call whose lookup used an element of another role,
+ * by the step's index in the call: the element's own role and label. */
+export type RunStepsStandIn = { step: number; role: string; name: string };
+
 /** How a CUA run_steps batch ended. */
 export type RunStepsOutcome =
-  | { kind: "completed"; windowChanges: string }
+  | { kind: "completed"; windowChanges: string; standIns: RunStepsStandIn[] }
   | {
       kind: "stopped";
       /** The actions that completed before the one the batch stopped at. */
@@ -160,6 +198,8 @@ export type RunStepsOutcome =
       /** CUA's own code for the stopped action, when it gave one. */
       cuaCode: string | null;
       message: string;
+      /** Of the steps that ran before the one the batch stopped at. */
+      standIns: RunStepsStandIn[];
     };
 
 /** Run actions in one CUA run_steps call: in order, stopping at the first
@@ -195,6 +235,11 @@ export async function runSteps(
     );
   }
   const total = args.steps.length;
+  const standIns = (before: number): RunStepsStandIn[] =>
+    report.steps.slice(0, before).flatMap((step, index) => {
+      const used = step.target?.stand_in;
+      return used?.role && used.name ? [{ step: index, role: used.role, name: used.name }] : [];
+    });
   if (report.failed_step == null) {
     if (reply.isError || report.ok === false || report.executed !== total)
       throw new ComputerBackendError(
@@ -206,6 +251,7 @@ export async function runSteps(
     return {
       kind: "completed",
       windowChanges: (report.steps.at(-1)?.window_changes ?? []).join("\n"),
+      standIns: standIns(total),
     };
   }
   const index = report.failed_step;
@@ -233,6 +279,7 @@ export async function runSteps(
     code: mapped ?? null,
     cuaCode: step.code ?? null,
     message: `${step.message?.trim() || "CUA reported no reason"}${hint}`,
+    standIns: standIns(index),
   };
 }
 
@@ -315,7 +362,8 @@ export async function callDesktop(
     effect === "partial" ||
     effect === "suspected_noop"
   ) {
-    const refused = effect === "refused";
+    // A write CUA reports as not applied changed nothing, like a refusal.
+    const refused = effect === "refused" || effect === "not_applied";
     const code = refusal.success
       ? refusal.data.code
       : error.success

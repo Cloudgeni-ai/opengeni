@@ -133,3 +133,28 @@ describe("transcription recording object reaper", () => {
     expect(JSON.stringify(warningAttributes)).not.toContain("transcription-recordings/account");
   });
 });
+
+describe("transient object deletion", () => {
+  test("deletes only keys inside the named workspace and tolerates objects already gone", async () => {
+    const deleted: string[] = [];
+    const reaper = createFileUploadReaperActivities(services(mock(() => undefined)), {
+      deleteObject: async (_storage, key) => {
+        deleted.push(key);
+      },
+    });
+    const workspaceId = claim.workspaceId;
+    const result = await reaper.deleteTransientObjects({
+      workspaceId,
+      objectKeys: [
+        `workspaces/${workspaceId}/browser-recordings/r/bundle`,
+        "workspaces/another/browser-recordings/r/bundle",
+        `workspaces/${workspaceId}/browser-recordings/r/op/video.mp4`,
+      ],
+    });
+    expect(result).toEqual({ deleted: 2 });
+    expect(deleted).toEqual([
+      `workspaces/${workspaceId}/browser-recordings/r/bundle`,
+      `workspaces/${workspaceId}/browser-recordings/r/op/video.mp4`,
+    ]);
+  });
+});

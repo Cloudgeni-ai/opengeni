@@ -26,7 +26,8 @@ import {
 import { useComposer, type ComposerControllerState } from "../src/hooks/use-composer";
 import { conversationTimeline } from "../src/conversation-timeline";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { actRun, flush, registerDom, renderComponent } from "./render-hook";
+import { SERVICE_UPDATING_CALM_WINDOW_MS } from "../src/lib/transient-retry";
+import { actRun, flush, registerDom, renderComponent, withVirtualClock } from "./render-hook";
 import { createOpenGeniText } from "../src/messages/runtime";
 
 const englishText = createOpenGeniText();
@@ -261,71 +262,84 @@ describe("native branded-host error paths", () => {
     }
   });
 
-  test("throwing host copy cannot replay an uncertain composer mutation", async () => {
-    const sdk = client();
-    const failure = errors()[3]!;
-    const sequence: string[] = [];
-    const keys: (string | undefined)[] = [];
-    sdk.sendMessage = async (_workspace, _session, input) => {
-      sequence.push("send");
-      expect(typeof input).toBe("object");
-      keys.push(typeof input === "string" ? undefined : input.clientEventId);
-      throw failure;
-    };
-    sdk.listEvents = async () => {
-      sequence.push("reconcile");
-      return [];
-    };
-    const sessionId = crypto.randomUUID();
-    let composer!: ComposerControllerState;
-    let diagnostic: Error | undefined;
-    function Harness() {
-      composer = useComposer(sessionId, {
-        draftPersistence: "disabled",
-        initialPolicy: {
-          model: "host-default",
-          reasoningEffort: "medium",
-          latencyMode: "standard",
-        },
-        onDeliveryError: (error) => {
-          diagnostic = error;
-        },
-      });
-      return <ChatComposer composer={composer} />;
-    }
-    const view = await renderComponent(
-      <OpenGeniProvider
-        client={sdk}
-        workspaceId={WORKSPACE_ID}
-        formatError={() => {
-          throw new Error("Broken host presentation");
-        }}
-      >
-        <Harness />
-      </OpenGeniProvider>,
-    );
-    try {
-      await actRun(() => composer.setValue("Only send on explicit action"));
-      await actRun(() => composer.send());
-      await flush(60);
-      expect(sequence).toEqual(["send"]);
-      expect(diagnostic).toBe(failure);
-      const operation = composer.optimisticMessages![0]!;
-      expect(operation).toMatchObject({ state: "failed", outcomeUnknown: true, retryable: true });
-      expect(operation.error).toContain("Check its status before retrying");
-      expect(operation.error).toContain("Reference: acme-unknown.");
-      await actRun(() => composer.retryOptimisticMessage!(operation.clientEventId));
-      await flush(60);
-      expect(sequence).toEqual(["send", "reconcile", "send"]);
-      expect(keys).toEqual([operation.clientEventId, operation.clientEventId]);
-      expect(composer.optimisticMessages![0]).toMatchObject({
-        state: "failed",
-        outcomeUnknown: true,
-      });
-    } finally {
-      await view.unmount();
-    }
-  });
+  test("throwing host copy cannot replay an uncertain composer mutation", async () =>
+    // The transport failure is held as an update first; this is the one that
+    // outlasts it and is reported.
+    await withVirtualClock(async () => {
+      const sdk = client();
+      const failure = errors()[3]!;
+      const sequence: string[] = [];
+      const keys: (string | undefined)[] = [];
+      sdk.sendMessage = async (_workspace, _session, input) => {
+        sequence.push("send");
+        expect(typeof input).toBe("object");
+        keys.push(typeof input === "string" ? undefined : input.clientEventId);
+        throw failure;
+      };
+      sdk.listEvents = async () => {
+        sequence.push("reconcile");
+        return [];
+      };
+      const sessionId = crypto.randomUUID();
+      let composer!: ComposerControllerState;
+      let diagnostic: Error | undefined;
+      function Harness() {
+        composer = useComposer(sessionId, {
+          draftPersistence: "disabled",
+          initialPolicy: {
+            model: "host-default",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+          },
+          onDeliveryError: (error) => {
+            diagnostic = error;
+          },
+        });
+        return <ChatComposer composer={composer} />;
+      }
+      const view = await renderComponent(
+        <OpenGeniProvider
+          client={sdk}
+          workspaceId={WORKSPACE_ID}
+          formatError={() => {
+            throw new Error("Broken host presentation");
+          }}
+        >
+          <Harness />
+        </OpenGeniProvider>,
+      );
+      try {
+        await actRun(() => composer.setValue("Only send on explicit action"));
+        await actRun(() => composer.send());
+        await flush(60);
+        expect(sequence).toEqual(["send"]);
+        expect(diagnostic).toBeUndefined();
+        await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
+        // Every automatic attempt was reconciled first and kept one key.
+        const attempts = sequence.length;
+        expect(attempts).toBeGreaterThan(3);
+        expect(sequence).toEqual(
+          Array.from({ length: attempts }, (_, index) => (index % 2 === 0 ? "send" : "reconcile")),
+        );
+        expect(diagnostic).toBe(failure);
+        const operation = composer.optimisticMessages![0]!;
+        expect(operation).toMatchObject({ state: "failed", outcomeUnknown: true, retryable: true });
+        expect(operation.error).toContain("Check its status before retrying");
+        expect(operation.error).toContain("Reference: acme-unknown.");
+        expect(new Set(keys)).toEqual(new Set([operation.clientEventId]));
+        await actRun(() => composer.retryOptimisticMessage!(operation.clientEventId));
+        await flush(60);
+        expect(sequence.slice(attempts)).toEqual(["reconcile", "send"]);
+        expect(new Set(keys)).toEqual(new Set([operation.clientEventId]));
+        // Still unreachable: held again with the same key, never replayed blindly.
+        expect(composer.optimisticMessages![0]).toMatchObject({
+          state: "sending",
+          outcomeUnknown: true,
+        });
+      } finally {
+        await view.unmount();
+      }
+    }));
 
   for (const failure of [
     { code: "host_error", details: { private: true }, message: "Opengeni diagnostic" },
@@ -687,59 +701,71 @@ describe("native branded-host error paths", () => {
     }
   });
 
-  test("composer delivery copy is neutral while original diagnostics and uncertainty survive", async () => {
-    const sdk = client();
-    const error = errors()[3]!;
-    sdk.sendMessage = async () => {
-      throw error;
-    };
-    let composer!: ComposerControllerState;
-    let deliveredError: Error | undefined;
-    function Harness() {
-      composer = useComposer(SESSION_ID, {
-        draftPersistence: "disabled",
-        initialPolicy: { model: "model-x", reasoningEffort: "medium", latencyMode: "standard" },
-        onDeliveryError: (original) => {
-          deliveredError = original;
-        },
-      });
-      return (
-        <>
-          <MessageTimeline
-            items={conversationTimeline([], { queue: [], snapshot: null }, composer)}
-          />
-          <ChatComposer composer={composer} />
-        </>
+  test("composer delivery copy is neutral while original diagnostics and uncertainty survive", async () =>
+    // Held as an update first; reported once it outlasts one.
+    await withVirtualClock(async () => {
+      const sdk = client();
+      const error = errors()[3]!;
+      sdk.sendMessage = async () => {
+        throw error;
+      };
+      let composer!: ComposerControllerState;
+      let deliveredError: Error | undefined;
+      function Harness() {
+        composer = useComposer(SESSION_ID, {
+          draftPersistence: "disabled",
+          initialPolicy: { model: "model-x", reasoningEffort: "medium", latencyMode: "standard" },
+          onDeliveryError: (original) => {
+            deliveredError = original;
+          },
+        });
+        return (
+          <>
+            <MessageTimeline
+              items={conversationTimeline([], { queue: [], snapshot: null }, composer)}
+            />
+            <ChatComposer composer={composer} />
+          </>
+        );
+      }
+      const view = await renderComponent(
+        <OpenGeniProvider
+          client={sdk}
+          workspaceId={WORKSPACE_ID}
+          formatError={(_error, message) => `ACME: ${message}`}
+        >
+          <Harness />
+        </OpenGeniProvider>,
       );
-    }
-    const view = await renderComponent(
-      <OpenGeniProvider
-        client={sdk}
-        workspaceId={WORKSPACE_ID}
-        formatError={(_error, message) => `ACME: ${message}`}
-      >
-        <Harness />
-      </OpenGeniProvider>,
-    );
-    try {
-      await actRun(() => composer.setValue("A private question"));
-      await actRun(() => composer.send());
-      await flush(60);
-      expect(view.container.textContent).toContain("ACME: The request could not be confirmed");
-      expect(view.container.textContent).toContain("Reference: acme-unknown.");
-      expect(view.container.textContent).not.toMatch(/opengeni/i);
-      expect(composer.optimisticMessages?.[0]).toMatchObject({
-        state: "failed",
-        retryable: true,
-        outcomeUnknown: true,
-        text: "A private question",
-      });
-      expect(deliveredError).toBe(error);
-      expect(deliveredError?.message).toContain("Opengeni could not confirm delivery");
-    } finally {
-      await view.unmount();
-    }
-  });
+      try {
+        await actRun(() => composer.setValue("A private question"));
+        await actRun(() => composer.send());
+        await flush(60);
+        expect(view.container.textContent).not.toContain("Reference:");
+        expect(deliveredError).toBeUndefined();
+        await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
+        // The calm updating line is gone (its exit animation does not run on
+        // the virtual clock, so leave the exiting node out of the copy check).
+        const visible = view.container.cloneNode(true) as HTMLElement;
+        for (const node of visible.querySelectorAll('[data-og-composer-status="updating"]')) {
+          node.remove();
+        }
+        expect(composer.reconnecting).toBe(false);
+        expect(visible.textContent).toContain("ACME: The request could not be confirmed");
+        expect(visible.textContent).toContain("Reference: acme-unknown.");
+        expect(visible.textContent).not.toMatch(/opengeni/i);
+        expect(composer.optimisticMessages?.[0]).toMatchObject({
+          state: "failed",
+          retryable: true,
+          outcomeUnknown: true,
+          text: "A private question",
+        });
+        expect(deliveredError).toBe(error);
+        expect(deliveredError?.message).toContain("Opengeni could not confirm delivery");
+      } finally {
+        await view.unmount();
+      }
+    }));
 
   test("user and assistant quotations are not rewritten by the error presenter", async () => {
     const view = await renderComponent(

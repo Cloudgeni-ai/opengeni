@@ -139,7 +139,8 @@ request body or path. Anonymous visitors on a public site share one fixed
 `tenant`; `{ user }` alone would give every visitor a workspace of their own.
 Also return `visitor: true` for them: visitors get no file attachments unless
 the handler sets `visitorUploads: true`. Live voice is off in the stock chat
-unless the handler sets `realtimeVoice: true`.
+unless the component turns it on
+(`<OpenGeniChat conversationProps={{ realtimeVoice: true }} />`).
 Server-side code gets the same workspace with
 `og.workspaceId({ tenant })` or `og.workspaceId({ user })`.
 

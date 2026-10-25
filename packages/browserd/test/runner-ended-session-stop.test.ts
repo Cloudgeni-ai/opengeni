@@ -23,6 +23,18 @@ async function withProfileProcesses(
     );
   const owned = spawn(profileDirectory);
   const unrelated = spawn(join(root, "unrelated-profile"));
+  // A just-spawned child can still show its parent's command line until it
+  // has exec'd. The stopper verifies the exact profile switch, so wait until
+  // both children are recognisably the processes they stand in for.
+  const execd = async (child: Bun.Subprocess, profile: string) => {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const cmdline = await readFile(`/proc/${child.pid}/cmdline`, "utf8").catch(() => "");
+      if (cmdline.split("\0").includes(`--user-data-dir=${profile}`)) return;
+      if (Date.now() > deadline) throw new Error(`child ${child.pid} never exec'd`);
+      await Bun.sleep(5);
+    }
+  };
   const birth = async (pid: number) => {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8");
     const startTime = stat
@@ -33,6 +45,10 @@ async function withProfileProcesses(
     return `${bootId}:${startTime}`;
   };
   try {
+    if (process.platform === "linux") {
+      await execd(owned, profileDirectory);
+      await execd(unrelated, join(root, "unrelated-profile"));
+    }
     await fn({ profileDirectory, owned, unrelated, birth });
   } finally {
     for (const child of [owned, unrelated]) {

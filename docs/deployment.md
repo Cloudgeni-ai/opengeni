@@ -19,6 +19,25 @@ every API, worker, web, SDK/React and embedded consumer, then enable
 `OPENGENI_SESSION_USAGE_LIMITS_ENABLED`. Disabling it refuses new limits but
 keeps enforcing persisted ones. See [task usage limit rollout](session-usage-limits.md#rollout-and-activation).
 
+Event triggers for automations (migration 0929) are off by default. Apply the
+migration, upgrade every API and worker, then set
+`OPENGENI_EVENT_TRIGGERS_ENABLED=true` on the API to turn on event sources, the
+public webhook intake at `/v1/webhooks/events/:routeId` and event runs. While it
+is off, the intake answers 404, automations cannot be given event triggers, and
+no event runs start; stored deliveries and events still expire on schedule
+(delivery bodies after 7 days, events after 30). See
+[automations and events](design/automations-and-events.md).
+
+GitHub event sources also need the platform GitHub App's webhook secret,
+`OPENGENI_GITHUB_WEBHOOK_SECRET`, and a public `OPENGENI_PUBLIC_BASE_URL`. The
+App sends its webhooks to `/v1/webhooks/github`; adding a workspace's GitHub
+source points an App without a webhook URL there automatically. An App whose
+webhook already points elsewhere is left alone, and the person adding the
+source is told what to change. The events a trigger can use are the ones the
+App subscribes to under its Permissions & events settings: issues, issue
+comments, pull requests, reviews, review comments, pushes and releases, plus
+check runs, check suites and workflow runs for CI.
+
 Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
 EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
 inventory during a rolling upgrade; no maintenance drain is required for these
@@ -2096,6 +2115,32 @@ later change to a reviewed Version path fails closed; choose an earlier green
 tip. The admission job reports `release_source_sha`, `version_provenance_sha`
 and `release_admission_mode`; the candidate receipt schema is unchanged.
 
+A reviewed, green Version PR that lands as a merge commit stays releasable from
+its exact head. With an empty `provenance_sha`, `source_sha` may be the bot
+Version PR head itself instead of its merge result (`release_admission_mode`
+`merge-version-head`). The candidate then builds that head's own tree; the merge
+commit is used only to prove how the head landed, never as release content, so
+changesets merged to `main` after the Version base cannot reach the candidate.
+Admission requires, fail-closed:
+
+- `source_sha` is the second parent of a two-parent merge commit retained by
+  `main`, and that merge commit is the `merge_commit_sha` of exactly one merged
+  `github-actions[bot]` PR from `changeset-release/main` into `main` whose single
+  commit is `source_sha`, directly on its reviewed base; any other PR head,
+  including an ordinary feature PR, is rejected;
+- the exact-head `Automation PR CI` check on `source_sha` succeeded, and a green
+  `workflow_dispatch` CI run on `main` at the Version base binds this PR, head and
+  base in its `Report exact-head automation CI` job log, with the admission,
+  required source and report jobs green in its latest attempt (the newest bound
+  run is recorded; every successful run that binds this head must record a
+  successful exact-head completion, and a later failed completion turns the
+  exact-head check red and fails admission);
+- the source-admission check, retained `opengeni-release-head-<source_sha>`
+  evidence and no pending `.changeset/*.md` at `source_sha`.
+
+The controller must descend from `source_sha` on `main`, as on the exact-source
+lane. Re-checking this evidence depends on GitHub retaining the job log.
+
 Recover a failed full-main run intended for release with **Re-run all jobs**, not
 "Re-run failed jobs": the canary image and full-green receipts must come from the
 same selected attempt. A green provider run with stale image receipts is still
@@ -2810,12 +2855,19 @@ the ingress class (`ingress.className`, or the legacy
 class name. It sets
 `nginx.ingress.kubernetes.io/proxy-next-upstream: "error timeout http_404"` and
 `proxy-next-upstream-tries` (`nextUpstreamTries`, default 3), so ingress-nginx
-retries a 404 on another web pod. This is best effort: the controller's
-balancer can pick the same pod again for a retry (reported upstream as
-[ingress-nginx issue 11852](https://github.com/kubernetes/ingress-nginx/issues/11852),
-and certain with `upstream-hash-by`), so it raises the chance of reaching a pod
-that has the asset without guaranteeing it. An asset that no pod has costs up to
-`nextUpstreamTries` upstream requests before the 404.
+retries a 404 on another web pod. The default round-robin balancer can pick the
+same pod again for a retry
+([ingress-nginx issue 11852](https://github.com/kubernetes/ingress-nginx/issues/11852)),
+so the asset Ingress also sets `nginx.ingress.kubernetes.io/load-balance: ewma`,
+whose balancer skips endpoints the request already tried until none is left.
+ingress-nginx keeps one balancer per Service port for every Ingress that routes
+to it, so the asset Ingress routes to its own `<release>-web-assets` Service,
+which selects the same web pods; the primary Ingress keeps its balancer. Keep
+`nextUpstreamTries` above the most web pods of one build that can serve at once
+(replicas, or the autoscaler maximum): a page of the new build may first try
+every old pod. An asset that no pod has costs up to `nextUpstreamTries`
+upstream requests before the 404. Setting `upstream-hash-by` or a load-balance
+annotation in `webAssetsIngress.annotations` replaces this behaviour.
 
 The asset Ingress covers only hosts and asset paths whose longest matching
 primary route (`Prefix` or `ImplementationSpecific`) already goes to the web
@@ -4103,6 +4155,7 @@ Useful settings:
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
+- `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` makes each API request span a child of the caller's W3C `traceparent`, so a calling service sees Opengeni's spans inside its own trace. Leave it off (the default) when untrusted clients can reach the API: the request span then starts its own trace and carries a span link to the caller's context. See `docs/application-observability.md`.
 
 The Helm chart has optional Prometheus Operator wiring, off by default:
 

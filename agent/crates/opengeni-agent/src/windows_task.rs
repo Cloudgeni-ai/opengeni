@@ -72,13 +72,13 @@ pub fn install(spec: &ServiceSpec, restart: bool) -> Result<(), String> {
         schtasks(&["/Run", "/TN", TASK])?;
         wait_until(START_WAIT, || agent_running(&dir)).map_err(|()| {
             format!(
-                "the agent did not start within {} seconds; its log is in {}",
+                "Opengeni Runner did not start within {} seconds; its log is in {}",
                 START_WAIT.as_secs(),
                 crate::log_file::log_directory(&dir).display()
             )
         })?;
     }
-    println!("the Opengeni agent runs in the background whenever you are signed in to Windows.");
+    println!("Opengeni Runner runs in the background whenever you are signed in to Windows.");
     Ok(())
 }
 
@@ -93,7 +93,7 @@ pub fn stop() -> Result<(), String> {
         schtasks(&["/Change", "/TN", TASK, "/DISABLE"])?;
     }
     stop_agent(&dir)?;
-    println!("paused the Opengeni agent; `opengeni-agent start` resumes it.");
+    println!("paused Opengeni Runner; `opengeni-agent start` resumes it.");
     Ok(())
 }
 
@@ -122,7 +122,7 @@ pub fn uninstall() -> Result<(), String> {
         stop_agent(&dir)?;
     }
     remove_legacy_service();
-    println!("removed the Opengeni agent background task.");
+    println!("removed the Opengeni Runner background task.");
     Ok(())
 }
 
@@ -195,7 +195,7 @@ fn stop_agent(dir: &Path) -> Result<(), String> {
             .output();
     }
     wait_until(Duration::from_secs(10), || !agent_running(dir))
-        .map_err(|()| "the agent did not stop".to_string())
+        .map_err(|()| "Opengeni Runner did not stop".to_string())
 }
 
 /// Whether `pid` is still an Opengeni agent (a recorded id can be reused).

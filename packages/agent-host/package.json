@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/agent-host",
-  "version": "4.7.1",
+  "version": "5.2.1",
   "description": "Run the Opengeni connected-machine agent from a desktop app: download and verify it, connect the computer to a workspace, supervise it, and guide people through the system permissions screen control needs.",
   "license": "Apache-2.0",
   "repository": {

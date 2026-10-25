@@ -63,6 +63,13 @@ export type CodexModelRequestEvent = {
   providerRequestId?: string;
   status?: number;
   willRetry?: boolean;
+  /** Content-free failure metadata; each optional string is at most 64 characters. */
+  failureCause?: {
+    kind: "caller_abort" | "transport_error" | "stream_reset" | "consumer_cancel";
+    errorName?: string;
+    errorCode?: string;
+    abortReasonName?: string;
+  };
   /** Only true for a successful response with substantive assistant/tool output. */
   meaningfulOutput?: boolean;
   /** How the request was carried; reported once its response headers arrive. */

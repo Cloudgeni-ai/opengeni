@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`9473a6f980186eb894e6a52da7ffb105c2177b0f`: upstream `cua-driver-rs-v0.37.0`
+`9cbd934c37402ee351aa13c2303a81fd09e9116c`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -22,12 +22,61 @@ A press that puts the caret in a text field reports a confirmed effect when the
 field then holds the keyboard focus, instead of an unconfirmed click.
 On macOS `set_value` writes a text field's value as text even when it reads as
 a number (Chrome accepts a number written to a web text field and ignores it).
+In web content it writes any number as text: Chrome empties a number field
+(`<input type=number>`, an AXIncrementor) given a CFNumber. A number field a
+write leaves empty gets its previous value back, and the write is refused as
+not applied. A control that takes a value write but keeps its value (a web
+range input) is stepped to the value with its increment and decrement actions;
+a value outside the range it reports is refused before any step, and a run
+that stops short fails with `value_not_reached` and what it reads now.
+`write_not_applied` always means the control holds what it held before (a
+number field a value emptied reports `write_cleared`), so Opengeni maps it to
+a definite failure.
+These refusals never repeat the value given, since it may be a secret such as a
+PIN in a number field.
+On macOS an element of a bubble or popover that a window lists as its own (Chrome's
+Save password?, translate, site permission and download bubbles are separate
+windows whose content the browser window lists among its accessibility
+children) takes accessibility actions (a press, `set_value`) through that
+window. Pointer and key input to it is refused with
+`element_in_attached_window` before anything is sent, since it would land on
+the window under the bubble, and a coordinate click over a bubble never
+presses it. An element of an unrelated window of the app is still refused, now
+naming the window it belongs to. An element scroll proves the pointer route
+before scrolling the element into view, and a wheel refused after that reveal
+reports a partial effect.
+A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
+control a moment after the write.
+A `run_steps` lookup or check may set `exact: true`, so its name must be the
+element's whole label rather than the start of a word in it.
+A `run_steps` lookup or presence check for a button or link that finds nothing
+of that role uses the one element of the other of the two with that exact name
+(button and link are pressed alike, and on the web models often confuse them),
+and its step report and `role_note` say which element it used and to name its
+role next time. It never does so for a pick by position, a text write or a
+drag, nor for a toggle button or anything with a pressed or checked state, and
+a true match in any window wins. It takes the stand-in only from a complete
+reading of the window (never one cut at the 2,000-element cap) whose content
+has stayed the same for 1.5 s, so a button an earlier step brings up wins over
+a link of its name. Several such elements never hold a wait or a lookup: once
+the window's content has stayed the same for 1.5 s the step fails as
+`ambiguous`, naming them. A window that never settles before the step's
+deadline fails as it did before, and a name shown only on an element of an
+unrelated role waits its whole time.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
 A `computer_act` batch runs as one `run_steps` call only where the worker offers
 `refind_stale`, so every step stays bound to the observation the batch was
-checked against; on Windows a batch's actions are sent one at a time. CUA is the
+checked against. The exception is a later action whose role, label or text
+locator the observation does not show (an earlier action brings it up): it is
+sent by role and name, and CUA finds it when the step runs after waiting up to
+10 s for it to appear and enable. So is a first action that names a button or
+link the observation does not show when it shows an element of the other of the
+two with that name: CUA's stand-in above decides whether it is the one meant.
+Every element-targeted action after it is
+then found by name too, because CUA's lookup re-reads the window and retires the
+observation's tokens. On Windows a batch's actions are sent one at a time. CUA is the
 default on macOS, on Windows and for explicitly selected isolated Linux
 desktops. Linux host desktops retain the native default.
 
@@ -129,7 +178,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/9473a6f980186eb894e6a52da7ffb105c2177b0f/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/9cbd934c37402ee351aa13c2303a81fd09e9116c/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

@@ -55,6 +55,23 @@ describe("published HTML artifacts", () => {
     ).toContain('aria-label="Preview"');
   });
 
+  it("lets the host replace or hide the Live indicator", () => {
+    const replaced = renderToStaticMarkup(
+      <ArtifactSandbox
+        html="<h1>App</h1>"
+        title="Status"
+        liveStatus={<a href="https://status.sites.example/">Open status</a>}
+      />,
+    );
+    expect(replaced).toContain('href="https://status.sites.example/"');
+    expect(replaced).not.toContain(">Live<");
+    const hidden = renderToStaticMarkup(
+      <ArtifactSandbox html="<h1>App</h1>" title="Status" liveStatus={null} />,
+    );
+    expect(hidden).not.toContain("Live");
+    expect(hidden).toContain('aria-label="Reload Site"');
+  });
+
   it("promotes the chat preview to the modal top layer without replacing its iframe", async () => {
     const showModal = spyOn(HTMLDialogElement.prototype, "showModal");
     const show = spyOn(HTMLDialogElement.prototype, "show");

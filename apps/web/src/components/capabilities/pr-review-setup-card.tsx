@@ -29,6 +29,11 @@ export function PrReviewSetupCard(props: {
   client: OpenGeniBrowserClient;
   workspaceId: string;
   canManage: boolean;
+  /**
+   * Review runs as an automation on this deployment: the card only manages a
+   * workspace's existing setup until it is retired, and offers no new one.
+   */
+  retiring?: boolean;
 }) {
   const context = useAppContext();
   const client = useMemo(() => new OpenGeniPrReviewClient(props.client), [props.client]);
@@ -186,6 +191,7 @@ export function PrReviewSetupCard(props: {
     lensUnavailable && props.canManage && (managedGitHub?.missing.length ?? 0) > 0;
   const hasExistingSetup = registrations.length > 0 || repositories.length > 0;
   if (loading || (lensUnavailable && !operatorHint && !hasExistingSetup)) return null;
+  if (props.retiring && !hasExistingSetup) return null;
 
   return (
     <section className="grid gap-4 rounded-xl border border-brand/30 bg-brand/5 p-4">
@@ -205,6 +211,12 @@ export function PrReviewSetupCard(props: {
         </div>
       </div>
 
+      {props.retiring ? (
+        <Notice>
+          Pull-request review now runs as an automation. This setup keeps working until January 25,
+          2027. Set up a review automation to replace it.
+        </Notice>
+      ) : null}
       {error ? <Notice tone="failed">{error}</Notice> : null}
       {!props.canManage ? (
         <Notice>

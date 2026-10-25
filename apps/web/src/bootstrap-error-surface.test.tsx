@@ -55,7 +55,6 @@ describe("bootstrap error surface", () => {
   });
 
   test.each([
-    { status: 503, body: "unavailable", attempts: 3, title: "Temporarily unavailable" },
     { status: 401, body: "unauthorized", attempts: 1, title: "Couldn't start" },
     { status: 403, body: "forbidden", attempts: 1, title: "Couldn't start" },
     { status: 500, body: "invalid configuration", attempts: 1, title: "Couldn't start" },
@@ -167,19 +166,25 @@ describe("bootstrap error surface", () => {
     },
   );
 
-  test("shows maintenance copy without the raw payload and retries in place", async () => {
+  test("rides out a parked API calmly and continues by itself", async () => {
+    jest.useFakeTimers();
     const originalFetch = globalThis.fetch;
     let configRequests = 0;
+    let parked = true;
     globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
-      const url = new URL(String(input), window.location.href);
-      if (url.pathname !== "/v1/config/client") {
-        throw new Error(`Unexpected request: ${url.pathname}`);
+      const path = new URL(String(input), window.location.href).pathname;
+      if (path === "/v1/config/client") {
+        configRequests += 1;
+        if (parked) {
+          return new Response(JSON.stringify({ error: "maintenance" }), {
+            status: 503,
+            headers: { "content-type": "application/json" },
+          });
+        }
+      } else if (parked) {
+        throw new Error(`Unexpected request while parked: ${path}`);
       }
-      configRequests += 1;
-      return new Response(JSON.stringify({ error: "maintenance" }), {
-        status: 503,
-        headers: { "content-type": "application/json" },
-      });
+      return bootstrapResponse(path);
     }) as typeof fetch;
 
     const container = document.createElement("div");
@@ -187,37 +192,161 @@ describe("bootstrap error surface", () => {
     const root = createRoot(container);
 
     try {
-      await act(async () => {
-        root.render(<App />);
-        await Promise.resolve();
-        await Promise.resolve();
-      });
+      await act(async () => root.render(<App />));
+      await act(async () => jest.advanceTimersByTime(500));
+      await act(async () => jest.advanceTimersByTime(1_500));
 
-      expect(container.textContent).toContain("Under maintenance");
-      expect(container.textContent).toContain("We'll be back shortly");
+      // One calm, live status: no problem panel, payload or error framing.
+      const status = container.querySelector("[data-bootstrap-waiting]");
+      expect(status?.getAttribute("role")).toBe("status");
+      expect(container.textContent).toContain("Updating");
+      expect(container.textContent).toContain("continues by itself");
+      expect(container.textContent).not.toContain("Under maintenance");
       expect(container.textContent).not.toContain("API 503");
       expect(container.textContent).not.toContain('{"error":"maintenance"}');
-      expect(document.body.textContent?.match(/Under maintenance/gu)).toHaveLength(1);
-      expect(configRequests).toBe(1);
+      expect(document.body.textContent?.match(/Updating/gu)).toHaveLength(1);
+      expect(configRequests).toBe(3);
 
+      // A long park keeps checking on its own, about every ten seconds. Each
+      // retry is scheduled only after the previous read settles, so advance in
+      // small steps: a coarse step fires at most one jittered (8-12 s) retry.
+      for (let i = 0; i < 600; i++) await act(async () => jest.advanceTimersByTime(1_000));
+      expect(configRequests).toBeGreaterThan(40);
+      expect(container.textContent).toContain("Updating");
+
+      // Try again stays available as a secondary action and checks at once.
       const retry = [...container.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Try again",
       );
       expect(retry).toBeDefined();
-
+      const beforeRetry = configRequests;
       await act(async () => {
         retry!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         await Promise.resolve();
-        await Promise.resolve();
       });
+      expect(configRequests).toBe(beforeRetry + 1);
+      expect(container.textContent).toContain("Updating");
 
-      expect(configRequests).toBe(2);
-      expect(container.textContent).toContain("Under maintenance");
-      expect(container.textContent).not.toContain("API 503");
+      // The update finishes: startup continues without a click.
+      parked = false;
+      for (let i = 0; i < 3; i++) await act(async () => jest.advanceTimersByTime(12_000));
+      expect(container.textContent).toContain("No workspace access");
+      expect(container.querySelector("[data-bootstrap-waiting]")).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();
       globalThis.fetch = originalFetch;
+      jest.useRealTimers();
+    }
+  });
+
+  test("a lasting 503 reconnects calmly, then names the problem while still retrying", async () => {
+    jest.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    let configRequests = 0;
+    let failing = true;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const path = new URL(String(input), window.location.href).pathname;
+      if (path === "/v1/config/client") {
+        configRequests += 1;
+        if (failing) return new Response("unavailable", { status: 503 });
+      }
+      return bootstrapResponse(path);
+    }) as typeof fetch;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      await act(async () => jest.advanceTimersByTime(500));
+      await act(async () => jest.advanceTimersByTime(1_500));
+      expect(container.textContent).toContain("Reconnecting");
+      expect(container.textContent).not.toContain("Temporarily unavailable");
+
+      for (let i = 0; i < 13; i++) await act(async () => jest.advanceTimersByTime(10_000));
+      expect(container.textContent).toContain("Temporarily unavailable");
+      expect(container.querySelector("[data-bootstrap-waiting]")).not.toBeNull();
+      const requestsAfterWindow = configRequests;
+      await act(async () => jest.advanceTimersByTime(12_000));
+      expect(configRequests).toBeGreaterThan(requestsAfterWindow);
+
+      failing = false;
+      for (let i = 0; i < 2; i++) await act(async () => jest.advanceTimersByTime(12_000));
+      expect(container.textContent).toContain("No workspace access");
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = originalFetch;
+      jest.useRealTimers();
+    }
+  });
+
+  test("workspace access waits out an update and continues by itself", async () => {
+    jest.useFakeTimers();
+    const originalFetch = globalThis.fetch;
+    let parked = true;
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0]) => {
+      const path = new URL(String(input), window.location.href).pathname;
+      if (path === "/v1/access/me" && parked) {
+        return new Response(JSON.stringify({ error: "maintenance" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return bootstrapResponse(path);
+    }) as typeof fetch;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<App />));
+      // Each access read also rides the SDK's own short read retry first.
+      for (let i = 0; i < 20; i++) await act(async () => jest.advanceTimersByTime(2_000));
+      expect(container.textContent).toContain("Updating");
+      expect(container.textContent).not.toContain("Workspace access unavailable");
+      for (let i = 0; i < 30; i++) await act(async () => jest.advanceTimersByTime(10_000));
+      expect(container.textContent).toContain("Updating");
+
+      parked = false;
+      for (let i = 0; i < 3; i++) await act(async () => jest.advanceTimersByTime(12_000));
+      expect(container.textContent).toContain("No workspace access");
+      expect(container.querySelector("[data-bootstrap-waiting]")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = originalFetch;
+      jest.useRealTimers();
     }
   });
 });
+
+function bootstrapResponse(path: string): Response {
+  const payload =
+    path === "/v1/config/client"
+      ? {
+          apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+          deploymentRevision: "",
+          managedAuthSessionSetMode: "legacy",
+          defaultModel: "gpt-5.6-sol",
+          allowedModels: ["gpt-5.6-sol"],
+          models: [],
+          defaultReasoningEffort: "none",
+          allowedReasoningEfforts: ["none"],
+          mcpServers: [],
+          fileUploads: { enabled: false, maxSizeBytes: 0 },
+          productAccessMode: "local",
+          auth: { mode: "none" },
+          analytics: { consentRequired: true, providers: {} },
+          structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+        }
+      : path === "/v1/access/me"
+        ? {
+            subjectId: "test-user",
+            accountGrants: [],
+            workspaceGrants: [],
+            defaultWorkspaceId: null,
+          }
+        : path === "/v1/workspaces"
+          ? []
+          : null;
+  if (payload === null) throw new Error(`Unexpected request: ${path}`);
+  return Response.json(payload);
+}

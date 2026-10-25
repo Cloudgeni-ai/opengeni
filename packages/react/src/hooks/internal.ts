@@ -1,4 +1,9 @@
-import { isTransientRequestError, observedSessionSequence, type SessionEvent } from "@opengeni/sdk";
+import {
+  isMaintenanceError,
+  isTransientRequestError,
+  observedSessionSequence,
+  type SessionEvent,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { EmbeddedSessionEventClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
@@ -86,6 +91,13 @@ export const DEFAULT_TRANSIENT_READ_RETRY: Readonly<TransientReadRetryPolicy> = 
 
 type TransientReadStreak = { since: number; attempts: number; surfaced: boolean };
 
+/**
+ * Upper bound between retries while the API answers with the maintenance
+ * marker. A park can last minutes; reads keep checking at this pace so the
+ * page recovers soon after the update finishes.
+ */
+export const MAINTENANCE_READ_RETRY_MAX_DELAY_MS = 8_000;
+
 function jittered(delayMs: number): number {
   return Math.round(delayMs * (0.8 + Math.random() * 0.4));
 }
@@ -98,8 +110,20 @@ export function transientReadRetryStep(
   streak: TransientReadStreak,
   now: number,
   policy: TransientReadRetryPolicy,
+  cause?: unknown,
 ): { quiet: boolean; delayMs: number } {
   streak.attempts += 1;
+  if (cause !== undefined && isMaintenanceError(cause)) {
+    // A planned update, not an outage: stay quiet for as long as the marker
+    // lasts. The quiet window restarts when the marker goes away, so a failure
+    // that outlasts the update still surfaces after the usual window.
+    streak.since = now;
+    const delayMs = Math.min(
+      MAINTENANCE_READ_RETRY_MAX_DELAY_MS,
+      policy.initialDelayMs * 2 ** (streak.attempts - 1),
+    );
+    return { quiet: true, delayMs: Math.max(0, jittered(delayMs)) };
+  }
   const quiet = now - streak.since < policy.quietWindowMs;
   const delayMs = quiet
     ? Math.min(policy.maxDelayMs, policy.initialDelayMs * 2 ** (streak.attempts - 1))
@@ -213,7 +237,7 @@ export function usePolledValue<T>(
               attempts: 0,
               surfaced: false,
             });
-            const step = transientReadRetryStep(streak, now, policy);
+            const step = transientReadRetryStep(streak, now, policy, cause);
             if (!step.quiet) {
               // One stable error per streak: background retries that fail
               // the same way must not re-announce it.

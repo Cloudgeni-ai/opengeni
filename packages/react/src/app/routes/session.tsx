@@ -28,11 +28,17 @@ import {
   type FailedSessionRetryInput,
 } from "../lib/failed-session-retry";
 import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
+import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import { failedSessionCopy } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import { isPaymentRequiredError } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
+import { waitingDescendants } from "../lib/descendant-requests";
+import {
+  useDescendantRequestsRefresh,
+  useLineagePollInterval,
+} from "../lib/use-descendant-requests-refresh";
 import { useStreamHealthTelemetry } from "../lib/stream-health";
 import { markIntegrationConnectRedirect } from "../lib/integration-connect-redirect";
 import { noteTurnFailureAction } from "../lib/turn-failure-actions";
@@ -60,6 +66,7 @@ import { LightboxProvider } from "../../timeline";
 import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
 import { sessionAdmissionBlocked, sessionDisplayStatus } from "../../session-status-model";
 import { useSessionSecrets } from "../../hooks/use-vaults";
+import { useQueuedPromptRecall } from "../../hooks/use-queued-prompt-recall";
 import type { WorkspaceTab } from "../../components/workspace-dock";
 import {
   SessionSecretsMenuBody,
@@ -151,7 +158,7 @@ import {
   SessionMachineAccessNotice,
 } from "../components/session/session-machine-access-notice";
 import { LoadingPanel, ProblemPanel } from "../components/common";
-import { useHostMessageContext } from "../lib/app-host";
+import { useHostMessageContext, useReportSessionState } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { useSessionOpening } from "../lib/session-opening";
 import { creationHandoffReconciled } from "../lib/session-creation-handoff";
@@ -171,6 +178,7 @@ import { useRail } from "../components/rail/rail-context";
 import { sessionComputeLabel } from "../../sandbox-label-model";
 import { useBackgroundAttentionTitle } from "../lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "../components/session/chat-viewport-file-drop-target";
+import { sessionInputWait } from "../lib/session-rail";
 import { SessionWorkspace } from "../components/session/sandbox-workspace";
 import { ArtifactLinkBoundary } from "../components/session/artifact-link-boundary";
 import { Button } from "../../ui/button";
@@ -244,7 +252,7 @@ import {
   sessionDockLayoutStorageId,
   updateSessionDockNavigation,
 } from "../lib/session-dock-preferences";
-import { consoleLinkResolver } from "../lib/session-artifact-navigation";
+import { useAppLinkResolver } from "../lib/session-artifact-navigation";
 import {
   clientFirstPartyMcpToolPolicy,
   firstPartySessionToolOptionsFor,
@@ -288,6 +296,7 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("../components/session/human-input"));
+const DescendantRequests = lazy(() => import("../components/session/descendant-requests"));
 const SessionSkillReviews = lazy(() =>
   import("../components/session/session-skill-reviews").then((module) => ({
     default: module.SessionSkillReviews,
@@ -305,11 +314,6 @@ const SessionCapabilityCard = lazy(async () => ({
 const NativeConnectSetup = lazy(() =>
   import("../components/capabilities/native-connect-setup").then((module) => ({
     default: module.NativeConnectSetup,
-  })),
-);
-const LazySessionWaitStatus = lazy(() =>
-  import("../components/session/session-wait-status").then((module) => ({
-    default: module.SessionWaitStatus,
   })),
 );
 
@@ -435,6 +439,8 @@ export function SessionRoute({
   // Consented funnel telemetry: a session this page started reached its first
   // completed turn. Only event types are inspected.
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
+  // The embedding host follows the open chat from this stream.
+  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading });
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>
@@ -1171,15 +1177,29 @@ export function SessionRoute({
     [providerLogos],
   );
   // One lineage read feeds the single composer-anchored agents surface. Events
-  // refresh it instantly on spawn/worker-completion, and a 30s poll ensures the pill's
-  // "running" count doesn't go stale on CHILD-side status changes that emit no
-  // event on this parent's feed. Must sit above the loading/error early-returns
-  // — it's a hook, so it has to run unconditionally on every render.
+  // refresh it instantly on spawn/worker-completion, list hints on child-side
+  // status changes, and a poll (faster when hints are unavailable) ensures the
+  // pill's "running" count doesn't go stale on CHILD-side status changes that
+  // emit no event on this parent's feed. Must sit above the loading/error
+  // early-returns — it's a hook, so it has to run unconditionally on every render.
+  const lineagePoll = useLineagePollInterval(workspaceId);
   const lineage = useSessionLineage(sessionId, {
     events,
-    pollIntervalMs: 30_000,
+    pollIntervalMs: lineagePoll.pollIntervalMs,
   });
-  const agentNodes = lineage.lineage?.children ?? [];
+  const agentNodes = useMemo(() => lineage.lineage?.children ?? [], [lineage.lineage]);
+  const observeLineageTree = lineagePoll.observeTree;
+  useEffect(() => observeLineageTree(agentNodes), [agentNodes, observeLineageTree]);
+  // Sub-sessions waiting on the person surface on this page: list hints that
+  // name one, and this agent answering one, re-read the tree.
+  const descendantRefreshSignal = useDescendantRequestsRefresh({
+    client: context.client,
+    workspaceId,
+    sessionId,
+    events,
+    nodes: agentNodes,
+    refreshLineage: lineage.refresh,
+  });
   // The same lineage read names the agents the timeline spawns, messages, and
   // hears from (parent and descendants), following renames.
   const lineageTitles = useMemo(() => {
@@ -1325,6 +1345,8 @@ export function SessionRoute({
       goal={goal}
       queue={queue}
       agentNodes={agentNodes}
+      descendantRefreshSignal={descendantRefreshSignal}
+      onDescendantResolved={() => void lineage.refresh()}
       hasOlder={hasOlder}
       loadingOlder={loadingOlder}
       onLoadOlder={loadOlder}
@@ -1940,6 +1962,10 @@ function SessionChatPane(props: {
   queue: ReturnType<typeof useTurnQueue>;
   /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
   agentNodes: LineageNode[];
+  /** Bumped when a sub-session in this tree changed; open request cards re-read. */
+  descendantRefreshSignal: number;
+  /** A sub-session's request was settled from this page: re-read the tree. */
+  onDescendantResolved: () => void;
   hasOlder: boolean;
   loadingOlder: boolean;
   onLoadOlder: OlderHistoryLoader;
@@ -1978,6 +2004,7 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  const resolveLink = useAppLinkResolver();
   const hostMessageContext = useHostMessageContext();
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
@@ -2198,6 +2225,10 @@ function SessionChatPane(props: {
     terminal,
   ]);
   const agentsSignal = useMemo(() => sessionAgentsSignal(t, props.agentNodes), [props.agentNodes]);
+  const waitingSubSessions = useMemo(
+    () => waitingDescendants(props.agentNodes),
+    [props.agentNodes],
+  );
   const codexConnected = modelCatalog.models.some(
     (candidate) =>
       candidate.provider === "codex-subscription" &&
@@ -2730,6 +2761,19 @@ function SessionChatPane(props: {
         void modelCatalog.refresh();
       }
     },
+  });
+  // A dropped event stream (an update or brief outage) reads as "updating" in
+  // the composer while it reconnects.
+  const composerView = useComposerWithStreamState(
+    composer,
+    props.connectionState,
+    props.initialLoading,
+  );
+  const queuedRecall = useQueuedPromptRecall({
+    queue: props.queue,
+    composer,
+    subjectId: context.accessContext.subjectId,
+    enabled: !terminal,
   });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
     if (attachments.hasUnresolved) {
@@ -3544,7 +3588,7 @@ function SessionChatPane(props: {
                       onViewDetails={viewToolReviewDetails}
                     >
                       <MessageTimeline
-                        resolveLink={consoleLinkResolver}
+                        resolveLink={resolveLink}
                         renderMessageSender={renderMessageSender}
                         allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                         trailingState={
@@ -3708,17 +3752,9 @@ function SessionChatPane(props: {
 
           {modelRecovery ? <ModelRecoveryNotice recovery={modelRecovery} /> : null}
 
-          {props.session.inputWait &&
-          props.session.status === "idle" &&
-          admissionControl.state === "active" ? (
-            <Suspense fallback={null}>
-              <LazySessionWaitStatus session={props.session} />
-            </Suspense>
-          ) : null}
-
-          {/* Compact session chrome above the composer — incoming, queue, goal,
-          and agents as one dock. Hides entirely when there are no signals. */}
-          <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
+          {/* One slim status row above the composer: the agent's wait, queue,
+          goal and activity. Hides entirely when there are no signals. */}
+          <div className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6">
             <div className="mx-auto w-full max-w-3xl">
               <SessionAdmissionNotice
                 key={`${props.session.workspaceId}:${props.session.id}`}
@@ -3751,12 +3787,58 @@ function SessionChatPane(props: {
                     refresh: [props.onReloadSession, props.queue.refresh],
                   })
                 }
+                onContinueWaitingWork={async () => {
+                  await context.client.continueSessionWaitingWork(
+                    props.session.workspaceId,
+                    props.session.id,
+                  );
+                  // A chat the refusal blocked resumes with the usual fenced
+                  // Resume; a running chat picks them up at its next step.
+                  if (
+                    sessionAdmissionReason(props.session) !== null &&
+                    admissionControl.state !== "paused"
+                  )
+                    await recheckSessionAdmission({
+                      control: admissionControl,
+                      refreshOnly: admissionRefreshRequired,
+                      resume: (control) =>
+                        context.client.resumeSession(props.session.workspaceId, props.session.id, {
+                          clientEventId: crypto.randomUUID(),
+                          expectedControlEtag: control.controlEtag,
+                        }),
+                      refresh: [props.onReloadSession, props.queue.refresh],
+                    });
+                  else await props.onReloadSession();
+                  // Machines last: the notice clears once nothing waits, and a
+                  // still-blocked session read in between would flash the refusal.
+                  await runsOn.fleet.refresh();
+                }}
               />
+              {waitingSubSessions.length > 0 ? (
+                <Suspense fallback={null}>
+                  <DescendantRequests
+                    client={context.client}
+                    workspaceId={props.session.workspaceId}
+                    parentSessionId={props.session.id}
+                    waiting={waitingSubSessions}
+                    onResolved={props.onDescendantResolved}
+                    refreshSignal={props.descendantRefreshSignal}
+                    loadSkillReview={loadSkillReview}
+                    allowedSaveTo={secretSaveTargets(
+                      context.accessContext,
+                      props.session.workspaceId,
+                    )}
+                  />
+                </Suspense>
+              ) : null}
               <SessionChrome
                 sessionStatus={props.session.status}
+                // Same rule as the header's Waiting badge, plus the merged admission control.
+                wait={admissionControl.state === "active" ? sessionInputWait(props.session) : null}
                 onOpenSession={props.onOpenSession}
                 queue={props.queue}
                 composer={terminal ? undefined : composer}
+                queuedRecall={queuedRecall}
                 goal={props.goal}
                 readOnly={terminal}
                 commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
@@ -3788,7 +3870,7 @@ function SessionChatPane(props: {
           <div
             ref={composerRegionRef}
             data-read-only-composer={readOnlyArchive ? "hidden" : undefined}
-            className={`shrink-0 px-4 pb-4 pt-1 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
+            className={`shrink-0 px-4 pb-4 sm:px-6${readOnlyArchive ? " hidden" : ""}`}
           >
             <div className="mx-auto w-full max-w-3xl">
               <PersonalResourceAttachmentSurface
@@ -3799,10 +3881,11 @@ function SessionChatPane(props: {
               <ConsoleComposer
                 workspaceId={props.session.workspaceId}
                 usageRefreshKey={props.session.status}
-                composer={composer}
+                composer={composerView}
                 attachments={attachments}
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
+                queuedRecall={queuedRecall}
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,

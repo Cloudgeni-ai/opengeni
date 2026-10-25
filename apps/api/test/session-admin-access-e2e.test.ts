@@ -23,7 +23,9 @@ import { callOrganizationAction } from "../src/organization-mcp";
    access for agent sessions and gives it to their own session; an agent with
    their full access does what they can (giving admin access, their inbox,
    connected agents, API keys), one with less can't widen its access, and the
-   organization turning it off ends it. */
+   organization turning it off ends it. A plain member of the workspace gives
+   their own session their access too, and its agent can do what they can,
+   never what only an owner or admin can. */
 
 const origin = "http://opengeni.test";
 let shared: SharedTestDatabase;
@@ -397,6 +399,124 @@ describe("session admin access end to end", () => {
         expectedGeneration: preview.body.generation,
       }),
     ).toMatchObject({ status: 200, body: { audience: "only_me" } });
+
+    // A plain member of the workspace gives their own session their access;
+    // its agent then does what they can and is refused what they can't.
+    const memberEmail = `member-${crypto.randomUUID()}@example.test`;
+    await app.request("/v1/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Sam Rivera", email: memberEmail, password }),
+    });
+    await shared.admin`update auth_users set email_verified = true where email = ${memberEmail}`;
+    const memberCookie = sessionCookie(
+      await app.request("/v1/auth/sign-in/email", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: memberEmail, password, rememberMe: true }),
+      }),
+    );
+    const [memberUser] = await shared.admin<
+      { id: string }[]
+    >`select id from auth_users where email = ${memberEmail}`;
+    const memberSubjectId = `user:${memberUser!.id}`;
+    const memberPersonal = crypto.randomUUID();
+    await shared.admin`
+      insert into workspaces (id, account_id, name)
+      values (${memberPersonal}, ${organizationId}, 'Personal')`;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${memberPersonal}, ${organizationId})`;
+    await shared.admin`
+      insert into organization_memberships (account_id, subject_id, role, status, personal_workspace_id)
+      values (${organizationId}, ${memberSubjectId}, 'member', 'active', ${memberPersonal})`;
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role, permissions)
+      values (${organizationId}, ${workspaceId}, ${memberSubjectId}, ${memberEmail}, 'member',
+        ${shared.admin.json(["workspace:read", "sessions:create", "sessions:read", "sessions:control"])})`;
+    const membersOwn = await session(memberSubjectId);
+    expect(
+      await (
+        await app.request(sessionAccess(membersOwn), { headers: { cookie: memberCookie } })
+      ).json(),
+    ).toMatchObject({ active: false, allowed: true, canGrant: true });
+    // Not on someone else's session.
+    expect(
+      (
+        await app.request(sessionAccess(own), {
+          method: "PUT",
+          headers: browser(memberCookie),
+          body: "{}",
+        })
+      ).status,
+    ).toBe(403);
+    const memberGranted = await app.request(sessionAccess(membersOwn), {
+      method: "PUT",
+      headers: browser(memberCookie),
+      body: "{}",
+    });
+    expect(memberGranted.status, await memberGranted.clone().text()).toBe(200);
+    expect(await memberGranted.json()).toMatchObject({
+      active: true,
+      grantedBy: { subjectId: memberSubjectId, name: "Sam Rivera" },
+      canRevoke: true,
+    });
+    // The owner sees it, can end it, but can't give it on the member's behalf.
+    expect(
+      await (await app.request(sessionAccess(membersOwn), { headers: { cookie } })).json(),
+    ).toMatchObject({ active: true, canGrant: false, canRevoke: true });
+    const asMember = async (
+      id: string,
+      pathParameters: Record<string, string>,
+      body?: Record<string, unknown>,
+    ) => {
+      const result = await callOrganizationAction(
+        {
+          caller: {
+            kind: "person",
+            accountId: organizationId,
+            subjectId: memberSubjectId,
+            access: {
+              preset: "full",
+              permissions: organizationAccessPresetPermissions("full"),
+              workspaceScope: { kind: "all" },
+            },
+          },
+          origin,
+          dispatch: async (request) => await app.fetch(request),
+        },
+        { id, pathParameters, query: {}, ...(body ? { body } : {}) },
+      );
+      return JSON.parse((result.content[0] as { text: string }).text) as { status: number };
+    };
+    expect(
+      await asMember("getSessionAdminAccess", { workspaceId, sessionId: membersOwn }),
+    ).toMatchObject({ status: 200 });
+    expect(
+      (
+        await asMember(
+          "createOrganizationApiKey",
+          { organizationId },
+          { name: "Not for members", access: "read" },
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await asMember(
+          "updateOrganizationAgentAdminAccess",
+          { organizationId },
+          { sessionAdminAccessAllowed: false },
+        )
+      ).status,
+    ).toBe(403);
+    // Leaving the workspace ends it.
+    await shared.admin`
+      delete from workspace_memberships
+      where workspace_id = ${workspaceId} and subject_id = ${memberSubjectId}`;
+    expect(
+      await (await app.request(sessionAccess(membersOwn), { headers: { cookie } })).json(),
+    ).toMatchObject({ active: false });
 
     // Turning the organization setting off ends it.
     expect(

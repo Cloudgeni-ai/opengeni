@@ -52,7 +52,7 @@ import {
   type LatencyMode,
 } from "@opengeni/contracts";
 import {
-  listConnectionsMetadata,
+  loadWorkspaceModelCatalogInputs,
   getDeploymentModelCatalog,
   listWorkspaceProviderCustomModelsByKind,
   getWorkspaceProviderCustomModelForExecution,
@@ -60,7 +60,6 @@ import {
   getWorkspaceGatewayCustomModelForExecution,
   getWorkspaceOpenRouterCustomModelForExecution,
   getOrganizationModelProviderCustomModelForExecution,
-  getOrganizationModelProviderCatalogForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
   type Database,
   type OrganizationClaudeModelAdmissionAuthority,
@@ -360,9 +359,8 @@ export async function resolveWorkspaceCatalogSettings(
       upstreamModelId: productModelId.slice(organizationDirectModelIdPrefix(providerKind).length),
     };
   });
-  // One scoped read per catalog family instead of one scoped transaction per
-  // provider kind. The batched readers keep each provider's filters, bound and
-  // overflow error. The Claude subscription flag is env-only (the catalog
+  // One scope for all public catalog families. The readers keep each provider's
+  // filters, bound and overflow error. The Claude subscription flag is env-only (the catalog
   // document never changes it), so it decides the requested kinds up front.
   const workspaceCustomModelKinds: WorkspaceCustomModelProviderKind[] = [
     "vercel_gateway",
@@ -374,6 +372,21 @@ export async function resolveWorkspaceCatalogSettings(
         )
       : []),
   ];
+  const publicCatalog = supportsOrganizationProviderReads
+    ? loadWorkspaceModelCatalogInputs(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        providerKinds: workspaceCustomModelKinds,
+        organizationProviderKinds: [
+          "vercel_gateway",
+          "openrouter",
+          "opper",
+          "openai",
+          "azure_openai",
+          ...CLAUDE_CONNECTION_KINDS,
+        ],
+      })
+    : undefined;
   const [
     resolved,
     workspaceCustomModels,
@@ -388,11 +401,12 @@ export async function resolveWorkspaceCatalogSettings(
     retainedOrganizationDirectCustomModels,
   ] = await Promise.all([
     resolveCatalogSettings(db, envSettings),
-    listWorkspaceProviderCustomModelsByKind(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      providerKinds: workspaceCustomModelKinds,
-    }),
+    publicCatalog?.then((catalog) => catalog.workspaceCustomModels) ??
+      listWorkspaceProviderCustomModelsByKind(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        providerKinds: workspaceCustomModelKinds,
+      }),
     Promise.all(
       [...new Set(retainedGatewayUpstreamModelIds)].map(
         async (upstreamModelId) =>
@@ -413,20 +427,7 @@ export async function resolveWorkspaceCatalogSettings(
           }),
       ),
     ),
-    supportsOrganizationProviderReads
-      ? getOrganizationModelProviderCatalogForWorkspace(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          providerKinds: [
-            "vercel_gateway",
-            "openrouter",
-            "opper",
-            "openai",
-            "azure_openai",
-            ...CLAUDE_CONNECTION_KINDS,
-          ],
-        })
-      : null,
+    publicCatalog?.then((catalog) => catalog.organizationProviders) ?? null,
     supportsOrganizationProviderReads
       ? Promise.all(
           [...new Set(retainedOrganizationGatewayUpstreamModelIds)].map(
@@ -453,9 +454,7 @@ export async function resolveWorkspaceCatalogSettings(
           ),
         )
       : Promise.resolve([]),
-    supportsOrganizationProviderReads
-      ? listConnectionsMetadata(db, input.workspaceId, null)
-      : Promise.resolve([]),
+    publicCatalog?.then((catalog) => catalog.workspaceConnections) ?? Promise.resolve([]),
     Promise.all(
       [...new Set(retainedOpperUpstreamModelIds)].map(
         async (upstreamModelId) =>

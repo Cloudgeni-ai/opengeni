@@ -35,7 +35,7 @@ Grouped by area. "Default off" columns are proposals for the presets below.
 | --- | --- | --- |
 | Chat list | Rail `session-list.tsx`: search, filters and browse order, projects (channels) with create/move, pinning, archive and restore, delete with refusal reasons, unread/mute, subagent tree rows with lazy loading, Site session groups, hover details, creator monogram, delivery and scheduled-task attention, pagination, context menu and row quick actions, skeletons | `SessionList`: flat list, rename, archive, paging |
 | Session header | `session-header.tsx`: title editor, ancestry breadcrumb, status badge, workstream control, pin, mute, admin access indicator and grant dialog, model and Codex/subscription account indicators, private indicator, panel toggle, Site origin link | none (title only inside `SessionChrome`) |
-| Conversation | `SessionChatPane`: `MessageTimeline` with message actions (fork, copy), find in conversation, search results, inline artifacts and interactive blocks, user message bodies with resource attachments, subagent tree, wait status, failed-session banner with retry, admission, usage-limit, machine-access, unavailable-model and model-recovery notices, read-only and terminal-session notices, skill reviews, learning-refusal actions, knowledge activity, file drop target | `SessionConversation`: timeline, approvals, human input, composer, goal chrome, voice, attachments |
+| Conversation | `SessionChatPane`: `MessageTimeline` with message actions (fork, copy), find in conversation, search results, inline artifacts and interactive blocks, user message bodies with resource attachments, subagent tree, wait status (a chip in the `SessionChrome` row), failed-session banner with retry, admission, usage-limit, machine-access, unavailable-model and model-recovery notices, read-only and terminal-session notices, skill reviews, learning-refusal actions, knowledge activity, file drop target | `SessionConversation`: timeline, approvals, human input, composer, goal chrome, voice, attachments |
 | Composer | `ConsoleComposer` around `ChatComposer`: model picker with payment source, effort, capabilities chip and menu, follow-up repository picker, runs-on machine picker, secrets menu, usage limit, tool selection, agents pill, mobile "+" panel with drill-ins, focus intents, Stop and queue | `ChatComposer` with optional model picker |
 | Session dock and panels | Files, terminal, desktop, browser and computer viewers, editable artifacts workspace, inspector, model-context inspector, agent configuration panel, session commands | `SandboxWorkspace` and viewers exist; the app adapts them |
 | New chat | `sessions-index.tsx`: starters, model control, folder (project) picker, repository and resource access, compute target, visibility, usage limit, secrets, private-workspace note, recent sessions, credit prompts, draft sync, realtime start | `NewConversation`: input and create |
@@ -81,7 +81,7 @@ person's permissions, exactly as in the web app. A switch only hides.
 
 | Feature (`SessionUiFeatures`) | `app` (web, desktop) | `companion` (Excel and other first-party side panes) | `embed` (customer page) |
 | --- | --- | --- | --- |
-| `chatList` (search, filters, projects, pins, archive, subagent rows) | on | on (a drawer when narrow) | on |
+| `chatList` (search, filters, projects, pins, archive, subagent rows; the new-chat page's project picker and recent chats) | on | on (a drawer when narrow) | on |
 | `dock` (files, terminal, desktop, browser, artifacts, inspector; lazy) | on | on | off |
 | `adminAccess` (workspace-admin access indicator and grant) | on | off | off |
 | `keyboardShortcuts` (⌘K menu, shortcut keys, ⌘/ sheet; `newChatShortcut` is a deprecated alias) | on | off | off |
@@ -125,9 +125,13 @@ embed.
   slots: `switcher`, `primaryNav`, `mobileWorkspacePanel`, `railFooter`,
   `canvasBanners`. The web app's `RailShell` is only its slot composition.
 - **`SessionApp`** (`@opengeni/react/session-app`): `apiBaseUrl`, `headers`,
-  `consoleUrl`, `workspaceId`, `sessionId` and `onSessionChange`, `preset`,
+  `consoleUrl`, `workspaceId`, `sessionId` and `onSessionChange`,
+  `onSessionState` (the open chat's status and held events, from the session
+  route's own stream, through `AppHost.onSessionState`), `preset`,
   `features`, `slots`, `surfaces` (PDF preview, editable artifacts), `theme`,
-  `messageContext`, `openUrl`, `onUnauthorized`. It renders its own `og-root`
+  `messageContext`, `openUrl`, `onUnauthorized`, `resolveLink` and
+  `renderLink` (the host's handling of links in agent messages, asked before
+  the app's own: the dock, else the web app page through `openUrl`). It renders its own `og-root`
   with `data-og-theme`, never touching the host page's `<html>`. A 401 from
   either the SDK client or a raw app request calls `onUnauthorized`.
 - **Styles.** The web app's design system (token bridge, base rules, motion)
@@ -142,36 +146,30 @@ embed.
   sign-out under the chat list, and the workbook's model context on every
   message.
 
-### Session proxy (open decision)
+### Session proxy
 
 `OpenGeniChat`, `SessionConversation` and `NewConversation` back customer
 pages that must not hold a credential: the browser talks to
-`createSessionProxyHandler`, an explicit allowlist of about 30 conversation
-routes run as the resolved user. The session app uses about 126 client
-methods (workspaces, access context, capabilities, connections, repositories,
-machines, projects, pins and more), so it cannot run behind today's proxy.
-Two end states are possible:
+`createSessionProxyHandler`, which runs each request as the resolved user. The
+session app uses about 126 client methods (workspaces, access context,
+capabilities, connections, repositories, machines, projects, pins and more).
+Two end states were considered:
 
-1. An opt-in app mode in the proxy that forwards the session app's
-   workspace-scoped routes as the resolved user (the API still enforces their
-   permissions), after which `OpenGeniChat` renders `SessionApp` with the
-   `embed` preset.
+1. The proxy forwards the session app's workspace-scoped routes as the
+   resolved user (the API still enforces their permissions), after which
+   `OpenGeniChat` renders `SessionApp` with the `embed` preset.
 2. A per-user browser credential minted by the customer's backend, after which
    customer pages use `SessionApp` directly and the proxy stays for chat-only
    embeds.
 
-Decision (October 22, 2026): option 1. `createSessionProxyHandler` takes
-`sessionApp: true`. The app's bootstrap (`access/me`, `workspaces`) answers
-with the resolved workspace only; other reads in that workspace and in chats
-`authorizeSession` admits pass through as the resolved user; a short list of
-the app's own writes (pin, move to a project, projects, the new-chat draft, a
-chat's tool approval settings) passes; every other write is refused, and
-rosters, keys, budgets and administration stay closed even for reads. The
-proxy keeps every existing route's rules, so the host's `createSession` and
-message hooks still decide what a new chat is. Option 2 was rejected because
-a browser credential bypasses those hooks. A product page can now render
-`SessionApp` with `apiBaseUrl` set to its proxy; `OpenGeniChat` keeps the
-conversation components until it switches to `SessionApp`.
+Decision (October 22, 2026): option 1, first as an opt-in `sessionApp` mode
+with its own list of permitted writes. Revised (October 23, 2026): the proxy
+is a relay for every route in the resolved workspace, with Opengeni's
+permissions as the only authority and no mode or per-feature flags; products
+narrow it with the key's and members' permissions and a `refuse` hook, and
+choose what users see with UI props and presets. See
+[Product relay](product-relay.md). Option 2 was rejected because a browser
+credential bypasses the host's `createSession` and message hooks.
 
 ## Plan
 

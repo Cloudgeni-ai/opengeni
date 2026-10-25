@@ -3,8 +3,9 @@
  *
  * A computer tool result keeps its complete typed value in
  * `structuredContent` for Code Mode, the API and the UI. What the model reads
- * is this text: one line per useful accessibility element, in the role/name
- * vocabulary that computer_act locators use. Desktop accessibility trees are
+ * is this text: one line per useful accessibility element (a run of plain
+ * menu bar items shares one), in the role/name vocabulary that computer_act
+ * locators use. Desktop accessibility trees are
  * far noisier than web pages: a Linux AT-SPI window repeats platform metadata
  * on every node, names unlabeled containers after their role, and keeps
  * hundreds of hidden elements. As JSON one browser window costs over 20k
@@ -20,6 +21,7 @@ export type ComputerTextNode = {
   value?: string | { redacted: true; reason: string } | undefined;
   states: readonly string[];
   actions: readonly string[];
+  bounds?: { x: number; y: number; width: number; height: number } | null | undefined;
   children?: readonly ComputerTextNode[] | undefined;
 };
 
@@ -266,8 +268,15 @@ export function computerNodeLines(
   const tree = options.tree ?? conventions(roots);
   const clip: Clip = { clipped: 0 };
   const lines: string[] = [];
+  // macOS lists a table's cells again under each AXColumn, as new elements
+  // with the same role, label and bounds; the one listed first stands for
+  // both.
+  const listedAt = new Set<string>();
   let omitted = 0;
   let focusedListed = false;
+  // The line of the menu bar items listed last and its depth, while the run
+  // continues.
+  let menuBar: { line: number; depth: number } | null = null;
   const visit = (
     nodes: readonly ComputerTextNode[],
     depth: number,
@@ -298,18 +307,74 @@ export function computerNodeLines(
       // Nothing to read, act on or descend into (macOS table rows whose cells
       // the platform did not expose).
       const empty = plain && !labelled && node.actions.length === 0 && !node.children?.length;
-      if (hidden || container || repeatedText || empty || (offscreen && !labelled && !focused)) {
+      const place =
+        node.bounds && (node.bounds.width > 0 || node.bounds.height > 0)
+          ? JSON.stringify([
+              node.role,
+              name ?? null,
+              value ?? null,
+              node.bounds.x,
+              node.bounds.y,
+              node.bounds.width,
+              node.bounds.height,
+            ])
+          : null;
+      const listedElsewhere = !focused && place !== null && listedAt.has(place);
+      if (
+        hidden ||
+        container ||
+        repeatedText ||
+        empty ||
+        listedElsewhere ||
+        (offscreen && !labelled && !focused)
+      ) {
         omitted += 1;
         if (!hidden && node.children) visit(node.children, depth, parentName);
         continue;
       }
+      if (place !== null) listedAt.add(place);
       if (node.ref === options.focusedRef) focusedListed = true;
+      // A macOS menu bar lists a dozen plain items; one line holds them all.
+      const disabled = tree.reportsEnabled && !node.states.includes("enabled");
+      if (plainMenuBarItem(node, name, value, focused || disabled || offscreen)) {
+        const item = `${quoted(clipped(name ?? "", MAX_NAME_CHARS, clip))} [${node.ref}]`;
+        if (menuBar !== null && menuBar.line === lines.length - 1 && menuBar.depth === depth) {
+          lines[menuBar.line] += `, ${item}`;
+        } else {
+          lines.push(`${"  ".repeat(depth)}- ${node.role} ${item}`);
+          menuBar = { line: lines.length - 1, depth };
+        }
+        continue;
+      }
       lines.push(computerNodeLine(node, depth, tree, offscreen, focused, clip));
       if (node.children) visit(node.children, depth + 1, name);
     }
   };
   visit(roots, 0, undefined);
   return { lines, listed: lines.length, omitted, clipped: clip.clipped, focusedListed };
+}
+
+/** A named menu bar item with nothing else to say: no value, state, own
+ * action or children. */
+function plainMenuBarItem(
+  node: ComputerTextNode,
+  name: string | undefined,
+  value: ComputerTextNode["value"],
+  marked: boolean,
+): boolean {
+  return (
+    node.role === "AXMenuBarItem" &&
+    name !== undefined &&
+    value === undefined &&
+    !marked &&
+    !node.description &&
+    !node.identifier &&
+    actionableRef(node.ref) &&
+    !node.children?.length &&
+    listedActions(node).length === 0 &&
+    !node.states.includes("expandable") &&
+    !node.states.some((state) => SHOWN_STATES.has(state))
+  );
 }
 
 function boundsText(bounds: ComputerTextTarget["bounds"]): string | null {
@@ -530,6 +595,20 @@ function computerErrorLine(error: NonNullable<ComputerTextError>): string {
   }`;
 }
 
+type ComputerTextRoleStandIn = {
+  actionIndex: number;
+  requestedRole: string;
+  role: string;
+  name: string;
+};
+
+/** An action that named a button that is a link here, or a link that is a
+ * button, and acted on it: says so, so the next call names the right role. */
+function roleStandInLine(standIn: ComputerTextRoleStandIn, batch: boolean): string {
+  const { requestedRole, role, name } = standIn;
+  return `${batch ? `Action ${standIn.actionIndex + 1}` : "The action"} named ${requestedRole} ${quoted(name)}, but no ${requestedRole} here has that name, so it used the ${role} ${quoted(name)}; name it as role ${quoted(role)} next time.`;
+}
+
 export function computerActionText(
   receipt:
     | {
@@ -539,6 +618,7 @@ export function computerActionText(
         state: string;
         error: ComputerTextError;
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
+        roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
       }
     | {
         type: "batch";
@@ -547,6 +627,7 @@ export function computerActionText(
         steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
         observationPrecedesStop?: boolean | undefined;
+        roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
       },
 ): string {
   if (receipt.type === "batch") return computerBatchText(receipt);
@@ -554,6 +635,7 @@ export function computerActionText(
     `Action ${receipt.state} on ${receipt.targetId} (operation ${receipt.operationId}).`,
   ];
   if (receipt.error) lines.push(computerErrorLine(receipt.error));
+  for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, false));
   if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(
       `This action opened ${receipt.observation.target.id}; act on that target with the observation below.`,
@@ -572,6 +654,7 @@ function computerBatchText(receipt: {
   steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
   observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
   observationPrecedesStop?: boolean | undefined;
+  roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
 }): string {
   const last = receipt.steps.at(-1);
   const lines: string[] = [];
@@ -628,6 +711,7 @@ function computerBatchText(receipt: {
     lines.push(
       `Action ${receipt.steps.length} opened ${opened}; act on that target with the observation below.`,
     );
+  for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, true));
   if (receipt.observation) lines.push(computerObservationText(receipt.observation));
   return lines.join("\n");
 }

@@ -1,5 +1,13 @@
 # Event-triggered automations
 
+> **Deprecated.** This is the first automation API (sources, triggers and runs
+> under `/v1/workspaces/:workspaceId/automations`, and
+> `POST /v1/webhooks/automations/:endpointId`). Its routes answer with
+> `Deprecation` and `Sunset` headers until January 25, 2027 and are removed in
+> the next major SDK. Automations are now scheduled tasks with event triggers on
+> event sources: see [the design](design/automations-and-events.md) and
+> [background agents](../docs-site/integrate/background-agents.mdx#from-your-products-events).
+
 Opengeni automations translate authenticated external events into ordinary agent sessions. Pull-request review is an adapter built on this substrate, not a separate execution engine.
 
 ## Model

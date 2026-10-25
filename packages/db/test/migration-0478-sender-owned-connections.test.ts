@@ -6,6 +6,8 @@ import {
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
+import { eventTriggerMigrationTail } from "./event-trigger-migration-tail";
 
 const migration = "0478_sender_owned_connections.sql";
 // 0494 patches the installed 0478 resolver, so it must wait until this fixture
@@ -32,6 +34,8 @@ const inboxTriggerTailMigrations = [
   "0677_local_human_inbox_recipient.sql",
   // Compiles SQL bodies against 0661's session person resolver.
   "0678_inbox_mute_session_replies.sql",
+  // Extends 0678's mute table and functions.
+  "0915_inbox_mute_scheduled_runs.sql",
 ];
 const withheldMigrations = [
   migration,
@@ -87,6 +91,9 @@ const withheldMigrations = [
   // Redefines a push routine from withheld 0664 and reads the inbox settings
   // columns withheld 0663 and 0665 add.
   "0718_inbox_time_sensitive_needs_you.sql",
+  // Redefines 0718's inbox recipient and 0677's person resolver, which read
+  // scheduled_tasks.owner_subject_id from this cutover.
+  "0923_external_user_inbox.sql",
   // Patches the acceptance writers withheld 0688 and 0707 define.
   "0726_subscription_personal_acceptance_reads.sql",
   // Built from the connect writer withheld 0715 rewrites; it follows 0715.
@@ -122,6 +129,8 @@ const withheldMigrations = [
   "0836_cheaper_session_write_fences.sql",
   // Patches the receipt/context fences and compatibility readers withheld above.
   "0843_indexed_inbox_lineage.sql",
+  // Patches the inbox fence created by withheld 0608 (as 0843 rewrites it).
+  "0917_continue_waiting_work.sql",
   "0846_independent_session_titles.sql",
   // Usage history routines live in the subscription schema the withheld 0688
   // creates; the seed reads them. Replay both after it.
@@ -145,6 +154,10 @@ const withheldMigrations = [
   // Patches the scheduled admission and live-authority routines that withheld
   // 0478/0534/0539 install by exact anchors; replay after them.
   "0906_scheduled_shared_slack_authority.sql",
+  // Rewrites the execution-context key withheld 0608 adds; replay after it.
+  ...workspaceDeletionMigrationTail,
+  // Redefines the exhausted-task predicate withheld 0761 creates; replay after it.
+  ...eventTriggerMigrationTail,
 ];
 let database: OwnerMigratedTestDatabase | null = null;
 

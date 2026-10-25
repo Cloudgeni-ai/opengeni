@@ -24,6 +24,7 @@ import {
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   SESSION_USAGE_LIMITS_PASSTHROUGH_ENV,
+  EVENT_TRIGGERS_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
   API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
@@ -1096,6 +1097,14 @@ describe("deployment contract", () => {
         OPENGENI_SLACK_SIGNING_SECRET: "slack-staging-signing-secret",
         OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Staging",
         OPENGENI_SLACK_COMMAND: "/opengeni-staging",
+        OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS: "b2a93667-d2ce-4468-8b65-3c773b701ad7",
+        OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS: "00000000-0000-4000-8000-000000000001",
+        OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS:
+          "00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
+        OPENGENI_TEAMS_BOT_CLIENT_ID: "teams-pilot-client",
+        OPENGENI_TEAMS_BOT_CLIENT_SECRET: "teams-pilot-secret",
+        OPENGENI_TEAMS_BOT_TENANT_ID: "teams-home-tenant",
+
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "github-personal-secret",
@@ -1156,6 +1165,19 @@ describe("deployment contract", () => {
       "OPENGENI_SLACK_SIGNING_SECRET=slack-staging-signing-secret",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=Opengeni Staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS=00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS=b2a93667-d2ce-4468-8b65-3c773b701ad7",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS=00000000-0000-4000-8000-000000000001",
+    );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_CLIENT_SECRET=teams-pilot-secret");
+
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
     expect(artifacts.runtimeEnv).toContain(
@@ -1814,6 +1836,23 @@ describe("deployment contract", () => {
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.runtimeEnv).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
+  });
+
+  test("renders the event triggers flag only when configured", () => {
+    expect(EVENT_TRIGGERS_PASSTHROUGH_ENV).toEqual(["OPENGENI_EVENT_TRIGGERS_ENABLED"]);
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_EVENT_TRIGGERS_ENABLED: "true",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=true");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED");
   });
 
   test("renders configured external browser providers without making them mandatory", () => {

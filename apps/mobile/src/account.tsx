@@ -157,16 +157,21 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<Error | null>(null);
   const retries = useRef(0);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Refreshes overlap (foreground, pull to refresh, opening the switcher); only
+  // the latest one may apply, so a slow older answer never brings back a stale list.
+  const reloadGeneration = useRef(0);
   const models = useMemo(() => config?.models ?? [], [config]);
 
   const reload = useCallback(async () => {
     if (!accountId || !activeToken) return;
+    const generation = ++reloadGeneration.current;
     try {
       const [nextContext, next, nextConfig] = await Promise.all([
         client.getAccessContext(),
         client.listWorkspaces(),
         client.getClientConfig().catch(() => null),
       ]);
+      if (generation !== reloadGeneration.current) return;
       setAccessContext(nextContext);
       setWorkspaces(next);
       if (nextConfig) setConfig(nextConfig);
@@ -185,6 +190,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       }
       retries.current = 0;
     } catch (caught) {
+      if (generation !== reloadGeneration.current) return;
       if (unauthorized(caught)) {
         updateAccount(accountId, { signedOut: true });
       } else {

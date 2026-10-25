@@ -1,3 +1,4 @@
+import { requestSessionArchive, useArchiveConfirmation } from "../../lib/archive-session";
 // The session shell every session surface renders: the left rail (fixed and
 // resizable on desktop, an overlay drawer on phones), the canvas top strip with
 // the session header on session routes, and the canvas itself. Surface-owned
@@ -466,7 +467,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
-    // Both schedule facts come from one read, so a newer lineage never pairs
+    // The automation facts come from one read, so a newer lineage never pairs
     // with an older session read (an older server sends no upcoming flag).
     const lineageSchedules = lineage.lineage?.sessionHasSchedules;
     return (
@@ -479,6 +480,8 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
                 hasSchedules: lineageSchedules,
                 hasUpcomingSchedules:
                   lineage.lineage?.sessionHasUpcomingSchedules ?? lineageSchedules,
+                waitingForEvents: lineage.lineage?.sessionWaitingForEvents ?? false,
+                automationWait: lineage.lineage?.sessionAutomationWait,
               }),
         }}
         ancestors={ancestors}
@@ -555,6 +558,7 @@ function SessionRouteHeader({
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
   const dock = useSessionUiFeature("dock");
+  const confirmArchive = useArchiveConfirmation();
   const archiveInFlight = useRef(false);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
@@ -563,10 +567,8 @@ function SessionRouteHeader({
       if (!accepted) return;
       archiveInFlight.current = true;
       try {
-        const updated = await context.client.updateSessionArchive(target.workspaceId, target.id, {
-          archived,
-          expectedVersion: target.archiveVersion ?? 0,
-        });
+        const updated = await requestSessionArchive(context, target, archived, confirmArchive);
+        if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         context.setSession((current) =>
           current?.id === updated.id && current.workspaceId === updated.workspaceId
@@ -588,18 +590,18 @@ function SessionRouteHeader({
         archiveInFlight.current = false;
       }
     },
-    [context],
+    [context, confirmArchive],
   );
 
   return (
     <SessionHeader
       session={session}
       ancestors={ancestors}
-      onOpenSchedule={
+      onOpenAutomations={
         session.hasSchedules
           ? () =>
               void navigate({
-                to: "/workspaces/$workspaceId/schedules",
+                to: "/workspaces/$workspaceId/automations",
                 params: { workspaceId: session.workspaceId },
                 search: { targetSessionId: session.id },
               })

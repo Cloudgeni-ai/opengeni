@@ -2120,6 +2120,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         (response) => new URL(response.url()).pathname === archivePath && response.ok(),
       );
       await row.getByRole("button", { name: "Archive session", exact: true }).press("Enter");
+      await confirmPauseAndArchive(page);
       const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
       await notification.waitFor();
       const undoRequest = page.waitForRequest(
@@ -2245,6 +2246,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .locator("xpath=..")
         .getByRole("button", { name: "Archive session", exact: true })
         .press("Enter");
+      await confirmPauseAndArchive(page);
       const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
       await notification.waitFor();
       // Keep the notification alive while another device makes two real writes.
@@ -2253,7 +2255,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       let latest = await (await page.request.get(sessionUrl)).json();
       for (const archived of [false, true]) {
         const response = await page.request.put(`${sessionUrl}/archive`, {
-          data: { archived, expectedVersion: latest.archiveVersion },
+          // The chat is already paused; the other client only moves the archive.
+          data: { archived, expectedVersion: latest.archiveVersion, mode: "hide_for_me" },
         });
         expect(response.ok()).toBe(true);
         latest = await response.json();
@@ -4579,6 +4582,13 @@ async function workspaceFromPage(
   return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
 }
 
+// A fixture chat keeps its queued first turn (no worker runs it), so archiving
+// it as someone who can pause asks to pause its active work first.
+async function confirmPauseAndArchive(page: Page) {
+  const dialog = page.getByRole("dialog", { name: "Pause and archive this chat?" });
+  await dialog.getByRole("button", { name: "Pause and archive", exact: true }).click();
+}
+
 async function createSessionThroughApi(
   page: Page,
   apiBaseUrl: string,
@@ -4892,10 +4902,26 @@ async function expectRowPrompt(
   }
 }
 
+// A 44px target is either a 44px box or a slimmer box with an invisible hit
+// area (::before); for the latter, hit-test points 22px either side of the centre.
 async function expectTouchTarget(locator: ReturnType<Page["getByRole"]>): Promise<void> {
-  const box = await locator.boundingBox();
-  expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-  expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+  const hits = await locator.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    if (box.width >= 44 && box.height >= 44) return [true, true, true, true];
+    const x = box.left + box.width / 2;
+    const y = box.top + box.height / 2;
+    const reach = 21.5;
+    return [
+      [x - reach, y],
+      [x + reach, y],
+      [x, y - reach],
+      [x, y + reach],
+    ].map(([px, py]) => {
+      const hit = document.elementFromPoint(px!, py!);
+      return hit !== null && element.contains(hit);
+    });
+  });
+  expect(hits).toEqual([true, true, true, true]);
 }
 
 async function expectContainedInViewport(

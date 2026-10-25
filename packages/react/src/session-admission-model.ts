@@ -46,6 +46,16 @@ export function sessionAdmissionReason(
   };
 }
 
+/**
+ * The block, if any, is the personal-machine refusal that waiting updates from
+ * other people's work explain; another block keeps its own notice.
+ */
+export function sessionWaitingWorkExplainsBlock(reason: SessionAdmissionReason | null): boolean {
+  return (
+    reason === null || (reason.reason === "database_claim_rejected" && reason.permissionDenied)
+  );
+}
+
 /** The saved message was refused because only the machine's owner may start work on it. */
 export function sessionAdmissionNeedsDifferentMachine(
   reason: SessionAdmissionReason | null,
@@ -141,6 +151,8 @@ export type PersonalMachineCopy = {
   ownerRequest: string | null;
   /** "Copy request to …" button label; null for the owner. */
   copyRequest: string | null;
+  /** Before sending, for others: their agents' updates wait here too. */
+  workNote: string | null;
 };
 
 /**
@@ -161,6 +173,7 @@ export function personalMachineCopy(
         : t("sessionAdmission.ownMachineDraftNext"),
       ownerRequest: null,
       copyRequest: null,
+      workNote: null,
     };
   }
   const owner = access.ownerName?.trim() || t("sessionAdmission.theMachineOwner");
@@ -171,6 +184,77 @@ export function personalMachineCopy(
       : t("sessionAdmission.otherMachineDraftNext", { owner }),
     ownerRequest: t("sessionAdmission.ownerRequest", { machine }),
     copyRequest: t("sessionAdmission.copyRequestTo", { owner }),
+    workNote: queued ? null : t("sessionAdmission.otherMachineWorkNote", { owner }),
+  };
+}
+
+export type WaitingWorkCopy = {
+  title: string;
+  /** Whose machine this is, and why the updates wait. */
+  explanation: string;
+  /** Who can do what about it. */
+  next: string;
+  /** The owner's "continue" button label; null for everyone else. */
+  continueAction: string | null;
+};
+
+/** "Sam", "Sam and Kim", "Sam, Kim and Ana" in the host's language. */
+function peopleList(t: OpenGeniText, names: readonly (string | null)[]): string {
+  const unique = [...new Set(names.map((name) => name?.trim() || t("sessionAdmission.aMember")))];
+  try {
+    return new Intl.ListFormat(t.locale, { type: "conjunction" }).format(unique);
+  } catch {
+    return unique.join(", ");
+  }
+}
+
+/**
+ * Explain updates from other people's work (their agents' messages and their
+ * workers' results) that wait because the chat runs on somebody's personal
+ * machine, or null when nothing waits. The owner gets the way to continue;
+ * everyone else learns who can and why.
+ */
+export function waitingWorkCopy(
+  t: OpenGeniText,
+  access: Pick<SessionMachineAccess, "machineName" | "ownerName" | "isOwner" | "waitingWork">,
+): WaitingWorkCopy | null {
+  const waiting = access.waitingWork ?? [];
+  if (waiting.length === 0) return null;
+  const machine = access.machineName;
+  const total = waiting.reduce((sum, entry) => sum + entry.results, 0);
+  if (access.isOwner) {
+    const people = peopleList(
+      t,
+      waiting.map((entry) => entry.name),
+    );
+    return {
+      title: t("sessionAdmission.waitingForYouTitle", { count: total, people }),
+      explanation: t("sessionAdmission.waitingForYouExplanation", { machine }),
+      next: t("sessionAdmission.waitingForYouNext"),
+      continueAction: t("sessionAdmission.continueWaitingWork", { count: total }),
+    };
+  }
+  const owner = access.ownerName?.trim() || t("sessionAdmission.theMachineOwner");
+  const yours = waiting.find((entry) => entry.isYou);
+  const others = waiting.filter((entry) => !entry.isYou);
+  const title = yours
+    ? t("sessionAdmission.yourUpdatesWaitingTitle", { count: yours.results, owner })
+    : t("sessionAdmission.othersUpdatesWaitingTitle", {
+        count: total,
+        owner,
+        people: peopleList(
+          t,
+          others.map((entry) => entry.name),
+        ),
+      });
+  return {
+    title,
+    explanation: t("sessionAdmission.updatesWaitingExplanation", { owner, machine }),
+    next: yours
+      ? t("sessionAdmission.yourUpdatesWaitingNext", { owner })
+      : t("sessionAdmission.othersUpdatesWaitingNext", { owner }),
+    // Others act from the composer's notice: choose a machine, or ask the owner.
+    continueAction: null,
   };
 }
 

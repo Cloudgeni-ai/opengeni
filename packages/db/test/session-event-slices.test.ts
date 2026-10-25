@@ -274,7 +274,7 @@ test("named tool identity reads do not detoast excluded arguments", async () => 
   let captured: { text: string; params: unknown[] } | undefined;
   try {
     driver.options.debug = (_connection, query, params) => {
-      if (query.startsWith('select "id", "sequence", case'))
+      if (query.startsWith("select") && query.includes('"tool_name_pages"'))
         captured = { text: query, params: [...params] };
     };
     const page = await read({ view: "tools", toolName: "wanted", direction: "before", limit: 1 });
@@ -285,16 +285,18 @@ test("named tool identity reads do not detoast excluded arguments", async () => 
   }
   if (!captured) throw new Error("Identity query not captured");
   const query = captured;
-  const legacy = query.text.replace(
-    'coalesce("session_events"."tool_name", "session_events"."payload"->>\'name\')',
-    '"session_events"."payload"->>\'name\'',
-  );
-  const explain = (text: string) =>
+  // Retain the pre-projection scan as the detoasting control. Replacing only
+  // the fallback predicate in the new UNION would leave the indexed branch
+  // intact and would no longer exercise the old all-arguments read.
+  const legacy = `select id,sequence,type,turn_id,turn_association,duplicate_of_event_id
+    from session_events where workspace_id=$1 and session_id=$2 and sequence>0
+    and type='agent.toolCall.created' and payload->>'name'=$3 order by sequence desc limit 2`;
+  const explain = (text: string, params = query.params) =>
     withWorkspaceRls(client.db, workspaceId, async (tx) => {
       const fragments = text
         .split(/\$(\d+)/g)
         .map((part, index) =>
-          index % 2 === 0 ? sql.raw(part) : sql`${sql.param(query.params[Number(part) - 1])}`,
+          index % 2 === 0 ? sql.raw(part) : sql`${sql.param(params[Number(part) - 1])}`,
         );
       const rows = await tx.execute(
         sql`explain (analyze, buffers, format json) ${sql.join(fragments, sql``)}`,
@@ -308,7 +310,7 @@ test("named tool identity reads do not detoast excluded arguments", async () => 
       if (!plans?.[0]) throw new Error("Identity query plan not returned");
       return plans[0];
     });
-  const before = await explain(legacy);
+  const before = await explain(legacy, [workspaceId, sessionId, "wanted"]);
   const after = await explain(query.text);
   const buffers = (plan: typeof before) =>
     plan.Plan["Shared Hit Blocks"] + plan.Plan["Shared Read Blocks"];

@@ -23,7 +23,7 @@ export const GROUP_LABELS: Record<UsageGroupBy, string> = {
   project: "Project",
   rootSession: "Session",
   person: "Person",
-  schedule: "Schedule",
+  schedule: "Automation",
   source: "Source",
 };
 
@@ -104,7 +104,7 @@ function rowLabel(
     case "unfiled":
       return { label: groupBy === "project" ? "No project" : group.label };
     case "service":
-      return { label: "Automations", detail: "Schedules and agent-started work" };
+      return { label: "Automations", detail: "Automation runs and agent-started work" };
     case "other":
     case "restricted":
       return { label: group.label };

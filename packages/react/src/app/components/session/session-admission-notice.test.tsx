@@ -398,3 +398,92 @@ describe("session admission notice", () => {
     expect(wiring).not.toContain("grant");
   });
 });
+
+describe("waiting updates from other people's work", () => {
+  const access = (
+    isOwner: boolean,
+    waitingWork: { name: string | null; isYou: boolean; results: number }[],
+  ) => ({
+    sandboxId: "machine",
+    machineName: "Alex Mac",
+    ownerName: "Alex",
+    isOwner,
+    queuedTurnBlocked: false,
+    waitingWork,
+  });
+
+  test("the owner gets one calm notice naming whose updates wait, and can continue", async () => {
+    const onContinue = mock(async () => {});
+    const onRecheck = await render({
+      machineAccess: access(true, [{ name: "Sam", isYou: false, results: 3 }]),
+      onContinueWaitingWork: onContinue,
+    });
+    expect(container.textContent).toContain("3 updates from Sam’s agents are waiting for you");
+    expect(container.textContent).toContain("your personal machine “Alex Mac”");
+    expect(container.textContent).not.toContain("Permission needed");
+    expect(container.querySelectorAll("[role=alert]")).toHaveLength(0);
+    const button = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Continue with them",
+    )!;
+    await act(async () => button.click());
+    expect(onContinue).toHaveBeenCalledTimes(1);
+    expect(onRecheck).not.toHaveBeenCalled();
+  });
+
+  test("it explains a running chat too, not only a blocked one", async () => {
+    await render({
+      session: session("database_claim_rejected", "running"),
+      machineAccess: access(true, [{ name: "Sam", isYou: false, results: 1 }]),
+      onContinueWaitingWork: async () => {},
+    });
+    expect(container.textContent).toContain("An update from Sam’s agents is waiting for you");
+  });
+
+  test("a refused continue says what to do next", async () => {
+    await render({
+      machineAccess: access(true, [{ name: "Sam", isYou: false, results: 2 }]),
+      onContinueWaitingWork: async () => {
+        throw Object.assign(new Error("conflict"), { status: 409 });
+      },
+    });
+    const button = [...container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Continue with them",
+    )!;
+    await act(async () => button.click());
+    expect(container.querySelector("[role=alert]")?.textContent).toContain(
+      "Send a message in this chat first",
+    );
+  });
+
+  test("the person whose updates wait sees who they wait for and can ask them", async () => {
+    await render({
+      machineAccess: access(false, [{ name: "Sam", isYou: true, results: 2 }]),
+      onContinueWaitingWork: async () => {},
+    });
+    expect(container.textContent).toContain("2 updates from your agents are waiting for Alex");
+    expect(container.textContent).toContain("Alex can continue with them from this chat");
+    // They act from the composer's notice; nothing here they cannot do.
+    expect(container.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  test("someone else sees whose updates wait for the owner", async () => {
+    await render({
+      machineAccess: access(false, [
+        { name: "Sam", isYou: false, results: 1 },
+        { name: "Kim", isYou: false, results: 1 },
+      ]),
+    });
+    expect(container.textContent).toContain(
+      "2 updates from Sam and Kim’s agents are waiting for Alex",
+    );
+    expect(container.textContent).toContain("Only Alex can let the agent continue with them");
+  });
+
+  test("another kind of block keeps its own notice", async () => {
+    await render({
+      session: session("initiator_membership_required"),
+      machineAccess: access(true, [{ name: "Sam", isYou: false, results: 1 }]),
+    });
+    expect(container.textContent).toContain("Workspace access needed");
+  });
+});

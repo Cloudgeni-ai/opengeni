@@ -150,6 +150,23 @@ describe("custom API control center diagnostics", () => {
       ),
     ).toBe(false);
   });
+
+  test("allows only the exact Teams bot status read the card replaces when the catalog refreshes", () => {
+    const teamsBotUrl = `http://127.0.0.1:9/v1/workspaces/${workspaceId}/integrations/teams/bot`;
+    expect(isExpectedTeamsBotStatusCancellation("GET", teamsBotUrl, "net::ERR_ABORTED")).toBe(true);
+    for (const [method, url, error] of [
+      ["PUT", teamsBotUrl, "net::ERR_ABORTED"],
+      ["DELETE", teamsBotUrl, "net::ERR_ABORTED"],
+      ["GET", teamsBotUrl, "net::ERR_CONNECTION_RESET"],
+      ["GET", `${teamsBotUrl}?unexpected=true`, "net::ERR_ABORTED"],
+      ["GET", `${teamsBotUrl}/link`, "net::ERR_ABORTED"],
+      ["GET", teamsBotUrl.replace(workspaceId, accountId), "net::ERR_ABORTED"],
+      ["GET", teamsBotUrl.replace(":9/", ":10/"), "net::ERR_ABORTED"],
+      ["GET", "not a URL", "net::ERR_ABORTED"],
+    ]) {
+      expect(isExpectedTeamsBotStatusCancellation(method!, url!, error!)).toBe(false);
+    }
+  });
 });
 
 describe("custom API control center browser acceptance", () => {
@@ -594,9 +611,31 @@ function collectRuntimeDiagnostics(page: Page): string[] {
   page.on("requestfailed", (request) => {
     const errorText = request.failure()?.errorText ?? "failed";
     if (isExpectedSessionPageCancellation(request.method(), request.url(), errorText)) return;
+    if (isExpectedTeamsBotStatusCancellation(request.method(), request.url(), errorText)) return;
     diagnostics.push(`request:${request.method()} ${request.url()} ${errorText}`);
   });
   return diagnostics;
+}
+
+// The Teams card re-reads its bot status when the capability catalog
+// refreshes and cancels the read it replaces.
+function isExpectedTeamsBotStatusCancellation(
+  method: string,
+  requestUrl: string,
+  errorText: string,
+): boolean {
+  if (method !== "GET" || errorText !== "net::ERR_ABORTED") return false;
+  let url: URL;
+  try {
+    url = new URL(requestUrl);
+  } catch {
+    return false;
+  }
+  return (
+    url.origin === "http://127.0.0.1:9" &&
+    url.pathname === `/v1/workspaces/${workspaceId}/integrations/teams/bot` &&
+    url.search === ""
+  );
 }
 
 function isExpectedSessionPageCancellation(

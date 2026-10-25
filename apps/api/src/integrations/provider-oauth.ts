@@ -1,3 +1,4 @@
+import { integrationAvailable, requireIntegrationAvailable } from "./teams-rollout";
 import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
@@ -155,6 +156,7 @@ export async function startApiIntegrationProviderOAuth(
     payload: ApiIntegrationOAuthStartRequest;
   },
 ): Promise<OAuthStartResponse> {
+  requireIntegrationAvailable(deps.settings, input.workspaceId, input.payload.definitionId);
   const definition = requiredDefinition(input.payload.definitionId);
   await withOrganizationIntegrationAcquisition(deps.db, input, [definition.id], async () => {});
   const providerDomain = integrationDefinitionProviderDomain(definition);
@@ -359,7 +361,8 @@ export async function completeApiIntegrationProviderOAuth(
     if (!input.code) throw new ProviderOAuthCallbackError("missing_code");
 
     const definition = integrationDefinitionById(state.definitionId);
-    if (!definition) throw new ProviderOAuthCallbackError("state_invalid");
+    if (!definition || !integrationAvailable(deps.settings, state.workspaceId, definition.id))
+      throw new ProviderOAuthCallbackError("state_invalid");
     await withOrganizationIntegrationAcquisition(deps.db, state, [definition.id], async () => {});
     if (
       state.definitionFingerprint !== providerDefinitionFingerprint(definition) ||

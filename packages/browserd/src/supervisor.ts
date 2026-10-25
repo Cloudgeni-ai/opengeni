@@ -43,7 +43,21 @@ import {
   type BrowserInteractionAuthority,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
-import { createAttachedChromeDriver, createAttachedChromeTransport } from "./attached-cdp";
+import {
+  connectAttachedBrowserBridge,
+  createAttachedChromeDriver,
+  createAttachedChromeTransport,
+  settleAttachedTabLedger,
+  type AttachedBrowserBridgeConnector,
+} from "./attached-cdp";
+import {
+  AttachedTabLedgerRecorder,
+  processRunning,
+  readAttachedTabLedger,
+  readAttachedTabLedgers,
+  removeAttachedTabLedger,
+  writeAttachedTabLedger,
+} from "./attached-tab-ledger";
 import { CdpConnection } from "./cdp";
 import {
   AgentBrowserDriver,
@@ -327,12 +341,18 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
    * honestly without implicit recovery. */
   isAvailable?(): Promise<boolean>;
   isTerminal?(): boolean;
+  /** When the most recent JavaScript dialog still waiting for an answer in
+   * one of its tabs opened (epoch milliseconds), or null when none is.
+   * Releasing the browser then would lose it: a relaunched browser no longer
+   * has it, and in the person's own Chrome a debugger attached later can
+   * neither see nor answer it. */
+  openDialogSince?(): number | null;
   ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
   /** Release a failed reattach transport without closing its owned browser. */
   detach?(): Promise<void>;
-  /** Explicit end only (never shutdown or reattach): close tabs this session
-   * opened in a browser it does not own and left blank. */
-  closeUnusedOwnedTabs?(): Promise<void>;
+  /** Ends this runtime's hold on the browser. In the person's own browser
+   * (attached Chrome) it also closes the tabs the session opened and left
+   * blank, and releases Chrome's debugger, however the runtime goes away. */
   close(): Promise<void>;
 };
 
@@ -403,11 +423,16 @@ export type BrowserSupervisorOptions = {
     browserSessionId: string,
   ) => Promise<void>;
   /** Close a managed browser nobody used for this long, keeping its profile
-   * on disk; its next request relaunches it with the same tabs (default 10
-   * minutes, 0 disables). */
+   * on disk; its next request relaunches it with the same tabs. A session in
+   * the person's own Chrome lets go of that browser after the same time and
+   * continues in its tab on its next request (default 10 minutes, 0
+   * disables). */
   idleReleaseMs?: number;
   /** Clock for idle release; tests advance it. */
   now?: () => number;
+  /** Opens a bridge to an attached Chrome profile; tests substitute a
+   * fixture browser. */
+  connectAttachedBridge?: AttachedBrowserBridgeConnector;
 };
 
 /** Managed browsers stop after this long unused. The profile, tabs and
@@ -418,6 +443,10 @@ const IDLE_RELEASE_SWEEP_MS = 60_000;
 /** How long a handed-off browser gets to save its session and exit after a
  * close request before it is stopped by signal. */
 const HANDED_OFF_CLOSE_TIMEOUT_MS = 10_000;
+/** How long cleanup in the person's own browser after a crashed controller is
+ * retried (the browser may be closed or disconnected meanwhile). After that
+ * its tab ids are no longer trusted to name the same tabs. */
+const ATTACHED_LEFTOVER_RETRY_MS = 24 * 60 * 60_000;
 
 type Runtime = {
   options: BrowserRuntimeOptions;
@@ -515,14 +544,19 @@ export class BrowserSupervisor {
   private readonly now: () => number;
   private idleReleaseTimer: ReturnType<typeof setInterval> | null = null;
   /** Browsers an earlier controller handed off that this one is stopping. */
-  private readonly releasingDetached = new Map<string, Promise<void>>();
+  private readonly releasingDetached = new Map<string, Promise<unknown>>();
   /** Handed-off browsers the last sweep found still waiting for their idle
    * time; the controller is not empty while any remain. */
   private detachedWaiting = 0;
   private detachedSweep: Promise<string[]> | null = null;
+  private attachedSweep: Promise<string[]> | null = null;
+  private readonly connectAttachedBridge: AttachedBrowserBridgeConnector;
+  /** Sessions whose failed attached cleanup was already reported. */
+  private readonly attachedLeftoverWarnings = new Set<string>();
 
   private constructor(options: BrowserSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
+    this.connectAttachedBridge = options.connectAttachedBridge ?? connectAttachedBrowserBridge;
     this.ephemeralContextPoolEnabled = options.ephemeralContextPoolEnabled === true;
     this.passkeysEnabled = options.passkeys !== false;
     this.maxSessions = boundedPositiveInteger(
@@ -539,6 +573,7 @@ export class BrowserSupervisor {
               options.lightpandaBinary,
               options.headlessShell,
               options.networkIsolation !== false,
+              this.connectAttachedBridge,
             )));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
     this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
@@ -554,6 +589,7 @@ export class BrowserSupervisor {
         () => {
           void this.releaseIdleBrowsers();
           void this.releaseDetachedBrowsers();
+          void this.releaseAttachedLeftovers();
         },
         Math.min(IDLE_RELEASE_SWEEP_MS, this.idleReleaseMs),
       );
@@ -568,7 +604,12 @@ export class BrowserSupervisor {
    * browser process stops instead of running on. The session leaves this
    * controller; its next request finds it missing, and the control plane
    * recovers it from that directory: the same profile, relaunched with its
-   * last tabs. Returns the released browser session ids.
+   * last tabs.
+   *
+   * A session in the person's own Chrome is released the same way: the empty
+   * tabs it opened close and Chrome's debugger lets go of the browser, so
+   * Chrome stops showing that it is being debugged. Its recovery continues
+   * in the tab it was using. Returns the released browser session ids.
    */
   async releaseIdleBrowsers(): Promise<string[]> {
     if (this.closed) return [];
@@ -580,11 +621,11 @@ export class BrowserSupervisor {
     const idleBefore = this.now() - this.idleReleaseMs;
     const released: string[] = [];
     for (const runtime of [...this.sessions.values()]) {
-      if (!idleReleasable(runtime, idleBefore)) continue;
+      if (!idleReleasable(runtime, idleBefore, this.now())) continue;
       // A download still transferring is the browser at work with nobody
       // calling it; stopping the browser would fail the download.
       if (await downloadInProgress(runtime)) continue;
-      if (!idleReleasable(runtime, idleBefore)) continue;
+      if (!idleReleasable(runtime, idleBefore, this.now())) continue;
       const browserSessionId = runtime.options.browserSessionId;
       if (this.sessions.get(browserSessionId) !== runtime || this.ending.has(browserSessionId))
         continue;
@@ -626,6 +667,106 @@ export class BrowserSupervisor {
       this.detachedSweep = null;
     });
     return await this.detachedSweep;
+  }
+
+  /**
+   * Cleans up the person's own Chrome after attached browser sessions whose
+   * controller went away without doing it (it crashed, or the cleanup could
+   * not reach the browser): closes the tabs each opened that are still blank
+   * and releases Chrome's debugger attachments it held. Tabs that show a page,
+   * tabs the session did not open and attachments a live session holds are
+   * left alone. A session whose next request arrives meanwhile waits for its
+   * cleanup and then continues in the tab it was using. Returns the settled
+   * browser session ids.
+   */
+  async releaseAttachedLeftovers(): Promise<string[]> {
+    if (this.closed) return [];
+    this.attachedSweep ??= this.sweepAttachedLeftovers().finally(() => {
+      this.attachedSweep = null;
+    });
+    return await this.attachedSweep;
+  }
+
+  private async sweepAttachedLeftovers(): Promise<string[]> {
+    let ledgers;
+    try {
+      ledgers = await readAttachedTabLedgers(this.rootDirectory);
+    } catch (error) {
+      console.warn("browserd.attached_leftover_release_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+    const settled: string[] = [];
+    for (const ledger of ledgers) {
+      if (this.closed) break;
+      if (ledger.settled || this.attachedSessionBusy(ledger.browserSessionId)) continue;
+      // Another live controller on this machine may still hold the session.
+      if (ledger.ownerPid !== process.pid && processRunning(ledger.ownerPid)) continue;
+      if (await this.settleAttachedLeftovers(ledger.browserSessionId)) {
+        settled.push(ledger.browserSessionId);
+      }
+    }
+    return settled;
+  }
+
+  private attachedSessionBusy(browserSessionId: string): boolean {
+    return (
+      this.sessions.has(browserSessionId) ||
+      this.creating.has(browserSessionId) ||
+      this.ending.has(browserSessionId) ||
+      this.adopting.has(browserSessionId) ||
+      this.releasingDetached.has(browserSessionId)
+    );
+  }
+
+  /** Settle one session's leftovers, claimed like a handed-off browser's
+   * release so that its recovery or end waits instead of racing it. The
+   * check and claim happen without yielding. Returns whether it settled; a
+   * session another live controller on this machine took over meanwhile is
+   * left to that controller. */
+  private async settleAttachedLeftovers(browserSessionId: string): Promise<boolean> {
+    if (this.attachedSessionBusy(browserSessionId)) return false;
+    const sessionDirectory = join(this.rootDirectory, "sessions", browserSessionId);
+    const release = (async (): Promise<boolean> => {
+      const ledger = readAttachedTabLedger(sessionDirectory);
+      if (!ledger || ledger.settled) return true;
+      if (ledger.ownerPid !== process.pid && processRunning(ledger.ownerPid)) return false;
+      let next;
+      try {
+        next = await settleAttachedTabLedger(ledger, this.connectAttachedBridge, Date.now());
+      } catch (error) {
+        if (Date.now() - ledger.updatedAt < ATTACHED_LEFTOVER_RETRY_MS) throw error;
+        next = {
+          ...ledger,
+          settled: true,
+          createdTabs: [],
+          attachedTabs: [],
+          updatedAt: Date.now(),
+        };
+      }
+      writeAttachedTabLedger(sessionDirectory, next);
+      if (!next.settled) throw new Error("some tabs could not be cleaned up yet");
+      return true;
+    })();
+    this.releasingDetached.set(browserSessionId, release);
+    try {
+      if (!(await release)) return false;
+      this.attachedLeftoverWarnings.delete(browserSessionId);
+      return true;
+    } catch (error) {
+      if (!this.attachedLeftoverWarnings.has(browserSessionId)) {
+        this.attachedLeftoverWarnings.add(browserSessionId);
+        console.warn("browserd.attached_leftover_release_failed", {
+          browserSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return false;
+    } finally {
+      if (this.releasingDetached.get(browserSessionId) === release)
+        this.releasingDetached.delete(browserSessionId);
+    }
   }
 
   private async sweepDetachedBrowsers(): Promise<string[]> {
@@ -810,6 +951,8 @@ export class BrowserSupervisor {
     // stopped now rather than at the first sweep; recent ones are counted so
     // this controller is not stopped as empty before their idle time ends.
     void supervisor.releaseDetachedBrowsers();
+    // Cleanup a crashed controller left undone in a person's own Chrome.
+    void supervisor.releaseAttachedLeftovers();
     return supervisor;
   }
 
@@ -1219,8 +1362,9 @@ export class BrowserSupervisor {
    * graceful shutdown and reattached on its next causal request, and a session
    * whose driver already ended has nothing left to lose. A quiescent attached
    * Chrome session is likewise left intact in the user's browser. Any other
-   * session (external providers, launches without a durable working runtime)
-   * or any admitted command still blocks. */
+   * session (external providers, launches without a durable working runtime),
+   * a JavaScript dialog an agent has yet to answer, or any admitted command
+   * still blocks. */
   isIdle(): boolean {
     return this.updateBlockers().length === 0;
   }
@@ -1252,7 +1396,7 @@ export class BrowserSupervisor {
         });
         continue;
       }
-      if (restartPreservesRuntime(runtime)) continue;
+      if (restartPreservesRuntime(runtime, this.now())) continue;
       const kind =
         runtime.recovery !== null
           ? "browser_recovery"
@@ -1272,6 +1416,7 @@ export class BrowserSupervisor {
       this.sessions.size === 0 &&
       this.detachedWaiting === 0 &&
       this.detachedSweep === null &&
+      this.attachedSweep === null &&
       this.isIdle()
     );
   }
@@ -1600,18 +1745,67 @@ export class BrowserSupervisor {
     return this.requireRecording(reference, recordingId).summary();
   }
 
-  /** Uploads a stopped recording's bundle through a narrow object grant. */
+  /** Uploads a stopped recording's bundle through a narrow object grant and
+   * waits for it to land, however long that takes. */
   async exportRecording(
     reference: BrowserSessionReference,
     recordingId: string,
     upload: BrowserDownloadExportRequestValue["upload"],
   ): Promise<{ sizeBytes: number; sha256: string }> {
-    const bundle = this.requireRecording(reference, recordingId).exportable();
-    await this.uploadDownload(bundle.path, upload, {
+    const recording = this.requireRecording(reference, recordingId);
+    const bundle = recording.exportable();
+    await this.recordingTransfer(recording, upload).done;
+    return { sizeBytes: bundle.sizeBytes, sha256: bundle.sha256 };
+  }
+
+  /** Starts or joins the bundle upload and waits at most `waitMs` for it. A
+   * slow link keeps uploading after this returns `uploading`; asking again
+   * with a grant for the same object joins that upload. */
+  async uploadRecording(
+    reference: BrowserSessionReference,
+    recordingId: string,
+    upload: BrowserDownloadExportRequestValue["upload"],
+    waitMs: number,
+    replace = false,
+  ): Promise<{ state: "uploading" | "uploaded"; sizeBytes: number; sha256: string }> {
+    const recording = this.requireRecording(reference, recordingId);
+    const bundle = recording.exportable();
+    const transfer = this.recordingTransfer(recording, upload, replace);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = new Promise<"waited">((settle) => {
+      timer = setTimeout(() => settle("waited"), waitMs);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([transfer.done, waited]);
+    } finally {
+      clearTimeout(timer);
+    }
+    return {
+      state: transfer.state === "uploaded" ? "uploaded" : "uploading",
       sizeBytes: bundle.sizeBytes,
       sha256: bundle.sha256,
-    });
-    return { sizeBytes: bundle.sizeBytes, sha256: bundle.sha256 };
+    };
+  }
+
+  private recordingTransfer(
+    recording: BrowserRecording,
+    upload: BrowserDownloadExportRequestValue["upload"],
+    replace = false,
+  ) {
+    const bundle = recording.exportable();
+    const target = new URL(upload.url);
+    target.search = "";
+    return recording.transferTo(
+      target.toString(),
+      async () => {
+        await this.uploadDownload(bundle.path, upload, {
+          sizeBytes: bundle.sizeBytes,
+          sha256: bundle.sha256,
+        });
+      },
+      replace,
+    );
   }
 
   private requireRecording(
@@ -1727,6 +1921,9 @@ export class BrowserSupervisor {
         await releasing.catch(() => undefined);
       }
       const sessionDirectory = join(this.rootDirectory, "sessions", reference.browserSessionId);
+      // An attached session released earlier: its end still cleans up what
+      // the release could not, then forgets the session's tabs.
+      if (!suspendForShutdown) await this.endReleasedAttachedSession(sessionDirectory);
       let workingRuntimePresent = true;
       try {
         await lstat(join(sessionDirectory, "working-runtime.sqlite"));
@@ -1796,16 +1993,8 @@ export class BrowserSupervisor {
         // lifecycle=ending fences queued/new dispatches without replaying input.
         await runtime.controller.waitForIdle();
       }
-      if (
-        runtime.driver.closeUnusedOwnedTabs &&
-        !suspendForShutdown &&
-        !driverAlreadyClosed &&
-        !runtime.driver.isTerminal?.()
-      ) {
-        // Ending a session in the person's own Chrome must not leave behind the
-        // empty tab it opened. Best effort: the end itself must still succeed.
-        await runtime.driver.closeUnusedOwnedTabs?.().catch(() => undefined);
-      }
+      // Closing the driver also closes the empty tabs a session opened in the
+      // person's own Chrome, on every path: an end, a shutdown or a restart.
       await this.disposeRuntime(
         runtime,
         options.removeState ?? false,
@@ -1817,11 +2006,25 @@ export class BrowserSupervisor {
     try {
       await ending;
       this.sessions.delete(reference.browserSessionId);
+      // An ended attached session will not continue in its tabs.
+      if (!suspendForShutdown && runtime.options.transport.kind === "attached_chrome") {
+        const ledger = readAttachedTabLedger(runtime.sessionDirectory);
+        if (ledger?.settled) removeAttachedTabLedger(runtime.sessionDirectory);
+      }
     } finally {
       if (this.ending.get(reference.browserSessionId) === ending) {
         this.ending.delete(reference.browserSessionId);
       }
     }
+  }
+
+  /** The end of an attached session no runtime holds (it was released): settle
+   * whatever cleanup its release left, and forget its tabs once settled. */
+  private async endReleasedAttachedSession(sessionDirectory: string): Promise<void> {
+    const ledger = readAttachedTabLedger(sessionDirectory);
+    if (!ledger) return;
+    if (!ledger.settled && !(await this.settleAttachedLeftovers(ledger.browserSessionId))) return;
+    removeAttachedTabLedger(sessionDirectory);
   }
 
   private async retireTerminalSessions(): Promise<void> {
@@ -1842,6 +2045,7 @@ export class BrowserSupervisor {
   }
 
   private async performClose(): Promise<void> {
+    await this.attachedSweep?.catch(() => undefined);
     await Promise.allSettled([...this.creationRequests]);
     await Promise.allSettled([...this.creating.values()]);
     // A browser already unused for the idle release time is stopped, not
@@ -2284,10 +2488,15 @@ export class BrowserSupervisor {
       let driverClosed = driver === null;
       let restoredProfileRemoved = false;
       // A launch from an adopted copy started a new process; it is closed,
-      // never detached, so the copy is provably unused again.
+      // never detached, so the copy is provably unused again. So is a
+      // recovery that relaunched the profile because its recorded browser had
+      // exited: detaching would leave that new browser running with nothing
+      // tracking it, and every later recovery refused because the profile
+      // could not be proven unused. Once it is closed, the next recovery
+      // reinstates the receipt it started from and relaunches the profile.
       const adoptedLaunch = recoveredReceipt?.intent === "adopt";
       try {
-        if (recoveredReceipt && !adoptedLaunch) await driver?.detach?.();
+        if (recoveredReceipt && !adoptedLaunch && !relaunchesProfile) await driver?.detach?.();
         else await driver?.close();
         driverClosed = true;
       } catch (cleanupError) {
@@ -2368,7 +2577,9 @@ export class BrowserSupervisor {
           failures.push(cleanupError);
         }
       }
-      if (recoveredReceipt && !adoptedLaunch && !driverClosed)
+      // A relaunch whose browser would not close is caught by the next
+      // recovery's own check that no process still uses the profile.
+      if (recoveredReceipt && !adoptedLaunch && !driverClosed && !relaunchesProfile)
         this.recoveryTransportsUncertain.add(options.browserSessionId);
       if (workingReceipt) {
         console.error("browser launch failed before its working-runtime receipt completed", {
@@ -3332,22 +3543,46 @@ async function createBrowserDriver(
   lightpandaBinary?: () => Promise<ResolvedLightpandaBinary>,
   headlessShell?: VerifiedHeadlessShell,
   networkIsolation = true,
+  connectAttachedBridge: AttachedBrowserBridgeConnector = connectAttachedBrowserBridge,
 ): Promise<BrowserSupervisorDriver> {
   if (context.transport.kind === "attached_chrome") {
-    const attached = await createAttachedChromeTransport({
-      deviceId: context.transport.deviceId,
-      connectionGeneration: context.transport.connectionGeneration,
-      browserName: context.transport.browserName,
-      browserVersion: context.transport.browserVersion,
-      ...(context.transport.authorityFile
-        ? { authorityFile: context.transport.authorityFile }
-        : {}),
+    const transport = context.transport;
+    // The session's tabs and attachments in the person's browser outlive
+    // this runtime; a later runtime of the session, or a later controller
+    // after a crash, continues from this record.
+    const ledger = AttachedTabLedgerRecorder.open(context.sessionDirectory, {
+      browserSessionId: context.browserSessionId,
+      deviceId: transport.deviceId,
+      connectionGeneration: transport.connectionGeneration,
+      ...(transport.authorityFile ? { authorityFile: transport.authorityFile } : {}),
     });
+    let attached: Awaited<ReturnType<typeof createAttachedChromeTransport>>;
+    try {
+      attached = await createAttachedChromeTransport({
+        deviceId: transport.deviceId,
+        connectionGeneration: transport.connectionGeneration,
+        browserName: transport.browserName,
+        browserVersion: transport.browserVersion,
+        ...(transport.authorityFile ? { authorityFile: transport.authorityFile } : {}),
+        connectBridge: connectAttachedBridge,
+        inheritedAttachments: ledger.inheritedAttachments,
+        onAttachmentsChange: (tabs) => ledger.attachmentsChanged(tabs),
+      });
+    } catch (error) {
+      ledger.abandon();
+      throw error;
+    }
+    const connection = attached.connection;
     return createAttachedChromeDriver(
       context,
       attached,
       context.resolveWorkspaceFiles,
       context.downloadEvents,
+      {
+        previous: ledger.previous,
+        onChange: (tabs) => ledger.tabsChanged(tabs),
+        onClosed: (tabsSettled) => ledger.closed(tabsSettled, connection.leftoverAttachments()),
+      },
     );
   }
   if (context.transport.kind === "managed" && context.transport.engine === "lightpanda") {
@@ -3522,18 +3757,27 @@ function hasPreservableWorkingRuntime(runtime: Runtime): boolean {
   );
 }
 
-/** A managed browser nobody is using, whose stopped profile its next request
- * can relaunch: no request, live view, recording or recovery in progress. */
-function idleReleasable(runtime: Runtime, idleBefore: number): boolean {
+/** A browser nobody is using that its next request can bring back: no
+ * request, live view, recording, recovery or recent unanswered JavaScript
+ * dialog in progress (an agent waiting on a dialog is still using the
+ * browser, and releasing it would lose the dialog). A managed browser
+ * needs a stopped profile its next request can relaunch. A session in the
+ * person's own Chrome needs nothing kept here: its tabs live on in Chrome, and
+ * its next request continues in the tab it was using. */
+function idleReleasable(runtime: Runtime, idleBefore: number, now: number): boolean {
+  const transport = runtime.options.transport.kind;
   return (
-    runtime.options.transport.kind === "managed" &&
+    (transport === "managed" || transport === "attached_chrome") &&
     runtime.lastUsedAt <= idleBefore &&
     runtime.presence.size === 0 &&
     runtime.recording?.summary().state !== "recording" &&
     runtime.recovery === null &&
     runtime.externalAuthTail === null &&
     runtime.controller.isIdle() &&
-    hasPreservableWorkingRuntime(runtime)
+    !awaitsDialogAnswer(runtime, now) &&
+    (transport === "attached_chrome"
+      ? runtime.lifecycle === "active" && runtime.driver.isTerminal?.() !== true
+      : hasPreservableWorkingRuntime(runtime))
   );
 }
 
@@ -3549,16 +3793,32 @@ async function downloadInProgress(runtime: Runtime): Promise<boolean> {
   }
 }
 
+/** How long an unanswered JavaScript dialog keeps its session's browser from
+ * an idle release or an agent restart. A dialog nobody answered in that time
+ * is taken as forgotten (or its close was never reported); losing it then is
+ * better than holding the browser, and the machine's updates, indefinitely. */
+const DIALOG_HOLD_MS = 30 * 60_000;
+
+/** Whether the session has a JavaScript dialog an agent may still answer. */
+function awaitsDialogAnswer(runtime: Runtime, now: number): boolean {
+  const since = runtime.driver.openDialogSince?.() ?? null;
+  return since !== null && now - since < DIALOG_HOLD_MS;
+}
+
 /** A restart now loses neither admitted work nor unrecoverable session state. */
-function restartPreservesRuntime(runtime: Runtime): boolean {
+function restartPreservesRuntime(runtime: Runtime, now: number): boolean {
   if (runtime.recovery !== null || runtime.externalAuthTail !== null) return false;
   if (!runtime.controller.isIdle()) return false;
   // A session whose driver already ended has no live state left to lose.
   if (runtime.driver.isTerminal?.()) return true;
-  // Attached Chrome lives outside this controller: its tabs, pages and
-  // debugger attachments survive our restart, and the agent keeps the
-  // profile's placement stable across it only for extensions that report a
-  // live-state generation. The agent's own update gate refuses older ones.
+  // A restart would lose a dialog the agent has yet to answer.
+  if (awaitsDialogAnswer(runtime, now)) return false;
+  // Attached Chrome lives outside this controller: its tabs and pages survive
+  // our restart (only the empty tabs the session opened close, and Chrome's
+  // debugger is released), and the session's next request continues in the
+  // tab it was using. The agent keeps the profile's placement stable across
+  // the restart only for extensions that report a live-state generation. The
+  // agent's own update gate refuses older ones.
   if (runtime.options.transport.kind === "attached_chrome") return runtime.lifecycle === "active";
   return hasPreservableWorkingRuntime(runtime);
 }

@@ -101,6 +101,45 @@ export type SessionWorkflowClient = {
     versionId?: string;
     workflowId?: string;
   }) => Promise<void>;
+  /**
+   * Durably deletes objects a request staged in storage once `deleteAfter`
+   * passes, whether or not the request ever finishes. Repeating the same keys
+   * is a no-op. Optional for embedded clients; callers without it must clean
+   * up within the request.
+   */
+  scheduleTransientObjectDeletion?: (input: {
+    workspaceId: string;
+    objectKeys: string[];
+    deleteAfter: Date;
+  }) => Promise<void>;
+  /**
+   * Start a recording's transcript or deletion workflow. Starting one that is
+   * already running does nothing. Optional for embedded clients; the worker's
+   * recovery sweep starts any it misses.
+   */
+  startRecordingWorkflow?: (input: {
+    kind: "transcript" | "deletion";
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    versionId: string | null;
+    ownerSubjectId: string;
+  }) => Promise<void>;
+  /**
+   * Record an agent's browser recording whose frame bundle is uploaded and
+   * make its video. Starting it again for the same recording while it runs,
+   * or after it finished, does nothing.
+   */
+  startBrowserRecordingVideo?: (input: {
+    accountId: string;
+    workspaceId: string;
+    recordingId: string;
+    ownerSubjectId: string;
+    visibility: "private" | "workspace";
+    startedAt: string;
+    durationMilliseconds: number;
+    bundle: { byteLength: number; sha256: string };
+  }) => Promise<void>;
   check?: () => Promise<void>;
 };
 
@@ -244,6 +283,8 @@ export type AppDependencies = {
   slackFetch?: typeof fetch;
   /** Injectable Google OAuth/Drive transport for deterministic connector tests. */
   googleDriveFetch?: typeof fetch;
+  /** Injectable transport for reading event sources (MCP servers and Gmail), for tests. */
+  eventSourceFetch?: typeof fetch;
   /** Injectable Fiken API transport for deterministic connector tests. */
   fikenFetch?: typeof fetch;
   /** Injectable Integration Definition OAuth/API transport for deterministic tests. */

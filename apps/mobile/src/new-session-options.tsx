@@ -441,7 +441,9 @@ function OptionChip(props: {
         flexDirection: "row",
         alignItems: "center",
         gap: 6,
-        height: 28,
+        // Grows with larger text sizes instead of clipping the label.
+        minHeight: 28,
+        paddingVertical: 4,
         paddingLeft: 10,
         paddingRight: props.onRemove ? 8 : 10,
         borderRadius: 14,

@@ -24,6 +24,7 @@ export type UnitTestProcess = {
 export type UnitTestProcessPlan = {
   parallel: UnitTestProcess[];
   explicitConcurrency: UnitTestProcess[];
+  cpuSaturating: UnitTestProcess[];
   wallClockSensitive: UnitTestProcess[];
   sharedPostgresExclusive: UnitTestProcess[];
   clusterRoleSensitive: UnitTestProcess[];
@@ -81,6 +82,14 @@ export function sourceRequiresExclusiveSharedPostgres(source: string): boolean {
   return /opengeni:test-shared-postgres-exclusive/u.test(source);
 }
 
+// A file whose test drives a multi-core build or tool (for example a native
+// `cargo test`) uses every CPU on the runner by itself. Ordinary sibling files
+// each assume one CPU slot of the shared budget, so running beside it starves
+// them past their own timeouts. Such a file declares itself and runs alone.
+export function sourceSaturatesCpu(source: string): boolean {
+  return /opengeni:test-saturates-cpu/u.test(source);
+}
+
 function sourceProvisionsRolesOnSharedDatabase(source: string): boolean {
   for (const match of source.matchAll(
     /\b([A-Za-z_$][\w$]*)\s*=\s*await\s+acquireSharedTestDatabase\s*\(/g,
@@ -122,11 +131,18 @@ export function planUnitTestProcesses(
       .filter(([, source]) => sourceUsesExplicitTestConcurrency(source))
       .map(([path]) => path),
   );
+  const cpuSaturating = new Set(
+    [...sources]
+      .filter(([path, source]) => !explicitConcurrency.has(path) && sourceSaturatesCpu(source))
+      .map(([path]) => path),
+  );
   const wallClockSensitive = new Set(
     [...sources]
       .filter(
         ([path, source]) =>
-          !explicitConcurrency.has(path) && sourceUsesWallClockPerformanceAssertion(source),
+          !explicitConcurrency.has(path) &&
+          !cpuSaturating.has(path) &&
+          sourceUsesWallClockPerformanceAssertion(source),
       )
       .map(([path]) => path),
   );
@@ -135,6 +151,7 @@ export function planUnitTestProcesses(
       .filter(
         ([path, source]) =>
           !explicitConcurrency.has(path) &&
+          !cpuSaturating.has(path) &&
           !wallClockSensitive.has(path) &&
           sourceRequiresExclusiveSharedPostgres(source),
       )
@@ -145,6 +162,7 @@ export function planUnitTestProcesses(
       .filter(
         ([path, source]) =>
           !explicitConcurrency.has(path) &&
+          !cpuSaturating.has(path) &&
           !wallClockSensitive.has(path) &&
           !sharedPostgresExclusive.has(path) &&
           sourceMutatesSharedPostgresRole(source),
@@ -152,6 +170,7 @@ export function planUnitTestProcesses(
       .map(([path]) => path),
   );
   const usesExplicitConcurrency = (path: string): boolean => explicitConcurrency.has(path);
+  const saturatesCpu = (path: string): boolean => cpuSaturating.has(path);
   const usesWallClock = (path: string): boolean => wallClockSensitive.has(path);
   const requiresExclusiveSharedPostgres = (path: string): boolean =>
     sharedPostgresExclusive.has(path);
@@ -159,22 +178,26 @@ export function planUnitTestProcesses(
   const parallelBatch = batch.filter(
     (path) =>
       !usesExplicitConcurrency(path) &&
+      !saturatesCpu(path) &&
       !usesWallClock(path) &&
       !requiresExclusiveSharedPostgres(path) &&
       !mutatesClusterRole(path),
   );
   const concurrentBatch = batch.filter(usesExplicitConcurrency);
+  const cpuSaturatingBatch = batch.filter(saturatesCpu);
   const wallClockBatch = batch.filter(usesWallClock);
   const sharedPostgresBatch = batch.filter(requiresExclusiveSharedPostgres);
   const clusterRoleBatch = batch.filter(mutatesClusterRole);
   const parallelIsolated = isolated.filter(
     (path) =>
       !usesExplicitConcurrency(path) &&
+      !saturatesCpu(path) &&
       !usesWallClock(path) &&
       !requiresExclusiveSharedPostgres(path) &&
       !mutatesClusterRole(path),
   );
   const concurrentIsolated = isolated.filter(usesExplicitConcurrency);
+  const cpuSaturatingIsolated = isolated.filter(saturatesCpu);
   const wallClockIsolated = isolated.filter(usesWallClock);
   const sharedPostgresIsolated = isolated.filter(requiresExclusiveSharedPostgres);
   const clusterRoleIsolated = isolated.filter(mutatesClusterRole);
@@ -193,6 +216,12 @@ export function planUnitTestProcesses(
     explicitConcurrency: [
       ...concurrentBatch.map((path) => ({ files: [path], isolated: false })),
       ...concurrentIsolated.map((path) => ({ files: [path], isolated: true })),
+    ],
+    // A file that drives a multi-core build already uses the whole runner, so
+    // it runs alone after the parallel pool instead of starving its siblings.
+    cpuSaturating: [
+      ...cpuSaturatingBatch.map((path) => ({ files: [path], isolated: false })),
+      ...cpuSaturatingIsolated.map((path) => ({ files: [path], isolated: true })),
     ],
     // Wall-clock assertions measure the tested operation, not unrelated CPU
     // contention from sibling files. Keep their existing limits unchanged and
@@ -360,7 +389,7 @@ async function main(): Promise<void> {
   const budget = testConcurrencyBudget();
   const processes = planUnitTestProcesses(process.cwd(), batch, isolated, configuredBatchSize);
   process.stdout.write(
-    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} wallClockSensitive=${processes.wallClockSensitive.length} sharedPostgresExclusive=${processes.sharedPostgresExclusive.length} clusterRoleSensitive=${processes.clusterRoleSensitive.length}\n`,
+    `[unit-shard] process plan: ${describeTestConcurrencyBudget(budget)} parallel=${processes.parallel.length} explicitConcurrency=${processes.explicitConcurrency.length} cpuSaturating=${processes.cpuSaturating.length} wallClockSensitive=${processes.wallClockSensitive.length} sharedPostgresExclusive=${processes.sharedPostgresExclusive.length} clusterRoleSensitive=${processes.clusterRoleSensitive.length}\n`,
   );
   const parallelStatus = await runBoundedTestProcesses(
     processes.parallel,
@@ -372,6 +401,10 @@ async function main(): Promise<void> {
     run(task, budget, 1, budget.concurrency),
   );
   if (explicitStatus !== 0) process.exit(explicitStatus);
+  const cpuSaturatingStatus = await runBoundedTestProcesses(processes.cpuSaturating, 1, (task) =>
+    run(task, budget, 1, 1),
+  );
+  if (cpuSaturatingStatus !== 0) process.exit(cpuSaturatingStatus);
   const wallClockStatus = await runBoundedTestProcesses(processes.wallClockSensitive, 1, (task) =>
     run(task, budget, 1, 1),
   );

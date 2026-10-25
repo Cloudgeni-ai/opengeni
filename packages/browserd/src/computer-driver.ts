@@ -24,6 +24,7 @@ import {
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
   type ComputerInteractionDriver,
+  type InteractionDispatchTrace,
 } from "@opengeni/interaction";
 import {
   LatestComputerFrameSubscription,
@@ -40,6 +41,7 @@ import {
   type ComputerBackendCaptureOptions,
   type ComputerBackendFrame,
   type ComputerBackendObservation,
+  type ComputerBackendRoleStandIn,
   type ComputerBackendTarget,
   type ComputerBackend,
 } from "./computer-backend";
@@ -92,6 +94,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
   /** Set once a failed helper could not be shut down. No replacement may
    * start beside it, so every later call fails with this clear reason. */
   private helperLost: InteractionControllerError | null = null;
+  /** The target last observed or acted on, listed as current (see
+   * ComputerTarget.current). */
+  private current: string | null = null;
 
   /** Secret values typed in this session; redacted from everything it returns,
    * since desktop accessibility trees and window titles show field values. */
@@ -114,7 +119,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
     try {
       return this.typedSecrets.redact(
         (await this.readWithRecovery(async (client) => await client.targets())).map((target) =>
-          this.projectTarget(target),
+          // Only the listing marks the current target; observations and
+          // receipts name their own.
+          this.projectTarget(target, target.id === this.current),
         ),
       );
     } catch (error) {
@@ -156,6 +163,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
         }
         return { ...observed, frameId: frame.frameId };
       });
+      this.current = observation.target.id;
       return this.typedSecrets.redact(this.projectObservation(observation));
     } catch (error) {
       throw predispatchError(error, this.typedSecrets.merged());
@@ -223,17 +231,25 @@ export class ComputerDriver implements ComputerInteractionDriver {
     }
   }
 
-  async dispatch(command: ComputerActionCommand): Promise<ComputerObservationValue | null> {
+  async dispatch(
+    command: ComputerActionCommand,
+    trace?: InteractionDispatchTrace,
+  ): Promise<ComputerObservationValue | null> {
     this.assertOpen();
     this.typedSecrets.remember(command.secretValues);
     const secretValues = this.typedSecrets.merged(command.secretValues);
     const materialized = materializeActionCommandSecrets(command);
+    // A stand-in names an element's label, which could show a typed secret.
+    const standIn = trace
+      ? (item: ComputerBackendRoleStandIn) =>
+          trace.record(redactInteractionSecretValues(item, secretValues))
+      : undefined;
     try {
       const client = await this.activeClient();
       this.assertClickContinuation(command, client);
       this.assertActionBatch(command, client);
       const native = nativeCommand(materialized);
-      const observation = await client.dispatch(native).catch(async (error: unknown) => {
+      const observation = await client.dispatch(native, standIn).catch(async (error: unknown) => {
         // A pasted value stays on the seat clipboard, where clipboard reads
         // would expose it; text with resolved secrets is never pasted.
         const text =
@@ -243,6 +259,9 @@ export class ComputerDriver implements ComputerInteractionDriver {
         if (text === null) throw error;
         return await pasteText(client, native, text);
       });
+      // An action that opened a window returns that window, and leaves the
+      // computer in it.
+      this.current = observation?.target.id ?? command.targetId;
       return observation === null
         ? null
         : redactInteractionSecretValues(this.projectObservation(observation), secretValues);
@@ -422,9 +441,10 @@ export class ComputerDriver implements ComputerInteractionDriver {
       throw new UnsettledCleanupError(failures, "computer driver cleanup failed");
   }
 
-  private projectTarget(target: ComputerBackendTarget): ComputerTargetValue {
+  private projectTarget(target: ComputerBackendTarget, current = false): ComputerTargetValue {
     return ComputerTarget.parse({
       ...target,
+      ...(current ? { current: true } : {}),
       computerSessionId: this.computerSessionId,
       controllerGeneration: this.controllerGeneration,
     });

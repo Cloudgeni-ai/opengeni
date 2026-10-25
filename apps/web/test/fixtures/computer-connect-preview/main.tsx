@@ -27,7 +27,7 @@ document.documentElement.dataset.ogTheme = params.get("theme") === "dark" ? "dar
 function Preview() {
   const computer = useThisComputer(host, "workspace");
   const [open, setOpen] = useState(false);
-  const desktop = useMemo(() => ({ computer, openSetup: () => setOpen(true) }), [computer]);
+  const desktop = useMemo(() => ({ computer, allowPermissions: () => setOpen(true) }), [computer]);
   const embedded = params.get("environment") === "embed";
   return (
     <main style={{ maxWidth: 620, margin: "40px auto", padding: 16 }}>

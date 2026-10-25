@@ -1,6 +1,6 @@
 import { eq, sql } from "drizzle-orm";
 
-import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
+import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import * as schema from "./schema";
 
 /**
@@ -11,6 +11,8 @@ import * as schema from "./schema";
 export type OrganizationPrivacyPreferences = {
   defaultVisibility: "workspace_shared" | "user_private";
   adminsSeePrivateSchedules: boolean;
+  /** Off: people neither see nor start new work in their Personal workspace (0918). */
+  personalWorkspacesEnabled: boolean;
   updatedAt: string | null;
 };
 
@@ -26,6 +28,7 @@ async function readPreferences(
   return {
     defaultVisibility: row?.defaultVisibility ?? "workspace_shared",
     adminsSeePrivateSchedules: row?.adminsSeePrivateSchedules ?? true,
+    personalWorkspacesEnabled: row?.personalWorkspacesEnabled ?? true,
     updatedAt: row?.updatedAt.toISOString() ?? null,
   };
 }
@@ -41,6 +44,31 @@ export async function getOrganizationPrivacyPreferences(
 }
 
 /**
+ * True when this is a Personal workspace in an organization whose owners and
+ * admins turned Personal workspaces off: nobody starts new chats or schedules
+ * there. A shared workspace, or any workspace while the setting is on, is open.
+ */
+export async function personalWorkspaceClosedToNewWork(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      if ((await readPreferences(scopedDb, input.accountId)).personalWorkspacesEnabled) {
+        return false;
+      }
+      const [row] = await rawRows<{ kind: string | null }>(
+        scopedDb,
+        sql`select get_workspace_kind(${input.accountId}::uuid, ${input.workspaceId}::uuid) as kind`,
+      );
+      return row?.kind === "personal";
+    },
+  );
+}
+
+/**
  * Change the organization's privacy choices. Only an active owner or admin,
  * or an organization key with administration rights, may; the database raises
  * 42501 for anyone else. Omitted fields keep their current value.
@@ -52,6 +80,7 @@ export async function updateOrganizationPrivacyPreferences(
     actorSubjectId: string;
     defaultVisibility?: "workspace_shared" | "user_private";
     adminsSeePrivateSchedules?: boolean;
+    personalWorkspacesEnabled?: boolean;
   },
 ): Promise<OrganizationPrivacyPreferences> {
   return await withRlsContext(
@@ -75,6 +104,9 @@ export async function updateOrganizationPrivacyPreferences(
           : {}),
         ...(input.adminsSeePrivateSchedules !== undefined
           ? { adminsSeePrivateSchedules: input.adminsSeePrivateSchedules }
+          : {}),
+        ...(input.personalWorkspacesEnabled !== undefined
+          ? { personalWorkspacesEnabled: input.personalWorkspacesEnabled }
           : {}),
       };
       await scopedDb

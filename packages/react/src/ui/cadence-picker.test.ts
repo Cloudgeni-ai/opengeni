@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { createOpenGeniText } from "../messages/runtime";
 import {
   cadenceFromScheduleSpec,
   describeCadence,
@@ -104,6 +105,30 @@ describe("describeCadence", () => {
     expect(describeCadence(rule, { timeZone: "UTC" }).sentence).toBe("Runs every day at 06:00 UTC");
     expect(describeCadence(rule, { timeZone: "America/New_York" }).short).toBe(
       "Every day at 06:00 · New York",
+    );
+  });
+
+  test("speaks the host's language", () => {
+    const text = createOpenGeniText({
+      locale: "nb",
+      messages: {
+        "cadence.and": "{head} og {last}",
+        "cadence.at": "kl. {time} {zone}",
+        "cadence.zoneTime": "{city}-tid",
+        "cadence.day.mon.long": "mandag",
+        "cadence.day.thu.long": "torsdag",
+        "cadence.describe.weekly": "Kjører hver {days} {at}",
+        "cadence.every.minutes_other": "{count}. minutt",
+        "cadence.describe.interval": "Kjører hvert {every}",
+      },
+    });
+    const weekly: CadenceRule = { frequency: "weekly", days: ["thu", "mon"], time: "09:30" };
+    expect(describeCadence(weekly, { timeZone: "Europe/Oslo", text }).sentence).toBe(
+      "Kjører hver mandag og torsdag kl. 09:30 Oslo-tid",
+    );
+    const interval: CadenceRule = { frequency: "interval", every: 15, unit: "minutes" };
+    expect(describeCadence(interval, { timeZone: "Europe/Oslo", text }).sentence).toBe(
+      "Kjører hvert 15. minutt",
     );
   });
 });
@@ -231,6 +256,26 @@ describe("describeNextRuns", () => {
   test("a single run is just its time", () => {
     const runs = nextRuns({ frequency: "once", date: "2026-10-02", time: "15:00" }, OSLO);
     expect(describeNextRuns(runs, OSLO)).toBe("Fri 2 Oct, 15:00");
+  });
+
+  test("dates and joins in the host's words", () => {
+    const text = createOpenGeniText({
+      locale: "nb",
+      messages: {
+        "cadence.date": "{weekday} {day}. {month}",
+        "cadence.day.mon.short": "man.",
+        "cadence.day.tue.short": "tir.",
+        "cadence.day.wed.short": "ons.",
+        "cadence.month.sep.short": "sep.",
+        "cadence.then": "{first}, så {rest}",
+        "cadence.and": "{head} og {last}",
+        "cadence.runTime": "{date} kl. {time}",
+      },
+    });
+    const runs = nextRuns({ frequency: "weekdays", time: "08:00" }, OSLO);
+    expect(describeNextRuns(runs, { ...OSLO, text })).toBe(
+      "man. 28. sep. kl. 08:00, så tir. 29. sep. og ons. 30. sep.",
+    );
   });
 });
 

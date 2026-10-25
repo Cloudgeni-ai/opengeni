@@ -106,6 +106,7 @@ import {
   getSessionGoal,
   getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
+  getSessionQueueMonitoringSummary,
   getSessionTurn,
   getSessionTurnMcpAccountBindings,
   getOrCreatePreferenceRegistrySnapshot,
@@ -192,6 +193,7 @@ import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
+import { registerMeetingTools } from "./meeting-tools";
 import { registerSecretTools } from "./secret-tools";
 import {
   attemptSecretWriteContext,
@@ -661,6 +663,8 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
           .optional(),
       })
       // Only a person pins connector accounts; agents never do.
+      // Event triggers are not part of this tool; how agents set them is
+      // designed with the agent tools and their guidance.
       .omit({
         agentLearning: true,
         connectionAuthorities: true,
@@ -668,6 +672,7 @@ const scheduledTaskUpdateToolInput = staticToolInput(() =>
         pinnedAccountsRequired: true,
         variableSetId: true,
         environmentId: true,
+        events: true,
       })
       .strict(),
     UpdateScheduledTaskRequest,
@@ -1144,6 +1149,16 @@ export function buildOpenGeniMcpServer(
   // Reading existing Knowledge and Skills remains available when authoring is Off.
   if (sessionId !== null) {
     registerKnowledgeEntryTools(server, deps, grant, sessionId);
+    // Recorded meetings, as the person this session works for (meeting-tools.ts).
+    registerMeetingTools({
+      server,
+      deps,
+      grant,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      json,
+    });
     // secret_* (capability `secrets`): gated by permission and the signed
     // tool selection like every catalogued tool; agent attempts only.
     registerSecretTools(server, deps, grant, sessionId);
@@ -3163,8 +3178,14 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. The platform persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits, including right after spawning a child that needs minutes, instead of sleeping or repeatedly calling session_wait, session_get, or command_wait. No preliminary short wait or status recheck is required. timeoutSeconds is a relative safety-wake duration, not a blocking execution wait; choose it for the dependency or a meaningful user/task/Skill monitoring cadence, potentially hours or days within the schema limits. Do not schedule wakeups merely for unchanged reassurance unless an explicit update cadence requires it. The platform persists the first absolute deadline for the turn, and repeated calls do not extend it. After answering a question during a wait, preserve the existing deadline by passing the time remaining, not a fresh full timeout. If less than the schema minimum remains or the deadline has passed, a question-only human/API turn that consumed no immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Do not send an invalid timeout or silently extend the deadline. Otherwise do not assume the old wait remains armed; register a valid wait if needed and make any unavoidable deadline adjustment explicit. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result (it carries the child's final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: observe them with command_wait/command_read rather than ending the turn. When this turn answers a person's message, put your complete answer in reply: it is shown to them exactly as written, while text written just before this call may reach them only as a short summary.",
       inputSchema: {
+        reply: z4
+          .string()
+          .nullish()
+          .describe(
+            "Your complete message to the person, shown to them verbatim as your reply (Markdown, tables and artifact images work). Pass it whenever this turn answers a person's message, and then do not also write the answer before this call. Omit it when there is nothing new to tell them.",
+          ),
         reason: inputWaitReasonSchema.describe(
           "Shown directly to the user; at most 2048 UTF-8 bytes. Write one short, natural sentence explaining what you are waiting for, with normal spacing. Exclude internal IDs, cursors, commit hashes, paths, and continuation instructions. Example: Waiting for the build and database checks to finish.",
         ),
@@ -5486,7 +5507,9 @@ function registerWorkspaceOrchestrationTools(
         if (!session) {
           throw new Error("session not found");
         }
-        const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
+        const queue = await (
+          detail === "full" ? getSessionQueueSnapshot : getSessionQueueMonitoringSummary
+        )(deps.db, grant.workspaceId, sessionId);
         const projected = projectSessionForRelatedAccess(
           {
             ...session,
@@ -6316,7 +6339,7 @@ function registerWorkspaceOrchestrationTools(
         "session_human_input_respond",
         {
           description:
-            "Answer (or skip, when the request allows it) a structured human-input request that another session is blocked on, typically a worker you spawned after a `child_requires_action` update named its requestId. Use it only when you actually know the answer; otherwise report the exact blocker to the user. Tool approvals are decided by humans only and cannot be answered here. The response is recorded as an agent-attempt answer and resumes that session's blocked turn.",
+            "Answer (or skip, when the request allows it) a structured human-input request that another session is blocked on, typically a worker you spawned after a `child_requires_action` update named its requestId and questions. The person is shown the same question, and the first answer wins. Answer when you can from your task context; leave questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answer a question meant for the person on their behalf. Tool approvals and questions marked humanOnly are decided by humans only and cannot be answered here. An accepted response is recorded as an agent answer and resumes that session's blocked turn. If the result reports alreadyAnswered, someone answered first and your answer was not used; do not answer again.",
           inputSchema: {
             sessionId: z4.string().uuid(),
             requestId: z4.string().uuid(),
@@ -6404,6 +6427,67 @@ function registerWorkspaceOrchestrationTools(
           }
           if (accepted.action === "conflict") {
             throw new Error("human-input request is not currently actionable");
+          }
+          if (accepted.action === "completed" && accepted.settledBy === "earlier_response") {
+            // Lost the first-writer race (or the request had already expired
+            // or been cancelled): a clear non-error result, so the agent does
+            // not retry or assume its answer was used.
+            const winner = accepted.request.respondedBy ?? "";
+            const winnerPayload = accepted.event.payload as { respondedByKind?: unknown } | null;
+            // The kind the winning response recorded; older rows fall back to
+            // the responder string.
+            const winnerKind =
+              typeof winnerPayload?.respondedByKind === "string"
+                ? winnerPayload.respondedByKind
+                : winner.startsWith("agent_attempt:")
+                  ? "agent_attempt"
+                  : winner.startsWith("system:")
+                    ? "system"
+                    : "human";
+            const answeredBy =
+              accepted.request.status === "expired" || winnerKind === "system"
+                ? "system"
+                : winner === `agent_attempt:${context.callerAttemptId}`
+                  ? "you"
+                  : winnerKind === "agent_attempt"
+                    ? "agent"
+                    : winnerKind === "api"
+                      ? "api"
+                      : "person";
+            const answeredByText =
+              answeredBy === "person"
+                ? "a person"
+                : answeredBy === "agent"
+                  ? "another agent"
+                  : answeredBy === "api"
+                    ? "an API client"
+                    : answeredBy === "you"
+                      ? "your earlier call"
+                      : "the system";
+            const state = accepted.request.status;
+            return json(
+              mcpMutationReceipt({
+                operation: "session_human_input_respond",
+                committed: true,
+                outcome: "unchanged",
+                changed: false,
+                resource: { type: "session_human_input_request", id: requestId, state },
+                relatedResources: [{ type: "session", id: sessionId }],
+                timestamp: accepted.request.respondedAt ?? new Date().toISOString(),
+                idempotency: { status: "applied" },
+                facts: {
+                  alreadyAnswered: true,
+                  answeredBy,
+                  outcome: accepted.request.response?.outcome ?? state,
+                },
+                warnings: [
+                  state === "answered" || state === "skipped"
+                    ? `Already ${state} by ${answeredByText}; this answer was not used. Do not answer again.`
+                    : `This request is already ${state}; this answer was not used. Do not answer again.`,
+                ],
+                nextAction: { tool: "session_get", arguments: { sessionId } },
+              }),
+            );
           }
           return json(
             mcpMutationReceipt({

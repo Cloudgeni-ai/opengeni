@@ -76,7 +76,9 @@ import {
 } from "./lossless-columns";
 
 export * from "./editable-artifacts-schema";
+export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
+export * from "./secret-approvals-schema";
 export * from "./slack-api-rate-limit-schema";
 export * from "./organization-recovery-schema";
 
@@ -337,6 +339,35 @@ export const siteOpens = pgTable(
       foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
     }).onDelete("cascade"),
     index("site_opens_site_idx").on(table.workspaceId, table.siteId),
+  ],
+);
+
+/**
+ * Each person's sidebar state for a Site row (migration 0949): pinned, or
+ * archived (hidden from their sidebar). Personal; grants nothing.
+ */
+export const siteSidebarStates = pgTable(
+  "site_sidebar_states",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.subjectId, table.siteId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_sidebar_states_site_idx").on(table.workspaceId, table.siteId),
   ],
 );
 
@@ -4833,6 +4864,7 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .notNull()
     .default("workspace_shared"),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
+  personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -9163,6 +9195,11 @@ export const sessionSystemUpdates = pgTable(
     deliveredHistoryItemId: uuid("delivered_history_item_id"),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // The personal machine's owner let this informational update from someone
+    // else's work continue under the owner's receiving context (0916). Set
+    // only by continue_session_waiting_work; the producer receipt is unchanged.
+    continuedBySubjectId: text("continued_by_subject_id"),
+    continuedAt: timestamp("continued_at", { withTimezone: true }),
   },
   (table) => ({
     kindValid: check(
@@ -9762,6 +9799,16 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
+    toolNamePage: index("session_events_tool_name_page_idx")
+      .on(table.workspaceId, table.sessionId, table.toolName, table.sequence)
+      .where(
+        sql`${table.type} = 'agent.toolCall.created' and ${table.toolName} is not null and octet_length(${table.toolName}) <= 2048`,
+      ),
+    toolNameFallbackPage: index("session_events_tool_name_fallback_page_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(
+        sql`${table.type} = 'agent.toolCall.created' and (${table.toolName} is null or octet_length(${table.toolName}) > 2048)`,
+      ),
     // Pre-0527 attention probes (which still counted commentary) during a rolling
     // deploy. Drop it in a later rolling migration once no pre-0527 API can run.
     meaningfulAttention: index("session_events_meaningful_attention_idx")
@@ -10082,6 +10129,9 @@ export const sessionHistoryItems = pgTable(
     // Receipt proofs page newest-first within one turn, not the whole session.
     turnPositionIdx: index("session_history_items_turn_position_idx")
       .on(table.turnId, table.position)
+      .where(sql`${table.turnId} IS NOT NULL`),
+    scopeTurnPositionIdx: index("session_history_items_scope_turn_position_idx")
+      .on(table.workspaceId, table.sessionId, table.turnId, table.position)
       .where(sql`${table.turnId} IS NOT NULL`),
   }),
 );
@@ -15499,6 +15549,7 @@ export * from "./governed-learning-evaluator-schema";
 export * from "./governed-learning-activation-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
+export * from "./recordings-schema";
 export * from "./interaction-schema";
 export * from "./site-data-schema";
 

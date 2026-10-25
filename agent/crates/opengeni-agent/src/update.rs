@@ -283,7 +283,7 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
             .apply_app_bundle(install_path, |_| Ok(()))
             .map_err(|error| format!("signed application update failed: {error}"))?;
         println!(
-            "complete signed application updated to v{}; restart the agent to activate it",
+            "complete signed application updated to v{}; restart Opengeni Runner to activate it",
             pending.version
         );
         return Ok(());
@@ -299,7 +299,7 @@ pub fn run(args: &UpdateArgs) -> Result<(), String> {
     })?;
     info!(version = %pending.version, "update applied and startup preflight passed; prior binary removed");
     println!(
-        "update applied and verified (v{}). Restart the agent to activate it.",
+        "update applied and verified (v{}). Restart Opengeni Runner to activate it.",
         pending.version
     );
     Ok(())

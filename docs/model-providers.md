@@ -1518,6 +1518,14 @@ for choices. Older string-list-only clients may show the unusable hint but
 receive the ordinary rejection instead of failing bootstrap parsing.
 Billing/usage admission and a provider's live response are separate from model
 selection. Changes between listing and creating are re-evaluated at creation.
+Within each catalog resolution, `loadWorkspaceModelCatalogInputs` reads public
+workspace connection metadata, bounded workspace custom models and organization
+provider/model metadata in one short tenant-scoped transaction. It reuses the
+canonical in-scope readers, retaining each SELECT's READ COMMITTED snapshot and
+the caller's provider sets. No credentials or provider I/O enter this transaction.
+Default selection and fresh admission still load their own catalog; results are
+never cached between them or across requests. Subscription readiness, live
+availability and retained-model lookups keep their separate existing boundaries.
 Responses contain no connected-account identity, provider secrets, or execution
 topology. Child inheritance and keyed repair keep their accepted-work rules.
 
@@ -2199,18 +2207,35 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and Opengeni's text compaction remain available.
 
-Claude Opus 5.5 and Sonnet 5.5 write their notes for the person between tool
-calls as progress-update `thinking` blocks, not `text` blocks. For those models
-requests use `thinking.display: "updates"` (beta
-`thinking-display-updates-2026-08-18`): reasoning blocks come back empty, and
-every `thinking` block with text is a progress update. Each non-empty one becomes
-an assistant message, streamed as output text, so it is shown as a reply and
-counts as visible text for `wait_for_input` and final-answer checks; empty
-reasoning blocks stay reasoning items. The message carries the signed block, and
-replay sends that block back unchanged in its original position, so the history
-bytes match what Claude returned. The shown text is Anthropic's short rendering
-of the note, not the verbatim note; replay gives the model its full note. Other
-Claude models keep `display: "summarized"` and their existing reasoning items.
+Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool call
+as its own `thinking` block. For those models requests use
+`thinking.display: "updates"` (beta `thinking-display-updates-2026-08-18`):
+reasoning blocks come back empty, and only progress updates carry text. That
+text is Anthropic's summary of the update, not the words the model wrote, and it
+can claim things the model never said. It therefore stays a reasoning item,
+streamed as reasoning and shown as a thought: it is never an assistant message,
+never `agent.message.completed` or `turn.completed.reply`, and never counts as
+visible text for `wait_for_input` or final-answer checks. The model writes a
+note longer than a sentence or two before a tool call this way, so an answer
+written just before `wait_for_input` would reach the person only as that
+summary. `wait_for_input` therefore takes a `reply` argument, shown verbatim as
+the agent's message (see [run lifecycle](./run-lifecycle.md)), and the prompt
+asks for it whenever the turn answers the person. When a person's turn asks to
+wait without a `reply` and the response holds a progress update, or the turn
+has no visible text, the wait is refused (at most twice per attempt) so the
+model passes its answer in `reply`; if it still passes none, nothing is
+recorded as the reply. A `text` block is always recorded verbatim. Progress
+updates are marked `providerData.anthropic.progressUpdate` on the reasoning
+item. `display: "updates"` stays on: under `"omitted"` the notes would be
+empty and under `"summarized"` they would be summaries mixed into reasoning,
+so no display mode returns them verbatim, and because a summary is only ever a
+thought it cannot replace a reply. Replay sends
+each signed block back unchanged in its original position, so history bytes
+match what Claude returned; history stored while updates were briefly recorded
+as assistant messages replays the same signed block. Other APIs see a newly
+stored summary only as labelled historical reasoning; summaries stored as
+assistant messages during that window are not rewritten. Other Claude models keep
+`display: "summarized"` and their existing reasoning items.
 
 Native Claude HTTP and SSE errors retain status and bounded retry/request
 metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes

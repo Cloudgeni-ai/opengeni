@@ -17,6 +17,7 @@ import {
   type ComputerBackendActionCommand,
   type ComputerBackendClipboard,
   type ComputerBackendErrorCode,
+  type ComputerBackendRoleStandIn,
 } from "../computer-backend";
 import {
   callDesktop,
@@ -33,12 +34,18 @@ import {
   dateFieldFormat,
   dateFields,
   dateFieldTyping,
+  distinctElements,
   locate,
+  observedRole,
   opensOnInvoke,
   parseDateValue,
   projectElements,
+  readWindowTitle,
+  TOGGLE_ROLES,
+  unindexedRows,
   unindexedTextByElement,
   type DateSegment,
+  type UnindexedRow,
 } from "./projection";
 import type { MacWindowPresence, MacWindows } from "./macos-windows";
 
@@ -67,12 +74,26 @@ type Operation = {
   args: Record<string, unknown>;
   /** The value a date field must read once this step's input has run. */
   expectDate?: { ref: string; value: string; segments: readonly DateSegment[] };
-  /** A text field's value before set_value wrote this one: a field that
-   * still reads it afterwards did not take the write. */
-  expectText?: { ref: string; value: string; before: string };
+  /** A text or number field's value before set_value wrote this one: a
+   * field that still reads it afterwards did not take the write. A number
+   * field (`numeric`) compares as numbers, and reading empty fails too. */
+  expectText?: {
+    ref: string;
+    value: string;
+    before: string;
+    numeric?: "number field" | "slider";
+  };
   /** This step only fills a field (a part of a date field's input), so it
    * cannot submit or clear another field. */
   fillsField?: true;
+  /** The checked state a checkbox or switch this step presses must read
+   * once the step has run. */
+  expectToggle?: { ref: string; wanted: boolean };
+  /** run_steps options of a step that names its element instead of carrying
+   * a token: how long CUA waits for it, the check that holds first, and for
+   * a checkbox or switch the checked state it is pressed into when it reads
+   * the other one. */
+  stepOptions?: { timeout_ms: number; wait_for: Record<string, unknown>; toggle_to?: boolean };
 };
 
 /** Every CUA action waits for the agent cursor to reach its target, and the
@@ -80,9 +101,25 @@ type Operation = {
  * but quick, without a pause after each click. */
 const CURSOR_MOTION = { timing: "fixed", glide_duration_ms: 150, dwell_after_click_ms: 0 };
 
+/** An untitled window with a side shorter than this is a strip attached to
+ * another window (Chrome's status bubble is 22 px tall, an Android
+ * emulator's toolbar 54 px wide), never the window in front. */
+const UNTITLED_STRIP_MAX_SIDE = 100;
+
 /** How long a field check waits before reading a window again, when the
  * reading straight after the input does not show it yet. */
 const INPUT_REREAD_MS = 150;
+
+/** How long the reading after an action waits for work the action started,
+ * such as a save or a load the page shows as "Saving..." or a busy element,
+ * and how often it reads the window again meanwhile. Work shown only by text
+ * gets less time: a text that just ends in "..." (a chat message, an
+ * editor's placeholder) can be content that stays. */
+const SETTLE_MAX_MS = 5_000;
+const SETTLE_TEXT_MAX_MS = 2_500;
+/** A reading of an ordinary window takes about 50 ms, so a save or load
+ * that finishes is seen within about a tenth of a second. */
+const SETTLE_POLL_MS = 100;
 
 /** CUA owns OS delivery. Opengeni owns authority, receipts and public media.
  * Every call is serialized, including preview captures and shutdown. */
@@ -95,6 +132,12 @@ export class CuaComputerBackend implements ComputerBackend {
   private readonly cursorMotionSet = new Set<string>();
   private readonly targetsById = new Map<string, Target>();
   private readonly observations = new Map<string, ComputerBackendObservation>();
+  /** The signs of work in progress each semantic reading shows (see
+   * progressSigns), read from its elements and its Markdown rows. */
+  private readonly progress = new WeakMap<ComputerBackendObservation, ProgressSigns>();
+  /** The title of the document each semantic reading shows (see
+   * documentTitle). */
+  private readonly documents = new WeakMap<ComputerBackendObservation, string>();
   /** Recent semantic observations per window, newest last. A ref names the
    * observation the model read it from; an action that omits its fence is
    * checked against a fresh observation, which mints new refs, so the ref is
@@ -108,11 +151,22 @@ export class CuaComputerBackend implements ComputerBackend {
    * element (AXOpen) instead of pressing it. */
   private readonly openingTokens = new Map<string, Set<string>>();
   /** Per window, the web date and time fields of its latest reading: each
-   * field's parts by its CUA token, and the field each part belongs to. */
+   * field's parts by its CUA token, the tokens of those parts in order, the
+   * field each part (or its date picker button) belongs to, and those picker
+   * buttons. */
   private readonly dateFieldTokens = new Map<
     string,
-    { fields: Map<string, DateSegment[]>; owners: Map<string, string> }
+    {
+      fields: Map<string, DateSegment[]>;
+      parts: Map<string, string[]>;
+      owners: Map<string, string>;
+      pickers: Set<string>;
+    }
   >();
+  /** Per window, the element's own label behind each CUA token of its latest
+   * reading: what CUA's lookup by name matches. An observed name can instead
+   * come from the element's text or drop Chrome's live memory figure. */
+  private readonly ownLabels = new Map<string, Map<string, string>>();
   private lastRef = 0;
   private readonly frames = new Map<string, Frame>();
   private tail: Promise<unknown> = Promise.resolve();
@@ -282,11 +336,14 @@ export class CuaComputerBackend implements ComputerBackend {
     });
   }
 
-  dispatch(command: ComputerBackendActionCommand): Promise<ComputerBackendObservation | null> {
+  dispatch(
+    command: ComputerBackendActionCommand,
+    standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+  ): Promise<ComputerBackendObservation | null> {
     if (command.action.type === "launch")
       return this.dispatchLaunch(command, command.action.applicationId);
     return this.run(async () => {
-      if (command.action.type === "batch") return await this.dispatchBatch(command);
+      if (command.action.type === "batch") return await this.dispatchBatch(command, false, standIn);
       // Passive previews never change the native action frame. Human pointer
       // input obtains its own fresh frame under the same serialized queue.
       // CUA then refuses stale native pixel/zoom input until the agent re-reads.
@@ -307,15 +364,17 @@ export class CuaComputerBackend implements ComputerBackend {
           );
       }
       const operations = await this.operations(command);
-      // Filling a date field takes several steps: run them as one batch.
+      // Filling a date field takes several steps, and a checkbox found by
+      // name reads its state as its step runs: run them as one batch.
       if (
-        operations.length > 1 &&
+        (operations.length > 1 || operations.some((operation) => operation.stepOptions)) &&
         command.action.type === "semantic" &&
         this.initialCapabilities.actionBatches
       )
         return await this.dispatchBatch(
           { ...command, action: { type: "batch", actions: [command.action] } },
           true,
+          standIn,
         );
       const observed = this.observations.get(command.targetId);
       this.observations.delete(command.targetId);
@@ -351,7 +410,14 @@ export class CuaComputerBackend implements ComputerBackend {
             throw (
               (command.action.type === "keyboard"
                 ? this.keyboardRefusal(command.targetId, error.cuaCode, error.code, observed)
-                : null) ?? error
+                : null) ??
+              (await this.elementWindowRefusal(
+                command.targetId,
+                error.cuaCode,
+                error.code,
+                error.message,
+              )) ??
+              error
             );
           // macOS answers an accessibility action with "cannot complete"
           // (-25205) even when it pressed the button or opened the item, often
@@ -366,7 +432,7 @@ export class CuaComputerBackend implements ComputerBackend {
           throw error;
         }
       }
-      const after = await this.observeAfter(command.targetId, acted, known, report);
+      const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const confirmed = await this.confirmInput(after, operations);
       if (confirmed.failures.length)
@@ -403,6 +469,7 @@ export class CuaComputerBackend implements ComputerBackend {
     acted: Target,
     known: Set<string>,
     report: string,
+    before?: ComputerBackendObservation,
   ): Promise<ComputerBackendObservation | null> {
     try {
       // CUA names the windows it saw the action open. Nothing else proves
@@ -414,10 +481,63 @@ export class CuaComputerBackend implements ComputerBackend {
         const reading = await this.observeTarget(opened).catch(() => null);
         if (reading) return reading;
       }
-      return await this.observeTarget(targetId);
+      return await this.settled(await this.observeTarget(targetId), before);
     } catch {
       return null;
     }
+  }
+
+  /** The window once the work an action started there has finished: while
+   * a reading shows a sign of work in progress that the reading before the
+   * action did not (a busy or progress element, for up to SETTLE_MAX_MS; or
+   * a text, label or disabled control reading "Saving..." or "Loading…"
+   * that the window did not show before, for up to SETTLE_TEXT_MAX_MS), it
+   * reads the window again. Otherwise the first reading stands, so an action
+   * on a page that is not busy costs no extra read. Each reading taken while
+   * waiting replaces the one before it among the window's recent readings,
+   * so the readings the model planned from stay valid, and refs carry over
+   * from the reading before the action. */
+  private async settled(
+    reading: ComputerBackendObservation,
+    before: ComputerBackendObservation | undefined,
+  ): Promise<ComputerBackendObservation> {
+    if (!before || before.target.id !== reading.target.id) return reading;
+    const earlier = this.progress.get(before);
+    if (!earlier) return reading;
+    const busyBefore = new Set(earlier.busy);
+    /** How long to wait for what a reading shows, from the start: 0 when it
+     * shows no new sign of work. */
+    const patience = (observation: ComputerBackendObservation) => {
+      const signs = this.progress.get(observation);
+      if (!signs) return 0;
+      if (signs.busy.some((sign) => !busyBefore.has(sign))) return SETTLE_MAX_MS;
+      if (signs.texts.some((text) => !earlier.shown.has(text))) return SETTLE_TEXT_MAX_MS;
+      return 0;
+    };
+    const start = Date.now();
+    let current = reading;
+    while (Date.now() + SETTLE_POLL_MS < start + patience(current)) {
+      await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
+      const again = await this.rereadInPlace(current);
+      if (again?.target.id !== current.target.id) break;
+      current = again;
+    }
+    return current;
+  }
+
+  /** A fresh reading of `current`'s window that takes its place among the
+   * window's recent readings instead of pushing out an older one. If the
+   * read fails, `current` stays the latest. */
+  private async rereadInPlace(
+    current: ComputerBackendObservation,
+  ): Promise<ComputerBackendObservation | null> {
+    const targetId = current.target.id;
+    const recent = this.recentObservations.get(targetId) ?? [];
+    const latest = recent.at(-1) === current;
+    if (latest) this.recentObservations.set(targetId, recent.slice(0, -1));
+    const again = await this.observeTarget(targetId).catch(() => null);
+    if (!again && latest) this.recentObservations.set(targetId, recent);
+    return again;
   }
 
   /** After an element action macOS did not confirm: the window's reading if
@@ -469,7 +589,12 @@ export class CuaComputerBackend implements ComputerBackend {
     const actionOf: number[] = [];
     for (const [index, action] of actions.entries()) {
       try {
-        const operations = await this.operations({ ...command, action }, index > 0);
+        const operations = await this.operations(
+          { ...command, action },
+          index > 0,
+          steps.some((step) => step.stepOptions !== undefined),
+          true,
+        );
         for (const operation of operations) {
           steps.push(operation);
           actionOf.push(index);
@@ -497,8 +622,11 @@ export class CuaComputerBackend implements ComputerBackend {
   private async dispatchBatch(
     command: ComputerBackendActionCommand,
     single = false,
+    standIn?: (standIn: ComputerBackendRoleStandIn) => void,
   ): Promise<ComputerBackendObservation | null> {
     const { steps, actionOf } = await this.batchSteps(command);
+    const standIns: ComputerBackendRoleStandIn[] = [];
+    const actions = command.action.type === "batch" ? command.action.actions : [];
     const observed = this.observations.get(command.targetId);
     this.observations.delete(command.targetId);
     const acted = await this.target(command.targetId);
@@ -516,7 +644,7 @@ export class CuaComputerBackend implements ComputerBackend {
           // finds stale names an element of a window that changed since: the
           // batch stops there instead of acting on a lookalike CUA finds again.
           refind_stale: false,
-          steps: chunk.map((step) => ({ tool: step.name, args: step.args })),
+          steps: chunk.map((step) => ({ tool: step.name, args: step.args, ...step.stepOptions })),
         });
       } catch (error) {
         // A later call refused before it ran: the earlier calls still did.
@@ -529,13 +657,36 @@ export class CuaComputerBackend implements ComputerBackend {
           code: null,
           cuaCode: null,
           message: error.message,
+          standIns: [],
         };
+      }
+      // CUA used the one element of a role pressed alike for a step that
+      // named its element by role and name (see namedOperation).
+      for (const used of outcome.standIns) {
+        const actionIndex = actionOf[start + used.step]!;
+        const action = actions[actionIndex];
+        if (action?.type !== "semantic" || action.locator.kind !== "role") continue;
+        standIns.push({
+          actionIndex,
+          requestedRole: action.locator.role,
+          role: observedRole(used.role),
+          name: used.name,
+        });
       }
       if (outcome.kind === "completed") report += openedWindowsReport(outcome.windowChanges);
       else stopped = { step: start + outcome.completed, outcome };
     }
+    // The actions that ran in full acted on their stand-ins.
+    const ran = stopped ? actionOf[stopped.step]! : actions.length;
+    const reported = new Set<number>();
+    if (standIn)
+      for (const used of standIns.sort((a, b) => a.actionIndex - b.actionIndex))
+        if (used.actionIndex < ran && !reported.has(used.actionIndex)) {
+          reported.add(used.actionIndex);
+          standIn(used);
+        }
     if (!stopped) {
-      const after = await this.observeAfter(command.targetId, acted, known, report);
+      const after = await this.observeAfter(command.targetId, acted, known, report, observed);
       if (after?.target.id !== command.targetId) return after;
       const { after: confirmed, failures } = await this.confirmInput(after, steps);
       if (failures.length) {
@@ -563,16 +714,25 @@ export class CuaComputerBackend implements ComputerBackend {
     const definite = outcome.definite && actionOf.indexOf(action) === step;
     const stoppedAction =
       command.action.type === "batch" ? command.action.actions[action] : undefined;
-    const refusal =
-      definite && stoppedAction?.type === "keyboard"
-        ? this.keyboardRefusal(
-            command.targetId,
-            outcome.cuaCode,
-            outcome.code ?? "invalid_action",
-            observed,
-          )
-        : null;
-    const reason = refusal?.message ?? outcome.message;
+    const refusal = definite
+      ? ((stoppedAction?.type === "keyboard"
+          ? this.keyboardRefusal(
+              command.targetId,
+              outcome.cuaCode,
+              outcome.code ?? "invalid_action",
+              observed,
+            )
+          : null) ??
+        (await this.elementWindowRefusal(
+          command.targetId,
+          outcome.cuaCode,
+          outcome.code ?? "invalid_action",
+          outcome.message,
+        )))
+      : null;
+    const reason =
+      refusal?.message ??
+      (outcome.cuaCode === "ambiguous" ? ambiguityForRefs(outcome.message) : outcome.message);
     const message = single
       ? `CUA stopped part way through the input: ${reason}`
       : `CUA stopped the batch at action ${action + 1}: ${reason}`;
@@ -666,6 +826,27 @@ export class CuaComputerBackend implements ComputerBackend {
         !(macos && window.is_on_screen === false && window.space_ids === null),
     );
     const presences = await this.offScreenPresences(windows);
+    // The frontmost ordinary window is the one the person has in front: CUA
+    // reports stacking, not keyboard focus. Windows' listing also stacks
+    // cloaked and always-on-top windows as ordinary ones, so it marks none.
+    // An untitled strip stacked above its app's window is part of that
+    // window, not one a person works in: Chrome's link status bubble, an
+    // emulator's side toolbar.
+    let front: { id: string; z: number } | null = null;
+    for (const window of this.identity.platform === "windows" ? [] : windows) {
+      const id = `cua:window:${window.pid}:${window.window_id}`;
+      if (
+        typeof window.z_index !== "number" ||
+        (window.layer ?? 0) !== 0 ||
+        presences.has(id) ||
+        // Minimized, hidden or unmapped on every platform.
+        window.is_on_screen === false ||
+        (!window.title.trim() &&
+          Math.min(window.bounds.width, window.bounds.height) < UNTITLED_STRIP_MAX_SIDE)
+      )
+        continue;
+      if (!front || window.z_index > front.z) front = { id, z: window.z_index };
+    }
     const live = new Set<string>();
     for (const window of windows) {
       const id = `cua:window:${window.pid}:${window.window_id}`;
@@ -692,7 +873,7 @@ export class CuaComputerBackend implements ComputerBackend {
           processId: window.pid,
           title: window.title || window.app_name,
           bounds: window.bounds,
-          focused: false,
+          focused: id === front?.id,
           ...(onScreen || restorable ? {} : { offScreen: true as const }),
         },
       });
@@ -933,6 +1114,52 @@ export class CuaComputerBackend implements ComputerBackend {
     );
   }
 
+  /** CUA refuses input to an element outside the addressed window, and names
+   * CUA's own tools and window numbers when it does. Say what the caller can
+   * do instead:
+   * - an element of a bubble or popover the window shows as its own takes
+   *   accessibility actions (invoke, set_value) but no pointer or key input,
+   *   which would land on the window under it;
+   * - an element of another window of the app is that window's to act on,
+   *   pointed at only when it is a target the caller can observe. */
+  private async elementWindowRefusal(
+    targetId: string,
+    cuaCode: string | null | undefined,
+    code: ComputerBackendErrorCode,
+    message: string,
+  ): Promise<ComputerBackendError | null> {
+    const target = this.targetsById.get(targetId);
+    if (!target) return null;
+    // CUA's wording names an input mode this tool does not offer.
+    if (cuaCode === "select_menu_would_raise_window")
+      return new ComputerBackendError(
+        code,
+        "Opening this dropdown's menu would bring the browser in front of the person's window, so nothing was sent. For a list of options, set_value on its ref with the option's text; a menu button's menu cannot be opened while the browser is in the background",
+        false,
+        false,
+      );
+    if (cuaCode === "element_in_attached_window")
+      return new ComputerBackendError(
+        code,
+        "That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode !== "element_outside_target_window") return null;
+    const owner = /belongs to window (\d{1,10})\b/.exec(message)?.[1];
+    if (!owner) return null;
+    const other = `cua:window:${target.pid}:${owner}`;
+    await this.discover().catch(() => undefined);
+    return new ComputerBackendError(
+      code,
+      this.targetsById.has(other)
+        ? `That element is in another window of this app (${other}), not in ${targetId}, so nothing was done: observe ${other} and act on its refs there`
+        : `That element is in another window of this app, not in ${targetId}, so nothing was done`,
+      false,
+      false,
+    );
+  }
+
   private async observeTarget(targetId: string): Promise<ComputerBackendObservation> {
     const target = await this.target(targetId);
     if (
@@ -994,13 +1221,28 @@ export class CuaComputerBackend implements ComputerBackend {
         false,
       );
     }
-    const roots = this.stabilizeRefs(
-      targetId,
-      target.native.title,
-      projectElements(
-        state.elements,
-        this.identity.platform,
-        unindexedTextByElement(state.tree_markdown, this.identity.platform),
+    const projected = projectElements(
+      state.elements,
+      this.identity.platform,
+      unindexedTextByElement(state.tree_markdown, this.identity.platform),
+    );
+    const shownTitle = readWindowTitle(state.elements, this.identity.platform);
+    const document = documentTitle(shownTitle, target.native.title);
+    const roots = this.stabilizeRefs(targetId, document, projected);
+    // The rows folded into a field are its text, typed by the person.
+    const refTokens = this.tokens.get(targetId);
+    const fieldTokens = new Set(
+      roots.filter((node) => node.actions.includes("set_value")).map((n) => refTokens?.get(n.ref)),
+    );
+    const fieldIndexes = new Set(
+      state.elements
+        .filter((element) => element.element_token && fieldTokens.has(element.element_token))
+        .map((element) => element.element_index),
+    );
+    const signs = progressSigns(
+      roots,
+      unindexedRows(state.tree_markdown, this.identity.platform).filter(
+        (row) => !fieldIndexes.has(row.owner),
       ),
     );
     this.openingTokens.delete(targetId);
@@ -1016,27 +1258,62 @@ export class CuaComputerBackend implements ComputerBackend {
     );
     while (this.openingTokens.size > 32)
       this.openingTokens.delete(this.openingTokens.keys().next().value!);
+    this.ownLabels.delete(targetId);
+    this.ownLabels.set(
+      targetId,
+      new Map(
+        state.elements
+          .filter((element) => element.element_token && element.label)
+          .map((element) => [element.element_token!, element.label!]),
+      ),
+    );
+    while (this.ownLabels.size > 32) this.ownLabels.delete(this.ownLabels.keys().next().value!);
     this.dateFieldTokens.delete(targetId);
     if (this.identity.platform === "macos") {
       const byIndex = new Map(state.elements.map((element) => [element.element_index, element]));
       const fields = new Map<string, DateSegment[]>();
+      const parts = new Map<string, string[]>();
       const owners = new Map<string, string>();
+      const pickers = new Set<string>();
+      const dateFieldByIndex = new Map<number, string>();
       for (const [index, field] of dateFields(state.elements)) {
         const token = byIndex.get(index)!.element_token!;
         fields.set(token, field.segments);
-        for (const part of field.parts) {
-          const partToken = byIndex.get(part)?.element_token;
-          if (partToken) owners.set(partToken, token);
+        dateFieldByIndex.set(index, token);
+        const partTokens = field.parts.map((part) => byIndex.get(part)?.element_token);
+        for (const partToken of partTokens) if (partToken) owners.set(partToken, token);
+        if (partTokens.every((partToken) => partToken !== undefined))
+          parts.set(token, partTokens as string[]);
+      }
+      // Chrome shows a "Show date picker" button inside the field. Its menu
+      // would bring the browser in front, so it is refused, as a <select> is.
+      for (const element of state.elements) {
+        const field =
+          element.parent_index === undefined
+            ? undefined
+            : dateFieldByIndex.get(element.parent_index);
+        if (field && element.role === "AXPopUpButton" && element.element_token) {
+          owners.set(element.element_token, field);
+          pickers.add(element.element_token);
         }
       }
-      if (fields.size) this.dateFieldTokens.set(targetId, { fields, owners });
+      if (fields.size) this.dateFieldTokens.set(targetId, { fields, parts, owners, pickers });
       while (this.dateFieldTokens.size > 32)
         this.dateFieldTokens.delete(this.dateFieldTokens.keys().next().value!);
     }
     const incomplete = walkIncompleteness(state);
     const observation: ComputerBackendObservation = {
       observationId: `${this.session}:${state.snapshot_id}`,
-      target: { ...target.native, bounds: state.window_bounds ?? target.native.bounds },
+      // Named as the reading shows the window: its listed title is the one it
+      // had when the windows were last listed, the page before an action.
+      target: {
+        ...target.native,
+        title: shownTitle ?? target.native.title,
+        bounds: state.window_bounds ?? target.native.bounds,
+        // Which window is in front is known only when windows are listed;
+        // a reading after an action or a switch would show it stale.
+        focused: false,
+      },
       frameId:
         [...this.frames.entries()]
           .reverse()
@@ -1049,6 +1326,8 @@ export class CuaComputerBackend implements ComputerBackend {
     };
     this.observations.delete(targetId);
     this.observations.set(targetId, observation);
+    this.progress.set(observation, signs);
+    this.documents.set(observation, document);
     while (this.observations.size > 32)
       this.observations.delete(this.observations.keys().next().value!);
     const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
@@ -1067,15 +1346,17 @@ export class CuaComputerBackend implements ComputerBackend {
    * are as many as before, matched in order: one added or removed among them
    * could otherwise move a ref onto a neighbour. A window whose title changed
    * shows another document, where a button alike (Delete) acts on something
-   * else, so none of its refs carry over. Every other element gets a new ref.
-   * CUA's token for each ref is kept for the action that names it. */
+   * else, so none of its refs carry over. The title is the one each reading
+   * shows (see documentTitle), so two readings of a page an action opened
+   * compare alike. Every other element gets a new ref. CUA's token for each
+   * ref is kept for the action that names it. */
   private stabilizeRefs(
     targetId: string,
     title: string,
     roots: InteractionSemanticNodeValue[],
   ): InteractionSemanticNodeValue[] {
     const last = this.recentObservations.get(targetId)?.at(-1);
-    const previous = last?.target.title === title ? last : undefined;
+    const previous = last && this.documents.get(last) === title ? last : undefined;
     const identity = (node: InteractionSemanticNodeValue) =>
       JSON.stringify([
         node.ref.startsWith("read-only:"),
@@ -1130,7 +1411,12 @@ export class CuaComputerBackend implements ComputerBackend {
   private dateFieldOf(
     targetId: string,
     ref: string,
-  ): { ref: string; name: string | undefined; segments: DateSegment[] } | null {
+  ): {
+    ref: string;
+    name: string | undefined;
+    segments: DateSegment[];
+    picker: boolean;
+  } | null {
     const known = this.dateFieldTokens.get(targetId);
     const token = this.tokens.get(targetId)?.get(ref);
     const fieldToken = token === undefined ? undefined : known?.owners.get(token);
@@ -1140,24 +1426,50 @@ export class CuaComputerBackend implements ComputerBackend {
     )?.[0];
     if (!fieldRef) return null;
     const name = this.observations.get(targetId)?.roots.find((node) => node.ref === fieldRef)?.name;
-    return { ref: fieldRef, name, segments: known.fields.get(fieldToken)! };
+    return {
+      ref: fieldRef,
+      name,
+      segments: known.fields.get(fieldToken)!,
+      picker: known.pickers.has(token!),
+    };
   }
 
   /**
-   * The input that fills a web date or time field: press the field, which
-   * focuses it, then for each part move to it and type its digits. A browser
-   * moves on to the next part by itself after some parts and not after
-   * others (a month part of a month field, a year that may take six digits),
-   * so each part is reached from the first one: Left as many times as there
-   * are parts stops at the first, then Right to the part. Typing over a part
-   * replaces what it held, so a filled field is changed the same way.
+   * The input that fills a web date or time field: for each part, give it
+   * the keyboard focus through accessibility and type its digits. Pressing
+   * the field instead focuses no part while the browser is not the active
+   * app, so its keys are dropped; and a browser moves on to the next part by
+   * itself after some parts only, so each part is focused on its own. Typing
+   * over a part replaces what it held, so a filled field is changed the same
+   * way. Without a token for every part, the field is pressed and each part
+   * reached from the first one with Left and Right.
    */
   private dateFieldInput(
     args: Record<string, unknown>,
     token: string,
+    parts: readonly string[] | undefined,
     texts: readonly string[],
   ): Operation[] {
     const delivery_mode = this.inputDelivery();
+    const type = (text: string): Operation => ({
+      name: "type_text",
+      args: { ...args, text, delivery_mode },
+      fillsField: true,
+    });
+    if (parts?.length === texts.length)
+      return texts.flatMap((text, index): Operation[] => [
+        {
+          name: "click",
+          args: {
+            ...args,
+            element_token: parts[index]!,
+            action: "focus",
+            delivery_mode: "background",
+          },
+          fillsField: true,
+        },
+        type(text),
+      ]);
     const key = (name: "left" | "right"): Operation => ({
       name: "press_key",
       args: { ...args, key: name, modifiers: [], delivery_mode },
@@ -1174,7 +1486,7 @@ export class CuaComputerBackend implements ComputerBackend {
       if (texts.length > 1)
         for (let step = 0; step < texts.length - 1; step++) input.push(key("left"));
       for (let step = 0; step < index; step++) input.push(key("right"));
-      input.push({ name: "type_text", args: { ...args, text, delivery_mode }, fillsField: true });
+      input.push(type(text));
     });
     return input;
   }
@@ -1276,6 +1588,9 @@ export class CuaComputerBackend implements ComputerBackend {
   private async operations(
     command: ComputerBackendActionCommand,
     laterInBatch = false,
+    /** An earlier action of the batch names its element (see namedOperation). */
+    afterNamed = false,
+    inBatch = false,
   ): Promise<Operation[]> {
     if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
@@ -1437,8 +1752,93 @@ export class CuaComputerBackend implements ComputerBackend {
       );
     }
     if (action.type === "semantic") {
-      const node = this.locateObserved(command.targetId, observed, action.locator);
-      if (!node.actions.includes(action.action) && !selectsByPressing(node, action.action)) {
+      let node: InteractionSemanticNodeValue;
+      try {
+        node = this.locateObserved(command.targetId, observed, action.locator);
+      } catch (error) {
+        // Not in the batch's observation: an earlier action may bring it up,
+        // or the element shown under the other role pressed alike may be the
+        // one meant, which CUA's step decides once the window has settled.
+        // Several shown by that name: an earlier action may narrow them (a
+        // search filtering a list), and CUA's step waits for the window to
+        // settle before it reports them.
+        const unseen = error instanceof ComputerBackendError && error.code === "locator_not_found";
+        const several =
+          laterInBatch &&
+          error instanceof ComputerBackendError &&
+          error.code === "locator_ambiguous" &&
+          action.locator.kind !== "ref" &&
+          action.locator.kind !== "identifier";
+        const named =
+          (unseen ? laterInBatch || (inBatch && mayStandIn(observed.roots, action)) : several) &&
+          (ACTIONS_ON_UNSEEN.has(action.action) ||
+            // select or deselect means a state only on a checkbox or switch.
+            ((action.action === "select" || action.action === "deselect") &&
+              action.locator.kind === "role" &&
+              TOGGLE_ROLES.has(action.locator.role)))
+            ? namedOperation(this.identity.platform, args, action, null)
+            : null;
+        if (!named) throw error;
+        return [named];
+      }
+      // A date field's picker button opens a menu that would bring the
+      // browser in front; the field itself takes the whole value.
+      const picker = this.dateFieldOf(command.targetId, node.ref);
+      if (picker?.picker)
+        throw unsupported(
+          `This button opens the date picker of the date or time field ${picker.ref}${
+            picker.name ? ` ("${picker.name}")` : ""
+          }, which would bring the browser in front of the person's window, so nothing was sent: set_value on ${picker.ref} with its value in the form ${dateFieldFormat(picker.segments)}`,
+        );
+      // set_value true or false (or select, deselect) on a checkbox or switch
+      // presses it only when it is not in that state already.
+      const wanted = toggleWanted(node.role, action);
+      if (wanted !== null && !afterNamed) {
+        // The observation shows its state before the action only: once an
+        // earlier action of the batch ran, CUA reads it as the step runs.
+        const state = laterInBatch ? undefined : checkedState(node);
+        if (state === wanted) return [];
+        if (!laterInBatch && node.states.includes("disabled"))
+          throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+        if (state !== undefined) {
+          const presses = await this.operations(
+            {
+              ...command,
+              action: { type: "semantic", locator: action.locator, action: "invoke" },
+            },
+            laterInBatch,
+            afterNamed,
+            inBatch,
+          );
+          return presses.map((step, index) =>
+            index === presses.length - 1
+              ? { ...step, expectToggle: { ref: node.ref, wanted } }
+              : step,
+          );
+        }
+        // CUA reads its state when the step runs, which needs the element's
+        // own label to find it by.
+        const token = this.elementToken(command.targetId, node.ref);
+        const findable =
+          node.name !== undefined &&
+          node.name === this.ownLabels.get(command.targetId)?.get(token) &&
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length === 1;
+        const named = findable ? namedOperation(this.identity.platform, args, action, node) : null;
+        if (!named || !this.initialCapabilities.actionBatches)
+          throw unsupported(
+            laterInBatch
+              ? "This checkbox or switch cannot be told apart by its label once earlier actions of the batch ran, so it cannot be set to checked or not there: act on it in its own call"
+              : "This window does not show whether this element is checked, so it cannot be set to checked or not: invoke it to toggle it",
+          );
+        return [named];
+      }
+      if (
+        wanted === null &&
+        !node.actions.includes(action.action) &&
+        !selectsByPressing(node, action.action)
+      ) {
         const field = this.dateFieldOf(command.targetId, node.ref);
         if (field)
           throw unsupported(
@@ -1459,6 +1859,39 @@ export class CuaComputerBackend implements ComputerBackend {
       // An earlier action of the batch can enable it; CUA refuses it if not.
       if (!laterInBatch && node.states.includes("disabled"))
         throw new ComputerBackendError("invalid_action", "CUA element is disabled", false, false);
+      if (afterNamed) {
+        // An earlier step found its element by name, which re-read the window
+        // and so retired every token of the batch's observation: this element
+        // is found by name too.
+        const token = this.elementToken(command.targetId, node.ref);
+        const special =
+          (action.action === "set_value" &&
+            this.dateFieldTokens.get(command.targetId)?.fields.has(token)) ||
+          (action.action === "invoke" && this.openingTokens.get(command.targetId)?.has(token));
+        // CUA finds an element by its own label only, and by that label it
+        // must find this one element.
+        const findable =
+          node.name !== undefined && node.name === this.ownLabels.get(command.targetId)?.get(token);
+        if (
+          findable &&
+          !special &&
+          distinctElements(
+            observed.roots.filter((other) => other.role === node.role && other.name === node.name),
+          ).length > 1
+        )
+          throw unsupported(
+            "Several elements here have this element's role and name, and it comes after an action that names an element not yet shown, so it cannot be told apart in the same batch: act on it in its own call",
+          );
+        const named =
+          special || !findable ? null : namedOperation(this.identity.platform, args, action, node);
+        if (!named)
+          throw unsupported(
+            special
+              ? "This field or file comes after an action that names an element not yet shown, so it cannot be filled or opened in the same batch: act on it in its own call"
+              : "This element has no label of its own, and it comes after an action that names an element not yet shown, so it cannot be found again in the same batch: act on it in its own call",
+          );
+        return [named];
+      }
       if (action.action === "focus")
         return [
           {
@@ -1480,12 +1913,13 @@ export class CuaComputerBackend implements ComputerBackend {
             false,
           );
         const token = this.elementToken(command.targetId, node.ref);
-        const segments = this.dateFieldTokens.get(command.targetId)?.fields.get(token);
+        const known = this.dateFieldTokens.get(command.targetId);
+        const segments = known?.fields.get(token);
         if (segments) {
           const typing = dateFieldTyping(segments, String(action.value));
           if ("error" in typing)
             throw new ComputerBackendError("invalid_action", typing.error, false, false);
-          const input = this.dateFieldInput(args, token, typing.texts);
+          const input = this.dateFieldInput(args, token, known!.parts.get(token), typing.texts);
           input[0]!.expectDate = { ref: node.ref, value: String(action.value), segments };
           return input;
         }
@@ -1498,13 +1932,25 @@ export class CuaComputerBackend implements ComputerBackend {
               value: String(action.value),
               ...(this.identity.platform === "windows" ? { delivery_mode: "background" } : {}),
             },
-            ...(node.role === "textbox" &&
-            (node.value === undefined || typeof node.value === "string")
+            // A slider is only checked when the window reads its value as a
+            // number: many native sliders expose a range but no readable
+            // value, and some read it as text such as "50 %".
+            ...(((node.role === "textbox" || node.role === "spinbutton") &&
+              (node.value === undefined || typeof node.value === "string")) ||
+            (node.role === "slider" &&
+              typeof node.value === "string" &&
+              node.value.trim() !== "" &&
+              Number.isFinite(Number(node.value)))
               ? {
                   expectText: {
                     ref: node.ref,
                     value: String(action.value),
                     before: node.value ?? "",
+                    ...(node.role === "spinbutton"
+                      ? { numeric: "number field" as const }
+                      : node.role === "slider"
+                        ? { numeric: "slider" as const }
+                        : {}),
                   },
                 }
               : {}),
@@ -1774,6 +2220,155 @@ const MAX_RUN_STEPS = 64;
 /** Roles chosen by pressing them: a radio button or a tab. */
 const PRESS_TO_SELECT_ROLES = new Set(["radio", "radio button", "tab", "page tab", "TabItem"]);
 
+/** What a later action of a batch may do to an element its observation does
+ * not show yet: an action whose meaning does not depend on the element's kind. */
+const ACTIONS_ON_UNSEEN: ReadonlySet<string> = new Set([
+  "invoke",
+  "show_menu",
+  "set_value",
+  "focus",
+]);
+
+/** How long a batch step that names its element waits for it to appear and
+ * enable: CUA's longest wait for one step. */
+const NAMED_STEP_WAIT_MS = 10_000;
+
+/** How long its lookup then waits, once the check found the element. */
+const NAMED_STEP_FIND_MS = 1_000;
+
+/** Roles pressed alike: CUA's step that names one may use the one element
+ * of the other with that name, once the window has settled. */
+const PRESSED_ALIKE_ROLES: ReadonlySet<string> = new Set(["button", "link"]);
+
+/** CUA's ambiguity message, worded for an action here: CUA's lookup can take
+ * an `nth`, while an action here names one element of several by its ref.
+ * CUA's `nth` and element numbers are left out of each candidate the message
+ * lists; names and window titles are kept as they are. */
+export function ambiguityForRefs(message: string): string {
+  const reworded = message.replace(
+    "; add `nth` or a more exact name: ",
+    "; give a more exact name, or observe the window and act on the one meant by its ref: ",
+  );
+  for (const lead of ["act on the one meant by its ref: ", "name the role of the one meant: "]) {
+    const at = reworded.lastIndexOf(lead);
+    if (at < 0) continue;
+    const listStart = at + lead.length;
+    const candidates = reworded
+      .slice(listStart)
+      .split("; ")
+      .map((candidate) => candidate.replace(/^(?:nth \d+: )?(?:\[\d+\] )?/, ""));
+    return reworded.slice(0, listStart) + candidates.join("; ");
+  }
+  return reworded;
+}
+
+/** Whether the first action of a batch, naming a button or link its
+ * observation does not show, may mean an element shown with that name under
+ * the other role: its step then goes to CUA by role and name, which uses that
+ * element only when the window's complete reading settles with exactly one
+ * such element and no element of the role named. Otherwise the action fails
+ * at once, as before. */
+function mayStandIn(
+  roots: readonly InteractionSemanticNodeValue[],
+  action: SemanticAction,
+): boolean {
+  const { locator } = action;
+  if (
+    locator.kind !== "role" ||
+    locator.name === undefined ||
+    !PRESSED_ALIKE_ROLES.has(locator.role) ||
+    !["invoke", "show_menu", "focus"].includes(action.action)
+  )
+    return false;
+  const wanted = locator.name.trim().toLowerCase();
+  return roots.some(
+    (node) =>
+      node.role !== locator.role &&
+      PRESSED_ALIKE_ROLES.has(node.role) &&
+      node.name?.trim().toLowerCase() === wanted,
+  );
+}
+
+/** The roles macOS and Windows observations show, as CUA's lookup names
+ * them where they differ ("text" there is a text field; here it is static
+ * text). Linux observations show AT-SPI roles, which CUA reads as they are. */
+const CUA_LOOKUP_ROLES: Readonly<Record<string, string>> = {
+  textbox: "textfield",
+  text: "statictext",
+  radio: "radiobutton",
+  combobox: "popupbutton",
+  spinbutton: "incrementor",
+};
+
+type SemanticAction = Extract<ComputerBackendActionCommand["action"], { type: "semantic" }>;
+
+/** The step for a later action of a batch that names its element by role
+ * and name instead of carrying a token: CUA finds the element when the step
+ * runs, after waiting for it to appear and enable. `node` is the element as
+ * the batch's observation shows it, when it shows it; a ref or identifier
+ * locator then names it by its role and exact name. Null when the element
+ * cannot be named: a ref or identifier the observation does not show, or an
+ * element without a role and name. */
+export function namedOperation(
+  platform: "macos" | "windows" | "linux",
+  args: Record<string, unknown>,
+  action: SemanticAction,
+  node: InteractionSemanticNodeValue | null,
+): Operation | null {
+  if (action.action === "set_value" && action.value === undefined) return null;
+  const { locator } = action;
+  const byLocator = locator.kind === "role" || locator.kind === "label" || locator.kind === "text";
+  if (!byLocator && !node) return null;
+  const role = locator.kind === "role" ? locator.role : byLocator ? undefined : node!.role;
+  const name = byLocator ? (locator.kind === "role" ? locator.name : locator.text) : node!.name;
+  const exact = byLocator ? locator.exact === true : true;
+  const selector = {
+    ...(role !== undefined
+      ? { role: platform === "linux" ? role : (CUA_LOOKUP_ROLES[role] ?? role) }
+      : {}),
+    ...(name !== undefined && name !== "" ? { name, ...(exact ? { exact: true } : {}) } : {}),
+  };
+  if (!("name" in selector) && (byLocator ? !("role" in selector) : true)) return null;
+  // A checkbox or switch set to a state is pressed only when CUA reads it
+  // in the other one as the step runs. An element named by label or text
+  // alone is taken as one when the value is true or false.
+  const toggleTo =
+    role !== undefined
+      ? toggleWanted(role, action)
+      : action.action === "set_value" && typeof action.value === "boolean"
+        ? action.value
+        : null;
+  // The check waits for the element; the lookup after it finds it at once.
+  const stepOptions = {
+    timeout_ms: NAMED_STEP_FIND_MS,
+    wait_for: {
+      ...selector,
+      pid: args.pid,
+      window_id: args.window_id,
+      enabled: true,
+      timeout_ms: NAMED_STEP_WAIT_MS,
+    },
+    ...(toggleTo !== null ? { toggle_to: toggleTo } : {}),
+  };
+  if (action.action === "set_value" && toggleTo === null)
+    return {
+      name: "set_value",
+      args: { ...args, ...selector, value: String(action.value) },
+      stepOptions,
+    };
+  return {
+    name: "click",
+    args: {
+      ...args,
+      ...selector,
+      button: action.action === "show_menu" ? "right" : "left",
+      ...(action.action === "focus" ? { action: "focus" } : {}),
+      delivery_mode: "background",
+    },
+    stepOptions,
+  };
+}
+
 /** `select` is the natural verb for a radio button or tab, which the platform
  * offers only as a press, so it presses one rather than being refused. */
 function selectsByPressing(
@@ -1783,6 +2378,45 @@ function selectsByPressing(
   return (
     action === "select" && node.actions.includes("invoke") && PRESS_TO_SELECT_ROLES.has(node.role)
   );
+}
+
+const CHECKED_WORDS: Readonly<Record<string, boolean>> = {
+  true: true,
+  on: true,
+  checked: true,
+  yes: true,
+  "1": true,
+  false: false,
+  off: false,
+  unchecked: false,
+  no: false,
+  "0": false,
+};
+
+/** The checked state an action asks of a checkbox or switch: set_value true
+ * or false (or on, off, checked, 1, 0...), select or deselect. Null when the
+ * element is no checkbox or switch, or the action asks no state. */
+export function toggleWanted(role: string, action: SemanticAction): boolean | null {
+  if (!TOGGLE_ROLES.has(role)) return null;
+  if (action.action === "select") return true;
+  if (action.action === "deselect") return false;
+  if (action.action !== "set_value" || action.value === undefined) return null;
+  const wanted =
+    typeof action.value === "boolean"
+      ? action.value
+      : CHECKED_WORDS[String(action.value).trim().toLowerCase()];
+  if (wanted === undefined)
+    throw unsupported("A checkbox or switch takes set_value true (checked) or false (not checked)");
+  return wanted;
+}
+
+/** Whether an observed checkbox or switch reads checked, when its value says,
+ * or "mixed". */
+function checkedState(node: InteractionSemanticNodeValue): boolean | "mixed" | undefined {
+  if (typeof node.value !== "string") return undefined;
+  const value = node.value.trim().toLowerCase();
+  // Neither state (indeterminate; "2" on macOS): never already as asked.
+  return value === "2" || value === "mixed" ? "mixed" : CHECKED_WORDS[value];
 }
 /** The app name CUA's worker process lists its own overlay windows under. */
 const CUA_WORKER_APP = "cua-driver";
@@ -1832,6 +2466,94 @@ function sameReading(
   const shape = (nodes: readonly InteractionSemanticNodeValue[]): string =>
     JSON.stringify(nodes, (key, value) => (key === "ref" ? undefined : value));
   return shape(after.roots) === shape(before.roots);
+}
+
+/** Roles whose text describes the page rather than being something to choose
+ * or type: their "Saving..." means the page is working. A menu item's
+ * "Print…" or a field's typed value does not. */
+const DESCRIPTIVE_ROLE =
+  /^(?:AX)?(?:static ?text|text|label|status|alert|heading|web ?area|document|group|cell)$/iu;
+const IN_PROGRESS_ROLE = /busy|progress/iu;
+const TRAILING_ELLIPSIS = /(?:\.\.\.|…)\s*$/u;
+/** A message of work in progress is short ("Saving...", "Loading your
+ * accounts…"); a longer text ending in an ellipsis is content cut short, such
+ * as a preview or a snippet, which stays on the page. */
+const MAX_PROGRESS_WORDS = 6;
+
+/** Whether one text reads as work in progress: a short text ending in an
+ * ellipsis. */
+function inProgressText(text: string): boolean {
+  if (!TRAILING_ELLIPSIS.test(text)) return false;
+  const words = text.replace(TRAILING_ELLIPSIS, "").trim().split(/\s+/u).filter(Boolean);
+  return words.length > 0 && words.length <= MAX_PROGRESS_WORDS;
+}
+
+/** The title of the document a reading shows: its window element's own
+ * label, which the reading itself carries, or else the window's listed title
+ * (never the page text an unlabeled window element is named by). A window's
+ * listed title is the one it had when the windows were last listed, so after
+ * an action that opened another page it still names the page before. */
+function documentTitle(shown: string | undefined, listed: string): string {
+  return shown !== undefined ? `window\u0000${shown}` : listed;
+}
+
+/** A button among the rows CUA leaves unindexed: on macOS a disabled button
+ * (one reading "Saving...") is such a row, folded into the page's web area. */
+const BUTTON_ROW = /^(?:AX)?(?:push ?)?button$/iu;
+
+/** What a reading shows of work in progress. */
+type ProgressSigns = {
+  /** A busy element or a spinner (a progress element without a value; a bar
+   * showing a value can be a static meter), one string per element. */
+  busy: string[];
+  /** The short texts ending in an ellipsis ("Saving...", "Loading…") of its
+   * descriptive elements and rows, its disabled elements and its folded
+   * buttons. None from a menu, whose "Move to…" is a choice, or a field,
+   * whose typed value is the person's. */
+  texts: string[];
+  /** Every text the reading shows, so that a sign counts only when the
+   * window did not show its text before: a control that becomes disabled
+   * as it was ("Options…") is not work in progress. */
+  shown: Set<string>;
+};
+
+function progressSigns(
+  nodes: readonly InteractionSemanticNodeValue[],
+  rows: readonly UnindexedRow[],
+): ProgressSigns {
+  const signs: ProgressSigns = { busy: [], texts: [], shown: new Set() };
+  const visit = (node: InteractionSemanticNodeValue, inMenu: boolean): void => {
+    const menu = inMenu || /menu/iu.test(node.role);
+    const value = typeof node.value === "string" ? node.value.trim() : undefined;
+    const name = node.name?.trim();
+    for (const text of [name, value]) if (text) signs.shown.add(text);
+    if (!menu) {
+      if (
+        node.states.includes("busy") ||
+        (IN_PROGRESS_ROLE.test(node.role) && node.value === undefined)
+      ) {
+        signs.busy.push(`${node.role}\u0000${name ?? ""}`);
+      } else if (
+        (DESCRIPTIVE_ROLE.test(node.role) && !node.actions.includes("set_value")) ||
+        node.states.includes("disabled")
+      ) {
+        for (const text of [name, value]) if (text && inProgressText(text)) signs.texts.push(text);
+      }
+    }
+    for (const child of node.children ?? []) visit(child, menu);
+  };
+  for (const node of nodes) visit(node, false);
+  for (const row of rows) {
+    const text = row.text.trim();
+    signs.shown.add(text);
+    if (
+      !row.inMenu &&
+      (DESCRIPTIVE_ROLE.test(row.role) || BUTTON_ROW.test(row.role)) &&
+      inProgressText(text)
+    )
+      signs.texts.push(text);
+  }
+  return signs;
 }
 
 function openedWindowsReport(text: string): string {
@@ -1946,10 +2668,11 @@ async function readPermissions(
 
 /** What the input a set of steps sent did not do, read from the window
  * afterwards: a date field that reads another value than the one typed into
- * its parts, a text field that still reads what it did before set_value.
- * The input ran either way, so these are not refusals. A date field Chrome
- * left without a value reads what its parts read (see projectElements). A
- * field the reading no longer shows is left to the caller's own look. */
+ * its parts, a text field that still reads what it did before set_value, a
+ * number field or slider that reads anything but the number it was given.
+ * The input ran either way, so these are not refusals. A date field reads
+ * what its parts read (see projectElements). A field the reading no longer
+ * shows is left to the caller's own look. */
 function inputFailures(
   observation: ComputerBackendObservation,
   steps: readonly Operation[],
@@ -1962,6 +2685,19 @@ function inputFailures(
       : { found: false as const };
   };
   for (const [index, step] of steps.entries()) {
+    if (step.expectToggle) {
+      const expected = step.expectToggle;
+      // A later step can press it again or change it with another control.
+      if (steps.slice(index + 1).some((later) => later.fillsField !== true)) continue;
+      const node = observation.roots.find((candidate) => candidate.ref === expected.ref);
+      const state = node ? checkedState(node) : undefined;
+      if (state !== undefined && state !== expected.wanted)
+        failures.push(
+          `the checkbox or switch ${expected.ref} still reads ${
+            state === "mixed" ? "mixed" : state ? "checked" : "not checked"
+          } after its press; observe it before pressing it again`,
+        );
+    }
     if (step.expectDate) {
       const expected = step.expectDate;
       const reading = read(expected.ref);
@@ -2000,6 +2736,26 @@ function inputFailures(
       const reading = read(expected.ref);
       if (!reading.found) continue;
       const now = reading.value ?? "";
+      if (expected.numeric) {
+        // A number field or slider reads its number back as a number ("7.50"
+        // reads "7.5"). Anything else is not the value it was given: its old
+        // value, nothing (a number field that refused text), or where a
+        // slider's steps or range stopped it.
+        const number = (text: string) => (text.trim() === "" ? Number.NaN : Number(text));
+        // A slider that no longer reads a value says nothing about the write.
+        if (expected.numeric === "slider" && now.trim() === "") continue;
+        if (now !== expected.value && number(now) !== number(expected.value))
+          failures.push(
+            `the ${expected.numeric} ${expected.ref} reads ${
+              now.trim() ? `"${now.slice(0, 64)}"` : "empty"
+            } instead of the value it was given; ${
+              expected.numeric === "slider"
+                ? "give it a value within its range that its steps reach"
+                : "give it a plain number, such as 42 or 7.5"
+            }`,
+          );
+        continue;
+      }
       // The value is not repeated: it may be a secret typed at dispatch.
       if (now === expected.before && now !== expected.value)
         failures.push(

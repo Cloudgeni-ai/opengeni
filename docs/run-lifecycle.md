@@ -1460,6 +1460,25 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
+Personal sidebar Archive composes native Pause and the member's archive row in
+one transaction, taking the personal-state fence before the control/workspace/
+session prefix. It pauses idle chats too; active work anywhere in the tree
+requires explicit confirmation under the control lock. `sessions:control` governs
+Pause regardless of the chat creator; `hide_for_me` explicitly changes only the
+caller's sidebar visibility. Shared Pause affects everyone. Restore changes only
+personal visibility and never resumes. A stable `clientEventId` replays an archive
+intent without undoing a later explicit Resume; use a new ID for a new intent.
+Native Pause interrupts descendant work and requests background-command
+cancellation through the existing durable settlement protocol. Completion of the
+HTTP request does not mean every external command has already stopped.
+
+Archive does not rewrite schedule ownership or enabled flags. Existing-session
+and reusable-session schedules cannot admit work into an effectively paused chat
+or descendant. Their definitions remain visible and enabled for their owners;
+only an explicit Resume can make the chat executable again. Independent
+new-chat-per-run schedules are not schedules *in* the archived chat and remain
+unaffected. Personal hiding alone makes no execution guarantee.
+
 Scheduled admission refuses an effectively paused session under every overlap
 policy (`refusePaused`), not only skip: an occurrence queued behind a Pause
 could neither run nor settle. Under the same session lock it distinguishes a
@@ -4132,6 +4151,27 @@ a session a worker-owned producer created (the `scheduler`, an
 settling activity completed last is the reply; an activity that resumed the
 turn after an approval, a human-input answer or a recovery and completed none
 reads the turn's newest current durable `agent.message.completed` instead.
+
+`wait_for_input` also takes an optional `reply` argument: the agent's complete
+message for the person, exactly as written. Text a model writes just before a
+tool call is not always delivered verbatim (Claude Opus 5.5 and Sonnet 5.5
+return a longer note there as a progress-update thinking block whose readable
+text is only Anthropic's summary, see [model providers](./model-providers.md)),
+but a tool argument always is. When the accepted wait carries a `reply`,
+the worker publishes it durably before the first tool result it records after
+the wait was accepted (after that response's own text), as an
+`agent.message.completed` with `phase` `final_answer` and `messageId`
+`wait_for_input:reply:<attempt id>`, whoever started the turn, unless it equals the turn's
+latest message. An approval pause or a retried activity therefore does not lose
+it (the agents SDK streams an executed tool's output item on an approval
+interruption too), and settlement publishes it only if that did not happen. For a turn that a
+human or API message started, it is also
+`turn.completed.payload.reply`, ahead of the latest message; a resumed
+activity finds it as the turn's newest durable message. The first accepted
+wait's reply in an attempt wins; a resumed attempt that accepts another wait
+publishes its reply as a separate message. The API tool itself ignores `reply`: only the turn worker's
+model tool path shows it, so a `wait_for_input` a Code Mode script calls does
+not show its `reply`.
 
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace

@@ -310,6 +310,9 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   knowledge_browse: "knowledge",
   knowledge_save: "knowledge",
   knowledge_retain_file: "knowledge",
+  // Recorded meetings are part of what the workspace knows.
+  meetings_search: "knowledge",
+  meeting_read: "knowledge",
   knowledge_retain_message: "knowledge",
   knowledge_archive: "knowledge",
   instruction_policy_save: "knowledge",
@@ -759,7 +762,7 @@ export const AGENT_CAPABILITY_DESCRIPTIONS: Readonly<
     label: "Knowledge",
     description: "Search and save workspace knowledge, task notes, and instructions.",
   },
-  schedules: { label: "Schedules", description: "Create and manage scheduled tasks." },
+  schedules: { label: "Automations", description: "Create and manage automations." },
   artifacts: {
     label: "Artifacts and Sites",
     description: "Publish files, documents, and Sites people can open.",

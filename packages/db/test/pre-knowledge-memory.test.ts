@@ -10,6 +10,7 @@ import postgres from "postgres";
 import { migrate } from "../src/migrate";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -50,6 +51,9 @@ describe("pre-knowledge Memory storage compatibility", () => {
       for (const name of strictOwnerMaintenanceMigrationTail)
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       for (const name of knowledgeActorMigrationTail)
+        await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
+      // Rewrites keys on the withheld Knowledge tables by name.
+      for (const name of workspaceDeletionMigrationTail)
         await owner`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // Rewrites the visibility transition installed by the withheld 0501 migration.
       await owner`INSERT INTO schema_migrations(name) VALUES('0738_private_sessions_share_sandboxes.sql')`;

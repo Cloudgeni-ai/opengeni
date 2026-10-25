@@ -70,6 +70,28 @@ function runtime(overrides: Partial<ApiIntegrationRuntime> = {}): ApiIntegration
 }
 
 describe("API Integration capability projection", () => {
+  test("Teams rollout hides retained adapters outside the exact pilot workspace", () => {
+    const teams = runtime({ definitionId: "microsoft-teams", definitionProvenance: "curated" });
+    const settings = testSettings({
+      microsoftTeamsToolsEnabled: false,
+      microsoftTeamsAllowedWorkspaceIds: ["pilot"],
+    });
+    expect(settingsWithApiIntegrationServers(settings, [teams]).mcpServers).toEqual(
+      settings.mcpServers,
+    );
+    expect(settingsWithApiIntegrationServers(settings, [teams], "other").mcpServers).toEqual(
+      settings.mcpServers,
+    );
+    expect(settingsWithApiIntegrationServers(settings, [teams], "pilot").mcpServers).toHaveLength(
+      settings.mcpServers.length + 1,
+    );
+    expect(
+      settingsWithApiIntegrationServers(testSettings({ microsoftTeamsToolsEnabled: true }), [
+        teams,
+      ]).mcpServers.some((server) => server.id === teams.serverId),
+    ).toBe(true);
+  });
+
   test("keeps only the exact personal API integrations frozen on an indirect turn", () => {
     const delegated = runtime({
       serverId: "delegated_api",

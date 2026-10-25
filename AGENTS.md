@@ -790,27 +790,22 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
 and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
-Run the full relevant suites
-on the VM (not only the fast queue checks), with bounded workers and isolated
-services. Obtain an independent agent review of the exact candidate head. Post
-one PR evidence comment containing that head SHA, commands/results, reviewer
-session and any limitations. Recheck the evidence after substantive head changes.
+Admission uses GitHub: an open, non-draft PR with `queue-ready` and the configured
+required fast GitHub-hosted checks (lint, types and selected unit tests) passing
+on its exact current head, not the full PR suite. Agent comments,
+VM attestations and reviewer session UUIDs are not admission requirements.
+Approval requirements come from the existing repository protection policy;
+the batcher adds no separate human or agent approval gate. Follow the repository's
+development validation guidance and report failures honestly, but do not invent
+an attestation requirement for queue intake. A changed head needs its own required
+checks; old-head success does not transfer. Version PRs remain singletons.
 
-Admission is ordered: complete the relevant full VM suites, obtain genuine
-independent review of that exact head, then post the real evidence and apply
-`queue-ready` only when the rollout owner has enabled intake. Never fabricate a
-test/reviewer receipt, copy evidence from another head, or treat a green provider
-check as independent review. A changed head revokes the old admission; repeat
-tests/review for the new head before signalling readiness again. Version PRs
-need the same human-readable exact-head evidence, not a bot exemption.
-
-Bendik selected the in-house batcher on October 21, 2026. GitHub native queue
-enforcement and vendor installation stay off. The batcher starts in read-only
-shadow mode; only the rollout owner's explicit go permits activation.
+GitHub native queue enforcement and vendor installation stay off. Only the
+rollout owner's explicit go permits activation of the reviewed controller and rules.
 Candidate-only CI shadow permission is not permission to control main or change
 rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
-does not activate anything; keep main control inactive until the release hold is
-cleared and the rollout owner gives a separate explicit go.
+does not activate anything; keep main control inactive until the rollout owner
+gives a separate explicit go with the matching core/workflow implementation.
 Merge mode follows **readable current GitHub rules**, not an owner-local receipt
 or whether a controller happens to be running. Read
 `gh api repos/Cloudgeni-ai/opengeni/rules/branches/main` and the paginated ruleset
@@ -822,7 +817,7 @@ belong to the activation operator, not ordinary agents selecting a merge path.
 Before activation or after a complete verified OFF restoration, the original
 squash-only PR admission plus non-FF/deletion protection, with no batcher writer
 restriction or partial guard transition, means normal reviewed squash after the
-same local-test and independent-review evidence. A private receipt is not a
+required GitHub checks and existing protection policy. A private receipt is not a
 prerequisite for that read-only determination. A partial transition, inaccessible
 effective-policy readback or unknown mode is **hold**: do not merge. Once the
 readable effective policy shows the complete intended main writer restriction
@@ -834,7 +829,7 @@ Explicit true, empty/null parameters, nonboolean values, extra fields or duplica
 rules are not that equivalence; unknown or mixed policy remains hold. The batcher
 is the **only normal path to main**; this queue-only instruction takes effect with
 that activation without waiting for another source edit. Submit the documented
-ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and
+ready signal (`queue-ready`) and
 observe the **Batch ready** result and exact landed SHA. Do not directly squash or
 merge a PR to main, use `--admin`, call a direct merge API, or push main. Do not
 create/update/delete queue or batcher-state refs or manually rerun/cancel Batch CI.
@@ -843,11 +838,12 @@ authorized operator's one-command OFF must prove writer stop and restore the exa
 prior rules, then publish its verified manual-mode receipt for the audit. Agents
 independently confirm restoration through the same readable GitHub rules; the
 owner's local receipt is not their only source. A ruleset name alone is never
-proof of mode, identity or bypass scope. Organization-admin
-policy changes are emergency/turn-off operations, never routine queue bypass;
-there is no standing admin writer bypass on active main. Do not rebase merely
+proof of mode, identity or bypass scope. Organization administrators have an
+emergency bypass on writer/admission restrictions, not on the separate immutable
+non-FF/deletion guard. GitHub does not enforce the word "emergency": this is an
+operator policy, never permission for routine queue bypass. Do not rebase merely
 because main advanced: the batcher tests the
-combined tree. Any head change invalidates earlier evidence and requires a new
+combined tree. Any head change invalidates earlier check results and requires a new
 candidate. Version PRs always occupy their own batch.
 
 Queue-green is not release-green. Releases require full main CI on the exact
@@ -855,15 +851,20 @@ released tip, with verified Version ancestry and matching image provenance.
 The required batch suite is plan/source/impact-selected units/Batch ready on the
 exact stacked candidate tree. Its verified latest-attempt success may land even
 when full-main CI is red or unknown; full main CI remains an independent backstop,
-not a candidate admission gate. Full relevant VM suites and independent review
-remain required before readiness. Failed candidate code never triggers a retry:
-split the cohort and durably park failing singleton heads without blame or ejection,
+not a candidate admission gate. Development validation is not a comment-based
+admission gate. The controller may retry a failed candidate's entire Batch CI once,
+using exact-attempt evidence classified as trusted code failure, verified
+infrastructure failure, provider cancellation, no-job-logs, or positive
+failed/timed-out job evidence.
+After a trusted second code failure, split the cohort and durably park failing
+singleton heads without blame or ejection,
 while other ready heads proceed. A new ready event or main advancement does not
 retry a parked head; a changed head may re-enter. Comparable base evidence remains
 unavailable, and full-main CI success is not a substitute. Current receipts lack
 trusted failure fingerprints, so no same-way suspected-base landing hold is claimed.
 Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
-the controller owns the single unchanged-input infrastructure-only retry. Do not stack manual
+the controller owns the single unchanged-input retry; unknown evidence never
+authorizes it, and a second unknown/infrastructure outcome remains held. Do not stack manual
 or in-job retries on it, or silently resubmit an ejected unchanged head.
 Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
 the plan and task receipts are deliberately bound to one run attempt.
@@ -875,8 +876,8 @@ the batcher or its CI control files require an isolated batch and explicit
 independent review of those control-plane changes.
 
 Budget/threshold increases, newly skipped tests and reduced coverage must be
-explicit in the PR and evidence comment, independently confirmed by the reviewer,
-and labelled `test-policy-change`. Never conceal a failing check by weakening it.
+explicit in the PR description, labelled `test-policy-change`, and confirmed in
+independent review. Never conceal a failing check by weakening it.
 The documented `hotfix/*` → `production` incident lane stays separate; ordinary
 main changes never bypass the queue. See the incident and rollback steps in the
 queue runbook before any exceptional main action.

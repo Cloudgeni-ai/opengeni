@@ -143,9 +143,12 @@ async function resolveTarget(input: Input) {
         (!input.connectionId || accountId(candidate) === input.connectionId),
     );
     if (!integration) throw new HTTPException(404, { message: "Integration account unavailable" });
-    const server = settingsWithApiIntegrationServers({ ...input.settings, mcpServers: [] }, [
-      integration,
-    ]).mcpServers[0]!;
+    const server = settingsWithApiIntegrationServers(
+      { ...input.settings, mcpServers: [] },
+      [integration],
+      input.workspaceId,
+    ).mcpServers[0];
+    if (!server) throw new HTTPException(404, { message: "Integration account unavailable" });
     const connection = integration.connectionRef?.connectionId
       ? await getConnectionMetadata(
           input.db,

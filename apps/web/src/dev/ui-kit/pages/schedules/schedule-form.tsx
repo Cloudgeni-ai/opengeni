@@ -2,7 +2,7 @@
  * The schedule form: What (a composer-style field with chips) -> When (the
  * cadence sentence and next runs) -> an optional Name -> a closed Advanced
  * section. One component for create and edit, always a full page
- * (/schedules/new, /schedules/:id/edit) with a back link and a sticky footer.
+ * (/automations/new, /automations/:id/edit) with a back link and a sticky footer.
  */
 import { useId, useMemo, useState, type ReactNode } from "react";
 import {

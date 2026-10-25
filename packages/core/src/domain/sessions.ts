@@ -1,3 +1,5 @@
+import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
+import type { TeamsConversationProof } from "@opengeni/db";
 import { isDirectModelId, ModelUnavailableError } from "@opengeni/contracts";
 import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments } from "@opengeni/db";
@@ -279,6 +281,7 @@ import {
   personalConnectionDelegationSourceForGrant,
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
+import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import {
   requireVerifiedOwningUser,
   requireManagedHumanPrivateSessionCreate,
@@ -891,6 +894,8 @@ type AgentChildSessionCreatePresentation = {
 
 /** Trusted entry-point options for creating a session outside the REST body. */
 export type SessionCreateRequestOptions = {
+  /** Internal durable Teams inbox proof; never accepted from a REST request body. */
+  teamsConversation?: TeamsConversationProof;
   /**
    * Product surface when the entry point knows it (for example Slack or an
    * in-process embedding host). Omitted derives it from the grant.
@@ -2587,7 +2592,28 @@ async function createSessionForRequestInFileScope(
   });
   payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
-  const externalBeforeCreateCommit = externalContinuationCommitAuthorizer(authorization);
+  const externalCommitAuthorizer = externalContinuationCommitAuthorizer(authorization);
+  const teamsProof = requestOptions.teamsConversation;
+  if (teamsProof && grant.metadata?.["sessionId"]) {
+    throw new HTTPException(403, { message: "teams_private_session_proof_invalid" });
+  }
+  const teamsCommitAuthorizer = teamsProof
+    ? await authorizeTeamsConversationAdmission(unresolvedDeps, grant, {
+        workspaceId,
+        sessionId: payload.requestedSessionId,
+        initialMessage: payload.initialMessage ?? "",
+        creating: true,
+        privateCreate: payload.visibility === "private",
+        personal: payload.visibility === "private",
+        proof: teamsProof,
+      })
+    : undefined;
+  const externalBeforeCreateCommit = teamsCommitAuthorizer
+    ? async (tx: Database) => {
+        await teamsCommitAuthorizer(tx);
+        await externalCommitAuthorizer?.(tx);
+      }
+    : externalCommitAuthorizer;
 
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
     throw new HTTPException(422, {
@@ -2596,7 +2622,11 @@ async function createSessionForRequestInFileScope(
   }
   const db = unresolvedDeps.db;
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
-  if (payload.visibility === "private" && !grant.metadata?.["sessionId"]) {
+  if (
+    payload.visibility === "private" &&
+    !grant.metadata?.["sessionId"] &&
+    !teamsCommitAuthorizer
+  ) {
     if (!authorization) {
       throw new HTTPException(403, {
         message: "managed human session required",
@@ -2629,6 +2659,15 @@ async function createSessionForRequestInFileScope(
       }
       throw error;
     }
+  }
+  // A new root chat needs the workspace open to new work: once the
+  // organization turned Personal workspaces off, nobody starts one there.
+  // Workers of an existing chat still start, so existing chats keep working.
+  if (!parentSessionId) {
+    await requirePersonalWorkspaceOpenToNewWork(unresolvedDeps, {
+      accountId: grant.accountId,
+      workspaceId,
+    });
   }
   // a create-time usage limit belongs to a new ROOT task and only a
   // person or the trusted host may set it. Agents (including children, which
@@ -3345,7 +3384,8 @@ async function createSessionForRequestInFileScope(
     },
   );
   // CHANNEL FILING. Pure rail organization: a UUID files the session into that
-  // workspace channel, omission/null leaves it unfiled (inbox). Resolved
+  // workspace channel, omission/null leaves it unfiled (inbox), or files a Site
+  // conversation in its Site's project (the database decides). Resolved
   // workspace-scoped so a foreign channel id can never attach; an explicit
   // unknown channelId is a caller error → 422.
   let channelId: string | null = null;
@@ -4313,6 +4353,8 @@ async function acceptSessionUserMessageInFileScope(
     expectedDraftRevision?: number | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     authorization?: AccessGrantAuthorization;
+    /** Trusted Teams inbox reference; never populated from public JSON. */
+    teamsConversation?: TeamsConversationProof;
   },
 ): Promise<{
   accepted: SessionEvent;
@@ -4324,6 +4366,14 @@ async function acceptSessionUserMessageInFileScope(
   replay: boolean;
 }> {
   const { db, bus, workflowClient, objectStorage } = deps;
+  const teamsCommitAuthorizer = input.teamsConversation
+    ? await authorizeTeamsConversationAdmission(deps, grant, {
+        workspaceId,
+        sessionId,
+        initialMessage: input.text,
+        proof: input.teamsConversation,
+      })
+    : undefined;
 
   const promptInitiator = creationInitiatorForGrant(grant);
   const delegatedServiceInitiator =
@@ -4650,6 +4700,7 @@ async function acceptSessionUserMessageInFileScope(
         connectionAccountIntent,
 
         captureTurnAuthority: async (tx: Database, turnId: string) => {
+          await teamsCommitAuthorizer?.(tx);
           await captureLinkedAuthority?.(tx, sessionId, turnId);
           // The prompt transaction has frozen the exact authority at this
           // point. A refusal rolls back both prompt and receipt atomically.

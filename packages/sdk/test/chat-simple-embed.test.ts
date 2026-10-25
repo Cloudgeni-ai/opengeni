@@ -41,6 +41,15 @@ function fakeApi(
         ...(credential ? { credential } : {}),
       });
     }
+    const grant = /^\/v1\/workspaces\/([^/]+)\/access\/grant$/u.exec(path);
+    if (grant) {
+      return Response.json({
+        subjectId: "external_user:fixture",
+        accountId: ORGANIZATION_ID,
+        workspaceId: decodeURIComponent(grant[1]!),
+        permissions: ["sessions:read"],
+      });
+    }
     if (request.method === "PUT" && path === "/v1/workspaces/external") {
       const key = `${String(body.externalSource)}\u0000${String(body.externalId)}`;
       if (!workspaces.has(key)) workspaces.set(key, `ws${workspaces.size + 1}`);

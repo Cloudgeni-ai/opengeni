@@ -1,6 +1,7 @@
 import { migrate } from "@opengeni/db/migrate";
 import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "../../../packages/db/test/knowledge-actor-migration-tail";
+import { workspaceDeletionMigrationTail } from "../../../packages/db/test/workspace-deletion-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "../../../packages/db/test/strict-owner-maintenance-migration-tail";
 import { restorePreRetirementGrants } from "../../../packages/db/test/fixtures/pre-retirement-grants";
 import { readFile } from "node:fs/promises";
@@ -1924,6 +1925,9 @@ describe("scheduled task personal MCP authority", () => {
       // 0461 (and each other). This pre-cutover producer-fence fixture must
       // withhold the dependent tail too, not fabricate modern Knowledge SQL.
       for (const name of knowledgeActorMigrationTail)
+        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+      // Rewrites keys on the withheld Knowledge tables by name.
+      for (const name of workspaceDeletionMigrationTail)
         await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // 0832 also extends the producer fence (generated default tool policy).
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES

@@ -5,6 +5,7 @@ import {
   listLostConnectedInteractionControllers,
   listSourceFormerPlacementResources,
   releaseLostConnectedInteractionController,
+  terminalizeStaleConnectedInteractionPlacement,
   type LostConnectedInteractionController,
 } from "@opengeni/db";
 import {
@@ -218,6 +219,28 @@ export async function retireFormerPlacementControllers(
       unreachable: false,
     };
   }
+}
+
+/**
+ * A browser or Desktop can still be live on a Connected Machine its source
+ * task has since moved away from, when nothing used it after the move. Record
+ * that move first, as any other use of it would, so ending it can retire its
+ * controller there in the same request rather than failing on the move. True
+ * when the task has moved away from that machine.
+ */
+export async function recordSourcePlacementMove(
+  services: Pick<ChannelAServices, "db">,
+  input: { grant: AccessGrant; sourceSessionId: string; connectedSandboxId: string },
+): Promise<boolean> {
+  const source = await getSession(services.db, input.grant.workspaceId, input.sourceSessionId);
+  if (!source || source.activeSandboxId === input.connectedSandboxId) return false;
+  const reconciliation = await terminalizeStaleConnectedInteractionPlacement(services.db, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+    sourceSessionId: input.sourceSessionId,
+    connectedSandboxId: input.connectedSandboxId,
+  });
+  return reconciliation.sourcePlacementChanged;
 }
 
 /**

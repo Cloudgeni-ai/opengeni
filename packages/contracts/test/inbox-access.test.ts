@@ -11,6 +11,18 @@ describe("accessContextHasInbox", () => {
     ).toBe(false);
   });
 
+  test("a product's external user has an inbox, but not through the key's own context", () => {
+    // The relay's access context for the user: their subject, no credential.
+    expect(accessContextHasInbox({ mode: "managed", subjectId: "external_user:abc" })).toBe(true);
+    expect(
+      accessContextHasInbox({
+        mode: "managed",
+        subjectId: "external_user:abc",
+        credential: { id: "k" },
+      }),
+    ).toBe(false);
+  });
+
   test("a local install's one human has an inbox", () => {
     expect(LOCAL_HUMAN_SUBJECT_ID).toBe("dev");
     expect(
@@ -42,6 +54,8 @@ describe("accessContextHasInbox", () => {
       { mode: "local", subjectId: "apikey:abc", workspaceGrants: [humanGrant] },
       { mode: "local", subjectId: "scheduler", workspaceGrants: [humanGrant] },
       { mode: "configured", subjectId: "configured", workspaceGrants: [humanGrant] },
+      { mode: "managed", subjectId: "externalXuser:abc" },
+      { mode: "managed", subjectId: "api_key:abc" },
     ];
     for (const context of cases) expect(accessContextHasInbox(context)).toBe(false);
     expect(accessContextHasInbox(null)).toBe(false);

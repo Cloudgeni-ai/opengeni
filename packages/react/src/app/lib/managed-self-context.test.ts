@@ -5,6 +5,7 @@ import {
   isPersonalWorkspace,
   loadCurrentManagedSelfContext,
   managedSelfContextIdentity,
+  navigableWorkspaces,
   personalWorkspaceMembership,
   type ManagedSelfContext,
   type ManagedSelfContextIdentity,
@@ -167,5 +168,34 @@ describe("managed self context", () => {
         },
       }),
     ).rejects.toThrow("current cookie failed");
+  });
+});
+
+describe("Personal workspaces turned off", () => {
+  const identity = managedSelfContextIdentity({ credentialGeneration: 1, managedUserId: "u1" });
+  const shared = { id: "44444444-4444-4444-8444-444444444444" };
+  const personal = { id: personalWorkspaceId };
+  const context = (personalWorkspacesEnabled?: boolean): ManagedSelfContext => ({
+    identity,
+    memberships: [
+      {
+        ...membership,
+        ...(personalWorkspacesEnabled === undefined ? {} : { personalWorkspacesEnabled }),
+      },
+    ],
+  });
+
+  test("offers the Personal workspace while the organization keeps it, or says nothing", () => {
+    expect(navigableWorkspaces([shared, personal], context(true))).toEqual([shared, personal]);
+    expect(navigableWorkspaces([shared, personal], context())).toEqual([shared, personal]);
+    expect(navigableWorkspaces([shared, personal], null)).toEqual([shared, personal]);
+  });
+
+  test("hides it once off, except while a link has the person in it", () => {
+    expect(navigableWorkspaces([shared, personal], context(false))).toEqual([shared]);
+    expect(navigableWorkspaces([shared, personal], context(false), personal.id)).toEqual([
+      shared,
+      personal,
+    ]);
   });
 });

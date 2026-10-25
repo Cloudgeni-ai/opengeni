@@ -227,6 +227,13 @@ export const SESSION_USAGE_LIMITS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_SESSION_USAGE_LIMITS_ENABLED",
 ];
 
+/** Event triggers for automations (API + both workers). Default off in
+ * @opengeni/config; a valueEnv passthrough emitted only when set. Enable only
+ * after every API and worker image understands the `event` run trigger. */
+export const EVENT_TRIGGERS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_EVENT_TRIGGERS_ENABLED",
+];
+
 /** Agent configuration rollout switches (sessions.agent_config, migration
  * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
  * only when set. Enable admission only after every worker runs a 0559-aware
@@ -2704,6 +2711,21 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
     valueEnv("OPENGENI_SLACK_BOT_DISPLAY_NAME", env.OPENGENI_SLACK_BOT_DISPLAY_NAME),
     valueEnv("OPENGENI_SLACK_COMMAND", env.OPENGENI_SLACK_COMMAND),
+    valueEnv(
+      "OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED",
+      env.OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED ?? "false",
+    ),
+    valueEnv(
+      "OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS",
+      env.OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS,
+    ),
+    valueEnv("OPENGENI_TEAMS_BOT_ENABLED", env.OPENGENI_TEAMS_BOT_ENABLED ?? "false"),
+    valueEnv("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS", env.OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS),
+    valueEnv("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS", env.OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS),
+    valueEnv("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS", env.OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS),
+    valueEnv("OPENGENI_TEAMS_BOT_CLIENT_ID", env.OPENGENI_TEAMS_BOT_CLIENT_ID),
+    valueEnv("OPENGENI_TEAMS_BOT_CLIENT_SECRET", env.OPENGENI_TEAMS_BOT_CLIENT_SECRET),
+    valueEnv("OPENGENI_TEAMS_BOT_TENANT_ID", env.OPENGENI_TEAMS_BOT_TENANT_ID),
     valueEnv("OPENGENI_PR_REVIEW_GITHUB_APP_ID", env.OPENGENI_PR_REVIEW_GITHUB_APP_ID),
     valueEnv("OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID", env.OPENGENI_PR_REVIEW_GITHUB_CLIENT_ID),
     valueEnv(
@@ -3063,6 +3085,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of SESSION_USAGE_LIMITS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of EVENT_TRIGGERS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of AGENT_CONFIG_PASSTHROUGH_ENV) {

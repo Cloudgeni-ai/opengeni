@@ -373,16 +373,27 @@ export function buildGitHubAppManifest(input: {
   const permissions: Record<string, string> = {
     metadata: "read",
     contents: "write",
+    issues: "write",
     pull_requests: "write",
     // Required for the authenticated-user membership endpoint that proves an
     // active organization owner. Existing installations must approve this
     // permission before organization-owner self-service can succeed.
     members: "read",
   };
+  const events = [
+    "issues",
+    "issue_comment",
+    "pull_request",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "push",
+    "release",
+  ];
   if (input.includeCiPermissions) {
     permissions.actions = "read";
     permissions.checks = "read";
     permissions.statuses = "write";
+    events.push("check_run", "check_suite", "workflow_run");
   }
   const manifest: Record<string, unknown> = {
     name: input.appName,
@@ -396,11 +407,30 @@ export function buildGitHubAppManifest(input: {
     request_oauth_on_install: !input.setupUrl,
     default_permissions: permissions,
   };
+  // GitHub must be able to reach the receiver, so only a public https
+  // deployment gets a webhook; others can add one later in the App settings.
+  if (githubCanDeliverTo(base)) {
+    manifest.hook_attributes = { url: `${base}/v1/webhooks/github`, active: true };
+    manifest.default_events = events;
+  }
   if (input.setupUrl) {
     manifest.setup_url = input.setupUrl;
     manifest.setup_on_update = true;
   }
   return manifest;
+}
+
+function githubCanDeliverTo(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    return (
+      url.protocol === "https:" &&
+      !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
+      !url.hostname.endsWith(".localhost")
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function personalAppManifestUrl(state: string): string {
@@ -1237,6 +1267,67 @@ export function githubAppBotIdentity(settings: Settings): { name: string; email:
 
 export const GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING =
   "github_app_bot_identity_unavailable" as const;
+
+type GitHubAppFetch = (url: string, init: RequestInit) => Promise<Response>;
+
+async function githubAppRequest(
+  settings: GitHubAppSigningSettings,
+  path: string,
+  init: { method?: "GET" | "PATCH"; body?: unknown },
+  fetchImpl: GitHubAppFetch,
+): Promise<Response> {
+  const jwt = await createGitHubAppJwt(settings);
+  return await fetchImpl(`${githubApiBase}${path}`, {
+    method: init.method ?? "GET",
+    headers: {
+      ...(githubHeaders(jwt) as Record<string, string>),
+      ...(init.body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+    signal: AbortSignal.timeout(10_000),
+  });
+}
+
+/** Where the App sends its webhooks and which events it is subscribed to. */
+export type GitHubAppWebhookSetup = {
+  /** The webhook URL; null when the App has none. */
+  webhookUrl: string | null;
+  events: string[];
+};
+
+export async function getGitHubAppWebhookSetup(
+  settings: GitHubAppSigningSettings,
+  fetchImpl: GitHubAppFetch = fetch,
+): Promise<GitHubAppWebhookSetup> {
+  const app = await githubAppRequest(settings, "/app", {}, fetchImpl);
+  if (!app.ok) throw new GitHubAppApiError(await githubErrorMessage(app), app.status);
+  const appPayload = (await app.json()) as { events?: unknown };
+  const events = Array.isArray(appPayload.events)
+    ? appPayload.events.filter((event): event is string => typeof event === "string")
+    : [];
+  const config = await githubAppRequest(settings, "/app/hook/config", {}, fetchImpl);
+  if (config.status === 404) return { webhookUrl: null, events };
+  if (!config.ok) throw new GitHubAppApiError(await githubErrorMessage(config), config.status);
+  const url = ((await config.json()) as { url?: unknown }).url;
+  return { webhookUrl: typeof url === "string" && url.trim() ? url.trim() : null, events };
+}
+
+/** Point the App's webhook at `url`, signed with `secret`. */
+export async function setGitHubAppWebhookUrl(
+  settings: GitHubAppSigningSettings,
+  input: { url: string; secret: string },
+  fetchImpl: GitHubAppFetch = fetch,
+): Promise<void> {
+  const response = await githubAppRequest(
+    settings,
+    "/app/hook/config",
+    { method: "PATCH", body: { url: input.url, content_type: "json", secret: input.secret } },
+    fetchImpl,
+  );
+  if (!response.ok) {
+    throw new GitHubAppApiError(await githubErrorMessage(response), response.status);
+  }
+}
 
 /**
  * Non-secret health posture for the stable sandbox Git identity. API-direct

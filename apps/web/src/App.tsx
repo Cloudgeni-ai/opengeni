@@ -19,10 +19,14 @@
 
 //   /workspaces/:id/capabilities             → legacy redirect to /plugins
 //   /integrations?…                          → workspace-less OAuth callback → current workspace /plugins
-//   /workspaces/:id/schedules                → schedules list
-//   /workspaces/:id/schedules/new            → new schedule (?template, ?from, ?sourceSessionId)
-//   /workspaces/:id/schedules/:scheduleId    → one schedule (overview + runs)
-//   /workspaces/:id/schedules/:scheduleId/edit → edit schedule
+//   /workspaces/:id/automations              → automations list
+//   /workspaces/:id/automations/new          → new automation (?template, ?from, ?sourceSessionId, ?source)
+//   /workspaces/:id/automations/:automationId → one automation (overview + runs)
+//   /workspaces/:id/automations/:automationId/edit → edit automation
+//   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
+//   /workspaces/:id/schedules[/…]            → old links, redirect to the same automation page
+//   /workspaces/:id/meetings                 → meetings list with the recorder
+//   /workspaces/:id/meetings/:recordingId    → one meeting (player, transcript, speakers)
 //   /workspaces/:id/playground               → playground: Opengeni inside a sample product, with a guided tour
 //   /workspaces/:id/state                    → Knowledge (?view, ?entry, ?page)
 //   /workspaces/:id/documents, /memory       → old links, redirect to Knowledge
@@ -35,6 +39,7 @@
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
 //   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
+//   /dev/composer-stack                      → DEV-only session column preview (mocked)
 //   /dev/onboarding                          → DEV-only production onboarding components
 //   /dev/ui-kit                              → DEV-only component studio (src/dev/ui-kit)
 // The shared session UI renders through this app's router and API helpers.
@@ -122,6 +127,7 @@ import {
   type RootWorkspaceSearch,
   workspaceNavigationPreferenceStorageId,
 } from "@opengeni/react/app/lib/workspace-navigation-preference";
+import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
@@ -144,12 +150,20 @@ const LazyIntegrationsReturnRoute = lazyRouteComponent(
   "IntegrationsReturnRoute",
 );
 const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
+const LazyTeamsConnectRoute = lazyRouteComponent(
+  () => import("@/routes/teams-connect"),
+  "TeamsConnectRoute",
+);
 const LazyConnectAgentRoute = lazyRouteComponent(
   () => import("@/routes/connect-agent"),
   "ConnectAgentRoute",
 );
 const LazySecretsRoute = lazyRouteComponent(() => import("@/routes/secrets"), "SecretsRoute");
 const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
+const LazyComputerUseRoute = lazyRouteComponent(
+  () => import("@/routes/computer-use"),
+  "ComputerUseRoute",
+);
 const LazyInsightsRoute = lazyRouteComponent(() => import("@/routes/insights"), "InsightsRoute");
 const LazyOrgSettingsRoute = lazyRouteComponent(
   () => import("@/routes/org-settings"),
@@ -205,14 +219,34 @@ const LazyRigDetailRoute = lazyRouteComponent(
   () => import("@/routes/rig-detail"),
   "RigDetailRoute",
 );
-const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
-const LazyScheduleDetailRoute = lazyRouteComponent(
-  () => import("@/routes/schedules"),
-  "ScheduleDetailRoute",
+const LazyAutomationsRoute = lazyRouteComponent(
+  () => import("@/routes/automations"),
+  "AutomationsRoute",
 );
-const LazyScheduleFormRoute = lazyRouteComponent(
-  () => import("@/routes/schedules"),
-  "ScheduleFormRoute",
+const LazyMeetingsRoute = lazyRouteComponent(() => import("@/routes/meetings"), "MeetingsRoute");
+const LazyMeetingDetailRoute = lazyRouteComponent(
+  () => import("@/routes/meetings"),
+  "MeetingDetailRoute",
+);
+const LazyAutomationDetailRoute = lazyRouteComponent(
+  () => import("@/routes/automations"),
+  "AutomationDetailRoute",
+);
+const LazyAutomationFormRoute = lazyRouteComponent(
+  () => import("@/routes/automations"),
+  "AutomationFormRoute",
+);
+const LazyEventSourcesRoute = lazyRouteComponent(
+  () => import("@/routes/automations"),
+  "EventSourcesRoute",
+);
+const LazyEventSourceNewRoute = lazyRouteComponent(
+  () => import("@/routes/automations"),
+  "EventSourceNewRoute",
+);
+const LazyEventSourceDetailRoute = lazyRouteComponent(
+  () => import("@/routes/automations"),
+  "EventSourceDetailRoute",
 );
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session-route"), "SessionRoute");
 const LazyPlaygroundRoute = lazyRouteComponent(
@@ -320,6 +354,11 @@ const integrationsReturnRoute = createRoute({
 // code via `lookupDeviceEnrollment`, so no workspace lives in the URL.
 // Where an agent's sign-in to the organization MCP server lands: the person
 // picks the organization, what the agent can do and where (/v1/mcp OAuth).
+const teamsConnectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "teams/connect",
+  component: LazyTeamsConnectRoute,
+});
 const connectAgentRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "connect-agent",
@@ -434,6 +473,19 @@ const devSessionTimelineRoute = createRoute({
   path: "dev/session-timeline",
   component: LazyDevSessionTimelineRoute,
 });
+// DEV-only: full-height session column (timeline, status stack, composer) for
+// composer-stack screenshots and measurements. Created only in development so
+// its fixtures are never emitted into a production build.
+const composerStackPreviewRoute = import.meta.env.DEV
+  ? createRoute({
+      getParentRoute: () => rootRoute,
+      path: "dev/composer-stack",
+      component: lazyRouteComponent(
+        () => import("@/routes/composer-stack"),
+        "ComposerStackPreviewRoute",
+      ),
+    })
+  : null;
 // DEV-only component studio. Created only in development so the kit chunk is
 // never emitted into a production build.
 const uiKitRoute = import.meta.env.DEV
@@ -561,6 +613,11 @@ const workspaceMachinesRoute = createRoute({
   path: "machines",
   component: Machines,
 });
+const workspaceComputerUseRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "computer-use",
+  component: LazyComputerUseRoute,
+});
 // Mirrors the UsageSearch keys in components/insights/usage-search.ts (kept here
 // so the route table doesn't import the lazy Insights chunk).
 const INSIGHTS_SEARCH_KEYS = [
@@ -614,59 +671,127 @@ const workspaceLegacyCapabilitiesRoute = createRoute({
   }),
   component: CapabilitiesLegacyRedirect,
 });
-const SCHEDULES_SEARCH_UUID =
+const AUTOMATIONS_SEARCH_UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
-const workspaceSchedulesRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "schedules",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { sourceSessionId?: string; taskId?: string; targetSessionId?: string } => ({
+type AutomationsSearch = { sourceSessionId?: string; taskId?: string; targetSessionId?: string };
+function automationsSearch(search: Record<string, unknown>): AutomationsSearch {
+  return {
     ...(typeof search.sourceSessionId === "string" &&
-    SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
+    AUTOMATIONS_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
       : {}),
     ...(typeof search.targetSessionId === "string" &&
-    SCHEDULES_SEARCH_UUID.test(search.targetSessionId)
+    AUTOMATIONS_SEARCH_UUID.test(search.targetSessionId)
       ? { targetSessionId: search.targetSessionId }
       : {}),
-    // Set when arriving from a session that a schedule started, so the page can
-    // reveal that one task instead of leaving the reader to find it.
-    ...(typeof search.taskId === "string" && SCHEDULES_SEARCH_UUID.test(search.taskId)
+    // Set when arriving from a session that an automation started, so the page
+    // can reveal that one automation instead of leaving the reader to find it.
+    ...(typeof search.taskId === "string" && AUTOMATIONS_SEARCH_UUID.test(search.taskId)
       ? { taskId: search.taskId }
       : {}),
-  }),
-  component: Schedules,
-});
-const SCHEDULE_TEMPLATE_IDS = new Set(["morning-brief", "dependency-pr", "cost-check"]);
-const workspaceScheduleNewRoute = createRoute({
-  getParentRoute: () => workspaceRoute,
-  path: "schedules/new",
-  validateSearch: (
-    search: Record<string, unknown>,
-  ): { template?: string; from?: string; sourceSessionId?: string } => ({
-    ...(typeof search.template === "string" && SCHEDULE_TEMPLATE_IDS.has(search.template)
+  };
+}
+// Template ids and source kinds are only shape-checked here; the pages ignore
+// one they don't know, so the router never keeps a second list of them.
+const AUTOMATIONS_SEARCH_SLUG = /^[a-z][a-z0-9-]{0,39}$/u;
+type NewAutomationSearch = {
+  template?: string;
+  from?: string;
+  sourceSessionId?: string;
+  /** Start with a trigger on this event source. */
+  source?: string;
+};
+function newAutomationSearch(search: Record<string, unknown>): NewAutomationSearch {
+  return {
+    ...(typeof search.template === "string" && AUTOMATIONS_SEARCH_SLUG.test(search.template)
       ? { template: search.template }
       : {}),
-    ...(typeof search.from === "string" && SCHEDULES_SEARCH_UUID.test(search.from)
+    ...(typeof search.from === "string" && AUTOMATIONS_SEARCH_UUID.test(search.from)
       ? { from: search.from }
       : {}),
     ...(typeof search.sourceSessionId === "string" &&
-    SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
+    AUTOMATIONS_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
       : {}),
-  }),
-  component: ScheduleNew,
-});
-const workspaceScheduleDetailRoute = createRoute({
+    ...(typeof search.source === "string" && AUTOMATIONS_SEARCH_UUID.test(search.source)
+      ? { source: search.source }
+      : {}),
+  };
+}
+const workspaceAutomationsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "schedules/$scheduleId",
-  component: ScheduleDetail,
+  path: "automations",
+  validateSearch: automationsSearch,
+  component: Automations,
 });
-const workspaceScheduleEditRoute = createRoute({
+const workspaceAutomationNewRoute = createRoute({
   getParentRoute: () => workspaceRoute,
-  path: "schedules/$scheduleId/edit",
-  component: ScheduleEdit,
+  path: "automations/new",
+  validateSearch: newAutomationSearch,
+  component: AutomationNew,
+});
+const workspaceAutomationDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "automations/$automationId",
+  component: AutomationDetail,
+});
+const workspaceAutomationEditRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "automations/$automationId/edit",
+  component: AutomationEdit,
+});
+const workspaceEventSourcesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "automations/sources",
+  component: EventSources,
+});
+const workspaceEventSourceNewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "automations/sources/new",
+  validateSearch: (search: Record<string, unknown>): { kind?: string } =>
+    typeof search.kind === "string" && AUTOMATIONS_SEARCH_SLUG.test(search.kind)
+      ? { kind: search.kind }
+      : {},
+  component: EventSourceNew,
+});
+const workspaceEventSourceDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "automations/sources/$sourceId",
+  component: EventSourceDetail,
+});
+// Automations were called Schedules; their links in old messages and
+// bookmarks still land on the same page.
+const workspaceLegacySchedulesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules",
+  validateSearch: automationsSearch,
+  component: LegacySchedulesRedirect,
+});
+const workspaceLegacyScheduleNewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/new",
+  validateSearch: newAutomationSearch,
+  component: LegacyScheduleNewRedirect,
+});
+const workspaceLegacyScheduleDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/$automationId",
+  component: LegacyScheduleDetailRedirect,
+});
+const workspaceLegacyScheduleEditRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "schedules/$automationId/edit",
+  component: LegacyScheduleEditRedirect,
+});
+const workspaceMeetingsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "meetings",
+  component: Meetings,
+});
+const workspaceMeetingDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "meetings/$recordingId",
+  component: MeetingDetail,
 });
 const workspacePlaygroundRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -758,11 +883,14 @@ const workspaceArtifactsRoute = createRoute({
 });
 const workspaceArtifactDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
+  // A Site's details, by tab; without a tab it opens the Site view instead.
   path: "artifacts/$artifactId",
   validateSearch: artifactReturnSearch,
   component: ArtifactDetail,
 });
-// A Site with its conversations beside it; the rail's Site rows open it.
+// A Site with its conversations beside it, where it is edited live. Every
+// way into a Site opens it: the rail, the Artifacts list, links and Edit with
+// Opengeni (`?new`, a new conversation with its composer focused).
 const workspaceSiteViewRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "sites/$siteId",
@@ -879,6 +1007,7 @@ const routeTree = rootRoute.addChildren([
   integrationsReturnRoute,
   deviceRoute,
   connectAgentRoute,
+  teamsConnectRoute,
   resetPasswordRoute,
   excelAddinRoute,
   desktopReturnRoute,
@@ -896,6 +1025,7 @@ const routeTree = rootRoute.addChildren([
         devSessionTimelineRoute,
       ]
     : []),
+  ...(import.meta.env.DEV && composerStackPreviewRoute ? [composerStackPreviewRoute] : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
   workspaceRoute.addChildren([
     workspaceIndexRoute,
@@ -917,13 +1047,23 @@ const routeTree = rootRoute.addChildren([
     workspaceReadOnlyChatsRoute,
     workspaceInboxRoute,
     workspaceMachinesRoute,
+    workspaceComputerUseRoute,
     workspaceInsightsRoute,
     workspaceCapabilitiesRoute,
     workspaceLegacyCapabilitiesRoute,
-    workspaceSchedulesRoute,
-    workspaceScheduleNewRoute,
-    workspaceScheduleDetailRoute,
-    workspaceScheduleEditRoute,
+    workspaceAutomationsRoute,
+    workspaceAutomationNewRoute,
+    workspaceAutomationDetailRoute,
+    workspaceAutomationEditRoute,
+    workspaceEventSourcesRoute,
+    workspaceEventSourceNewRoute,
+    workspaceEventSourceDetailRoute,
+    workspaceLegacySchedulesRoute,
+    workspaceLegacyScheduleNewRoute,
+    workspaceLegacyScheduleDetailRoute,
+    workspaceLegacyScheduleEditRoute,
+    workspaceMeetingsRoute,
+    workspaceMeetingDetailRoute,
     workspacePlaygroundRoute,
     workspaceDocumentsRoute,
     workspaceMemoryRoute,
@@ -956,7 +1096,7 @@ warmDesktopPages([
   LazySessionsIndexRoute,
   LazyInboxRoute,
   LazyCapabilitiesRoute,
-  LazySchedulesRoute,
+  LazyAutomationsRoute,
   LazyArtifactsRoute,
 ]);
 
@@ -992,7 +1132,12 @@ function RootIndexRoute() {
     rememberedWorkspaceId: readLastWorkspaceId(
       workspaceNavigationPreferenceStorageId(context.accessContext.subjectId),
     ),
-    workspaces: context.workspaces,
+    // Never land in a Personal workspace the organization turned off.
+    workspaces: navigableWorkspaces(
+      context.workspaces,
+      context.managedSelfContext,
+      requestedWorkspaceId,
+    ),
     accessContext: context.accessContext,
   });
   if (!workspaceId) {
@@ -1138,11 +1283,11 @@ function Capabilities() {
   );
 }
 
-function Schedules() {
-  const { workspaceId } = workspaceSchedulesRoute.useParams();
-  const { sourceSessionId, taskId, targetSessionId } = workspaceSchedulesRoute.useSearch();
+function Automations() {
+  const { workspaceId } = workspaceAutomationsRoute.useParams();
+  const { sourceSessionId, taskId, targetSessionId } = workspaceAutomationsRoute.useSearch();
   return (
-    <LazySchedulesRoute
+    <LazyAutomationsRoute
       workspaceId={workspaceId}
       sourceSessionId={sourceSessionId}
       focusTaskId={taskId}
@@ -1151,13 +1296,73 @@ function Schedules() {
   );
 }
 
-function ScheduleNew() {
-  const { workspaceId } = workspaceScheduleNewRoute.useParams();
-  const { template, from, sourceSessionId } = workspaceScheduleNewRoute.useSearch();
+function AutomationNew() {
+  const { workspaceId } = workspaceAutomationNewRoute.useParams();
+  const { template, from, sourceSessionId, source } = workspaceAutomationNewRoute.useSearch();
   return (
-    <LazyScheduleFormRoute
+    <LazyAutomationFormRoute
       workspaceId={workspaceId}
-      mode={{ kind: "create", template, from, sourceSessionId }}
+      mode={{ kind: "create", template, from, sourceSessionId, eventSourceId: source }}
+    />
+  );
+}
+
+function EventSources() {
+  const { workspaceId } = workspaceEventSourcesRoute.useParams();
+  return <LazyEventSourcesRoute workspaceId={workspaceId} />;
+}
+
+function EventSourceNew() {
+  const { workspaceId } = workspaceEventSourceNewRoute.useParams();
+  const { kind } = workspaceEventSourceNewRoute.useSearch();
+  return <LazyEventSourceNewRoute workspaceId={workspaceId} kind={kind} />;
+}
+
+function EventSourceDetail() {
+  const { workspaceId, sourceId } = workspaceEventSourceDetailRoute.useParams();
+  return <LazyEventSourceDetailRoute workspaceId={workspaceId} sourceId={sourceId} />;
+}
+
+function LegacySchedulesRedirect() {
+  const { workspaceId } = workspaceLegacySchedulesRoute.useParams();
+  const search = workspaceLegacySchedulesRoute.useSearch();
+  return (
+    <Navigate
+      to="/workspaces/$workspaceId/automations"
+      params={{ workspaceId }}
+      search={search}
+      replace
+    />
+  );
+}
+
+function LegacyScheduleNewRedirect() {
+  const { workspaceId } = workspaceLegacyScheduleNewRoute.useParams();
+  const search = workspaceLegacyScheduleNewRoute.useSearch();
+  return (
+    <Navigate
+      to="/workspaces/$workspaceId/automations/new"
+      params={{ workspaceId }}
+      search={search}
+      replace
+    />
+  );
+}
+
+function LegacyScheduleDetailRedirect() {
+  const params = workspaceLegacyScheduleDetailRoute.useParams();
+  return (
+    <Navigate to="/workspaces/$workspaceId/automations/$automationId" params={params} replace />
+  );
+}
+
+function LegacyScheduleEditRedirect() {
+  const params = workspaceLegacyScheduleEditRoute.useParams();
+  return (
+    <Navigate
+      to="/workspaces/$workspaceId/automations/$automationId/edit"
+      params={params}
+      replace
     />
   );
 }
@@ -1167,14 +1372,29 @@ function Playground() {
   return <LazyPlaygroundRoute key={workspaceId} workspaceId={workspaceId} />;
 }
 
-function ScheduleDetail() {
-  const { workspaceId, scheduleId } = workspaceScheduleDetailRoute.useParams();
-  return <LazyScheduleDetailRoute workspaceId={workspaceId} scheduleId={scheduleId} />;
+function AutomationDetail() {
+  const { workspaceId, automationId } = workspaceAutomationDetailRoute.useParams();
+  return <LazyAutomationDetailRoute workspaceId={workspaceId} scheduleId={automationId} />;
 }
 
-function ScheduleEdit() {
-  const { workspaceId, scheduleId } = workspaceScheduleEditRoute.useParams();
-  return <LazyScheduleFormRoute workspaceId={workspaceId} mode={{ kind: "edit", scheduleId }} />;
+function Meetings() {
+  const { workspaceId } = workspaceMeetingsRoute.useParams();
+  return <LazyMeetingsRoute workspaceId={workspaceId} />;
+}
+
+function MeetingDetail() {
+  const { workspaceId, recordingId } = workspaceMeetingDetailRoute.useParams();
+  return <LazyMeetingDetailRoute workspaceId={workspaceId} recordingId={recordingId} />;
+}
+
+function AutomationEdit() {
+  const { workspaceId, automationId } = workspaceAutomationEditRoute.useParams();
+  return (
+    <LazyAutomationFormRoute
+      workspaceId={workspaceId}
+      mode={{ kind: "edit", scheduleId: automationId }}
+    />
+  );
 }
 
 function Documents() {
@@ -1275,13 +1495,14 @@ function ArtifactDetail() {
 
 function SiteViewPage() {
   const { workspaceId, siteId } = workspaceSiteViewRoute.useParams();
-  const { conversation } = workspaceSiteViewRoute.useSearch();
+  const { conversation, new: startNew } = workspaceSiteViewRoute.useSearch();
   return (
     <LazySiteViewRoute
       key={`${workspaceId}:${siteId}`}
       workspaceId={workspaceId}
       siteId={siteId}
       conversation={conversation}
+      startNew={startNew === true}
     />
   );
 }

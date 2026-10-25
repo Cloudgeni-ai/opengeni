@@ -500,7 +500,10 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     // per-connect `capabilities()` re-probe then reflects a freshly-granted
     // display). A denied/pending grant degrades cleanly to `display_unavailable`
     // and never blocks the serve loop. No-op on every non-macOS / feature-off build.
-    ensure_macos_desktop_grants();
+    // Skipped entirely while screen control is turned off in the desktop app.
+    if !screen_control_turned_off() {
+        ensure_macos_desktop_grants();
+    }
 
     // A desktop app starts this agent as its own helper. Chrome's attached-browser
     // bridge then has to point at this copy, since no service install wrote it,
@@ -565,10 +568,23 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
     if let Some(cgroups) = op_cgroups {
         platform = platform.with_oom_isolation(cgroups);
     }
+    if screen_control_turned_off() {
+        // Turned off in the desktop app on this computer: no screen, no input,
+        // and no question to the system about either, whatever the
+        // connection's consent says. The app restarts this agent to undo it.
+        info!("screen control is turned off on this computer; the desktop stays unavailable");
+        platform = platform.with_desktop(Arc::new(opengeni_agent_platform::TurnedOffDesktop::new(
+            SCREEN_CONTROL_OFF_REASON,
+        )));
+    }
     let config_dir = config::config_dir().ok();
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
-    let (next_platform, browser_sidecars) =
-        attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
+    let (next_platform, browser_sidecars) = attach_browser_controller(
+        platform,
+        config_dir.as_deref(),
+        update_drain.clone(),
+        !screen_control_turned_off(),
+    );
     platform = next_platform;
     // Only the agent holding the instance lock may remove helper generations
     // that earlier releases left behind; the removal runs off the startup path.
@@ -592,7 +608,16 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         inherited_instance.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
-    let browser_bridge = start_browser_bridge(config_dir.as_deref(), update_drain.clone()).await;
+    // A desktop app whose person turned the Chrome extension off gets no bridge
+    // from this agent at all, not only no Native Messaging registration.
+    let browser_bridge = if hosted_by_desktop_app()
+        && !hosted_browser_extension_value(
+            std::env::var_os(DESKTOP_BROWSER_EXTENSION_ENV).as_deref(),
+        ) {
+        None
+    } else {
+        start_browser_bridge(config_dir.as_deref(), update_drain.clone()).await
+    };
     if let (Some(sidecars), Some(bridge)) = (&browser_sidecars, &browser_bridge) {
         sidecars.observe_attached_inventory(bridge.inventory());
     }
@@ -605,6 +630,9 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
     supervisor = supervisor.with_update_drain(update_drain);
+    if screen_control_turned_off() {
+        supervisor = supervisor.with_screen_control_turned_off();
+    }
     #[cfg(unix)]
     {
         let inherited = handover::take_inherited();
@@ -754,7 +782,7 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     let config_dir = config::config_dir().ok();
     let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (platform, browser_sidecars) =
-        attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
+        attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone(), true);
 
     let credentials = link_config.credentials();
     let relay = RelayCredential::pending();
@@ -882,6 +910,15 @@ const DESKTOP_HOST_ENV: &str = "OPENGENI_AGENT_HOST";
 /// Chrome extension.
 const DESKTOP_BROWSER_EXTENSION_ENV: &str = "OPENGENI_AGENT_BROWSER_EXTENSION";
 
+/// Set to `off` by a desktop app whose person turned screen control off there.
+/// The agent then never sees or controls the screen, whatever the connection's
+/// consent says, until the app starts it without the setting.
+const DESKTOP_SCREEN_CONTROL_ENV: &str = "OPENGENI_AGENT_SCREEN_CONTROL";
+
+/// What agents and the person see instead of this computer's screen.
+const SCREEN_CONTROL_OFF_REASON: &str =
+    "Screen control is turned off on this computer. Its owner can turn it on in the Opengeni app's settings, under Computer use.";
+
 /// The screen-control permissions as JSON. A fresh process reads macOS's current
 /// answer; a long-running one can keep seeing a Screen Recording denial that the
 /// person has since changed, until it restarts.
@@ -890,6 +927,7 @@ fn permissions_json() -> String {
     let grants = opengeni_agent_platform::desktop_grants();
     serde_json::json!({
         "required": true,
+        "screenControlSwitch": true,
         "screenRecording": grants.screen_recording,
         "accessibility": grants.accessibility,
         "inputMonitoring": grants.input_monitoring,
@@ -913,7 +951,9 @@ fn request_permission(_permission: cli::PermissionRequest) {}
 /// Other platforms ask for no screen-control permission.
 #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
 fn permissions_json() -> String {
-    serde_json::json!({ "required": false }).to_string()
+    // `screenControlSwitch` tells a desktop host this agent honours
+    // `OPENGENI_AGENT_SCREEN_CONTROL=off`; older agents leave it out.
+    serde_json::json!({ "required": false, "screenControlSwitch": true }).to_string()
 }
 
 /// The exit status that asks a desktop host to start the (updated) agent again.
@@ -930,6 +970,14 @@ fn hosted_by_desktop_app_value(value: Option<&std::ffi::OsStr>) -> bool {
 
 fn hosted_browser_extension_value(value: Option<&std::ffi::OsStr>) -> bool {
     value.is_none_or(|value| value != "off")
+}
+
+fn screen_control_turned_off() -> bool {
+    screen_control_turned_off_value(std::env::var_os(DESKTOP_SCREEN_CONTROL_ENV).as_deref())
+}
+
+fn screen_control_turned_off_value(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| value == "off")
 }
 
 /// Removes a bridge registration an earlier run of this agent wrote, so the
@@ -986,12 +1034,21 @@ fn attach_browser_controller(
     platform: NativePlatform,
     config_dir: Option<&Path>,
     update_drain: Arc<uploads::update_drain::UpdateDrain>,
+    computer_control: bool,
 ) -> (NativePlatform, Option<Arc<BrowserSidecarManager>>) {
     let Some(directory) = config_dir else {
         return (platform, None);
     };
     match BrowserSidecarManager::discover(directory) {
         Ok(manager) => {
+            // Screen control turned off: browser sessions still work, but the
+            // controllers start without a computer backend, so no native
+            // computer session can reach the screen around the turned-off desktop.
+            let manager = if computer_control {
+                manager
+            } else {
+                manager.without_computer_control()
+            };
             let manager = Arc::new(manager.with_update_drain(update_drain));
             manager.spawn_empty_controller_reaper();
             manager.spawn_detached_browser_sweep();
@@ -1037,7 +1094,8 @@ fn supervisor_links(
                     credentials.relay_url.clone(),
                     credentials.relay_token.clone(),
                 ),
-                allow_screen_control: credentials.consented_screen_control,
+                allow_screen_control: credentials.consented_screen_control
+                    && !screen_control_turned_off(),
             });
             let link_platform = Arc::new(platform.clone().with_stream_registry(Arc::new(hub)));
             let link =
@@ -1098,6 +1156,10 @@ fn parse_geometry(geometry: &str) -> (u32, u32) {
 /// Probe the display offer independently of capture permission. A Mac awaiting
 /// Screen Recording must still offer the user explicit screen-control consent.
 async fn probe_offers_display() -> bool {
+    // Turned off in the desktop app: nothing to offer, and no grant request.
+    if screen_control_turned_off() {
+        return false;
+    }
     ensure_macos_desktop_grants();
     probe_offers_display_with_backend(opengeni_agent_platform::resolve_desktop()).await
 }
@@ -1424,7 +1486,10 @@ mod anyhow_lite {
 
 #[cfg(test)]
 mod desktop_host_tests {
-    use super::{hosted_browser_extension_value, hosted_by_desktop_app_value};
+    use super::{
+        hosted_browser_extension_value, hosted_by_desktop_app_value,
+        screen_control_turned_off_value,
+    };
     use std::ffi::OsStr;
 
     #[test]
@@ -1440,6 +1505,14 @@ mod desktop_host_tests {
         assert!(hosted_browser_extension_value(None));
         assert!(hosted_browser_extension_value(Some(OsStr::new("on"))));
         assert!(!hosted_browser_extension_value(Some(OsStr::new("off"))));
+    }
+
+    #[test]
+    fn only_an_explicit_off_turns_screen_control_off() {
+        assert!(!screen_control_turned_off_value(None));
+        assert!(!screen_control_turned_off_value(Some(OsStr::new(""))));
+        assert!(!screen_control_turned_off_value(Some(OsStr::new("on"))));
+        assert!(screen_control_turned_off_value(Some(OsStr::new("off"))));
     }
 }
 

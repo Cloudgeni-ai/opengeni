@@ -8,7 +8,7 @@ import {
   type AttachedBrowserDeviceListResponse as AttachedBrowserDeviceListResponseValue,
   type AttachedBrowserInventorySnapshot as AttachedBrowserInventorySnapshotValue,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 import {
   advanceWorkspaceInteractionRevision,
@@ -86,6 +86,12 @@ type EnrollmentVisibility = {
   active: Set<string>;
   /** Revoked machines the viewer may still see, with when they were revoked. */
   revoked: Map<string, Date | null>;
+  /** Each visible machine's sandbox and plain name, as the Machines list shows it. */
+  machines: Map<string, { sandboxId: string | null; machineName: string }>;
+  /** Where each visible machine is enrolled, which is where its Chrome
+   *  profiles are stored. An organization or personal machine can be
+   *  enrolled in another workspace than the viewer's. */
+  workspaces: Map<string, string>;
 };
 
 /** The machines this viewer may see here, through the same owner-aware
@@ -96,23 +102,114 @@ async function visibleEnrollments(
 ): Promise<EnrollmentVisibility> {
   return await withRlsContext(db, viewer, async (scopedDb) => {
     await setSubjectRlsContext(scopedDb, viewer.subjectId);
-    const rows = await rawRows<{ id: string; status: string; revokedAt: string | null }>(
+    const rows = await rawRows<{
+      id: string;
+      workspaceId: string;
+      status: string;
+      revokedAt: string | null;
+      sandboxId: string | null;
+      sandboxName: string | null;
+      os: string;
+    }>(
       scopedDb,
-      sql`select value->>'id' as id, value->>'status' as status, value->>'revokedAt' as "revokedAt"
+      sql`select value->>'id' as id, value->>'workspaceId' as "workspaceId",
+          value->>'status' as status, value->>'revokedAt' as "revokedAt",
+          value->>'sandboxId' as "sandboxId", value->>'sandboxName' as "sandboxName",
+          value->>'os' as os
         from list_scoped_enrollments(
           ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'active') value
         union all
-        select value->>'id', value->>'status', value->>'revokedAt'
+        select value->>'id', value->>'workspaceId', value->>'status', value->>'revokedAt',
+          value->>'sandboxId', value->>'sandboxName', value->>'os'
         from list_scoped_enrollments(
           ${viewer.accountId}::uuid, ${viewer.workspaceId}::uuid, null, 'revoked') value`,
     );
-    const visibility: EnrollmentVisibility = { active: new Set(), revoked: new Map() };
+    const visibility: EnrollmentVisibility = {
+      active: new Set(),
+      revoked: new Map(),
+      machines: new Map(),
+      workspaces: new Map(),
+    };
     for (const row of rows) {
       if (row.status === "active") visibility.active.add(row.id);
       else visibility.revoked.set(row.id, row.revokedAt ? new Date(row.revokedAt) : null);
+      visibility.workspaces.set(row.id, row.workspaceId);
+      // The same name the Machines list gives this machine.
+      visibility.machines.set(row.id, {
+        sandboxId: row.sandboxId,
+        machineName: row.sandboxName ?? `${row.os} machine`,
+      });
     }
     return visibility;
   });
+}
+
+/** Run `read` once per workspace holding visible machines, the viewer's own
+ *  workspace first, each under that workspace's row-level security, inside
+ *  the caller's transaction. The viewer's machine listing already authorized
+ *  every enrollment passed to `read`. */
+async function readVisibleWorkspaces<T>(
+  scopedDb: Database,
+  viewer: AttachedBrowserViewer,
+  visibility: EnrollmentVisibility,
+  read: (db: Database, workspaceId: string, enrollmentIds: string[]) => Promise<T[]>,
+  onlyWorkspaceId?: string | null,
+): Promise<T[]> {
+  const byWorkspace = new Map<string, string[]>();
+  for (const [enrollmentId, workspaceId] of visibility.workspaces) {
+    if (onlyWorkspaceId && workspaceId !== onlyWorkspaceId) continue;
+    const ids = byWorkspace.get(workspaceId) ?? [];
+    ids.push(enrollmentId);
+    byWorkspace.set(workspaceId, ids);
+  }
+  const workspaceIds = [...byWorkspace.keys()].sort((left, right) => {
+    if (left === viewer.workspaceId) return -1;
+    if (right === viewer.workspaceId) return 1;
+    return left.localeCompare(right);
+  });
+  const results: T[] = [];
+  for (const workspaceId of workspaceIds) {
+    const enrollmentIds = (byWorkspace.get(workspaceId) ?? []).sort();
+    results.push(
+      ...(workspaceId === viewer.workspaceId
+        ? await read(scopedDb, workspaceId, enrollmentIds)
+        : await withRlsContext(
+            scopedDb,
+            { accountId: viewer.accountId, workspaceId },
+            async (workspaceDb) => await read(workspaceDb, workspaceId, enrollmentIds),
+          )),
+    );
+  }
+  return results;
+}
+
+/** List order: connected first, then most recently disconnected and updated. */
+function compareDeviceRows(left: DeviceRow, right: DeviceRow): number {
+  const leftDisconnected = left.disconnectedAt?.getTime() ?? Number.POSITIVE_INFINITY;
+  const rightDisconnected = right.disconnectedAt?.getTime() ?? Number.POSITIVE_INFINITY;
+  if (leftDisconnected !== rightDisconnected) return rightDisconnected - leftDisconnected;
+  const updated = right.updatedAt.getTime() - left.updatedAt.getTime();
+  if (updated !== 0) return updated;
+  if (left.name !== right.name) return left.name < right.name ? -1 : 1;
+  if (left.id !== right.id) return left.id < right.id ? -1 : 1;
+  return left.workspaceId < right.workspaceId ? -1 : left.workspaceId > right.workspaceId ? 1 : 0;
+}
+
+/** One Chrome profile id can be stored twice when the same computer is
+ *  enrolled in two workspaces. Address the connected one, preferring the
+ *  viewer's own workspace, then the most recent. */
+function preferredDevice(
+  devices: readonly AttachedBrowserDeviceValue[],
+  viewerWorkspaceId: string,
+): AttachedBrowserDeviceValue | null {
+  const ranked = [...devices].sort(
+    (left, right) =>
+      Number(left.state !== "connected") - Number(right.state !== "connected") ||
+      Number(left.workspaceId !== viewerWorkspaceId) -
+        Number(right.workspaceId !== viewerWorkspaceId) ||
+      Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
+  );
+  return ranked[0] ?? null;
 }
 
 /** A device as this viewer may see it: null when its machine is hidden from
@@ -543,14 +640,33 @@ async function recordAttachedBrowserConnectionEnds(
 }
 
 /** A new physical Chrome generation cannot inherit a prior controller token.
- *  Mark every still-live BrowserSession/ComputerSession on that exact device
- *  lost in place. Never rewrite placementInstanceId onto the successor. */
+ *  Mark every still-live BrowserSession/ComputerSession in this workspace on
+ *  that exact device lost in place. Never rewrite placementInstanceId onto the
+ *  successor. A session in another workspace using a machine shared from here
+ *  is ended the same way by its own next controller check
+ *  (attachedDeviceGenerationMatches), so no other workspace is scanned. */
 async function terminalizeStaleAttachedDeviceSessions(
   tx: Database,
   input: { workspaceId: string; deviceIds: readonly string[] },
 ): Promise<boolean> {
   if (input.deviceIds.length === 0) return false;
+  return await terminalizeWorkspaceAttachedDeviceSessions(tx, {
+    workspaceId: input.workspaceId,
+    deviceWorkspaceId: input.workspaceId,
+    deviceIds: [...input.deviceIds].sort(),
+  });
+}
 
+async function terminalizeWorkspaceAttachedDeviceSessions(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    deviceWorkspaceId: string;
+    deviceIds: readonly string[];
+    /** Only sessions placed on this Chrome generation. */
+    placementInstanceId?: string;
+  },
+): Promise<boolean> {
   const browserRows = await tx
     .select({ id: schema.browserSessions.id })
     .from(schema.browserSessions)
@@ -558,6 +674,10 @@ async function terminalizeStaleAttachedDeviceSessions(
       and(
         eq(schema.browserSessions.workspaceId, input.workspaceId),
         eq(schema.browserSessions.placementKind, "attached_device"),
+        deviceWorkspaceMatches(schema.browserSessions, input),
+        input.placementInstanceId === undefined
+          ? undefined
+          : eq(schema.browserSessions.placementInstanceId, input.placementInstanceId),
         inArray(schema.browserSessions.deviceId, [...input.deviceIds]),
         inArray(schema.browserSessions.lifecycle, [...ATTACHED_DEVICE_LIVE_LIFECYCLES]),
       ),
@@ -569,6 +689,10 @@ async function terminalizeStaleAttachedDeviceSessions(
       and(
         eq(schema.computerSessions.workspaceId, input.workspaceId),
         eq(schema.computerSessions.placementKind, "attached_device"),
+        deviceWorkspaceMatches(schema.computerSessions, input),
+        input.placementInstanceId === undefined
+          ? undefined
+          : eq(schema.computerSessions.placementInstanceId, input.placementInstanceId),
         inArray(schema.computerSessions.deviceId, [...input.deviceIds]),
         inArray(schema.computerSessions.lifecycle, [...ATTACHED_DEVICE_LIVE_LIFECYCLES]),
       ),
@@ -668,25 +792,70 @@ async function terminalizeStaleAttachedDeviceSessions(
 }
 
 /** Lock the device row first (same order as inventory) and prove the live
- *  physical generation still matches this controller placement. */
+ *  physical generation still matches this controller placement. The device
+ *  row lives in `deviceWorkspaceId`, which is the session's own workspace
+ *  unless the session runs on a machine shared from another workspace.
+ *  When Chrome has restarted (or its profile is gone), every live session in
+ *  this workspace on the old generation is marked lost here, in place: the
+ *  inventory heartbeat ends them eagerly only in the profile's own workspace. */
 export async function attachedDeviceGenerationMatches(
   tx: Database,
-  input: { workspaceId: string; deviceId: string; placementInstanceId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    deviceWorkspaceId: string;
+    deviceId: string;
+    placementInstanceId: string;
+  },
 ): Promise<boolean> {
-  const [device] = await tx
-    .select({
-      connectionGeneration: schema.attachedBrowserDevices.connectionGeneration,
+  const read = async (deviceDb: Database) => {
+    const [device] = await deviceDb
+      .select({
+        connectionGeneration: schema.attachedBrowserDevices.connectionGeneration,
+      })
+      .from(schema.attachedBrowserDevices)
+      .where(
+        and(
+          eq(schema.attachedBrowserDevices.workspaceId, input.deviceWorkspaceId),
+          eq(schema.attachedBrowserDevices.id, input.deviceId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    return device?.connectionGeneration === input.placementInstanceId;
+  };
+  const current =
+    input.deviceWorkspaceId === input.workspaceId
+      ? await read(tx)
+      : await withRlsContext(
+          tx,
+          { accountId: input.accountId, workspaceId: input.deviceWorkspaceId },
+          read,
+        );
+  if (current) return true;
+  if (
+    await terminalizeWorkspaceAttachedDeviceSessions(tx, {
+      workspaceId: input.workspaceId,
+      deviceWorkspaceId: input.deviceWorkspaceId,
+      deviceIds: [input.deviceId],
+      placementInstanceId: input.placementInstanceId,
     })
-    .from(schema.attachedBrowserDevices)
-    .where(
-      and(
-        eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
-        eq(schema.attachedBrowserDevices.id, input.deviceId),
-      ),
-    )
-    .for("update")
-    .limit(1);
-  return device?.connectionGeneration === input.placementInstanceId;
+  ) {
+    await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+  }
+  return false;
+}
+
+/** Sessions placed on a Chrome profile stored in `deviceWorkspaceId`. A row
+ *  written before sessions recorded it has none, which means its own
+ *  workspace. */
+function deviceWorkspaceMatches(
+  table: typeof schema.browserSessions | typeof schema.computerSessions,
+  input: { workspaceId: string; deviceWorkspaceId: string },
+) {
+  return input.workspaceId === input.deviceWorkspaceId
+    ? or(eq(table.deviceWorkspaceId, input.deviceWorkspaceId), isNull(table.deviceWorkspaceId))
+    : eq(table.deviceWorkspaceId, input.deviceWorkspaceId);
 }
 
 /** Immediately mark every live Chrome profile on a cleanly disconnected agent
@@ -743,6 +912,8 @@ export async function disconnectAttachedBrowserDevices(
   );
 }
 
+/** Every Chrome profile on a machine this viewer can use, wherever that
+ *  machine is enrolled: the same machines the viewer's Machines list shows. */
 export async function listAttachedBrowserDevices(
   db: Database,
   input: AttachedBrowserViewer & { includeDisconnected?: boolean },
@@ -752,55 +923,82 @@ export async function listAttachedBrowserDevices(
     db,
     input,
     async (scopedDb) => {
-      const rows = await scopedDb
-        .select()
-        .from(schema.attachedBrowserDevices)
-        .where(
-          input.includeDisconnected
-            ? eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId)
-            : and(
-                eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
-                isNull(schema.attachedBrowserDevices.disconnectedAt),
+      const rows = (
+        await readVisibleWorkspaces(
+          scopedDb,
+          input,
+          visibility,
+          async (workspaceDb, workspaceId, enrollmentIds) =>
+            await workspaceDb
+              .select()
+              .from(schema.attachedBrowserDevices)
+              .where(
+                and(
+                  eq(schema.attachedBrowserDevices.workspaceId, workspaceId),
+                  inArray(schema.attachedBrowserDevices.enrollmentId, enrollmentIds),
+                  input.includeDisconnected
+                    ? undefined
+                    : isNull(schema.attachedBrowserDevices.disconnectedAt),
+                ),
               ),
         )
-        .orderBy(
-          desc(schema.attachedBrowserDevices.disconnectedAt),
-          desc(schema.attachedBrowserDevices.updatedAt),
-          asc(schema.attachedBrowserDevices.name),
-          asc(schema.attachedBrowserDevices.id),
-        );
-      const inventories = await scopedDb
-        .select({
-          enrollmentId: schema.attachedBrowserInventories.enrollmentId,
-          bridgeGeneration: schema.attachedBrowserInventories.bridgeGeneration,
-          revision: schema.attachedBrowserInventories.revision,
-          observedAt: schema.attachedBrowserInventories.observedAt,
-          enrollmentStatus: schema.enrollments.status,
-          connectionLeaseExpiresAt: schema.enrollments.connectionLeaseExpiresAt,
-          wentOfflineAt: schema.enrollments.wentOfflineAt,
-        })
-        .from(schema.attachedBrowserInventories)
-        .innerJoin(
-          schema.enrollments,
-          and(
-            eq(schema.enrollments.id, schema.attachedBrowserInventories.enrollmentId),
-            eq(schema.enrollments.workspaceId, schema.attachedBrowserInventories.workspaceId),
-          ),
+      ).sort(compareDeviceRows);
+      const inventories = (
+        await readVisibleWorkspaces(
+          scopedDb,
+          input,
+          visibility,
+          async (workspaceDb, workspaceId, enrollmentIds) =>
+            await workspaceDb
+              .select({
+                enrollmentId: schema.attachedBrowserInventories.enrollmentId,
+                bridgeGeneration: schema.attachedBrowserInventories.bridgeGeneration,
+                revision: schema.attachedBrowserInventories.revision,
+                observedAt: schema.attachedBrowserInventories.observedAt,
+                enrollmentStatus: schema.enrollments.status,
+                connectionLeaseExpiresAt: schema.enrollments.connectionLeaseExpiresAt,
+                wentOfflineAt: schema.enrollments.wentOfflineAt,
+              })
+              .from(schema.attachedBrowserInventories)
+              .innerJoin(
+                schema.enrollments,
+                and(
+                  eq(schema.enrollments.id, schema.attachedBrowserInventories.enrollmentId),
+                  eq(schema.enrollments.workspaceId, schema.attachedBrowserInventories.workspaceId),
+                ),
+              )
+              .where(
+                and(
+                  eq(schema.attachedBrowserInventories.workspaceId, workspaceId),
+                  inArray(schema.attachedBrowserInventories.enrollmentId, enrollmentIds),
+                ),
+              ),
         )
-        .where(eq(schema.attachedBrowserInventories.workspaceId, input.workspaceId))
-        .orderBy(
-          desc(schema.attachedBrowserInventories.observedAt),
-          asc(schema.attachedBrowserInventories.enrollmentId),
-        );
+      ).sort(
+        (left, right) =>
+          right.observedAt.getTime() - left.observedAt.getTime() ||
+          left.enrollmentId.localeCompare(right.enrollmentId),
+      );
       const observations = new Map(
         inventories.map((inventory) => [inventory.enrollmentId, inventory.observedAt]),
       );
-      const devices = rows
+      const visibleDevices = rows
         .map((row) => visibleDevice(row, visibility, observations.get(row.enrollmentId) ?? null))
         .filter(
           (device): device is AttachedBrowserDeviceValue =>
             device !== null && (input.includeDisconnected === true || device.state === "connected"),
         );
+      // A profile id stored in two workspaces is listed once, as the copy
+      // getAttachedBrowserDevice addresses.
+      const preferred = new Map<string, AttachedBrowserDeviceValue>();
+      for (const device of visibleDevices) {
+        const current = preferred.get(device.id);
+        preferred.set(
+          device.id,
+          current ? (preferredDevice([current, device], input.workspaceId) ?? device) : device,
+        );
+      }
+      const devices = visibleDevices.filter((device) => preferred.get(device.id) === device);
       const connectedProfilesByEnrollment = new Map<string, number>();
       for (const device of devices) {
         if (device.state !== "connected") continue;
@@ -819,6 +1017,8 @@ export async function listAttachedBrowserDevices(
           )
           .map((inventory) => ({
             enrollmentId: inventory.enrollmentId,
+            sandboxId: visibility.machines.get(inventory.enrollmentId)?.sandboxId ?? null,
+            machineName: visibility.machines.get(inventory.enrollmentId)?.machineName ?? null,
             state:
               inventory.enrollmentStatus === "active" &&
               inventory.wentOfflineAt === null &&
@@ -838,42 +1038,58 @@ export async function listAttachedBrowserDevices(
   );
 }
 
+/** One Chrome profile this viewer can use. `deviceWorkspaceId` pins the
+ *  copy an existing session was placed on; without it, the copy a new
+ *  session would use. */
 export async function getAttachedBrowserDevice(
   db: Database,
-  input: AttachedBrowserViewer & { deviceId: string },
+  input: AttachedBrowserViewer & { deviceId: string; deviceWorkspaceId?: string | null },
 ): Promise<AttachedBrowserDeviceValue> {
   const visibility = await visibleEnrollments(db, input);
   return await withRlsContext(
     db,
     input,
     async (scopedDb) => {
-      const [row] = await scopedDb
-        .select({
-          device: schema.attachedBrowserDevices,
-          observedAt: schema.attachedBrowserInventories.observedAt,
-        })
-        .from(schema.attachedBrowserDevices)
-        .leftJoin(
-          schema.attachedBrowserInventories,
-          and(
-            eq(
-              schema.attachedBrowserInventories.workspaceId,
-              schema.attachedBrowserDevices.workspaceId,
-            ),
-            eq(
-              schema.attachedBrowserInventories.enrollmentId,
-              schema.attachedBrowserDevices.enrollmentId,
-            ),
-          ),
-        )
-        .where(
-          and(
-            eq(schema.attachedBrowserDevices.workspaceId, input.workspaceId),
-            eq(schema.attachedBrowserDevices.id, input.deviceId),
-          ),
-        )
-        .limit(1);
-      const device = row ? visibleDevice(row.device, visibility, row.observedAt) : null;
+      const rows = await readVisibleWorkspaces(
+        scopedDb,
+        input,
+        visibility,
+        async (workspaceDb, workspaceId, enrollmentIds) =>
+          await workspaceDb
+            .select({
+              device: schema.attachedBrowserDevices,
+              observedAt: schema.attachedBrowserInventories.observedAt,
+            })
+            .from(schema.attachedBrowserDevices)
+            .leftJoin(
+              schema.attachedBrowserInventories,
+              and(
+                eq(
+                  schema.attachedBrowserInventories.workspaceId,
+                  schema.attachedBrowserDevices.workspaceId,
+                ),
+                eq(
+                  schema.attachedBrowserInventories.enrollmentId,
+                  schema.attachedBrowserDevices.enrollmentId,
+                ),
+              ),
+            )
+            .where(
+              and(
+                eq(schema.attachedBrowserDevices.workspaceId, workspaceId),
+                eq(schema.attachedBrowserDevices.id, input.deviceId),
+                inArray(schema.attachedBrowserDevices.enrollmentId, enrollmentIds),
+              ),
+            )
+            .limit(1),
+        input.deviceWorkspaceId,
+      );
+      const device = preferredDevice(
+        rows
+          .map((row) => visibleDevice(row.device, visibility, row.observedAt))
+          .filter((value): value is AttachedBrowserDeviceValue => value !== null),
+        input.workspaceId,
+      );
       if (!device) throw new AttachedBrowserDeviceNotFoundError("Attached browser not found");
       return device;
     },
@@ -884,19 +1100,28 @@ export async function getAttachedBrowserDevice(
 /** Where a browser or computer's controller runs, as far as ending it needs. */
 export type InteractionControllerPlacement =
   | { kind: "connected_machine"; sandboxId: string }
-  | { kind: "attached_device"; deviceId: string }
+  | {
+      kind: "attached_device";
+      deviceId: string;
+      deviceWorkspaceId?: string | null;
+      /** The Chrome generation the session's controller is bound to. */
+      placementInstanceId?: string | null;
+    }
   | { kind: string };
 
 /** True when a browser or computer's controller can never be reached again,
  * so ending it completes in the control plane:
  *  - on a Connected Machine that was removed (revoked); that machine can no
  *    longer run or keep it;
- *  - in a person's own Chrome whose device is disconnected, or whose machine
- *    was removed. Such a session holds no Opengeni process or profile; the
- *    tabs it opened stay with the person as ordinary tabs.
- * A machine that is only offline still holds its sessions' processes and
- * private profiles, so it is not gone. Both checks go through the viewer's
- * own owner-aware machine listing: a machine hidden from them is never gone. */
+ *  - in a person's own Chrome whose profile is disconnected, has restarted
+ *    since the session was placed, is gone, or is no longer reachable from
+ *    this viewer's workspace (its machine was removed or stopped being shared
+ *    here). Such a session holds no Opengeni process or profile, and nobody
+ *    here can reach the controller to end it there; the tabs it opened stay
+ *    with the person as ordinary tabs, and completing under the bound
+ *    generation fences that controller off.
+ * A Connected Machine that is only offline, or hidden from this viewer, still
+ * holds its sessions' processes and private profiles, so it is not gone. */
 export async function interactionControllerGone(
   db: Database,
   viewer: AttachedBrowserViewer,
@@ -918,14 +1143,25 @@ export async function interactionControllerGone(
     });
   }
   if (placement && "deviceId" in placement && placement.kind === "attached_device") {
+    const expectedGeneration =
+      "placementInstanceId" in placement && typeof placement.placementInstanceId === "string"
+        ? placement.placementInstanceId
+        : null;
     try {
       const device = await getAttachedBrowserDevice(db, {
         ...viewer,
         deviceId: placement.deviceId,
+        deviceWorkspaceId:
+          "deviceWorkspaceId" in placement && typeof placement.deviceWorkspaceId === "string"
+            ? placement.deviceWorkspaceId
+            : null,
       });
-      return device.state !== "connected";
+      return (
+        device.state !== "connected" ||
+        (expectedGeneration !== null && device.connectionGeneration !== expectedGeneration)
+      );
     } catch (error) {
-      if (error instanceof AttachedBrowserDeviceNotFoundError) return false;
+      if (error instanceof AttachedBrowserDeviceNotFoundError) return true;
       throw error;
     }
   }

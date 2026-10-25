@@ -10,6 +10,7 @@ import {
   UpsertSitePublicationRequest,
   type SiteAbuseReport,
   type SiteAuthAuthorizeResponse,
+  type SitePublicationLink,
 } from "@opengeni/contracts";
 import {
   getManagedSession,
@@ -53,6 +54,7 @@ import { SiteSqlError } from "../site-sql/service";
 import { siteDataHttpError } from "./site-data";
 import { siteSqlHttpError } from "./site-sql";
 import {
+  publishedSiteAddress,
   requireSiteManager,
   requireSitesDomain,
   resolveSiteManagement,
@@ -191,6 +193,31 @@ export function registerSitePublishingRoutes(app: Hono, deps: ApiRouteDeps): voi
         "This Site is not published",
       );
     return context.json(await sitePublicationView(deps, management.scope, publication));
+  });
+
+  /**
+   * Where the Site is published, for anyone who can open it in the app (the
+   * Site view's "Live" link). Reading the address needs only the Site; the
+   * publication's settings above stay with the people who manage it.
+   */
+  app.get(`${base}/link`, async (context) => {
+    const domain = requireSitesDomain(deps.settings);
+    const grant = await grantFor(context, "artifacts:read");
+    const management = await resolveSiteManagement(deps, grant, siteIdParam(context));
+    const publication = await getSitePublication(deps.db, management.scope, management.record.id);
+    if (!publication)
+      throw sitePublishingError(
+        404,
+        "not_found",
+        "site_not_published",
+        "This Site is not published",
+      );
+    const link: SitePublicationLink = {
+      siteId: publication.siteId,
+      ...publishedSiteAddress(publication.label, domain),
+      status: publication.status,
+    };
+    return context.json(link);
   });
 
   app.put(base, async (context) => {

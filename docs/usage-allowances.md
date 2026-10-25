@@ -469,11 +469,12 @@ do not promise complete allowance history from before the feature was enabled.
 ## Recipe: a fraction-only browser meter
 
 The packaged [session proxy](product-integration.md#default-integration-the-full-conversation)
-serves **only** `GET /v1/workspaces/:workspaceId/usage/me` for allowance reads.
+forwards `GET /v1/workspaces/:workspaceId/usage/me` like every workspace route.
 It resolves the authenticated product user on every request, pins the workspace,
 and forwards through `asUser`; there is no service-key fallback or subject
-selector. Only `period` is accepted as a usage query parameter. Full roster
-reads, configuration, grants, and member mutations are not proxied.
+selector. Full roster reads, configuration, grants, and member mutations need
+permissions an ordinary member does not hold; a product that never offers them
+can also close them with `refuse`.
 
 ```ts
 // Backend: the usual product-authenticated conversation proxy.

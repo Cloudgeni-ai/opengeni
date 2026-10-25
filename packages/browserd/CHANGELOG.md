@@ -1,5 +1,60 @@
 # @opengeni/browserd
 
+## 0.4.8
+
+### Patch Changes
+
+- 2752a36: On macOS a web page's number field (`<input type=number>`) now shows as a `spinbutton` that offers `set_value`, instead of a raw `AXIncrementor` offering only invoke and a focus that failed. Its value is written as text and checked afterwards: a field that reads its old value or nothing instead of the number it was given fails the action, and CUA puts back the old value of a field a value emptied and refuses the write, so `set_value` (also as a later batch step that names the field) never silently clears it. `focus` on it works. A web range input given a value is stepped to it; a value outside its range is refused without moving it, a run that stops short fails saying what it reads now, and a slider that reads anything but the value it was given fails the action. A value write CUA refused and put back is reported as a definite failure rather than an unknown outcome. The parts of a date or time field stay as they were, and a web date field that already had a value now reads the date typed into it (Chrome keeps the field's own value at the first one), so filling it no longer reports a failure (parts that form no calendar date, such as 31 February, do not count).
+- a800c15: On macOS a `set_value` that CUA refuses because the value is outside a control's range, or because stepping stopped short of it, no longer repeats the value in its message, since it may be a secret such as a PIN in a number field.
+- Updated dependencies [fb72b9d]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/interaction@5.2.0
+
+## 0.4.7
+
+### Patch Changes
+
+- 442354f: A `computer_act` batch on macOS and in Linux sandboxes can now cross a page or form change. A later action whose role, label or text locator names an element the batch's observation does not show yet is sent to CUA by role and name; CUA finds it when that step runs, after waiting up to 10 seconds for it to appear and enable. Element-targeted actions after it are found by name too (an exact name for a ref), since CUA's lookup retires the observation's tokens. CUA is pinned to a revision whose lookups and checks accept `exact`. The tool description tells agents to do each record of a repeated procedure in one batch.
+  - @opengeni/contracts@5.1.0
+  - @opengeni/interaction@5.1.0
+
+## 0.4.6
+
+### Patch Changes
+
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/contracts@5.0.0
+  - @opengeni/interaction@5.0.0
+
+## 0.4.5
+
+### Patch Changes
+
+- 3e378e5: A tab in the person's own Chrome that reports no address yet (one Chrome just opened or is still loading) or a very long one (a large `data:` page) no longer fails listing the browser's tabs or starting a session there.
+- 104a12e: Cleaning up after a crashed controller no longer abandons a tab it opened that Chrome still lists without an address: the tab stays recorded and a later sweep closes it once it shows it is empty.
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/interaction@4.8.0
+
+## 0.4.4
+
+### Patch Changes
+
+- d9fb31c: An agent using a person's own Chrome no longer leaves empty tabs behind or keeps Chrome's "started debugging this browser" banner up. Whatever ends a session's controller runtime (an end, an agent restart or update, or now also ten minutes without use) closes the tabs that session opened that are still blank and releases Chrome's debugger. Tabs the session did not open, tabs showing a page, and tabs another session is using stay. The session's next request continues in the tab it was using instead of opening another blank one, and a controller that starts after one crashed cleans up what it left. A debugger released by another controller is attached again on the next use instead of leaving the tab unusable. A session waiting on a JavaScript dialog keeps its browser (managed or the person's Chrome) through idle release and agent restarts until the dialog is answered (for at most 30 minutes), because a debugger attached later can neither see nor answer it; a continuing session waits at most a few seconds for its earlier tab, and a read that meets a dialog whose event has not arrived yet reports the dialog instead of hanging.
+- da761bd: The browser click guard no longer refuses legitimate clicks when the page re-renders the target as the pointer arrives (an identical copy now takes the click), and a double-click judges only its first press, so a "double-click to edit" row that turns into a text field on the first click still gets its double-click. On attached Chrome the guard's per-press reports are taken in before deciding a click whose document went away, so a click that reached its target is no longer reported as an unknown outcome. Each guarded click also waits on two fewer CDP round trips.
+- 8e57406: A browser click no longer lands on a different element while reporting success on the one it was asked to click. Hit-testing happens before the pointer moves, and a page can put something over the target in between: an open popover that follows its anchor back after the driver scrolled the panel to uncover the target, or a hover card that the pointer's arrival opens. The driver now waits for scroll-driven layout to settle before trusting a reveal scroll. Each click also runs behind a guard in an isolated world: a press that would reach anything other than the target is cancelled together with its release and clicks, and the action fails with the existing "browser element is covered by …" error, which becomes an unknown outcome once pointer input has been sent. Releases and clicks are not judged by their own target, so pointer capture and label-forwarded clicks keep working. A guard that a JavaScript dialog interrupted is removed by the next action once the dialog is handled, and it disarms itself after five seconds regardless. The guard also reports each press's verdict out of the page as it happens, through a binding only its isolated world can call, so a verdict survives the document being replaced or removed before it is read back; a click whose verdict is missing is reported as an unknown outcome rather than a success.
+- 5f091b6: Computer use on macOS fills web form fields more reliably. `set_value` on a text field with a value that reads as a number (a card's CVC, a postcode) now writes it as text, and a number a web number or range input took without showing is written again as text: Chrome used to accept the number and leave the field empty while the action reported success. A text field that still reads its old value after `set_value` (read again 150 ms later before judging) now fails with "the app did not take the value; invoke the field and type the text instead". A web date field Chrome leaves without a value of its own now reads the value its day, month and year parts show, so a correctly filled date is no longer reported as "reads empty". When every action of a batch ran but a field check failed, the error says "All N actions of the batch ran, but …" instead of reporting later actions as not run.
+- a6a1dac: Once an agent uses the native `cua_*` computer tools in a session, `computer_act` and `computer_observe` stop reading elements themselves so the native element tokens stay valid. Their results used to say "The accessibility tree has no readable elements; use the screenshot", which sent agents to pixel clicks on windows full of controls. They now say the session reads elements with `interaction__cua_get_window_state` and to call it, and two such readings are no longer reported as "no element changed". Semantic snapshots carry this as `readByNativeTools: true`.
+- 83c7a88: macOS computer use: `set_value` on a native slider, stepper or checkbox in a document window no longer sends the app stray Space and Delete keys. Only a text write marks a document as edited.
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/interaction@4.7.2
+
 ## 0.4.3
 
 ### Patch Changes

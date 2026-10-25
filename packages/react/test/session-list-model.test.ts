@@ -10,6 +10,7 @@ import {
   recentSessionStatus,
   recentSessionsForHome,
   relativeTimeLabel,
+  sessionAutomationWait,
   sessionHasUpcomingSchedule,
   sessionRepoLabel,
 } from "../src/session-list-model";
@@ -247,5 +248,22 @@ describe("sessionHasUpcomingSchedule", () => {
     // Servers that predate the upcoming flag keep the earlier meaning.
     expect(sessionHasUpcomingSchedule({ hasSchedules: true })).toBe(true);
     expect(sessionHasUpcomingSchedule({})).toBe(false);
+  });
+});
+
+describe("sessionAutomationWait", () => {
+  test("an event that can still arrive outranks the next scheduled run", () => {
+    expect(sessionAutomationWait({ waitingForEvents: true, hasUpcomingSchedules: true })).toBe(
+      "event",
+    );
+    expect(sessionAutomationWait({ waitingForEvents: true })).toBe("event");
+    expect(sessionAutomationWait({ waitingForEvents: false, hasUpcomingSchedules: true })).toBe(
+      "schedule",
+    );
+    // A finished once-automation or a paused schedule waits for nothing.
+    expect(sessionAutomationWait({ waitingForEvents: false, hasUpcomingSchedules: false })).toBe(
+      null,
+    );
+    expect(sessionAutomationWait({})).toBe(null);
   });
 });

@@ -44,6 +44,10 @@ import type { ComposerState } from "../hooks/use-composer";
 import { shouldSteerOnKey, shouldSubmitOnKey } from "../hooks/use-composer";
 import type { UseFileAttachmentsResult } from "../hooks/use-file-attachments";
 import {
+  shouldRecallQueuedOnKey,
+  type ComposerQueuedRecall,
+} from "../hooks/use-queued-prompt-recall";
+import {
   useSlashCommands,
   type ConfirmState,
   type SlashCommandContext,
@@ -58,6 +62,12 @@ import {
   type ResponsiveBasis,
 } from "../lib/composer-responsive-context";
 import { composerSubmissionErrorMessage } from "../lib/format";
+import {
+  isActionFailure,
+  OPENGENI_UPDATING_ACTION_NOTICE,
+  OPENGENI_UPDATING_NOTICE,
+} from "../lib/transient-retry";
+import { useCalmServiceFailure } from "../lib/use-calm-service-failure";
 import { defaultChatComposerMessages, type ChatComposerMessages } from "../composer-messages";
 import { singleSendText } from "../messages/single-send";
 import type { PickerModelRow } from "../model-policy";
@@ -97,6 +107,7 @@ export type ComposerDelivery = Pick<
   | "canSend"
   | "error"
   | "clearError"
+  | "reconnecting"
   | "annotations"
   | "requestAnnotationReview"
 >;
@@ -163,6 +174,8 @@ export type UseChatComposerControllerOptions = {
   runControl?: ComposerRunControl | undefined;
   /** A response is in progress; shows the Stop control under `runControl="stop"`. */
   running?: boolean | undefined;
+  /** Up in an empty composer pulls the latest waiting prompt back for editing. */
+  queuedRecall?: ComposerQueuedRecall | undefined;
 };
 
 /**
@@ -271,6 +284,7 @@ export function useChatComposerController({
   messages: messageOverrides,
   runControl = "pause",
   running = false,
+  queuedRecall,
 }: UseChatComposerControllerOptions) {
   const t = useOpenGeniText();
   const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
@@ -553,14 +567,86 @@ export function useChatComposerController({
     ],
   );
 
+  const recallingRef = useRef(false);
+  const caretToEndRef = useRef(false);
+  const placeCaretAtEnd = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    const end = textarea.value.length;
+    textarea.setSelectionRange(end, end);
+  }, []);
+  useLayoutEffect(() => {
+    if (!caretToEndRef.current) return;
+    caretToEndRef.current = false;
+    placeCaretAtEnd();
+  }, [placeCaretAtEnd, visibleValue]);
+  const recallQueued = useCallback(async () => {
+    if (!queuedRecall || recallingRef.current) return;
+    recallingRef.current = true;
+    try {
+      const outcome = await queuedRecall.recall();
+      if (!mountedRef.current) return;
+      if (outcome === "recalled") {
+        caretToEndRef.current = true;
+        // The value may already be rendered (or be empty for a files-only
+        // prompt); settle the caret next frame either way.
+        window.requestAnimationFrame(() => {
+          if (!caretToEndRef.current) return;
+          caretToEndRef.current = false;
+          placeCaretAtEnd();
+        });
+      } else if (outcome === "already_sent") {
+        setNotice({
+          tone: "ok",
+          message:
+            messages.queuedPromptAlreadySent ?? t("composerMessages.queuedPromptAlreadySent"),
+        });
+      }
+    } catch {
+      // Recall is a convenience; the queue surface reports real failures.
+    } finally {
+      recallingRef.current = false;
+    }
+  }, [messages.queuedPromptAlreadySent, placeCaretAtEnd, queuedRecall, t]);
+
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
       if (paletteEnabled && paletteMounted && palette.onKeyDown(event)) return;
+      if (
+        queuedRecall?.available &&
+        !disabled &&
+        shouldRecallQueuedOnKey(event, {
+          value: event.currentTarget.value,
+          selectionStart: event.currentTarget.selectionStart,
+          selectionEnd: event.currentTarget.selectionEnd,
+          hasOtherContent:
+            (delivery.annotations?.length ?? 0) > 0 ||
+            (draft?.restoredResources.length ?? 0) > 0 ||
+            (attachments?.attachments.length ?? 0) > 0,
+          popupOpen: paletteEnabled && paletteMounted && palette.open,
+        })
+      ) {
+        event.preventDefault();
+        void recallQueued();
+        return;
+      }
       if (!shouldSubmitOnKey(event)) return;
       event.preventDefault();
       void submit(shouldSteerOnKey(event) ? "steer" : "queue");
     },
-    [palette, paletteEnabled, paletteMounted, submit],
+    [
+      attachments,
+      delivery.annotations,
+      disabled,
+      draft?.restoredResources,
+      palette,
+      paletteEnabled,
+      paletteMounted,
+      queuedRecall,
+      recallQueued,
+      submit,
+    ],
   );
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -591,19 +677,29 @@ export function useChatComposerController({
       }),
     [commandContext, commands],
   );
+  // While Opengeni is updating (or briefly unreachable) the composer shows
+  // one calm line and keeps retrying; the error itself only surfaces if it
+  // outlasts a normal update. An explicit action (Stop, Resume, Steer) is not
+  // retried for the person, so it says calmly that it did not go through.
+  const calmServiceFailure = useCalmServiceFailure(delivery.error);
+  const calmActionFailure = calmServiceFailure && isActionFailure(delivery.error);
+  const serviceUpdating =
+    (calmServiceFailure && !calmActionFailure) || delivery.reconnecting === true;
   const activeNotice =
     notice ??
-    (delivery.error
-      ? {
-          tone: "error" as const,
-          message: /control changed|paused while/i.test(delivery.error.message)
-            ? messages.controlChangedError
-            : formatError(
-                delivery.error,
-                composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
-              ),
-        }
-      : null);
+    (calmActionFailure
+      ? { tone: "ok" as const, message: OPENGENI_UPDATING_ACTION_NOTICE(t) }
+      : delivery.error && !calmServiceFailure
+        ? {
+            tone: "error" as const,
+            message: /control changed|paused while/i.test(delivery.error.message)
+              ? messages.controlChangedError
+              : formatError(
+                  delivery.error,
+                  composerSubmissionErrorMessage(t, delivery.error) || messages.sendFailedError,
+                ),
+          }
+        : null);
   useEffect(() => {
     if (notice?.tone !== "ok") return;
     const timer = window.setTimeout(
@@ -708,6 +804,9 @@ export function useChatComposerController({
     setHelpOpen,
     helpCommands,
     activeNotice,
+    /** Opengeni is updating: show the calm reconnecting line, not an error. */
+    serviceUpdating,
+    serviceUpdatingMessage: OPENGENI_UPDATING_NOTICE(t),
     canSubmit,
     submitBlocker,
     submit,
@@ -1525,6 +1624,8 @@ export function Status() {
       <AnimatePresence>
         {controller.activeNotice ? (
           <motion.p
+            key="notice"
+            role="status"
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
@@ -1534,6 +1635,21 @@ export function Status() {
             )}
           >
             {controller.activeNotice.message}
+          </motion.p>
+        ) : controller.serviceUpdating ? (
+          <motion.p
+            key="service-updating"
+            data-og-composer-status="updating"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="flex items-center gap-1.5 overflow-hidden px-1 pt-1.5 text-og-control text-og-fg-muted"
+          >
+            <LoaderCircleIcon
+              aria-hidden="true"
+              className="size-3.5 shrink-0 animate-og-spin motion-reduce:animate-none"
+            />
+            <span>{controller.serviceUpdatingMessage}</span>
           </motion.p>
         ) : null}
       </AnimatePresence>
@@ -1568,6 +1684,8 @@ function ComposerAnnouncements() {
         <p role={controller.activeNotice.tone === "error" ? "alert" : "status"}>
           {controller.activeNotice.message}
         </p>
+      ) : controller.serviceUpdating ? (
+        <p role="status">{controller.serviceUpdatingMessage}</p>
       ) : null}
       {controller.draftConflict ? <p role="alert">{controller.messages.draftConflict}</p> : null}
     </div>
@@ -1957,7 +2075,7 @@ function AttachmentChips({
   }
 
   return (
-    <div className="flex flex-wrap gap-2 px-3 py-2">
+    <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-0.5">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
         const secureContextRequired = attachment.errorCode === "secure_context_required";
@@ -1992,13 +2110,18 @@ function AttachmentChips({
         // An app-shot reads as the window it shows: its title first, then the
         // app, with a wider thumbnail so the window is recognizable.
         const displayName = appShot ? appShot.title.trim() || appShot.app : attachment.name;
-        const thumbSize = appShot ? "h-10 w-16" : "size-8";
+        // A plain file reads on one line (thumbnail, name, size) so it costs the
+        // conversation as little height as possible; states that need words
+        // (failures, app-shots) keep their two-line layout.
+        const compact = !appShot && !failed && !previewFailed;
+        const thumbSize = appShot ? "h-10 w-16" : compact ? "size-6" : "size-8";
         return (
           <div
             key={attachment.id}
             data-app-shot={appShot ? "" : undefined}
             className={cn(
-              "flex min-w-0 items-center gap-2 rounded-og-md border px-2 py-1.5 text-og-sm",
+              "flex min-w-0 items-center gap-2 rounded-og-md border text-og-sm",
+              compact ? "py-1 pr-1 pl-1" : "px-2 py-1.5",
               // A captured window arrives from outside the page: let it settle in.
               appShot && "animate-og-enter",
               failed
@@ -2022,6 +2145,10 @@ function AttachmentChips({
                 className={cn(
                   thumbSize,
                   "shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
+                  // The slim chip's 24px preview keeps a 44px touch target; the
+                  // hit area grows over the name, never the remove button.
+                  compact &&
+                    "relative overflow-visible pointer-coarse:before:absolute pointer-coarse:before:-inset-y-2.5 pointer-coarse:before:-left-2.5 pointer-coarse:before:-right-2.5 pointer-coarse:before:content-['']",
                   appShot && "border border-og-border bg-og-surface-1",
                   !thumb && "flex items-center justify-center disabled:cursor-wait",
                 )}
@@ -2040,6 +2167,7 @@ function AttachmentChips({
                     className={cn(
                       "h-full w-full object-cover transition-opacity hover:opacity-80",
                       appShot && "object-top",
+                      compact && "rounded",
                     )}
                   />
                 ) : previewLoading ? (
@@ -2060,33 +2188,42 @@ function AttachmentChips({
             ) : (
               <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
             )}
-            <div className="min-w-0 flex-1">
-              <div className="truncate font-medium text-og-fg">{displayName}</div>
-              {appShot && !failed && !previewFailed && attachment.status !== "uploading" ? (
-                <ComposerTip
-                  tip={
-                    appShot.text?.trim()
-                      ? t("composer.appShotTextIncluded")
-                      : t("composer.appShotNoText")
-                  }
-                >
-                  <div className="flex min-w-0 items-center gap-1 text-og-xs text-og-fg-subtle">
-                    <AppWindowIcon aria-hidden className="size-3 shrink-0" />
-                    <span className="truncate">{statusText}</span>
-                  </div>
-                </ComposerTip>
-              ) : secureContextRequired ? (
-                <div className="break-words text-og-xs leading-4 text-og-status-failed">
+            {compact ? (
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="truncate font-medium text-og-fg">{displayName}</span>
+                <span className="shrink-0 text-og-xs text-og-fg-subtle tabular-nums">
                   {statusText}
-                </div>
-              ) : failed || previewFailed ? (
-                <ComposerTip tip={statusText}>
-                  <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
-                </ComposerTip>
-              ) : (
-                <div className="truncate text-og-xs text-og-fg-subtle">{statusText}</div>
-              )}
-            </div>
+                </span>
+              </div>
+            ) : (
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium text-og-fg">{displayName}</div>
+                {appShot && !failed && !previewFailed && attachment.status !== "uploading" ? (
+                  <ComposerTip
+                    tip={
+                      appShot.text?.trim()
+                        ? t("composer.appShotTextIncluded")
+                        : t("composer.appShotNoText")
+                    }
+                  >
+                    <div className="flex min-w-0 items-center gap-1 text-og-xs text-og-fg-subtle">
+                      <AppWindowIcon aria-hidden className="size-3 shrink-0" />
+                      <span className="truncate">{statusText}</span>
+                    </div>
+                  </ComposerTip>
+                ) : secureContextRequired ? (
+                  <div className="break-words text-og-xs leading-4 text-og-status-failed">
+                    {statusText}
+                  </div>
+                ) : failed || previewFailed ? (
+                  <ComposerTip tip={statusText}>
+                    <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
+                  </ComposerTip>
+                ) : (
+                  <div className="truncate text-og-xs text-og-fg-subtle">{statusText}</div>
+                )}
+              </div>
+            )}
             {attachment.status === "uploading" ? (
               <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" />
             ) : null}
@@ -2107,7 +2244,13 @@ function AttachmentChips({
               type="button"
               onClick={() => onRemove(attachment.id)}
               disabled={disabled}
-              className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
+              className={cn(
+                "shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50",
+                // The slim chip keeps a 44px touch target with an invisible hit area.
+                compact
+                  ? "relative pointer-coarse:p-1.5 pointer-coarse:before:absolute pointer-coarse:before:-inset-2.5 pointer-coarse:before:content-['']"
+                  : "pointer-coarse:size-10",
+              )}
               aria-label={messages.removeAttachment(displayName)}
             >
               <XIcon className="size-3.5" />

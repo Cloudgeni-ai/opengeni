@@ -109,21 +109,25 @@ Full access; SDK
 `listOrganizationMcpConnections`, `updateOrganizationMcpConnection`,
 `deleteOrganizationMcpConnection`). Migration `0601` is rolling.
 
-### Admin access for agent sessions
+### Full access for agent sessions
 
-An owner or admin can let one of their own Opengeni sessions reach the same
-organization actions, without connecting an outside client:
+Any member can let a session they started reach the same organization
+actions as themselves, without connecting an outside client. The API calls it
+admin access; the app calls it full access. The agent can do exactly what
+that person can do in the app: a member's workspaces and their settings, or
+everything an owner or admin manages.
 
 - The organization allows it first: Organization settings > Security & data >
-  Agents, "Admin access for agent sessions" (off by default;
+  Agents, "Full access for agent sessions" (off by default;
   `GET`/`PATCH /v1/organizations/:id/agent-admin-access`, owners and admins).
   Turning it off removes every session's access at once, and turning it on
   again restores none.
-- Then, in the session's header menu, "Give admin access…" (`PUT
+- Then, in the session's header menu, "Give full access…" (`PUT
   /v1/workspaces/:ws/sessions/:id/admin-access`, body `{ durationHours }`:
-  one hour by default, up to 720, or `null` for no time limit). Only an owner
-  or admin, on a session they started themselves, or an agent acting as them
-  with Full access (such as one with admin access). API keys and limited
+  one hour by default, up to 720, or `null` for no time limit). Only someone
+  who belongs to the session's workspace (or an owner or admin), on a session
+  they started themselves, or an agent acting as them with Full access (such
+  as one with full access). API keys and limited
   agents can never give access, to their own session or another.
   The granter or any owner or admin can turn it off from the shield beside
   the title or the same menu (`DELETE`; `GET` returns the state and what the
@@ -132,11 +136,12 @@ organization actions, without connecting an outside client:
   `admin_action_describe` and `admin_action_call`. They are never part of a
   tool selection or default: the session's Opengeni MCP server lists them only
   while access is in effect, and every call checks again, so turning it off,
-  the organization turning it off, or the granter losing their owner or admin
-  role applies to the very next call.
+  the organization turning it off, or the granter leaving the session's
+  workspace (or losing the owner or admin role that gave them access to it)
+  applies to the very next call.
 - They cover exactly the organization MCP server's catalog and run each
-  action in process as the granter with Full access over all workspaces,
-  under the same rules (`browserOnly` actions and browser-bound provider OAuth
+  action in process as the granter, capped by the granter's own live access
+  (a member's 403s stay 403s), under the same rules (`browserOnly` actions and browser-bound provider OAuth
   stay with the person). Nothing of the agent's own workspace scope carries
   into the action.
 
@@ -526,7 +531,7 @@ First-party Opengeni MCP session monitoring tools (`sessions:read`):
 - `sessions_list` / `session_get` / `session_events` - compact-by-default discovery and child-management state, and conversation-first history with explicit `results`, `tools`, and `debug` views. `session_get({})` reads only the authenticated current agent session (a child reads itself); sessionless/operator callers must supply an explicit `sessionId`. Both forms retain live-attempt and target authorization. Use `detail: "full"` on list/get for the previous bounded projections (get includes `effectiveToolPolicy`). Plain compact list browse skips claim reads; `includeRelatedWork` opts in and query/subject automatically enables advisory evidence without granting access. REST/UI defaults are unchanged. See [session monitoring](session-monitoring-mcp.md) for exact fields, pagination and loss facts, and [work discovery](work-discovery.md) for matching semantics.
 - `session_wait` - one blocking call (session-scoped grants only) for a short in-turn wait. It returns when a watched session has a matching durable event after the supplied cursor, the calling session has immediate pending machine input, or `maxWaitSeconds` elapses (default 45, max 50). `waitFor: "change"` observes turn lifecycle, completed agent messages, terminal background commands, blocking failures, goal facts, and session control; `waitFor: "completion"` remains the child-result join and ignores progress, goal facts, background commands, maintenance turns, and continuation segments until a result-bearing final turn or blocker. The tool subscribes to NATS before reading PostgreSQL, but `session_events` remains authority and every wake is followed by a durable read. Failed live fanout degrades to the durable pre-check plus deadline re-check. `ownPendingUpdates > 0` means input will be delivered only when the next turn is claimed. When the returned events include a direct child's complete final answer and the call is the exact live parent attempt's own model call (the worker marks it `_meta.opengeniCaller: "model"`; a Codemode call does not count), the read is recorded on the turn and the own-pending counts exclude that child's idle terminal result for it. The attempt's successful completion supersedes a still-pending such result (`consumed_by_parent_read`), and one committed after that completion arrives already consumed; a failed or interrupted attempt suppresses nothing. Do not immediately repeat a timed-out short wait without new evidence; an unchanged `session_get` snapshot between waits is not new evidence.
 - `command_read` / `command_wait` - one provider-neutral, command-specific output/status path. Read immediately or wait briefly, then resume from the output cursor. A terminal read marks completion observed and suppresses its still-pending notification; a running read leaves future completion eligible. Retained output remains readable after settlement subject to explicit retention limits. Timeout never cancels the command; use `wait_for_input` for a long or uncertain wait. The separate native shell tool `command_input(session_id, chars)` sends nonempty stdin in its owning context where supported; it is not a first-party MCP endpoint and reports unsupported capabilities explicitly.
-- `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A human/API turn that neither calls `wait_for_input` again nor consumes the awaited machine input leaves the wait armed; only a newer finished turn that a person did not start or that consumed immediate machine input, or the deadline, retires it. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
+- `wait_for_input` (`sessions:control`, session-scoped grants only, self-only) - the out-of-turn long wait. It does not require a goal. The tool stores the exact declaring turn, a bounded reason, and an absolute PostgreSQL deadline derived from relative `timeoutSeconds` (30 seconds to 7 days), appends `session.wait.started`, and arms the durable workflow-wake outbox. Its optional `reply` is the agent's complete message for the person: the worker shows it verbatim as the turn's answer once the wait is accepted (see [run lifecycle](run-lifecycle.md)). The agent must end its turn after success. Human/API input, Agent message or Steer, an immediate child notice, a schedule, a terminal background-command result, or the deadline restarts the session. A human/API turn that neither calls `wait_for_input` again nor consumes the awaited machine input leaves the wait armed; only a newer finished turn that a person did not start or that consumed immediate machine input, or the deadline, retires it. A timeout queues typed `session_wait_timeout` machine input and never cancels background work. `goal_pause` remains the correct tool when the active goal itself must stop for a human decision.
 
 Exact-attempt advisory work-claim mutations (`sessions:control`) use
 `work_claim_upsert` and `work_claim_release`. They are CAS/idempotency-fenced,

@@ -27,6 +27,31 @@ export const SITE_ID_HEADER = "x-opengeni-site-id";
 /** The exact Site version the pinned frame runs. */
 export const SITE_VERSION_HEADER = "x-opengeni-site-version";
 
+/** The Site a console Site view conversation is about, as its messages name it. */
+export type SiteConversationSite = {
+  siteId: string;
+  title: string;
+  versionId: string;
+  revision: number;
+};
+
+/**
+ * Message context for a conversation in the console's Site view, where the
+ * person edits the Site beside it: which Site and version "the Site" means,
+ * and that a change is published straight away. The API attaches it to the
+ * first message of a conversation started there; the console attaches it to
+ * each later message, with the version then current. It is ordinary,
+ * model-visible context (`modelContext`), never authority.
+ */
+export function siteConversationContext(site: SiteConversationSite): string {
+  const title = site.title.replace(/\s+/gu, " ").trim().slice(0, 200) || "Untitled Site";
+  return [
+    `The person is working on the Opengeni Site “${title}” (Site id ${site.siteId}), shown beside this chat at version ${site.revision} (version id ${site.versionId}).`,
+    "When they ask for a change to “the Site”, “this page” or a part of it, they mean this Site: read its current source, then publish the change as a new version of this Site.",
+    "A published version goes live immediately and the preview beside this chat reloads; earlier versions can be restored.",
+  ].join(" ");
+}
+
 /** A Site/Codemode SDK request named a route outside the proxied surface. */
 export class SiteSessionPathError extends Error {
   readonly code = "site_session_path_unsupported";

@@ -320,7 +320,12 @@ export function nativeHumanInputSummary(
   const questions = item.questions
     .map((question) => (question.label ? `${question.label}: ${question.prompt}` : question.prompt))
     .join("\n");
-  const outcome = labels.humanInputOutcome[item.response.outcome];
+  const outcome =
+    item.response.outcome === "answered" && item.answeredByAgent
+      ? (labels.humanInputOutcome.agentAnswered ?? labels.humanInputOutcome.answered)
+      : item.response.outcome === "skipped" && item.answeredByAgent
+        ? (labels.humanInputOutcome.agentSkipped ?? labels.humanInputOutcome.skipped)
+        : labels.humanInputOutcome[item.response.outcome];
   const answers = humanInputAnswerLines(item.answers, item.response, labels.secretSaved, false)
     .map(
       (line, index) =>

@@ -288,6 +288,26 @@ describe("public SDK client inheritance", () => {
     expect(breakingIds(before, snapshot(fixture.collect()))).toEqual([]);
   });
 
+  test("an inline options object may gain optional members, but not required or changed ones", () => {
+    const fixture = hierarchy();
+    const list = (members: string) =>
+      `list(id: string, options: { ${members} } = {}): Promise<ApiKey> { throw new Error(); }`;
+    fixture.configure("", list("query?: string; limit?: number"));
+    const before = snapshot(fixture.collect());
+    fixture.configure("", list("query?: string; person?: string; limit?: number"));
+    expect(breakingIds(before, snapshot(fixture.collect()))).toEqual([]);
+    for (const changed of [
+      "query?: string; person: string; limit?: number",
+      "query?: number; limit?: number",
+      "query?: string",
+    ]) {
+      fixture.configure("", list(changed));
+      expect(breakingIds(before, snapshot(fixture.collect()))).toContain(
+        "signature:@opengeni/sdk/core:OpenGeniCoreClient.list",
+      );
+    }
+  });
+
   test("narrow overrides and lost overloads cannot hide behind inherited signatures", () => {
     const fixture = hierarchy();
     const overloads =

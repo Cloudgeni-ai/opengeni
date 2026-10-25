@@ -117,6 +117,7 @@ import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
 import { PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN } from "./product-lifecycle-facts";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
+import { WorkspaceRecordingSettings } from "./recordings";
 import { MediaGenerationResult } from "./video-generation";
 import { KnowledgeProviderCitation } from "./knowledge";
 import { XaiProviderAccountAuthoritySnapshotV1 } from "./xai-provider-account-authority";
@@ -156,10 +157,19 @@ export * from "./agent-topology";
 export * from "./work-claims";
 export * from "./product-analytics";
 export * from "./desktop-app";
+export * from "./event-triggers";
+import {
+  ScheduledOccurrenceEvents,
+  ScheduledTaskEvents,
+  ScheduledTaskEventsInput,
+  ScheduledTaskRunEventOccurrence,
+  SessionAutomationWaitSummary,
+} from "./event-triggers";
 export * from "./vaults";
 export * from "./vault-provider-wire";
 export * from "./secret-references";
 export * from "./secret-resolution";
+export * from "./secret-use-approvals";
 export * from "./secret-generator";
 export * from "./secret-totp";
 
@@ -170,10 +180,13 @@ export {
   RollbackWorkspaceArtifactRequest,
   SetWorkspaceArtifactStatusRequest,
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
+  UpdateSiteSidebarStateRequest,
   UpdateWorkspaceArtifactVisibilityRequest,
   UpdateWorkspaceArtifactVisibilityResponse,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactEvent,
   WorkspaceArtifactEventType,
@@ -986,6 +999,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "knowledge_retain_file",
   "knowledge_retain_message",
   "knowledge_archive",
+  "meetings_search",
+  "meeting_read",
   "instruction_policy_save",
   "instruction_policy_get",
   "memory_search",
@@ -1356,7 +1371,7 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
 
 /**
  * Tools a session has only while it has admin access: the organization's
- * actions, run as the owner or admin who gave it. Admin access, not the
+ * actions, run as the person who gave it, with exactly their access. Admin access, not the
  * session's tool selection, decides whether they are there.
  */
 export const SESSION_ADMIN_ACCESS_TOOL_NAMES = [
@@ -1735,6 +1750,11 @@ export const ManagedOrganizationMembershipProjection = /* @__PURE__ */ defineSch
     organizationId: primitives.uuid,
     status: z.literal("active"),
     personalWorkspaceId: primitives.uuid,
+    /**
+     * False when the organization turned Personal workspaces off: the person
+     * no longer sees or starts new work there. Absent means on.
+     */
+    personalWorkspacesEnabled: z.boolean().optional(),
   }),
 );
 export type ManagedOrganizationMembershipProjection = z.infer<
@@ -2560,6 +2580,7 @@ export const VOICE_INPUT_ACCEPTED_MIME_TYPES = [
 ] as const;
 
 export * from "./transcription-recordings";
+export * from "./recordings";
 
 /** Per-session / workspace Codex compaction strategy. */
 export const CodexCompactionMode = /* @__PURE__ */ defineSchema(() =>
@@ -2818,7 +2839,7 @@ export function workspaceModelCompactionThreshold(
 }
 
 /**
- * Whether owners and admins may give an agent session admin access. Off by
+ * Whether members may give a session they started their own access. Off by
  * default; turning it off ends every session's admin access.
  */
 export const OrganizationAgentAdminAccess = /* @__PURE__ */ defineSchema(() =>
@@ -2838,8 +2859,8 @@ export type UpdateOrganizationAgentAdminAccessRequest = z.infer<
 
 /**
  * A session's admin access as the viewer sees it. While `active`, the agent
- * in this session can do what `grantedBy` can manage across the
- * organization, checked live on every action.
+ * in this session can do what `grantedBy` can do, checked live on every
+ * action.
  */
 export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -2854,7 +2875,7 @@ export const SessionAdminAccess = /* @__PURE__ */ defineSchema(() =>
     allowed: primitives.boolean,
     /**
      * The viewer may turn it on, or choose a new time limit while it is on: an
-     * owner or admin, in person, on their own session.
+     * member, in person, on a session they started.
      */
     canGrant: primitives.boolean,
     /** The viewer may turn it off. */
@@ -3182,6 +3203,8 @@ export const WorkspaceSettingsSchema = /* @__PURE__ */ defineSchema(() =>
       // The workspace's default realtime voice model; null or absent follows
       // the organization. Read leniently.
       realtimeDefaultModel: z.string().nullable().optional().catch(undefined),
+      // Meeting recording defaults. Read leniently.
+      recordings: WorkspaceRecordingSettings.optional().catch(undefined),
     })
     .passthrough(),
 );
@@ -3384,6 +3407,8 @@ export const UpdateWorkspaceSettingsRequest = /* @__PURE__ */ defineSchema(() =>
       realtimeVoice: WorkspaceRealtimeVoicePatch.optional(),
       // Default realtime voice model; null follows the organization again.
       realtimeDefaultModel: SessionRealtimeModel.nullable().optional(),
+      // Meeting recording defaults, replaced as a whole.
+      recordings: WorkspaceRecordingSettings.optional(),
     })
     .passthrough(),
 );
@@ -4365,6 +4390,13 @@ export const StreamTokenPayload = /* @__PURE__ */ defineSchema(() =>
     // can still attach to a fresh channel. Real revocation is the mint refusing
     // to issue new tokens plus the 120 s TTL bounding the old ones.
     authorityEpoch: z.number().int().positive().optional(),
+    // A Connected Machine relay stream binds the token to its exact channel:
+    // the machine (agent) and the stream instance. `workspaceId` is then the
+    // workspace the machine is enrolled in, which is the relay's routing
+    // namespace and can differ from the chat's workspace. Optional for rolling
+    // compatibility: older relays ignore them, provider tunnels omit them.
+    agentId: z.string().min(1).max(256).optional(),
+    channelId: z.string().min(1).max(512).optional(),
   }),
 );
 export type StreamTokenPayload = z.infer<typeof StreamTokenPayload>;
@@ -6217,6 +6249,18 @@ export type GitHubAppApiPort = {
     page: number;
     limit: number;
   }) => Promise<GitHubAppRepositoryBranchPage>;
+  /**
+   * Where the App sends its webhooks (null when it has no webhook URL) and the
+   * webhook events it is subscribed to. Read when a workspace adds a GitHub
+   * event source and when a trigger lists the event types it can use.
+   */
+  getWebhookSetup?: () => Promise<{ webhookUrl: string | null; events: string[] }>;
+  /**
+   * Point the App's webhook at Opengeni's GitHub receiver, signed with the
+   * webhook secret the deployment verifies (`OPENGENI_GITHUB_WEBHOOK_SECRET`).
+   * Only called when the App has no webhook URL yet.
+   */
+  setWebhookUrl?: (input: { url: string }) => Promise<void>;
 };
 
 export const PromotionalCreditScope = /* @__PURE__ */ defineSchema(() =>
@@ -8413,6 +8457,12 @@ export const UpdateSessionArchiveRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       archived: primitives.boolean,
+      /** Stable for retries of one intent; use a fresh ID for a later intentional archive. */
+      clientEventId: z.string().min(1).max(200).optional(),
+      /** Hiding alone never changes shared execution. Ordinary archive pauses first. */
+      mode: z.enum(["pause_and_archive", "hide_for_me"]).optional(),
+      /** Required when the locked chat tree has active work. Restore never resumes. */
+      confirmPause: z.boolean().optional(),
       expectedVersion: z.number().int().nonnegative().optional(),
     })
     .strict(),
@@ -8697,6 +8747,10 @@ export const SessionRealtimeWebsocketResponse = /* @__PURE__ */ defineSchema(() 
       connectionEpoch: primitives.positiveInteger,
       startupFenceSequence: primitives.nonnegativeInteger,
       modeVersion: primitives.positiveInteger,
+      /**
+       * @deprecated Always empty: the prior conversation travels in the
+       * provider's session instructions. Kept for clients of earlier releases.
+       */
       initialItems: z.array(SessionRealtimeWebsocketInitialItem).max(128),
       instructions: z.string().min(1).max(32_768),
       /**
@@ -10138,6 +10192,8 @@ export function childPausedClassification(
 export const CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES = 8 * 1024;
 /** Bounded first-question preview inside a child_requires_action notice. */
 export const CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES = 512;
+/** Bounded option label inside a child_requires_action question. */
+export const CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES = 128;
 export const CHILD_REQUIRES_ACTION_MAX_REQUESTS = 20;
 export const CHILD_PAUSED_REASON_MAX_BYTES = 2 * 1024;
 export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
@@ -10146,6 +10202,32 @@ const boundedUtf8String = (maxBytes: number) =>
   primitives.string.refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
     message: `must be at most ${maxBytes} UTF-8 bytes`,
   });
+
+/**
+ * Compact copy of one question of a child's blocking request: enough for the
+ * parent agent to build a valid `session_human_input_respond` answer (question
+ * and option ids) without reading the child's history. Never carries secret
+ * specs, help text, or option descriptions.
+ */
+export const ChildRequiresActionQuestion = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().min(1).max(64),
+    kind: z.string().min(1).max(32),
+    prompt: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
+    required: z.boolean(),
+    options: z
+      .array(
+        z.object({
+          id: z.string().min(1).max(64),
+          label: boundedUtf8String(CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES),
+        }),
+      )
+      .max(20),
+    /** Only a person can answer it (a Skill review); an agent's answer is refused. */
+    humanOnly: z.literal(true).optional(),
+  }),
+);
+export type ChildRequiresActionQuestion = z.infer<typeof ChildRequiresActionQuestion>;
 
 export const ChildRequiresActionRequest = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
@@ -10156,6 +10238,12 @@ export const ChildRequiresActionRequest = /* @__PURE__ */ defineSchema(() =>
       firstQuestion: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
       allowSkip: primitives.boolean,
       expiresAt: primitives.nullableString,
+      /**
+       * Every question, compact. Absent on older rows and when the whole
+       * notice would exceed its byte bound; the parent then reads the
+       * child's request itself.
+       */
+      questions: z.array(ChildRequiresActionQuestion).max(20).optional(),
     }),
     z.object({
       kind: z.literal("approval"),
@@ -10449,6 +10537,8 @@ export const SessionSystemUpdatePayload = /* @__PURE__ */ defineSchema(() =>
          * person pinned for them can no longer be used.
          */
         unavailableConnectors: z.array(z.string().min(1).max(256)).max(128).optional(),
+        /** Event runs only: the events that caused this run. */
+        events: ScheduledOccurrenceEvents.optional(),
       })
       .passthrough(),
     z
@@ -11589,7 +11679,7 @@ export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ /* @__PURE__ */ define
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
 export const ScheduledTaskTriggerType = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.enum(["scheduled", "manual", "initial", "provider_event", "retry", "repair"]),
+  z.enum(["scheduled", "manual", "initial", "provider_event", "retry", "repair", "event"]),
 );
 export type ScheduledTaskTriggerType = z.infer<typeof ScheduledTaskTriggerType>;
 
@@ -12373,6 +12463,11 @@ export const ScheduledTask = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
      * active and until a run succeeds). Absent when nothing blocks it.
      */
     blocker: ScheduledTaskBlocker.optional(),
+    /**
+     * Read-only response projection: the automation's event triggers and
+     * event run policy. Absent when it has no event triggers.
+     */
+    events: ScheduledTaskEvents.optional(),
   }),
 );
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
@@ -12818,6 +12913,8 @@ export const ScheduledTaskRun = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() 
     degradedAccounts: ScheduledTaskDegradedAccounts.optional(),
     /** Why the scheduler refused this occurrence before running it (see the schema). */
     admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
+    /** Event runs only: the trigger and events that caused the run. */
+    eventOccurrence: ScheduledTaskRunEventOccurrence.nullable().optional(),
     /**
      * Read-time: this dispatched run's own turn is waiting on a person (a tool
      * approval or structured question) since `since`; `expiresAt` is when the
@@ -12973,6 +13070,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     // session's own environment for an existing-session task. null means none.
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
+    /** Event triggers and the event run policy. Use schedule `{ type: "manual" }` for an event-only automation. */
+    events: ScheduledTaskEventsInput.optional(),
   },
   { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
 ).superRefine((value, context) => {
@@ -13062,6 +13161,8 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */
       overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
       status: ScheduledTaskStatus.default("active"),
       metadata: ScheduledTaskMetadataInput.default({}),
+      /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
+      events: ScheduledTaskEventsInput.optional(),
     })
     .strict()
     .superRefine((value, context) => {
@@ -13166,6 +13267,8 @@ export const UpdateScheduledTaskRequest =
       // resolved per fire, so an update takes effect on the next dispatch.
       rigId: z.string().uuid().nullable().optional(),
       metadata: z.record(primitives.string, z.unknown()).optional(),
+      /** Replace the event triggers and event run policy; `{ triggers: [] }` removes every trigger. */
+      events: ScheduledTaskEventsInput.optional(),
     },
     { rejectKeys: ["selectedHostMcpDelegations", "connectionAccounts"] },
   ).superRefine((value, context) => {
@@ -15930,6 +16033,19 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * paused, and not a one-time schedule whose time has passed.
      */
     hasUpcomingSchedules: primitives.optionalBoolean,
+    /**
+     * An active automation targeting this session will run when one of its
+     * events arrives: it has an active event trigger and, if it runs once,
+     * has not run yet.
+     */
+    waitingForEvents: z.boolean().optional(),
+    /**
+     * What the automations the reader can see are waiting for before they
+     * continue this session: the next scheduled run and the first event.
+     * Null when none of them can start a run; omitted by older servers and
+     * for readers without schedule access.
+     */
+    automationWait: SessionAutomationWaitSummary.nullable().optional(),
     initialMessage: primitives.string,
     title: primitives.nullableString,
     titleSource: z.enum(["user", "agent"]).nullable(),
@@ -16204,7 +16320,7 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     title: primitives.string,
     /** Root conversations in the group; 0 for a Site with none yet. */
     conversations: primitives.nonnegativeInteger,
-    /** Latest activity: its conversations, its own changes, or the viewer opening it. */
+    /** Latest activity: its conversations, its newest published version, or the chats that published it. Opening it is not activity. */
     updatedAt: primitives.dateTime,
     /** Creation time of the group's newest conversation, else of the Site. */
     createdAt: primitives.dateTime,
@@ -16218,6 +16334,9 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     waiting: primitives.nonnegativeInteger,
     unread: primitives.nonnegativeInteger,
     activeWork: primitives.nonnegativeInteger,
+    /** This person pinned the Site in their sidebar. Absent when not pinned. */
+    pinned: z.literal(true).optional(),
+    pinnedAt: z.string().datetime().nullable().optional(),
   }),
 );
 export type SiteConversationGroup = z.infer<typeof SiteConversationGroup>;
@@ -16274,6 +16393,8 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     backgroundCommandActivity: true,
     hasSchedules: true,
     hasUpcomingSchedules: true,
+    waitingForEvents: true,
+    automationWait: true,
     title: true,
     titleSource: true,
     createdBy: true,
@@ -16382,6 +16503,10 @@ export const SessionLineageResponse = /* @__PURE__ */ defineSkillContractSchema(
     sessionHasSchedules: primitives.optionalBoolean,
     /** An active schedule targeting the requested session can still start a run. */
     sessionHasUpcomingSchedules: primitives.optionalBoolean,
+    /** An active automation targeting the requested session is waiting for an event. */
+    sessionWaitingForEvents: z.boolean().optional(),
+    /** What the automations continuing the requested session are waiting for. */
+    sessionAutomationWait: SessionAutomationWaitSummary.nullable().optional(),
     ancestors: z.array(Session),
     children: z.array(LineageNode),
     truncated: primitives.boolean.default(false),
@@ -17194,17 +17319,20 @@ type InboxAccessContextShape = {
 };
 
 /**
- * Who has an inbox: a signed-in person (`user:`), or the one human of a local
- * install. API keys, services, configured or development subjects and agents
- * act through sessions and have none. This is the shape the web uses to show
- * the Inbox; the API also checks verified managed-human or local-bootstrap
- * provenance (see `inboxSubjectForContext` in `@opengeni/core`).
+ * Who has an inbox: a signed-in person (`user:`), a product's external user
+ * (`external_user:`, signed in to the product, which relays as them), or the
+ * one human of a local install. API keys, services, configured or development
+ * subjects and agents act through sessions and have none. This is the shape
+ * the web uses to show the Inbox; the API also checks verified managed-human,
+ * external-actor or local-bootstrap provenance (see `inboxSubjectForContext`
+ * in `@opengeni/core`).
  */
 export function accessContextHasInbox(
   context: InboxAccessContextShape | null | undefined,
 ): boolean {
   if (!context || context.credential) return false;
-  if (context.subjectId.startsWith("user:")) return true;
+  if (context.subjectId.startsWith("user:") || context.subjectId.startsWith("external_user:"))
+    return true;
   const grants = context.workspaceGrants ?? [];
   return (
     context.mode === "local" &&
@@ -17222,11 +17350,14 @@ export function accessContextHasInbox(
 /**
  * The signed-in person's mute on one session. Muted replies neither reach the
  * inbox nor alert the phone; the agent's notifications, questions and
- * approvals still do.
+ * approvals still do. `scope` is "schedule" when the session is a run of a
+ * schedule that starts a new session per run: the mute then covers every run
+ * of that schedule. Older servers omit it.
  */
 export const SessionInboxMute = /* @__PURE__ */ defineSchema(() =>
   z.object({
     repliesMuted: primitives.boolean,
+    scope: z.enum(["session", "schedule"]).optional(),
   }),
 );
 export type SessionInboxMute = z.infer<typeof SessionInboxMute>;
@@ -19471,7 +19602,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // An id that does not name a rig in the workspace is a 422.
       rigId: z.string().uuid().nullable().optional(),
       // The workspace channel to file this session under (rail organization only).
-      // Omitted/null ⇒ unfiled (inbox). An id that does not name a channel in the
+      // Omitted/null ⇒ unfiled (inbox), except that a Site conversation is filed
+      // in its Site's project. An id that does not name a channel in the
       // workspace is a 422.
       channelId: z.string().uuid().nullable().optional(),
       goal: GoalSpec.optional(),
@@ -21351,9 +21483,34 @@ export const SessionMachineAccess = /* @__PURE__ */ defineSchema(() =>
     ownerName: primitives.nullableString,
     isOwner: primitives.boolean,
     queuedTurnBlocked: primitives.boolean,
+    /**
+     * Results from other people's work (their workers' results and agent
+     * messages) waiting because only the machine's owner may start work on
+     * it, grouped by whose work it is. Older servers omit it.
+     */
+    waitingWork: z
+      .array(
+        z.object({
+          /** The person's display name, when known. */
+          name: z.string().nullable(),
+          /** The waiting results come from the caller's own work. */
+          isYou: z.boolean(),
+          results: z.number().int().positive(),
+        }),
+      )
+      .optional(),
   }),
 );
 export type SessionMachineAccess = z.infer<typeof SessionMachineAccess>;
+
+/** POST /v1/workspaces/:ws/sessions/:id/waiting-work/continue */
+export const ContinueSessionWaitingWorkResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    /** How many waiting results the agent now continues with under the caller's authority. */
+    continued: z.number().int().nonnegative(),
+  }),
+);
+export type ContinueSessionWaitingWorkResponse = z.infer<typeof ContinueSessionWaitingWorkResponse>;
 
 /** GET /v1/workspaces/:ws/machines; active pointer fields are session-scoped. */
 export const MachinesResponse = /* @__PURE__ */ defineSchema(() =>
@@ -22121,6 +22278,11 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
      * Omitted by older servers, which ignore `usageLimitMicros` on create.
      */
     sessionUsageLimits: z.object({ enabled: primitives.boolean }).strict().optional(),
+    /**
+     * Whether automations can have event triggers on this server: event
+     * sources, the webhook intake and event runs. Omitted by older servers.
+     */
+    eventTriggers: z.object({ enabled: z.boolean() }).strict().optional(),
     // Whether this deployment offers the Jev-backed code_search agent tool and
     // whether workspaces without their own setting get it.
     codeSearch: z

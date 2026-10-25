@@ -2,7 +2,7 @@ import {
   recoverProviderClockAfterDependencyWait,
   PROVIDER_RECOVERY_SUSPENDED_AT,
 } from "./provider-recovery-clock";
-export { getSessionMachineAccess } from "./session-machine-access";
+export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 export * from "./site-session-access";
 import { siteSessionAccessFilter } from "./site-session-access";
@@ -12,6 +12,7 @@ import {
   isActivityXidToken,
   normalizeActivityToken,
 } from "./session-activity-xid";
+import { syncGitHubEventRoutes, wakeScheduledTaskEventSubscriptions } from "./event-triggers";
 export {
   listExhaustedScheduledTasks,
   retireExhaustedScheduledTask,
@@ -23,12 +24,14 @@ export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./model-call-timing";
 export * from "./model-provider-execution-inputs";
+export * from "./workspace-model-catalog-inputs";
 import {
   modelCallTimingColumns,
   modelCallTimingOrNull,
   type ModelCallTiming,
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
+export * from "./secret-use-approvals";
 export * from "./connected-machine-audience";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { sessionRetentionFromRow } from "./session-archive";
@@ -41,6 +44,11 @@ import {
   applyPreparedSecretAnswersInTransaction,
   type PreparedSecretAnswer,
 } from "./human-input-secret-answers";
+import {
+  decideSecretUseApprovalTx,
+  secretUseApprovalsForSessionTx,
+  secretUseApprovalView,
+} from "./secret-use-approvals";
 import type { VaultDbContext } from "./vaults";
 import { browserDeadlineCheckpoint } from "./browser-deadline-checkpoints";
 import {
@@ -776,6 +784,8 @@ import type {
   ScheduledTaskTriggerType,
   SlackInstallationBinding,
   Session,
+  EventSourceKind,
+  SessionAutomationWaitSummary,
   SessionAgentAccess,
   SessionAgentAccessViewer,
   SessionAuthorizationListScope,
@@ -808,6 +818,7 @@ import type {
   SessionToolPolicy,
   SessionTurn,
   SessionQueueSnapshot,
+  SessionMcpQueueSummary,
   SessionSystemUpdate,
   SessionSystemUpdateKind,
   SessionSystemUpdateState,
@@ -935,6 +946,10 @@ import {
   OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
   HumanInputQuestion as HumanInputQuestionContract,
   canonicalSkillReviewQuestion,
+  secretUseApprovalHumanInput,
+  secretUseApprovalIdFromQuestionId,
+  SECRET_USE_APPROVAL_DECISIONS,
+  type SecretUseApprovalDecision,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
   CodexCredentialPolicySnapshotV1,
@@ -2515,19 +2530,24 @@ async function projectManagedOrganizationAccess(
   }
 
   const defaultAccountId = activeOrganizationMemberships[0]!.organizationId;
-  // Preserve the final scope of the old per-organization loop. These authority
-  // tables are non-RLS: every join is explicitly limited to the subject and the
-  // active organization ids just returned by the canonical membership helper.
-  await setRlsContext(db, {
-    accountId: activeOrganizationMemberships.at(-1)!.organizationId,
-    workspaceId: null,
-  });
+  const finalAccountId = activeOrganizationMemberships.at(-1)!.organizationId;
+  // The authority tables below are non-RLS: every join is explicitly limited to
+  // the subject and the active organization ids just returned by the canonical
+  // membership helper. The default organization's account-scoped privacy row
+  // (0918: Personal workspaces off lands people in a shared workspace) rides
+  // in the same read under that organization's scope.
+  await setRlsContext(db, { accountId: defaultAccountId, workspaceId: null });
   const rows = await db
     .select({
       accountId: schema.managedAccounts.id,
       accountName: schema.managedAccounts.name,
       workspaceId: schema.workspaces.id,
       permissions: schema.workspaceMemberships.permissions,
+      defaultPersonalWorkspacesEnabled: sql<boolean | null>`(
+        select privacy.personal_workspaces_enabled
+        from ${schema.organizationPrivacyPreferences} privacy
+        where privacy.account_id = ${defaultAccountId}::uuid
+      )`,
       preferredDefaultWorkspaceId: sql<string | null>`(
         select legacy.id from ${schema.workspaces} legacy
         join ${schema.managedAccounts} fallback on fallback.id = legacy.account_id
@@ -2561,6 +2581,11 @@ async function projectManagedOrganizationAccess(
       ),
     )
     .orderBy(desc(schema.workspaces.createdAt));
+  // Preserve the final scope of the old per-organization loop.
+  if (finalAccountId !== defaultAccountId) {
+    await setRlsContext(db, { accountId: finalAccountId, workspaceId: null });
+  }
+  const defaultPersonalWorkspacesEnabled = rows[0]?.defaultPersonalWorkspacesEnabled ?? true;
   const workspaceGrants: AccessGrant[] = [];
   for (const organizationMembership of activeOrganizationMemberships) {
     workspaceGrants.push(
@@ -2597,12 +2622,24 @@ async function projectManagedOrganizationAccess(
   }
   const organizationNameById = new Map(rows.map((row) => [row.accountId, row.accountName]));
   const defaultPersonalWorkspaceId = activeOrganizationMemberships[0]!.personalWorkspaceId;
+  // Rows are newest first, so the last shared grant is the organization's oldest.
+  const defaultSharedWorkspaceId = defaultPersonalWorkspacesEnabled
+    ? undefined
+    : [...workspaceGrants]
+        .reverse()
+        .find(
+          (grant) =>
+            grant.accountId === defaultAccountId &&
+            grant.workspaceId !== defaultPersonalWorkspaceId,
+        )?.workspaceId;
   const defaultWorkspaceId =
     workspaceGrants.find(
       (grant) =>
         grant.accountId === defaultAccountId &&
         grant.workspaceId === rows[0]?.preferredDefaultWorkspaceId,
-    )?.workspaceId ?? defaultPersonalWorkspaceId;
+    )?.workspaceId ??
+    defaultSharedWorkspaceId ??
+    defaultPersonalWorkspaceId;
   return {
     accessContext: {
       mode: "managed",
@@ -3039,9 +3076,11 @@ export async function getWorkspace(db: Database, workspaceId: string): Promise<W
   if (!row) return null;
   // Bootstrap metadata is not RLS-protected. It does not by itself establish
   // that the complete workspace is readable in the caller's database scope.
-  const control = await findWorkspaceControlProjection(db, row.id);
-  if (!control) return null;
-  return mapWorkspace(row, control, await workspaceKindProjection(db, row));
+  return await withWorkspaceRls(db, row.id, async (scopedDb) => {
+    const control = await readWorkspaceControlProjection(scopedDb, row.id);
+    if (!control) return null;
+    return mapWorkspace(row, control, await readWorkspaceKindProjection(scopedDb, row));
+  });
 }
 
 /**
@@ -3958,6 +3997,7 @@ export async function deleteWorkspace(db: Database, workspaceId: string): Promis
     await tx.execute(
       sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-tenancy:${workspaceId}`}, 0))`,
     );
+    await tx.execute(sql`select opengeni_private.defer_workspace_cascade_foreign_keys()`);
     await tx.delete(schema.workspaces).where(eq(schema.workspaces.id, workspaceId));
   });
 }
@@ -4571,19 +4611,11 @@ export async function deleteWorkspaceIfQuiescent(
           });
           const cascadeStartedAt = performance.now();
           // The activity gate flushes deferred checks with ALL IMMEDIATE.
-          // Workspace deletion owns both ends of these Skill history links;
-          // check them at commit after the complete cascade, not between rows.
-          // Keep all unrelated activity and retention constraints immediate.
-          await tx.execute(sql`
-            SET CONSTRAINTS
-              preference_registry_preferences_superseded_by_fk,
-              preference_registry_events_related_fk,
-              preference_registry_revisions_corrects_revision_id_fkey,
-              preference_registry_preferences_active_revision_fk,
-              preference_registry_events_old_revision_fk,
-              preference_registry_events_new_revision_fk
-            DEFERRED
-          `);
+          // The cascade removes both ends of every reference between the
+          // workspace's own tables; check those at commit, after the complete
+          // cascade, not between rows. Activity and retention constraint
+          // triggers stay immediate.
+          await tx.execute(sql`select opengeni_private.defer_workspace_cascade_foreign_keys()`);
           const deleted = await tx
             .delete(schema.workspaces)
             .where(
@@ -5339,6 +5371,8 @@ export async function upsertGitHubInstallation(
     accountLogin?: string | null;
     accountType?: string | null;
     linkedBySubjectId?: string | null;
+    /** The deployment's event route secret: GitHub event routes are recomputed with it. */
+    eventRouteSecret: Uint8Array | null;
   },
 ): Promise<GitHubInstallation> {
   return await withRlsContext(
@@ -5377,6 +5411,7 @@ export async function upsertGitHubInstallation(
       if (!row) {
         throw new Error("Failed to upsert GitHub installation");
       }
+      await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
       return mapGitHubInstallation(row);
     },
   );
@@ -5392,6 +5427,8 @@ export async function bindGitHubInstallationRepositories(
     accountType?: string | null;
     linkedBySubjectId: string;
     repositoryIds: number[];
+    /** The deployment's event route secret: GitHub event routes are recomputed with it. */
+    eventRouteSecret: Uint8Array | null;
   },
 ): Promise<GitHubInstallationAccess> {
   if (!Number.isSafeInteger(input.installationId) || input.installationId <= 0) {
@@ -5458,6 +5495,7 @@ export async function bindGitHubInstallationRepositories(
             })),
           );
         }
+        await syncGitHubEventRoutes(tx, input.workspaceId, input.eventRouteSecret);
         return { ...mapGitHubInstallation(row), repositoryIds };
       }),
   );
@@ -5480,6 +5518,8 @@ export async function bindAuthorizedGitHubInstallationRepositories(
     authorityExpiresAt: Date;
     authorityNonce: string;
     repositoryIds: number[];
+    /** The deployment's event route secret: GitHub event routes are recomputed with it. */
+    eventRouteSecret: Uint8Array | null;
   },
 ): Promise<GitHubInstallationAccess | null> {
   if (!Number.isSafeInteger(input.installationId) || input.installationId <= 0) {
@@ -5624,6 +5664,7 @@ export async function bindAuthorizedGitHubInstallationRepositories(
           input.authorityCheckedAt,
           input.authorityExpiresAt,
         );
+        await syncGitHubEventRoutes(tx, input.workspaceId, input.eventRouteSecret);
         return { ...mapGitHubInstallation(row), repositoryIds };
       }),
   );
@@ -5759,7 +5800,13 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
 
 export async function deleteGitHubInstallationBinding(
   db: Database,
-  input: { accountId: string; workspaceId: string; installationId: number },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    installationId: number;
+    /** The deployment's event route secret: GitHub event routes are recomputed with it. */
+    eventRouteSecret: Uint8Array | null;
+  },
 ): Promise<boolean> {
   return await withRlsContext(
     db,
@@ -5774,6 +5821,7 @@ export async function deleteGitHubInstallationBinding(
           ),
         )
         .returning({ id: schema.githubInstallations.id });
+      await syncGitHubEventRoutes(scopedDb, input.workspaceId, input.eventRouteSecret);
       return rows.length > 0;
     },
   );
@@ -8723,6 +8771,47 @@ export async function getRetainedScreenshotArtifact(
       .where(retainedScreenshotSessionArtifactPredicate(workspaceId, sessionId, artifactId))
       .limit(1);
     return row ? mapRetainedScreenshotArtifact(row.artifact, row.file) : null;
+  });
+}
+
+/**
+ * This session's own retained screenshots among `artifactIds`, in one query.
+ * Screenshots a fork reaches through its ancestry are left out; resolve each
+ * of those with getRetainedScreenshotArtifact, which proves the copied receipt.
+ */
+export async function getSessionRetainedScreenshotArtifacts(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  artifactIds: readonly string[],
+): Promise<Map<string, RetainedScreenshotArtifact>> {
+  const found = new Map<string, RetainedScreenshotArtifact>();
+  if (artifactIds.length === 0) return found;
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        artifact: schema.retainedScreenshotArtifacts,
+        file: schema.files,
+      })
+      .from(schema.retainedScreenshotArtifacts)
+      .innerJoin(
+        schema.files,
+        and(
+          eq(schema.files.workspaceId, schema.retainedScreenshotArtifacts.workspaceId),
+          eq(schema.files.id, schema.retainedScreenshotArtifacts.artifactId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.retainedScreenshotArtifacts.workspaceId, workspaceId),
+          eq(schema.retainedScreenshotArtifacts.sessionId, sessionId),
+          inArray(schema.retainedScreenshotArtifacts.artifactId, [...new Set(artifactIds)]),
+        ),
+      );
+    for (const row of rows) {
+      found.set(row.artifact.artifactId, mapRetainedScreenshotArtifact(row.artifact, row.file));
+    }
+    return found;
   });
 }
 
@@ -19220,23 +19309,264 @@ export type SessionScheduleTargets = {
   scheduled: Set<string>;
   /** Sessions an active schedule targets that can still start a run. */
   upcoming: Set<string>;
+  /**
+   * Sessions an active automation targets that an event can still start: it
+   * has an active event trigger and, if it runs once, has not run yet.
+   */
+  waitingForEvents: Set<string>;
+  /**
+   * What the automations the reader can see are waiting for, per session that
+   * one of them can still continue. Sessions without such an automation are
+   * absent. Null when the reader was not given schedule access at all.
+   */
+  waits: Map<string, SessionAutomationWaitSummary> | null;
 };
+
+const CALENDAR_DAYS = [
+  "SUNDAY",
+  "MONDAY",
+  "TUESDAY",
+  "WEDNESDAY",
+  "THURSDAY",
+  "FRIDAY",
+  "SATURDAY",
+] as const;
+const wallClockFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function wallClockFormatter(timeZone: string): Intl.DateTimeFormat | null {
+  const cached = wallClockFormatters.get(timeZone);
+  if (cached) return cached;
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      hourCycle: "h23",
+    });
+    if (wallClockFormatters.size >= 256) wallClockFormatters.clear();
+    wallClockFormatters.set(timeZone, formatter);
+    return formatter;
+  } catch {
+    return null;
+  }
+}
+
+/** The wall clock in a time zone at an instant, as a UTC timestamp of the same fields. */
+function wallClockAsUtc(formatter: Intl.DateTimeFormat, instantMs: number): number {
+  const parts: Record<string, number> = {};
+  for (const part of formatter.formatToParts(new Date(instantMs))) {
+    if (part.type !== "literal") parts[part.type] = Number(part.value);
+  }
+  return Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour!, parts.minute!);
+}
+
+/** The instant a wall-clock minute happens in a time zone (the later side of a DST gap). */
+function zonedWallClockToUtc(formatter: Intl.DateTimeFormat, wallClockMs: number): number {
+  let guess = wallClockMs;
+  for (let step = 0; step < 3; step += 1) {
+    const drift = wallClockMs - wallClockAsUtc(formatter, guess);
+    if (drift === 0) break;
+    guess += drift;
+  }
+  return guess;
+}
+
+/**
+ * A schedule's next run strictly after `now`, as the Temporal schedule it
+ * becomes fires it: a one-time run at its instant, intervals aligned to
+ * `startAt` (otherwise the Unix epoch) until `endAt`, and calendar runs at a
+ * wall-clock time in the schedule's time zone. Null for a manual schedule, a
+ * one-time run that has passed, an interval past its end, or a malformed spec.
+ */
+export function scheduledTaskNextRunAt(schedule: unknown, now: Date): Date | null {
+  const spec =
+    schedule && typeof schedule === "object" ? (schedule as Record<string, unknown>) : null;
+  const nowMs = now.getTime();
+  const instant = (value: unknown) => (typeof value === "string" ? Date.parse(value) : Number.NaN);
+  switch (spec?.type) {
+    case "once": {
+      const at = instant(spec.runAt);
+      return Number.isFinite(at) && at > nowMs ? new Date(at) : null;
+    }
+    case "interval": {
+      const everyMs = Number(spec.everySeconds) * 1_000;
+      if (!Number.isSafeInteger(everyMs) || everyMs <= 0) return null;
+      const startMs = spec.startAt == null ? null : instant(spec.startAt);
+      const endMs = spec.endAt == null ? null : instant(spec.endAt);
+      if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
+      const phase = startMs === null ? 0 : ((startMs % everyMs) + everyMs) % everyMs;
+      const from = Math.max(nowMs + 1, startMs ?? Number.NEGATIVE_INFINITY);
+      const next = phase + Math.ceil((from - phase) / everyMs) * everyMs;
+      return endMs !== null && next > endMs ? null : new Date(next);
+    }
+    case "calendar": {
+      const hour = Number(spec.hour);
+      const minute = Number(spec.minute);
+      if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+      const formatter = wallClockFormatter(
+        typeof spec.timeZone === "string" && spec.timeZone ? spec.timeZone : "UTC",
+      );
+      if (!formatter) return null;
+      const days =
+        Array.isArray(spec.daysOfWeek) && spec.daysOfWeek.length > 0
+          ? new Set(spec.daysOfWeek)
+          : null;
+      const today = new Date(wallClockAsUtc(formatter, nowMs));
+      for (let offset = 0; offset <= 7; offset += 1) {
+        const day = Date.UTC(
+          today.getUTCFullYear(),
+          today.getUTCMonth(),
+          today.getUTCDate() + offset,
+        );
+        if (days && !days.has(CALENDAR_DAYS[new Date(day).getUTCDay()]!)) continue;
+        const run = zonedWallClockToUtc(formatter, day + (hour * 60 + minute) * 60_000);
+        if (run > nowMs) return new Date(run);
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+type AutomationWaitRow = {
+  taskId: string;
+  sessionId: string | null;
+  status: string;
+  schedule: unknown;
+  createdAt: Date;
+  visibility: string;
+  ownerSubjectId: string | null;
+  triggerStatus: string | null;
+  triggerPosition: number | null;
+  eventTypes: string[] | null;
+  sourceKind: string | null;
+  sourceName: string | null;
+  sourceVisibility: string | null;
+  sourceOwnerSubjectId: string | null;
+  eventsOnce: boolean | null;
+  eventsCompletedAt: Date | null;
+  hasEventSettings: string | null;
+};
+
+/**
+ * What the automations the reader can see are waiting for, per session. A
+ * trusted reader (undefined) sees every automation and source; null sees
+ * shared ones; a subject also sees their own.
+ */
+function automationWaitSummaries(
+  rows: readonly AutomationWaitRow[],
+  now: Date,
+  viewerSubjectId: string | null | undefined,
+): Map<string, SessionAutomationWaitSummary> {
+  const visible = (visibility: string | null, owner: string | null, shared: string) =>
+    viewerSubjectId === undefined ||
+    visibility === shared ||
+    (viewerSubjectId !== null && owner === viewerSubjectId);
+  const tasks = new Map<string, { sessionId: string; rows: AutomationWaitRow[] }>();
+  for (const row of rows) {
+    if (!row.sessionId || !visible(row.visibility, row.ownerSubjectId, "workspace_shared"))
+      continue;
+    const task = tasks.get(row.taskId) ?? { sessionId: row.sessionId, rows: [] };
+    task.rows.push(row);
+    tasks.set(row.taskId, task);
+  }
+  const ordered = [...tasks.values()].sort(
+    (left, right) =>
+      left.rows[0]!.createdAt.getTime() - right.rows[0]!.createdAt.getTime() ||
+      left.rows[0]!.taskId.localeCompare(right.rows[0]!.taskId),
+  );
+  const waits = new Map<string, SessionAutomationWaitSummary>();
+  for (const { sessionId, rows: taskRows } of ordered) {
+    const task = taskRows[0]!;
+    if (task.status !== "active" || (task.eventsOnce && task.eventsCompletedAt)) continue;
+    const nextRun = scheduledTaskHasUpcomingRun(task, now)
+      ? scheduledTaskNextRunAt(task.schedule, now)
+      : null;
+    const trigger = task.hasEventSettings
+      ? taskRows
+          .filter((row) => row.triggerStatus === "active")
+          .sort((left, right) => left.triggerPosition! - right.triggerPosition!)[0]
+      : undefined;
+    if (!nextRun && !trigger) continue;
+    const wait = waits.get(sessionId) ?? { nextRunAt: null, event: null, automations: 0 };
+    wait.automations += 1;
+    if (nextRun && (!wait.nextRunAt || nextRun.getTime() < Date.parse(wait.nextRunAt))) {
+      wait.nextRunAt = nextRun.toISOString();
+    }
+    if (trigger && !wait.event) {
+      wait.event = {
+        source:
+          trigger.sourceKind &&
+          trigger.sourceName !== null &&
+          visible(trigger.sourceVisibility, trigger.sourceOwnerSubjectId, "workspace")
+            ? {
+                kind: trigger.sourceKind as EventSourceKind,
+                name: trigger.sourceName,
+              }
+            : null,
+        eventTypes: trigger.eventTypes ?? [],
+      };
+    }
+    waits.set(sessionId, wait);
+  }
+  return waits;
+}
 
 export async function sessionScheduleTargets(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
-  now: Date = new Date(),
+  options: {
+    now?: Date;
+    /**
+     * Who is reading, for the wait summaries. Omitted (trusted callers): every
+     * automation and source is described. Given: it is asked only when an
+     * Only me automation or a private source targets these sessions; null
+     * then describes shared ones, a subject also their own.
+     */
+    viewer?: () => Promise<string | null>;
+  } = {},
 ): Promise<SessionScheduleTargets> {
-  if (sessionIds.length === 0) return { scheduled: new Set(), upcoming: new Set() };
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
+  const now = options.now ?? new Date();
+  if (sessionIds.length === 0)
+    return {
+      scheduled: new Set(),
+      upcoming: new Set(),
+      waitingForEvents: new Set(),
+      waits: new Map(),
+    };
+  const rows = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+    scopedDb
       .select({
+        taskId: schema.scheduledTasks.id,
         sessionId: schema.scheduledTasks.reusableSessionId,
         status: schema.scheduledTasks.status,
         schedule: schema.scheduledTasks.schedule,
+        createdAt: schema.scheduledTasks.createdAt,
+        visibility: schema.scheduledTasks.visibility,
+        ownerSubjectId: schema.scheduledTasks.ownerSubjectId,
+        triggerStatus: schema.eventTriggers.status,
+        triggerPosition: schema.eventTriggers.position,
+        eventTypes: schema.eventTriggers.eventTypes,
+        sourceKind: schema.eventSources.kind,
+        sourceName: schema.eventSources.name,
+        sourceVisibility: schema.eventSources.visibility,
+        sourceOwnerSubjectId: schema.eventSources.ownerSubjectId,
+        eventsOnce: schema.scheduledTaskEventSettings.once,
+        eventsCompletedAt: schema.scheduledTaskEventSettings.completedAt,
+        hasEventSettings: schema.scheduledTaskEventSettings.taskId,
       })
       .from(schema.scheduledTasks)
+      .leftJoin(schema.eventTriggers, eq(schema.eventTriggers.taskId, schema.scheduledTasks.id))
+      .leftJoin(schema.eventSources, eq(schema.eventSources.id, schema.eventTriggers.sourceId))
+      .leftJoin(
+        schema.scheduledTaskEventSettings,
+        eq(schema.scheduledTaskEventSettings.taskId, schema.scheduledTasks.id),
+      )
       .where(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
@@ -19244,15 +19574,29 @@ export async function sessionScheduleTargets(
           inArray(schema.scheduledTasks.runMode, ["existing_session", "reusable_session"]),
           anyOf(schema.scheduledTasks.reusableSessionId, sessionIds),
         ),
-      );
-    const targets: SessionScheduleTargets = { scheduled: new Set(), upcoming: new Set() };
-    for (const row of rows) {
-      if (!row.sessionId) continue;
-      targets.scheduled.add(row.sessionId);
-      if (scheduledTaskHasUpcomingRun(row, now)) targets.upcoming.add(row.sessionId);
+      ),
+  );
+  const restricted = rows.some(
+    (row) =>
+      row.visibility !== "workspace_shared" ||
+      (row.sourceVisibility !== null && row.sourceVisibility !== "workspace"),
+  );
+  const viewerSubjectId = options.viewer ? (restricted ? await options.viewer() : null) : undefined;
+  const targets: SessionScheduleTargets = {
+    scheduled: new Set(),
+    upcoming: new Set(),
+    waitingForEvents: new Set(),
+    waits: automationWaitSummaries(rows, now, viewerSubjectId),
+  };
+  for (const row of rows) {
+    if (!row.sessionId) continue;
+    targets.scheduled.add(row.sessionId);
+    if (scheduledTaskHasUpcomingRun(row, now)) targets.upcoming.add(row.sessionId);
+    if (row.status === "active" && row.triggerStatus === "active" && !row.eventsCompletedAt) {
+      targets.waitingForEvents.add(row.sessionId);
     }
-    return targets;
-  });
+  }
+  return targets;
 }
 
 export async function listScheduledTasks(
@@ -19586,6 +19930,64 @@ export async function deleteScheduledTask(
       };
     });
   });
+}
+
+/**
+ * Archiving a chat pauses it, so the one-time waits that would continue it
+ * are retired with it: a run-once event automation that has not run yet, and
+ * a one-time scheduled run still ahead. Both belong to the chat (a "wake me
+ * when" from that chat or one of its sub-chats); repeating automations stay,
+ * and a run of theirs that meets the paused chat is blocked with a notice to
+ * the owner. Pass the archive transaction so the chat never ends up archived
+ * with a pending wait; any Temporal schedule is removed by the cleanup pump
+ * from the durable outbox row each deletion writes. Restore does not bring
+ * a retired wait back. Returns the retired automation ids.
+ */
+export async function retireArchivedChatWaits(
+  db: Database,
+  input: { workspaceId: string; rootSessionId: string; now?: Date },
+): Promise<string[]> {
+  const now = input.now ?? new Date();
+  const task = schema.scheduledTasks;
+  const settings = schema.scheduledTaskEventSettings;
+  const rows = await withWorkspaceRls(db, input.workspaceId, async (scoped) =>
+    scoped
+      .select({ id: task.id })
+      .from(task)
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, task.workspaceId),
+          eq(schema.sessions.id, task.reusableSessionId),
+        ),
+      )
+      .leftJoin(settings, eq(settings.taskId, task.id))
+      .where(
+        and(
+          eq(task.workspaceId, input.workspaceId),
+          isNull(task.deletedAt),
+          eq(task.runMode, "existing_session"),
+          eq(schema.sessions.rootSessionId, input.rootSessionId),
+          or(
+            and(eq(settings.once, true), isNull(settings.completedAt)),
+            and(
+              isNull(settings.taskId),
+              sql`${task.schedule} ->> 'type' = 'once'`,
+              sql`(${task.schedule} ->> 'runAt')::timestamptz > ${now.toISOString()}::timestamptz`,
+            ),
+          ),
+        ),
+      )
+      .orderBy(task.id),
+  );
+  const retired: string[] = [];
+  for (const row of rows) {
+    const deletion = await deleteScheduledTask(db, input.workspaceId, row.id);
+    if (!deletion.changed) continue;
+    await wakeScheduledTaskEventSubscriptions(db, input.workspaceId, row.id);
+    retired.push(row.id);
+  }
+  return retired;
 }
 
 /** A terminal refusal is evidence, not accepted execution or permission to retry. */
@@ -30002,7 +30404,8 @@ function wellFormedDriverText(value: unknown): unknown {
  * A new Site conversation is filed in the project of the chat that created the
  * Site (the tree of its first version's session), so the Site's sidebar row and
  * its conversations sit together. Without a Site origin, or a creating chat,
- * the session stays unfiled.
+ * the session stays unfiled. Callers pass "no project" as null or omit it, so
+ * both mean "file it with its Site"; only a named project overrides that.
  */
 async function siteHomeChannelId(
   tx: Database,
@@ -30319,7 +30722,7 @@ async function createSessionInTransaction(
     parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
   );
   const channelId =
-    input.channelId === undefined && !input.parentSessionId
+    input.channelId == null && !input.parentSessionId
       ? await siteHomeChannelId(tx as unknown as Database, input.workspaceId, sessionMetadata)
       : (input.channelId ?? null);
   try {
@@ -31383,8 +31786,21 @@ export async function getSessionAuthorityProjection(
   workspaceId: string,
   sessionId: string,
 ): Promise<SessionAuthorityProjection | null> {
+  return (
+    (await getSessionAuthorityProjections(db, workspaceId, [sessionId])).values().next().value ??
+    null
+  );
+}
+
+/** One live RLS read for a response window; absent and hidden rows stay absent. */
+export async function getSessionAuthorityProjections(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, SessionAuthorityProjection>> {
+  if (sessionIds.length === 0) return new Map();
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
+    const rows = await scopedDb
       .select({
         sessionId: schema.sessions.id,
         rootSessionId: schema.sessions.rootSessionId,
@@ -31400,23 +31816,31 @@ export async function getSessionAuthorityProjection(
         memoryScope: schema.sessions.memoryScope,
       })
       .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
-    if (!row) return null;
-    return {
-      sessionId: row.sessionId,
-      authorityEpoch: row.authorityEpoch,
-      rootSessionId: row.rootSessionId,
-      visibility: row.visibility as SessionAuthorityProjection["visibility"],
-      ownerSubjectId: row.ownerSubjectId ?? null,
-      siteId: row.siteId ?? null,
-      siteAccessRootId: row.siteAccessRootId ?? null,
-      siteViewerPrincipal: row.siteViewerPrincipal ?? null,
-      siteOwnerSubjectId: row.siteOwnerSubjectId ?? null,
-      agentAccess: sessionAgentAccessFromRow(row),
-      scopeSubjectId: sessionEndUserFromRow(row),
-      memoryScope: sessionMemoryScopeFromRow(row),
-    };
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          inArray(schema.sessions.id, [...new Set(sessionIds)]),
+        ),
+      );
+    return new Map(
+      rows.map((row) => [
+        row.sessionId,
+        {
+          sessionId: row.sessionId,
+          authorityEpoch: row.authorityEpoch,
+          rootSessionId: row.rootSessionId,
+          visibility: row.visibility as SessionAuthorityProjection["visibility"],
+          ownerSubjectId: row.ownerSubjectId ?? null,
+          siteId: row.siteId ?? null,
+          siteAccessRootId: row.siteAccessRootId ?? null,
+          siteViewerPrincipal: row.siteViewerPrincipal ?? null,
+          siteOwnerSubjectId: row.siteOwnerSubjectId ?? null,
+          agentAccess: sessionAgentAccessFromRow(row),
+          scopeSubjectId: sessionEndUserFromRow(row),
+          memoryScope: sessionMemoryScopeFromRow(row),
+        },
+      ]),
+    );
   });
 }
 
@@ -31492,10 +31916,33 @@ export async function getSessionAuthorizationFacts(
     caller?: { sessionId: string; attemptId: string } | undefined;
   },
 ): Promise<SessionAuthorizationFacts> {
+  const results = await getSessionAuthorizationFactsBatch(db, {
+    ...input,
+    sessionIds: [input.sessionId],
+  });
+  return results.get(input.sessionId)!;
+}
+
+/** Canonical authorization facts for one bounded response window, not an authority cache. */
+export async function getSessionAuthorizationFactsBatch(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionIds: readonly string[];
+    caller?: { sessionId: string; attemptId: string } | undefined;
+  },
+): Promise<Map<string, SessionAuthorizationFacts>> {
+  if (input.sessionIds.length === 0) return new Map();
+  // Parse UUIDs before the RLS relation join. Casting a text anchor in the
+  // join itself prevents keyed access under the security barrier. Ordinality
+  // preserves the caller's original spelling for the result map.
+  const requestedSessionIds = [...new Set(input.sessionIds)];
   const callerSessionId = input.caller?.sessionId ?? null;
   const attemptId = input.caller?.attemptId ?? null;
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [row] = await rawRows<{
+    const rows = await rawRows<{
+      requested_session_index: number | string;
       target_id: string | null;
       target_account_id: string | null;
       target_root_session_id: string | null;
@@ -31528,6 +31975,7 @@ export async function getSessionAuthorizationFacts(
       scopedDb,
       sql`
         select
+          anchor.ordinality as requested_session_index,
           target.id as target_id,
           target.account_id as target_account_id,
           target.root_session_id as target_root_session_id,
@@ -31556,10 +32004,13 @@ export async function getSessionAuthorizationFacts(
           turn.initiator_context as turn_initiator_context,
           turn.initiating_human_subject_id as turn_initiating_human_subject_id,
           link.canonical_snapshot as turn_link_snapshot
-        from (select 1) as anchor
+        from unnest(array[${sql.join(
+          requestedSessionIds.map((id) => sql`${id}`),
+          sql`, `,
+        )}]::uuid[]) with ordinality as anchor(session_id, ordinality)
         left join ${schema.sessions} target
           on target.workspace_id = ${input.workspaceId}
-          and target.id = ${input.sessionId}
+          and target.id = anchor.session_id
         left join ${schema.slackInteractions} slack
           on slack.account_id = ${input.accountId}
           and slack.workspace_id = ${input.workspaceId}
@@ -31592,63 +32043,86 @@ export async function getSessionAuthorizationFacts(
           and link.turn_id = turn.id
       `,
     );
-    const target: SessionAuthorizationFacts["target"] =
-      row?.target_id && row.target_account_id && row.target_root_session_id
-        ? {
-            sessionId: row.target_id,
-            accountId: row.target_account_id,
-            authorityEpoch: Number(row.target_authority_epoch),
-            rootSessionId: row.target_root_session_id,
-            visibility: row.target_visibility as SessionAuthorityProjection["visibility"],
-            ownerSubjectId: row.target_owner_subject_id ?? null,
-            siteId: row.target_site_id ?? null,
-            siteAccessRootId: row.target_site_access_root_id ?? null,
-            siteViewerPrincipal: row.target_site_viewer_principal ?? null,
-            siteOwnerSubjectId: row.target_site_owner_subject_id ?? null,
-            agentAccess: sessionAgentAccessFromRow({ agentAccess: row.target_agent_access ?? "" }),
-            scopeSubjectId: sessionEndUserFromRow({ scopeSubjectId: row.target_scope_subject_id }),
-            memoryScope: sessionMemoryScopeFromRow({ memoryScope: row.target_memory_scope ?? "" }),
-            slackAccess:
-              row.slack_owning_subject_id && row.slack_visibility
-                ? { owningSubjectId: row.slack_owning_subject_id, visibility: row.slack_visibility }
-                : null,
-          }
-        : null;
-    if (!input.caller) return { target, caller: null };
-    const session: SessionAuthorizationCallerFacts["session"] =
-      row?.caller_account_id && row.caller_root_session_id
-        ? {
-            accountId: row.caller_account_id,
-            rootSessionId: row.caller_root_session_id,
-            parentSessionId: row.caller_parent_session_id ?? null,
-            agentAccess: sessionAgentAccessFromRow({ agentAccess: row.caller_agent_access ?? "" }),
-            scopeSubjectId: sessionEndUserFromRow({ scopeSubjectId: row.caller_scope_subject_id }),
-          }
-        : null;
-    let turn: SessionAuthorizationCallerFacts["turn"] = null;
-    if (
-      row?.turn_id &&
-      row.turn_execution_generation !== null &&
-      row.turn_initiator_kind !== null &&
-      row.turn_initiator_subject_id !== null &&
-      // A linked external turn keeps its authority only while the link is live.
-      (row.turn_link_snapshot === null ||
-        (await externalLinkWorkSnapshotIsLive(scopedDb, row.turn_link_snapshot)))
-    ) {
-      const initiatorContext = row.turn_initiator_context ?? {};
-      turn = {
-        id: row.turn_id,
-        executionGeneration: Number(row.turn_execution_generation),
-        initiator: initiatorFromStorage(
-          row.turn_initiator_kind,
-          row.turn_initiator_subject_id,
+    const results = new Map<string, SessionAuthorizationFacts>();
+    // Linked-identity checks may create savepoints on this same scoped handle.
+    // Never overlap them, and keep each check live rather than caching it.
+    for (const row of rows) {
+      const requestedSessionId = requestedSessionIds[Number(row.requested_session_index) - 1]!;
+      const target: SessionAuthorizationFacts["target"] =
+        row?.target_id && row.target_account_id && row.target_root_session_id
+          ? {
+              sessionId: row.target_id,
+              accountId: row.target_account_id,
+              authorityEpoch: Number(row.target_authority_epoch),
+              rootSessionId: row.target_root_session_id,
+              visibility: row.target_visibility as SessionAuthorityProjection["visibility"],
+              ownerSubjectId: row.target_owner_subject_id ?? null,
+              siteId: row.target_site_id ?? null,
+              siteAccessRootId: row.target_site_access_root_id ?? null,
+              siteViewerPrincipal: row.target_site_viewer_principal ?? null,
+              siteOwnerSubjectId: row.target_site_owner_subject_id ?? null,
+              agentAccess: sessionAgentAccessFromRow({
+                agentAccess: row.target_agent_access ?? "",
+              }),
+              scopeSubjectId: sessionEndUserFromRow({
+                scopeSubjectId: row.target_scope_subject_id,
+              }),
+              memoryScope: sessionMemoryScopeFromRow({
+                memoryScope: row.target_memory_scope ?? "",
+              }),
+              slackAccess:
+                row.slack_owning_subject_id && row.slack_visibility
+                  ? {
+                      owningSubjectId: row.slack_owning_subject_id,
+                      visibility: row.slack_visibility,
+                    }
+                  : null,
+            }
+          : null;
+      if (!input.caller) {
+        results.set(requestedSessionId, { target, caller: null });
+        continue;
+      }
+      const session: SessionAuthorizationCallerFacts["session"] =
+        row?.caller_account_id && row.caller_root_session_id
+          ? {
+              accountId: row.caller_account_id,
+              rootSessionId: row.caller_root_session_id,
+              parentSessionId: row.caller_parent_session_id ?? null,
+              agentAccess: sessionAgentAccessFromRow({
+                agentAccess: row.caller_agent_access ?? "",
+              }),
+              scopeSubjectId: sessionEndUserFromRow({
+                scopeSubjectId: row.caller_scope_subject_id,
+              }),
+            }
+          : null;
+      let turn: SessionAuthorizationCallerFacts["turn"] = null;
+      if (
+        row?.turn_id &&
+        row.turn_execution_generation !== null &&
+        row.turn_initiator_kind !== null &&
+        row.turn_initiator_subject_id !== null &&
+        // A linked external turn keeps its authority only while the link is live.
+        (row.turn_link_snapshot === null ||
+          (await externalLinkWorkSnapshotIsLive(scopedDb, row.turn_link_snapshot)))
+      ) {
+        const initiatorContext = row.turn_initiator_context ?? {};
+        turn = {
+          id: row.turn_id,
+          executionGeneration: Number(row.turn_execution_generation),
+          initiator: initiatorFromStorage(
+            row.turn_initiator_kind,
+            row.turn_initiator_subject_id,
+            initiatorContext,
+          ),
           initiatorContext,
-        ),
-        initiatorContext,
-        initiatingHumanSubjectId: row.turn_initiating_human_subject_id ?? null,
-      };
+          initiatingHumanSubjectId: row.turn_initiating_human_subject_id ?? null,
+        };
+      }
+      results.set(requestedSessionId, { target, caller: { session, turn } });
     }
-    return { target, caller: { session, turn } };
+    return results;
   });
 }
 
@@ -33087,7 +33561,7 @@ async function sessionListTotalsInScope(
   // A grouped rail counts Site conversations in its project totals and gets
   // their Site rows here; its ordinary rows still omit them.
   const siteConversations = options.siteConversations ? "include" : undefined;
-  // Sites this person opened join the rows only in the plain view: a root
+  // Sites this person opened or pinned join the rows only in the plain view: a root
   // filter (Mine, search, creator, dates, archived content, another person's
   // scope) or an agent caller lists only Sites its listed chats created.
   const withOpenedSites =
@@ -33115,6 +33589,11 @@ async function sessionListTotalsInScope(
     ...(archiveStatus === "all"
       ? []
       : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
+    // A Site this person archived from their sidebar hides its conversations
+    // with its row, as an archived chat hides its tree.
+    ...(archiveStatus === "active" && siteConversations
+      ? archivedSiteConversationFilters({ ...options, siteConversations })
+      : []),
   );
   const rows = await rawRows<{
     needsYouCount: number;
@@ -33299,10 +33778,11 @@ async function sessionListTotalsInScope(
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
       -- its first version's session), as far as this viewer can see that
-      -- chat; new Site conversations are filed there too. A Site without
-      -- conversations here is listed when this viewer lists its creating
-      -- chat, or opened it. Candidates are the live Sites in this viewer's
-      -- audience (one row each); revision 1 is a unique-index lookup.
+      -- chat; new Site conversations are filed there too. Conversations in
+      -- other projects never take the Site out of its own: a Site without
+      -- conversations here is still listed here when this viewer lists its
+      -- creating chat, or opened it. Candidates are the live Sites in this
+      -- viewer's audience (one row each); revision 1 is a unique-index lookup.
       select artifact.id as site_id, creator.channel_id
       from ${schema.workspaceArtifacts} artifact
       join lateral (
@@ -33319,14 +33799,23 @@ async function sessionListTotalsInScope(
         and artifact.workspace_id = ${workspaceId} and artifact.status = 'active'
         and (artifact.visibility = 'workspace_shared'
           or artifact.owner_subject_id = ${options.subjectId})
-        and artifact.id not in (select site_id from site_conv)
+        and not exists (
+          select 1 from site_conv_totals filed
+          where filed.site_id = artifact.id
+            and filed.channel_id is not distinct from creator.channel_id)
         and (exists (select 1 from roots listed where listed.id = creator.id)
           ${
+            // Opens and pins are this person's own plain-view state: a root
+            // filter or an agent caller lists only Sites its chats created.
             withOpenedSites
               ? sql`or exists (
             select 1 from ${schema.siteOpens} opened
             where opened.workspace_id = ${workspaceId}
-              and opened.subject_id = ${options.subjectId} and opened.site_id = artifact.id)`
+              and opened.subject_id = ${options.subjectId} and opened.site_id = artifact.id)
+          or exists (
+            select 1 from ${schema.siteSidebarStates} pin
+            where pin.workspace_id = ${workspaceId} and pin.subject_id = ${options.subjectId}
+              and pin.site_id = artifact.id and pin.pinned_at is not null)`
               : sql``
           })
     ), site_keys as (
@@ -33338,29 +33827,46 @@ async function sessionListTotalsInScope(
       -- its audience includes this viewer (the catalog's rule; RLS only
       -- isolates the workspace), else the creation-time label. A row without
       -- conversations needs a live Site the viewer can see. Activity is the
-      -- latest of its conversations, its own changes and this person opening
-      -- it. One extra row reports truncation.
+      -- latest of its conversations, its newest published version (creation
+      -- is version 1) and the chats that published its versions (the chat
+      -- that created it and any used to edit it), as far as this viewer can
+      -- see them. Opening a Site is not activity, as opening a chat is not;
+      -- an open only lists it. Archive, restore, rollback and other updates
+      -- to the Site's record are not activity either, so they never lift a
+      -- Site for everyone. One extra row reports truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.updated_at, opened.opened_at) as "updatedAt",
-        coalesce(key.created_at, site.created_at) as "createdAt"
+        greatest(key.updated_at, site.published_at, site.edited_at) as "updatedAt",
+        coalesce(key.created_at, site.created_at) as "createdAt",
+        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt"
       from site_keys key
       left join lateral (
-        select artifact.title, artifact.status, artifact.created_at, artifact.updated_at
+        select artifact.title, artifact.status, artifact.created_at,
+          (select version.created_at from ${schema.workspaceArtifactVersions} version
+            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
+            order by version.revision desc limit 1) as published_at,
+          (select max(editor.updated_at) from ${schema.workspaceArtifactVersions} version
+            join ${schema.sessions} source
+              on source.workspace_id = ${workspaceId} and source.id = version.source_session_id
+            join ${schema.sessions} editor
+              on editor.workspace_id = ${workspaceId} and editor.id = source.root_session_id
+            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id)
+            as edited_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'
             or artifact.owner_subject_id = ${options.subjectId})
       ) site on true
       left join lateral (
-        select opened.opened_at from ${schema.siteOpens} opened
-        where opened.workspace_id = ${workspaceId} and opened.subject_id = ${options.subjectId}
-          and opened.site_id = key.site_id
-      ) opened on true
-      where (key.conversations > 0 or site.status = 'active')
+        select state.pinned_at, state.archived_at from ${schema.siteSidebarStates} state
+        where state.workspace_id = ${workspaceId} and state.subject_id = ${options.subjectId}
+          and state.site_id = key.site_id
+      ) sidebar on true
+      -- This person's archived Sites leave their sidebar; pinned ones lead.
+      where (key.conversations > 0 or site.status = 'active') and sidebar.archived_at is null
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
-      order by 5 desc, 1, 2
+      order by 7 desc, 5 desc, 1, 2
       limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
@@ -33403,11 +33909,13 @@ async function sessionListTotalsInScope(
       ...group,
       attentionSince: iso(group.attentionSince),
     })),
-    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map((site) => ({
+    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map(({ pinned, pinnedAt, ...site }) => ({
       ...site,
       updatedAt: iso(site.updatedAt)!,
       createdAt: iso(site.createdAt)!,
       attentionSince: iso(site.attentionSince),
+      // Only a pinned row carries pin fields, so unpinned rows keep their shape.
+      ...(pinned ? { pinned: true, pinnedAt: iso(pinnedAt ?? null) } : {}),
     })),
     sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
@@ -33418,6 +33926,34 @@ async function sessionListTotalsInScope(
  * for a long time fall past it; the Artifacts page lists every Site.
  */
 export const SITE_CONVERSATION_GROUP_LIMIT = 200;
+
+/**
+ * A Site this person archived from their sidebar hides its conversations from
+ * every view of their sidebar (grouped, flat and search), as an archived chat
+ * hides its tree. Only the console's opt-in listing of Site conversations is
+ * affected; a Site's own conversation list and agent callers are not.
+ */
+function archivedSiteConversationFilters(
+  options: Pick<
+    ListSessionsForSubjectOptions,
+    "authorizationScope" | "subjectId" | "originSiteId" | "siteAccessId" | "siteConversations"
+  >,
+): SQL[] {
+  if (
+    !options.siteConversations ||
+    options.originSiteId ||
+    options.siteAccessId ||
+    options.authorizationScope?.agentAccessViewer
+  )
+    return [];
+  return [
+    sql`not (${schema.sessions.siteAccessRootId} is not null and exists (
+      select 1 from ${schema.siteSidebarStates} hidden
+      where hidden.workspace_id = ${schema.sessions.workspaceId}
+        and hidden.subject_id = ${options.subjectId}
+        and hidden.site_id = ${schema.sessions.siteId} and hidden.archived_at is not null))`,
+  ];
+}
 
 function sessionFilters(
   options: Pick<
@@ -33492,6 +34028,7 @@ function sessionFilters(
   if (archiveStatus !== "all") {
     filters.push(archiveStatus === "archived" ? archivedRoot : sql`not (${archivedRoot})`);
   }
+  if (archiveStatus === "active") filters.push(...archivedSiteConversationFilters(options));
   if (options.authorizationScope) {
     filters.push(
       options.parentSessionId === null
@@ -35275,40 +35812,142 @@ export async function setSessionArchive(
     sessionId: string;
     archived: boolean;
     expectedVersion?: number | undefined;
+    /** Trusted composition hook, inside the personal-state fence and before hiding. */
+    beforeArchive?:
+      | ((tx: SessionActivityDatabase, archiveVersion: number) => Promise<boolean | void>)
+      | undefined;
     /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
     personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
   },
 ): Promise<Session | null> {
-  return await withWorkspaceSubjectRls(
+  return await withWorkspaceSubjectSessionActivityRls(
     db,
     input.workspaceId,
     input.subjectId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
-        await requireSessionPersonalStateWriteAuthority(tx, input);
+    async (tx) => {
+      await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
+      await requireSessionPersonalStateWriteAuthority(tx, input);
 
-        const [storedSession] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-              isNull(schema.sessions.parentSessionId),
-            ),
-          )
-          .limit(1);
-        if (!storedSession) return null;
-        const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
-          storedSession,
-        ]);
-        if (!session)
-          throw new Error(`Session event cursor missing for session ${input.sessionId}`);
+      const [storedSession] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            isNull(schema.sessions.parentSessionId),
+          ),
+        )
+        .limit(1);
+      if (!storedSession) return null;
+      const [session] = await canonicalSessionRowsFromEventCursors(tx, input.workspaceId, [
+        storedSession,
+      ]);
+      if (!session) throw new Error(`Session event cursor missing for session ${input.sessionId}`);
 
-        const [existing] = await tx
-          .select()
-          .from(schema.sessionPins)
+      const [existing] = await tx
+        .select()
+        .from(schema.sessionPins)
+        .where(
+          and(
+            eq(schema.sessionPins.workspaceId, input.workspaceId),
+            eq(schema.sessionPins.subjectId, input.subjectId),
+            eq(schema.sessionPins.sessionId, input.sessionId),
+          ),
+        )
+        .limit(1);
+      const current = mapSessionArchive(existing);
+      if (current.archived === input.archived) {
+        if (input.archived && input.beforeArchive) {
+          const replay = await input.beforeArchive(tx, current.archiveVersion);
+          // An identical receipt may replay the original pre-transition CAS.
+          // A fresh pause intent must not bypass a stale archive precondition.
+          if (
+            input.expectedVersion !== undefined &&
+            input.expectedVersion !== current.archiveVersion &&
+            !replay
+          ) {
+            throw new SessionArchiveVersionConflictError(current);
+          }
+        }
+        return await mapSessionWithControl(
+          tx as unknown as Database,
+          session,
+          [],
+          mapSessionPin(existing),
+          mapSessionAttention(session, existing),
+          current,
+        );
+      }
+      if (input.expectedVersion !== undefined && input.expectedVersion !== current.archiveVersion) {
+        throw new SessionArchiveVersionConflictError(current);
+      }
+
+      if (input.archived && input.beforeArchive) {
+        await input.beforeArchive(tx, current.archiveVersion + 1);
+      }
+
+      let state = existing ?? null;
+      if (!existing) {
+        const [inserted] = await tx
+          .insert(schema.sessionPins)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            sessionId: input.sessionId,
+            pinned: false,
+            pinnedAt: null,
+            version: 0,
+            activelyWorking: false,
+            archived: true,
+            archivedAt: new Date(),
+            attentionVersion: 0,
+            archiveVersion: 1,
+          })
+          // A turn claim may have created this subject's row for the same
+          // session between the read above and here, to acknowledge a consumed
+          // child lifecycle notice. That row is archive-neutral and pin-neutral
+          // (the absent-row projection), so this is the same false -> true
+          // archive transition; its attention fence and version stay untouched.
+          .onConflictDoUpdate({
+            target: [
+              schema.sessionPins.subjectId,
+              schema.sessionPins.workspaceId,
+              schema.sessionPins.sessionId,
+            ],
+            set: {
+              archived: true,
+              archivedAt: new Date(),
+              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+              pinned: false,
+              pinnedAt: null,
+              activelyWorking: false,
+            },
+          })
+          .returning();
+        state = inserted ?? null;
+      } else {
+        const [updated] = await tx
+          .update(schema.sessionPins)
+          .set({
+            archived: input.archived,
+            archivedAt: input.archived ? new Date() : null,
+            archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
+            ...(input.archived
+              ? {
+                  pinned: false,
+                  pinnedAt: null,
+                  activelyWorking: false,
+                  version: existing.pinned
+                    ? sql`${schema.sessionPins.version} + 1`
+                    : sql`${schema.sessionPins.version}`,
+                  attentionVersion: existing.activelyWorking
+                    ? sql`${schema.sessionPins.attentionVersion} + 1`
+                    : sql`${schema.sessionPins.attentionVersion}`,
+                }
+              : {}),
+          })
           .where(
             and(
               eq(schema.sessionPins.workspaceId, input.workspaceId),
@@ -35316,108 +35955,21 @@ export async function setSessionArchive(
               eq(schema.sessionPins.sessionId, input.sessionId),
             ),
           )
-          .limit(1);
-        const current = mapSessionArchive(existing);
-        if (current.archived === input.archived) {
-          return await mapSessionWithControl(
-            tx as unknown as Database,
-            session,
-            [],
-            mapSessionPin(existing),
-            mapSessionAttention(session, existing),
-            current,
-          );
-        }
-        if (
-          input.expectedVersion !== undefined &&
-          input.expectedVersion !== current.archiveVersion
-        ) {
-          throw new SessionArchiveVersionConflictError(current);
-        }
-
-        let state = existing ?? null;
-        if (!existing) {
-          const [inserted] = await tx
-            .insert(schema.sessionPins)
-            .values({
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              subjectId: input.subjectId,
-              sessionId: input.sessionId,
-              pinned: false,
-              pinnedAt: null,
-              version: 0,
-              activelyWorking: false,
-              archived: true,
-              archivedAt: new Date(),
-              attentionVersion: 0,
-              archiveVersion: 1,
-            })
-            // A turn claim may have created this subject's row for the same
-            // session between the read above and here, to acknowledge a consumed
-            // child lifecycle notice. That row is archive-neutral and pin-neutral
-            // (the absent-row projection), so this is the same false -> true
-            // archive transition; its attention fence and version stay untouched.
-            .onConflictDoUpdate({
-              target: [
-                schema.sessionPins.subjectId,
-                schema.sessionPins.workspaceId,
-                schema.sessionPins.sessionId,
-              ],
-              set: {
-                archived: true,
-                archivedAt: new Date(),
-                archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-                pinned: false,
-                pinnedAt: null,
-                activelyWorking: false,
-              },
-            })
-            .returning();
-          state = inserted ?? null;
-        } else {
-          const [updated] = await tx
-            .update(schema.sessionPins)
-            .set({
-              archived: input.archived,
-              archivedAt: input.archived ? new Date() : null,
-              archiveVersion: sql`${schema.sessionPins.archiveVersion} + 1`,
-              ...(input.archived
-                ? {
-                    pinned: false,
-                    pinnedAt: null,
-                    activelyWorking: false,
-                    version: existing.pinned
-                      ? sql`${schema.sessionPins.version} + 1`
-                      : sql`${schema.sessionPins.version}`,
-                    attentionVersion: existing.activelyWorking
-                      ? sql`${schema.sessionPins.attentionVersion} + 1`
-                      : sql`${schema.sessionPins.attentionVersion}`,
-                  }
-                : {}),
-            })
-            .where(
-              and(
-                eq(schema.sessionPins.workspaceId, input.workspaceId),
-                eq(schema.sessionPins.subjectId, input.subjectId),
-                eq(schema.sessionPins.sessionId, input.sessionId),
-              ),
-            )
-            .returning();
-          state = updated ?? null;
-        }
-        const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
-          session.id,
-        ]);
-        return await mapSessionWithControl(
-          tx as unknown as Database,
-          session,
-          mcpServers.get(session.id) ?? [],
-          mapSessionPin(state),
-          mapSessionAttention(session, state),
-          mapSessionArchive(state),
-        );
-      }),
+          .returning();
+        state = updated ?? null;
+      }
+      const mcpServers = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
+        session.id,
+      ]);
+      return await mapSessionWithControl(
+        tx as unknown as Database,
+        session,
+        mcpServers.get(session.id) ?? [],
+        mapSessionPin(state),
+        mapSessionAttention(session, state),
+        mapSessionArchive(state),
+      );
+    },
   );
 }
 
@@ -39164,6 +39716,13 @@ export type AcceptSessionHumanInputResponseResult =
       event: SessionEvent;
       events: SessionEvent[];
       workflowWakeRevision: number | null;
+      /**
+       * `same_submission`: this exact submission (its clientEventId) already
+       * committed and is replayed. `earlier_response`: another response, an
+       * expiry or a cancellation settled the request first; this submission
+       * was not used.
+       */
+      settledBy: "same_submission" | "earlier_response";
     }
   | {
       action: "conflict";
@@ -39261,6 +39820,12 @@ export async function acceptSessionHumanInputResponse(
     respondedBy: string;
     /** API-owned verified managed/local browser stamp, never a submitted principal shape. */
     canonicalHumanSession?: boolean;
+    /**
+     * API-owned: the response comes from the person's own Opengeni sign-in
+     * (browser, desktop or phone app), not an agent, personal key or
+     * integration acting as them. Secret approval cards require it.
+     */
+    personSignedIn?: boolean;
     /** Bounded responder kind for the parent's resolution notice; derived from `respondedBy` when omitted. */
     respondedByKind?: ChildRequiresActionRespondedByKind;
     clientEventId?: string | null;
@@ -39380,6 +39945,7 @@ export async function acceptSessionHumanInputResponse(
               event: mapEvent(existing),
               events: [],
               workflowWakeRevision: null,
+              settledBy: "same_submission",
             } as const;
           }
         }
@@ -39487,6 +40053,7 @@ export async function acceptSessionHumanInputResponse(
             event,
             events: repairedEvents,
             workflowWakeRevision: null,
+            settledBy: "earlier_response",
           } as const;
         }
         const [turnPreview] = session.activeTurnId
@@ -39585,6 +40152,75 @@ export async function acceptSessionHumanInputResponse(
             "Choose Save or Don't save for this Skill review.",
           );
         }
+        // Secret approval cards: only the person the run acts for decides,
+        // signed in themselves, with one of the card's own choices. The only
+        // other answer is the system denying on a scheduled run's timeout.
+        const secretApprovalAnswers: Array<{
+          approvalId: string;
+          decision: SecretUseApprovalDecision;
+        }> = [];
+        const boundApprovals = expired
+          ? new Map()
+          : await secretUseApprovalsForSessionTx(tx as unknown as Database, {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              ids: request.questions.flatMap((question) => {
+                const id = secretUseApprovalIdFromQuestionId(question.id);
+                return id === null ? [] : [id];
+              }),
+            });
+        if (boundApprovals.size > 0) {
+          const responderKind = childRequiresActionRespondedByKindFor(
+            input.respondedBy,
+            input.respondedByKind,
+          );
+          const answered = response.outcome === "answered" ? response.answers : null;
+          const systemDenial =
+            responderKind === "system" &&
+            answered !== null &&
+            [...boundApprovals.keys()].every((approvalId) =>
+              answered.some(
+                (answer) =>
+                  secretUseApprovalIdFromQuestionId(answer.questionId) === approvalId &&
+                  answer.values.length === 1 &&
+                  answer.values[0] === "deny",
+              ),
+            );
+          for (const approval of boundApprovals.values()) {
+            if (
+              !systemDenial &&
+              (responderKind !== "human" ||
+                input.personSignedIn !== true ||
+                input.respondedBy !== approval.approverSubjectId)
+            ) {
+              throw new HumanInputResponseValidationError(
+                "HUMAN_AUTH_REQUIRED",
+                "Only the person this agent works for can allow it to use this secret, signed in to Opengeni themselves.",
+              );
+            }
+          }
+          if (response.outcome === "answered") {
+            for (const answer of response.answers) {
+              const approvalId = secretUseApprovalIdFromQuestionId(answer.questionId);
+              if (approvalId === null || !boundApprovals.has(approvalId)) continue;
+              const decision = answer.values[0];
+              if (
+                answer.values.length !== 1 ||
+                Boolean(answer.other?.trim()) ||
+                !(SECRET_USE_APPROVAL_DECISIONS as readonly string[]).includes(decision ?? "")
+              ) {
+                throw new HumanInputResponseValidationError(
+                  "INVALID_RESPONSE",
+                  "Choose one of the card's options to allow or deny this secret.",
+                );
+              }
+              secretApprovalAnswers.push({
+                approvalId,
+                decision: decision as SecretUseApprovalDecision,
+              });
+            }
+          }
+        }
         if (response.outcome === "answered" && secretAnswers.length > 0) {
           if (
             secretAnswers.some((answer) => answer.saveTo === "user") &&
@@ -39659,10 +40295,25 @@ export async function acceptSessionHumanInputResponse(
             requestId: request.id,
           });
         }
+        for (const answer of secretApprovalAnswers) {
+          await decideSecretUseApprovalTx(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            approvalId: answer.approvalId,
+            decision: answer.decision,
+            subjectId: input.respondedBy,
+            now,
+          });
+        }
         await applySessionResponseMcpCredentialUpdatesInTransaction(
           tx as unknown as Database,
           input,
         );
+        // Bounded responder kind (never a subject id): lets the conversation
+        // say who answered, and the parent notice report the same.
+        const respondedByKind = expired
+          ? ("system" as const)
+          : childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind);
         const [event] = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -39676,7 +40327,7 @@ export async function acceptSessionHumanInputResponse(
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "user.humanInputResponse",
-                payload: { requestId: request.id, response },
+                payload: { requestId: request.id, response, respondedByKind },
                 clientEventId: expired ? null : (input.clientEventId ?? null),
                 occurredAt: now,
               },
@@ -39696,9 +40347,7 @@ export async function acceptSessionHumanInputResponse(
             requestId: request.id,
             approvalId: null,
             outcome: response.outcome,
-            respondedByKind: expired
-              ? "system"
-              : childRequiresActionRespondedByKindFor(input.respondedBy, input.respondedByKind),
+            respondedByKind,
           },
         );
         await mirrorSessionRealtimeContextInTransaction(tx as unknown as Database, {
@@ -42763,7 +43412,7 @@ export async function insertRecording(
   );
 }
 
-export async function updateRecording(
+export async function updateSessionRecording(
   db: Database,
   input: {
     accountId: string;
@@ -42925,7 +43574,7 @@ export async function abandonRecordingForTurnAttempt(
   );
 }
 
-export async function getRecording(
+export async function getSessionRecording(
   db: Database,
   workspaceId: string,
   recordingId: string,
@@ -42945,7 +43594,7 @@ export async function getRecording(
   });
 }
 
-export async function listRecordings(
+export async function listSessionRecordings(
   db: Database,
   workspaceId: string,
   sessionId: string,
@@ -63849,9 +64498,17 @@ export async function setEnrollmentOpStreamState(
 }
 
 /** Refresh the exact running agent build/capabilities from an authoritative
- * process Hello. A pending update becomes succeeded only when the successor
- * reports BOTH the requested version and the artifact digest selected from the
- * signed manifest. Merely reaching `restarting` never counts as success. */
+ * process Hello. An update becomes succeeded only when the successor reports
+ * BOTH the requested version and the artifact digest its managed-update receipt
+ * recorded for that version. Merely reaching `restarting` never counts as
+ * success.
+ *
+ * The updater is process-global: one agent process serves every enrollment it
+ * is linked to, so only one of them owns the operation that installs a build,
+ * and the others are refused or postponed while it runs. The receipt therefore
+ * proves the target for every enrollment of that process, whichever operation
+ * installed it, and settles a pending, postponed or failed update whose target
+ * is now running. */
 export async function setEnrollmentAgentRuntime(
   db: Database,
   input: {
@@ -63877,7 +64534,6 @@ export async function setEnrollmentAgentRuntime(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const now = new Date();
-      const completedOperationId = input.completedUpdate?.operationId ?? null;
       const completedTargetVersion = input.completedUpdate?.targetVersion ?? null;
       const completedBinarySha256 = input.completedUpdate?.binarySha256 ?? null;
       const activeUpdate = sql`${schema.enrollments.agentUpdateStatus} in (
@@ -63887,8 +64543,7 @@ export async function setEnrollmentAgentRuntime(
       // No receipt (manual install or ordinary restart) is false, not SQL NULL:
       // the negation below must still settle the replaced process's operation.
       const successorProvesCompletion = sql`coalesce((
-        ${activeUpdate}
-        and ${schema.enrollments.agentUpdateOperationId}::text = ${completedOperationId}
+        (${activeUpdate} or ${schema.enrollments.agentUpdateStatus} = 'failed')
         and ${schema.enrollments.agentUpdateTargetVersion} = ${completedTargetVersion}
         and ${schema.enrollments.agentUpdateTargetVersion} = ${input.agentVersion}
         and ${completedBinarySha256} = ${input.binarySha256}
@@ -77518,8 +78173,20 @@ export async function peekSessionWork(
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
       lock: "share",
     });
+    // This is an advisory control observation, not a session/configuration
+    // read. Do not transfer frozen prompts, tool catalogs or other payloads
+    // that none of the decisions below consumes.
     const [session] = await scopedDb
-      .select()
+      .select({
+        accountId: schema.sessions.accountId,
+        status: schema.sessions.status,
+        activeTurnId: schema.sessions.activeTurnId,
+        lastSequence: schema.sessions.lastSequence,
+        admissionBlock: schema.sessions.admissionBlock,
+        compactRequested: schema.sessions.compactRequested,
+        inputWaitTurnId: schema.sessions.inputWaitTurnId,
+        inputWaitUntil: schema.sessions.inputWaitUntil,
+      })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
@@ -77530,7 +78197,7 @@ export async function peekSessionWork(
     let admissionSequence = session.lastSequence;
     if (includeAdmissionFence) {
       const [cursor] = await scopedDb
-        .select()
+        .select({ lastSequence: schema.sessionEventCursors.lastSequence })
         .from(schema.sessionEventCursors)
         .where(
           and(
@@ -77647,7 +78314,16 @@ export async function peekSessionWork(
 
     if (session.activeTurnId) {
       const [turn] = await scopedDb
-        .select()
+        .select({
+          id: schema.sessionTurns.id,
+          sessionId: schema.sessionTurns.sessionId,
+          status: schema.sessionTurns.status,
+          metadata: schema.sessionTurns.metadata,
+          triggerEventId: schema.sessionTurns.triggerEventId,
+          executionGeneration: schema.sessionTurns.executionGeneration,
+          activeAttemptId: schema.sessionTurns.activeAttemptId,
+          scheduledTaskRunId: schema.sessionTurns.scheduledTaskRunId,
+        })
         .from(schema.sessionTurns)
         .where(
           and(
@@ -77857,7 +78533,13 @@ export async function peekSessionWork(
       if (turn.status === "running") {
         if (observerAccountId && turn.activeAttemptId) {
           const [attempt] = await scopedDb
-            .select()
+            .select({
+              id: schema.sessionTurnAttempts.id,
+              temporalWorkflowId: schema.sessionTurnAttempts.temporalWorkflowId,
+              temporalWorkflowRunId: schema.sessionTurnAttempts.temporalWorkflowRunId,
+              temporalActivityId: schema.sessionTurnAttempts.temporalActivityId,
+              quiescedAt: schema.sessionTurnAttempts.quiescedAt,
+            })
             .from(schema.sessionTurnAttempts)
             .where(
               and(
@@ -81331,9 +82013,23 @@ export async function applySessionTurnSettlement(
         return { action: "pending_steer_withdrawn" as const, events: [] as [] };
       }
 
-      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => ({
-        ...request,
-        questions: request.questions.map((question) => {
+      // A secret approval card is bound to its stored request by question id;
+      // the host's own text replaces whatever the agent sent, so the person
+      // always sees what is really being approved.
+      const secretApprovals = await secretUseApprovalsForSessionTx(tx as unknown as Database, {
+        workspaceId,
+        sessionId: input.sessionId,
+        ids: (input.runState?.humanInputRequests ?? []).flatMap((request) =>
+          request.questions.flatMap((question) => {
+            const id = secretUseApprovalIdFromQuestionId(question.id);
+            return id === null ? [] : [id];
+          }),
+        ),
+      });
+      const approvalCardRequestIds = new Set<string>();
+      const humanInputRequests = (input.runState?.humanInputRequests ?? []).map((request) => {
+        let approvalCard = false;
+        const questions = request.questions.map((question) => {
           const parsed = HumanInputQuestionContract.parse(question);
           if (parsed.skillReview) {
             const canonical = canonicalSkillReviewQuestion(question);
@@ -81342,11 +82038,19 @@ export async function applySessionTurnSettlement(
             }
             return canonical;
           }
+          const approvalId = secretUseApprovalIdFromQuestionId(parsed.id);
+          const approval = approvalId === null ? undefined : secretApprovals.get(approvalId);
+          if (approval) {
+            approvalCard = true;
+            return secretUseApprovalHumanInput(secretUseApprovalView(approval)).questions[0]!;
+          }
           return parsed.kind === "text" || parsed.allowOther
             ? parsed
             : { ...parsed, allowOther: true };
-        }),
-      }));
+        });
+        if (approvalCard) approvalCardRequestIds.add(request.id);
+        return { ...request, questions, ...(approvalCard ? { allowSkip: false } : {}) };
+      });
       const interactionInterventionRequests = input.runState?.interactionInterventionRequests ?? [];
       if (input.runState) {
         if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
@@ -81856,13 +82560,50 @@ export async function applySessionTurnSettlement(
           };
         }
       }
+      // The requested event feeds push, chat integrations and timelines, so
+      // an approval card's event carries the same host text as its row.
+      const canonicalApprovalRequests = new Map(
+        humanInputRequests
+          .filter((request) => approvalCardRequestIds.has(request.id))
+          .map((request) => [request.id, request]),
+      );
+      const turnEvents =
+        canonicalApprovalRequests.size === 0
+          ? input.events
+          : input.events.map((event) => {
+              if (event.type !== "session.humanInput.requested") return event;
+              const payload =
+                event.payload && typeof event.payload === "object"
+                  ? (event.payload as Record<string, unknown>)
+                  : null;
+              const request =
+                payload?.request && typeof payload.request === "object"
+                  ? (payload.request as Record<string, unknown>)
+                  : null;
+              const canonical =
+                typeof request?.id === "string"
+                  ? canonicalApprovalRequests.get(request.id)
+                  : undefined;
+              if (!payload || !request || !canonical) return event;
+              return {
+                ...event,
+                payload: {
+                  ...payload,
+                  request: {
+                    ...request,
+                    questions: canonical.questions,
+                    allowSkip: canonical.allowSkip,
+                  },
+                },
+              };
+            });
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
         ...terminalHumanInputEvents,
         ...(machineInputSettlementEvent ? [machineInputSettlementEvent] : []),
         ...(consumedChildResultEvent ? [consumedChildResultEvent] : []),
-        ...input.events,
+        ...turnEvents,
         ...(allowanceGoalEvent ? [allowanceGoalEvent] : []),
       ];
       const values = settlementEvents.map((event) => {
@@ -83653,6 +84394,85 @@ export async function listPendingSessionTurns(
   });
 }
 
+/** Compact MCP monitoring never needs prompt bodies or inbox attachment planning.
+ * Keep the same control lock and stopping proof as the full queue projection. */
+export async function getSessionQueueMonitoringSummary(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<(SessionMcpQueueSummary & Pick<SessionQueueSnapshot, "effectiveControl">) | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
+      lock: "share",
+    });
+    const [session] = await scopedDb
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!session) return null;
+    const rows = await scopedDb
+      .select({
+        promptRouting: schema.sessionTurns.promptRouting,
+        metadata: schema.sessionTurns.metadata,
+      })
+      .from(schema.sessionTurns)
+      .where(sessionQueueTurnsPredicate(workspaceId, sessionId));
+    const [pending] = await scopedDb
+      .select({ count: sql<string>`count(*)` })
+      .from(schema.sessionSystemUpdates)
+      .where(sessionQueuePendingInputsPredicate(workspaceId, sessionId));
+    return {
+      effectiveControl: serializeEffectiveSessionControl(effectiveControl),
+      queuedTurns: rows.filter(
+        (row) => row.promptRouting === null || row.promptRouting === "queued_for_execution",
+      ).length,
+      pendingInputs: Number(pending!.count),
+      stoppingPreviousAttempt: await sessionQueueStoppingPreviousAttempt(
+        scopedDb,
+        workspaceId,
+        sessionId,
+        rows.map((row) => row.metadata),
+      ),
+    };
+  });
+}
+
+function sessionQueueTurnsPredicate(workspaceId: string, sessionId: string) {
+  return and(
+    eq(schema.sessionTurns.workspaceId, workspaceId),
+    eq(schema.sessionTurns.sessionId, sessionId),
+    eq(schema.sessionTurns.status, "queued"),
+    inArray(schema.sessionTurns.source, ["user", "api"]),
+  );
+}
+
+function sessionQueuePendingInputsPredicate(workspaceId: string, sessionId: string) {
+  return and(
+    eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+    eq(schema.sessionSystemUpdates.sessionId, sessionId),
+    eq(schema.sessionSystemUpdates.state, "pending"),
+  );
+}
+
+async function sessionQueueStoppingPreviousAttempt(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  queuedMetadata: Record<string, unknown>[],
+): Promise<boolean> {
+  const latestInterruption = await latestSessionAttemptInterruption(db, workspaceId, sessionId);
+  const predecessorIds = queuedMetadata
+    .map(queuedSteerReplacementAttemptId)
+    .filter((attemptId): attemptId is string => attemptId !== null);
+  return (
+    (latestInterruption !== null &&
+      latestInterruption.interruptionState !== "rejected_stale" &&
+      latestInterruption.quiescedAt === null) ||
+    (await queuedSteerHasUnquiescedPredecessor(db, workspaceId, sessionId, predecessorIds))
+  );
+}
+
 export async function getSessionQueueSnapshot(
   db: Database,
   workspaceId: string,
@@ -83681,25 +84501,12 @@ export async function getSessionQueueSnapshot(
     const rows = await scopedDb
       .select()
       .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.status, "queued"),
-          inArray(schema.sessionTurns.source, ["user", "api"]),
-        ),
-      )
+      .where(sessionQueueTurnsPredicate(workspaceId, sessionId))
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
     const pendingInputs = await scopedDb
       .select()
       .from(schema.sessionSystemUpdates)
-      .where(
-        and(
-          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-          eq(schema.sessionSystemUpdates.sessionId, sessionId),
-          eq(schema.sessionSystemUpdates.state, "pending"),
-        ),
-      )
+      .where(sessionQueuePendingInputsPredicate(workspaceId, sessionId))
       .orderBy(
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then 0 else 1 end`,
         sql`case when ${schema.sessionSystemUpdates.kind} = 'agent_steer_instruction' then ${schema.sessionSystemUpdates.createdAt} end desc`,
@@ -83716,24 +84523,12 @@ export async function getSessionQueueSnapshot(
     const items = rows
       .filter((row) => row.promptRouting === null || row.promptRouting === "queued_for_execution")
       .map(mapSessionTurn);
-    const latestInterruption = await latestSessionAttemptInterruption(
+    const stoppingPreviousAttempt = await sessionQueueStoppingPreviousAttempt(
       scopedDb,
       workspaceId,
       sessionId,
+      physicalItems.map((turn) => turn.metadata),
     );
-    const queuedSteerPredecessorIds = physicalItems
-      .map((turn) => queuedSteerReplacementAttemptId(turn.metadata))
-      .filter((attemptId): attemptId is string => attemptId !== null);
-    const stoppingPreviousAttempt =
-      (latestInterruption !== null &&
-        latestInterruption.interruptionState !== "rejected_stale" &&
-        latestInterruption.quiescedAt === null) ||
-      (await queuedSteerHasUnquiescedPredecessor(
-        scopedDb,
-        workspaceId,
-        sessionId,
-        queuedSteerPredecessorIds,
-      ));
 
     const hasPendingAgentSteer = pendingInputs.some(
       (update) => update.kind === "agent_steer_instruction",
@@ -85801,7 +86596,9 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // explicit durable obligation, independent of whether the session has
         // a goal, so an immediate child result may wake it. A parent with no
         // goal at all (an ordinary chat that started a worker and promised its
-        // result) is woken by the child's terminal result.
+        // result) is woken by the child's terminal result, and by the child's
+        // blocking question so it can answer it or tell the person; the person
+        // sees the question too, and the first answer wins.
         const waitingForInput =
           childLifecycleKind &&
           session.status !== "failed" &&
@@ -85812,7 +86609,8 @@ export async function addSessionSystemUpdateWithSourceMutation<
           (session.status !== "failed" &&
             (goalStatus === "active" ||
               waitingForInput ||
-              (input.kind === "child_terminal_result" && goalStatus === null)));
+              ((input.kind === "child_terminal_result" || input.kind === "child_requires_action") &&
+                goalStatus === null)));
         const shouldWake =
           !consumedByParentRead &&
           wakeClass === "immediate" &&
@@ -87188,7 +87986,11 @@ async function scheduledHumanWaitTargetInRlsContext(
   scopedDb: Database,
   workspaceId: string,
   turn: { id: string; sessionId: string; executionGeneration: number },
-): Promise<{ kind: "approval"; approvalId: string } | { kind: "input"; requestId: string } | null> {
+): Promise<
+  | { kind: "approval"; approvalId: string }
+  | { kind: "input"; requestId: string; denyQuestionIds: string[] | null }
+  | null
+> {
   const [runState] = await scopedDb
     .select({
       pendingApprovals: schema.agentRunStates.pendingApprovals,
@@ -87234,7 +88036,17 @@ async function scheduledHumanWaitTargetInRlsContext(
   const request = requests.find(
     (candidate) => !candidate.questions.some((question) => question.skillReview != null),
   );
-  return request ? { kind: "input", requestId: request.id } : null;
+  if (!request) return null;
+  // Secret approval cards can't be skipped; the timeout denies them, as it
+  // rejects a tool approval.
+  const approvalCards = request.questions.every(
+    (question) => secretUseApprovalIdFromQuestionId(question.id) !== null,
+  );
+  return {
+    kind: "input",
+    requestId: request.id,
+    denyQuestionIds: approvalCards ? request.questions.map((question) => question.id) : null,
+  };
 }
 
 /**
@@ -87351,7 +88163,15 @@ export async function expireScheduledRunHumanWait(
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     requestId: target.requestId,
-    response: { outcome: "skipped" },
+    response: target.denyQuestionIds
+      ? {
+          outcome: "answered",
+          answers: target.denyQuestionIds.map((questionId) => ({
+            questionId,
+            values: ["deny"],
+          })),
+        }
+      : { outcome: "skipped" },
     respondedBy: "system:scheduled-approval-timeout",
     respondedByKind: "system",
     clientEventId,
@@ -89302,50 +90122,62 @@ async function findWorkspaceControlProjection(
   db: Database,
   workspaceId: string,
 ): Promise<Workspace["inferenceControl"] | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [control] = await scopedDb
-      .select()
-      .from(schema.workspaceInferenceControls)
-      .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId))
-      .limit(1);
-    if (!control) return null;
-    return {
-      timer: control.timerId
-        ? {
-            id: control.timerId,
-            action: control.timerAction as "pause" | "resume",
-            dueAt: control.timerDueAt!.toISOString(),
-            pauseForSeconds: control.timerPauseForSeconds,
-          }
-        : null,
-      serverTime: new Date().toISOString(),
-      state: control.workspaceState as "active" | "paused",
-      revision: Number(control.revision),
-      reason: control.reason,
-      changedBy: control.changedBy,
-      changedAt: control.changedAt?.toISOString() ?? null,
-    };
-  });
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    readWorkspaceControlProjection(scopedDb, workspaceId),
+  );
+}
+
+/** The caller owns the workspace scope and its tenancy fence. */
+async function readWorkspaceControlProjection(
+  db: Database,
+  workspaceId: string,
+): Promise<Workspace["inferenceControl"] | null> {
+  const [control] = await db
+    .select()
+    .from(schema.workspaceInferenceControls)
+    .where(eq(schema.workspaceInferenceControls.workspaceId, workspaceId))
+    .limit(1);
+  if (!control) return null;
+  return {
+    timer: control.timerId
+      ? {
+          id: control.timerId,
+          action: control.timerAction as "pause" | "resume",
+          dueAt: control.timerDueAt!.toISOString(),
+          pauseForSeconds: control.timerPauseForSeconds,
+        }
+      : null,
+    serverTime: new Date().toISOString(),
+    state: control.workspaceState as "active" | "paused",
+    revision: Number(control.revision),
+    reason: control.reason,
+    changedBy: control.changedBy,
+    changedAt: control.changedAt?.toISOString() ?? null,
+  };
 }
 
 async function workspaceKindProjection(
   db: Database,
   row: Pick<typeof schema.workspaces.$inferSelect, "id" | "accountId">,
 ): Promise<Workspace["kind"]> {
-  return await withRlsContext(
-    db,
-    { accountId: row.accountId, workspaceId: row.id },
-    async (scopedDb) => {
-      const [kind] = await rawRows<{ kind: string }>(
-        scopedDb,
-        sql`select get_workspace_kind(${row.accountId}::uuid, ${row.id}::uuid) as kind`,
-      );
-      if (kind?.kind !== "personal" && kind?.kind !== "shared") {
-        throw new Error(`Workspace ${row.id} has no canonical kind`);
-      }
-      return kind.kind;
-    },
+  return await withRlsContext(db, { accountId: row.accountId, workspaceId: row.id }, (scopedDb) =>
+    readWorkspaceKindProjection(scopedDb, row),
   );
+}
+
+/** The caller owns the workspace scope and its tenancy fence. */
+async function readWorkspaceKindProjection(
+  db: Database,
+  row: Pick<typeof schema.workspaces.$inferSelect, "id" | "accountId">,
+): Promise<Workspace["kind"]> {
+  const [kind] = await rawRows<{ kind: string }>(
+    db,
+    sql`select get_workspace_kind(${row.accountId}::uuid, ${row.id}::uuid) as kind`,
+  );
+  if (kind?.kind !== "personal" && kind?.kind !== "shared") {
+    throw new Error(`Workspace ${row.id} has no canonical kind`);
+  }
+  return kind.kind;
 }
 
 function mapWorkspace(
@@ -89895,6 +90727,16 @@ export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
 export * from "./tool-gateway-approvals";
 export * from "./transcription-recordings";
+export * from "./recordings";
+export * from "./recording-live";
+export {
+  cosineSimilarity,
+  recordingVoiceChannel,
+  suggestSpeakersByVoice,
+  VOICE_SUGGESTION_THRESHOLD,
+  type RecordingSpeakerVoice,
+  type RecordingVoiceChannel,
+} from "./recording-voices";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-materialization";
 export * from "./attempt-tool-catalogs";
@@ -89923,6 +90765,9 @@ export * from "./active-sandbox";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
+export * from "./event-triggers";
+export * from "./mcp-event-subscriptions";
+export * from "./event-source-feeds";
 export * from "./organization-model-providers";
 export * from "./organization-model-defaults";
 export * from "./session-admin-access";
@@ -90155,3 +91000,7 @@ export {
 export { readSubscriptionHistoryProvenance } from "./subscription-core/serving-runtime";
 export * from "./session-usage-limits";
 export * from "./boot-connect";
+
+export * from "./teams-conversations";
+
+export * from "./teams-private-session";

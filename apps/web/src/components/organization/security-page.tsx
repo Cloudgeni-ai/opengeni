@@ -44,22 +44,27 @@ import type {
 import { useOrganizationDirectory } from "./organization-directory";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Security & data: Only me chats and schedules, admin access for
+   Organization settings > Security & data: Only me chats and automations, full access for
    agent sessions, how long a removed person's data is kept, and recovery
    (owners, managed sign-in only).
    -------------------------------------------------------------------------- */
 
 export function OrganizationSecurityPage() {
   const directory = useOrganizationDirectory();
-  const client = useAppContext().client;
+  const appContext = useAppContext();
+  const client = appContext.client;
   const managedPeople = directory.managedSession && !directory.singleUser;
   // Members see only Recovery: they may be recovery contacts.
   const administrator = directory.canAdminister;
   return (
     <SectionStack>
       {managedPeople && administrator ? (
-        <Section title="Chats and schedules">
-          <PrivateChatsRow client={client} identity={directory.identity} />
+        <Section title="Chats and automations">
+          <PrivateChatsRow
+            client={client}
+            identity={directory.identity}
+            onAccessChanged={appContext.revalidatePrincipalAccess}
+          />
         </Section>
       ) : null}
       {administrator ? (
@@ -175,10 +180,13 @@ function RowLoadFailure({
   );
 }
 
-/* ----------------------------------------------- Only me chats and schedules */
+/* ----------------------------------------------- Only me chats and automations */
 
 type PrivacyChoice = Partial<
-  Pick<OrganizationPrivacySettings, "defaultVisibility" | "adminsSeePrivateSchedules">
+  Pick<
+    OrganizationPrivacySettings,
+    "defaultVisibility" | "adminsSeePrivateSchedules" | "personalWorkspaces"
+  >
 >;
 
 /** What a row says when this app fixes the choice for every organization. */
@@ -187,9 +195,12 @@ const LOCKED_FOR_APP = "This is set for everyone using this app.";
 export function PrivateChatsRow({
   client,
   identity,
+  onAccessChanged,
 }: {
   client: OpenGeniBrowserClient;
   identity: OrganizationAdminIdentity;
+  /** Reloads which workspaces the person can see after Personal workspaces change. */
+  onAccessChanged?: () => void;
 }) {
   const { claim, owns } = useOwnedOperations(identity, "private-sessions");
   const { claim: claimPrivacy, owns: ownsPrivacy } = useOwnedOperations(identity, "privacy");
@@ -232,6 +243,8 @@ export function PrivateChatsRow({
         if (!ownsPrivacy(operation)) return;
         setPrivacy(value);
         toast.success(success);
+        // The workspace switcher and landing follow the new Personal choice.
+        if (change.personalWorkspaces !== undefined) onAccessChanged?.();
       } catch (saveError) {
         if (!ownsPrivacy(operation)) return;
         toast.error("Couldn't change this setting", { description: userErrorText(saveError) });
@@ -239,7 +252,7 @@ export function PrivateChatsRow({
         if (ownsPrivacy(operation)) setPrivacyPending(null);
       }
     },
-    [claimPrivacy, client, identity.organizationId, ownsPrivacy],
+    [claimPrivacy, client, identity.organizationId, ownsPrivacy, onAccessChanged],
   );
 
   if (error && (!settings || !privacy)) {
@@ -257,19 +270,43 @@ export function PrivateChatsRow({
   const enabled = available && (pending ?? settings.enabled);
   const defaultVisibility = privacyPending?.defaultVisibility ?? privacy.defaultVisibility;
   const adminsSee = privacyPending?.adminsSeePrivateSchedules ?? privacy.adminsSeePrivateSchedules;
+  const personalWorkspaces = privacyPending?.personalWorkspaces ?? privacy.personalWorkspaces;
 
   return (
     <SettingRowGroup>
       <SettingRow
-        label="Only me chats and schedules"
+        label="Personal workspaces"
+        description={
+          personalWorkspaces
+            ? "Everyone has a private workspace of their own, next to the shared ones."
+            : "Hidden for everyone. People work in shared workspaces, where their own machines, browsers and vaults keep working. Chats already in a Personal workspace stay reachable from a link."
+        }
+        control={
+          <Switch
+            aria-label="Personal workspaces"
+            checked={personalWorkspaces}
+            pending={privacyPending?.personalWorkspaces !== undefined}
+            onCheckedChange={(next) =>
+              void savePrivacy(
+                { personalWorkspaces: next },
+                next ? "Personal workspaces are back" : "Personal workspaces are hidden",
+              )
+            }
+          />
+        }
+      />
+      <SettingRow
+        label="Only me chats and automations"
         description={
           available
-            ? "Lets people start chats and schedules only they can see in shared workspaces. Personal workspaces are always private."
+            ? personalWorkspaces
+              ? "Lets people start chats and automations only they can see in shared workspaces. Personal workspaces are always private."
+              : "Lets people start chats and automations only they can see in shared workspaces."
             : `Only me is off. ${LOCKED_FOR_APP}`
         }
         control={
           <Switch
-            aria-label="Only me chats and schedules"
+            aria-label="Only me chats and automations"
             checked={enabled}
             pending={pending !== null}
             disabled={!available}
@@ -290,8 +327,8 @@ export function PrivateChatsRow({
                 setSettings(value);
                 toast.success(
                   next
-                    ? "People can start Only me chats and schedules"
-                    : "Only me is off for new chats and schedules",
+                    ? "People can start Only me chats and automations"
+                    : "Only me is off for new chats and automations",
                 );
               } catch (saveError) {
                 if (!owns(operation)) return;
@@ -308,7 +345,7 @@ export function PrivateChatsRow({
       >
         {enabled ? (
           <SettingRow
-            label="New chats and schedules"
+            label="New chats and automations"
             description={
               privacy.limits.defaultVisibilityLocked
                 ? `Start as Workspace. ${LOCKED_FOR_APP}`
@@ -318,15 +355,15 @@ export function PrivateChatsRow({
             control={
               <SegmentedControl<"workspace" | "private">
                 size="sm"
-                aria-label="Who can see new chats and schedules"
+                aria-label="Who can see new chats and automations"
                 value={defaultVisibility}
                 onValueChange={(next) => {
                   if (next === defaultVisibility) return;
                   void savePrivacy(
                     { defaultVisibility: next },
                     next === "private"
-                      ? "New chats and schedules start as Only me"
-                      : "New chats and schedules start as Workspace",
+                      ? "New chats and automations start as Only me"
+                      : "New chats and automations start as Workspace",
                   );
                 }}
                 options={[
@@ -345,17 +382,17 @@ export function PrivateChatsRow({
         ) : null}
       </SettingRow>
       <SettingRow
-        label="Admins see Only me schedules"
+        label="Admins see Only me automations"
         description={
           privacy.limits.adminsSeePrivateSchedulesLocked
             ? `Admins see who owns each one, how often it runs and what it costs, and can pause it. ${LOCKED_FOR_APP}`
             : adminsSee
               ? "Admins see who owns each one, how often it runs and what it costs, and can pause it. Never its name, message or chats."
-              : "Admins can't see other people's Only me schedules at all, like Only me chats."
+              : "Admins can't see other people's Only me automations at all, like Only me chats."
         }
         control={
           <Switch
-            aria-label="Admins see Only me schedules"
+            aria-label="Admins see Only me automations"
             checked={adminsSee}
             pending={privacyPending?.adminsSeePrivateSchedules !== undefined}
             disabled={privacy.limits.adminsSeePrivateSchedulesLocked}
@@ -363,8 +400,8 @@ export function PrivateChatsRow({
               void savePrivacy(
                 { adminsSeePrivateSchedules: next },
                 next
-                  ? "Admins see that Only me schedules exist"
-                  : "Only me schedules are hidden from admins",
+                  ? "Admins see that Only me automations exist"
+                  : "Only me automations are hidden from admins",
               )
             }
           />
@@ -374,7 +411,7 @@ export function PrivateChatsRow({
   );
 }
 
-/* ------------------------------------------------- Admin access for agents */
+/* -------------------------------------------------- Full access for agents */
 
 export function AgentAdminAccessRow({
   client,
@@ -417,12 +454,12 @@ export function AgentAdminAccessRow({
         setAllowed(value.sessionAdminAccessAllowed);
         toast.success(
           next
-            ? "Owners and admins can give their sessions admin access"
-            : "Admin access is off for every session",
+            ? "Members can give their own sessions full access"
+            : "Full access is off for every session",
         );
       } catch (saveError) {
         if (!owns(operation)) return;
-        toast.error("Couldn't change admin access for agents", {
+        toast.error("Couldn't change full access for agents", {
           description: userErrorText(saveError),
         });
       } finally {
@@ -435,7 +472,7 @@ export function AgentAdminAccessRow({
   if (error && allowed === null) {
     return (
       <RowLoadFailure
-        title="Couldn't load the admin access setting."
+        title="Couldn't load the full access setting."
         error={error}
         onRetry={() => void load()}
       />
@@ -446,11 +483,11 @@ export function AgentAdminAccessRow({
   return (
     <SettingRowGroup>
       <SettingRow
-        label="Admin access for agent sessions"
-        description="Lets owners and admins give one of their own sessions admin access. Its agent can then manage what they can across the organization: every workspace's sessions, settings and connections."
+        label="Full access for agent sessions"
+        description="Lets each member give a session they started their own access. Its agent can then do what that person can in the app, and never more: a member's workspaces and settings, or everything an owner or admin manages."
         control={
           <Switch
-            aria-label="Admin access for agent sessions"
+            aria-label="Full access for agent sessions"
             checked={pending ?? allowed}
             pending={pending !== null}
             onCheckedChange={(next) => {
@@ -464,8 +501,8 @@ export function AgentAdminAccessRow({
         open={confirmOff}
         onOpenChange={setConfirmOff}
         size="sm"
-        title="Turn off admin access for agents?"
-        description="Every session that has admin access loses it right away. Turning this on again doesn't give it back."
+        title="Turn off full access for agents?"
+        description="Every session that has full access loses it right away. Turning this on again doesn't give it back."
         submitLabel="Turn off"
         pendingLabel="Turning off…"
         tone="destructive"

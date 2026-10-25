@@ -1,5 +1,110 @@
 # @opengeni/react
 
+## 5.2.1
+
+### Minor Changes
+
+- fb72b9d: Any member can now give a session they started their own access, not only organization owners and admins. The app calls it full access. Its agent can do exactly what that person can do in the app and nothing more, and the access ends when the person leaves the session's workspace. The organization's on/off switch is unchanged.
+
+### Patch Changes
+
+- b3a641c: With the `chatList` feature off, the new-chat page no longer shows the project picker or the workspace's recent chats, so an embed that shows a single chat does not list the others.
+- c4d18a1: The app no longer reads the workspace GitHub status for a member whose grant lacks `github:use`; it shows no GitHub state instead of a failed 403 request.
+- Updated dependencies [fb72b9d]
+- Updated dependencies [2d6484c]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/sdk@5.2.0
+  - @opengeni/connect@5.2.0
+
+## 5.1.2
+
+### Minor Changes
+
+- 9c72069: `SessionApp` takes `onSessionState`: it is called with the open chat's status and the events the chat holds (`SessionViewState`) each time they change, read from the stream the chat already uses. A host can show that the agent is working, or refresh what a turn changed, without opening a second stream for the same chat.
+
+### Patch Changes
+
+- Updated dependencies [5d377a7]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/connect@5.1.0
+  - @opengeni/contracts@5.1.0
+
+## 5.0.2
+
+### Minor Changes
+
+- 3083c1e: `createSessionProxyHandler` is now a relay: it forwards every Opengeni route and method inside the resolved workspace as the resolved user, so a product with its own sign-in gives its users the same Opengeni they would get natively (chats and their history, queue, goals, approvals and human input, files, artifacts and Sites, voice, schedules, Knowledge), decided by Opengeni's permissions instead of a list in the relay. Outside the workspace it answers only the bootstrap reads (`GET /v1/workspaces`, `GET /v1/access/me` and `GET /v1/config/client`, each scoped to the resolved workspace); a path naming another workspace is a 403. Path segments are forwarded re-encoded, so keys and subject ids in paths work as in the SDK client. Archived history import (`session-imports`) and browser MCP credential rotation stay refused: only the product's server may write either. Request bodies stream through, Opengeni's statuses, error envelopes and content headers are kept, and SSE streams get heartbeats between events.
+
+  Narrow what users can do with the organization key's permissions, the member's permissions (`addExternalWorkspaceMember`, `updateExternalWorkspaceMember`), and the new `refuse(route, context)` hook for routes Opengeni would allow but the product keeps closed (`route` is `{ method, segments, sessionId }`; return `true` for a 404 or a `Response`). Choose what users see with UI props and `SessionApp` presets. `authorizeSession` now also runs for every request that names a chat in `x-opengeni-session-id`.
+
+  Breaking:
+
+  - Removed options and their replacements: `sessionApp` and `office` (the full app and the Excel add-in work without them), `sessionList` (the list is Opengeni's; pass `listProps={{ mineOnly: true }}` to `OpenGeniChat` or `mineOnly` to `SessionList` for the user's own chats), `archive` (`listProps={{ archive: false }}`), `voiceInput` and `realtimeVoice` (the `voiceInput` and `realtimeVoice` component props), `files`, `sandboxFiles`, `artifacts` and `sites` (permissions, or `refuse` for the routes; `editableLiveUrl` is now a top-level option).
+  - Newly reachable for a resolved user, within their permissions: every workspace route, including sandbox file reads (`files:read`, without the old workspace-only rewrite), artifact and Site writes (`artifacts:publish`), schedules, Knowledge, chat cancel, workspace pause and resume, and archive with Pause (`sessions:control`). Without a `createSession` hook the browser now creates chats with Opengeni's own create request (MCP credential updates refused), with `chats` defaults filling what it leaves out.
+  - Artifact and Site reads are no longer checked against the session that produced them; `authorizeSession` and Opengeni's `artifacts:read` decide (a product that wants the old check calls `getSessionProxyArtifactAssociation` from `refuse`). `downloadSessionProxySiteHtml`, `SESSION_PROXY_SITE_HTML_MAX_BYTES` and `SessionProxySiteHtmlTooLargeError` are removed; Site HTML keeps Opengeni's sandboxing and download headers.
+  - Without `authorizeMutation`, mutations with a `text/plain` or `application/x-www-form-urlencoded` body are now refused as well as cross-site ones.
+  - The client config no longer reports `sessionCreation`, `archive`, `realtimeVoice` or `sandboxFiles`; `artifacts` is reported whenever the editor's live socket and the user's grant are available. Stock components treat the missing flags as available and keep honoring them from older relays.
+  - Create and other responses keep Opengeni's status (for example `202` for a created chat).
+
+  `@opengeni/react`: `SessionList` gains `mineOnly`, and `OpenGeniChat` forwards it through `listProps`.
+
+- 1320d6c: `SessionApp` takes `resolveLink` and `renderLink`, so a host opens links in agent messages its own way (an artifact on the host's own page, its own link scheme); they are asked before the app's own handling. Object links in an embed no longer resolve against the host page's origin: with the dock on they open in the dock, and with it off (the `embed` preset) they open the object's page in the web app through `openUrl` instead of a broken host-origin link.
+- 217ed52: Shared chats on a member's personal machine now show one clear notice when another member's messages or worker results are waiting, naming whose work waits and why. The machine owner can continue with that work in one click; other members see that it waits for the owner before they send.
+- ce7f5f3: The Site view's chat panel no longer repeats the Site's conversation list (the sidebar already nests it under the Site row). It shows the open conversation as a regular chat with the model picker, titled in its header, with one New action. The panel can be resized by dragging its left edge or with the keyboard (320 to 720 px, leaving the Site 360 px where there is room), hidden and shown again (choosing a conversation shows it), and its width and hidden state are remembered per person. Adds a reusable `ResizeHandle` window-splitter primitive.
+
+### Patch Changes
+
+- ca3f931: Workspace control events now reach a reader only for chats that reader can see; a cursor-only frame keeps hidden events from stalling the reader. Session start notices accept machinesEnabled so viewers without machine access never request the machine list.
+- a9d20b3: Pause chat work atomically before personal archiving, require confirmation for active shared work, and retain explicit hide-only behavior for read-only and embedded proxy clients. Restore does not resume work. Keep sidebar survivors stable across archive completion and overlap independent session response reads without changing transaction or authorization boundaries.
+- 929ca26: The session list's archive action reads its "Hide for me" label from the host message catalog again (`sessionList.archive`), so apps can translate or rename it.
+- f7dfe7a: The composer's "Opengeni is updating" line now appears only when a session event stream that was live drops and keeps reconnecting. A slow first connection, or a host client that never reports its stream state, no longer shows it or shifts the conversation.
+- Updated dependencies [ca3f931]
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [217ed52]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/contracts@5.0.0
+  - @opengeni/artifact-tool@5.0.0
+  - @opengeni/connect@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- fd953dc: A sub-session question that an agent (such as the parent) answered or skipped is now shown as agent work instead of conversation: one quiet "Asked Target branch → main" row inside the turn's "Worked for" details, which opens to the question, who answered, and the answer. Nothing appears on the person's side any more. Questions a person answered, system skips (a scheduled run's unanswered question), and expired, cancelled or still pending questions look as before. `@opengeni/react/timeline-model` exports `isAgentWorkHumanInput` and `agentWorkHumanInputSummary` so custom renderers make the same decision. React Native: `NativeTimelineMessages.humanInputOutcome` and `OpenGeniNativeLabels.humanInputOutcome` gain an optional `agentSkipped` (defaults to `skipped`), and host overrides of `agentAnswered` still apply to the new row. `OpenGeniNativeSessionView`, which has no turn work details, shows the question as a compact step.
+- 3089aaf: Stay calm while Opengeni is updating. The SDK now decodes the parked maintenance answer (`{"error":"maintenance"}`) into an `OpenGeniApiError` with `code: "maintenance"`, `retryable: true` and `outcomeUnknown: false`, without a support reference. `isMaintenanceError` and `OPENGENI_MAINTENANCE_ERROR_CODE` are exported, and `isTransientRequestError` treats the marker as transient.
+
+  In the console and embedded chat, an update or brief outage no longer shows red errors, References, a "Queue needs attention" chip or error toasts. The composer shows one line, "Opengeni is updating. We'll reconnect automatically.", keeps a message sent meanwhile in place with the same idempotency key and delivers it once the API answers, and clears on its own. Reads keep retrying for as long as the maintenance marker lasts. Other transient failures stay calm for two minutes; after that, and for any definitive error, the existing error copy appears. At startup, the web, desktop and embedded apps show "Updating" or "Reconnecting" and continue by themselves when the API is back, with Try again as a secondary action.
+
+- bcce117: The Connected Machine card keeps its Allow button when the agent asks for a machine while the chat already runs on a different one. Before, it showed as done ("This chat runs on …") and gave no way to allow the requested machine.
+- e2a641c: Muting replies on a run of a schedule that starts a new chat each time now mutes the whole schedule, so later runs stay quiet. The session menu says "Mute this schedule's replies" there, and `SessionInboxMute` carries an optional `scope`.
+- Updated dependencies [3089aaf]
+- Updated dependencies [e2a641c]
+- Updated dependencies [85fb89e]
+  - @opengeni/sdk@4.8.0
+  - @opengeni/contracts@4.8.0
+  - @opengeni/connect@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- 8301382: A sub-session's question can now be answered by the person or by the parent agent, and the first answer wins. The parent's `child_requires_action` notice now carries each question's id, kind, prompt and option ids and labels (never secret specs), so the parent can answer with `session_human_input_respond` without reading the sub-session's history. The notice now also wakes an idle parent that has no goal. An agent whose answer arrives after someone else's gets `outcome: "unchanged"` with `alreadyAnswered: true`, who answered, and a warning not to answer again; before, it got a success-looking `replayed` result. The `user.humanInputResponse` event records whether a person, API key, agent or the system answered. The agent instructions and the `request_human_input` and `session_human_input_respond` descriptions now say that a parent answers when it can from its task context, leaves questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answers on the person's behalf. The conversation now says "Agent answered" instead of "You answered" when an agent gave the answer.
+- e423d8f: A parent session now shows the questions and tool approvals its sub-sessions are waiting on, pinned above the composer. Each one names the sub-session that is asking, uses the same answer form or approval card as the sub-session's own page, and sends the answer or decision to that sub-session as if it were given there, with the same permission checks. An unsent answer is shared with the sub-session's page, so it is still there when you switch between them. Several waiting sub-sessions stack under one line ("3 sub-sessions need you") that collapses. Each item links to the sub-session, opened at the moment it asked. A request disappears once it is resolved anywhere, including by the parent agent answering it. The collapsed bar of a question with a deadline no longer shows "[object Object]".
+- b3fc68b: Site rows in the sidebar sort only by real activity: their conversations, a new published version, and your own opens. Archiving, restoring or rolling back a Site no longer lifts it for everyone. The console records one open per page that shows a Site: not again when its client is replaced, and not again when a reload, restored tab or Back shows a page where it was already recorded. A page that loads hidden counts once it is shown.
+- ee5020c: Text selected and copied from the conversation timeline no longer carries the app's styling. Browsers copy a selection's rich text with the page's computed colours, fonts and the surrounding message's background inlined, so pasting into a document or chat brought the timeline's dark or tinted backgrounds along. The timeline now copies its selection as clean semantic HTML (paragraphs, lists, emphasis, code, links, tables and images keep their structure) together with the browser's own plain text. Selections inside editable fields and outside the timeline keep the browser's default copy.
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/sdk@4.7.2
+  - @opengeni/connect@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes

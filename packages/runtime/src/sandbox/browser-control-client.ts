@@ -12,6 +12,7 @@ import {
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
+  COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -25,6 +26,8 @@ import {
   BrowserRecordingExportRequest,
   BrowserRecordingStartRequest,
   BrowserRecordingSummary,
+  BrowserRecordingUploadRequest,
+  BrowserRecordingUploadStatus,
   BrowserDownloadExportRequest,
   BrowserDownloadListResponse,
   BrowserDomReadRequest,
@@ -58,6 +61,8 @@ import {
   type BrowserRecordingExportReceipt as BrowserRecordingExportReceiptValue,
   type BrowserRecordingExportRequest as BrowserRecordingExportRequestValue,
   type BrowserRecordingSummary as BrowserRecordingSummaryValue,
+  type BrowserRecordingUploadRequest as BrowserRecordingUploadRequestValue,
+  type BrowserRecordingUploadStatus as BrowserRecordingUploadStatusValue,
   type BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
   type BrowserDownloadListResponse as BrowserDownloadListResponseValue,
   type BrowserDomReadRequest as BrowserDomReadRequestValue,
@@ -114,6 +119,10 @@ const COMMAND_OK = "OPENGENI_BROWSER_CONTROL_CLIENT_OK";
 const TOKEN_PATTERN = /^[A-Za-z0-9._~-]{32,2048}$/u;
 const MAX_REQUEST_TIMEOUT_MS = 20 * 60_000;
 const BROWSER_STATE_TRANSFER_TIMEOUT_MS = 20 * 60_000;
+/** Stopping writes the recording's bundle (up to 200 MB) to local disk. */
+const BROWSER_RECORDING_STOP_TIMEOUT_MS = 2 * 60_000;
+/** Slack for the controller to answer after its bounded upload wait. */
+const BROWSER_RECORDING_UPLOAD_RESPONSE_MARGIN_MS = 15_000;
 const PRIVATE_READ_CHUNK_BYTES = 512 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
@@ -1942,12 +1951,16 @@ export class BrowserControlSessionClient {
         path: this.path(`recordings/${id}/stop`),
         token: this.controlToken,
         body: {},
+        timeoutMs: BROWSER_RECORDING_STOP_TIMEOUT_MS,
       }),
     );
   }
 
+  /** Waits for the whole bundle upload. Controllers that support it are asked
+   * through `uploadRecording` instead, which never outlives a slow link. */
   async exportRecording(
     requestInput: BrowserRecordingExportRequestValue,
+    options: { timeoutMs?: number } = {},
   ): Promise<BrowserRecordingExportReceiptValue> {
     const request = BrowserRecordingExportRequest.parse(requestInput);
     const receipt = BrowserRecordingExportReceipt.parse(
@@ -1956,12 +1969,39 @@ export class BrowserControlSessionClient {
         path: this.path(`recordings/${request.recordingId}/exports`),
         token: this.controlToken,
         body: request,
+        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
       }),
     );
     if (receipt.recordingId !== request.recordingId) {
       throw new BrowserControlProtocolError("browser controller returned another recording");
     }
     return receipt;
+  }
+
+  /** Starts or joins the bundle upload and waits at most `waitMs` for it to
+   * land. Returns null from a controller that predates resumable uploads. */
+  async uploadRecording(
+    requestInput: BrowserRecordingUploadRequestValue,
+  ): Promise<BrowserRecordingUploadStatusValue | null> {
+    const request = BrowserRecordingUploadRequest.parse(requestInput);
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`recordings/${request.recordingId}/uploads`),
+        token: this.controlToken,
+        body: request,
+        timeoutMs: request.waitMs + BROWSER_RECORDING_UPLOAD_RESPONSE_MARGIN_MS,
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return null;
+      throw error;
+    }
+    const status = BrowserRecordingUploadStatus.parse(data);
+    if (status.recordingId !== request.recordingId) {
+      throw new BrowserControlProtocolError("browser controller returned another recording");
+    }
+    return status;
   }
 
   async openTarget(url?: string): Promise<BrowserObservationValue> {
@@ -2444,7 +2484,8 @@ export class ComputerControlSessionClient {
     return ComputerActionReceipt.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("actions"),
+        // Controllers that predate role stand-ins ignore this parameter.
+        path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1`,
         token: this.controlToken,
         body: parsed,
       }),

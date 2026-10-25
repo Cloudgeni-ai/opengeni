@@ -100,8 +100,55 @@ class DetachmentBridge implements AttachedBrowserBridgeTransport {
   close(): void {}
 }
 
-async function fixture() {
-  const bridge = new DetachmentBridge();
+/** A bridge like the current extension's: each attachment has a number, and a
+ * command naming an attachment that has ended is refused. */
+class FencedBridge extends DetachmentBridge {
+  private lastAttachment = 0;
+  readonly attachments = new Map<string, number>();
+
+  override detach(tabId: string, reason: "target_closed" | "canceled_by_user"): void {
+    const attachment = this.attachments.get(tabId);
+    this.attachments.delete(tabId);
+    this.attached.delete(tabId);
+    this.event(tabId, "OpenGeni.debuggerDetached", { reason, attachment });
+  }
+
+  /** Chrome ends the tab's attachment, but its detach event is reported
+   * only later. */
+  detachSilently(tabId: string): number | undefined {
+    const attachment = this.attachments.get(tabId);
+    this.attachments.delete(tabId);
+    this.attached.delete(tabId);
+    return attachment;
+  }
+
+  override async request<T>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+    const tabId = String(payload.tabId);
+    if (payload.type === "debugger.attach") {
+      if (!this.attachments.has(tabId)) this.attachments.set(tabId, ++this.lastAttachment);
+      const reply = await super.request<Record<string, unknown>>(payload);
+      return { ...reply, attachment: this.attachments.get(tabId) } as T;
+    }
+    if (
+      payload.type === "debugger.command" &&
+      this.attachments.has(tabId) &&
+      payload.attachment !== undefined &&
+      payload.attachment !== this.attachments.get(tabId)
+    ) {
+      this.commands.push(payload);
+      throw new AttachedBrowserBridgeError(
+        "debugger_unavailable",
+        "The attachment this command was sent for has ended",
+        false,
+      );
+    }
+    return await super.request<T>(payload);
+  }
+}
+
+async function fixture<B extends DetachmentBridge = DetachmentBridge>(
+  bridge: B = new DetachmentBridge() as B,
+) {
   const connection = new AttachedChromeCdpConnection(bridge, {
     browserName: "Chrome",
     browserVersion: "151.0.0.0",
@@ -604,3 +651,163 @@ for (const code of ["debugger_unavailable", "driver_rejected"] as const) {
     }
   });
 }
+
+test("input Chrome ends a fenced attachment under is outcome unknown, and the tab attaches again", async () => {
+  const bridge = new FencedBridge();
+  const { connection, driver } = await fixture(bridge);
+  try {
+    const observation = await driver.observe("7");
+    let ended = false;
+    bridge.beforeCommandReply = async (method) => {
+      if (method !== "Input.dispatchMouseEvent" || ended) return;
+      ended = true;
+      // Another extension added a frame: Chrome ends the attachment while it
+      // handles the input, and reports the detach before the reply.
+      bridge.detach("7", "target_closed");
+      await drainDetach(bridge);
+      throw new AttachedBrowserBridgeError(
+        "driver_rejected",
+        "Detached while handling command.",
+        false,
+      );
+    };
+    await expect(
+      driver.dispatch({
+        protocolVersion: 1,
+        actor: { kind: "agent", subjectId: "agent:test" },
+        operationId: randomUUID(),
+        browserSessionId: observation.browserSessionId,
+        controllerGeneration: observation.target.controllerGeneration,
+        targetId: "7",
+        expectedTargetGeneration: observation.target.targetGeneration,
+        expectedDocumentGeneration: observation.target.documentGeneration!,
+        expectedFrameId: observation.frameId,
+        observationMode: "none",
+        action: { type: "pointer", action: "click", x: 10, y: 10 },
+      }),
+    ).rejects.toMatchObject({ code: "outcome_unknown" });
+    await expect(driver.observe("7")).resolves.toMatchObject({ target: { id: "7" } });
+    expect(bridge.commands.filter((c) => c.type === "debugger.attach").length).toBeGreaterThan(1);
+    const inputs = bridge.commands.filter((c) => c.method === "Input.dispatchMouseEvent");
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]!.attachment).toBe(1);
+    expect(bridge.commands.at(-1)!.attachment).toBe(2);
+  } finally {
+    connection.close();
+  }
+});
+
+test("a late command for an ended attachment is refused and leaves its replacement working", async () => {
+  const held = barrier();
+  const method = "Runtime.callFunctionOn";
+  let ranUnderReplacement = false;
+  let heldOnce = false;
+  class QueuedFencedBridge extends FencedBridge {
+    override async request<T>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+      if (payload.type === "debugger.command" && payload.method === method && !heldOnce) {
+        heldOnce = true;
+        await held.hold();
+        try {
+          return await super.request<T>(payload);
+        } finally {
+          ranUnderReplacement = this.attachments.get(String(payload.tabId)) === payload.attachment;
+        }
+      }
+      return await super.request<T>(payload);
+    }
+  }
+  const bridge = new QueuedFencedBridge();
+  const connection = new AttachedChromeCdpConnection(bridge, {
+    browserName: "Chrome",
+    browserVersion: "151.0.0.0",
+  });
+  let pending: Promise<unknown> | null = null;
+  try {
+    const first = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: "7",
+    });
+    pending = connection
+      .send(method, {}, { sessionId: first.sessionId })
+      .catch((error: unknown) => error);
+    await held.arrived;
+    bridge.detach("7", "target_closed");
+    await drainDetach(bridge);
+    const second = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: "7",
+    });
+    held.release();
+    await expect(pending).resolves.toMatchObject({ code: "resource_unavailable" });
+    expect(ranUnderReplacement).toBe(false);
+    await expect(
+      connection.send("Page.getFrameTree", {}, { sessionId: second.sessionId }),
+    ).resolves.toHaveProperty("frameTree");
+  } finally {
+    held.release();
+    await pending;
+    connection.close();
+  }
+});
+
+test("a detach reported after its replacement attached leaves the replacement working", async () => {
+  const bridge = new FencedBridge();
+  const connection = new AttachedChromeCdpConnection(bridge, {
+    browserName: "Chrome",
+    browserVersion: "151.0.0.0",
+  });
+  const detached: unknown[] = [];
+  connection.on("Target.detachedFromTarget", (event) => detached.push(event.params));
+  try {
+    await connection.send("Target.attachToTarget", { targetId: "7" });
+    const ended = bridge.detachSilently("7");
+    const second = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: "7",
+    });
+    expect(bridge.attachments.get("7")).not.toBe(ended);
+    bridge.event("7", "OpenGeni.debuggerDetached", { reason: "target_closed", attachment: ended });
+    await drainDetach(bridge);
+    expect(detached).toEqual([]);
+    await expect(
+      connection.send("Page.getFrameTree", {}, { sessionId: second.sessionId }),
+    ).resolves.toHaveProperty("frameTree");
+  } finally {
+    connection.close();
+  }
+});
+
+test("a method the extension refuses before sending leaves the tab attachable after a detach", async () => {
+  // Extensions before Inspector.enable was allowed refuse it outright; the
+  // driver sends it on every attach to notice a crashed tab.
+  const { bridge, connection, driver } = await fixture();
+  bridge.beforeCommandReply = async (method) => {
+    if (method === "Inspector.enable")
+      throw new AttachedBrowserBridgeError(
+        "invalid_request",
+        "debugger method is outside the browser driver surface",
+        false,
+      );
+  };
+  try {
+    await driver.observe("7");
+    expect(bridge.commands.some((c) => c.method === "Inspector.enable")).toBe(true);
+    // Let the refusal of the enable, sent without waiting, come back first.
+    await Bun.sleep(20);
+    bridge.detach("7", "target_closed");
+    await drainDetach(bridge);
+    await expect(driver.observe("7")).resolves.toMatchObject({ target: { id: "7" } });
+    expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(2);
+    // The same on the connection itself, waiting for the refusal.
+    const { sessionId } = await connection.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: "8",
+    });
+    await expect(connection.send("Inspector.enable", {}, { sessionId })).rejects.toMatchObject({
+      code: -32_601,
+    });
+    bridge.detach("8", "target_closed");
+    await drainDetach(bridge);
+    await expect(
+      connection.send("Target.attachToTarget", { targetId: "8" }),
+    ).resolves.toHaveProperty("sessionId");
+  } finally {
+    connection.close();
+  }
+});

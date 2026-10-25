@@ -292,8 +292,17 @@ describe("browser session proxy", () => {
   const handlerFor = (onUpstream: (path: string) => void) => {
     const { og } = client((request) => {
       onUpstream(`${request.method} ${new URL(request.url).pathname}`);
-      if (new URL(request.url).pathname === "/v1/config/client") {
+      const path = new URL(request.url).pathname;
+      if (path === "/v1/config/client") {
         return Response.json({ sessionUsageLimits: { enabled: true } });
+      }
+      if (path === `/v1/workspaces/${WORKSPACE_ID}/access/grant`) {
+        return Response.json({
+          subjectId: "external_user:alice",
+          accountId: "44444444-4444-4444-8444-444444444444",
+          workspaceId: WORKSPACE_ID,
+          permissions: ["sessions:create", "sessions:read"],
+        });
       }
       return created(state(1));
     });
@@ -318,24 +327,23 @@ describe("browser session proxy", () => {
     expect(upstream).toEqual([]);
   });
 
-  test("a browser cannot read or write the limit route through the proxy", async () => {
+  test("a browser reads the limit but cannot change it when the server owns chat setup", async () => {
     const upstream: string[] = [];
     const handler = handlerFor((path) => upstream.push(path));
-    for (const method of ["GET", "PUT"]) {
-      const response = await handler(
-        new Request(`${base}/sessions/${SESSION_ID}/usage-limit`, {
-          method,
-          ...(method === "PUT"
-            ? {
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ limitMicros: null, expectedVersion: 1, operationId: "x" }),
-              }
-            : {}),
-        }),
-      );
-      expect(response.status).toBe(404);
-    }
-    expect(upstream.filter((path) => path.includes("usage-limit"))).toEqual([]);
+    const read = await handler(new Request(`${base}/sessions/${SESSION_ID}/usage-limit`));
+    expect(read.status).toBe(201);
+    const write = await handler(
+      new Request(`${base}/sessions/${SESSION_ID}/usage-limit`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ limitMicros: null, expectedVersion: 1, operationId: "x" }),
+      }),
+    );
+    expect(write.status).toBe(404);
+    expect(await write.json()).toMatchObject({ error: { code: "route_not_allowed" } });
+    expect(upstream.filter((path) => path.includes("usage-limit"))).toEqual([
+      `GET /v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/usage-limit`,
+    ]);
   });
 
   test("the proxied client config does not advertise limit editing", async () => {

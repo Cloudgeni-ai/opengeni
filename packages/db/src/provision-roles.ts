@@ -2,6 +2,7 @@ import postgres from "postgres";
 import { databaseBootConnectOptions } from "./boot-connect";
 import type { RlsStrategy } from "./database";
 import {
+  DEFERRED_RUNTIME_PRIVATE_ROUTINES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
   RUNTIME_READ_INSERT_UPDATE_TABLES,
@@ -2290,6 +2291,14 @@ BEGIN
           routine_signature, ${literal(role)});
       END IF;
     END LOOP;
+    -- Deferred definers stay withheld until the previous release knows them
+    -- (DEFERRED_RUNTIME_PRIVATE_ROUTINES; empty when none is withheld).
+    FOREACH routine_signature IN ARRAY ARRAY[${DEFERRED_RUNTIME_PRIVATE_ROUTINES.map(literal).join(",")} ]::text[] LOOP
+      IF to_regprocedure('opengeni_private.' || routine_signature) IS NOT NULL THEN
+        EXECUTE format('REVOKE EXECUTE ON FUNCTION opengeni_private.%s FROM PUBLIC, %I',
+          routine_signature, ${literal(role)});
+      END IF;
+    END LOOP;
     FOREACH routine_signature IN ARRAY ${retiringOwnerOnlyRoutines} LOOP
       IF to_regprocedure(routine_signature) IS NOT NULL THEN
         EXECUTE format('REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC, %I',
@@ -2717,6 +2726,7 @@ BEGIN
       END LOOP;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      'wake_teams_route_for_session_event()',
       'sync_usage_maintenance_due()',
       'arm_usage_allowances_for_membership()',
       'read_sender_connection(uuid,uuid,uuid,text)',

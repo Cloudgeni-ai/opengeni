@@ -97,6 +97,7 @@ async function bindRepository(
     authorityExpiresAt: new Date(now.getTime() + 5 * 60_000),
     authorityNonce: `github-branches-${crypto.randomUUID()}`,
     repositoryIds: input.repositoryIds,
+    eventRouteSecret: null,
   });
   expect(bound).not.toBeNull();
 }

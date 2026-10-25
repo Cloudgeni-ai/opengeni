@@ -120,6 +120,76 @@ function Fixture() {
     </main>
   );
 }
+/** `?view=waiting`: other people's updates waiting on a personal machine, as each person sees it. */
+function WaitingWorkFixture() {
+  const [continued, setContinued] = useState(false);
+  const blocked = {
+    status: continued ? "running" : "requires_action",
+    activeSandboxId: "machine",
+    admissionBlock: { reason: "database_claim_rejected", sqlState: "42501" },
+    effectiveControl: { state: "active", controlVersion: 1, controlEtag: "1" },
+  } as unknown as Session;
+  const access = (isOwner: boolean, isYou: boolean) => ({
+    sandboxId: "machine",
+    machineName: "Maya’s MacBook Pro",
+    ownerName: "Maya Chen",
+    isOwner,
+    queuedTurnBlocked: false,
+    waitingWork: continued ? [] : [{ name: "Sam Rivera", isYou, results: 4 }],
+  });
+  const fail = new URLSearchParams(window.location.search).has("fail");
+  return (
+    <main className="mx-auto grid max-w-3xl gap-6 p-4 sm:p-6">
+      <section className="grid gap-2" aria-label="Machine owner">
+        <h2 className="text-sm text-fg-muted">The machine’s owner</h2>
+        <SessionAdmissionNotice
+          session={blocked}
+          canControl
+          paused={false}
+          busy={false}
+          onRecheck={async () => {}}
+          machineAccess={access(true, false)}
+          onContinueWaitingWork={async () => {
+            await new Promise((resolve) => setTimeout(resolve, 600));
+            if (fail) throw Object.assign(new Error("conflict"), { status: 409 });
+            setContinued(true);
+          }}
+        />
+        {continued ? <p role="status">The agent is reading them now.</p> : null}
+      </section>
+      <section className="grid gap-2" aria-label="Member whose updates wait">
+        <h2 className="text-sm text-fg-muted">The member whose agents sent them</h2>
+        <SessionAdmissionNotice
+          session={blocked}
+          canControl
+          paused={false}
+          busy={false}
+          onRecheck={async () => {}}
+          machineAccess={access(false, true)}
+        />
+        <SessionMachineAccessNotice access={access(false, true)} />
+      </section>
+      <section className="grid gap-2" aria-label="Someone else">
+        <h2 className="text-sm text-fg-muted">Someone else in the chat</h2>
+        <SessionAdmissionNotice
+          session={blocked}
+          canControl
+          paused={false}
+          busy={false}
+          onRecheck={async () => {}}
+          machineAccess={access(false, false)}
+        />
+      </section>
+    </main>
+  );
+}
+
 const root = createRoot(document.getElementById("root")!);
-root.render(<Fixture />);
+root.render(
+  new URLSearchParams(window.location.search).get("view") === "waiting" ? (
+    <WaitingWorkFixture />
+  ) : (
+    <Fixture />
+  ),
+);
 if (import.meta.hot) import.meta.hot.dispose(() => root.unmount());

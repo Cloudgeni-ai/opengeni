@@ -119,6 +119,21 @@ export interface ComputerBackend {
   stopCapture(targetId: string): Promise<void>;
   clipboard(): Promise<ComputerBackendClipboard>;
   validate(command: ComputerBackendActionCommand): Promise<void>;
-  dispatch(command: ComputerBackendActionCommand): Promise<ComputerBackendObservation | null>;
+  /** A backend that can act on an element of another role than the one an
+   * action's locator named reports each such action to `standIn`. */
+  dispatch(
+    command: ComputerBackendActionCommand,
+    standIn?: (standIn: ComputerBackendRoleStandIn) => void,
+  ): Promise<ComputerBackendObservation | null>;
   close(): Promise<void>;
 }
+
+/** An action that acted on the one element of a role pressed alike (a link
+ * for a button, or a button for a link) with the exact name its locator gave,
+ * because nothing of the role named had that name. */
+export type ComputerBackendRoleStandIn = {
+  actionIndex: number;
+  requestedRole: string;
+  role: string;
+  name: string;
+};

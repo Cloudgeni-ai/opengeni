@@ -1,3 +1,4 @@
+import { integrationAvailable, requireIntegrationAvailable } from "../integrations/teams-rollout";
 import {
   CORE_INTEGRATION_DEFINITIONS,
   INTEGRATION_DEFINITION_PRESENTATIONS,
@@ -200,7 +201,9 @@ export function registerApiIntegrationRoutes(
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     return c.json(
       ListIntegrationDefinitionsResponse.parse({
-        definitions: CORE_INTEGRATION_DEFINITIONS.map((definition) => ({
+        definitions: CORE_INTEGRATION_DEFINITIONS.filter((definition) =>
+          integrationAvailable(deps.settings, workspaceId, definition.id),
+        ).map((definition) => ({
           id: definition.id,
           name: definition.name,
           summary: definition.summary,
@@ -401,6 +404,13 @@ export async function resolveForRoute(input: {
   payload: PreviewApiIntegrationRequest | InstallApiIntegrationRequest;
 }): ReturnType<typeof resolveApiIntegrationPreview> {
   const payload = structuredClone(input.payload);
+  if (payload.source.kind === "definition") {
+    requireIntegrationAvailable(
+      input.deps.settings,
+      input.workspaceId,
+      payload.source.definitionId,
+    );
+  }
   const preparation = await withOrganizationIntegrationPolicyFence(
     input.deps.db,
     input,

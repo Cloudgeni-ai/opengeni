@@ -11,7 +11,7 @@ export type Snapshot = {
   classic: { nodes: Json[]; pageInfo: { hasNextPage: boolean } };
 };
 export type Plan = {
-  schemaVersion: 2;
+  schemaVersion: 3 | 4;
   appId: number;
   installationId: number;
   before: Snapshot;
@@ -21,10 +21,21 @@ export type Plan = {
   guard: ObjectValue;
   namespace: ObjectValue;
 };
-export type Phase = "original" | "guard" | "namespace" | "applied" | "restored";
+export type Phase =
+  | "original"
+  | "guard"
+  | "namespace"
+  | "applied"
+  | "restored"
+  | "legacy-applied"
+  | "upgrade-admission"
+  | "legacy-namespace";
 const writableKeys = ["name", "target", "enforcement", "bypass_actors", "conditions", "rules"];
 const guardName = "Opengeni batcher immutable refs";
-const namespaceName = "Opengeni batcher dedicated writer";
+const namespaceName = "Merges go through the batcher: add the queue-ready label";
+export const appOnlyNamespaceName =
+  "Merges go through the batcher: use gh pr merge --auto or add the queue-ready label";
+export const appOnlyCheckName = "merge-batcher: run gh pr merge --auto (or add queue-ready)";
 const refs = ["refs/heads/queue/live/**", "refs/heads/batcher-state"];
 
 function object(value: Json | undefined): ObjectValue {
@@ -46,25 +57,36 @@ export function writable(value: ObjectValue): ObjectValue {
 }
 // Ruleset lists are sets, including rules/bypass actors/ref patterns. Preserve
 // multiplicity so an unexpected duplicate still fails the readback comparison.
-function canonical(value: Json, rule = false): string {
+function canonical(value: Json, rule = false, bypassActor = false): string {
   if (Array.isArray(value))
     return `[${value
-      .map((item) => canonical(item, rule))
+      .map((item) => canonical(item, rule, bypassActor))
       .sort()
       .join(",")}]`;
   if (value && typeof value === "object") {
     // GitHub stores the default update rule without parameters. Normalize only
     // that exact rule shape, in rules arrays, on both comparison sides. Explicit
     // false already has this form; empty/null/extra fields must remain different.
-    const normalized: ObjectValue =
+    let normalized: ObjectValue =
       rule && value.type === "update" && Object.keys(value).length === 1
         ? { type: "update", parameters: { update_allows_fetch_and_merge: false } }
         : value;
+    // GitHub ignores OrganizationAdmin actor_id and returns null for the
+    // reviewed legacy sentinel 1. Compare only this exact bypass shape; retain
+    // all other IDs/types/modes, missing fields, extras and duplicates as drift.
+    if (
+      bypassActor &&
+      value.actor_type === "OrganizationAdmin" &&
+      value.actor_id === 1 &&
+      value.bypass_mode === "always" &&
+      Object.keys(value).length === 3
+    )
+      normalized = { ...value, actor_id: null };
     return `{${Object.keys(normalized)
       .sort()
       .map(
         (key) =>
-          `${JSON.stringify(key)}:${canonical(normalized[key]!, key === "rules" && writableKeys.every((field) => field in normalized))}`,
+          `${JSON.stringify(key)}:${canonical(normalized[key]!, key === "rules" && writableKeys.every((field) => field in normalized), key === "bypass_actors" && writableKeys.every((field) => field in normalized))}`,
       )
       .join(",")}}`;
   }
@@ -97,7 +119,15 @@ export function prepare(before: Snapshot, appId: number, installationId: number)
     throw new Error("Classic protection needs separate review; do not replace it");
   }
   index(before.rulesets);
-  if (before.rulesets.some((r) => r.name === guardName || r.name === namespaceName))
+  if (
+    before.rulesets.some(
+      (r) =>
+        r.name === guardName ||
+        r.name === namespaceName ||
+        r.name === appOnlyNamespaceName ||
+        r.name === "Opengeni batcher dedicated writer",
+    )
+  )
     throw new Error("Prepared ruleset name already exists; reconcile prior execution first");
   const matches = before.rulesets.filter(
     (r) =>
@@ -120,7 +150,11 @@ export function prepare(before: Snapshot, appId: number, installationId: number)
   const pr = original.rules.find((rule) => object(rule).type === "pull_request")!;
   equal(object(object(pr).parameters).allowed_merge_methods!, ["squash"], "Manual merge methods");
   const restore = writable(original);
-  const bypass = [{ actor_id: appId, actor_type: "Integration", bypass_mode: "always" }];
+  const bypass = [
+    { actor_id: appId, actor_type: "Integration", bypass_mode: "always" },
+    // GitHub ignores actor_id for OrganizationAdmin; this is not an assigned ID.
+    { actor_id: 1, actor_type: "OrganizationAdmin", bypass_mode: "always" },
+  ];
   const admission = { ...restore, rules: [pr], bypass_actors: bypass };
   const guard = {
     name: guardName,
@@ -142,7 +176,7 @@ export function prepare(before: Snapshot, appId: number, installationId: number)
     ],
   };
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     appId,
     installationId,
     before,
@@ -164,29 +198,91 @@ export function verify(
   validatePlan(plan);
   equal(current.repository, plan.before.repository, "Repository configuration");
   equal(current.classic, plan.before.classic, "Classic protection");
+  const legacyPhase = ["legacy-applied", "upgrade-admission", "legacy-namespace"].includes(phase);
+  if (legacyPhase && plan.schemaVersion !== 4)
+    throw new Error("Legacy upgrade phases require an explicit version 4 plan");
+  const legacy =
+    plan.schemaVersion === 4 ? prepare(plan.before, plan.appId, plan.installationId) : undefined;
   const expected = index(plan.before.rulesets);
-  const includeGuard = phase === "guard" || phase === "namespace" || phase === "applied";
-  const includeNamespace = phase === "namespace" || phase === "applied";
+  const includeGuard =
+    phase === "guard" || phase === "namespace" || phase === "applied" || legacyPhase;
+  const includeNamespace = phase === "namespace" || phase === "applied" || legacyPhase;
   function add(receipt: RuleSet | undefined, payload: ObjectValue, name: string) {
     if (!receipt) throw new Error(`Missing ${name} creation receipt`);
     const id = positiveId(receipt.id);
     if (expected.has(id)) throw new Error("Creation receipt collides with an existing ID");
-    equal(writable(receipt), payload, `${name} creation receipt`);
+    // A retained creation receipt is historical evidence, not a claim that the
+    // namespace PUT already occurred. Only the exact v3 predecessor is accepted
+    // as an alternative receipt for this explicitly versioned upgrade.
+    const retained = writable(receipt);
+    if (name === "namespace" && legacy && canonical(retained) === canonical(legacy.namespace)) {
+      equal(retained, legacy.namespace, "Legacy namespace creation receipt");
+    } else {
+      equal(retained, name === "namespace" ? plan.namespace : payload, `${name} creation receipt`);
+    }
     expected.set(id, payload);
   }
   if (includeGuard) add(receipts.guard, plan.guard, "guard");
-  if (includeNamespace) add(receipts.namespace, plan.namespace, "namespace");
-  if (phase === "applied") expected.set(plan.admissionId, plan.admission);
+  if (includeNamespace)
+    add(receipts.namespace, legacyPhase ? legacy!.namespace : plan.namespace, "namespace");
+  if (phase === "applied" || phase === "upgrade-admission")
+    expected.set(plan.admissionId, plan.admission);
+  if (phase === "legacy-applied") expected.set(plan.admissionId, legacy!.admission);
   const actual = index(current.rulesets);
   equal([...actual.keys()], [...expected.keys()], "Full ruleset inventory");
   for (const [id, payload] of expected) equal(actual.get(id)!, payload, `Ruleset ${id}`);
 }
 
-/** Version 1 allowed normal manual merges; never silently activate that plan. */
+/** Explicit new policy; legacy plans and their exact restore payload remain unchanged. */
+export function prepareAppOnly(
+  before: Snapshot,
+  appId: number,
+  installationId: number,
+  namespaceLabel: "auto" | "legacy" = "auto",
+): Plan {
+  const legacy = prepare(before, appId, installationId);
+  const bypass = [{ actor_id: appId, actor_type: "Integration", bypass_mode: "always" }];
+  return {
+    ...legacy,
+    schemaVersion: 4,
+    admission: {
+      ...legacy.admission,
+      bypass_actors: bypass,
+      rules: [
+        ...(legacy.admission.rules as Json[]),
+        {
+          type: "required_status_checks",
+          parameters: {
+            required_status_checks: [{ context: appOnlyCheckName, integration_id: appId }],
+            strict_required_status_checks_policy: false,
+            do_not_enforce_on_create: false,
+          },
+        },
+      ],
+    },
+    namespace: {
+      ...legacy.namespace,
+      name: namespaceLabel === "legacy" ? namespaceName : appOnlyNamespaceName,
+      bypass_actors: bypass,
+    },
+  };
+}
+
+/** Older plans have different bypass policy; never silently upgrade them. */
 export function validatePlan(plan: Plan): void {
-  if (plan.schemaVersion !== 2)
-    throw new Error("Exclusive-main rollout requires a newly reviewed version 2 plan");
-  const expected = prepare(plan.before, plan.appId, plan.installationId);
+  if (plan.schemaVersion !== 3 && plan.schemaVersion !== 4)
+    throw new Error("Rollout requires a reviewed version 3 or version 4 plan");
+  // Preserve exact retained v4 payloads. Only these two generated names are
+  // supported; full plan/receipt/readback equality still rejects live renames.
+  const expected =
+    plan.schemaVersion === 4
+      ? prepareAppOnly(
+          plan.before,
+          plan.appId,
+          plan.installationId,
+          plan.namespace.name === namespaceName ? "legacy" : "auto",
+        )
+      : prepare(plan.before, plan.appId, plan.installationId);
   equal(plan as unknown as Json, expected as unknown as Json, "Prepared exclusive-main plan");
 }
 
@@ -206,7 +302,9 @@ export async function cli(args: string[]): Promise<void> {
   if (command === "receipt" && rest.length === 4) {
     const [directory, snapshot, kind, candidatePath] = rest as [string, string, string, string];
     if (kind !== "guard" && kind !== "namespace") throw new Error("Unknown receipt kind");
-    const plan = await json<Plan>(join(directory, "plan.json"));
+    const plan = await json<Plan>(
+      join(process.env.BATCHER_VERIFIED_PLAN || directory, "plan.json"),
+    );
     const candidate = await json<RuleSet>(candidatePath);
     if (candidate.source_type !== "Repository" || candidate.source !== "Cloudgeni-ai/opengeni") {
       throw new Error("Creation receipt must belong to this repository");
@@ -232,9 +330,13 @@ export async function cli(args: string[]): Promise<void> {
     console.log(`Verified and retained ${kind} receipt; no API writes.`);
     return;
   }
-  if (command === "prepare" && rest.length === 4) {
+  if ((command === "prepare" || command === "prepare-app-only") && rest.length === 4) {
     const [snapshot, app, installation, output] = rest as [string, string, string, string];
-    const plan = prepare(await json<Snapshot>(snapshot), Number(app), Number(installation));
+    const plan = (command === "prepare-app-only" ? prepareAppOnly : prepare)(
+      await json<Snapshot>(snapshot),
+      Number(app),
+      Number(installation),
+    );
     await mkdir(output, { recursive: false, mode: 0o700 });
     for (const [name, value] of Object.entries({
       plan,
@@ -253,15 +355,43 @@ export async function cli(args: string[]): Promise<void> {
   }
   if (command === "verify" && rest.length === 3) {
     const [directory, snapshot, phase] = rest as [string, string, string];
-    if (!["original", "guard", "namespace", "applied", "restored"].includes(phase))
+    if (
+      ![
+        "original",
+        "guard",
+        "namespace",
+        "applied",
+        "restored",
+        "legacy-applied",
+        "upgrade-admission",
+        "legacy-namespace",
+      ].includes(phase)
+    )
       throw new Error("Unknown phase");
     const receipts: { guard?: RuleSet; namespace?: RuleSet } = {};
-    if (["guard", "namespace", "applied"].includes(phase))
-      receipts.guard = await json(join(directory, "guard-receipt.json"));
-    if (["namespace", "applied"].includes(phase))
-      receipts.namespace = await json(join(directory, "namespace-receipt.json"));
+    if (
+      [
+        "guard",
+        "namespace",
+        "applied",
+        "legacy-applied",
+        "upgrade-admission",
+        "legacy-namespace",
+      ].includes(phase)
+    )
+      receipts.guard = await json(
+        join(process.env.BATCHER_VERIFIED_PLAN || directory, "guard-receipt.json"),
+      );
+    if (
+      ["namespace", "applied", "legacy-applied", "upgrade-admission", "legacy-namespace"].includes(
+        phase,
+      )
+    )
+      receipts.namespace = await json(
+        join(process.env.BATCHER_VERIFIED_PLAN || directory, "namespace-receipt.json"),
+      );
     verify(
-      await json<Plan>(join(directory, "plan.json")),
+      await json<Plan>(join(process.env.BATCHER_VERIFIED_PLAN || directory, "plan.json")),
       await json<Snapshot>(snapshot),
       phase as Phase,
       receipts,
@@ -272,7 +402,7 @@ export async function cli(args: string[]): Promise<void> {
     return;
   }
   throw new Error(
-    "Usage: bundle.ts prepare SNAPSHOT APP_ID INSTALLATION_ID NEW_OUTPUT_DIRECTORY | verify OUTPUT_DIRECTORY CURRENT_SNAPSHOT original|guard|namespace|applied|restored | receipt OUTPUT_DIRECTORY CURRENT_SNAPSHOT guard|namespace CANDIDATE_JSON",
+    "Usage: bundle.ts prepare|prepare-app-only SNAPSHOT APP_ID INSTALLATION_ID NEW_OUTPUT_DIRECTORY | verify OUTPUT_DIRECTORY CURRENT_SNAPSHOT original|guard|namespace|applied|restored | receipt OUTPUT_DIRECTORY CURRENT_SNAPSHOT guard|namespace CANDIDATE_JSON",
   );
 }
 if (import.meta.main) await cli(process.argv.slice(2));

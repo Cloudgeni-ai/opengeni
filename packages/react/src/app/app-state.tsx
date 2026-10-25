@@ -15,7 +15,11 @@ import {
 import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
-import { hasWorkspacePermission, isWorkspacePermissionDenied } from "./lib/permissions";
+import {
+  hasWorkspacePermission,
+  isWorkspacePermissionDenied,
+  lacksWorkspacePermission,
+} from "./lib/permissions";
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
@@ -46,7 +50,11 @@ import {
 import { flushSync } from "react-dom";
 import { toast } from "./lib/toast";
 import type { AnalyticsEventName, AnalyticsProperties } from "./lib/analytics-types";
-import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "./lib/bootstrap-error";
+import {
+  bootstrapErrorPresentation,
+  bootstrapWaitingPresentation,
+  type BootstrapErrorPresentation,
+} from "./lib/bootstrap-error";
 import { readBootstrap } from "./lib/bootstrap-read";
 import { startDeploymentRefresh } from "./lib/deployment-refresh";
 import {
@@ -657,6 +665,17 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           context: "client_configuration",
           request: () => fetchClientConfig(controller.signal),
           signal: controller.signal,
+          // An update parks the API for a while: say so calmly and continue
+          // on our own as soon as it answers.
+          waiting: {
+            onWaiting: (error, elapsedMs) => {
+              if (!cancelled) {
+                setConfigError(
+                  bootstrapWaitingPresentation(error, "client_configuration", elapsedMs),
+                );
+              }
+            },
+          },
         }),
       )
       .then((config) => {
@@ -710,9 +729,23 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
     let cancelled = false;
     const acceptedPrincipal = principalTransitionIdentity.current;
+    const controller = new AbortController();
     setManagedAuthBootstrapComplete(false);
     setAuthSession(undefined);
-    void fetchAuthSession()
+    // During an update the session read fails transiently. That is not
+    // "signed out": keep waiting calmly and continue when the API answers.
+    void readBootstrap({
+      context: "client_configuration",
+      request: fetchAuthSession,
+      signal: controller.signal,
+      waiting: {
+        onWaiting: (error, elapsedMs) => {
+          if (!cancelled) {
+            setConfigError(bootstrapWaitingPresentation(error, "client_configuration", elapsedMs));
+          }
+        },
+      },
+    })
       .then((nextSession) => {
         if (
           cancelled ||
@@ -720,6 +753,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         ) {
           return;
         }
+        setConfigError((current) => (current?.recovering ? null : current));
         const nextPrincipalId = nextSession?.user.id ?? null;
         if (authPrincipalIdRef.current !== null && authPrincipalIdRef.current !== nextPrincipalId) {
           invalidatePrincipalWorkspaceState();
@@ -736,11 +770,13 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         ) {
           return;
         }
+        setConfigError((current) => (current?.recovering ? null : current));
         setAuthSession(null);
         setManagedAuthBootstrapComplete(true);
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [clientConfig, fetchAuthSession, managedAuthRequired, invalidatePrincipalWorkspaceState]);
 
@@ -766,7 +802,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     managedSelfContextIdentityRef.current = acceptedManagedIdentity;
     setManagedSelfContext(null);
     setAccessLoading(true);
-    setAccessError(null);
+    // A calm waiting state stays up while a retry runs.
+    setAccessError((current) => (current?.recovering ? current : null));
     const controller = new AbortController();
     // These SDK reads do not accept a caller signal. Fence their late results
     // and every new attempt without changing the SDK's general retry policy.
@@ -777,6 +814,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         signal: controller.signal,
         isCurrent: () =>
           ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal),
+        waiting: {
+          onWaiting: (error, elapsedMs) => {
+            if (
+              !cancelled &&
+              ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
+            ) {
+              setAccessError(bootstrapWaitingPresentation(error, "workspace_access", elapsedMs));
+            }
+          },
+        },
       });
     const selfContextPromise = acceptedManagedIdentity
       ? loadCurrentManagedSelfContext({
@@ -797,6 +844,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         ) {
           return;
         }
+        // The API answered: any calm "reconnecting" state is over.
+        setAccessError((current) => (current?.recovering ? null : current));
         if (acceptedManagedIdentity && nextManagedSelfContext === null) {
           return;
         }
@@ -1345,6 +1394,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         );
       const refreshId = githubRefreshId.current + 1;
       githubRefreshId.current = refreshId;
+      // A member whose loaded grant lacks GitHub has no GitHub state to read.
+      if (lacksWorkspacePermission(accessContextRef.current, workspaceId, "github:use")) {
+        setGithubStatus(null);
+        setGithubStatusFailed(false);
+        setGithubAppOpen(false);
+        setGithubRepos([]);
+        setGithubCatalogReady(true);
+        setRepoBusy(false);
+        return;
+      }
       setRepoBusy(true);
       try {
         const status = await client.getGitHubApp(workspaceId);
@@ -2565,7 +2624,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     clientConfig,
     configError,
     retryClientConfig: () => {
-      setConfigError(null);
+      // A calm waiting state stays up while the retry runs.
+      setConfigError((current) => (current?.recovering ? current : null));
       setConfigRequestVersion((version) => version + 1);
     },
     authSession,

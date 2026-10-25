@@ -10,6 +10,7 @@ import type {
 } from "@opengeni/sdk";
 import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -23,6 +24,7 @@ import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
 import {
   answersFromDrafts,
+  choiceOffersOther,
   defaultHumanInputFormMessages,
   emptyDraft,
   initialDrafts,
@@ -520,7 +522,16 @@ function HumanInputRequestForm({
             {resolvedTitle}
           </h2>
           {metaBits.length > 0 ? (
-            <p className="mt-0.5 truncate text-og-xs text-og-fg-subtle">{metaBits.join(" · ")}</p>
+            <p className="mt-0.5 truncate text-og-xs text-og-fg-subtle">
+              {metaBits.map((bit, index) => (
+                // Positional facts of one bar; a deadline is markup, not text.
+                // oxlint-disable-next-line react/no-array-index-key -- fixed positions
+                <Fragment key={index}>
+                  {index > 0 ? " · " : null}
+                  {bit}
+                </Fragment>
+              ))}
+            </p>
           ) : null}
         </div>
         <button
@@ -1074,7 +1085,7 @@ function QuestionControls({
               </label>
             );
           })}
-          {!question.skillReview ? (
+          {choiceOffersOther(question) ? (
             <div
               className={cn(
                 "flex items-start gap-2.5 rounded-og-md px-2.5 py-2 transition-colors",

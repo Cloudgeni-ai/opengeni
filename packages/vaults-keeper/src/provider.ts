@@ -31,7 +31,7 @@ import {
   totpParamsFor,
 } from "./mapping";
 import { safeSecretName } from "./naming";
-import { restrictToOperations } from "./operations";
+import { restrictToOperations } from "@opengeni/vaults";
 import {
   type CapturedConsole,
   KEEPER_REQUEST_TIMEOUT_MS,

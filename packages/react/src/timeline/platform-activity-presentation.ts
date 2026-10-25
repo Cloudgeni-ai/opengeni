@@ -89,6 +89,12 @@ const STARTUP_PHASE_TITLES = (
     t("timeline.platformActivityPresentation.toolConnectionInterrupted"),
     t("timeline.platformActivityPresentation.toolsReady"),
   ],
+  history: [
+    t("timeline.platformActivityPresentation.loadingConversationHistory"),
+    t("timeline.platformActivityPresentation.conversationHistoryDidnTLoad"),
+    t("timeline.platformActivityPresentation.conversationHistoryLoadingInterrupted"),
+    t("timeline.platformActivityPresentation.conversationHistoryLoaded"),
+  ],
   model_preparation: [
     t("timeline.platformActivityPresentation.preparingRuntimeAndModelRequest"),
     t("timeline.platformActivityPresentation.runtimeModelPreparationFailed"),

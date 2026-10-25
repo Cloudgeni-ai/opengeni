@@ -1,5 +1,55 @@
 # @opengeni/desktop
 
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [2d6484c]
+  - @opengeni/sdk@5.2.0
+  - @opengeni/agent-host@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [5d377a7]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/agent-host@5.1.0
+
+## 5.0.2
+
+### Patch Changes
+
+- Updated dependencies [ca3f931]
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [217ed52]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/agent-host@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [3089aaf]
+- Updated dependencies [e2a641c]
+  - @opengeni/sdk@4.8.0
+  - @opengeni/agent-host@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+  - @opengeni/sdk@4.7.2
+  - @opengeni/agent-host@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes

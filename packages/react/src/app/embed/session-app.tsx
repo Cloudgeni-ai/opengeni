@@ -1,3 +1,4 @@
+import { ArchiveConfirmationProvider } from "../lib/archive-session";
 // The Opengeni session app for an embedding page that already holds an
 // authenticated API client (a first-party side pane such as the Excel add-in,
 // the desktop app, a playground). It renders the web app's own session shell,
@@ -13,12 +14,17 @@ import {
 import { useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 
 import { OpenGeniProvider } from "../../provider";
+import {
+  OpenGeniLinkProvider,
+  type OpenGeniLinkRenderer,
+  type OpenGeniLinkResolver,
+} from "../../components/open-geni-links";
 import { SecretsUiProvider } from "../../secrets-ui";
 import { Button } from "../../ui/button";
 import { PortalContainerProvider } from "../../ui/portal-container";
 import { AppContext, useAppContext } from "../app-context";
 import { createSlackLinkPrepareController, useAppState, type AppStateHost } from "../app-state";
-import { LoadingPanel, ProblemPanel } from "../components/common";
+import { LoadingPanel, ProblemPanel, WaitingPanel } from "../components/common";
 import { RailProvider } from "../components/rail/rail-context";
 import { ActionsProvider } from "../lib/actions/actions-provider";
 import { SessionShell, type SessionShellSlots } from "../components/rail/session-shell";
@@ -26,7 +32,7 @@ import { CreditRequiredGate } from "../components/credit-required-gate";
 import { Toaster } from "../components/toaster";
 import { WorkspaceTenantBoundary } from "../components/workspace-tenant-boundary";
 import { apiErrorFromResponseBody, type AppApiHost } from "../lib/app-api";
-import { AppHostProvider, type AppHost } from "../lib/app-host";
+import { AppHostProvider, type AppHost, type SessionViewState } from "../lib/app-host";
 import type { EditableArtifactSurfaceProps, PdfPreviewProps } from "../lib/app-surfaces";
 import { AppearanceProvider, useAppearance } from "../lib/appearance";
 import { parseComposerLaunchSearch } from "../lib/composer-launch";
@@ -82,6 +88,13 @@ export type SessionAppProps = Readonly<{
   /** Called when the person opens another chat (null: the new-chat page). */
   onSessionChange?: ((sessionId: string | null) => void) | undefined;
   /**
+   * Called with the open chat's status and loaded events each time they
+   * change, from the stream the chat already reads, so the host can follow its
+   * progress (show that the agent is working, refresh what a turn changed)
+   * without opening a second one.
+   */
+  onSessionState?: ((state: SessionViewState) => void) | undefined;
+  /**
    * Which features show. `embed` (default) is the chat list, chats and
    * composer; `companion` (first-party side panes) adds the session panel and
    * Opengeni's brand; `app` is the web app. `features` switches single ones.
@@ -113,6 +126,18 @@ export type SessionAppProps = Readonly<{
    * and shows nothing. Context for the model, never instructions.
    */
   messageContext?: MessageContextInput;
+  /**
+   * Opens Opengeni object links in agent messages (files, Sites, editable
+   * artifacts) the host's way, such as its own page for an artifact. Return
+   * null for a link the app should handle: the session dock when it is on,
+   * otherwise the web app's page for the object through `openUrl`.
+   */
+  resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Draws the host's own links in agent messages (its scheme, in-app paths,
+   * web URLs). Return undefined to keep the default link.
+   */
+  renderLink?: OpenGeniLinkRenderer | undefined;
 }>;
 
 function trimSlash(url: string): string {
@@ -350,13 +375,38 @@ function SessionAppGates({
   const state = useAppState(stateHost, { bootstrapSuspended: false });
   let content: ReactNode;
   if (!state.clientConfig && !state.configError) content = <LoadingPanel />;
-  else if (state.configError) {
+  else if (state.configError?.recovering) {
+    // An update or dropped connection: the embed continues by itself.
+    content = (
+      <WaitingPanel
+        title={state.configError.title}
+        description={state.configError.description}
+        action={
+          <Button type="button" variant="ghost" size="sm" onClick={state.retryClientConfig}>
+            Try again
+          </Button>
+        }
+      />
+    );
+  } else if (state.configError) {
     content = (
       <ProblemPanel
         title={state.configError.title}
         description={state.configError.description}
         action={
           <Button type="button" variant="outline" onClick={state.retryClientConfig}>
+            Try again
+          </Button>
+        }
+      />
+    );
+  } else if (state.accessError?.recovering) {
+    content = (
+      <WaitingPanel
+        title={state.accessError.title}
+        description={state.accessError.description}
+        action={
+          <Button type="button" variant="ghost" size="sm" onClick={state.retryAccess}>
             Try again
           </Button>
         }
@@ -379,12 +429,14 @@ function SessionAppGates({
     const context = state.appContext;
     content = (
       <AppContext.Provider value={context}>
-        <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
-        <CreditRequiredGate
-          creditRequired={state.creditRequired}
-          setCreditRequired={state.setCreditRequired}
-          accessContext={state.accessContext}
-        />
+        <ArchiveConfirmationProvider>
+          <SessionAppWorkspace workspaceId={workspaceId} slots={slots} />
+          <CreditRequiredGate
+            creditRequired={state.creditRequired}
+            setCreditRequired={state.setCreditRequired}
+            accessContext={state.accessContext}
+          />
+        </ArchiveConfirmationProvider>
       </AppContext.Provider>
     );
   }
@@ -461,21 +513,24 @@ function SessionAppForWorkspace(props: SessionAppProps) {
         ...(editableArtifact ? { editableArtifact } : {}),
       },
       messageContext,
+      onSessionState: (state) => latest.current.onSessionState?.(state),
     }),
     [api, editableArtifact, messageContext, navigation, pdfPreview],
   );
   return (
     <AppearanceProvider hostTheme={props.theme} scope="local">
       <AppHostProvider host={host}>
-        <SessionUiFeaturesProvider preset={props.preset ?? "embed"} features={props.features}>
-          <SessionAppRoot className={props.className}>
-            <SessionAppGates
-              stateHost={stateHost}
-              workspaceId={props.workspaceId}
-              slots={props.slots}
-            />
-          </SessionAppRoot>
-        </SessionUiFeaturesProvider>
+        <OpenGeniLinkProvider resolveLink={props.resolveLink} renderLink={props.renderLink}>
+          <SessionUiFeaturesProvider preset={props.preset ?? "embed"} features={props.features}>
+            <SessionAppRoot className={props.className}>
+              <SessionAppGates
+                stateHost={stateHost}
+                workspaceId={props.workspaceId}
+                slots={props.slots}
+              />
+            </SessionAppRoot>
+          </SessionUiFeaturesProvider>
+        </OpenGeniLinkProvider>
       </AppHostProvider>
     </AppearanceProvider>
   );

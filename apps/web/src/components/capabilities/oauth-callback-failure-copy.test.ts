@@ -40,12 +40,8 @@ describe("provider OAuth callback failure copy", () => {
         }
       } else {
         expect(message("provider_denied")).toBe(oauthCallbackReasonMessage("provider_denied")!);
-        for (const reason of [
-          "account_mismatch",
-          "http_503",
-          null,
-          GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
-        ]) {
+        expect(message("account_mismatch")).toBe(oauthCallbackReasonMessage("account_mismatch")!);
+        for (const reason of ["http_503", null, GOOGLE_DRIVE_NATIVE_RETIRED_REASON]) {
           expect(message(reason)).toBe(GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE);
         }
       }
@@ -67,4 +63,16 @@ describe("generic OAuth callback failure copy", () => {
     expect(oauthCallbackFailureMessage(null)).toBe("Couldn't connect. Please try again.");
     expect(oauthCallbackFailureMessage("  ")).toBe("Couldn't connect. Please try again.");
   });
+});
+
+test("MCP duplicate failures give actionable guidance without raw codes", () => {
+  for (const reason of [
+    "account_mismatch",
+    "account_already_connected",
+    "account_identity_unavailable",
+  ]) {
+    const message = oauthCallbackFailureMessage(reason);
+    expect(message).not.toContain(reason);
+    expect(message.toLowerCase()).toContain("reconnect");
+  }
 });

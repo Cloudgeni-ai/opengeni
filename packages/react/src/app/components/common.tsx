@@ -95,6 +95,36 @@ export function ProblemPanel(props: {
 }
 
 /**
+ * Startup is waiting for the API (an update or a dropped connection) and will
+ * continue by itself: a calm, live status instead of a problem. The action is
+ * a secondary way to try right away.
+ */
+export function WaitingPanel(props: {
+  title: string;
+  description: ReactNode;
+  action?: ReactNode | undefined;
+}) {
+  return (
+    <section className="grid flex-1 place-items-center px-4 text-center">
+      <div
+        role="status"
+        aria-live="polite"
+        data-bootstrap-waiting=""
+        className="w-full max-w-md rounded-lg border border-border bg-surface p-5"
+      >
+        <Loader2Icon
+          aria-hidden
+          className="mx-auto mb-3 size-5 animate-spin text-fg-muted motion-reduce:animate-none"
+        />
+        <h1 className="text-base font-semibold">{props.title}</h1>
+        <p className="mt-2 text-sm leading-5 text-fg-muted">{props.description}</p>
+        {props.action ? <div className="mt-4 flex justify-center">{props.action}</div> : null}
+      </div>
+    </section>
+  );
+}
+
+/**
  * Connection health, shown only when it needs a word (doctrine D2). Healthy
  * states (live / idle / ended) render nothing — the session status badge is the
  * single persistent pill, so there is no "live" + "Idle" double-green. The pill

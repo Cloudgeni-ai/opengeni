@@ -80,6 +80,7 @@ export const DIAGNOSTIC_POSTGRES_FUNCTIONS = [
   "admit_session_attempt_personal_machine_v1",
   "admit_session_attempt_personal_documents",
   "bind_session_attempt_machine_consent",
+  "carry_session_attempt_machine_authorization",
   "guard_session_admission_block",
   "workspace_instruction_policy_get_or_create_snapshot",
   "preference_registry_get_or_create_snapshot",

@@ -30,7 +30,7 @@ const SHEET_TITLES: Record<string, string> = {
   "go.previousChat": "Previous chat",
   "go.nextChat": "Next chat",
   "go.pinnedChat": "Pinned chats 1 to 9",
-  "commandMenu.open": "Search chats and actions",
+  "commandMenu.open": "Search chats, Sites and actions",
 };
 
 type SheetRow = {

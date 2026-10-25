@@ -53,7 +53,11 @@ describe("interaction attempt tools", () => {
       expect(tool.inputSchema.type).toBe("object");
       expect(tool.inputSchema.anyOf).toBeUndefined();
       expect(tool.inputSchema.oneOf).toBeUndefined();
-      expect(tool.inputSchema.required).toContain("computerSessionId");
+      // Optional: omitted, it is the computer the agent used last.
+      expect(tool.inputSchema.required ?? []).not.toContain("computerSessionId");
+      expect(
+        (tool.inputSchema.properties as Record<string, unknown>).computerSessionId,
+      ).toBeDefined();
       expect((tool.inputSchema.properties as Record<string, unknown>).session).toBeUndefined();
       // Found under "cua" in Code Mode, next to its model name interaction__cua_<name>.
       expect(tool.codemodePath).toEqual(["interaction", "cua", tool.identity.toolName.slice(4)]);
@@ -96,6 +100,53 @@ describe("interaction attempt tools", () => {
         coordinate_frame: { enum: ["window", "desktop"], type: "string" },
       },
     });
+  });
+  test("a nested step field one platform lacks merges into the steps instead of an anyOf", () => {
+    const steps = (extra: Record<string, unknown>, required: string[]) => ({
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            required,
+            additionalProperties: true,
+            properties: { tool: { type: "string" }, ...extra },
+          },
+        },
+      },
+    });
+    const merged = nativeCuaSchema([
+      steps({ toggle_to: { type: "boolean" } }, ["tool"]),
+      steps({}, ["tool"]),
+      steps({ timeout_ms: { type: "integer" } }, ["tool", "timeout_ms"]),
+    ]);
+    expect(merged).toEqual({
+      type: "object",
+      properties: {
+        steps: {
+          type: "array",
+          maxItems: 20,
+          items: {
+            type: "object",
+            required: ["tool"],
+            additionalProperties: true,
+            properties: {
+              tool: { type: "string" },
+              toggle_to: { type: "boolean" },
+              timeout_ms: { type: "integer" },
+            },
+          },
+        },
+      },
+    });
+    // A real constraint difference around the nested fields still keeps both.
+    const differing = nativeCuaSchema([
+      steps({ toggle_to: { type: "boolean" } }, ["tool"]),
+      { type: "object", properties: { steps: { type: "array", maxItems: 8, items: {} } } },
+    ]);
+    expect((differing.properties as any).steps.anyOf).toHaveLength(2);
   });
   test.each(["browser_read", "browser_act"] as const)(
     "%s preserves the definite tab diagnosis at the model boundary",
@@ -565,6 +616,121 @@ describe("interaction attempt tools", () => {
         (result.structuredContent as { attachedBrowsers: object[] }).attachedBrowsers[0]!,
       ),
     ).toHaveLength(8);
+  });
+
+  test("attached Chrome discovery names each profile's and bridge's computer", async () => {
+    const thisMachine = randomUUID();
+    const bridge = (sandboxId: string, machineName: string, connectedProfileCount: number) => ({
+      enrollmentId: randomUUID(),
+      sandboxId,
+      machineName,
+      state: "online" as const,
+      bridgeGeneration: "bridge-1",
+      inventoryRevision: 1,
+      connectedProfileCount,
+      lastSeenAt: now,
+    });
+    const here = bridge(thisMachine, "Mac mini", 1);
+    const there = bridge(randomUUID(), "Laptop", 1);
+    const device = (name: string, enrollmentId: string) => ({
+      id: randomUUID(),
+      accountId,
+      workspaceId,
+      enrollmentId,
+      name,
+      profileLabel: null,
+      browserName: "Google Chrome",
+      browserVersion: "150.0.0.0",
+      extensionVersion: "0.1.4",
+      platform: "macos" as const,
+      architecture: "arm64" as const,
+      state: "connected" as const,
+      connectionGeneration: "connection-1",
+      inventoryRevision: 3,
+      tabCount: 2,
+      capabilities: {
+        tabInventory: true,
+        debuggerAttachment: true,
+        semanticObservation: true,
+        screenshots: true,
+        liveFrames: true,
+        humanInput: true,
+        diagnostics: true,
+        rawCdp: true,
+        linkedComputer: true,
+      },
+      lastSeenAt: now,
+      disconnectedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const discover = async (
+      inventory: { bridges: ReturnType<typeof bridge>[]; devices: ReturnType<typeof device>[] },
+      scope: "attached_browsers" | "workspace",
+    ) => {
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listBrowserSessions: async () => ({ revision: 1, sessions: [] }),
+            listComputerSessions: async () => ({ revision: 1, sessions: [] }),
+            listBrowserIdentities: async () => ({ revision: 1, identities: [] }) as never,
+            listAttachedBrowsers: async () => ({ revision: 1, ...inventory }),
+          }),
+          getSession: async () =>
+            ({
+              id: sessionId,
+              sandboxGroupId: randomUUID(),
+              activeSandboxId: thisMachine,
+            }) as never,
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["interaction_discover"],
+        permissions: ["sessions:read"],
+      });
+      return (
+        await definitions[0]!.execute(
+          { scope },
+          { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+        )
+      ).structuredContent;
+    };
+    const mine = device("Personal", here.enrollmentId);
+    const theirs = device("Work", there.enrollmentId);
+    for (const scope of ["attached_browsers", "workspace"] as const) {
+      expect(
+        await discover({ bridges: [here, there], devices: [mine, theirs] }, scope),
+      ).toMatchObject({
+        attachedBrowserBridges: [],
+        attachedBrowsers: [
+          { id: mine.id, name: "Personal", machine: "Mac mini", onThisMachine: true },
+          { id: theirs.id, name: "Work", machine: "Laptop" },
+        ],
+      });
+    }
+    const listed = (await discover(
+      { bridges: [here, there], devices: [mine, theirs] },
+      "attached_browsers",
+    )) as {
+      attachedBrowsers: object[];
+    };
+    expect(listed.attachedBrowsers[1]).not.toHaveProperty("onThisMachine");
+    // A machine ready for the extension says which computer it is.
+    expect(
+      await discover(
+        { bridges: [{ ...here, connectedProfileCount: 0 }], devices: [] },
+        "attached_browsers",
+      ),
+    ).toMatchObject({
+      attachedBrowserBridges: [
+        {
+          enrollmentId: here.enrollmentId,
+          machine: "Mac mini",
+          onThisMachine: true,
+          connectedProfileCount: 0,
+        },
+      ],
+    });
   });
 
   test("browser_open, computer_open and discovery narrow inventories in the query", async () => {
@@ -1736,17 +1902,44 @@ describe("interaction attempt tools", () => {
     const open = async (
       devices: ReturnType<typeof profile>[],
       postSetupCard?: UserSetupCardPoster,
+      machines: {
+        bridges?: Array<{ enrollmentId: string; sandboxId: string | null; machineName: string }>;
+        activeSandboxId?: string | null;
+      } = {},
     ) => {
       let createRequest: Record<string, unknown> | null = null;
       const definitions = createInteractionAttemptToolDefinitions({
-        transport: partialTransport({
-          listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
-          listAttachedBrowsers: async () => ({ revision: 1, bridges: [], devices }),
-          createBrowserSession: async (_workspaceId, request) => {
-            createRequest = request as unknown as Record<string, unknown>;
-            return { session: discoveredBrowserSession(randomUUID(), sessionId) } as never;
-          },
-        }),
+        transport: {
+          ...partialTransport({
+            listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+            listAttachedBrowsers: async () => ({
+              revision: 1,
+              bridges: (machines.bridges ?? []).map((bridge) => ({
+                ...bridge,
+                state: "online" as const,
+                bridgeGeneration: "bridge-1",
+                inventoryRevision: 1,
+                connectedProfileCount: 1,
+                lastSeenAt: now,
+              })),
+              devices,
+            }),
+            createBrowserSession: async (_workspaceId, request) => {
+              createRequest = request as unknown as Record<string, unknown>;
+              return { session: discoveredBrowserSession(randomUUID(), sessionId) } as never;
+            },
+          }),
+          ...(machines.activeSandboxId !== undefined
+            ? {
+                getSession: async () =>
+                  ({
+                    id: sessionId,
+                    sandboxGroupId: randomUUID(),
+                    activeSandboxId: machines.activeSandboxId,
+                  }) as never,
+              }
+            : {}),
+        },
         workspaceId,
         sessionId,
         selectedTools: ["browser_open"],
@@ -1785,6 +1978,68 @@ describe("interaction attempt tools", () => {
         attachedProfile: { id: newer.id, name: "Personal" },
         otherAttachedProfiles: [{ id: older.id, name: "Work" }],
       });
+    });
+
+    test("prefers a profile on the computer this session runs on, and says where each is", async () => {
+      const thisMachine = randomUUID();
+      const here = profile("Here", "2026-10-15T09:00:00.000Z");
+      const elsewhere = profile("Elsewhere", "2026-10-15T10:00:00.000Z");
+      const bridges = [
+        { enrollmentId: here.enrollmentId, sandboxId: thisMachine, machineName: "Mac mini" },
+        { enrollmentId: elsewhere.enrollmentId, sandboxId: randomUUID(), machineName: "Laptop" },
+      ];
+      const { result, createRequest } = await open([elsewhere, here], undefined, {
+        bridges,
+        activeSandboxId: thisMachine,
+      });
+      // The other computer's profile is newer, but this computer's comes first.
+      expect(createRequest).toMatchObject({
+        placement: { kind: "attached_device", deviceId: here.id },
+      });
+      expect(result.structuredContent).toMatchObject({
+        attachedProfile: { id: here.id, machine: "Mac mini", onThisMachine: true },
+        otherAttachedProfiles: [{ id: elsewhere.id, machine: "Laptop" }],
+      });
+      expect(
+        (result.structuredContent as { otherAttachedProfiles: object[] }).otherAttachedProfiles[0],
+      ).not.toHaveProperty("onThisMachine");
+      const text = (result.content[0] as { text: string }).text;
+      expect(text).toContain(
+        `Attached Chrome profile: "Here" on "Mac mini" (this session's machine) deviceId ${here.id}`,
+      );
+      expect(text).toContain(
+        `Other attached profiles: "Elsewhere" on "Laptop" deviceId ${elsewhere.id}`,
+      );
+    });
+
+    test("without a profile on this computer, opens the most recent one and names its computer", async () => {
+      const older = profile("Work", "2026-10-15T09:00:00.000Z");
+      const newer = profile("Personal", "2026-10-15T10:00:00.000Z");
+      const bridges = [
+        { enrollmentId: older.enrollmentId, sandboxId: randomUUID(), machineName: "Desktop" },
+        { enrollmentId: newer.enrollmentId, sandboxId: randomUUID(), machineName: "Laptop" },
+      ];
+      // A managed sandbox (no active Connected Machine) and a machine with no
+      // connected profile both fall back to recency.
+      for (const activeSandboxId of [null, randomUUID()]) {
+        const { result, createRequest } = await open([older, newer], undefined, {
+          bridges,
+          activeSandboxId,
+        });
+        expect(createRequest).toMatchObject({
+          placement: { kind: "attached_device", deviceId: newer.id },
+        });
+        expect(result.structuredContent).toMatchObject({
+          attachedProfile: { id: newer.id, machine: "Laptop" },
+          otherAttachedProfiles: [{ id: older.id, machine: "Desktop" }],
+        });
+        expect(
+          (result.structuredContent as { attachedProfile: object }).attachedProfile,
+        ).not.toHaveProperty("onThisMachine");
+        expect((result.content[0] as { text: string }).text).toContain(
+          `Attached Chrome profile: "Personal" on "Laptop" deviceId ${newer.id}`,
+        );
+      }
     });
 
     test("explains how to connect Chrome when no profile is connected", async () => {
@@ -2962,12 +3217,82 @@ describe("interaction attempt tools", () => {
     expect(retried.structuredContent).toEqual(result.structuredContent);
   });
 
+  test("a computer action can leave out its type and name elements as role:name", async () => {
+    const target = computerTarget();
+    const after = { ...computerObservation(target), observationId: "after-batch" };
+    const requests: ComputerActionRequest[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerActionReceipt: noRecordedReceipt,
+        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
+        listComputerTargets: async () => ({ targets: [target] }) as never,
+        observeComputerTarget: async () => after,
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return computerReceipt(value.operationId, after);
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_act"],
+      permissions: ["sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      {
+        computerSessionId,
+        targetId: target.id,
+        action: {
+          actions: [
+            { locator: "link:Accounts", action: "invoke" },
+            { locator: "textbox:Search accounts", action: "set_value", value: "AC-1" },
+            { type: "keyboard", action: "press", value: "enter" },
+          ],
+        },
+      },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect(result.isError).not.toBe(true);
+    expect(requests[0]?.action).toEqual({
+      type: "batch",
+      actions: [
+        {
+          type: "semantic",
+          locator: { kind: "role", role: "link", name: "Accounts", exact: true },
+          action: "invoke",
+        },
+        {
+          type: "semantic",
+          locator: { kind: "role", role: "textbox", name: "Search accounts", exact: true },
+          action: "set_value",
+          value: "AC-1",
+        },
+        { type: "keyboard", action: "press", value: "enter" },
+      ],
+    });
+    // The model view says so: type is optional, on an action and in a batch.
+    const schema = definitions[0]!.inputSchema as {
+      properties: {
+        action: {
+          required?: string[];
+          description?: string;
+          properties: Record<string, { items?: { required?: string[] } }>;
+        };
+      };
+    };
+    expect(schema.properties.action.required).toBeUndefined();
+    expect(schema.properties.action.description).toStartWith(
+      "type defaults to semantic when locator is set and to batch when actions is.",
+    );
+    expect(schema.properties.action.properties.actions?.items?.required).toBeUndefined();
+  });
+
   test("a computer that runs batches gets the whole batch as one operation", async () => {
     const target = computerTarget();
     const initial = computerObservation(target);
     const after = { ...initial, observationId: "after-batch" };
     const requests: ComputerActionRequest[] = [];
     let stopAfter: number | null = null;
+    let roleStandIns: ComputerActionReceipt["roleStandIns"];
     let sessionReads = 0;
     let observed = 0;
     const definitions = createInteractionAttemptToolDefinitions({
@@ -2984,7 +3309,11 @@ describe("interaction attempt tools", () => {
         },
         actInComputer: async (_workspaceId, _computerSessionId, value) => {
           requests.push(value);
-          if (stopAfter === null) return computerReceipt(value.operationId, after);
+          if (stopAfter === null)
+            return {
+              ...computerReceipt(value.operationId, after),
+              ...(roleStandIns ? { roleStandIns } : {}),
+            };
           return {
             ...computerReceipt(value.operationId, after),
             state: "outcome_unknown",
@@ -3064,36 +3393,64 @@ describe("interaction attempt tools", () => {
     expect(text).toStartWith(`Batch stopped on ${target.id} at action 2 of 3: action 2 failed`);
     // The bookkeeping that says how far the batch got is not shown again.
     expect(text).not.toContain("batchActionsCompleted");
+
+    // An action that pressed a link it named as a button says so.
+    stopAfter = null;
+    roleStandIns = [{ actionIndex: 0, requestedRole: "button", role: "link", name: "Pay" }];
+    const stoodIn = await run();
+    expect(stoodIn.structuredContent).toMatchObject({ roleStandIns });
+    expect((stoodIn.content[0] as { text: string }).text).toContain(
+      'Action 1 named button "Pay", but no button here has that name, so it used the link "Pay"; name it as role "link" next time.\n',
+    );
+    expect(result.structuredContent).not.toHaveProperty("roleStandIns");
     // Support is read once for the session.
     expect(sessionReads).toBe(1);
   });
 
-  test("a retried Computer batch runs the way its first try did when the computer's batch support changes", async () => {
+  test("a retried Computer batch reports what its first try ran without sending it again", async () => {
     const target = computerTarget();
-    const observation = computerObservation(target);
-    const journal = new Map<string, ComputerActionReceipt>();
+    // Like CUA, every read is a new observation, and the computer's journal
+    // refuses one operation ID sent with different fences.
+    let reads = 0;
+    const read = () => ({ ...computerObservation(target), observationId: `obs-${++reads}` });
+    const journal = new Map<
+      string,
+      { request: ComputerActionRequest; receipt: ComputerActionReceipt }
+    >();
     const sent: ComputerActionRequest[] = [];
-    // Each try is a fresh process that asks the computer whether it runs
-    // batches: the answer changes between tries, or cannot be read.
+    let receiptReads = 0;
+    let windowGone = false;
     const tryOnce = async (operationId: string, support: boolean | "unreadable") =>
       await createInteractionAttemptToolDefinitions({
         transport: partialTransport({
+          // The computer fixes its answer for the session's life.
           getComputerSession: async () => {
             if (support === "unreadable") throw new Error("api unavailable");
             return { capabilities: { actionBatches: support } } as never;
           },
           listComputerTargets: async () => ({ targets: [target] }) as never,
-          observeComputerTarget: async () => observation,
+          observeComputerTarget: async () => {
+            if (windowGone) throw new Error("window closed");
+            return read();
+          },
           actInComputer: async (_workspaceId, _computerSessionId, value) => {
             const existing = journal.get(value.operationId);
-            if (existing) return existing;
+            if (existing) {
+              if (existing.request.expectedObservationId !== value.expectedObservationId)
+                throw new OpenGeniApiError(409, "operation id is already bound", {
+                  code: "operation_conflict",
+                });
+              return existing.receipt;
+            }
             sent.push(value);
-            const receipt = computerReceipt(value.operationId, observation);
-            journal.set(value.operationId, receipt);
+            const receipt = computerReceipt(value.operationId, read());
+            journal.set(value.operationId, { request: value, receipt });
             return receipt;
           },
-          getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) =>
-            journal.get(id) ?? (await noRecordedReceipt()),
+          getComputerActionReceipt: async (_workspaceId, _computerSessionId, id) => {
+            receiptReads += 1;
+            return journal.get(id)?.receipt ?? (await noRecordedReceipt());
+          },
         }),
         workspaceId,
         sessionId,
@@ -3103,7 +3460,6 @@ describe("interaction attempt tools", () => {
         {
           computerSessionId,
           targetId: target.id,
-          expectedObservationId: observation.observationId,
           action: {
             type: "batch",
             actions: [
@@ -3115,26 +3471,37 @@ describe("interaction attempt tools", () => {
         { operationId, caller: { kind: "model", subjectId: "model:test" } },
       );
 
-    // Run one action at a time, then retried on a computer that now runs
-    // batches: the recorded actions are reported, and nothing is sent again.
+    // Run as one operation: nothing is read before it is sent.
+    const native = randomUUID();
+    const whole = await tryOnce(native, true);
+    expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
+    expect(receiptReads).toBe(0);
+    sent.length = 0;
+    // A retry reads the window again, so the journal refuses its new fence,
+    // and the recorded receipt says what ran.
+    const again = await tryOnce(native, true);
+    expect(sent).toEqual([]);
+    expect(again.structuredContent).toEqual(whole.structuredContent);
+    // So does a retry once the batch closed the window.
+    windowGone = true;
+    const gone = await tryOnce(native, true);
+    expect(sent).toEqual([]);
+    expect(gone.structuredContent).toEqual(whole.structuredContent);
+    // A retry that cannot read how the computer runs batches sends nothing.
+    await expect(tryOnce(native, "unreadable")).rejects.toThrow(
+      "so the batch was not sent; retry the call",
+    );
+    expect(sent).toEqual([]);
+
+    // One action at a time: a retry reuses the recorded actions.
+    windowGone = false;
     const sequential = randomUUID();
     const first = await tryOnce(sequential, false);
     expect(sent.map((request) => request.action.type)).toEqual(["keyboard", "keyboard"]);
     sent.length = 0;
-    const retried = await tryOnce(sequential, true);
+    const retried = await tryOnce(sequential, false);
     expect(sent).toEqual([]);
     expect(retried.structuredContent).toEqual(first.structuredContent);
-
-    // Run as one operation, then retried where support cannot be read.
-    const native = randomUUID();
-    const whole = await tryOnce(native, true);
-    expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
-    sent.length = 0;
-    for (const support of ["unreadable", false] as const) {
-      const again = await tryOnce(native, support);
-      expect(sent).toEqual([]);
-      expect(again.structuredContent).toEqual(whole.structuredContent);
-    }
   });
 
   test("does not send a Computer batch whose way of running cannot be read", async () => {
@@ -3244,42 +3611,6 @@ describe("interaction attempt tools", () => {
     const held = await first;
     expect(sent.map((request) => request.action.type)).toEqual(["batch"]);
     expect(held.structuredContent).toEqual(second.structuredContent);
-  });
-
-  test("does not send a retried Computer batch when an earlier try's other way cannot be read", async () => {
-    const target = computerTarget();
-    const observation = computerObservation(target);
-    let sent = 0;
-    const definitions = createInteractionAttemptToolDefinitions({
-      transport: partialTransport({
-        getComputerSession: async () => ({ capabilities: { actionBatches: true } }) as never,
-        listComputerTargets: async () => ({ targets: [target] }) as never,
-        observeComputerTarget: async () => observation,
-        actInComputer: async (_workspaceId, _computerSessionId, value) => {
-          sent += 1;
-          return computerReceipt(value.operationId, observation);
-        },
-        getComputerActionReceipt: async () => {
-          throw new Error("controller unreachable");
-        },
-      }),
-      workspaceId,
-      sessionId,
-      selectedTools: ["computer_act"],
-      permissions: ["sessions:control"],
-    });
-    await expect(
-      definitions[0]!.execute(
-        {
-          computerSessionId,
-          targetId: target.id,
-          expectedObservationId: observation.observationId,
-          action: { type: "batch", actions: [{ type: "keyboard", action: "press", value: "5" }] },
-        },
-        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
-      ),
-    ).rejects.toThrow("whether an earlier try of this batch already ran could not be read");
-    expect(sent).toBe(0);
   });
 
   test("a retried Computer batch reuses actions that ran even when the window can no longer be read", async () => {
@@ -3725,8 +4056,8 @@ describe("interaction attempt tools", () => {
     expect(action.properties.actions.items).toEqual({
       type: "object",
       properties: { type: { type: "string", enum: ["semantic", "keyboard"] } },
-      required: ["type"],
-      description: "One semantic or keyboard action with the same fields as action.",
+      description:
+        "One semantic or keyboard action with the same fields as action; a semantic one can leave out type.",
     });
     expect(action.description).toContain("batch: actions");
   });
@@ -5310,7 +5641,11 @@ describe("interaction attempt tools", () => {
     })[0]!;
     const action = (act.inputSchema.properties as Record<string, Record<string, unknown>>).action!;
     const locator = (action.properties as Record<string, { anyOf?: unknown[] }>).locator!;
-    expect(locator.anyOf?.[0]).toEqual({ type: "string", description: "An element ref." });
+    expect(locator.anyOf?.[0]).toEqual({
+      type: "string",
+      description:
+        'An element ref, or role:name for the element with that role and exact name ("link:Sign in").',
+    });
     expect(JSON.stringify(locator.anyOf?.[1])).toContain('"ref"');
   });
 });
@@ -5689,7 +6024,7 @@ for (const mismatch of ["personal-profile", "machine", "identity"] as const) {
   });
 }
 
-describe("placement-less open reuses only a session on the chat's current machine", () => {
+describe("open reuses only a session on the chat's current machine", () => {
   const groupId = randomUUID();
   const oldMachine = randomUUID();
   const swappedMachine = randomUUID();
@@ -5774,17 +6109,100 @@ describe("placement-less open reuses only a session on the chat's current machin
     });
   }
 
-  test("an explicit placement does not read the session", async () => {
-    const old = discoveredComputerSession(randomUUID(), sessionId);
-    old.placement = { kind: "connected_machine", sandboxId: oldMachine };
+  // A session on a named machine is reused only while the chat is routed
+  // there. On any other route the server retires it on contact, so the open
+  // creates instead, and that create says how to move the chat.
+  for (const route of [
+    { name: "that machine", activeSandboxId: oldMachine, reused: true },
+    { name: "another machine", activeSandboxId: swappedMachine, reused: false },
+    { name: "an unreadable route", activeSandboxId: undefined, reused: true },
+  ] as const) {
+    test(`computer_open naming a machine when the chat is routed to ${route.name}`, async () => {
+      const old = discoveredComputerSession(randomUUID(), sessionId);
+      old.placement = { kind: "connected_machine", sandboxId: oldMachine };
+      const created = discoveredComputerSession(randomUUID(), sessionId);
+      const createRequests: unknown[] = [];
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listComputerSessions: async () => ({ revision: 0, sessions: [old] }),
+            createComputerSession: async (_workspaceId, request) => {
+              createRequests.push(request);
+              return { session: created } as never;
+            },
+          }),
+          getSession:
+            route.activeSandboxId === undefined
+              ? async () => {
+                  throw new Error("session read failed");
+                }
+              : sessionRead(route.activeSandboxId),
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_open"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const placement = { kind: "connected_machine", sandboxId: oldMachine } as const;
+      const result = await definitions[0]!.execute({ placement }, context());
+      const opened = (result.structuredContent as { session: ComputerSession }).session;
+      expect(opened.id).toBe(route.reused ? old.id : created.id);
+      expect(createRequests).toEqual(route.reused ? [] : [expect.objectContaining({ placement })]);
+    });
+
+    test(`browser_open naming a machine when the chat is routed to ${route.name}`, async () => {
+      const old = discoveredBrowserSession(randomUUID(), sessionId);
+      old.placement = { kind: "connected_machine", sandboxId: oldMachine };
+      let created = 0;
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listBrowserSessions: async () => ({ revision: 0, sessions: [old] }),
+            getBrowserSession: async () => old,
+            createBrowserSession: async () => {
+              created += 1;
+              return { session: { lifecycle: "starting" } } as never;
+            },
+          }),
+          getSession:
+            route.activeSandboxId === undefined
+              ? async () => {
+                  throw new Error("session read failed");
+                }
+              : sessionRead(route.activeSandboxId),
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+        context(),
+      );
+      if (route.reused) {
+        expect(created).toBe(0);
+        expect((result.structuredContent as { session: BrowserSession }).session.id).toBe(old.id);
+      } else {
+        expect(created).toBe(1);
+      }
+    });
+  }
+
+  // The chat's own sandbox group is usable from any route, so a session there
+  // is reused while the chat works on a Connected Machine.
+  test("computer_open naming the chat's own sandbox from a Connected Machine reuses it", async () => {
+    const home = discoveredComputerSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
     const definitions = createInteractionAttemptToolDefinitions({
       transport: {
         ...partialTransport({
-          listComputerSessions: async () => ({ revision: 0, sessions: [old] }),
+          listComputerSessions: async () => ({ revision: 0, sessions: [home] }),
+          createComputerSession: async () => {
+            throw new Error("the home Desktop is reused");
+          },
         }),
-        getSession: async () => {
-          throw new Error("an explicit placement needs no session read");
-        },
+        getSession: sessionRead(swappedMachine),
       },
       workspaceId,
       sessionId,
@@ -5792,9 +6210,35 @@ describe("placement-less open reuses only a session on the chat's current machin
       permissions: ["sessions:read", "sessions:control"],
     });
     const result = await definitions[0]!.execute(
-      { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+      { placement: { kind: "sandbox_group", sandboxGroupId: groupId } },
       context(),
     );
-    expect((result.structuredContent as { session: ComputerSession }).session.id).toBe(old.id);
+    expect((result.structuredContent as { session: ComputerSession }).session.id).toBe(home.id);
+  });
+
+  test("browser_open naming the chat's own sandbox from a Connected Machine reuses it", async () => {
+    const home = discoveredBrowserSession(randomUUID(), sessionId);
+    home.placement = { kind: "sandbox_group", sandboxGroupId: groupId };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listBrowserSessions: async () => ({ revision: 0, sessions: [home] }),
+          getBrowserSession: async () => home,
+          createBrowserSession: async () => {
+            throw new Error("the home browser is reused");
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "sandbox_group", sandboxGroupId: groupId } },
+      context(),
+    );
+    expect((result.structuredContent as { session: BrowserSession }).session.id).toBe(home.id);
   });
 });

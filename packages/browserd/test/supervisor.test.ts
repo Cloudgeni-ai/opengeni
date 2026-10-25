@@ -149,31 +149,6 @@ describe("BrowserSupervisor", () => {
     }
   });
 
-  test("only an explicit end closes the blank tabs a session opened, never a shutdown", async () => {
-    const directory = await mkdtemp("/tmp/ogb-end-blank-tabs-");
-    const cleaned: number[] = [];
-    const supervisor = await BrowserSupervisor.open({
-      rootDirectory: join(directory, "state"),
-      createDriver: async (context) => ({
-        ...fakeDriver(context),
-        async closeUnusedOwnedTabs() {
-          cleaned.push(Number(context.browserSessionId.slice(-2)));
-        },
-      }),
-    });
-    try {
-      await supervisor.createSession({ ...reference(46), headed: false });
-      await supervisor.createSession({ ...reference(47), headed: false });
-      await supervisor.endSession(reference(46));
-      expect(cleaned).toEqual([46]);
-    } finally {
-      // Shutdown releases session 47 without touching its tabs.
-      await supervisor.close();
-      await rm(directory, { recursive: true, force: true });
-    }
-    expect(cleaned).toEqual([46]);
-  });
-
   test("holds the browser's windows presented for each use and while a live view is open", async () => {
     const directory = await mkdtemp("/tmp/ogb-window-presence-");
     let holders = 0;
@@ -2720,6 +2695,64 @@ describe("same-working-directory controller restart", () => {
           supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
         ).rejects.toThrow("synthetic accepted transport disappeared");
         expect({ closes, detaches, drivers }).toEqual({ closes: 0, detaches: 2, drivers: 2 });
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("a failed relaunch closes the browser it started, so the next recovery relaunches", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        detaches = 0,
+        starts = 0,
+        relaunchedRunning = false;
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        // The recorded browser is gone, so recovery relaunches the profile.
+        inspectOwnedProcess: async () => "exited",
+        // The profile counts as in use while a relaunched browser runs.
+        assertProfileUnused: async () => {
+          if (relaunchedRunning) throw new Error("synthetic profile in use");
+        },
+        createDriver: async (context) => {
+          const driver = fakeDriver(context);
+          return {
+            ...driver,
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            async start(url?: string) {
+              relaunchedRunning = true;
+              starts++;
+              if (starts === 1) throw new Error("synthetic start failure after launch");
+              return await driver.start(url);
+            },
+            async close() {
+              closes++;
+              relaunchedRunning = false;
+              await driver.close();
+            },
+            async detach() {
+              detaches++;
+            },
+          };
+        },
+      });
+      try {
+        await expect(
+          supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true }),
+        ).rejects.toThrow();
+        // The browser this recovery launched was stopped, not left running.
+        expect({ closes, detaches, relaunchedRunning }).toEqual({
+          closes: 1,
+          detaches: 0,
+          relaunchedRunning: false,
+        });
+        const result = await supervisor.createSession({
+          ...options,
+          recoverExistingWorkingDirectory: true,
+        });
+        expect(result.browserSessionId).toBe(options.browserSessionId);
+        expect(starts).toBe(2);
       } finally {
         await supervisor.close();
       }

@@ -447,6 +447,47 @@ describe("native session view-models", () => {
     expect(timelineAccessibilityLabel(item, labels)).toBe(
       "Agenten spurte: Fag: Velg fag\nDu svarte: Fag: Rør",
     );
+    expect(
+      timelineAccessibilityLabel(
+        { ...item, answeredByAgent: true },
+        DEFAULT_OPENGENI_NATIVE_LABELS,
+      ),
+    ).toBe("Agent asked: Fag: Velg fag\nAgent answered: Fag: Rør");
+    expect(
+      timelineAccessibilityLabel(
+        { ...item, answeredByAgent: true },
+        {
+          ...labels,
+          humanInputOutcome: {
+            answered: "Du svarte",
+            skipped: "Hoppet over",
+            expired: "Utløpt",
+            cancelled: "Avbrutt",
+          },
+        },
+      ),
+    ).toBe("Agenten spurte: Fag: Velg fag\nDu svarte: Fag: Rør");
+    // An agent's skip says who skipped; a host without that label keeps "skipped".
+    const skippedByAgent = {
+      ...item,
+      answeredByAgent: true,
+      response: { outcome: "skipped" as const },
+      answers: [],
+    };
+    expect(timelineAccessibilityLabel(skippedByAgent, DEFAULT_OPENGENI_NATIVE_LABELS)).toBe(
+      "Agent asked: Fag: Velg fag\nAgent skipped",
+    );
+    expect(
+      timelineAccessibilityLabel(skippedByAgent, {
+        ...labels,
+        humanInputOutcome: {
+          answered: "Du svarte",
+          skipped: "Hoppet over",
+          expired: "Utløpt",
+          cancelled: "Avbrutt",
+        },
+      }),
+    ).toBe("Agenten spurte: Fag: Velg fag\nHoppet over");
   });
 
   test("previews pending structured questions for the collapsed workspace header", () => {

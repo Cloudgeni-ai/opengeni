@@ -40,7 +40,12 @@ export async function auditWorkspaceBillingStatic(
     checkUnscopedOperationalRoutes(file, text, findings);
     await checkForbiddenProviderImports(file, text, findings);
     checkBillingPortalSurface(file, text, findings);
-    checkGithubWebhookAdvertising(file, text, findings);
+    if (file === GITHUB_APP_MANIFEST_FILE) {
+      const receiver = await Bun.file(GITHUB_WEBHOOK_RECEIVER_FILE)
+        .text()
+        .catch(() => "");
+      checkGithubWebhookAdvertising(file, text, receiver, findings);
+    }
     checkMcpDefaults(file, text, findings);
   }
 
@@ -266,16 +271,30 @@ export function checkBillingPortalSurface(file: string, text: string, out: Findi
   }
 }
 
-function checkGithubWebhookAdvertising(file: string, text: string, out: Finding[]): void {
-  if (
-    file === "packages/github/src/index.ts" &&
-    (text.includes("hook_attributes") || text.includes("/v1/github/webhook"))
-  ) {
-    out.push({
-      file,
-      message: "advertises GitHub webhooks without a signed/idempotent /v1/github/webhook receiver",
-    });
-  }
+const GITHUB_APP_MANIFEST_FILE = "packages/github/src/index.ts";
+const GITHUB_WEBHOOK_RECEIVER_FILE = "packages/core/src/domain/event-triggers/github-events.ts";
+const GITHUB_WEBHOOK_PATH = ["/v1", "webhooks", "github"].join("/");
+
+/**
+ * The GitHub App manifest may advertise webhooks only to the event-source
+ * receiver, which verifies `X-Hub-Signature-256` over the raw body and keys
+ * each delivery by `X-GitHub-Delivery`, so redeliveries are idempotent.
+ */
+export function checkGithubWebhookAdvertising(
+  file: string,
+  text: string,
+  receiver: string,
+  out: Finding[],
+): void {
+  if (file !== GITHUB_APP_MANIFEST_FILE || !text.includes("hook_attributes")) return;
+  const advertisesReceiver = text.includes(`\${base}${GITHUB_WEBHOOK_PATH}\``);
+  const receiverSignedAndIdempotent =
+    receiver.includes('"x-hub-signature-256"') && receiver.includes('"x-github-delivery"');
+  if (advertisesReceiver && receiverSignedAndIdempotent) return;
+  out.push({
+    file,
+    message: `advertises GitHub webhooks without the signed, idempotent ${GITHUB_WEBHOOK_PATH} receiver`,
+  });
 }
 
 export function checkMcpDefaults(file: string, text: string, out: Finding[]): void {

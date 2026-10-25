@@ -9,7 +9,6 @@ import type {
   PreviewApiIntegrationRequest,
 } from "@opengeni/sdk";
 import { OpenGeniClient } from "@opengeni/sdk";
-import { OpenGeniAutomationsClient } from "@opengeni/sdk/automations";
 import type { Opengeni } from "@opengeni/sdk/chat";
 import {
   getWorkspaceAllowance,
@@ -207,25 +206,55 @@ export async function configureSchedule(
   return await og.getScheduledTask(workspaceId, task.id);
 }
 
-export async function configureEventSource(
+export async function configureEventAutomation(
   og: OpenGeniClient,
   workspaceId: string,
-  webhookSecret: string,
+  serverId: string,
+  storeSecret: (name: string, value: string) => Promise<void>,
 ) {
-  const automations = new OpenGeniAutomationsClient(og);
-  const matches = (await automations.listSources(workspaceId)).filter(
-    (source) => source.name === "Acme product events",
+  const sources = (await og.listEventSources(workspaceId)).filter(
+    (source) => source.kind === "webhook" && source.name === "Acme product events",
   );
-  if (matches.length > 1) throw new Error("Reconcile duplicate event sources");
-  const source =
-    matches[0] ??
-    (await automations.createSource(workspaceId, {
+  if (sources.length > 1) throw new Error("Reconcile duplicate event sources");
+  let source = sources[0];
+  if (!source) {
+    const created = await og.createEventSource(workspaceId, {
+      kind: "webhook",
+      adapter: "standard",
       name: "Acme product events",
-      adapterId: "signed-json.v1",
-      webhookSecret,
-      configuration: {},
+      visibility: "workspace",
+    });
+    // Returned once: the product's backend signs every event with it.
+    if (!created.signingSecret) throw new Error("The event source returned no signing secret");
+    await storeSecret("OPENGENI_EVENTS_SIGNING_SECRET", created.signingSecret);
+    source = created.source;
+  }
+  const setupKey = "acme-product:report-changed";
+  const tasks = (await og.listScheduledTasks(workspaceId)).filter(
+    (task) => task.metadata.developerSetupKey === setupKey,
+  );
+  if (tasks.length > 1) throw new Error("Duplicate provisioning key; reconcile schedules");
+  const task =
+    tasks[0] ??
+    (await og.createScheduledTask(workspaceId, {
+      name: "Acme report changed",
+      schedule: { type: "manual" }, // runs only on its events
+      status: "paused",
+      runMode: "new_session_per_run",
+      agentConfig: {
+        prompt: "Summarize the changed report.",
+        agent: productAgent,
+        sandboxBackend: "none",
+        tools: [{ kind: "mcp", id: serverId }],
+      },
+      events: { triggers: [{ sourceId: source.id, eventTypes: ["report.changed"] }] },
+      metadata: { developerSetupKey: setupKey },
     }));
-  return (await automations.listSources(workspaceId)).find((item) => item.id === source.id);
+  return {
+    // The product's backend posts Standard Webhooks events to webhookUrl.
+    source: await og.getEventSource(workspaceId, source.id),
+    task: await og.getScheduledTask(workspaceId, task.id),
+  };
 }
 
 export async function configureWebhook(

@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { markFailurePhase } from "./diagnostics";
+import { writeAttempted, writeResolved } from "./cycle-outcome";
 import {
   assertSha,
   canonical,
@@ -61,8 +62,28 @@ export class GitStore {
   commandTimeoutMs(args: string[]): number {
     return args[0] === "fetch" ? this.fetchTimeoutSeconds * 1000 : 60_000;
   }
-  async fetch(remote: string, refs: string[]): Promise<void> {
-    await this.exec(["fetch", "--no-tags", "--no-write-fetch-head", remote, ...refs]);
+  async fetch(
+    remote: string,
+    refs: string[],
+    cache: "state" | "candidate" | "objects" = "objects",
+  ): Promise<void> {
+    // Raw-SHA fetches without refs cannot advertise their existing history on
+    // the next fetch. Main churn then downloads the full history repeatedly.
+    // These bounded LOCAL refs are negotiation hints, never queue/state proof.
+    // Keep state roots separate so a one-off candidate read cannot evict main.
+    const targets = refs.map((ref, index) =>
+      /^[a-f0-9]{40}$/.test(ref) && index < 64
+        ? `+${ref}:refs/batcher-cache/${cache}/${index}`
+        : ref,
+    );
+    await this.exec([
+      "fetch",
+      "--atomic",
+      "--no-tags",
+      "--no-write-fetch-head",
+      remote,
+      ...targets,
+    ]);
   }
   async ancestor(base: string, tip: string): Promise<boolean> {
     try {
@@ -260,6 +281,8 @@ export class AtomicGitWriter {
     const current = await this.git.remoteRefs(this.remote);
     if (updates.some((u) => (current.get(u.ref) ?? null) !== u.expected))
       throw new Error("Stale remote ref snapshot");
+    const outcomeKey = `git:${fence.next}`;
+    writeAttempted(outcomeKey);
     await this.git
       .exec([
         "push",
@@ -278,5 +301,6 @@ export class AtomicGitWriter {
       .catch((error) => {
         throw markFailurePhase(error, "atomic-push");
       });
+    writeResolved(outcomeKey);
   }
 }

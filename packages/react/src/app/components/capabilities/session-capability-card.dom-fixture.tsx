@@ -847,7 +847,7 @@ describe("conversation connection card", () => {
         await act(async () => button(h.container, "Add API key").click());
         const dialog = document.querySelector("[role=dialog]");
         expect(dialog?.textContent).toContain(
-          "Your messages and personal schedules can use this account.",
+          "Your messages and personal automations can use this account.",
         );
         expect(dialog?.querySelector("input[type=checkbox]")).toBeNull();
         const add = button(h.container, "Add tools");

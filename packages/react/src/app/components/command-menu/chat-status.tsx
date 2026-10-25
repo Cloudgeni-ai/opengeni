@@ -23,7 +23,7 @@ const WORKSPACE_PAGE = 40;
 
 const lastWorkspaceRead = new Map<string, number>();
 
-/** The working, needs-you, waiting, scheduled and creator marks, as on the chat's sidebar row. */
+/** The working, needs-you, waiting, automation and creator marks, as on the chat's sidebar row. */
 export function ChatStatusMarks({ status }: { status: ChatStatus | null }) {
   if (!status) return null;
   const { summary } = status;
@@ -32,7 +32,8 @@ export function ChatStatusMarks({ status }: { status: ChatStatus | null }) {
       {summary.kind !== "neutral" ? <span className="sr-only">{summary.label}</span> : null}
       <RailTrailingMetadata
         summary={summary}
-        scheduled={status.scheduled}
+        automationWait={status.automationWait}
+        automationWaitLabel={status.automationWaitLabel ?? undefined}
         creator={status.creator}
       />
     </>

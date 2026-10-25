@@ -558,6 +558,7 @@ describe("core new-session draft hydration", () => {
       authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
       authorityNonce: `core-new-session-drafts-${crypto.randomUUID()}`,
       repositoryIds: [42],
+      eventRouteSecret: null,
     });
 
     const resources: ResourceRef[] = [

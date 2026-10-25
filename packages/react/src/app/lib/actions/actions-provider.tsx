@@ -20,16 +20,17 @@ import { useAppContext } from "../../app-context";
 import { useRail } from "../../components/rail/rail-context";
 import { requestConversationFind } from "../conversation-find-event";
 import { desktopBridge, desktopCapability } from "../desktop";
-import { useNavigate, useRouterState } from "../navigation";
+import { useNavigate, usePage, useRouterState } from "../navigation";
 import { requestSessionSearch } from "../session-search-route";
 import { requestSessionComposerFocus } from "../session-focus";
 import { useSessionUiFeature } from "../session-ui-features";
 import { useUiEventTarget } from "../ui-events";
 import { t } from "../console-text";
-import { isPersonalWorkspace } from "../managed-self-context";
+import { isPersonalWorkspace, navigableWorkspaces } from "../managed-self-context";
 import { workspacesByOrganization } from "../org";
 import { hasWorkspacePermission } from "../permissions";
 import { readChatDirectory, recordChatVisit } from "./chat-directory";
+import { sitePath } from "./site-directory";
 import {
   extendChatSwitcher,
   isSwitcherKey,
@@ -153,6 +154,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
   const app = useAppContext();
   const rail = useRail();
   const navigate = useNavigate();
+  const page = usePage();
   const ops = useChatOperations();
   const uiEvents = useUiEventTarget("document");
   const windowEvents = useUiEventTarget("window");
@@ -165,15 +167,21 @@ export function ActionsProvider(props: { children: ReactNode }) {
   const subjectId = app.accessContext.subjectId;
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const routeChatId = /\/sessions\/([^/]+)/.exec(pathname)?.[1] ?? null;
+  const routeSiteId = /\/sites\/([^/]+)/.exec(pathname)?.[1] ?? null;
   const currentChat =
     app.session && app.session.id === routeChatId && app.session.workspaceId === workspaceId
       ? app.session
       : null;
 
-  // Every workspace open to the person, in the workspace picker's order.
+  // Every workspace open to the person, in the workspace picker's order (so
+  // not a Personal one the organization turned off, unless the person is in it).
   const workspaces = useMemo<WorkspaceChoice[]>(
     () =>
-      workspacesByOrganization(t, app.accessContext, app.workspaces).flatMap((group) =>
+      workspacesByOrganization(
+        t,
+        app.accessContext,
+        navigableWorkspaces(app.workspaces, app.managedSelfContext, workspaceId),
+      ).flatMap((group) =>
         group.workspaces.map((workspace) => ({
           id: workspace.id,
           name: workspace.name,
@@ -181,7 +189,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
           personal: isPersonalWorkspace(workspace, app.managedSelfContext),
         })),
       ),
-    [app.accessContext, app.workspaces, app.managedSelfContext],
+    [app.accessContext, app.workspaces, app.managedSelfContext, workspaceId],
   );
   // The same rule as the fork button under a message.
   const canForkCurrentChat =
@@ -275,6 +283,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       surface,
       platform,
       currentChat,
+      currentSiteId: routeSiteId,
       ops,
       chatList,
       workspacePanel,
@@ -282,6 +291,14 @@ export function ActionsProvider(props: { children: ReactNode }) {
       canForkCurrentChat,
       newChat: () => rail.startNewSession(),
       openChat: (chatId, inWorkspaceId) => openChatForTyping(chatId, inWorkspaceId),
+      openSite: (siteId) => {
+        rail.setDrawerOpen(false);
+        void navigate({
+          to: "/workspaces/$workspaceId/sites/$siteId",
+          params: { workspaceId, siteId },
+        });
+      },
+      siteLink: (siteId) => `${page.origin()}${sitePath(workspaceId, siteId)}`,
       openWorkspace: (id) => rail.openWorkspace(id),
       openWorkspacePicker: () => openCommandMenu(true),
       openInbox: () => {
@@ -314,6 +331,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       subjectId,
       platform,
       currentChat,
+      routeSiteId,
       routeChatId,
       ops,
       chatList,
@@ -326,6 +344,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
       rail,
       openChatForTyping,
       navigate,
+      page,
       uiEvents,
       windowEvents,
       openCommandMenu,

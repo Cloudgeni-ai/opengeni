@@ -8,14 +8,14 @@ import { NavItem, type NavItemSize } from "@opengeni/react/ui/settings-nav";
 /* ----------------------------------------------------------------------------
    The main rail's destinations, as the product ships them (components/rail/
    primary-nav.tsx and workspace-nav.tsx): New session, Capabilities,
-   Knowledge, Schedules, Artifacts, then Settings. Labels, order and
+   Knowledge, Automations, Meetings, Artifacts, then Settings. Labels, order and
    icons come from the real catalog. Settings opens in the content area.
    -------------------------------------------------------------------------- */
 
 const DESTINATION_IDS = {
   "/workspaces/$workspaceId/plugins": "capabilities",
   "/workspaces/$workspaceId/state": "knowledge",
-  "/workspaces/$workspaceId/schedules": "schedules",
+  "/workspaces/$workspaceId/automations": "schedules",
   "/workspaces/$workspaceId/artifacts": "artifacts",
 } as const;
 

@@ -72,7 +72,6 @@ export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
     if (!me) return new Response("Unauthorized", { status: 401 });
     return { user: me.id, tenant: me.orgId }; // or { user: me.id } for one workspace per user
   },
-  createSession: (input) => input, // let the browser start chats; add agent/tools here
 });
 ```
 
@@ -98,8 +97,11 @@ for several components or the headless hooks.
 private per user by default), `{ user }` (one workspace per user), or
 `{ user, workspaceId }` (bring your own workspace). `og.workspaceId({ tenant })`
 and `og.workspaceId({ user })` translate the same ids to the workspace the
-proxy uses. The `createSession` hook returns the complete create request, so it
-is where the server chooses the agent, Skills, tools, and model policy:
+proxy uses. Without a `createSession` hook the browser creates chats with
+Opengeni's own create request, limited by the user's permissions. With the
+hook, chat setup is server-owned: the hook returns the complete create
+request, so it is where the server chooses the agent, Skills, tools, and model
+policy, and the proxy refuses the routes that would change that setup later:
 
 ```ts
 createSession: ({ initialMessage, idempotencyKey }) => ({
@@ -119,32 +121,76 @@ A server that creates sessions itself uses the same mapping and identity:
 Mount the handler with a framework adapter: `createSessionProxyRoute` from
 `@opengeni/sdk/next` (App Router catch-all route), `toNodeMiddleware` from
 `@opengeni/sdk/express`, or `toHonoHandler` from `@opengeni/sdk/hono`.
-`OpenGeniChat` lists the chats the resolved user created (`sessionList:
-"mine"`, the proxy default) and starts new ones through the `createSession`
-hook.
+`OpenGeniChat` lists the chats Opengeni lets the resolved user read
+(`listProps={{ mineOnly: true }}` for only their own) and starts new ones.
 
-The proxy calls `resolve` on every request and acts only through
-`asUser(user, { source })`; there is no fallback to the key's service
-authority. It rejects any workspace other than the resolved one and serves only
-the native routes `OpenGeniProvider` and the conversation use: client config;
-workspace read, model catalog, live control stream, and workspace Resume;
-session read and rename, event list and SSE (with `Last-Event-ID` resume),
-send, steer, approval and human-input responses, queue, composer draft,
-pause/resume, (unless `files: false`) attachment upload and download URLs, and
-(only with explicit `sandboxFiles: true`) session sandbox file reads for `sandbox:` links.
-Every other route or method is a 404 (cancel and workspace Pause are refused);
-unknown query parameters on served reads pass through for newer browser SDKs. Browser session creation is off unless the server
-supplies `createSession`; the browser may then send only `initialMessage` and
-`idempotencyKey`, and the hook returns the complete request, so tools, MCP
-servers, Skills, instructions, and model policy stay server-chosen. Bodies are
-bounded (`maxBodyBytes`, default 1 MiB), cannot rotate MCP credentials, and may
-attach only files; `modelSelection: false` removes per-message model choices
-and `authorizeSession` adds a product-level session check. Without
-`authorizeMutation` only cross-site mutations (by `Sec-Fetch-Site`) are
-refused, so cookie-authenticated products should pass their CSRF check.
+The proxy is a relay. It calls `resolve` on every request and acts only
+through `asUser(user, { source })`; there is no fallback to the key's service
+authority. Inside the resolved workspace it forwards every Opengeni route and
+method as that user, so the browser can use what Opengeni lets the user do
+there with the same requests the Opengeni web app makes, and Opengeni's
+permission checks decide each one. A path naming another workspace is a 403.
+Outside the workspace only the bootstrap reads answer, scoped to the resolved
+workspace: `GET /v1/workspaces`, `GET /v1/access/me` (the user's effective
+grant there) and `GET /v1/config/client`. The user's own inbox also passes:
+`GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to the resolved
+workspace's items, and `GET`/`PUT /v1/inbox/settings` (keep settings
+read-only with `authorizeMutation` if your product owns them). Everything
+else is a 404. An external user has an inbox like an Opengeni member: their
+sessions' questions, approvals, paused goals and agent notifications land
+there, and the stock app shows it, so a product needs no notification
+pipeline of its own. Phone pushes need the Opengeni native app and do not
+reach external users.
+
+The product narrows that surface in three places, from coarse to fine:
+
+1. **The organization key.** An `asUser` request holds only the permissions
+   both the key and the user's membership hold. A key without `schedules:*`
+   or `knowledge:*` gives no user those, whatever their role.
+2. **Member permissions.** Automatic membership grants the conversation
+   permissions below; `addExternalWorkspaceMember` and
+   `updateExternalWorkspaceMember` choose others per user.
+3. **`refuse(route, context)`.** Routes Opengeni would allow but the product
+   keeps closed: return `true` for a 404, or a `Response`. `route` is
+   `{ method, segments, sessionId }`, with the path segments after
+   `/v1/workspaces/{workspaceId}`; every hook also finds it in
+   `context.route`.
+
+`authorizeSession(sessionId, context)` adds a product-level check to every
+`sessions/{id}/...` route and every request that names a chat in
+`x-opengeni-session-id`. With `createSession`, the proxy refuses the routes
+that would change server-owned chat setup (a chat's agent, tool policy, Skills,
+variable sets, usage limit, visibility, active sandbox and Codex account,
+forks, and `chat/completions`); browser MCP credential rotation is always
+refused. Every action that starts model work passes through
+`beforeForwardMessage` with its `delivery` and the browser's action key
+(`clientEventId`): messages (`create`, `send`, `steer`, `submit`), the
+person's `approval` and `answer`, `resume`, `retry`, `queue-steer` and
+`realtime` voice. It is where a product admits work (billing, rate limits)
+and adds per-message context. It also sees the context the browser attached
+(`browserContext`, an unverified claim; for voice, once per entry) and can
+keep, replace or drop it; return a `Response` to refuse. Bodies are
+bounded (`maxBodyBytes`, default 1 MiB) and `modelSelection: false` removes
+per-message and retry model choices. `afterForward(route, response, context)`
+sees Opengeni's answer to every forwarded request before the browser does,
+so the product can record what it keeps beside Opengeni (an uploaded file's
+owner, a new chat's id, activity) or answer differently. When the hop to
+Opengeni fails or answers 408 or 5xx for a keyed action the relay read, it
+sends the action once more; Opengeni answers a repeated key with the first
+outcome. Without
+`authorizeMutation`, cross-site mutations (by `Sec-Fetch-Site`) and the content
+types a cross-site form can send are refused, so cookie-authenticated products
+should pass their CSRF check.
+
+What users see is the UI's decision, not the proxy's: component props
+(`newChat`, `listProps`, `attachments`, `voiceInput`, `realtimeVoice`,
+`modelPicker`, `renderInteractiveBlock`) and `SessionApp` presets and
+`features` choose the surfaces, and the stock UI also hides controls the user's
+permissions do not allow. See
+[Product relay](design/product-relay.md) for the design.
 
 The handler is JavaScript. A Django, Rails, Go, PHP, or Java backend implements
-the same allowlist in its own framework instead of running a Node sidecar: see
+the same relay in its own framework instead of running a Node sidecar: see
 [Proxy from any backend](../docs-site/integrate/proxy-from-any-backend.mdx)
 for the routes, headers, stripped fields, security rules, and a Django example.
 
@@ -255,13 +301,18 @@ anyone else to it. Legacy `"isolated"` needs the `Opengeni` facade as the proxy
 target; with `{ tenant, user }` it does the same per tenant user (standalone:
 `createWorkspaceIdResolver` from `@opengeni/sdk/tenant-workspaces`).
 `memberPermissions` replaces that first owner grant's permissions; a
-retry never restores a revoked owner grant. A `resolve` that returns a
+retry never restores a revoked owner grant. Set `memberPermissions` on the
+facade for tenant workspaces too when your users need a role other than the
+defaults (for example `artifacts:read` or `documents:search`): the SDK then
+adds each signed-in user the relay or facade resolves with exactly those
+permissions before their first request, with the same stable onboarding key. A `resolve` that returns a
 `tenant` or `workspaceId` key with an empty or undefined value is refused
 rather than falling back to the per-user workspace.
 
-Automatically added users receive workspace read, session create/read/control
-(including Send), file upload/read, and `mcp_servers:attach` for the host's
-per-session servers, never admin permissions. The organization key remains a
+Without `memberPermissions`, automatically added users (and anonymous
+visitors) receive workspace read, session create/read/control (including
+Send), file upload/read, and `mcp_servers:attach` for the host's per-session
+servers, never admin permissions. The organization key remains a
 permission ceiling on every request. Change an existing member's permissions
 with `updateExternalWorkspaceMember`; Opengeni never overwrites them. Supply
 MCP URLs and credentials only in the server's `createSession` hook, not
@@ -1115,23 +1166,16 @@ routes, which resolve against the product's own origin and 404 there.
 
 | Agent writes | Target | `SessionConversation` default |
 | --- | --- | --- |
-| `[Report](artifact:<file uuid>)` | Retained workspace file (exports, published files) | Downloads through a short-lived URL (proxy `files`) |
-| `[Code](sandbox:src/app.ts:12)` | File in the session's working directory | Unavailable unless the proxy explicitly enables `sandboxFiles: true` |
+| `[Report](artifact:<file uuid>)` | Retained workspace file (exports, published files) | Downloads through a short-lived URL |
+| `[Code](sandbox:src/app.ts:12)` | File in the session's working directory | Downloads when the user has `files:read` |
 | `[Weekly report](/workspaces/<ws>/artifacts/editable/<id>)` | Live editable document, workbook, or presentation (`artifactReference` from the artifact tools) | Opens in the host viewer with `onOpenArtifact`; otherwise unavailable |
 | `[Dashboard](/workspaces/<ws>/artifacts/<uuid>)` or an `opengeni-site` fence | Saved Site / published HTML | Fence renders the inline Site preview; links open with `onOpenArtifact` |
 
-With `SessionConversation` (or `OpenGeniChat`) behind the proxy, retained-file
-downloads work by default. Sandbox-path reads are off by default: enable
-`sandboxFiles: true` deliberately. The proxy forces workspace-only reads,
-including on Connected Machines: relative paths and absolute paths inside the
-selected working directory are accepted; traversal, outside absolute paths,
-and symlink components are refused. Reads are capped at 25 MiB in actual bytes.
-Providers without the required no-symlink descriptor support fail closed.
-This strict mode currently requires a POSIX runtime with Python and
-descriptor-relative opens; Windows Connected Machine sandbox-path downloads
-are unavailable.
-The proxy reports this capability in client config, so disabled sandbox links
-render unavailable rather than offering a download that fails.
+With `SessionConversation` (or `OpenGeniChat`) behind the proxy, both
+download as they do in Opengeni: the user needs `files:read`, and Opengeni
+applies its own session and Connected Machine access checks. A product that
+keeps sandbox reads closed refuses `sessions/{id}/fs/*` with `refuse` and
+routes `sandbox:` links with `resolveLink`.
 
 #### Inline previews and the artifact viewer
 
@@ -1174,56 +1218,25 @@ default and overridable: pass `labels` (a partial `ArtifactLabels`) to
 `ArtifactLabelsProvider`. Unspecified keys keep the defaults, and count and
 version labels are functions so the host applies its own plural rules.
 
-Both read through the proxy only when it opts in with `artifacts: true`:
+Both read through the proxy like every other Opengeni route, as the resolved
+user and under Opengeni's own checks (`artifacts:read` to read,
+`artifacts:publish` to edit or change a Site). The viewer and conversation
+name their session in `x-opengeni-session-id`, so `authorizeSession` also runs
+for those requests. Site HTML keeps Opengeni's headers: it is a sandboxed
+download, never a page on the product origin. The editor's live socket is
+ticket-authenticated and connects to the Opengeni API directly
+(`editableLiveUrl` overrides the derived URL); the client config advertises it
+with the user's browser cache partition, and permission changes produce a new
+authorization epoch. When an older API lacks the effective-grant endpoint, the
+proxy reports `artifacts: false` and the conversation shows Sites as
+unavailable. A host with its own proxy adds the same capability to its
+`/v1/config/client` response with `artifactViewerCapability({ client:
+og.asUser(user, { source }), workspaceId, source })` from `@opengeni/sdk`.
 
-```ts
-createSessionProxyHandler(og, { resolve, authorizeMutation, artifacts: true });
-```
-
-Every artifact request names its session in `x-opengeni-session-id` (the
-viewer and conversation send it); the proxy runs `authorizeSession`, then
-performs an exact authorized association lookup for that session on every
-request (no cached authorization or bounded list scan): the artifact read and
-editor live ticket, and Site detail and HTML (served as a sandboxed download,
-never as a page on the product origin). Writes, exports, version changes, and
-Site tool calls are not proxied. The editor's live socket is ticket-authenticated
-and connects to the Opengeni API directly (`artifacts.editableLiveUrl`
-overrides the derived URL). Tickets minted through the proxy bind the source
-session, whose authority the API also revalidates while connected.
-Sockets bound this way have a 15-second lease from ticket issuance and reconnect
-through the proxy, so its product-level `authorizeSession` also checks renewal.
-The deadline runs independently of authorization; source authority is checked
-again inside the mutation commit transaction after kernel computation.
-Unbound console tickets keep their existing socket lifecycle. Client
-config resolves fresh effective workspace permissions (including external
-users and organization-key ceilings) and advertises the user's browser cache
-partition; permission changes produce a new authorization epoch. A host with
-its own proxy adds the same capability to
-its `/v1/config/client` response with `artifactViewerCapability({ client:
-og.asUser(user, { source }), workspaceId, source })` from `@opengeni/sdk`, and
-forwards the same artifact routes under its own authorization.
-
-A page that belongs to the workspace rather than to one chat (for example a
-dashboard several sessions keep current) has no single source session. To show
-it with `SiteList` or `SiteDetail` from `@opengeni/react/sites`, opt in with
-`sites: true`: requests that do not send `x-opengeni-session-id` may then list
-Sites and read Site detail, content, and versioned HTML under Opengeni's own
-read authorization for the resolved user (`artifacts:read`). It is read-only:
-rollback and status changes stay closed, so pass `canPublish={false}` to
-`SiteDetail`. Requests that name a session keep the session-scoped checks above.
-
-When an older API lacks the effective-grant endpoint, the proxy omits artifact
-capability from config but still boots the conversation. Artifact requests fail
-closed; a subsequent config read can discover upgraded API support.
-
-The server-only helpers for exact association, effective grant and streaming
-HTML reads live on `@opengeni/sdk/session-proxy`, not the browser client.
-The proxy streams Site HTML with backpressure and cancellation and caps actual
-bytes at `SESSION_PROXY_SITE_HTML_MAX_BYTES` (25 MiB). An oversized stream fails
-with `SessionProxySiteHtmlTooLargeError` (`site_html_too_large`); once response
-headers have been sent, the body errors instead of replacing the HTTP status.
-The Opengeni console's direct HTML delivery is unchanged. Temporary viewer
-config failures show Retry; absence of the capability remains unavailable.
+Pages that belong to the workspace rather than to one chat (for example a
+dashboard several sessions keep current) work the same way: `SiteList` and
+`SiteDetail` from `@opengeni/react/sites` read and, with `artifacts:publish`,
+change Sites through the proxy.
 
 For any other routing, `resolveLink` returns `{ href }` for a host page or
 `{ open }` for an action, and `null` to keep the default; `viewerLinkResolver`

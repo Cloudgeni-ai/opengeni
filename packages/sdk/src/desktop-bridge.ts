@@ -34,7 +34,29 @@ export type DesktopCapability =
   /** The web app lists its actions and keys; the shell builds the menu bar from them. */
   | "menuActions"
   /** The app reports a new version it found, and installs it on request. */
-  | "updates";
+  | "updates"
+  /** Record the audio other apps play (a meeting's other participants) as its own track. */
+  | "systemAudio"
+  /** What Opengeni may do on this computer: switches the app enforces, and the microphone. */
+  | "computerCapabilities";
+
+export type DesktopSystemAudioErrorCode =
+  /** This computer, its OS version or this app build can't record other apps' audio. */
+  | "unavailable"
+  /** The person hasn't allowed recording other apps' audio. */
+  | "permission_denied"
+  /** Linux: no PulseAudio or PipeWire sound server to record from. */
+  | "sound_server_unavailable"
+  /** The capture failed to start or stopped unexpectedly. */
+  | "capture_failed";
+
+export interface DesktopSystemAudioError {
+  code: DesktopSystemAudioErrorCode;
+  /** A plain English sentence for people. */
+  message: string;
+  /** Technical detail for logs. */
+  detail?: string;
+}
 
 /**
  * The app's own updates as the web app shows them. `downloading` means a new
@@ -188,6 +210,56 @@ export type DesktopAppShotResult =
       message: string;
     };
 
+/**
+ * What the person lets Opengeni do on this computer, kept by the desktop app
+ * and enforced there: a switch that is off stops the use, not only its
+ * display. Each is on until the person turns it off, so nothing that worked
+ * before stops; the system permission each needs is asked for only when the
+ * person turns it on or first uses it.
+ */
+export interface DesktopComputerSettings {
+  /**
+   * Agents may see and control the screen of this computer (computer use).
+   * Off: the app's agent shows no screen and sends no input.
+   */
+  screenControl: boolean;
+  /**
+   * The Opengeni Browser extension in Chrome may reach this computer's agent,
+   * so agents can work in the person's own Chrome. Off: the agent removes its
+   * bridge, and the extension can't reach it.
+   */
+  browserExtension: boolean;
+  /** Dictation and voice chats may use the microphone. Off: the app refuses it. */
+  microphone: boolean;
+}
+
+/** The system's answer about a permission; `unknown` where the system has no such question. */
+export type DesktopSystemPermission = "granted" | "denied" | "notDetermined" | "unknown";
+
+export interface DesktopComputerCapabilities {
+  settings: DesktopComputerSettings;
+  /** The system's answer about the microphone for this app. */
+  microphone: DesktopSystemPermission;
+  /**
+   * This computer was connected with screen control, so turning
+   * `screenControl` on needs nothing more than the system's permissions.
+   * False: turning it on connects again with screen control.
+   */
+  screenControlConnected: boolean;
+  /**
+   * Switches the app can't enforce here, e.g. when a separately installed agent
+   * service serves this computer rather than the app's own agent, or an older
+   * agent that doesn't honour the switch.
+   */
+  unavailable: (keyof DesktopComputerSettings)[];
+  /**
+   * What went wrong with a switch, in a sentence for its row: a change that
+   * couldn't be saved or applied, settings that couldn't be read, or an agent
+   * too old to honour it. Absent from older apps.
+   */
+  problems?: Partial<Record<keyof DesktopComputerSettings, string>>;
+}
+
 /** `window.opengeniDesktop` inside a desktop app. */
 export interface DesktopBridge {
   readonly version: number;
@@ -268,6 +340,38 @@ export interface DesktopBridge {
     install(): Promise<void>;
     onChange(listener: (state: DesktopUpdateState) => void): Unsubscribe;
   };
+  /**
+   * Other apps' audio, as mono float samples. With the `systemAudio`
+   * capability. The app leaves its own sounds out.
+   */
+  readonly systemAudio?: {
+    /**
+     * Start recording. Resolves once audio flows; rejects with a
+     * {@link DesktopSystemAudioError}. Starting again ends the page's previous
+     * capture.
+     */
+    start(): Promise<{ captureId: string; sampleRate: number }>;
+    stop(captureId: string): Promise<void>;
+    /** Samples arrive about ten times a second, silence included. */
+    onSamples(listener: (captureId: string, samples: Float32Array) => void): Unsubscribe;
+    /** The capture ended: stopped (error null) or failed. */
+    onEnded(
+      listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
+    ): Unsubscribe;
+  };
+  /** What Opengeni may do on this computer. With the `computerCapabilities` capability. */
+  readonly computerCapabilities?: {
+    status(): Promise<DesktopComputerCapabilities>;
+    /** Turn switches on or off; the app applies them at once (restarting its agent if needed). */
+    update(change: Partial<DesktopComputerSettings>): Promise<DesktopComputerCapabilities>;
+    /**
+     * Ask for the microphone: the system's question while it hasn't been
+     * answered, otherwise the system's settings page for it.
+     */
+    requestMicrophone(): Promise<DesktopComputerCapabilities>;
+    /** Switches or the system's answers changed. */
+    onChange(listener: () => void): Unsubscribe;
+  };
 }
 
 /** The bridge when the page runs inside a desktop app, else null. */
@@ -314,6 +418,14 @@ export const DESKTOP_IPC = {
   updatesState: "og:updates:state",
   updatesInstall: "og:updates:install",
   updatesChanged: "og:updates:changed",
+  systemAudioStart: "og:system-audio:start",
+  systemAudioStop: "og:system-audio:stop",
+  systemAudioSamples: "og:system-audio:samples",
+  systemAudioEnded: "og:system-audio:ended",
+  capabilitiesStatus: "og:capabilities:status",
+  capabilitiesUpdate: "og:capabilities:update",
+  capabilitiesRequestMicrophone: "og:capabilities:request-microphone",
+  capabilitiesChanged: "og:capabilities:changed",
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",
   welcomeCancel: "og:welcome:cancel",

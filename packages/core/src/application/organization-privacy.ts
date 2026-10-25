@@ -6,6 +6,7 @@ import type {
 import {
   getOrganizationPrivacyPreferences,
   getPrivateSessionCreatePolicy,
+  personalWorkspaceClosedToNewWork,
   SessionTenancyNotActivatedError,
   updateOrganizationPrivacyPreferences,
   type Database,
@@ -88,6 +89,35 @@ export async function requireDeploymentAllowsOnlyMe(
   if (!policy?.personalWorkspace) throw new SessionTenancyNotActivatedError();
 }
 
+/**
+ * Raised when someone starts a new chat or schedule in a Personal workspace
+ * after the organization turned Personal workspaces off.
+ */
+export class PersonalWorkspacesOffError extends Error {
+  readonly name = "PersonalWorkspacesOffError";
+  readonly code = "personal_workspaces_off";
+  constructor() {
+    super(
+      "Personal workspaces are turned off in this organization. Start new chats and schedules in a shared workspace.",
+    );
+  }
+}
+
+/**
+ * Refuse new work (a chat or a schedule) in a Personal workspace once the
+ * organization turned Personal workspaces off. Existing chats there stay
+ * readable and keep working; the person's machines, browsers and vaults that
+ * the workspace anchors keep working from shared workspaces.
+ */
+export async function requirePersonalWorkspaceOpenToNewWork(
+  deps: { db: Database },
+  input: { accountId: string; workspaceId: string },
+): Promise<void> {
+  if (await personalWorkspaceClosedToNewWork(deps.db, input)) {
+    throw new PersonalWorkspacesOffError();
+  }
+}
+
 /** Raised when a change would go past what this deployment allows. */
 export class OrganizationPrivacyLockedError extends Error {
   readonly name = "OrganizationPrivacyLockedError";
@@ -101,6 +131,7 @@ function settingsResponse(
   return {
     organizationId,
     ...effectiveOrganizationPrivacy(preferences, limits),
+    personalWorkspaces: preferences.personalWorkspacesEnabled,
     limits,
     updatedAt: preferences.updatedAt,
   };
@@ -155,6 +186,9 @@ export async function updateOrganizationPrivacySettings(
       : {}),
     ...(input.request.adminsSeePrivateSchedules !== undefined
       ? { adminsSeePrivateSchedules: input.request.adminsSeePrivateSchedules }
+      : {}),
+    ...(input.request.personalWorkspaces !== undefined
+      ? { personalWorkspacesEnabled: input.request.personalWorkspaces }
       : {}),
   });
   return settingsResponse(input.organizationId, preferences, limits);

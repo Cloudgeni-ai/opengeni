@@ -6,6 +6,11 @@ an organization, workspace, or organization user and driven by the agent directl
 primary compute target**, not a backend variant layered on top of a managed
 box.
 
+The program that runs on the machine is **Opengeni Runner** (command
+`opengeni-agent`, source in [`../agent`](../agent)). In this document, "native
+agent", "machine agent" and "Connected Machine agent" mean the Runner; "the
+agent" in the context of a session means the AI agent driving it.
+
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
@@ -814,7 +819,8 @@ remains in that group. The browsers it launched run in their own sessions and
 are adopted by the next controller. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
-busy attached browser sessions, browsers without a durable working runtime, and
+busy attached browser sessions, browsers without a durable working runtime,
+sessions with a JavaScript dialog unanswered for less than 30 minutes, and
 isolated virtual desktops. A quiescent managed browser with a durable working
 runtime does not: graceful browserd shutdown detaches from it without closing
 it, so its tabs and unsaved page state stay live and the restarted controller
@@ -1558,6 +1564,11 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   workspace access and confirms locally before connecting. The link carries only
   the origin, workspace/chat destination and subject, never an enrollment token.
   Mobile browsers direct the person to the computer they want to connect;
+- inside the desktop app, the same dialog is **Connect a machine**: for the
+  computer the app runs on it shows the **Computer use** switch (off, turning
+  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
+  command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.
   Only then is a token minted. The person chooses **Who can use it?** (**Only me** by
   default, or **This workspace**) and screen control (off by default); both are
@@ -2073,6 +2084,35 @@ remain enforced. Reuse honors
 explicit placement, identity, revision, network route and linked desktop choices.
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
+
+An attached BrowserSession never leaves its empty tabs or Chrome's debugger
+behind. Whatever ends its controller runtime (an explicit end, a controller
+shutdown or restart, or an idle release after the same idle time as a managed
+browser) closes the tabs that session opened that are still blank, and releases
+Chrome's debugger on the tabs it attached, so Chrome stops showing that it is
+being debugged once no agent is using the profile. A tab the session did not
+open, a tab showing a page, and a tab another session on the same controller is
+using are left alone. The session's next request recovers it as it recovers a
+released managed browser, and it continues in the tab it was using; when that
+was an empty tab that has since been closed, it opens a new one, and a request
+naming the closed tab is told which tab is current. Each session records these
+tabs in an owner-only `attached-tabs.json` in its session directory. A
+controller that starts after another crashed finishes any cleanup left undone,
+for the same extension connection generation only: Chrome tab ids are not
+trusted to name the same tabs after the extension reconnects.
+
+A session waiting on a JavaScript dialog is still in use: neither an idle
+release nor an agent restart lets go of its browser until the dialog is
+answered, for attached and managed browsers alike, or until it has been open
+for 30 minutes: a dialog nobody answered by then is taken as forgotten (or its
+close was never reported), and losing it is better than holding the browser
+and the machine's updates indefinitely. Chrome offers a dialog only
+to the debugger that was attached when it opened; a debugger attached later can
+neither see nor answer it, and the page answers nothing until the person does.
+For the same reason, a session that continues in its earlier tab waits at most
+a few seconds for it. A tab blocked by a dialog its page opened while no agent
+held the browser is left as it is for the person, and the session continues in
+a new tab.
 
 An attached tab's debugger disconnect invalidates its cached target, document,
 frame and element authority without restarting Chrome or changing other tabs.

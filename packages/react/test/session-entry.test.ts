@@ -63,6 +63,8 @@ describe("session-only entry", () => {
       "@opengeni/sdk/model-picker-order",
       // The new-conversation controller imports only the voice model type.
       "@opengeni/sdk/realtime",
+      // Unsent answers drop Other on a secret approval card: an id-only leaf.
+      "@opengeni/sdk/secret-use-approval",
       // The timeline's task usage-limit stop: a zod-free refusal leaf.
       "@opengeni/sdk/session-usage-limits",
       "react",
@@ -174,7 +176,20 @@ describe("session-only entry", () => {
     // arguments with the pure tool-argument parser (tree-shaken to that read).
     expect(reactSources.some((id) => id.endsWith("/src/timeline/invoked-tool.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/timeline/parsers.ts"))).toBe(true);
-    expect(reactSources.length).toBe(55);
+    // The renderer-free transient-failure rules the composer uses to hold a
+    // send calmly while Opengeni is updating.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/transient-retry.ts"))).toBe(true);
+    // Pure rule for questions another agent answered: the projection folds them into work.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/agent-work-human-input.ts"))).toBe(
+      true,
+    );
+    // Up-arrow recall of the person's latest waiting prompt.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-queued-prompt-recall.ts"))).toBe(
+      true,
+    );
+    // The draft store asks the pure human-input rules which questions offer Other.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-model.ts"))).toBe(true);
+    expect(reactSources.length).toBe(59);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

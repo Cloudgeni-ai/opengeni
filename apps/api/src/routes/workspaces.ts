@@ -11,6 +11,7 @@ import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   listWorkspaceProviderCustomModelsByKind,
   getOrganizationModelProviderCatalogForWorkspace,
+  loadWorkspaceModelCatalogInputs,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
 import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
@@ -18,11 +19,15 @@ import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@ope
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
   resolveRealtimeVoiceSettings,
+  resolveWorkspaceRecordingSettings,
   resolveWorkspaceRealtimeDefaultModel,
   resolveWorkspaceRealtimeVoiceSettings,
   WorkspacePauseTimerRequest,
 } from "@opengeni/contracts";
-import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
+import {
+  forgetWorkspaceRecordingVoices,
+  getWorkspaceConnectionModelRestrictions,
+} from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
@@ -133,6 +138,7 @@ import {
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireWorkspaceMemberManagementAuthority,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
@@ -158,6 +164,7 @@ import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { projectWorkspaceModelCatalog } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
+import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   ELEVENLABS_REALTIME_MODELS,
@@ -599,6 +606,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         },
       );
+      // Meetings that stop recognizing voices forget every remembered voice.
+      if (
+        parsed.data.recordings !== undefined &&
+        resolveWorkspaceRecordingSettings(workspace.settings).voiceprints !== true
+      ) {
+        await forgetWorkspaceRecordingVoices(deps.db, { workspaceId, subjectId: grant.subjectId });
+      }
       return c.json(Workspace.parse(workspace));
     } catch (error) {
       if (nestedPostgresSqlState(error) === "0A000") {
@@ -635,11 +649,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       subjectId: grant.subjectId,
     });
-    const workspaceConnectionsRead =
+    // Reuse the core's one-invocation public metadata scope. Subscription
+    // readiness and live provider discovery remain separate, fresh reads.
+    const catalogInputs =
       typeof deps.db.transaction === "function" &&
       typeof (deps.db as typeof deps.db & { rollback?: unknown }).rollback !== "function"
-        ? listConnectionsMetadata(deps.db, workspaceId, null)
+        ? loadWorkspaceModelCatalogInputs(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKinds,
+            organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
+          })
         : undefined;
+    const workspaceConnectionsRead = catalogInputs?.then((inputs) => inputs.workspaceConnections);
     // The original promise remains in the catalog batch. On failure the
     // restrictions keep their standalone read rather than mask its error.
     const restrictionMetadata = workspaceConnectionsRead?.catch(() => undefined);
@@ -696,17 +718,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ),
       ),
       workspaceConnectionsRead ?? listConnectionsMetadata(deps.db, workspaceId, null),
-      listWorkspaceProviderCustomModelsByKind(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKinds,
-      }),
-      getOrganizationModelProviderCatalogForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        // Organization Azure OpenAI has no workspace custom-model rail.
-        providerKinds: [...providerKinds, "openai", "azure_openai"],
-      }),
+      catalogInputs?.then((inputs) => inputs.workspaceCustomModels) ??
+        listWorkspaceProviderCustomModelsByKind(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          providerKinds,
+        }),
+      catalogInputs?.then((inputs) => inputs.organizationProviders) ??
+        getOrganizationModelProviderCatalogForWorkspace(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          // Organization Azure OpenAI has no workspace custom-model rail.
+          providerKinds: [...providerKinds, "openai", "azure_openai"],
+        }),
       getWorkspace(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
       deps.settings.billingMode === "stripe"
@@ -1488,24 +1512,43 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/control-events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
     const limit = boundedLimit(c.req.query("limit"));
     const fetched = await listWorkspaceControlEvents(deps.db, workspaceId, after, limit + 1);
     const countHasMore = fetched.length > limit;
-    const page = boundWorkspaceControlHttpPage(fetched.slice(0, limit));
+    const scanned = fetched.slice(0, limit);
+    const visible = await workspaceControlEventVisibility(
+      deps,
+      workspaceId,
+      authorization,
+    )(scanned);
+    const page = boundWorkspaceControlHttpPage(visible);
     const truncated = countHasMore || page.truncated;
+    // Events this reader cannot see still advance its cursor, so a page made
+    // only of another person's private-chat events never stalls paging.
+    const nextSequence = page.truncated ? page.nextSequence : (scanned.at(-1)?.sequence ?? null);
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
     c.header("X-OpenGeni-Page-Truncated", String(truncated));
-    if (page.nextSequence !== null) {
-      c.header("X-OpenGeni-Next-After", String(page.nextSequence));
+    if (nextSequence !== null) {
+      c.header("X-OpenGeni-Next-After", String(nextSequence));
     }
     return c.json(page.events);
   });
 
   app.get("/v1/workspaces/:workspaceId/control-events/stream", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
     return await sseWorkspaceControlStream(
       deps.db,
@@ -1517,6 +1560,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
+        visibleControlEvents: workspaceControlEventVisibility(deps, workspaceId, authorization),
         reauthorize: async () => {
           await requireFreshAccessGrant(c, deps, workspaceId, "workspace:read");
         },

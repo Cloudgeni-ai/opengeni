@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/sdk",
-  "version": "4.7.1",
+  "version": "5.2.1",
   "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
@@ -142,6 +142,10 @@
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"
     },
+    "./recordings": {
+      "types": "./src/recordings.ts",
+      "default": "./src/recordings.ts"
+    },
     "./editable-artifacts": {
       "types": "./src/editable-artifacts.ts",
       "default": "./src/editable-artifacts.ts"
@@ -173,6 +177,10 @@
     "./model-display": {
       "types": "./src/model-display.ts",
       "default": "./src/model-display.ts"
+    },
+    "./secret-use-approval": {
+      "types": "./src/secret-use-approval.ts",
+      "default": "./src/secret-use-approval.ts"
     },
     "./chat": {
       "types": "./src/chat/index.ts",
@@ -206,7 +214,11 @@
       "types": "./src/session-list-entries.ts",
       "default": "./src/session-list-entries.ts"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./teams": {
+      "types": "./src/teams.ts",
+      "default": "./src/teams.ts"
+    }
   },
   "publishConfig": {
     "access": "public",

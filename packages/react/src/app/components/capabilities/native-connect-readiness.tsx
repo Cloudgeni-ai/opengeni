@@ -184,6 +184,8 @@ function primaryProviderId(modelId: string, slackBotMode: boolean): string | nul
       return "github-app";
     case "google-drive":
       return "google-drive-knowledge";
+    case "microsoft-teams":
+      return "microsoft-teams";
     case "outlook-mail":
       return "microsoft-outlook-mail";
     case "outlook-calendar":

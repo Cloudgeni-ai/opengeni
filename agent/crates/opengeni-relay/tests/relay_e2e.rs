@@ -140,6 +140,23 @@ impl Viewer {
         resume_from_seq: u64,
         route: Option<&str>,
     ) -> Result<(Self, v1::StreamOpenAck), String> {
+        Self::connect_with_token(
+            base,
+            port,
+            viewer_token(epoch, port),
+            resume_from_seq,
+            route,
+        )
+        .await
+    }
+
+    async fn connect_with_token(
+        base: &str,
+        port: u32,
+        token: String,
+        resume_from_seq: u64,
+        route: Option<&str>,
+    ) -> Result<(Self, v1::StreamOpenAck), String> {
         let channel_id = format!("ch-{port}");
         let mut url =
             format!("{base}?ws={WORKSPACE}&agent={AGENT}&port={port}&channel={channel_id}");
@@ -159,7 +176,7 @@ impl Viewer {
                 port,
                 relay_route: None,
             }),
-            token: viewer_token(epoch, port),
+            token,
             role: v1::StreamRole::Client as i32,
             resume_from_seq,
         });
@@ -562,6 +579,63 @@ async fn a_stale_epoch_viewer_is_rejected() {
         .expect("connect (the dial succeeds; the ACK rejects)");
     assert!(!stale_ack.accepted, "a stale-epoch viewer must be rejected");
     assert!(metrics.opens_rejected() >= 1);
+}
+
+/// A viewer token bound to one machine's exact stream (the claims a Connected
+/// Machine mint carries; its workspace is where the machine is enrolled).
+fn bound_viewer_token(port: u32, agent: &str, channel: &str) -> String {
+    mint(
+        "ogs_",
+        &format!(
+            r#"{{"workspaceId":"{WORKSPACE}","sessionId":"22222222-2222-4222-8222-222222222222","viewerId":"33333333-3333-4333-8333-333333333333","leaseEpoch":0,"mode":"view","port":{port},"exp":4102444800,"agentId":"{agent}","channelId":"{channel}"}}"#
+        ),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_viewer_token_bound_to_a_stream_opens_only_that_stream() {
+    let (base, _shutdown, _m) = start_relay(|_| {}).await;
+    let _producer = RelayChannel::register(producer_config(&base, PTY_PORT))
+        .await
+        .expect("producer register");
+    let channel = format!("ch-{PTY_PORT}");
+
+    let (_viewer, ack) = Viewer::connect_with_token(
+        &base,
+        PTY_PORT,
+        bound_viewer_token(PTY_PORT, AGENT, &channel),
+        0,
+        None,
+    )
+    .await
+    .expect("bound viewer");
+    assert!(ack.accepted, "a token bound to this exact stream opens it");
+
+    let other_machine = "55555555-5555-4555-8555-555555555555";
+    let (_v, ack) = Viewer::connect_with_token(
+        &base,
+        PTY_PORT,
+        bound_viewer_token(PTY_PORT, other_machine, &channel),
+        0,
+        None,
+    )
+    .await
+    .expect("dial");
+    assert!(!ack.accepted, "a token for another machine is rejected");
+
+    let (_v, ack) = Viewer::connect_with_token(
+        &base,
+        PTY_PORT,
+        bound_viewer_token(PTY_PORT, AGENT, "ch-another-stream"),
+        0,
+        None,
+    )
+    .await
+    .expect("dial");
+    assert!(
+        !ack.accepted,
+        "a token for another stream of the same machine is rejected"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

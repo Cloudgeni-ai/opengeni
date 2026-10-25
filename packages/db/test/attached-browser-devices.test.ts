@@ -9,6 +9,7 @@ import {
   bootstrapWorkspace,
   createDb,
   createEnrollment,
+  createSandbox,
   createSession,
   disconnectAttachedBrowserDevices,
   dispatchBrowserSessionOperation,
@@ -246,6 +247,41 @@ async function activateAttachedBrowser(
 }
 
 describe("attached browser endpoint registry", () => {
+  test("each bridge names the Connected Machine it runs on", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    await reconcileAttachedBrowserInventory(client.db, {
+      ...scope,
+      snapshot: {
+        bridgeGeneration: "bridge-1",
+        revision: 1,
+        devices: [device(crypto.randomUUID(), "Primary Chrome")],
+      },
+    });
+    // Before the machine has its sandbox, it has the Machines list's fallback name.
+    expect((await listAttachedBrowserDevices(client.db, scope)).bridges).toEqual([
+      expect.objectContaining({
+        enrollmentId: scope.enrollmentId,
+        sandboxId: null,
+        machineName: "macos machine",
+      }),
+    ]);
+    const sandbox = await createSandbox(client.db, {
+      accountId: scope.accountId,
+      workspaceId: scope.workspaceId,
+      kind: "selfhosted",
+      name: "Ada's Mac mini",
+      enrollmentId: scope.enrollmentId,
+    });
+    expect((await listAttachedBrowserDevices(client.db, scope)).bridges).toEqual([
+      expect.objectContaining({
+        enrollmentId: scope.enrollmentId,
+        sandboxId: sandbox.id,
+        machineName: "Ada's Mac mini",
+      }),
+    ]);
+  });
+
   test("persists opaque generations beginning with base64url punctuation", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -1065,7 +1101,7 @@ describe("attached browser endpoint registry", () => {
     ).toBe(true);
   });
 
-  test("rejects a controller heartbeat whose placement generation is already stale", async () => {
+  test("a controller heartbeat on a stale placement generation is rejected and ends its sessions", async () => {
     if (!available) return;
     const scope = await fixture();
     const deviceId = crypto.randomUUID();
@@ -1100,10 +1136,7 @@ describe("attached browser endpoint registry", () => {
         workspaceId: scope.workspaceId,
         browserSessionId: browser.browserSessionId,
       }),
-    ).toMatchObject({
-      lifecycle: "active",
-      controller: { placementInstanceId: "extension-1" },
-    });
+    ).toMatchObject({ lifecycle: "lost", failureCode: "controller_transition_expired" });
     expect(
       (
         await getComputerSessionControlRecord(client.db, {
@@ -1112,9 +1145,6 @@ describe("attached browser endpoint registry", () => {
           computerSessionId: computer.computerSessionId,
         })
       ).session,
-    ).toMatchObject({
-      lifecycle: "active",
-      controller: { placementInstanceId: "extension-1" },
-    });
+    ).toMatchObject({ lifecycle: "lost", failureCode: "controller_transition_expired" });
   });
 });

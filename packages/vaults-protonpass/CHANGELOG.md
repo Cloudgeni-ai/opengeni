@@ -1,5 +1,49 @@
 # @opengeni/vaults-protonpass
 
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [fb72b9d]
+  - @opengeni/contracts@5.2.0
+  - @opengeni/vaults@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- @opengeni/contracts@5.1.0
+- @opengeni/vaults@5.1.0
+
+## 5.0.2
+
+### Patch Changes
+
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/contracts@5.0.0
+  - @opengeni/vaults@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/vaults@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/vaults@4.7.2
+
 ## 4.7.1
 
 ### Patch Changes

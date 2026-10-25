@@ -38,6 +38,22 @@ const DEBUGGER_PROTOCOL_VERSION = "1.3";
 const UPDATE_IDLE_RELOAD_MS = 15 * 60_000;
 // Chrome throttles update checks; asking again sooner than this gains nothing.
 const UPDATE_CHECK_INTERVAL_MS = 10 * 60_000;
+// Chrome ends an extension's debugging of a whole tab the moment another
+// extension adds one of its own pages to it as a frame, and refuses to attach
+// again while that frame is there; Chromium treats this as intended. Password
+// managers do it whenever a login field gets focus, to show their inline menu.
+// So when Chrome ends debugging of a tab, or refuses to attach to one, the
+// extension removes other extensions' frames from it. A page that keeps adding
+// them is left alone after this many removals in this window.
+const FRAME_REMOVAL_LIMIT = 5;
+const FRAME_REMOVAL_WINDOW_MS = 30_000;
+// Extensions known to add such frames, named in the error when one keeps doing it.
+const FRAME_EXTENSION_NAMES: Readonly<Record<string, string>> = {
+  aeblfdkhhhdcdjpifhhbdiojplfjncoa: "1Password",
+  nngceckbapebfimnlniiiahkandclblb: "Bitwarden",
+  hdokiejnpimakedhajhdlcegeplioahd: "LastPass",
+  fdjamakpfbbddfjaooikfcpapjohcfmg: "Dashlane",
+};
 
 type StoredState = {
   deviceId?: string;
@@ -63,7 +79,19 @@ let lastUpdateCheckAtMs = 0;
 let everConnected = false;
 let debuggerSequence = 0;
 const debuggerEvents: BridgeDebuggerEvent[] = [];
-const attachedDebuggerTabs = new Set<number>();
+// Attached tabs, each with the number of its current attachment. Commands that
+// name an attachment are refused once it has ended, so a late one can never
+// run under a newer attachment of the same tab.
+const attachedDebuggerTabs = new Map<number, number>();
+// Starts at a random number, so a number from before this worker restarted
+// does not name one of its attachments.
+let lastAttachment = Math.floor(Math.random() * 2 ** 40);
+// Removals of other extensions' frames still running, and when each tab's
+// recent removals started.
+const frameRemovals = new Map<number, Promise<readonly string[] | null>>();
+const frameRemovalTimes = new Map<number, number[]>();
+// Other extensions whose frames were last removed from each tab.
+const removedFrameExtensions = new Map<number, readonly string[]>();
 let updatePending = false;
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let commandsInFlight = 0;
@@ -369,12 +397,12 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
     }
     case "debugger.attach": {
       const tabId = numericTabId(command.tabId);
+      // Right after Chrome ended debugging of this tab, wait for the frames
+      // that ended it to be removed.
+      await frameRemovals.get(tabId);
       await requireControllableTab(tabId);
-      if (!attachedDebuggerTabs.has(tabId)) {
-        await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
-        attachedDebuggerTabs.add(tabId);
-      }
-      return { attached: true };
+      if (!attachedDebuggerTabs.has(tabId)) await attachDebugger(tabId);
+      return { attached: true, attachment: attachedDebuggerTabs.get(tabId) };
     }
     case "debugger.detach": {
       const tabId = numericTabId(command.tabId);
@@ -383,10 +411,17 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
     }
     case "debugger.command": {
       const tabId = numericTabId(command.tabId);
-      if (!attachedDebuggerTabs.has(tabId)) {
+      const attachment = attachedDebuggerTabs.get(tabId);
+      if (attachment === undefined) {
         throw new BridgeCommandError(
           "debugger_unavailable",
           `${BRAND.product} is not attached to this tab`,
+        );
+      }
+      if (command.attachment !== undefined && command.attachment !== attachment) {
+        throw new BridgeCommandError(
+          "debugger_unavailable",
+          `The ${BRAND.product} attachment this command was sent for has ended`,
         );
       }
       assertAllowedDebuggerMethod(command.method);
@@ -451,6 +486,146 @@ async function detachDebugger(tabId: number): Promise<void> {
   } catch {
     // Already detached is the desired idempotent state.
   }
+}
+
+/** Attaches Chrome's debugger to a tab, first removing other extensions'
+ * frames when Chrome refuses because of one. */
+async function attachDebugger(tabId: number): Promise<void> {
+  try {
+    await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
+  } catch (error) {
+    if (!otherExtensionFrameRefusal(error)) throw error;
+    const removed = await removeOtherExtensionFrames(tabId);
+    if (removed === null) throw otherExtensionFramesError(tabId);
+    try {
+      await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
+    } catch (retry) {
+      if (!otherExtensionFrameRefusal(retry)) throw retry;
+      throw removed.length > 0 ? otherExtensionFramesError(tabId) : unremovableFrameError();
+    }
+  }
+  // Another attach of this tab may have finished first; keep its number.
+  if (!attachedDebuggerTabs.has(tabId)) attachedDebuggerTabs.set(tabId, ++lastAttachment);
+}
+
+/** Chrome refuses to attach to a tab holding another extension's page with
+ * "Cannot access a chrome-extension:// URL of different extension". */
+function otherExtensionFrameRefusal(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("chrome-extension://");
+}
+
+function otherExtensionFramesError(tabId: number): BridgeCommandError {
+  const names = [
+    ...new Set((removedFrameExtensions.get(tabId) ?? []).map((id) => FRAME_EXTENSION_NAMES[id])),
+  ].filter((name): name is string => name !== undefined);
+  const culprit = names.length > 0 ? names.join(" and ") : "Another browser extension";
+  return new BridgeCommandError(
+    "tab_unavailable",
+    `${culprit} keeps adding its own frame to this page (password managers do this for ` +
+      `their inline menu), and Chrome does not let ${BRAND.product} control a tab while it ` +
+      "has one. Turn off that extension's inline menu for this site, or use a managed browser",
+  );
+}
+
+function unremovableFrameError(): BridgeCommandError {
+  return new BridgeCommandError(
+    "tab_unavailable",
+    "This page holds another browser extension's page, which Chrome does not let " +
+      `${BRAND.product} control a tab with, and it could not be removed. Turn off that ` +
+      "extension for this site, or use a managed browser",
+  );
+}
+
+/** Starts removing other extensions' frames from a tab Chrome stopped
+ * debugging; an attach of that tab waits for it. */
+function startFrameRemoval(tabId: number): void {
+  if (frameRemovals.has(tabId)) return;
+  frameRemovals.set(
+    tabId,
+    removeOtherExtensionFrames(tabId).finally(() => frameRemovals.delete(tabId)),
+  );
+}
+
+/** Removes frames showing other extensions' pages from every frame of a tab.
+ * Returns those extensions' ids, or null once the tab has used up its recent
+ * removals. */
+async function removeOtherExtensionFrames(tabId: number): Promise<readonly string[] | null> {
+  const now = Date.now();
+  const recent = (frameRemovalTimes.get(tabId) ?? []).filter(
+    (time) => now - time < FRAME_REMOVAL_WINDOW_MS,
+  );
+  frameRemovalTimes.set(tabId, recent);
+  if (recent.length >= FRAME_REMOVAL_LIMIT) return null;
+  recent.push(now);
+  const run = (target: chrome.scripting.InjectionTarget) =>
+    chrome.scripting.executeScript({
+      target,
+      world: "ISOLATED",
+      func: removeFramesOfOtherExtensions,
+      args: [chrome.runtime.id],
+    });
+  let results: Awaited<ReturnType<typeof run>>;
+  try {
+    results = await run({ tabId, allFrames: true });
+  } catch {
+    try {
+      results = await run({ tabId });
+    } catch {
+      // A closed tab, or a page Chrome does not let extensions script.
+      return [];
+    }
+  }
+  const removed = [
+    ...new Set(
+      results.flatMap((result) =>
+        Array.isArray(result.result)
+          ? result.result.filter((id): id is string => typeof id === "string")
+          : [],
+      ),
+    ),
+  ];
+  if (removed.length > 0) {
+    removedFrameExtensions.set(tabId, removed);
+    console.warn(`removed other extensions' frames from tab ${tabId}: ${removed.join(", ")}`);
+  }
+  return removed;
+}
+
+/** Runs in a page frame, in this extension's isolated world: removes elements
+ * showing another extension's page, also inside closed shadow roots (where
+ * password managers put their inline menus), and returns those extensions'
+ * ids. Self-contained, since Chrome runs it from its source. */
+function removeFramesOfOtherExtensions(ownId: string): string[] {
+  const removed = new Set<string>();
+  const shadowRootOf = (element: Element): ShadowRoot | null => {
+    try {
+      return chrome.dom.openOrClosedShadowRoot(element as HTMLElement) ?? null;
+    } catch {
+      return element.shadowRoot;
+    }
+  };
+  const visit = (root: Document | ShadowRoot): void => {
+    for (const element of Array.from(root.querySelectorAll("*"))) {
+      const source =
+        element instanceof HTMLIFrameElement ||
+        element instanceof HTMLFrameElement ||
+        element instanceof HTMLEmbedElement
+          ? element.src
+          : element instanceof HTMLObjectElement
+            ? element.data
+            : "";
+      const id = /^chrome-extension:\/\/([a-p]{32})\//i.exec(source)?.[1]?.toLowerCase();
+      if (id && id !== ownId) {
+        removed.add(id);
+        element.remove();
+        continue;
+      }
+      const shadow = shadowRootOf(element);
+      if (shadow) visit(shadow);
+    }
+  };
+  visit(document);
+  return [...removed];
 }
 
 /**
@@ -572,7 +747,7 @@ async function setBadge(connected: boolean): Promise<void> {
   await chrome.action.setBadgeText({ text: connected ? "" : "!" });
   if (!connected) await chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
   await chrome.action.setTitle({
-    title: `${BRAND.name} · ${connected ? "Connected" : "Agent unavailable"}`,
+    title: `${BRAND.name} · ${connected ? "Connected" : "Runner unavailable"}`,
   });
 }
 
@@ -587,17 +762,26 @@ chrome.debugger.onEvent.addListener((source, method, params = {}) => {
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
-  if (source.tabId === undefined || !attachedDebuggerTabs.delete(source.tabId)) return;
+  if (source.tabId === undefined) return;
+  const attachment = attachedDebuggerTabs.get(source.tabId);
+  if (attachment === undefined) return;
+  attachedDebuggerTabs.delete(source.tabId);
   appendDebuggerEvent({
     tabId: String(source.tabId),
     sessionId: null,
     method: "OpenGeni.debuggerDetached",
-    params: { reason },
+    params: { reason, attachment },
   });
+  // Chrome reports a tab it stopped debugging because another extension
+  // added a frame as closed, though it stays open. Remove such frames, so
+  // the agent's next attach works.
+  if (reason === "target_closed") startFrameRemoval(source.tabId);
   maybeApplyUpdate();
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  frameRemovalTimes.delete(tabId);
+  removedFrameExtensions.delete(tabId);
   appendDebuggerEvent({
     tabId: String(tabId),
     sessionId: null,

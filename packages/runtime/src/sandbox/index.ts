@@ -527,6 +527,8 @@ export {
   parseUnifiedPatch,
   REPOSITORY_DISCOVERY_LIMIT,
   CODE_SEARCH_RG_MAX_BYTES,
+  MAC_HOME_FILES_DIRS,
+  MAC_HOME_PRIVACY_GUARDED_DIRS,
   validateCodeSearchRipgrepArgs,
   type CodeSearchRipgrepOutcome,
   type ChannelASession,

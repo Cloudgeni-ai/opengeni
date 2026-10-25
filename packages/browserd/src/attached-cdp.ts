@@ -7,10 +7,12 @@ import {
 } from "./attached-bridge";
 import {
   AgentBrowserDriver,
+  isBlankTabUrl,
   type AgentBrowserDriverOptions,
   type BrowserCdpConnection,
   type BrowserCommandRunner,
 } from "./cdp-driver";
+import { MAX_CLOSED_BLANK_TABS, type AttachedTabLedger } from "./attached-tab-ledger";
 import {
   CdpCommandTimeoutError,
   CdpProtocolError,
@@ -82,6 +84,8 @@ function restrictedPageError(reason: string): InteractionDefiniteDriverError {
   );
 }
 
+const MAX_TAB_URL_LENGTH = 65_536;
+
 type AttachedTab = {
   id: string;
   title: string;
@@ -102,26 +106,65 @@ type EventListener = (event: CdpEvent) => void;
 
 export type AttachedBrowserBridgeTransport = Pick<AttachedBrowserBridgeClient, "request" | "close">;
 
+/** Opens one bridge connection to an attached browser profile. Tests
+ * substitute a bridge to a fixture browser. */
+export type AttachedBrowserBridgeConnector = (
+  options: AttachedBrowserBridgeOptions,
+) => Promise<AttachedBrowserBridgeTransport & { readonly closed?: boolean }>;
+
+export const connectAttachedBrowserBridge: AttachedBrowserBridgeConnector = async (options) =>
+  await AttachedBrowserBridgeClient.connect(options);
+
+/**
+ * Chrome keeps one debugger attachment per tab for the extension, whichever
+ * session asked for it, and detaching it ends it for every session. Each
+ * connection in this process records the tabs it holds here, so releasing a
+ * tab detaches Chrome's debugger only once no other session still holds it.
+ * Keyed by browser profile connection (device and connection generation).
+ */
+const debuggerHolders = new Map<string, Set<AttachedChromeCdpConnection>>();
+
+function holderKey(scope: string, tabId: string): string {
+  return `${scope}\u0000${tabId}`;
+}
+
+function attachmentScope(deviceId: string, connectionGeneration: string): string {
+  return `${deviceId}\u0000${connectionGeneration}`;
+}
+
+/** Whether a live session in this process holds Chrome's debugger on a tab. */
+export function attachedDebuggerHeld(
+  deviceId: string,
+  connectionGeneration: string,
+  tabId: string,
+): boolean {
+  const holders = debuggerHolders.get(
+    holderKey(attachmentScope(deviceId, connectionGeneration), tabId),
+  );
+  return holders !== undefined && holders.size > 0;
+}
+
 /** One owner-local bridge connection that outlives a lost socket. A request
  * in flight when the socket closed still fails, since its effect is unknown;
  * the next request reconnects under the same profile fence. A profile that
  * reconnected under a new generation is refused by that fence. */
 export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTransport {
-  private client: Promise<AttachedBrowserBridgeClient> | null;
+  private client: Promise<AttachedBrowserBridgeTransport & { readonly closed?: boolean }> | null;
   private stopped = false;
 
   private constructor(
     private readonly options: AttachedBrowserBridgeOptions,
-    first: AttachedBrowserBridgeClient,
+    first: AttachedBrowserBridgeTransport & { readonly closed?: boolean },
+    private readonly connector: AttachedBrowserBridgeConnector,
   ) {
     this.client = Promise.resolve(first);
   }
 
-  static async connect(options: AttachedBrowserBridgeOptions): Promise<ReconnectingAttachedBridge> {
-    return new ReconnectingAttachedBridge(
-      options,
-      await AttachedBrowserBridgeClient.connect(options),
-    );
+  static async connect(
+    options: AttachedBrowserBridgeOptions,
+    connector: AttachedBrowserBridgeConnector = connectAttachedBrowserBridge,
+  ): Promise<ReconnectingAttachedBridge> {
+    return new ReconnectingAttachedBridge(options, await connector(options), connector);
   }
 
   async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
@@ -131,8 +174,8 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
         "attached browser bridge closed by browserd",
         true,
       );
-    const pending = (this.client ??= AttachedBrowserBridgeClient.connect(this.options));
-    let client: AttachedBrowserBridgeClient;
+    const pending = (this.client ??= this.connector(this.options));
+    let client: AttachedBrowserBridgeTransport & { readonly closed?: boolean };
     try {
       client = await pending;
     } catch (error) {
@@ -170,6 +213,12 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
 export type AttachedChromeDriverOptions = AttachedBrowserBridgeOptions & {
   browserName: string;
   browserVersion: string;
+  connectBridge?: AttachedBrowserBridgeConnector;
+  /** Debugger attachments an earlier runtime of the session left in Chrome;
+   * this connection releases them as its own. */
+  inheritedAttachments?: readonly string[];
+  /** Called whenever the tabs this connection holds Chrome's debugger on change. */
+  onAttachmentsChange?: (tabs: readonly string[]) => void;
 };
 
 /** Build the runner + CDP transport consumed by the existing semantic browser
@@ -179,10 +228,24 @@ export async function createAttachedChromeTransport(options: AttachedChromeDrive
   runner: BrowserCommandRunner;
   connection: AttachedChromeCdpConnection;
 }> {
-  const bridge = await ReconnectingAttachedBridge.connect(options);
+  const bridge = await ReconnectingAttachedBridge.connect(
+    {
+      deviceId: options.deviceId,
+      connectionGeneration: options.connectionGeneration,
+      ...(options.authorityFile ? { authorityFile: options.authorityFile } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    },
+    options.connectBridge,
+  );
   const connection = new AttachedChromeCdpConnection(bridge, {
     browserName: options.browserName,
     browserVersion: options.browserVersion,
+    attachments: {
+      deviceId: options.deviceId,
+      connectionGeneration: options.connectionGeneration,
+      ...(options.inheritedAttachments ? { inherited: options.inheritedAttachments } : {}),
+      ...(options.onAttachmentsChange ? { onChange: options.onAttachmentsChange } : {}),
+    },
   });
   return {
     connection,
@@ -199,15 +262,20 @@ export function createAttachedChromeDriver(
     workspaceFileIds: readonly string[],
   ) => Promise<readonly string[]>,
   downloadEvents?: AgentBrowserDriverOptions["downloadEvents"],
+  ownedTabs: NonNullable<AgentBrowserDriverOptions["ownedTabs"]> = {},
 ): AgentBrowserDriver {
   return new AgentBrowserDriver({
     browserSessionId: session.browserSessionId,
     controllerGeneration: session.controllerGeneration,
     runner: transport.runner,
     targetLifecycle: "cdp",
-    // The browser is the person's own: ending the session closes the tabs it
-    // opened and left blank.
-    closeUnusedOwnedTabsOnEnd: true,
+    // The browser is the person's own: whatever ends this runtime closes the
+    // tabs the session opened and left blank, unless another session is
+    // using one of them now.
+    ownedTabs: {
+      inUseElsewhere: (tabId) => transport.connection.debuggerHeldElsewhere(tabId),
+      ...ownedTabs,
+    },
     connect: async () => transport.connection,
     engine: "chrome",
     permissionControl: false,
@@ -219,6 +287,103 @@ export function createAttachedChromeDriver(
     // session keeps a copy of each one its tabs start.
     ...(downloadEvents ? { downloadEvents, downloadsSavedByPerson: true } : {}),
   });
+}
+
+/**
+ * Clean up after a session runtime that went away without doing so itself (a
+ * crashed controller, or a cleanup that could not reach the browser): close
+ * the tabs it opened that are still blank and release the debugger
+ * attachments it held. A tab that shows a page, or that a live session in
+ * this process holds, stays. A tab Chrome reports without an address yet
+ * (just created, or still loading) is neither: it stays recorded for a later
+ * sweep. Returns the record to keep; it is settled when nothing is left to
+ * do. A profile that reconnected under another generation
+ * can no longer be addressed with these tab ids, so its record settles as is.
+ * Any other failure throws, for a later retry.
+ */
+export async function settleAttachedTabLedger(
+  ledger: AttachedTabLedger,
+  connectBridge: AttachedBrowserBridgeConnector,
+  now: number,
+): Promise<AttachedTabLedger> {
+  const unaddressable: AttachedTabLedger = {
+    ...ledger,
+    settled: true,
+    createdTabs: [],
+    attachedTabs: [],
+    updatedAt: now,
+  };
+  const fenced = (error: unknown) =>
+    error instanceof AttachedBrowserBridgeError && error.code === "fenced";
+  let bridge: AttachedBrowserBridgeTransport;
+  try {
+    bridge = await connectBridge({
+      deviceId: ledger.deviceId,
+      connectionGeneration: ledger.connectionGeneration,
+      ...(ledger.authorityFile ? { authorityFile: ledger.authorityFile } : {}),
+    });
+  } catch (error) {
+    if (fenced(error)) return unaddressable;
+    throw error;
+  }
+  const held = (tabId: string) =>
+    attachedDebuggerHeld(ledger.deviceId, ledger.connectionGeneration, tabId);
+  try {
+    const listed = await bridge.request<{ tabs: unknown }>({ type: "tabs.list" });
+    const tabs = new Map(requireTabs(listed.tabs).map((tab) => [tab.id, tab]));
+    let settled = true;
+    const createdTabs: string[] = [];
+    const closedBlankTabs = [...ledger.closedBlankTabs];
+    const closed = new Set<string>();
+    for (const tabId of ledger.createdTabs) {
+      const tab = tabs.get(tabId);
+      if (!tab) continue;
+      if (tab.url === null) {
+        // Whether it ends up blank or showing a page is not known yet.
+        createdTabs.push(tabId);
+        settled = false;
+        continue;
+      }
+      if (!isBlankTabUrl(tab.url) || held(tabId)) {
+        createdTabs.push(tabId);
+        continue;
+      }
+      try {
+        // Closing a tab also ends Chrome's debugger attachment to it.
+        await bridge.request({ type: "tabs.close", tabId });
+        closed.add(tabId);
+        closedBlankTabs.push(tabId);
+      } catch (error) {
+        if (fenced(error)) throw error;
+        createdTabs.push(tabId);
+        settled = false;
+      }
+    }
+    const attachedTabs: string[] = [];
+    for (const tabId of ledger.attachedTabs) {
+      if (!tabs.has(tabId) || closed.has(tabId) || held(tabId)) continue;
+      try {
+        await bridge.request({ type: "debugger.detach", tabId });
+      } catch (error) {
+        if (fenced(error)) throw error;
+        attachedTabs.push(tabId);
+        settled = false;
+      }
+    }
+    return {
+      ...ledger,
+      settled,
+      createdTabs,
+      attachedTabs,
+      closedBlankTabs: [...new Set(closedBlankTabs)].slice(-MAX_CLOSED_BLANK_TABS),
+      updatedAt: now,
+    };
+  } catch (error) {
+    if (fenced(error)) return unaddressable;
+    throw error;
+  } finally {
+    bridge.close();
+  }
 }
 
 export class AttachedChromeRunner implements BrowserCommandRunner {
@@ -273,6 +438,10 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private readonly tabDetachEpochs = new Map<string, number>();
   private readonly pendingInput = new Map<string, number>();
   private readonly uncertainTabs = new Set<string>();
+  // The extension's number for each tab's current debugger attachment, sent
+  // with every command so the extension refuses one whose attachment ended.
+  // Extensions that predate it report none.
+  private readonly tabAttachments = new Map<string, number>();
   private readonly browserName: string;
   private readonly browserVersion: string;
   private readonly browserPlatform: NodeJS.Platform;
@@ -301,10 +470,26 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private readonly finishedDownloads = new Set<string>();
   // Chrome's ids of saved files already matched to a download here.
   private readonly claimedDownloadFiles = new Set<number>();
+  // Which browser profile connection this connection's debugger holds count
+  // against (see debuggerHolders).
+  private readonly attachmentScope: string;
+  private readonly onAttachmentsChange: ((tabs: readonly string[]) => void) | null;
+  // Attachments shutdown could not release.
+  private leftovers: string[] = [];
 
   constructor(
     private readonly bridge: AttachedBrowserBridgeTransport,
-    browser: { browserName: string; browserVersion: string; platform?: NodeJS.Platform },
+    browser: {
+      browserName: string;
+      browserVersion: string;
+      platform?: NodeJS.Platform;
+      attachments?: {
+        deviceId: string;
+        connectionGeneration: string;
+        inherited?: readonly string[];
+        onChange?: (tabs: readonly string[]) => void;
+      };
+    },
   ) {
     this.browserName = boundedString(browser.browserName, 1, 100, "browser name");
     this.browserVersion = boundedString(browser.browserVersion, 1, 256, "browser version");
@@ -312,6 +497,55 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     // Preserve its OS when synthesizing the browser-scoped version response;
     // the shared driver uses this to choose native keyboard shortcuts.
     this.browserPlatform = browser.platform ?? process.platform;
+    this.attachmentScope = browser.attachments
+      ? attachmentScope(browser.attachments.deviceId, browser.attachments.connectionGeneration)
+      : `connection:${randomUUID()}`;
+    this.onAttachmentsChange = browser.attachments?.onChange ?? null;
+    for (const tabId of browser.attachments?.inherited ?? []) this.holdDebugger(tabId);
+  }
+
+  /** Whether another live session in this process holds Chrome's debugger
+   * on this tab, so it is in use there. */
+  debuggerHeldElsewhere(tabId: string): boolean {
+    const holders = debuggerHolders.get(holderKey(this.attachmentScope, tabId));
+    if (!holders) return false;
+    return holders.size > (holders.has(this) ? 1 : 0);
+  }
+
+  /** Debugger attachments the last shutdown could not release. */
+  leftoverAttachments(): readonly string[] {
+    return [...this.leftovers];
+  }
+
+  private holdDebugger(tabId: string): void {
+    if (this.attachedTabs.has(tabId)) return;
+    this.attachedTabs.add(tabId);
+    const key = holderKey(this.attachmentScope, tabId);
+    const holders = debuggerHolders.get(key) ?? new Set<AttachedChromeCdpConnection>();
+    holders.add(this);
+    debuggerHolders.set(key, holders);
+    this.attachmentsChanged();
+  }
+
+  /** Stops holding a tab's debugger here. Returns whether another session in
+   * this process still holds it, so Chrome's attachment must stay. */
+  private releaseDebugger(tabId: string): boolean {
+    const key = holderKey(this.attachmentScope, tabId);
+    const holders = debuggerHolders.get(key);
+    holders?.delete(this);
+    if (holders?.size === 0) debuggerHolders.delete(key);
+    if (this.attachedTabs.delete(tabId)) this.attachmentsChanged();
+    return (holders?.size ?? 0) > 0;
+  }
+
+  private attachmentsChanged(): void {
+    // Shutdown reports what it could not release once it is done.
+    if (this.stopped) return;
+    try {
+      this.onAttachmentsChange?.([...this.attachedTabs]);
+    } catch {
+      // Recording is the owner's concern; it never fails browser work.
+    }
   }
 
   /** Refuse, before anything is created or navigated, a page Chrome will not
@@ -358,16 +592,38 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         const mayChangePage = mayChangePageContent(method);
         if (mayChangePage) this.pendingInput.set(tabId, (this.pendingInput.get(tabId) ?? 0) + 1);
         const detachEpoch = this.tabDetachEpochs.get(tabId) ?? 0;
+        const attachment = this.tabAttachments.get(tabId);
         let response: { result: unknown };
         try {
           response = await this.bridge.request<{ result: unknown }>({
             type: "debugger.command",
             tabId,
             sessionId: nestedSessionId(options.sessionId),
+            ...(attachment === undefined ? {} : { attachment }),
             method,
             params,
           });
         } catch (error) {
+          if (
+            error instanceof AttachedBrowserBridgeError &&
+            error.code === "debugger_unavailable"
+          ) {
+            // The extension refuses before sending anything to the page:
+            // another controller released Chrome's debugger on this tab. The
+            // tab is as it was; the next use attaches again. A refusal for an
+            // attachment that has since been replaced leaves the new one be.
+            if (attachment === undefined || this.tabAttachments.get(tabId) === attachment)
+              this.forgetReleasedAttachment(tabId);
+            throw error;
+          }
+          // Chrome ended the attachment while it handled this command, so
+          // nothing of it is left to arrive later; whether it took effect is
+          // unknown.
+          if (chromeDetachedDuringCommand(error)) throw new CdpSessionDetachedError(method);
+          // The extension refuses a command it does not allow before sending
+          // anything to the page (such as a method outside its surface).
+          if (error instanceof AttachedBrowserBridgeError && error.code === "invalid_request")
+            throw new CdpProtocolError(method, -32_601, error.message);
           // A failed bridge reply does not prove that a queued command cannot
           // arrive later. Do not attach a replacement debugger underneath it.
           // Chrome's own protocol refusal is the reply to that exact command,
@@ -500,6 +756,12 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   close(): void {
     if (this.stopped) return;
     this.stopped = true;
+    // Chrome's attachments stay; shutdown is what releases them.
+    for (const tabId of [...this.attachedTabs]) {
+      const key = holderKey(this.attachmentScope, tabId);
+      debuggerHolders.get(key)?.delete(this);
+      if (debuggerHolders.get(key)?.size === 0) debuggerHolders.delete(key);
+    }
     this.sessionTabs.clear();
     this.tabSessions.clear();
     this.canceledTabs.clear();
@@ -512,15 +774,27 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.bridge.close();
   }
 
+  /** Release Chrome's debugger on every tab this connection holds, except
+   * those another live session in this process still holds, then close. A
+   * detach that fails is reported by leftoverAttachments. */
   async shutdown(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    const leftovers: string[] = [];
     await Promise.allSettled(
       [...this.attachedTabs].map(async (tabId) => {
-        await this.bridge.request({ type: "debugger.detach", tabId });
+        if (this.releaseDebugger(tabId)) return;
+        try {
+          await this.bridge.request({ type: "debugger.detach", tabId });
+        } catch (error) {
+          // A fenced request can never be retried: the profile reconnected
+          // under another generation, which accepts none of this one's.
+          if (!(error instanceof AttachedBrowserBridgeError && error.code === "fenced"))
+            leftovers.push(tabId);
+        }
       }),
     );
-    this.attachedTabs.clear();
+    this.leftovers = leftovers;
     this.sessionTabs.clear();
     this.tabSessions.clear();
     this.canceledTabs.clear();
@@ -597,12 +871,22 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
             true,
           );
         this.assertAttachAllowed(targetId);
+        // Apply detaches Chrome already reported (one may have ended this tab's
+        // attachment just now), so they cannot land on the new attachment.
+        await this.flushEvents();
+        this.assertAttachAllowed(targetId);
         const detachEpoch = this.tabDetachEpochs.get(targetId) ?? 0;
         const streamBreaks = this.streamBreaks;
-        await this.bridge.request({ type: "debugger.attach", tabId: targetId });
+        const attached = await this.bridge.request<{ attachment?: unknown }>({
+          type: "debugger.attach",
+          tabId: targetId,
+        });
+        if (Number.isSafeInteger(attached?.attachment) && (attached.attachment as number) > 0)
+          this.tabAttachments.set(targetId, attached.attachment as number);
+        else this.tabAttachments.delete(targetId);
         // Chrome's attachment exists now, whatever this session makes of it:
         // shutdown must detach it even if the session is refused below.
-        this.attachedTabs.add(targetId);
+        this.holdDebugger(targetId);
         // Events of this attachment may be among those a break discarded.
         if (this.streamBreaks !== streamBreaks || this.resyncing)
           throw new InteractionControllerError(
@@ -612,7 +896,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
           );
         if ((this.tabDetachEpochs.get(targetId) ?? 0) !== detachEpoch) {
           // Chrome itself ended the attachment.
-          this.attachedTabs.delete(targetId);
+          this.releaseDebugger(targetId);
           throw new InteractionControllerError(
             "resource_unavailable",
             "Browser tab disconnected while attaching",
@@ -821,6 +1105,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
 
   private emit(input: BridgeDebuggerEvent): void {
     if (input.method === "OpenGeni.debuggerDetached") {
+      // A detach of an attachment this connection has already replaced
+      // (reported after the replacement attached) leaves the new one be.
+      const ended = input.params.attachment;
+      const current = this.tabAttachments.get(input.tabId);
+      if (typeof ended === "number" && current !== undefined && ended !== current) return;
       this.detachLocally(input.tabId, input.params.reason, { synthetic: false });
       return;
     }
@@ -928,7 +1217,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   }
 
   /** End this connection's session for a tab. Input still in flight leaves
-   * the tab uncertain, so nothing attaches underneath it. A synthetic detach
+   * the tab uncertain, so nothing attaches underneath it, unless the
+   * extension fences each attachment: then Chrome's own detach means a late
+   * command can only be refused, and the tab may be attached again. A synthetic detach
    * (after a broken event stream) is not evidence that Chrome detached: it
    * keeps Chrome's debugger attachment, which a later attach reuses and
    * shutdown still detaches, and it leaves the detach epochs that only
@@ -938,13 +1229,14 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     reason: unknown,
     { synthetic }: { synthetic: boolean },
   ): void {
-    if ((this.pendingInput.get(tabId) ?? 0) > 0) this.uncertainTabs.add(tabId);
+    const fenced = !synthetic && this.tabAttachments.has(tabId);
+    if ((this.pendingInput.get(tabId) ?? 0) > 0 && !fenced) this.uncertainTabs.add(tabId);
     if (!synthetic) this.tabDetachEpochs.set(tabId, (this.tabDetachEpochs.get(tabId) ?? 0) + 1);
     const sessionId = this.tabSessions.get(tabId);
     if (reason === "canceled_by_user") this.canceledTabs.add(tabId);
     const attached = this.attachedTabs.has(tabId);
     this.removeTab(tabId);
-    if (synthetic && attached) this.attachedTabs.add(tabId);
+    if (synthetic && attached) this.holdDebugger(tabId);
     if (sessionId)
       this.emitEvent({
         method: "Target.detachedFromTarget",
@@ -953,9 +1245,24 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       });
   }
 
+  /** Chrome's debugger on this tab was released by another controller. Ends
+   * this connection's session for it without making it uncertain: the
+   * refused command never reached the page. */
+  private forgetReleasedAttachment(tabId: string): void {
+    const sessionId = this.tabSessions.get(tabId);
+    this.removeTab(tabId);
+    if (sessionId)
+      this.emitEvent({
+        method: "Target.detachedFromTarget",
+        sessionId: null,
+        params: { sessionId, targetId: tabId, reason: "debugger_released" },
+      });
+  }
+
   private removeTab(tabId: string): void {
-    this.attachedTabs.delete(tabId);
+    if (this.attachedTabs.has(tabId)) this.releaseDebugger(tabId);
     this.tabSessions.delete(tabId);
+    this.tabAttachments.delete(tabId);
     for (const [sessionId, mappedTabId] of this.sessionTabs) {
       if (mappedTabId === tabId) this.sessionTabs.delete(sessionId);
     }
@@ -1006,10 +1313,20 @@ function requireTab(value: unknown): AttachedTab {
   return {
     id: requireTargetId(tab.id),
     title: boundedString(tab.title, 0, 8_192, "tab title"),
-    url: tab.url === null ? null : boundedString(tab.url, 1, 65_536, "tab URL"),
+    url: tabUrl(tab.url),
     active: requireBoolean(tab.active, "tab active state"),
     controllable: requireBoolean(tab.controllable, "tab controllability"),
   };
+}
+
+/** A tab's address as Chrome reports it, or null when it reports none yet.
+ * One tab's unusual address never fails a listing or a session's start:
+ * Chrome reports a tab it has just created, or one still loading, with an
+ * empty address, and a page's own address (a large data: URL) can be far
+ * longer than anything we need to read of it. */
+function tabUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0) return null;
+  return value.length > MAX_TAB_URL_LENGTH ? value.slice(0, MAX_TAB_URL_LENGTH) : value;
 }
 
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
@@ -1030,6 +1347,8 @@ function mapBridgeError(method: string, error: unknown, sessionId?: string): Err
         "Browser tab debugging unavailable; observe the tab again",
         true,
       );
+    if (error.code === "invalid_request")
+      return new CdpProtocolError(method, -32_601, error.message);
     if (error.code !== "driver_rejected") return new CdpTransportError(error.message);
     const refusal = chromeProtocolRefusal(error);
     return refusal
@@ -1037,6 +1356,16 @@ function mapBridgeError(method: string, error: unknown, sessionId?: string): Err
       : new CdpProtocolError(method, -32_000, error.message);
   }
   return new CdpTransportError(error instanceof Error ? error.message : "attached Chrome failed");
+}
+
+/** chrome.debugger rejects the commands it was still handling when Chrome
+ * ended the tab's attachment with exactly this message. */
+function chromeDetachedDuringCommand(error: unknown): boolean {
+  return (
+    error instanceof AttachedBrowserBridgeError &&
+    error.code === "driver_rejected" &&
+    error.message.trim() === "Detached while handling command."
+  );
 }
 
 /** chrome.debugger rejects a command the browser refused with the protocol's
@@ -1078,6 +1407,7 @@ const READ_ONLY_TAB_METHODS = new Set([
   "DOM.querySelectorAll",
   "DOM.resolveNode",
   "Emulation.setFocusEmulationEnabled",
+  "Inspector.enable",
   "Log.enable",
   "Network.enable",
   "Page.captureScreenshot",

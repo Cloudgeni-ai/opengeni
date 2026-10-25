@@ -109,7 +109,11 @@ describe("session control surface architecture", () => {
     // page gutter. Putting the gutter inside only SessionChrome makes it 48px
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
-    expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
+    expect(route).toContain(
+      'className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6"',
+    );
+    // The wait status is a chip in SessionChrome, not a separate banner row.
+    expect(route).not.toContain("<LazySessionWaitStatus");
   });
 
   test("current model pacing is shown above the composer, never on an older history page", async () => {
@@ -348,7 +352,11 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps pin and archive one click away while the full row menu stays on right-click", async () => {
-    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
+    const [list, shared, siteRow] = await Promise.all([
+      source("../../../packages/react/src/app/components/rail/session-list.tsx"),
+      source("../../../packages/react/src/app/components/rail/rail-row-quick-actions.tsx"),
+      source("../../../packages/react/src/app/components/rail/site-session-group-heading.tsx"),
+    ]);
     const rowStart = list.indexOf("function SessionRow(");
     const quickActionsStart = list.indexOf("function RowQuickActions(");
     const overflowStart = list.indexOf("function RowActionsMenu(");
@@ -364,16 +372,27 @@ describe("session control surface architecture", () => {
     expect(row).toMatch(/<ContextMenu[\s>]/);
     expect(row).toContain("<ContextMenuContent");
     expect(row).toContain("<RowQuickActions");
-    expect(quickActions).toContain('aria-label={session.pinned ? "Unpin session" : "Pin session"}');
-    expect(quickActions).toContain(
-      'aria-label={session.archived ? "Restore session" : "Archive session"}',
+    expect(quickActions).toContain('label={session.pinned ? "Unpin session" : "Pin session"}');
+    // Someone who cannot pause the chat only hides it for themselves (#5711).
+    expect(quickActions).toMatch(
+      /archiveLabel === "Hide for me"\s*\? "Hide for me"\s*: session\.archived\s*\? "Restore session"\s*: "Archive session"/,
     );
-    expect(quickActions).toContain("group-hover:opacity-100");
-    expect(quickActions).toContain("group-focus-within:opacity-100");
-    expect(quickActions).toContain("pointer-coarse:hidden");
+    // A spawned row archives its workstream instead of offering nothing.
+    expect(quickActions).not.toContain("parentSessionId === null");
+    expect(quickActions).toContain("onArchive(target, !target.archived");
+    // Session and Site rows share one placement and one tooltip button.
+    expect(quickActions).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
+    expect(siteRow).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
+    expect(siteRow).toContain("<ContextMenuContent");
+    expect(siteRow).toContain("RAIL_ROW_OVERFLOW_TRIGGER_CLASS");
+    expect(shared).toContain("group-hover:opacity-100");
+    expect(shared).toContain("group-focus-within:opacity-100");
+    expect(shared).toContain("pointer-coarse:hidden");
+    expect(shared).toContain("pointer-coarse:inline-flex");
+    expect(shared).toContain("<TooltipContent");
     expect(quickActions).not.toContain("<DropdownMenu>");
     expect(overflow).toContain('data-session-actions-mode="overflow"');
-    expect(overflow).toContain("pointer-coarse:inline-flex");
+    expect(overflow).toContain("RAIL_ROW_OVERFLOW_TRIGGER_CLASS");
   });
 
   test("keeps rail optimistic pin overrides out of the header projection", async () => {
@@ -402,8 +421,8 @@ describe("session control surface architecture", () => {
 
   test("bounds rendered groups independently of cached pages and keyboard navigation", async () => {
     const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
-    expect(list).toContain(
-      "sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId)",
+    expect(list).toMatch(
+      /sessionGroupWindowNodes\(\s*nodes,\s*visibleCountForGroup\(key\),\s*activeSessionId,/,
     );
     expect(list).toContain("visibleForestRows(visibleForest, expanded, activeSessionId)");
     expect(list).toContain("visibleNodes={visibleNodesForGroup(");

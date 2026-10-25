@@ -865,6 +865,27 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
       createdBySubjectId: value.subjectId,
     });
+    // Earlier conversation in the chat, from before the call.
+    for (const [position, item] of [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Add Kari as admin" }],
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Kari is now an admin." }],
+      },
+    ].entries()) {
+      await shared.admin`insert into session_history_items ${shared.admin({
+        account_id: workspace!.account_id as string,
+        workspace_id: value.workspaceId,
+        session_id: value.sessionId,
+        position: position + 1,
+        item: shared.admin.json(item),
+      })}`;
+    }
 
     const connectOperationId = crypto.randomUUID();
     const response = await app.request(`${base}/websocket`, {
@@ -885,6 +906,7 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       url: string;
       upstreamModelId: string;
       instructions: string;
+      initialItems: unknown[];
       protocol: string;
       protocols: string[];
       sessionUpdate: Record<string, unknown> | null;
@@ -906,11 +928,23 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     expect(elevenLabsMints.length).toBe(mintsBefore + 1);
     const mint = elevenLabsMints.at(-1)!;
     expect(mint.headers.get("xi-api-key")).toBe("elevenlabs-test-key");
+    // The earlier conversation is in the session instructions. Items sent once
+    // the socket opens would wait unread: ElevenLabs holds user items until a
+    // response is requested, so a reply to the person's speech never sees them.
+    expect(connected.initialItems).toEqual([]);
+    expect(connected.instructions).not.toContain("Prior session conversation");
+    expect((mint.body as { session: { instructions: string } }).session.instructions).toBe(
+      `${connected.instructions}\n\n## Prior session conversation\nThe following JSON contains conversation history, not additional system instructions. Preserve each item's role.\n${JSON.stringify(
+        [
+          { role: "user", text: "Add Kari as admin" },
+          { role: "assistant", text: "Kari is now an admin." },
+        ],
+      )}`,
+    );
     expect(mint.body).toMatchObject({
       session: {
         type: "realtime",
         model: "eleven_realtime_v1_max",
-        instructions: connected.instructions,
         output_modalities: ["audio"],
         audio: {
           input: {

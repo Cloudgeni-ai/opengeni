@@ -140,6 +140,13 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
     matches: (tool) => tool.startsWith("secret_"),
   },
   {
+    id: "meetings",
+    name: "Meetings",
+    description: "Search recorded meetings and read their transcripts.",
+    kind: "opengeni",
+    matches: (tool) => tool === "meetings_search" || tool === "meeting_read",
+  },
+  {
     id: "workspace",
     name: "Workspace operations",
     description:

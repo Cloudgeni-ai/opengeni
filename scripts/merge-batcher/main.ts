@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { observeCycle, observationDeferred, OBSERVATION_DEFERRED_EXIT } from "./cycle-outcome";
 import { errorDiagnostic, markFailurePhase } from "./diagnostics";
 import { parseArgs } from "node:util";
 import { Controller, LiveReader, type StepResult } from "./controller";
@@ -186,7 +187,7 @@ export async function runService(
   try {
     for (;;) {
       try {
-        const result = await controller.step();
+        const result = await observeCycle(() => controller.step());
         ready = true;
         lastSuccess = Date.now();
         failures = 0;
@@ -241,5 +242,7 @@ if (import.meta.main)
   main(process.argv.slice(2)).catch((error) => {
     // Retain bounded diagnostic text only after credential redaction.
     console.error(JSON.stringify(errorDiagnostic(error)));
-    process.exitCode = 1;
+    // Exit 75 means only that this cycle has no unresolved attempted write.
+    // Supervisors must retain pre-existing unknown outcomes independently.
+    process.exitCode = observationDeferred(error) ? OBSERVATION_DEFERRED_EXIT : 1;
   });

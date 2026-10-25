@@ -21,6 +21,12 @@ const STALE_LINK = "This connection link is no longer valid or was already used.
  */
 export function oauthCallbackReasonMessage(reason: string | null): string | null {
   switch (reason) {
+    case "account_mismatch":
+      return "You signed in to a different account. Reconnect with the same account, or use Add account.";
+    case "account_already_connected":
+      return "This account is already connected. Reconnect the existing account in connection settings.";
+    case "account_identity_unavailable":
+      return "This service does not provide enough account information to safely add another connection. Manage or reconnect the existing connection in settings.";
     case "access_denied":
     case "provider_denied":
       return `You cancelled at the provider, so nothing was connected.${RETRY}`;

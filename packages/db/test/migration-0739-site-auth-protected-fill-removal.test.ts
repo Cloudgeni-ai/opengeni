@@ -29,23 +29,28 @@ const MIGRATIONS_DIR = join(import.meta.dir, "../drizzle");
 /** Later migrations that compile against the vault objects 0739 creates. The
  *  fixture withholds 0739, so it must withhold these too: they would run
  *  before the vault tables and routines exist. A later migration that uses a
- *  function one of those creates (0900 on 0897's administrator predicate) is
- *  withheld with it. */
+ *  function or table one of those creates (0900 on 0897's administrator
+ *  predicate, 0953 on 0952's approval requests) is withheld with it. */
 async function laterVaultMigrations(): Promise<string[]> {
   const later = (await readdir(MIGRATIONS_DIR))
     .filter((file) => file.endsWith(".sql") && file > MIGRATION)
     .sort();
   const dependent: string[] = [];
-  const withheldFunctions = new Set<string>();
+  const withheldObjects = new Set<string>();
   for (const file of later) {
     const sql = await readFile(join(MIGRATIONS_DIR, file), "utf8");
-    const usesWithheldFunction = [...withheldFunctions].some((name) =>
+    const usesWithheldObject = [...withheldObjects].some((name) =>
       new RegExp(`\\b${name}\\b`, "u").test(sql),
     );
-    if (!/\bvaults?\b|vault_/iu.test(sql) && !usesWithheldFunction) continue;
+    if (!/\bvaults?\b|vault_/iu.test(sql) && !usesWithheldObject) continue;
     dependent.push(file);
     for (const created of sql.matchAll(/CREATE\s+FUNCTION\s+(?:[\w"]+\.)?"?(\w+)"?\s*\(/giu)) {
-      withheldFunctions.add(created[1]!);
+      withheldObjects.add(created[1]!);
+    }
+    for (const created of sql.matchAll(
+      /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[\w"]+\.)?"?(\w+)"?/giu,
+    )) {
+      withheldObjects.add(created[1]!);
     }
   }
   return dependent;

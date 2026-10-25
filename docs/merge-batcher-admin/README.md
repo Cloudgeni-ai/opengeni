@@ -1,3 +1,8 @@
+# App-only namespace guidance compatibility
+
+New `prepare-app-only` plans name the namespace `Merges go through the batcher: use gh pr merge --auto or add the queue-ready label`.
+Retained v3 and older v4 plans keep their exact original name and restore payload; verification accepts only their matching full inventory and creation receipts. This does not authorize renaming an active ruleset without rebinding its plan. Use the coordinated Manual/fresh-activation procedure, preserving old claims and journals. Capture `allow_auto_merge=true` in the new saved Manual snapshot when native auto-merge is enabled, so later OFF keeps that repository setting.
+
 # Prepared administration bundle — inactive
 
 This bundle is **inactive by default**. `bundle.ts` is offline: it reads saved
@@ -15,13 +20,49 @@ The continuous service, secret injection, qualified image and stop/restart
 qualification are separately owned deployment work. No live admin writes or
 controller activation are part of this change.
 
-## Intended boundaries
+## Explicit App-only plan (version 4)
+
+`bundle.ts prepare-app-only SNAPSHOT APP_ID INSTALLATION_ID NEW_OUTPUT_DIRECTORY`
+prepares a new, offline version 4 plan. Only that App has `always` bypass on
+Protection and the namespace; neither organization administrators nor repository
+role 5 retain ON bypass. Protection also requires
+`merge-batcher: run gh pr merge --auto (or add queue-ready)`, with its expected
+source bound to the App's integration ID. The App can bypass this check; this
+change does not manufacture a successful check or replace candidate CI evidence.
+The immutable guard still has no bypass.
+
+The restore payload is the exact saved Manual policy, including any original
+administrator bypass and without the added guiding check. Version 3 `prepare`
+and validation remain supported for retained activations; changing a plan's
+version does not upgrade it. Do not substitute version 4 payloads or config into
+an active version 3 watchdog. A live in-place upgrade still requires reviewed
+transition handling, a qualified image/plan binding and rollback qualification.
+The offline plan command does not authorize or implement that transition.
+
+Version 4 recovery also recognizes three exact inventories for a reviewed
+in-place upgrade: `legacy-applied` (both v3 payloads), `upgrade-admission`
+(v4 Protection, v3 namespace), and `legacy-namespace` (saved Manual Protection,
+v3 namespace). These are recovery states, never ordinary ON clearance. The
+historical namespace creation receipt remains unchanged; it must match either
+the exact predecessor or v4 payload, and the live full inventory must match the
+selected phase. Unknown combinations and drift still refuse restoration writes.
+OFF uses the exact saved restore payload and reverse-only stages for these states.
+An unresolved upgrade write blocks reverse writes unless its exact destination
+has been reconciled; absence or a different later inventory is not finality proof.
+
+This recovery support does not add forward upgrade writes. Before a live upgrade,
+the rollout owner must resolve single-writer coordination with scheduled OFF,
+qualify the new image and immutable binding, and retain provider/enforcement and
+rollback evidence. Do not pause the live Scheduler or introduce a claim reset to
+work around that requirement.
+
+## Legacy version 3 boundaries
 
 | Ruleset | Refs | Bypass | Rules |
 | --- | --- | --- | --- |
-| Existing `Protection`, updated in place | Existing default-branch condition (`main` required) | Dedicated App, `Integration`, `always` | Existing PR admission parameters, including squash-only manual merges, unchanged |
+| Existing `Protection`, updated in place | Existing default-branch condition (`main` required) | Dedicated App and `OrganizationAdmin`, `always` | Existing PR admission parameters, including squash-only manual merges, unchanged |
 | `Opengeni batcher immutable refs` | `main`, `queue/live/**`, `batcher-state` | **None**, including administrators and the App | Non-fast-forward and deletion prohibited |
-| `Opengeni batcher dedicated writer` | `main`, `queue/live/**`, `batcher-state` | Dedicated App, `Integration`, `always` | Creation/update restricted to the App, including normal PR merges to main |
+| `Merges go through the batcher: add the queue-ready label` | `main`, `queue/live/**`, `batcher-state` | Dedicated App and `OrganizationAdmin`, `always` | App is the normal writer; organization administrators have emergency bypass |
 
 On **main**, the App bypasses PR admission and the dedicated-writer restriction,
 never the separate immutable guard. The writer restriction is the exclusive
@@ -33,11 +74,17 @@ Main receives no force authorization. Candidate refs remain create-only in the
 controller; the ruleset itself permits App FF updates and is not a substitute
 for that implementation invariant.
 
-The previous combined ruleset's broad administrator bypass is removed from main
-admission, not copied into either guard or writer restriction. While applied,
-ordinary collaborators **and administrators** cannot normally merge directly to
-main. No standing admin writer bypass is installed. An authorized organization/
-repository administrator can run the emergency OFF policy restoration; policy
+Organization administrators have `OrganizationAdmin`/`always` bypass on admission
+and writer restrictions only. This is not `RepositoryRole` (repository admin).
+GitHub's REST schema ignores `actor_id` for `OrganizationAdmin`; the payload uses
+the constant 1, not an assigned organization or installation ID. `always` permits
+direct updates as well as PR merges, including the listed queue/state namespaces.
+GitHub does not constrain this grant to emergencies: emergency-only use is operator
+policy. These actor and mode semantics are defined by the
+[GitHub rulesets REST API](https://docs.github.com/en/rest/repos/rules#create-a-repository-ruleset).
+No live API write is claimed by the offline tests; unexpected provider payload
+normalization must hold and reconcile, not relax comparison. The separate immutable guard still has no bypass. An authorized
+administrator can run the emergency OFF policy restoration; policy
 administration cannot itself be prevented by a repository ruleset and is not
 permission for routine bypass. The original normal squash path returns only after
 OFF restores it. No linear-history enforcement is added (candidate commits have two
@@ -63,7 +110,7 @@ register a private App with that name/homepage and only these repository grants:
 - Workflows **write**: commits can contain workflow-file changes.
 - Actions **write**: read bound receipts and rerun the whole workflow once.
 - Pull requests **write**: exact-head reconciliation and remaining-delta follow-up PRs.
-- Issues **write**: exact-head evidence/ejection comments.
+- Issues **write**: landing, parking and reconciliation comments (not admission attestations).
 - Metadata **read** is GitHub's implicit grant. No Administration permission,
   organization/account grants, deployment grants or subscribed events.
 
@@ -166,13 +213,12 @@ identity is accepted by GitHub. Future policy drift needs a new reviewed plan,
 not a relaxed assertion. No production/tag change is proposed.
 
 `plan.json` retains the complete before snapshot, App/installation IDs and payloads.
-This exclusive-main revision uses **schemaVersion 2**. Version 1 intentionally
-allowed manual merges and is not silently upgraded or accepted for activation.
-Generate a fresh, independently reviewed version 2 plan from untouched live
+This emergency-admin revision uses **schemaVersion 3**. Versions 1 and 2 are not
+silently upgraded or accepted for activation.
+Generate a fresh, independently reviewed version 3 plan from untouched live
 originals. Retain older evidence rather than overwriting it. Every verification
 reconstructs the proposed payloads from the original snapshot and assigned IDs;
-edited parallel files or edited plan payloads cannot remove exclusivity or add
-an admin bypass.
+edited parallel files or edited plan payloads cannot change the reviewed bypass set.
 For comparison only, an exact update rule with parameters absent is equivalent
 to the exact explicit `update_allows_fetch_and_merge:false` form. GitHub can omit
 this default in stored readbacks. This applies to both sides, including unchanged
@@ -305,7 +351,7 @@ readers; the absence of hidden fields alone does not change it:
 
 The rollout owner still uses exact original snapshots and the full `verify`
 routine for mutations/OFF, with administrative readbacks proving the assigned
-App Integration is the only admission/writer bypass and the immutable guard has
+App Integration and OrganizationAdmin are exactly the admission/writer bypasses; the immutable guard has
 **no bypass actors**. Those exact identity/bypass checks are activation gates,
 not prerequisites for an ordinary agent to choose queue-only rather than merge.
 This agent readback is observational and grants no
@@ -442,14 +488,21 @@ credential rollback and an optional shadow restart remain separately owned by th
 deployment operator, after the old active writer is proven stopped. Production/
 tags and full-main/release proof remain unchanged.
 
+Never restart an older active controller against a ledger containing durable
+parking records unless that exact binary has been reviewed as compatible. A
+supervisor STOP alone leaves queue-only rules in place: the designated rules
+operator owns the one-command OFF and verified Manual restoration, coordinated
+with the sole runtime operator so STOP operations do not race.
+
 The accepted landing contract remains an exact **tested snapshot**, not an atomic
 lock on PR metadata. A later head can race the final reread. Exact landed SHA
 comments/reconciliation must not claim that newer work was tested. An auto-merged
 original with newer descendant work can receive an idempotently reconciled
 follow-up PR; externally closed unmerged PRs cannot. Source access, API permission,
 divergence or ambiguous creation can leave explicit blocked recovery. Every new
-head/follow-up needs fresh full VM tests, independent review and readiness. Version
-intake is a singleton with the same evidence, never an automated exemption. Full
+head/follow-up needs fresh required exact-head GitHub-hosted checks and readiness.
+No VM attestation, agent comment or reviewer UUID is an admission requirement.
+Version intake is a singleton with the same checks, never an automated exemption. Full
 main CI and Version/image provenance still gate production release.
 
 ## Exact-prior ruleset restoration (OFF's underlying reverse stages)

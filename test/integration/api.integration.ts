@@ -5716,6 +5716,7 @@ describe("API component integration", () => {
       accountType: "User",
       linkedBySubjectId: context.subjectId,
       repositoryIds: [repository.id],
+      eventRouteSecret: null,
     });
     const legacyInfo = (await (
       await app.request(workspacePath(secondWorkspace.id, "/github/app"))
@@ -5952,6 +5953,7 @@ describe("API component integration", () => {
         authorityExpiresAt,
         authorityNonce: `first-${crypto.randomUUID()}`,
         repositoryIds: [adminRepository.id],
+        eventRouteSecret: null,
       }),
       bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
         accountId: context.defaultAccountId!,
@@ -5968,6 +5970,7 @@ describe("API component integration", () => {
         authorityExpiresAt,
         authorityNonce: `second-${crypto.randomUUID()}`,
         repositoryIds: [adminRepository.id],
+        eventRouteSecret: null,
       }),
     ]);
 

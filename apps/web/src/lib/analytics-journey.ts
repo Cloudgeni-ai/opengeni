@@ -15,11 +15,13 @@ const PAGES = new Set([
   "state",
   "memory",
   "schedules",
+  "automations",
   "artifacts",
   "settings",
   "organization",
   "insights",
   "machines",
+  "computer-use",
   "files",
   "agents",
   "secrets",
@@ -30,6 +32,7 @@ const PAGES = new Set([
   "read-only-chats",
   "inbox",
   "sites",
+  "meetings",
 ]);
 // Top-level routes outside a workspace, by exact path shape. A concrete id in
 // the path is never reported for these; everything unlisted is "other".
@@ -39,6 +42,7 @@ const TOP_LEVEL_PAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^\/identity-links\/[^/]+$/, "identity-link"],
   [/^\/billing$/, "checkout-return"],
   [/^\/integrations$/, "integration-return"],
+  [/^\/teams\/connect$/, "teams-connect"],
   [/^\/device$/, "device"],
   [/^\/connect-agent$/, "connect-agent"],
   [/^\/native-sign-in$/, "native-sign-in"],
