@@ -6,7 +6,7 @@
  * this device, uploading, or waiting for the connection).
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   CircleIcon,
   InfoIcon,
@@ -401,6 +401,8 @@ export function RecorderPanel({
   liveTranscript = null,
   defaultLanguage = null,
   autoStart = null,
+  externalRef = null,
+  notice = null,
 }: {
   /** Null while the capture code loads. */
   recorder: MeetingRecorder | null;
@@ -416,6 +418,10 @@ export function RecorderPanel({
    * request once, so it starts one recording.
    */
   autoStart?: { pending: boolean; take: () => { title: string } | null } | null;
+  /** The host's own id for what new recordings belong to, such as a project. */
+  externalRef?: string | null | undefined;
+  /** A short line shown before every start, such as a reminder to tell the people present. */
+  notice?: ReactNode;
 }) {
   const msg = useOpenGeniText();
   const titleId = useId();
@@ -443,6 +449,7 @@ export function RecorderPanel({
       ...(titleText.trim() ? { title: titleText.trim() } : {}),
       systemAudio: tabAudio,
       ...(liveOn ? { liveTranscript: true } : {}),
+      ...(externalRef ? { externalRef } : {}),
       // Sent even when it's the workspace's, so this meeting keeps it.
       transcription: { language: language === DETECT_LANGUAGE ? null : language },
     });
@@ -669,6 +676,7 @@ export function RecorderPanel({
           {recorderErrorText(error, recorder?.systemAudioKind, msg).body}
         </Notice>
       ) : null}
+      {notice ? <p className="px-1 text-sm leading-5 text-fg-label">{notice}</p> : null}
       <p className="px-1 text-xs leading-4.5 text-fg-muted" aria-live="polite">
         {startHint}
         {liveOn && !starting ? ` ${liveCostHint(liveTranscript?.usdPerHour ?? null, msg)}` : null}

@@ -23,6 +23,7 @@ export type {
 export { RecorderPanel } from "./meetings/recorder-panel";
 export { MeetingsListPage } from "./meetings/meetings-list-page";
 export { MeetingDetailPage } from "./meetings/meeting-detail-page";
+export type { MeetingDetail } from "./meetings/meeting-detail-page";
 export { MeetingTranscript } from "./meetings/meeting-transcript";
 export type { TranscriptActions, VoiceActions } from "./meetings/meeting-transcript";
 export { MeetingPlayer } from "./meetings/meeting-player";

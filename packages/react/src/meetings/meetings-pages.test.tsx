@@ -163,9 +163,58 @@ describe("Meetings list", () => {
       await view.unmount();
     }
   });
+
+  test("a host can show only its own meetings inside its page, with a reminder at Start", async () => {
+    const fixture = createMeetingsFixture();
+    await fixture.client.updateRecording(fixture.workspaceId, fixture.readyId, {
+      externalRef: "project:42",
+    });
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+        externalRef="project:42"
+        header={false}
+        notice="Tell the people present that you're recording."
+      />,
+    );
+    try {
+      await waitForText(view.container, "Weekly product sync");
+      const text = view.container.textContent ?? "";
+      expect(text).not.toContain("Transcript failed");
+      expect(text).toContain("Tell the people present that you're recording.");
+      expect(view.container.querySelector("h1")).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
 });
 
 describe("Meeting page", () => {
+  test("shows the host's own details beside the transcript", async () => {
+    const fixture = createMeetingsFixture();
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+        details={(recording) => [
+          { id: "project", label: "Project", content: `Linked to ${recording.title}` },
+        ]}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Linked to Weekly product sync");
+      expect(view.container.textContent).toContain("Project");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("shows the transcript with named and unnamed speakers", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(

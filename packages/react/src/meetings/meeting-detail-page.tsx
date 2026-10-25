@@ -8,7 +8,7 @@
  * with the reason and what to try.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AudioLinesIcon,
   CheckIcon,
@@ -548,6 +548,9 @@ function RerunNotice({
   return null;
 }
 
+/** One of the host's own lines about a meeting, such as its project. */
+export type MeetingDetail = { id: string; label: string; content: ReactNode };
+
 export function MeetingDetailPage({
   workspaceId,
   recordingId,
@@ -557,6 +560,7 @@ export function MeetingDetailPage({
   recordings: recordingsClient,
   onBack,
   onOpenSettings,
+  details,
 }: {
   workspaceId: string;
   recordingId: string;
@@ -570,6 +574,11 @@ export function MeetingDetailPage({
   onBack: () => void;
   /** Opens Meetings settings, where voice recognition is turned on. */
   onOpenSettings?: (() => void) | undefined;
+  /**
+   * The host's own lines about this meeting, shown first beside the
+   * transcript, such as the project it belongs to.
+   */
+  details?: ((recording: Recording) => readonly MeetingDetail[]) | undefined;
 }) {
   const msg = useOpenGeniText();
   const override = { workspaceId, ...(recordingsClient ? { recordings: recordingsClient } : {}) };
@@ -1053,9 +1062,15 @@ export function MeetingDetailPage({
     />
   );
 
+  const hostDetails = details?.(recording) ?? [];
   const aside =
-    showTranscript || meeting.versions.length > 0 ? (
+    showTranscript || meeting.versions.length > 0 || hostDetails.length > 0 ? (
       <DetailAside label={msg("meetings.detailPage.aboutThisTranscript")}>
+        {hostDetails.map((detail) => (
+          <DetailAsideItem key={detail.id} label={detail.label}>
+            {detail.content}
+          </DetailAsideItem>
+        ))}
         {speakerLabels.length > 0 ? (
           <DetailAsideItem label={msg("meetings.detailPage.speakers")}>
             <ul className="grid w-full min-w-0 gap-1">{speakerButtons("list")}</ul>

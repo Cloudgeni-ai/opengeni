@@ -4,7 +4,7 @@
  * transcribing say so and update on their own.
  */
 import { useOpenGeniText } from "../messages/runtime";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import type { Recording } from "@opengeni/contracts";
 import {
@@ -67,6 +67,9 @@ export function MeetingsListPage({
   recordings: recordingsClient,
   meetingHref,
   onOpen,
+  externalRef = null,
+  notice = null,
+  header = true,
 }: {
   workspaceId: string;
   /** Whether the workspace shows a live transcript while recording by default. */
@@ -77,6 +80,15 @@ export function MeetingsListPage({
   recordings?: RecordingsClientOverride["recordings"];
   meetingHref: (recordingId: string) => string;
   onOpen: (recordingId: string) => void;
+  /**
+   * Show only the meetings with this id of the host's, such as a project, and
+   * give new recordings started here the same id.
+   */
+  externalRef?: string | null;
+  /** A short line shown before every start, such as a reminder to tell the people present. */
+  notice?: ReactNode;
+  /** Show the page title; false when the list sits inside a page of the host's. */
+  header?: boolean;
 }) {
   const msg = useOpenGeniText();
   const columns: RowListColumn[] = [
@@ -86,7 +98,11 @@ export function MeetingsListPage({
   const [search, setSearch] = useState("");
   const query = useDebounced(search.trim(), 250);
   const override = { workspaceId, ...(recordingsClient ? { recordings: recordingsClient } : {}) };
-  const list = useRecordings({ ...override, ...(query ? { query } : {}) });
+  const list = useRecordings({
+    ...override,
+    ...(query ? { query } : {}),
+    ...(externalRef ? { externalRef } : {}),
+  });
   const { client } = useRecordingsClient(override);
   const { recorder, finished } = useMeetingRecorder();
   const models = useRecordingModels(override);
@@ -122,17 +138,21 @@ export function MeetingsListPage({
 
   return (
     <>
-      <PageHeader
-        icon={<AudioLinesIcon />}
-        title={msg("meetings.listPage.meetings")}
-        description={msg("meetings.listPage.recordAMeetingAndGet")}
-      />
-      <div className="mt-2 grid gap-8">
+      {header ? (
+        <PageHeader
+          icon={<AudioLinesIcon />}
+          title={msg("meetings.listPage.meetings")}
+          description={msg("meetings.listPage.recordAMeetingAndGet")}
+        />
+      ) : null}
+      <div className={header ? "mt-2 grid gap-8" : "grid gap-8"}>
         <RecorderPanel
           recorder={recorder}
           onStopped={onOpen}
           defaultLanguage={defaultLanguage}
           autoStart={autoStart}
+          externalRef={externalRef}
+          notice={notice}
           liveTranscript={
             liveModel
               ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }

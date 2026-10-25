@@ -402,10 +402,15 @@ export function createMeetingsFixture(
   };
   const delay = <T>(value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), 120));
   const client = {
-    listRecordings: async (_workspaceId: string, request: { query?: string } = {}) =>
+    listRecordings: async (
+      _workspaceId: string,
+      request: { query?: string; externalRef?: string } = {},
+    ) =>
       await delay({
-        recordings: recordings.filter((entry) =>
-          request.query ? matchesSearch(entry, request.query) : true,
+        recordings: recordings.filter(
+          (entry) =>
+            (request.query ? matchesSearch(entry, request.query) : true) &&
+            (request.externalRef ? entry.externalRef === request.externalRef : true),
         ),
         nextBefore: null,
       }),

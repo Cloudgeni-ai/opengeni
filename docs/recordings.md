@@ -84,9 +84,15 @@ the console uses:
   keeps going while the person moves around. In the desktop app it also
   carries out the call notifications ("Record this meeting?"); pass
   `onOpenMeetings` and `onOpenMeeting` to say where those open.
-- `MeetingsListPage`: the recorder plus the searchable list.
+- `MeetingsListPage`: the recorder plus the searchable list. Pass
+  `externalRef` to show only the meetings that belong to something of yours,
+  such as a project, and to give new recordings started there the same id;
+  `notice` for a line shown before every start, such as a reminder to tell
+  the people present; and `header={false}` when the list sits inside a page
+  of your own.
 - `MeetingDetailPage`: one meeting, with its player, transcript, speaker
-  naming, versions and sharing.
+  naming, versions and sharing. `details` adds your own lines beside the
+  transcript, such as the project it belongs to.
 - `MeetingDefaultsView`: the workspace's meeting settings over plain values
   and an `onSave`.
 - The smaller pieces they are built from: `RecorderPanel`,

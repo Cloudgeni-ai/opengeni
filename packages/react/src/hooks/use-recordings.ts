@@ -201,7 +201,14 @@ export type UseRecorderResult = RecorderSnapshot & {
   start: (
     overrides?: Pick<
       UseRecorderOptions,
-      "title" | "systemAudio" | "microphone" | "visibility" | "liveTranscript" | "transcription"
+      | "title"
+      | "systemAudio"
+      | "microphone"
+      | "visibility"
+      | "liveTranscript"
+      | "transcription"
+      | "externalRef"
+      | "metadata"
     >,
   ) => Promise<void>;
   pause: () => void;

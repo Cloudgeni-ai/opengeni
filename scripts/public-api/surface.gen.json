@@ -37107,6 +37107,7 @@
       "LiveTranscriptLine": "type",
       "MEETING_LANGUAGES": "value",
       "MeetingDefaultsView": "value",
+      "MeetingDetail": "type",
       "MeetingDetailPage": "value",
       "MeetingPlayer": "value",
       "MeetingPlayerHandle": "type",
