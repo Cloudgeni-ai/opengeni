@@ -28,7 +28,7 @@ const { MeetingsListPage } = await import("./meetings-list-page");
 const { MeetingDetailPage } = await import("./meeting-detail-page");
 const { createMeetingRecorderStore, MeetingRecorderStoreProvider } =
   await import("./recorder-context");
-const { createMeetingsFixture } = await import("../../dev/ui-kit/pages/meetings/fixture");
+const { createMeetingsFixture } = await import("../testing/meetings-fixture");
 
 async function render(node: React.ReactNode) {
   const container = document.createElement("div");
@@ -369,7 +369,7 @@ describe("Live transcript", () => {
   });
 
   test("a meeting recorded elsewhere shows the saved live text as a preview", async () => {
-    const { LIVE_RECORDING_ID } = await import("../../dev/ui-kit/pages/meetings/fixture");
+    const { LIVE_RECORDING_ID } = await import("../testing/meetings-fixture");
     const fixture = createMeetingsFixture();
     const view = await render(
       <MeetingDetailPage

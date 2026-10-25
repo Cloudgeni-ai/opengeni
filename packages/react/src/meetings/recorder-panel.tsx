@@ -17,14 +17,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
-import { Button } from "@opengeni/react/ui/button";
-import { Checkbox } from "@opengeni/react/ui/field";
-import { Input } from "@opengeni/react/ui/input";
-import { Notice } from "@opengeni/react/ui/notice";
-import { NativeSelect } from "@opengeni/react/ui/select-menu";
-import { cn } from "@opengeni/react/app/lib/utils";
+import { Button } from "../ui/button";
+import { Checkbox } from "../ui/field";
+import { Input } from "../ui/input";
+import { Notice } from "../ui/notice";
+import { NativeSelect } from "../ui/select-menu";
+import { cn } from "../app/lib/utils";
 
-import { formatClock } from "@opengeni/react/recordings";
+import { formatClock } from "../recordings";
 import type { MeetingRecorder } from "./recorder-context";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -335,7 +335,7 @@ function RecordingTitle({ recorder }: { recorder: MeetingRecorder }) {
 
 function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
   const live = recorder.live;
-  const lines = useMemo(() => recorderLiveLines({ live }), [live]);
+  const lines = useMemo(() => recorderLiveLines({ live: live ?? null }), [live]);
   if (!live || live.length === 0) return null;
   const status = liveStatus(live);
   if (lines.length === 0 && live.every((track) => track.state === "unavailable")) {

@@ -2,8 +2,8 @@
  * The languages offered wherever a meeting's language is picked: the
  * recorder, Meetings settings and "Transcribe again". "auto" detects it.
  */
-import { languageName } from "@opengeni/react/recordings";
-import type { SelectOption } from "@opengeni/react/ui/select-menu";
+import { languageName } from "../recordings";
+import type { SelectOption } from "../ui/select-menu";
 
 export const DETECT_LANGUAGE = "auto";
 

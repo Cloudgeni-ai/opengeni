@@ -43,10 +43,10 @@ import {
   useLiveTranscript,
   useTranscript,
   type RecordingsClientOverride,
-} from "@opengeni/react/recordings";
+} from "../recordings";
 
-import { Button } from "@opengeni/react/ui/button";
-import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { Button } from "../ui/button";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 import {
   DetailAside,
   DetailAsideItem,
@@ -54,26 +54,26 @@ import {
   DetailPage,
   DetailPageBody,
   DetailPageHeader,
-} from "@opengeni/react/ui/detail-page";
-import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+} from "../ui/detail-page";
+import { DetailSection } from "../ui/detail-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@opengeni/react/ui/dropdown-menu";
-import { EmptyState } from "@opengeni/react/ui/empty-state";
-import { ErrorMessage } from "@opengeni/react/ui/error-message";
-import { Field, FieldStack, TextInput } from "@opengeni/react/ui/field";
-import { FormDialog } from "@opengeni/react/ui/form-dialog";
-import { MoreMenu } from "@opengeni/react/ui/page-actions";
-import { Notice } from "@opengeni/react/ui/notice";
-import { formatAbsoluteTime } from "@opengeni/react/ui/relative-time";
-import { NativeSelect, type SelectOption } from "@opengeni/react/ui/select-menu";
-import { Skeleton } from "@opengeni/react/ui/skeleton";
-import { StatusBadge } from "@opengeni/react/ui/status-badge";
-import { cn } from "@opengeni/react/app/lib/utils";
+} from "../ui/dropdown-menu";
+import { EmptyState } from "../ui/empty-state";
+import { ErrorMessage } from "../ui/error-message";
+import { Field, FieldStack, TextInput } from "../ui/field";
+import { FormDialog } from "../ui/form-dialog";
+import { MoreMenu } from "../ui/page-actions";
+import { Notice } from "../ui/notice";
+import { formatAbsoluteTime } from "../ui/relative-time";
+import { NativeSelect, type SelectOption } from "../ui/select-menu";
+import { Skeleton } from "../ui/skeleton";
+import { StatusBadge } from "../ui/status-badge";
+import { cn } from "../app/lib/utils";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";

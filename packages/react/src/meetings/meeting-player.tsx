@@ -6,10 +6,10 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { PauseIcon, PlayIcon, RotateCcwIcon, RotateCwIcon } from "lucide-react";
 
-import { Button } from "@opengeni/react/ui/button";
-import { cn } from "@opengeni/react/app/lib/utils";
+import { Button } from "../ui/button";
+import { cn } from "../app/lib/utils";
 
-import { formatClock } from "@opengeni/react/recordings";
+import { formatClock } from "../recordings";
 
 export type MeetingPlayerHandle = {
   /** Jump to a moment and play from there. */

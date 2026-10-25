@@ -1,7 +1,7 @@
 import { toast } from "sonner";
 import type { Recording } from "@opengeni/contracts";
 
-import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
+import { ConfirmDialog } from "../ui/confirm-dialog";
 
 /** "Delete 'Weekly sync'?": removes the audio, every transcript and the speaker names. */
 export function DeleteMeetingDialog({

@@ -37099,6 +37099,33 @@
       "UseMachinesResult": "type",
       "WINDOW_LABEL": "value"
     },
+    "@opengeni/react/meetings": {
+      "createMeetingRecorderStore": "value",
+      "DeleteMeetingDialog": "value",
+      "DETECT_LANGUAGE": "value",
+      "LiveTranscript": "value",
+      "LiveTranscriptLine": "type",
+      "MEETING_LANGUAGES": "value",
+      "MeetingDefaultsView": "value",
+      "MeetingDetailPage": "value",
+      "MeetingPlayer": "value",
+      "MeetingPlayerHandle": "type",
+      "MeetingPlayerSource": "type",
+      "MeetingRecorder": "type",
+      "MeetingRecorderProvider": "value",
+      "MeetingRecorderStore": "type",
+      "MeetingRecorderStoreProvider": "value",
+      "MeetingSettingsViewer": "type",
+      "MeetingsListPage": "value",
+      "MeetingStartRequest": "type",
+      "MeetingTranscript": "value",
+      "RecorderPanel": "value",
+      "TranscriptActions": "type",
+      "useMeetingRecorder": "value",
+      "useMeetingRecorderState": "value",
+      "usePendingMeetingStart": "value",
+      "VoiceActions": "type"
+    },
     "@opengeni/react/messages": {
       "createOpenGeniText": "value",
       "englishMessages": "value",
@@ -37707,6 +37734,12 @@
       "LabScenario": "type",
       "LabScenarioId": "type",
       "labScenarios": "value"
+    },
+    "@opengeni/react/testing/meetings": {
+      "createMeetingsFixture": "value",
+      "LIVE_LINES": "value",
+      "LIVE_RECORDING_ID": "value",
+      "MeetingsFixture": "type"
     },
     "@opengeni/react/this-computer": {
       "AppIcon": "value",

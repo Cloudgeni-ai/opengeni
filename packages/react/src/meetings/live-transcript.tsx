@@ -7,9 +7,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDownIcon } from "lucide-react";
 
-import { Button } from "@opengeni/react/ui/button";
-import { cn } from "@opengeni/react/app/lib/utils";
-import { formatClock } from "@opengeni/react/recordings";
+import { Button } from "../ui/button";
+import { cn } from "../app/lib/utils";
+import { formatClock } from "../recordings";
 
 import { SpeakerDot } from "./meeting-transcript";
 

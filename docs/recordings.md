@@ -77,6 +77,25 @@ segment to another speaker and text edits), `useRecordingPeople` and
 `recordings` client such as a host proxy that implements only the methods the
 mounted hooks call.
 
+`@opengeni/react/meetings` is the ready-made UI on those hooks, the same one
+the console uses:
+
+- `MeetingRecorderProvider`: mount it once above the routes, so a recording
+  keeps going while the person moves around. In the desktop app it also
+  carries out the call notifications ("Record this meeting?"); pass
+  `onOpenMeetings` and `onOpenMeeting` to say where those open.
+- `MeetingsListPage`: the recorder plus the searchable list.
+- `MeetingDetailPage`: one meeting, with its player, transcript, speaker
+  naming, versions and sharing.
+- `MeetingDefaultsView`: the workspace's meeting settings over plain values
+  and an `onSave`.
+- The smaller pieces they are built from: `RecorderPanel`,
+  `MeetingTranscript`, `MeetingPlayer` and `LiveTranscript`.
+
+The pages navigate through callbacks (`onOpen`, `meetingHref`, `onBack`), so
+any router works. `@opengeni/react/testing/meetings` has an in-memory
+recordings client with meetings in every state, for previews and tests.
+
 ## Live transcript preview
 
 While a meeting is recorded, each track can also be streamed to a live speech

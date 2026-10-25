@@ -14,21 +14,21 @@ import {
   useRecordings,
   useRecordingsClient,
   type RecordingsClientOverride,
-} from "@opengeni/react/recordings";
+} from "../recordings";
 
-import { Button } from "@opengeni/react/ui/button";
-import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
-import { EmptyState } from "@opengeni/react/ui/empty-state";
-import { ErrorMessage } from "@opengeni/react/ui/error-message";
-import { inAppClick } from "@opengeni/react/ui/in-app-click";
-import { Input } from "@opengeni/react/ui/input";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
-import { LogoTile } from "@opengeni/react/ui/logo-tile";
-import { MetaChip } from "@opengeni/react/ui/meta-chip";
-import { Notice } from "@opengeni/react/ui/notice";
-import { PageHeader } from "@opengeni/react/ui/page-header";
-import { RelativeTime } from "@opengeni/react/ui/relative-time";
-import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { Button } from "../ui/button";
+import { DropdownMenuItem } from "../ui/dropdown-menu";
+import { EmptyState } from "../ui/empty-state";
+import { ErrorMessage } from "../ui/error-message";
+import { inAppClick } from "../ui/in-app-click";
+import { Input } from "../ui/input";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "../ui/list-row";
+import { LogoTile } from "../ui/logo-tile";
+import { MetaChip } from "../ui/meta-chip";
+import { Notice } from "../ui/notice";
+import { PageHeader } from "../ui/page-header";
+import { RelativeTime } from "../ui/relative-time";
+import { StatusBadge } from "../ui/status-badge";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { RecorderPanel } from "./recorder-panel";

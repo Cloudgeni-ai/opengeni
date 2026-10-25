@@ -3,8 +3,8 @@
  * Loaded lazily by MeetingRecorderProvider; renders nothing.
  */
 import { useEffect, useLayoutEffect } from "react";
-import { desktopCapability } from "@opengeni/react/app/lib/desktop";
-import { useRecorder } from "@opengeni/react/recordings";
+import { desktopCapability } from "../app/lib/desktop";
+import { useRecorder } from "../recordings";
 
 import type { MeetingRecorderStore } from "./recorder-context";
 

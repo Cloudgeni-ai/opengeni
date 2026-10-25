@@ -6,26 +6,24 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import {
-  resolveWorkspaceRecordingSettings,
   type RecordingPerson,
   type RecordingRetention,
   type RecordingVisibility,
   type WorkspaceRecordingSettings,
 } from "@opengeni/contracts";
-import { useAppContext } from "@opengeni/react/app/app-context";
 import {
   languageName,
   useRecordingModels,
   useRecordingPeople,
   type RecordingsClientOverride,
-} from "@opengeni/react/recordings";
-import { Button } from "@opengeni/react/ui/button";
-import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
-import { Section } from "@opengeni/react/ui/section";
-import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
-import { NativeSelect, type SelectOption } from "@opengeni/react/ui/select-menu";
-import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
-import { Switch } from "@opengeni/react/ui/switch";
+} from "../recordings";
+import { Button } from "../ui/button";
+import { ConfirmDialog } from "../ui/confirm-dialog";
+import { Section } from "../ui/section";
+import { SegmentedControl } from "../ui/segmented-control";
+import { NativeSelect, type SelectOption } from "../ui/select-menu";
+import { SettingRow, SettingRowLink } from "../ui/setting-row";
+import { Switch } from "../ui/switch";
 
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
 
@@ -79,41 +77,6 @@ export function retentionChangeWarning(
 /** Who is looking at the settings, so they can agree to have their own voice remembered. */
 export type MeetingSettingsViewer = { subjectId: string; name: string };
 
-export function MeetingDefaultsSection({
-  workspaceId,
-  personal,
-  canManage,
-  onConnectModels,
-}: {
-  workspaceId: string;
-  /** A Personal workspace has only its person, so visibility has nothing to choose. */
-  personal: boolean;
-  canManage: boolean;
-  /** Opens where model accounts are added, for people who may add them. */
-  onConnectModels?: (() => void) | undefined;
-}) {
-  const context = useAppContext();
-  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const viewer = context.accessContext;
-  return (
-    <MeetingDefaultsView
-      workspaceId={workspaceId}
-      settings={resolveWorkspaceRecordingSettings(workspace?.settings)}
-      personal={personal}
-      canManage={canManage}
-      viewer={{ subjectId: viewer.subjectId, name: viewer.subjectLabel?.trim() || "Me" }}
-      onConnectModels={onConnectModels}
-      onSave={async (next) => {
-        const accepted = context.captureWorkspaceInvocation(workspaceId);
-        if (!accepted) return false;
-        const updated = await context.updateWorkspaceSettings(workspaceId, { recordings: next });
-        return Boolean(updated) && context.ownsWorkspaceInvocation(workspaceId, accepted);
-      }}
-    />
-  );
-}
-
-/** The Meetings settings rows over plain values, so previews can render them. */
 export function MeetingDefaultsView({
   workspaceId,
   settings: current,

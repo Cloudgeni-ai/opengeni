@@ -25,7 +25,7 @@ import type {
   RecordingTranscriptSegment,
 } from "@opengeni/contracts";
 
-import { Button } from "@opengeni/react/ui/button";
+import { Button } from "../ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -36,10 +36,10 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-} from "@opengeni/react/ui/dropdown-menu";
-import { Field, FieldStack, TextArea, TextInput } from "@opengeni/react/ui/field";
-import { FormDialog } from "@opengeni/react/ui/form-dialog";
-import { cn } from "@opengeni/react/app/lib/utils";
+} from "../ui/dropdown-menu";
+import { Field, FieldStack, TextArea, TextInput } from "../ui/field";
+import { FormDialog } from "../ui/form-dialog";
+import { cn } from "../app/lib/utils";
 
 import {
   formatClock,
@@ -48,7 +48,7 @@ import {
   speakerDisplayName,
   speakerIsNamed,
   type TranscriptTurn,
-} from "@opengeni/react/recordings";
+} from "../recordings";
 
 /** The chart palette, one hue per voice. Text stays in fg; only the dot carries color. */
 const SPEAKER_DOT: Record<number, string> = {
