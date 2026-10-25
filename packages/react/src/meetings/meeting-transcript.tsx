@@ -5,6 +5,7 @@
  * moves it to another speaker or corrects its words. A name recognized by
  * voice is marked suggested until someone confirms or turns it down.
  */
+import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AudioLinesIcon,
@@ -51,6 +52,8 @@ import {
 } from "../recordings";
 
 /** The chart palette, one hue per voice. Text stays in fg; only the dot carries color. */
+const defaultText = createOpenGeniText();
+
 const SPEAKER_DOT: Record<number, string> = {
   1: "bg-chart-1",
   2: "bg-chart-2",
@@ -113,10 +116,15 @@ export function speakerIsSuggested(
 }
 
 /** "92% match", from the voice similarity behind a suggestion. */
-export function suggestionMatch(speaker: RecordingSpeaker): string | null {
+export function suggestionMatch(
+  speaker: RecordingSpeaker,
+  msg: OpenGeniText = defaultText,
+): string | null {
   return speaker.confidence === null
     ? null
-    : `${Math.round(Math.max(0, Math.min(1, speaker.confidence)) * 100)}% match`;
+    : msg("meetings.transcript.valueMatch", {
+        value: Math.round(Math.max(0, Math.min(1, speaker.confidence)) * 100),
+      });
 }
 
 async function withToast(failure: string, work: () => Promise<void>): Promise<boolean> {
@@ -156,6 +164,7 @@ export function SpeakerNameMenu({
   /** Open on first render, for previews. */
   defaultOpen?: boolean;
 }) {
+  const msg = useOpenGeniText();
   const current = speakers.find((speaker) => speaker.label === label);
   const named = speakerIsNamed(label, speakers);
   const suggested = speakerIsSuggested(label, speakers);
@@ -184,7 +193,7 @@ export function SpeakerNameMenu({
     [people, inMeeting, current?.source, current?.personId, viewerSubjectId],
   );
   const pick = (person: RecordingPerson) =>
-    void withToast("Couldn't name this speaker", () =>
+    void withToast(msg("meetings.transcript.couldnTNameThisSpeaker"), () =>
       actions.nameSpeaker(label, { personId: person.id }),
     );
   const nameSelf = actions.nameSelf;
@@ -198,10 +207,12 @@ export function SpeakerNameMenu({
   const selfItem =
     nameSelf && !isSelf ? (
       <DropdownMenuItem
-        onSelect={() => void withToast("Couldn't name this speaker", () => nameSelf(label))}
+        onSelect={() =>
+          void withToast(msg("meetings.transcript.couldnTNameThisSpeaker"), () => nameSelf(label))
+        }
       >
         <UserIcon aria-hidden="true" />
-        It's me
+        {msg("meetings.transcript.itSMe")}
       </DropdownMenuItem>
     ) : null;
   const currentPerson = current?.personId
@@ -209,7 +220,7 @@ export function SpeakerNameMenu({
     : null;
   const voiceItem =
     !suggested && currentPerson && actions.voices
-      ? voiceMenuItem(currentPerson, actions.voices)
+      ? voiceMenuItem(currentPerson, actions.voices, msg)
       : null;
   return (
     <DropdownMenu {...(defaultOpen ? { defaultOpen } : {})}>
@@ -218,45 +229,56 @@ export function SpeakerNameMenu({
         {suggested ? (
           <>
             <DropdownMenuLabel className="grid gap-0.5">
-              <span>Is this {displayName}?</span>
+              <span>
+                {msg("meetings.transcript.isThisDisplayname", { displayName: displayName })}
+              </span>
               <span className="text-xs leading-4 font-normal text-fg-muted">
-                Suggested because the voice sounds like theirs
-                {suggestionMatch(suggested) ? ` (${suggestionMatch(suggested)})` : ""}
+                {suggestionMatch(suggested, msg)
+                  ? msg("meetings.transcript.suggestedBecauseTheVoiceSounds", {
+                      suggestionMatch: suggestionMatch(suggested, msg),
+                    })
+                  : msg("meetings.transcript.suggestedBecauseTheVoiceSounds2")}
               </span>
             </DropdownMenuLabel>
             <DropdownMenuItem
               onSelect={() =>
-                void withToast("Couldn't confirm this name", () =>
+                void withToast(msg("meetings.transcript.couldnTConfirmThisName"), () =>
                   actions.nameSpeaker(label, { personId: suggested.personId! }),
                 )
               }
             >
               <CheckIcon aria-hidden="true" />
-              Yes, it's {displayName}
+              {msg("meetings.transcript.yesItSDisplayname", { displayName: displayName })}
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() =>
-                void withToast("Couldn't turn down this name", () =>
+                void withToast(msg("meetings.transcript.couldnTTurnDownThis"), () =>
                   actions.rejectSuggestion(label),
                 )
               }
             >
               <XIcon aria-hidden="true" />
-              No, leave unnamed
+              {msg("meetings.transcript.noLeaveUnnamed")}
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="text-xs leading-4 font-normal text-fg-muted">
-              Or pick who it is
+              {msg("meetings.transcript.orPickWhoItIs")}
             </DropdownMenuLabel>
           </>
         ) : (
-          <DropdownMenuLabel>Who is {displayName}?</DropdownMenuLabel>
+          <DropdownMenuLabel>
+            {msg("meetings.transcript.whoIsDisplayname", { displayName: displayName })}
+          </DropdownMenuLabel>
         )}
         {selfItem}
         {selfItem && inMeeting.length + others.length > 0 ? <DropdownMenuSeparator /> : null}
         {inMeeting.map((person) => (
           <DropdownMenuItem key={person.id} onSelect={() => pick(person)}>
-            <span className="min-w-0 flex-1 truncate">Same person as {person.displayName}</span>
+            <span className="min-w-0 flex-1 truncate">
+              {msg("meetings.transcript.samePersonAsDisplayname", {
+                displayName: person.displayName,
+              })}
+            </span>
           </DropdownMenuItem>
         ))}
         {inMeeting.length > 0 && others.length > 0 ? <DropdownMenuSeparator /> : null}
@@ -271,23 +293,25 @@ export function SpeakerNameMenu({
         {inMeeting.length + others.length > 0 ? <DropdownMenuSeparator /> : null}
         <DropdownMenuItem onSelect={() => onAddNew(label)}>
           <UserPlusIcon aria-hidden="true" />
-          Someone new…
+          {msg("meetings.transcript.someoneNew")}
         </DropdownMenuItem>
         {named && !suggested ? (
           <DropdownMenuItem
             onSelect={() =>
-              void withToast("Couldn't clear this name", () => actions.nameSpeaker(label, null))
+              void withToast(msg("meetings.transcript.couldnTClearThisName"), () =>
+                actions.nameSpeaker(label, null),
+              )
             }
           >
             <XIcon aria-hidden="true" />
-            Remove name
+            {msg("meetings.transcript.removeName")}
           </DropdownMenuItem>
         ) : null}
         {voiceItem ? (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="text-xs leading-4 font-normal text-fg-muted">
-              Used to suggest names in later meetings
+              {msg("meetings.transcript.usedToSuggestNamesIn")}
             </DropdownMenuLabel>
             {voiceItem}
           </>
@@ -301,17 +325,29 @@ export function SpeakerNameMenu({
  * "Remember my voice", "Remember Maja's voice…" or "Forget …": members only
  * decide for themselves, so another member's voice offers nothing here.
  */
-function voiceMenuItem(person: RecordingPerson, voices: VoiceActions): React.ReactNode {
+function voiceMenuItem(
+  person: RecordingPerson,
+  voices: VoiceActions,
+  msg: OpenGeniText = defaultText,
+): React.ReactNode {
   const self = person.memberSubjectId === voices.viewerSubjectId;
   if (person.memberSubjectId && !self) return null;
   if (person.voice) {
     return (
       <DropdownMenuItem
-        onSelect={() => void withToast("Couldn't forget this voice", () => voices.forget(person))}
+        onSelect={() =>
+          void withToast(msg("meetings.transcript.couldnTForgetThisVoice"), () =>
+            voices.forget(person),
+          )
+        }
       >
         <AudioLinesIcon aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate">
-          {self ? "Forget my voice" : `Forget ${person.displayName}'s voice`}
+          {self
+            ? msg("meetings.transcript.forgetMyVoice")
+            : msg("meetings.transcript.forgetDisplaynameSVoice", {
+                displayName: person.displayName,
+              })}
         </span>
       </DropdownMenuItem>
     );
@@ -320,7 +356,11 @@ function voiceMenuItem(person: RecordingPerson, voices: VoiceActions): React.Rea
     <DropdownMenuItem onSelect={() => voices.remember(person)}>
       <AudioLinesIcon aria-hidden="true" />
       <span className="min-w-0 flex-1 truncate">
-        {self ? "Remember my voice" : `Remember ${person.displayName}'s voice…`}
+        {self
+          ? msg("meetings.transcript.rememberMyVoice")
+          : msg("meetings.transcript.rememberDisplaynameSVoice", {
+              displayName: person.displayName,
+            })}
       </span>
     </DropdownMenuItem>
   );
@@ -338,6 +378,7 @@ export function NewSpeakerNameDialog({
   actions: TranscriptActions;
   onClose: () => void;
 }) {
+  const msg = useOpenGeniText();
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   return (
@@ -350,10 +391,10 @@ export function NewSpeakerNameDialog({
           setError(null);
         }
       }}
-      title={`Who is ${displayName}?`}
-      description="The name is added to the people list your organization shares, so anyone can pick it in later meetings."
-      submitLabel="Save name"
-      pendingLabel="Saving…"
+      title={msg("meetings.transcript.whoIsDisplayname", { displayName: displayName })}
+      description={msg("meetings.transcript.theNameIsAddedTo")}
+      submitLabel={msg("meetings.transcript.saveName")}
+      pendingLabel={msg("meetings.transcript.saving")}
       submitDisabled={!name.trim()}
       error={error}
       onSubmit={async () => {
@@ -362,7 +403,9 @@ export function NewSpeakerNameDialog({
           const person = await actions.createPerson(name.trim());
           await actions.nameSpeaker(label, { personId: person.id });
         } catch (cause) {
-          setError(cause instanceof Error ? cause.message : "Couldn't save this name.");
+          setError(
+            cause instanceof Error ? cause.message : msg("meetings.transcript.couldnTSaveThisName"),
+          );
           return false;
         }
         setName("");
@@ -371,13 +414,13 @@ export function NewSpeakerNameDialog({
       onSubmitted={onClose}
     >
       <FieldStack>
-        <Field label="Name">
+        <Field label={msg("meetings.transcript.name")}>
           <TextInput
             value={name}
             maxLength={200}
             autoComplete="off"
             onChange={(event) => setName(event.target.value)}
-            placeholder="For example, Maja Berg"
+            placeholder={msg("meetings.transcript.forExampleMajaBerg")}
           />
         </Field>
       </FieldStack>
@@ -396,6 +439,7 @@ function EditTurnDialog({
   onClose: () => void;
   actions: TranscriptActions;
 }) {
+  const msg = useOpenGeniText();
   const [drafts, setDrafts] = useState<Record<number, string>>({});
   const formId = useId();
   const changed =
@@ -412,10 +456,10 @@ function EditTurnDialog({
         }
       }}
       size="lg"
-      title="Correct the words"
-      description="Fix what the transcript got wrong. Everyone sees your correction in this version; the model's original words are kept, and clearing a line brings them back."
-      submitLabel="Save"
-      pendingLabel="Saving…"
+      title={msg("meetings.transcript.correctTheWords")}
+      description={msg("meetings.transcript.fixWhatTheTranscriptGot")}
+      submitLabel={msg("meetings.transcript.save")}
+      pendingLabel={msg("meetings.transcript.saving")}
       submitDisabled={!changed}
       onSubmit={async () => {
         if (!turn) return;
@@ -423,12 +467,15 @@ function EditTurnDialog({
           (segment) =>
             drafts[segment.index] !== undefined && drafts[segment.index] !== segment.text,
         );
-        const ok = await withToast("Couldn't save the correction", async () => {
-          for (const segment of changes) {
-            const text = drafts[segment.index]!.trim();
-            await actions.editSegment(segment.index, text.length > 0 ? text : null);
-          }
-        });
+        const ok = await withToast(
+          msg("meetings.transcript.couldnTSaveTheCorrection"),
+          async () => {
+            for (const segment of changes) {
+              const text = drafts[segment.index]!.trim();
+              await actions.editSegment(segment.index, text.length > 0 ? text : null);
+            }
+          },
+        );
         if (!ok) return false;
         setDrafts({});
       }}
@@ -438,7 +485,10 @@ function EditTurnDialog({
         {turn?.segments.map((segment) => (
           <Field
             key={segment.index}
-            label={`${speakerName} at ${formatClock(segment.startMilliseconds)}`}
+            label={msg("meetings.transcript.speakernameAtFormatclock", {
+              speakerName: speakerName,
+              formatClock: formatClock(segment.startMilliseconds),
+            })}
           >
             <TextArea
               id={`${formId}-${segment.index}`}
@@ -474,6 +524,7 @@ export function MeetingTranscript({
   /** Null when there is no audio to play. */
   onSeek: ((milliseconds: number) => void) | null;
 }) {
+  const msg = useOpenGeniText();
   const turns = useMemo(() => groupTranscriptTurns(segments), [segments]);
   const slots = useMemo(() => speakerColorSlots(segments), [segments]);
   const labels = useMemo(() => [...slots.keys()], [slots]);
@@ -508,7 +559,7 @@ export function MeetingTranscript({
 
   return (
     <>
-      <ol ref={listRef} className="grid gap-6" aria-label="Transcript">
+      <ol ref={listRef} className="grid gap-6" aria-label={msg("meetings.transcript.transcript")}>
         {turns.map((turn) => {
           const name = nameOf(turn.speakerLabel);
           const unnamed = turn.speakerLabel ? !speakerIsNamed(turn.speakerLabel, speakers) : false;
@@ -530,10 +581,10 @@ export function MeetingTranscript({
                       type="button"
                       aria-label={
                         unnamed
-                          ? `${name}, name this speaker`
+                          ? msg("meetings.transcript.nameNameThisSpeaker", { name: name })
                           : suggested
-                            ? `${name}, suggested from their voice. Confirm or correct`
-                            : `${name}, change who this is`
+                            ? msg("meetings.transcript.nameSuggestedFromTheirVoice", { name: name })
+                            : msg("meetings.transcript.nameChangeWhoThisIs", { name: name })
                       }
                       className="group/speaker -mx-1.5 flex min-w-0 items-center gap-2 rounded-[6px] px-1.5 py-0.5 text-sm leading-5 font-semibold text-fg transition-colors duration-[120ms] hover:bg-hover data-[state=open]:bg-hover pointer-coarse:min-h-11"
                     >
@@ -541,14 +592,14 @@ export function MeetingTranscript({
                       <span className={cn("truncate", unnamed && "text-fg-label")}>{name}</span>
                       {suggested ? (
                         <span className="shrink-0 rounded-full border border-dashed border-border-strong px-1.5 text-xs leading-4 font-normal text-fg-muted">
-                          Suggested
+                          {msg("meetings.transcript.suggested")}
                         </span>
                       ) : null}
                       {unnamed ? (
                         // An unnamed speaker always shows it can be named, not only on hover.
                         <span className="flex shrink-0 items-center gap-1 text-xs leading-4 font-normal text-fg-muted group-hover/speaker:text-fg">
                           <PencilIcon aria-hidden="true" className="size-3" />
-                          Name
+                          {msg("meetings.transcript.name")}
                         </span>
                       ) : (
                         <ChevronDownIcon
@@ -569,7 +620,9 @@ export function MeetingTranscript({
                     type="button"
                     onClick={() => onSeek(turn.startMilliseconds)}
                     className="rounded-[6px] px-1 text-xs leading-4 text-fg-muted tabular-nums underline-offset-2 transition-colors duration-[120ms] hover:text-fg hover:underline pointer-coarse:min-h-11"
-                    aria-label={`Play from ${formatClock(turn.startMilliseconds)}`}
+                    aria-label={msg("meetings.transcript.playFromFormatclock", {
+                      formatClock: formatClock(turn.startMilliseconds),
+                    })}
                   >
                     {formatClock(turn.startMilliseconds)}
                   </button>
@@ -584,7 +637,10 @@ export function MeetingTranscript({
                       type="button"
                       variant="ghost"
                       size="icon-sm"
-                      aria-label={`More actions for ${name} at ${formatClock(turn.startMilliseconds)}`}
+                      aria-label={msg("meetings.transcript.moreActionsForNameAt", {
+                        name: name,
+                        formatClock: formatClock(turn.startMilliseconds),
+                      })}
                       className="ml-auto size-7 rounded-[8px] text-fg-subtle opacity-0 group-hover/turn:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-100"
                     >
                       <MoreHorizontalIcon />
@@ -595,7 +651,7 @@ export function MeetingTranscript({
                       <DropdownMenuSub>
                         <DropdownMenuSubTrigger>
                           <UsersIcon aria-hidden="true" />
-                          Change speaker
+                          {msg("meetings.transcript.changeSpeaker")}
                         </DropdownMenuSubTrigger>
                         <DropdownMenuSubContent className="min-w-48">
                           {labels
@@ -604,11 +660,14 @@ export function MeetingTranscript({
                               <DropdownMenuItem
                                 key={label}
                                 onSelect={() =>
-                                  void withToast("Couldn't change the speaker", async () => {
-                                    for (const segment of turn.segments) {
-                                      await actions.moveSegment(segment.index, label);
-                                    }
-                                  })
+                                  void withToast(
+                                    msg("meetings.transcript.couldnTChangeTheSpeaker"),
+                                    async () => {
+                                      for (const segment of turn.segments) {
+                                        await actions.moveSegment(segment.index, label);
+                                      }
+                                    },
+                                  )
                                 }
                               >
                                 <SpeakerDot slot={slots.get(label)} />
@@ -620,7 +679,7 @@ export function MeetingTranscript({
                     ) : null}
                     <DropdownMenuItem onSelect={() => setEditing(turn)}>
                       <PencilIcon aria-hidden="true" />
-                      Correct the words
+                      {msg("meetings.transcript.correctTheWords")}
                     </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
@@ -645,7 +704,9 @@ export function MeetingTranscript({
                     >
                       {segment.text}
                     </span>
-                    {segment.edited ? <span className="sr-only"> (corrected)</span> : null}
+                    {segment.edited ? (
+                      <span className="sr-only">{msg("meetings.transcript.corrected")}</span>
+                    ) : null}
                   </span>
                 ))}
               </p>

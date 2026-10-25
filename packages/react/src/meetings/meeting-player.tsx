@@ -3,6 +3,7 @@
  * separate files, so one control drives every <audio> element and keeps the
  * followers within a quarter second of the first track.
  */
+import { useOpenGeniText } from "../messages/runtime";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { PauseIcon, PlayIcon, RotateCcwIcon, RotateCwIcon } from "lucide-react";
 
@@ -35,6 +36,7 @@ export const MeetingPlayer = forwardRef<
     className?: string | undefined;
   }
 >(function MeetingPlayer({ sources, durationMilliseconds, onTime, onSourceError, className }, ref) {
+  const msg = useOpenGeniText();
   const audioRefs = useRef<Map<number, HTMLAudioElement>>(new Map());
   const [playing, setPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
@@ -154,7 +156,7 @@ export const MeetingPlayer = forwardRef<
         variant="ghost"
         size="icon-sm"
         onClick={() => skip(-SKIP_SECONDS)}
-        aria-label={`Back ${SKIP_SECONDS} seconds`}
+        aria-label={msg("meetings.player.backCountSeconds", { count: SKIP_SECONDS })}
         className={skipClass}
       >
         <RotateCcwIcon aria-hidden="true" />
@@ -163,7 +165,7 @@ export const MeetingPlayer = forwardRef<
         type="button"
         size="icon-sm"
         onClick={() => (playing ? pause() : play())}
-        aria-label={playing ? "Pause" : "Play"}
+        aria-label={playing ? msg("meetings.player.pause") : msg("meetings.player.play")}
         className="shrink-0 rounded-full pointer-coarse:size-11"
       >
         {playing ? (
@@ -177,7 +179,7 @@ export const MeetingPlayer = forwardRef<
         variant="ghost"
         size="icon-sm"
         onClick={() => skip(SKIP_SECONDS)}
-        aria-label={`Forward ${SKIP_SECONDS} seconds`}
+        aria-label={msg("meetings.player.forwardCountSeconds", { count: SKIP_SECONDS })}
         className={skipClass}
       >
         <RotateCwIcon aria-hidden="true" />
@@ -194,8 +196,11 @@ export const MeetingPlayer = forwardRef<
           step={0.1}
           value={current}
           onChange={(event) => seek(Number(event.target.value))}
-          aria-label="Position"
-          aria-valuetext={`${formatClock(current * 1000)} of ${formatClock(total * 1000)}`}
+          aria-label={msg("meetings.player.position")}
+          aria-valuetext={msg("meetings.player.formatclockOfFormatclock2", {
+            formatClock: formatClock(current * 1000),
+            formatClock2: formatClock(total * 1000),
+          })}
           className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer opacity-0"
         />
         <span aria-hidden="true" className="h-1 w-full overflow-hidden rounded-full bg-surface-3">
@@ -215,11 +220,11 @@ export const MeetingPlayer = forwardRef<
         variant="ghost"
         size="sm"
         onClick={() => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length]!)}
-        aria-label={`Playback speed ${rate}×`}
-        title="Playback speed"
+        aria-label={msg("meetings.player.playbackSpeedRate", { rate: rate })}
+        title={msg("meetings.player.playbackSpeed")}
         className="w-12 min-w-12 shrink-0 justify-center rounded-[8px] px-0 text-xs text-fg-muted tabular-nums pointer-coarse:h-11"
       >
-        {rate}×
+        {msg("meetings.player.rate", { rate: rate })}
       </Button>
     </div>
   );

@@ -3,6 +3,7 @@
  * newest first. A row opens the meeting's own page. Rows still uploading or
  * transcribing say so and update on their own.
  */
+import { useOpenGeniText } from "../messages/runtime";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AudioLinesIcon, LockIcon, SearchIcon, Trash2Icon } from "lucide-react";
 import type { Recording } from "@opengeni/contracts";
@@ -33,11 +34,6 @@ import { StatusBadge } from "../ui/status-badge";
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
 import { RecorderPanel } from "./recorder-panel";
 import { useMeetingRecorder, usePendingMeetingStart } from "./recorder-context";
-
-const COLUMNS: RowListColumn[] = [
-  { id: "length", label: "Length", width: 96 },
-  { id: "recorded", label: "Recorded", width: 148 },
-];
 
 function useDebounced<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -82,6 +78,11 @@ export function MeetingsListPage({
   meetingHref: (recordingId: string) => string;
   onOpen: (recordingId: string) => void;
 }) {
+  const msg = useOpenGeniText();
+  const columns: RowListColumn[] = [
+    { id: "length", label: msg("meetings.listPage.length"), width: 96 },
+    { id: "recorded", label: msg("meetings.listPage.recorded"), width: 148 },
+  ];
   const [search, setSearch] = useState("");
   const query = useDebounced(search.trim(), 250);
   const override = { workspaceId, ...(recordingsClient ? { recordings: recordingsClient } : {}) };
@@ -123,8 +124,8 @@ export function MeetingsListPage({
     <>
       <PageHeader
         icon={<AudioLinesIcon />}
-        title="Meetings"
-        description="Record a meeting and get a transcript of who said what."
+        title={msg("meetings.listPage.meetings")}
+        description={msg("meetings.listPage.recordAMeetingAndGet")}
       />
       <div className="mt-2 grid gap-8">
         <RecorderPanel
@@ -140,9 +141,9 @@ export function MeetingsListPage({
         />
         {recorder && recorder.recovered.length > 0 ? (
           <Notice tone="info">
-            {recorder.recovered.length === 1
-              ? "An earlier recording was still saved in this browser. It's uploading now."
-              : `${recorder.recovered.length} earlier recordings were still saved in this browser. They're uploading now.`}
+            {msg("meetings.listPage.earlierRecordingsWereStillSaved", {
+              count: recorder.recovered.length,
+            })}
           </Notice>
         ) : null}
         <div className="grid gap-3">
@@ -156,21 +157,26 @@ export function MeetingsListPage({
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search meetings"
-                aria-label="Search meetings"
+                placeholder={msg("meetings.listPage.searchMeetings")}
+                aria-label={msg("meetings.listPage.searchMeetings")}
                 className="h-9 pl-9 pointer-coarse:h-11"
               />
             </div>
           ) : null}
           {loading ? (
-            <RowList label="Meetings" columns={narrow ? [] : COLUMNS} flush busy>
+            <RowList
+              label={msg("meetings.listPage.meetings")}
+              columns={narrow ? [] : columns}
+              flush
+              busy
+            >
               <ListRowSkeleton count={4} />
             </RowList>
           ) : list.error && list.recordings.length === 0 ? (
             <ErrorMessage
               align="center"
-              title="Couldn't load meetings"
-              details={[{ label: "Error", value: list.error.message }]}
+              title={msg("meetings.listPage.couldnTLoadMeetings")}
+              details={[{ label: msg("meetings.listPage.error"), value: list.error.message }]}
               action={
                 <Button
                   type="button"
@@ -179,30 +185,34 @@ export function MeetingsListPage({
                   onClick={() => void list.refresh()}
                   className="pointer-coarse:h-11"
                 >
-                  Try again
+                  {msg("meetings.listPage.tryAgain")}
                 </Button>
               }
             >
-              Check your connection, then try again. Recordings in progress keep going either way.
+              {msg("meetings.listPage.checkYourConnectionThenTry")}
             </ErrorMessage>
           ) : empty ? (
             query ? (
               <EmptyState
                 variant="inline"
-                title={`No meetings match “${query}”.`}
-                description="Search finds words in meeting titles and transcripts."
+                title={msg("meetings.listPage.noMeetingsMatchQuery", { query: query })}
+                description={msg("meetings.listPage.searchFindsWordsInMeeting")}
               />
             ) : (
               <EmptyState
                 variant="page"
                 icon={<AudioLinesIcon />}
-                title="No meetings yet"
-                description="Start a recording above. When you stop, Opengeni transcribes it and works out who said what."
+                title={msg("meetings.listPage.noMeetingsYet")}
+                description={msg("meetings.listPage.startARecordingAboveWhen")}
                 className="pt-8"
               />
             )
           ) : (
-            <RowList label="Meetings" columns={narrow ? [] : COLUMNS} flush>
+            <RowList
+              label={msg("meetings.listPage.meetings")}
+              columns={narrow ? [] : columns}
+              flush
+            >
               {list.recordings.map((recording) => {
                 const status = meetingStatusLabel(meetingPhase(recording));
                 const isLive = recording.id === liveId && recorder?.state !== "stopped";
@@ -214,14 +224,16 @@ export function MeetingsListPage({
                     titleAddon={
                       recording.visibility === "private" ? (
                         <MetaChip icon={<LockIcon />}>
-                          <span className={narrow ? "sr-only" : undefined}>Only me</span>
+                          <span className={narrow ? "sr-only" : undefined}>
+                            {msg("meetings.listPage.onlyMe")}
+                          </span>
                         </MetaChip>
                       ) : undefined
                     }
                     status={
                       isLive ? (
                         <StatusBadge variant="dot" tone="danger" pulse>
-                          Recording
+                          {msg("meetings.listPage.recording")}
                         </StatusBadge>
                       ) : status ? (
                         <StatusBadge
@@ -260,10 +272,12 @@ export function MeetingsListPage({
                         onSelect={() => setPendingDelete(recording)}
                       >
                         <Trash2Icon aria-hidden="true" />
-                        Delete meeting
+                        {msg("meetings.listPage.deleteMeeting")}
                       </DropdownMenuItem>
                     }
-                    menuLabel={`More actions for ${recording.title}`}
+                    menuLabel={msg("meetings.listPage.moreActionsForTitle", {
+                      title: recording.title,
+                    })}
                     href={meetingHref(recording.id)}
                     linkProps={{ onClick: inAppClick(() => onOpen(recording.id)) }}
                   />
@@ -281,7 +295,9 @@ export function MeetingsListPage({
                 onClick={() => void list.loadMore()}
                 className="pointer-coarse:h-11"
               >
-                {list.loadingMore ? "Loading" : "Show older meetings"}
+                {list.loadingMore
+                  ? msg("meetings.listPage.loading")
+                  : msg("meetings.listPage.showOlderMeetings")}
               </Button>
             </div>
           ) : null}
