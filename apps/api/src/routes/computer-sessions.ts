@@ -125,7 +125,7 @@ import {
 } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
-import { liftRequestIdleTimeout } from "../http/request-idle-timeout";
+import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
@@ -735,57 +735,64 @@ export function registerComputerSessionRoutes(
         "sessions:control",
       );
       const request = await parseJsonBody(context, ComputerActionRequest);
+      const startedAtMs = performance.now();
       // The response waits for the whole batch, which may outlast the
       // server's idle timeout.
-      liftRequestIdleTimeout(context);
-      const startedAtMs = performance.now();
-      const result = await withActiveComputerController(
+      const result = await withoutRequestIdleTimeout(
         context,
-        grant,
-        workspaceId,
-        computerSessionId,
-        "session.control",
-        "computer.action",
-        async ({ sessionClient, binding, record }) => {
-          if (
-            record.session.placement.kind === "sandbox_group" &&
-            deps.settings.sandboxDesktopInteractive === false &&
-            grant.principalKind !== "agent_attempt"
-          ) {
-            throw new HTTPException(403, { message: "Human desktop input is disabled" });
-          }
-          const commandFields = {
-            protocolVersion: INTERACTION_PROTOCOL_VERSION,
-            operationId: request.operationId,
-            computerSessionId,
-            controllerGeneration: binding.controllerGeneration,
-            targetId: request.targetId,
-            expectedTargetGeneration: request.expectedTargetGeneration,
-            expectedObservationId: request.expectedObservationId,
-            expectedFrameId: request.expectedFrameId,
-            actor: interactionActorForGrant(grant),
-            action: request.action,
-          };
-          ComputerActionCommand.parse(commandFields);
-          const secretValues = await resolveInteractionSecretValues({
-            port: interactionSecrets,
+        async () =>
+          await withActiveComputerController(
+            context,
             grant,
-            texts: computerActionSecretTexts(request.action),
-            use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
-            beforeResolve: requirePlacementAcceptsSecretValues(
-              deps.db,
-              grant,
-              workspaceId,
-              record.session.placement,
-            ),
-          });
-          return await sessionClient.action(
-            ComputerActionCommand.parse({
-              ...commandFields,
-              ...(secretValues === undefined ? {} : { secretValues }),
-            }),
-          );
-        },
+            workspaceId,
+            computerSessionId,
+            "session.control",
+            "computer.action",
+            async ({ sessionClient, binding, record }) => {
+              if (
+                record.session.placement.kind === "sandbox_group" &&
+                deps.settings.sandboxDesktopInteractive === false &&
+                grant.principalKind !== "agent_attempt"
+              ) {
+                throw new HTTPException(403, { message: "Human desktop input is disabled" });
+              }
+              const commandFields = {
+                protocolVersion: INTERACTION_PROTOCOL_VERSION,
+                operationId: request.operationId,
+                computerSessionId,
+                controllerGeneration: binding.controllerGeneration,
+                targetId: request.targetId,
+                expectedTargetGeneration: request.expectedTargetGeneration,
+                expectedObservationId: request.expectedObservationId,
+                expectedFrameId: request.expectedFrameId,
+                actor: interactionActorForGrant(grant),
+                action: request.action,
+              };
+              ComputerActionCommand.parse(commandFields);
+              const secretValues = await resolveInteractionSecretValues({
+                port: interactionSecrets,
+                grant,
+                texts: computerActionSecretTexts(request.action),
+                use: {
+                  surface: "desktop",
+                  toolName: "computer_act",
+                  operationId: request.operationId,
+                },
+                beforeResolve: requirePlacementAcceptsSecretValues(
+                  deps.db,
+                  grant,
+                  workspaceId,
+                  record.session.placement,
+                ),
+              });
+              return await sessionClient.action(
+                ComputerActionCommand.parse({
+                  ...commandFields,
+                  ...(secretValues === undefined ? {} : { secretValues }),
+                }),
+              );
+            },
+          ),
       );
       observeComputerActionResult(deps.observability, startedAtMs, request, result);
       return context.json(result);

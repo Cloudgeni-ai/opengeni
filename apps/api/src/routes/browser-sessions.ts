@@ -256,7 +256,7 @@ import {
 import { resolveBrowserActionFences, type BrowserActionFences } from "../browser-action-fences";
 import { InteractionRouteStages, reportInteractionRouteStages } from "../interaction-route-stages";
 import { validateInteractionRequestOrigin } from "../http/cors";
-import { liftRequestIdleTimeout } from "../http/request-idle-timeout";
+import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
   interactionActionDeadlineApiError,
@@ -1650,9 +1650,6 @@ export function registerBrowserSessionRoutes(
         "sessions:control",
       );
       const request = await parseJsonBody(context, BrowserActionRequest);
-      // The response waits for the whole batch, which may outlast the
-      // server's idle timeout.
-      liftRequestIdleTimeout(context);
       const workspaceFileIds = browserUploadFileIds(request.action);
       if (workspaceFileIds.length > 0) {
         await requireAccessGrant(context, deps, workspaceId, "files:read");
@@ -1663,137 +1660,143 @@ export function registerBrowserSessionRoutes(
       // live controller in this request (a recovery retry of the callback must
       // replay the same command digest, so it reuses the first read).
       let resolvedFences: BrowserActionFences | null = null;
-      const result = await withActiveBrowserController(
+      // The response waits for the whole batch, which may outlast the
+      // server's idle timeout.
+      const result = await withoutRequestIdleTimeout(
         context,
-        grant,
-        workspaceId,
-        browserSessionId,
-        "session.control",
-        "browser.action",
-        async ({ sessionClient, binding, record, sourceAuthorization }) => {
-          stages.mark("placement");
-          const passkeySync = (refresh: boolean) =>
-            syncBrowserPasskeys({
-              port: interactionSecrets,
-              grant,
-              browserSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              client: sessionClient,
-              refresh,
-              log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
-            });
-          // Before the action this browser takes over the principal's passkeys.
-          // It is independent of the fence read, so both run together; the
-          // action is dispatched only after the takeover settles.
-          const passkeyTakeover = passkeySync(true);
-          resolvedFences ??= await resolveBrowserActionFences(request, () =>
-            sessionClient.targetState(request.targetId),
-          );
-          stages.mark("fences");
-          const commandFields = {
-            protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
-            operationId: request.operationId,
-            browserSessionId,
-            controllerGeneration: binding.controllerGeneration,
-            targetId: request.targetId,
-            ...resolvedFences,
-            actor: interactionActorForGrant(grant),
-            observationMode: request.observationMode,
-            action: request.action,
-          };
-          // Validate the public command before resolving any reference.
-          BrowserActionCommand.parse(commandFields);
-          if (workspaceFileIds.length > 0) {
-            let alreadyAdmitted = false;
-            try {
-              await sessionClient.receipt(request.operationId);
-              alreadyAdmitted = true;
-            } catch (error) {
-              if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
-                throw error;
-              }
-            }
-            if (!alreadyAdmitted) {
-              if (!deps.objectStorage) {
-                throw new HTTPException(503, {
-                  message: "object storage is not configured",
-                });
-              }
-              const files = await getFilesForSubject(deps.db, {
-                accountId: grant.accountId,
-                workspaceId,
-                subjectId: browserFileAuthoritySubjectId(grant, sourceAuthorization),
-                fileIds: workspaceFileIds,
-              });
-              const ordered = requireAuthorizedBrowserUploadFiles(workspaceFileIds, files);
-              const authorities = await Promise.all(
-                ordered.map(async (file) => {
-                  const signed = await deps.objectStorage!.createGetUrl({
-                    key: file.objectKey,
-                    expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
-                    audience: signedUrlAudienceForPlacement(record.session.placement),
-                  });
-                  return {
-                    fileId: file.id,
-                    safeFilename: browserUploadFilename(file.safeFilename),
-                    sizeBytes: file.sizeBytes,
-                    sha256: browserUploadSha256(file.sha256),
-                    download: {
-                      url: signed.url,
-                      expiresAt: signed.expiresAt.toISOString(),
-                    },
-                  };
-                }),
-              );
-              await sessionClient.stageWorkspaceFiles({
-                operationId: request.operationId,
-                files: authorities,
-              });
-            }
-          }
-          await passkeyTakeover;
-          stages.mark("passkey_pre");
-          // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
-          const secretValues = await resolveInteractionSecretValues({
-            port: interactionSecrets,
+        async () =>
+          await withActiveBrowserController(
+            context,
             grant,
-            texts: browserActionSecretTexts(request.action),
-            use: {
-              surface: "browser",
-              toolName: "browser_act",
-              operationId: request.operationId,
-              // The page's host, shown to a person asked to approve the use.
-              lookupDestination: async () => {
-                const targets = await sessionClient.listTargets();
-                const url = targets.find((target) => target.id === request.targetId)?.url;
-                return url ? new URL(url).host || null : null;
-              },
+            workspaceId,
+            browserSessionId,
+            "session.control",
+            "browser.action",
+            async ({ sessionClient, binding, record, sourceAuthorization }) => {
+              stages.mark("placement");
+              const passkeySync = (refresh: boolean) =>
+                syncBrowserPasskeys({
+                  port: interactionSecrets,
+                  grant,
+                  browserSessionId,
+                  controllerGeneration: binding.controllerGeneration,
+                  client: sessionClient,
+                  refresh,
+                  log: (event, fields) => console.warn(event, { browserSessionId, ...fields }),
+                });
+              // Before the action this browser takes over the principal's passkeys.
+              // It is independent of the fence read, so both run together; the
+              // action is dispatched only after the takeover settles.
+              const passkeyTakeover = passkeySync(true);
+              resolvedFences ??= await resolveBrowserActionFences(request, () =>
+                sessionClient.targetState(request.targetId),
+              );
+              stages.mark("fences");
+              const commandFields = {
+                protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+                operationId: request.operationId,
+                browserSessionId,
+                controllerGeneration: binding.controllerGeneration,
+                targetId: request.targetId,
+                ...resolvedFences,
+                actor: interactionActorForGrant(grant),
+                observationMode: request.observationMode,
+                action: request.action,
+              };
+              // Validate the public command before resolving any reference.
+              BrowserActionCommand.parse(commandFields);
+              if (workspaceFileIds.length > 0) {
+                let alreadyAdmitted = false;
+                try {
+                  await sessionClient.receipt(request.operationId);
+                  alreadyAdmitted = true;
+                } catch (error) {
+                  if (!(error instanceof BrowserControlRequestError && error.status === 404)) {
+                    throw error;
+                  }
+                }
+                if (!alreadyAdmitted) {
+                  if (!deps.objectStorage) {
+                    throw new HTTPException(503, {
+                      message: "object storage is not configured",
+                    });
+                  }
+                  const files = await getFilesForSubject(deps.db, {
+                    accountId: grant.accountId,
+                    workspaceId,
+                    subjectId: browserFileAuthoritySubjectId(grant, sourceAuthorization),
+                    fileIds: workspaceFileIds,
+                  });
+                  const ordered = requireAuthorizedBrowserUploadFiles(workspaceFileIds, files);
+                  const authorities = await Promise.all(
+                    ordered.map(async (file) => {
+                      const signed = await deps.objectStorage!.createGetUrl({
+                        key: file.objectKey,
+                        expiresInSeconds: BROWSER_WORKSPACE_FILE_AUTHORITY_TTL_SECONDS,
+                        audience: signedUrlAudienceForPlacement(record.session.placement),
+                      });
+                      return {
+                        fileId: file.id,
+                        safeFilename: browserUploadFilename(file.safeFilename),
+                        sizeBytes: file.sizeBytes,
+                        sha256: browserUploadSha256(file.sha256),
+                        download: {
+                          url: signed.url,
+                          expiresAt: signed.expiresAt.toISOString(),
+                        },
+                      };
+                    }),
+                  );
+                  await sessionClient.stageWorkspaceFiles({
+                    operationId: request.operationId,
+                    files: authorities,
+                  });
+                }
+              }
+              await passkeyTakeover;
+              stages.mark("passkey_pre");
+              // Resolved last, right before dispatch, so TOTP codes are fresh (Q-33).
+              const secretValues = await resolveInteractionSecretValues({
+                port: interactionSecrets,
+                grant,
+                texts: browserActionSecretTexts(request.action),
+                use: {
+                  surface: "browser",
+                  toolName: "browser_act",
+                  operationId: request.operationId,
+                  // The page's host, shown to a person asked to approve the use.
+                  lookupDestination: async () => {
+                    const targets = await sessionClient.listTargets();
+                    const url = targets.find((target) => target.id === request.targetId)?.url;
+                    return url ? new URL(url).host || null : null;
+                  },
+                },
+                beforeResolve: requirePlacementAcceptsSecretValues(
+                  deps.db,
+                  grant,
+                  workspaceId,
+                  record.session.placement,
+                ),
+              });
+              stages.mark("secrets");
+              try {
+                return await sessionClient.action(
+                  BrowserActionCommand.parse({
+                    ...commandFields,
+                    ...(secretValues === undefined ? {} : { secretValues }),
+                  }),
+                );
+              } finally {
+                stages.mark("dispatch");
+                // Write back what the action did (new registrations, sign counts)
+                // without holding the response: unacknowledged events stay in
+                // browserd, and the session's next sync waits for this one.
+                void passkeySync(false);
+              }
             },
-            beforeResolve: requirePlacementAcceptsSecretValues(
-              deps.db,
-              grant,
-              workspaceId,
-              record.session.placement,
-            ),
-          });
-          stages.mark("secrets");
-          try {
-            return await sessionClient.action(
-              BrowserActionCommand.parse({
-                ...commandFields,
-                ...(secretValues === undefined ? {} : { secretValues }),
-              }),
-            );
-          } finally {
-            stages.mark("dispatch");
-            // Write back what the action did (new registrations, sign counts)
-            // without holding the response: unacknowledged events stay in
-            // browserd, and the session's next sync waits for this one.
-            void passkeySync(false);
-          }
-        },
-        true,
-        stages,
+            true,
+            stages,
+          ),
       );
       observeBrowserActionResult(deps.observability, startedAtMs, request, result);
       reportInteractionRouteStages(context, deps.observability, stages);
