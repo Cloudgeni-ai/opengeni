@@ -10,6 +10,7 @@ import type { ToolResult } from "@trycua/cua-driver";
 import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
 import { callDesktop, type CuaDesktopRuntime } from "../src/cua/wire";
+import type { MacConsoleState } from "../src/cua/macos-windows";
 import type {
   ComputerBackendActionCommand,
   ComputerBackendObservation,
@@ -2816,6 +2817,9 @@ describe("CUA desktop boundary", () => {
           fixture.minimized = false;
           return before;
         },
+        async console() {
+          return "available";
+        },
       },
     });
     try {
@@ -2863,6 +2867,83 @@ describe("CUA desktop boundary", () => {
         ["cua:window:42:1", true],
         ["cua:window:62:4", true],
       ]);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("macOS offers no window while the screen is locked or shows another user's session", async () => {
+    // macOS keeps listing this session's windows meanwhile, but reading one
+    // finds no AXWindow for it.
+    class LockedFixture extends Fixture {
+      console: MacConsoleState | "unreadable" = "available";
+      async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
+        const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+        if (name === "get_window_state" && this.console !== "available")
+          return result({
+            pid: 42,
+            window_id: args.window_id,
+            degraded_reason:
+              "ax_window_unresolved: window_id 1 exists and is owned by pid 42, but none of the 0 AXWindow element(s) under that pid reports this CGWindowID",
+          });
+        return await super.callTool(name, argumentsJson);
+      }
+    }
+    const fixture = new LockedFixture();
+    let consoleReads = 0;
+    const backend = await CuaComputerBackend.open(fixture, "macos", {
+      macWindows: {
+        presence: async (windows) => windows.map(() => "unknown"),
+        restore: async () => "unknown",
+        async console() {
+          consoleReads++;
+          if (fixture.console === "unreadable") throw new Error("helper unavailable");
+          return fixture.console;
+        },
+      },
+    });
+    try {
+      const [target] = await backend.targets();
+      const observation = await backend.observe(target!.id);
+      fixture.console = "locked";
+      const locked = {
+        code: "machine_locked",
+        retryable: false,
+        dispatched: false,
+        message:
+          "This Mac's screen is locked, so nothing on it can be read or clicked. Ask a person to unlock it, then try again.",
+      };
+      // No window is listed as a target, and every read or action says why
+      // instead of reporting the empty read.
+      await expect(backend.targets()).rejects.toMatchObject(locked);
+      await expect(backend.observe(target!.id)).rejects.toMatchObject(locked);
+      await expect(backend.validate(command(observation))).rejects.toMatchObject(locked);
+      // Native tools are checked before anything runs too.
+      const native = {
+        operationId: crypto.randomUUID(),
+        tool: "type_text",
+        arguments: { pid: 42, window_id: 1, text: "secret" },
+      };
+      await expect(backend.validateNative(native)).rejects.toMatchObject(locked);
+      await expect(backend.callNative(native)).rejects.toMatchObject(locked);
+      expect(fixture.calls.some((call) => call.name === "type_text")).toBe(false);
+      fixture.console = "other_user";
+      await expect(backend.targets()).rejects.toMatchObject({
+        code: "machine_locked",
+        message:
+          "Another user's session is on this Mac's screen, so nothing in this user's session can be read or clicked. Ask a person to switch back to this user, then try again.",
+      });
+      await expect(backend.observe(target!.id)).rejects.toMatchObject({
+        code: "machine_locked",
+      });
+      // A check that cannot run leaves the computer as it was.
+      fixture.console = "unreadable";
+      expect(await backend.targets()).toHaveLength(1);
+      // Back on screen, everything works again in the same computer.
+      fixture.console = "available";
+      expect(await backend.targets()).toHaveLength(1);
+      expect((await backend.observe(target!.id)).nodeCount).toBeGreaterThan(0);
+      expect(consoleReads).toBeGreaterThan(0);
     } finally {
       await backend.close();
     }
