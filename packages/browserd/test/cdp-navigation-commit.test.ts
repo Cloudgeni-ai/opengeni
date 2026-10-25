@@ -58,6 +58,7 @@ function navigationFixture() {
   };
   const reply = (command: Call) => {
     let result: unknown = {};
+    let error: { code: number; message: string } | null = null;
     switch (command.method) {
       case "Browser.getVersion":
         result = { product: "Chrome/151.0.0.0" };
@@ -215,16 +216,41 @@ function navigationFixture() {
       }
       case "DOM.describeNode":
         result = {
-          node: { nodeId: 0, backendNodeId: command.params?.backendNodeId, nodeName: "BUTTON" },
+          node: {
+            nodeId: 0,
+            backendNodeId: command.params?.backendNodeId ?? backendNode(),
+            nodeName: "BUTTON",
+          },
         };
+        break;
+      case "DOM.getDocument":
+        // Chromium numbers each document's nodes afresh, so ids repeat.
+        heldRoot = current;
+        result = { root: { nodeId: 1, backendNodeId: 1, nodeName: "#document" } };
+        break;
+      case "DOM.querySelectorAll":
+        // Real Chromium answers both refusals with the same code.
+        if (heldRoot !== current) {
+          error = { code: -32000, message: "Could not find node with given id" };
+        } else if (String(command.params?.selector).includes("[[")) {
+          error = { code: -32000, message: "DOM Error while querying" };
+        } else {
+          result = { nodeIds: [2] };
+        }
         break;
     }
     queueMicrotask(() =>
       socket.dispatchEvent(
-        new MessageEvent("message", { data: JSON.stringify({ id: command.id, result }) }),
+        new MessageEvent("message", {
+          data: JSON.stringify(error ? { id: command.id, error } : { id: command.id, result }),
+        }),
       ),
     );
   };
+  /** The document whose node ids the last DOM.getDocument handed out. */
+  let heldRoot: Document | null = null;
+  const backendNode = () =>
+    current === pages.a ? 10 : current === pages.b ? 20 : current === pages.b2 ? 30 : 40;
   socket.readyState = WebSocket.CONNECTING;
   socket.send = (raw) => {
     const command = JSON.parse(raw) as Call;
@@ -461,6 +487,61 @@ test("a single action whose document changed after it found its element is refus
       "browser document changed after the action found its element; no input was sent",
     );
     expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a CSS locator whose page navigated between reading the document and querying it reports document_stale, not an invalid selector", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    // The next page commits while the query for the old page's root is in
+    // flight, so Chromium no longer holds that root.
+    fixture.commitSilentlyOn("DOM.querySelectorAll", fixture.pages.b!);
+    const receipt = await fixture.controller.run(
+      await fixture.command({ type: "hover", locator: { kind: "css", selector: "button" } }),
+    );
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error?.code).toBe("document_stale");
+    expect(inputCalls(fixture.calls)).toEqual([]);
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("an invalid CSS selector is still reported as invalid", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    const receipt = await fixture.controller.run(
+      await fixture.command({ type: "hover", locator: { kind: "css", selector: "button[[" } }),
+    );
+    expect(receipt.state).toBe("failed");
+    expect(receipt.error?.code).toBe("invalid_action");
+    expect(receipt.error?.message).toBe("browser CSS selector is invalid");
+  } finally {
+    await fixture.driver.close();
+  }
+});
+
+test("a later batch action's CSS locator follows a navigation that drops its document root mid-query", async () => {
+  const fixture = navigationFixture();
+  try {
+    await fixture.driver.start();
+    fixture.commitSilentlyOn("DOM.querySelectorAll", fixture.pages.b!);
+    const receipt = await fixture.controller.run(
+      await fixture.command({
+        type: "batch",
+        actions: [
+          { type: "hover", locator: grantAccess },
+          { type: "hover", locator: { kind: "css", selector: "button" } },
+        ],
+      }),
+    );
+    expect(receipt.error ?? null).toBeNull();
+    expect(receipt.state).toBe("completed");
+    expect(fixture.current()).toBe(fixture.pages.b!);
   } finally {
     await fixture.driver.close();
   }
