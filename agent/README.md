@@ -267,9 +267,18 @@ contract is `compute/docs/agent-link.md`.
   captured at a fixed rate whether or not anything changed. A browser
   controller that is merely running does not count: each use of it is a
   request, and requests keep the sandbox awake on the host's side.
-- Enrollment, credential renewal, self-update (the image pins the agent) and
-  service installation do not happen in this mode; requests for them are
-  refused with `renewal_unsupported` and `update_unsupported`.
+- Enrollment, credential renewal and service installation do not happen in
+  this mode; a renewal request is refused with `renewal_unsupported`.
+- The agent does update itself, through the same signed self-update as a
+  connected machine: a sandbox keeps its disk for as long as it lives, so the
+  agent its image carried would otherwise run for good. The verified release
+  replaces `/usr/local/bin/opengeni-agent` on the sandbox's disk, and the
+  process execs it with its commands handed over, so the guest init that
+  supervises it sees the same process carry on, under the same connection
+  instance. The download and the swap count as work in the activity file, so
+  the sandbox does not sleep in the middle of them; waiting for idle does not.
+  A sandbox heartbeats only while it runs, so Opengeni asks one that sleeps
+  when it next wakes. Agents from before this refuse with `update_unsupported`.
 
 ## Wire protocol — single source of truth
 

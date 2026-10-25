@@ -747,17 +747,23 @@ fn operation_cgroups(
 /// one link, dialed through the sandbox's host with no credential, and keeps
 /// the relay credential the host sends in memory. It reports what it has in
 /// use as the guest's activity file, reconnects at once on `SIGUSR1` (sent
-/// when its host has lost its connections), and never enrolls, renews,
-/// updates itself or installs
-/// a service: Opengeni compute owns the sandbox's enrollment and image.
+/// when its host has lost its connections), and never enrolls, renews or
+/// installs a service: Opengeni compute owns the sandbox's enrollment. It
+/// does update itself, as a connected machine does: a sandbox keeps its disk
+/// for as long as it lives, so the agent its image carried would otherwise
+/// run for good. The verified release replaces the binary on that disk and
+/// this process execs it, handing its commands over, so the guest init that
+/// supervises it sees the same process carry on.
 async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
+    // Capture before any update replaces the running executable inode.
+    update::installed_executable().map_err(string_err)?;
     let link_config = compute::ComputeConfig::load(link_file).map_err(to_boxed)?;
     std::fs::create_dir_all(&link_config.workspace_root).map_err(to_boxed)?;
     std::env::set_current_dir(&link_config.workspace_root).map_err(to_boxed)?;
 
     // One agent serves a sandbox: a second would be a duplicate responder for
     // the same subjects (see `run`).
-    let _instance_lock = match instance_lock::acquire() {
+    let instance_lock_guard = match instance_lock::acquire() {
         Ok(lock) => Some(lock),
         Err(instance_lock::LockError::Contended { holder_pid }) => {
             let pid = holder_pid.map_or_else(|| "unknown".to_owned(), |p| p.to_string());
@@ -771,7 +777,12 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         }
     };
 
-    let op_cgroups = operation_cgroups(&[])?;
+    // Leaves of commands handed over by the previous image stay in place.
+    #[cfg(unix)]
+    let handed_over_cgroups = handover::inherited_cgroup_dirs();
+    #[cfg(not(unix))]
+    let handed_over_cgroups: Vec<std::path::PathBuf> = Vec::new();
+    let op_cgroups = operation_cgroups(&handed_over_cgroups)?;
     let _virtual_desktop = maybe_spawn_virtual_desktop(args);
     // The link file names the root explicitly, `/` included: no fallback to
     // the home directory as for a working directory a user started in.
@@ -794,9 +805,22 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
     });
     let streams = hub.activity().clone();
     let link_platform = Arc::new(platform.with_stream_registry(Arc::new(hub)));
-    let link = SupervisorLink::new(link_config.connection_id(), link_platform, credentials)
-        .with_connection_instance_id(uuid::Uuid::new_v4().to_string())
-        .with_compute(supervisor::ComputeLink { relay });
+    // A successor image keeps its predecessor's connection instance: the host
+    // takes the same session up again, and the op subjects of the commands it
+    // continues stay valid.
+    #[cfg(unix)]
+    let inherited_instance = handover::inherited_connection_instance();
+    #[cfg(not(unix))]
+    let inherited_instance: Option<String> = None;
+    let connection_instance_id =
+        inherited_instance.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let link = SupervisorLink::new(
+        link_config.connection_id(),
+        link_platform.clone(),
+        credentials,
+    )
+    .with_connection_instance_id(connection_instance_id.clone())
+    .with_compute(supervisor::ComputeLink { relay });
     let links = vec![link];
     let (_keep_links, updates_rx) = tokio::sync::watch::channel(links.clone());
 
@@ -806,7 +830,17 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
     supervisor = supervisor.with_update_drain(update_drain);
-    spawn_signal_handler(supervisor.shutdown_handle());
+    #[cfg(unix)]
+    {
+        supervisor = carry_on_handed_over(
+            supervisor,
+            config_dir.as_deref(),
+            &link_platform,
+            connection_instance_id,
+        );
+    }
+    let shutdown_status = supervisor.shutdown_handle();
+    spawn_signal_handler(shutdown_status.clone());
     spawn_reconnect_handler(supervisor.reconnect_handle());
 
     let silence = link_config.stream_silence;
@@ -829,8 +863,54 @@ async fn run_compute(args: &RunArgs, link_file: &Path) -> anyhow_lite::Result {
         sidecars.shutdown().await;
     }
     supervisor_result.map_err(to_boxed)?;
+    if shutdown_status.is_update() {
+        // The binary on the sandbox's disk has already been atomically
+        // replaced and health-gated: exec it in this same process.
+        exec_verified_successor(&supervisor, instance_lock_guard)?;
+    }
     info!("agent stopped");
     Ok(())
+}
+
+/// Releases the single-process lock, then starts the verified successor with
+/// whatever this image hands over.
+fn exec_verified_successor<P: Platform + 'static>(
+    supervisor: &Supervisor<P>,
+    instance_lock: Option<instance_lock::InstanceLock>,
+) -> anyhow_lite::Result {
+    drop(instance_lock);
+    #[cfg(unix)]
+    let handover = supervisor.take_pending_handover();
+    #[cfg(not(unix))]
+    let handover = {
+        let _ = supervisor;
+        None::<()>
+    };
+    restart_after_verified_update(&handover)
+}
+
+/// Continues the commands a previous agent image handed over, and readies
+/// this one to hand its own over when a verified update replaces it. The
+/// handover manifest lives in the config dir, so without one this image can
+/// still continue what it was given but hands nothing over itself.
+#[cfg(unix)]
+fn carry_on_handed_over<P: Platform + 'static>(
+    mut supervisor: Supervisor<P>,
+    config_dir: Option<&Path>,
+    platform: &P,
+    connection_instance_id: String,
+) -> Supervisor<P> {
+    let inherited = handover::take_inherited();
+    if let Some(dir) = config_dir {
+        handover::remove_stray_frames(&dir.join("spool"), inherited.as_ref());
+        supervisor = supervisor
+            .with_update_handover(dir.join(handover::MANIFEST_FILE), connection_instance_id);
+    }
+    if let Some(inherited) = inherited {
+        supervisor.restore_lost_markers(inherited.lost_markers);
+        supervisor.adopt_handed_over(platform, inherited.ops);
+    }
+    supervisor
 }
 
 /// Wires `SIGUSR1` to an immediate reconnect: the guest init sends it when

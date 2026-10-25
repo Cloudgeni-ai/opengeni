@@ -848,6 +848,9 @@ pub struct Supervisor<P: Platform> {
     update_drain: Arc<UpdateDrain>,
     /// Upload requests being served and when the last one began or ended.
     upload_activity: Arc<UploadActivity>,
+    /// Self-update steps under way: fetching and verifying a release, then
+    /// swapping the binary and handing over. Waiting for idle is not one.
+    update_steps: Arc<std::sync::atomic::AtomicUsize>,
     /// Keep exact-scope receipts even if a credential file temporarily disappears.
     /// Re-adding that same process subject must never re-admit an old delivery.
     reply_journals: std::sync::Mutex<HashMap<ReplyScope, ReplyJournal>>,
@@ -954,6 +957,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             reconnect: ReconnectSignal::default(),
             update_drain: Arc::new(UpdateDrain::default()),
             upload_activity: Arc::default(),
+            update_steps: Arc::default(),
             reply_journals: std::sync::Mutex::new(HashMap::new()),
             frame_lanes: Arc::new(std::sync::Mutex::new(FrameLanes::default())),
             #[cfg(unix)]
@@ -1061,7 +1065,10 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// as in use in a compute sandbox. That is admitted engine work, every
     /// upload request being served, and accepted upload transactions while
     /// their clients keep sending within `silence` (a sleep between chunks
-    /// would reconnect the agent and fence the transaction).
+    /// would reconnect the agent and fence the transaction), plus a
+    /// self-update's download and swap, so the sandbox does not sleep in the
+    /// middle of one. An update waiting for idle counts for nothing more:
+    /// whatever it waits for counts already, or does not keep a sandbox awake.
     pub fn work_in_progress(
         &self,
         silence: Duration,
@@ -1069,6 +1076,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let engine = self.engine.clone();
         let drain = self.update_drain.clone();
         let uploads = self.upload_activity.clone();
+        let update_steps = self.update_steps.clone();
         move || {
             let admission = engine.admission_snapshot();
             let accepted = drain.snapshot().map_or(0, |snapshot| snapshot.uploads);
@@ -1077,6 +1085,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 + admission.heavy_running
                 + admission.heavy_queued
                 + uploads.in_use_at(Instant::now(), accepted, silence)
+                + update_steps.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -1967,19 +1976,6 @@ impl<P: Platform + 'static> Supervisor<P> {
     ) {
         let max_payload = client.server_info().max_payload;
         let request_id = request.request_id.clone();
-        if link.compute.is_some() {
-            // A sandbox's image pins its agent; a new agent comes with a new
-            // image, never by replacing the running one.
-            publish_response(
-                client,
-                reply,
-                update_error_response(request_id, "update_unsupported", false),
-                "agent_update_apply",
-                max_payload,
-            )
-            .await;
-            return;
-        }
         if request.epoch != 0 && request.epoch < link.epoch.load() {
             publish_response(
                 client,
@@ -2063,6 +2059,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let agent_id = link.creds.agent_id.clone();
         let engine = self.engine.clone();
         let update_drain = self.update_drain.clone();
+        let update_steps = self.update_steps.clone();
         let browser_control = link.platform.browser_control_backend();
         let shutdown = self.shutdown.clone();
         #[cfg(unix)]
@@ -2171,6 +2168,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     let channel = update.channel.clone();
                     let target = update.target_version.clone();
                     let operation_id = update.operation_id.clone();
+                    let fetching = UpdateStep::begin(&update_steps);
                     let fetched = tokio::task::spawn_blocking(move || {
                         crate::update::prepare_managed(
                             &operation_id,
@@ -2181,6 +2179,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         )
                     })
                     .await;
+                    drop(fetching);
                     let failure = match fetched {
                         Ok(Ok(release)) => {
                             prepared = Some(release);
@@ -2295,6 +2294,9 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
             }
 
+            // Held to the end: from here the update either execs its successor
+            // or reports its failure.
+            let _swapping = UpdateStep::begin(&update_steps);
             let (phase_tx, mut phase_rx) = tokio::sync::mpsc::unbounded_channel();
             let prepared = prepared.expect("the idle wait exits only with a prepared release");
             let apply = tokio::task::spawn_blocking(move || {
@@ -3473,6 +3475,22 @@ fn native_update_blockers(
 
 /// Why an update cannot proceed yet. With `handover`, jobs the update will
 /// hand to its successor image do not count; anything else still does.
+/// One self-update step, counted as work in progress while it is held.
+struct UpdateStep(Arc<std::sync::atomic::AtomicUsize>);
+
+impl UpdateStep {
+    fn begin(steps: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        steps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(steps.clone())
+    }
+}
+
+impl Drop for UpdateStep {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn update_busy_code(
     update_drain: &UpdateDrain,
     engine: &Engine,
@@ -5842,8 +5860,10 @@ mod tests {
 
     /// Compute mode over a real nats-server playing the sandbox's host: the
     /// link dials with no credential, advertises nothing to renew, follows the
-    /// relay credential the host sends, refuses renewal and self-update, and
-    /// reconnects at once when asked (its host lost its connections).
+    /// relay credential the host sends, refuses renewal, takes a self-update
+    /// as a connected machine does (a sandbox's disk outlives its image's
+    /// agent), and reconnects at once when asked (its host lost its
+    /// connections).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::too_many_lines)] // one linear wire scenario
     async fn a_compute_link_serves_through_its_host_without_a_credential() {
@@ -5926,28 +5946,32 @@ mod tests {
             error.message
         );
 
+        // Nothing listens on the release address: the accepted update fails
+        // its download in the background and changes nothing.
+        let operation_id = uuid::Uuid::new_v4().to_string();
         let update = it::ask(
             &host,
             link.rpc_subject(),
             request(
                 "update",
                 v1::control_request::Op::AgentUpdateApply(v1::AgentUpdateApplyRequest {
-                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    operation_id: operation_id.clone(),
                     target_version: "9.9.9".to_string(),
                     channel: "stable".to_string(),
                     expected_current_version: "test-0.0.0".to_string(),
                     expected_current_sha256: String::new(),
-                    release_base_url: "https://releases.example".to_string(),
+                    release_base_url: format!("http://127.0.0.1:{}", it::free_local_port()),
                 }),
             ),
         )
         .await;
-        let error = update.error.expect("update refused");
-        assert!(!error.retryable);
-        assert_eq!(
-            error.detail.get("failure_code").map(String::as_str),
-            Some("update_unsupported")
-        );
+        assert!(update.error.is_none(), "{:?}", update.error);
+        let Some(v1::control_response::Result::AgentUpdateApply(accepted)) = update.result else {
+            panic!("not an update answer: {:?}", update.result);
+        };
+        assert!(accepted.accepted);
+        assert_eq!(accepted.operation_id, operation_id);
+        assert_eq!(accepted.current_version, "test-0.0.0");
 
         // The host lost the link's connections: the link drops its own and
         // says hello again at once, far inside the outage back-off.
