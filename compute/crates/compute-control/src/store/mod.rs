@@ -306,7 +306,9 @@ pub trait Store: Send + Sync + 'static {
     fn prune_hosts(&self, before_ms: u64) -> impl Future<Output = Result<u64>> + Send;
 
     /// Moves a host from `from` to `to` (live and draining), if it is in
-    /// `from`.
+    /// `from`. A drained host stays drained until moved back to live: given
+    /// up on, it registers again draining, so a drain an operator asked for
+    /// outlasts the host's going away and coming back.
     fn set_state(
         &self,
         host: HostId,

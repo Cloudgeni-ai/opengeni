@@ -401,6 +401,62 @@ async fn hosts_given_up_on_are_forgotten_in_time_and_stay_refused() {
     each(forgetting, forgetting).await;
 }
 
+/// The state the store has for `host`.
+async fn state<S: Store>(store: &S, host: HostId) -> HostState {
+    store
+        .hosts_changed(0)
+        .await
+        .unwrap()
+        .iter()
+        .find(|row| row.id == host)
+        .expect("listed")
+        .state
+}
+
+/// Gives up on `host` and registers it again, as after a fence.
+async fn back_after_a_fence<S: Store>(store: &S, name: &str, host: HostId) {
+    let count = renewals(store, host).await.unwrap();
+    assert_eq!(store.give_up(host, count, now_ms()).await.unwrap(), Some(0));
+    assert_eq!(state(store, host).await, HostState::Lost);
+    let (again, _) = registered(store, &register(name, random(), Vec::new())).await;
+    assert_eq!(again, host, "the same host, by name");
+}
+
+async fn drained<S: Store>(store: S) {
+    let name = name();
+    let (host, _) = registered(&store, &register(&name, random(), Vec::new())).await;
+    assert_eq!(state(&store, host).await, HostState::Live);
+    assert!(
+        store
+            .set_state(host, HostState::Live, HostState::Draining)
+            .await
+            .unwrap()
+    );
+    back_after_a_fence(&store, &name, host).await;
+    assert_eq!(
+        state(&store, host).await,
+        HostState::Draining,
+        "a drained host comes back drained"
+    );
+    assert!(
+        store
+            .set_state(host, HostState::Draining, HostState::Live)
+            .await
+            .unwrap()
+    );
+    back_after_a_fence(&store, &name, host).await;
+    assert_eq!(
+        state(&store, host).await,
+        HostState::Live,
+        "an undrained host comes back live"
+    );
+}
+
+#[tokio::test]
+async fn a_drained_host_given_up_on_registers_again_drained_until_undrained() {
+    each(drained, drained).await;
+}
+
 async fn reclaim<S: Store>(store: S) {
     let returning = name();
     let (host, _) = registered(&store, &register(&returning, random(), Vec::new())).await;
@@ -1028,7 +1084,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
@@ -1140,6 +1196,49 @@ async fn migrating_gives_up_on_a_sandbox_naming_a_host_the_store_lacks() {
         Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION),
         "{refused}"
     );
+    drop(store);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
+
+/// A host draining when the database is brought to the version that
+/// remembers drains is remembered as drained, so it too comes back
+/// draining after a fence.
+#[tokio::test]
+async fn migrating_remembers_the_hosts_draining_then_as_drained() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_drained_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    let scoped = format!("{url} options='-c search_path={schema}'");
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let name = name();
+    let (host, _) = registered(&store, &register(&name, random(), Vec::new())).await;
+    drop(store);
+    // As the database was before this version, with the host draining.
+    client
+        .batch_execute(&format!(
+            "alter table {schema}.compute_hosts drop column drained; \
+             update {schema}.compute_hosts set state = 'draining' where id = {}; \
+             update {schema}.compute_schema set version = 4",
+            host.0
+        ))
+        .await
+        .unwrap();
+
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    back_after_a_fence(&store, &name, host).await;
+    assert_eq!(state(&store, host).await, HostState::Draining);
     drop(store);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
