@@ -372,12 +372,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       workspaceId,
       "scheduled_tasks:manage",
     );
-    const parsed = RefreshScheduledTaskAccessRequest.safeParse(
+    const parsed = parseRequestBody(
+      RefreshScheduledTaskAccessRequest,
       await c.req.json().catch(() => null),
+      { status: 400, message: "invalid scheduled task access refresh request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid scheduled task access refresh request" });
-    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: authorization.grant.accountId,
@@ -390,7 +389,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       objectStorage,
       authorization,
       taskId: c.req.param("taskId"),
-      request: parsed.data,
+      request: parsed,
       permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",

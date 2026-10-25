@@ -36,6 +36,7 @@ import { z } from "zod";
 import { offerClaudeDefaultModels } from "../claude-default-models";
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { parseRequestBody } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
 
@@ -46,9 +47,11 @@ function parseOrganizationId(value: string): string {
 }
 
 async function jsonBody<T>(c: Context, schema: z.ZodType<T>, message: string): Promise<T> {
-  const parsed = schema.safeParse(await c.req.json().catch(() => null));
-  if (!parsed.success) throw new HTTPException(422, { message });
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await c.req.json().catch(() => null), {
+    status: 422,
+    message: message,
+  });
+  return parsed;
 }
 
 function providerKind(value: string) {

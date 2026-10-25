@@ -186,7 +186,7 @@ import {
 } from "@opengeni/contracts";
 import { readSignedState } from "@opengeni/github";
 import { oauthStateTtlMs, requireIntegrationsStateSecret } from "../integrations/oauth-client";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 import { parsePathParam } from "../http/path-identifier";
 
 type OpenGeniSlackInstallState = {
@@ -795,10 +795,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertPersonalConnectionOwnerPrincipal(access, "Google Drive");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const parsed = GoogleDriveOAuthStartRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid Google Drive install request" });
-    }
+    const parsed = parseRequestBody(GoogleDriveOAuthStartRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid Google Drive install request",
+    });
     return c.json(
       GoogleDriveOAuthStartResponse.parse(
         await startGoogleDriveOAuth(deps, {
@@ -806,7 +806,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           requestUrl: c.req.url,
-          payload: parsed.data,
+          payload: parsed,
         }),
       ),
     );
@@ -821,10 +821,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertPersonalConnectionOwnerPrincipal(access, "Atlassian");
     requireLegacyOAuthActor(access);
     const grant = access.grant;
-    const parsed = AtlassianOAuthStartRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid Atlassian install request" });
-    }
+    const parsed = parseRequestBody(AtlassianOAuthStartRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid Atlassian install request",
+    });
     return c.json(
       AtlassianOAuthStartResponse.parse(
         await startAtlassianOAuth(deps, {
@@ -832,7 +832,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           requestUrl: c.req.url,
-          payload: parsed.data,
+          payload: parsed,
         }),
       ),
     );
@@ -857,17 +857,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-      const parsed = AtlassianLifecycleActionRequest.safeParse(await c.req.json());
-      if (!parsed.success) {
-        throw new HTTPException(400, { message: "invalid Atlassian lifecycle request" });
-      }
+      const parsed = parseRequestBody(AtlassianLifecycleActionRequest, await c.req.json(), {
+        status: 400,
+        message: "invalid Atlassian lifecycle request",
+      });
       return c.json(
         ConnectionResponse.parse({
           connection: await transitionAtlassianLifecycle(deps, {
             workspaceId,
             subjectId: grant.subjectId,
             connectionId: c.req.param("connectionId"),
-            payload: parsed.data,
+            payload: parsed,
           }),
         }),
       );
@@ -934,17 +934,17 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       assertIntegrationsEnabled();
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
-      const parsed = GoogleDriveLifecycleActionRequest.safeParse(await c.req.json());
-      if (!parsed.success) {
-        throw new HTTPException(400, { message: "invalid Google Drive lifecycle request" });
-      }
+      const parsed = parseRequestBody(GoogleDriveLifecycleActionRequest, await c.req.json(), {
+        status: 400,
+        message: "invalid Google Drive lifecycle request",
+      });
       return c.json(
         ConnectionResponse.parse({
           connection: await transitionGoogleDriveLifecycle(deps, {
             workspaceId,
             subjectId: grant.subjectId,
             connectionId: c.req.param("connectionId"),
-            payload: parsed.data,
+            payload: parsed,
           }),
         }),
       );
@@ -1520,13 +1520,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireProviderConsentInBrowser(access);
     const grant = access.grant;
-    const parsed = OAuthStartRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid OAuth start request",
-      });
-    }
-    const payload = withDesktopAppReturnPath(c, parsed.data);
+    const parsed = parseRequestBody(OAuthStartRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid OAuth start request",
+    });
+    const payload = withDesktopAppReturnPath(c, parsed);
     const result = await startMcpOAuth(
       { db, settings, observability, oauthStartDeadlineMs: deps.oauthStartDeadlineMs },
       {
@@ -1550,12 +1548,10 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
     requireProviderConsentInBrowser(access);
     const grant = access.grant;
-    const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid Integration OAuth start request",
-      });
-    }
+    const parsed = parseRequestBody(ApiIntegrationOAuthStartRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid Integration OAuth start request",
+    });
     return c.json(
       OAuthStartResponse.parse(
         await startApiIntegrationProviderOAuth(deps, {
@@ -1567,7 +1563,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           subjectId: grant.subjectId,
           personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
           requestUrl: c.req.url,
-          payload: withDesktopAppReturnPath(c, parsed.data),
+          payload: withDesktopAppReturnPath(c, parsed),
         }),
       ),
     );

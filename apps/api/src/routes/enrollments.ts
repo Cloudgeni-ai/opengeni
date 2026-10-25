@@ -72,6 +72,7 @@ import {
   renewEnrollmentCredentials,
   toLookupResponse,
 } from "../sandbox/enrollment";
+import { parseRequestBody } from "../http/request-body";
 
 const ENROLLMENT_OUTCOMES = new Set([
   "ok",
@@ -144,12 +145,14 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/renew", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, exchangeLimiter);
-    const parsed = RenewEnrollmentRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "invalid renewal request" });
+    const parsed = parseRequestBody(RenewEnrollmentRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "invalid renewal request",
+    });
     c.header("Cache-Control", "no-store");
     const now = Math.floor(Date.now() / 1000);
     // These failures do not establish that the credential can never recover.
-    if (Math.abs(now - parsed.data.signedAt) > 120)
+    if (Math.abs(now - parsed.signedAt) > 120)
       return c.json(
         {
           code: "enrollment_clock_skew",
@@ -165,7 +168,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         503,
       );
-    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed.data, now);
+    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed, now);
     recordEnrollment(deps, "renew", credentials ? "ok" : "unauthorized");
     if (!credentials)
       return c.json(
@@ -183,11 +186,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/device/start", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, startLimiter);
-    const parsed = DeviceEnrollmentStartRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid device-start request" });
-    }
-    const body = parsed.data;
+    const parsed = parseRequestBody(
+      DeviceEnrollmentStartRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid device-start request" },
+    );
+    const body = parsed;
     // Resolve the (account) for the supplied workspace. An unknown workspace is a
     // 404 (the same shape requireAccessGrant uses for an unknown workspace).
     const workspace = await getWorkspace(db, body.workspaceId);
@@ -219,14 +223,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/device/poll", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, pollLimiter);
-    const parsed = DeviceEnrollmentPollRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid device-poll request" });
-    }
-    const result = await pollDeviceEnrollment(
-      { db, settings },
-      { deviceCode: parsed.data.deviceCode },
+    const parsed = parseRequestBody(
+      DeviceEnrollmentPollRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid device-poll request" },
     );
+    const result = await pollDeviceEnrollment({ db, settings }, { deviceCode: parsed.deviceCode });
     // `pending` is the normal polling loop; count only decisions.
     if (result.state !== "pending") recordEnrollment(deps, "device_poll", result.state);
     return c.json(result, 200);
@@ -241,16 +243,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/device/lookup", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, lookupLimiter);
-    const parsed = DeviceEnrollmentLookupRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid device-lookup request",
-      });
-    }
-    const record = await lookupDeviceEnrollment(
-      { db, settings },
-      { userCode: parsed.data.userCode },
+    const parsed = parseRequestBody(
+      DeviceEnrollmentLookupRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid device-lookup request" },
     );
+    const record = await lookupDeviceEnrollment({ db, settings }, { userCode: parsed.userCode });
     if (!record) {
       // Unknown / terminal / expired code → 404 (indistinguishable from an
       // unauthorized one below, by design).
@@ -280,13 +278,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/enrollments/token/exchange", async (c) => {
     assertSelfhostedEnabled();
     rateLimit(c, exchangeLimiter);
-    const parsed = EnrollTokenExchangeRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid enroll-token-exchange request",
-      });
-    }
-    const body = parsed.data;
+    const parsed = parseRequestBody(
+      EnrollTokenExchangeRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid enroll-token-exchange request" },
+    );
+    const body = parsed;
     const result = await exchangeEnrollToken(
       { db, settings },
       {
@@ -421,16 +418,17 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "enrollments:manage");
     assertSelfhostedEnabled();
-    const parsed = DeviceEnrollmentDenyRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid device-deny request" });
-    }
+    const parsed = parseRequestBody(
+      DeviceEnrollmentDenyRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid device-deny request" },
+    );
     const result = await denyDeviceEnrollment(
       { db, settings },
       {
         accountId: grant.accountId,
         workspaceId,
-        userCode: parsed.data.userCode,
+        userCode: parsed.userCode,
       },
     );
     return c.json(DeviceEnrollmentDenyResponse.parse({ denied: result.denied }), 200);
@@ -459,13 +457,11 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertSelfhostedEnabled();
     // All fields are optional/defaulted, so an empty POST body is valid (default
     // allowScreenControl=false). Coalesce a missing/empty body to {} before parse.
-    const parsed = MintEnrollTokenRequest.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid mint-enroll-token request",
-      });
-    }
-    const personal = parsed.data.scope === "user";
+    const parsed = parseRequestBody(MintEnrollTokenRequest, await c.req.json().catch(() => ({})), {
+      status: 400,
+      message: "invalid mint-enroll-token request",
+    });
+    const personal = parsed.scope === "user";
     if (personal && !isPersonalConnectionOwnerPrincipal(authorization)) {
       throw new HTTPException(422, {
         message:
@@ -477,7 +473,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       {
         accountId: grant.accountId,
         workspaceId,
-        allowScreenControl: parsed.data.allowScreenControl,
+        allowScreenControl: parsed.allowScreenControl,
         ...(personal ? { ownerSubjectId: grant.subjectId } : {}),
       },
     );
@@ -535,14 +531,12 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = authorization.grant;
     requirePermission(grant, "enrollments:manage");
     assertSelfhostedEnabled();
-    const parsed = RemoveEnrollmentRequest.safeParse(await c.req.json().catch(() => ({})));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid machine removal request",
-      });
-    }
+    const parsed = parseRequestBody(RemoveEnrollmentRequest, await c.req.json().catch(() => ({})), {
+      status: 400,
+      message: "invalid machine removal request",
+    });
     const idempotencyKey =
-      parsed.data.idempotencyKey?.trim() || c.req.header("idempotency-key")?.trim() || randomUUID();
+      parsed.idempotencyKey?.trim() || c.req.header("idempotency-key")?.trim() || randomUUID();
     try {
       const enrollmentId = c.req.param("enrollmentId");
       const enrollment = (await listEnrollments(db, grant, { status: "active" })).find(
@@ -566,9 +560,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId: enrollment.workspaceId,
         enrollmentId,
         operationKey: idempotencyKey,
-        ...(parsed.data.expectedUpdatedAt
-          ? { expectedUpdatedAt: parsed.data.expectedUpdatedAt }
-          : {}),
+        ...(parsed.expectedUpdatedAt ? { expectedUpdatedAt: parsed.expectedUpdatedAt } : {}),
         subjectId: grant.subjectId,
       });
       if (!result) {

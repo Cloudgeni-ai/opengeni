@@ -1,5 +1,24 @@
 import type { Context, MiddlewareHandler } from "hono";
+import { ApiHttpError } from "./api-error";
 import { registeredHandlerRoutePath } from "./registered-route-label";
+
+/**
+ * The answer of a public route that was removed after its deprecation: 410
+ * `gone`, naming the route that replaced it ("METHOD /v1/path") so a caller
+ * can move without reading docs. Call it with literal arguments: the
+ * organization MCP action catalog reads the replacement from the handler
+ * (scripts/public-api/action-catalog.ts), leaves the retired action out of
+ * search and points describe and call at its replacement.
+ */
+export function routeRetired(replacement: string, message: string): ApiHttpError {
+  return new ApiHttpError(410, {
+    code: "gone",
+    message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: "route_retired", replacement },
+  });
+}
 
 /**
  * A public `/v1` route whose current behaviour is scheduled for removal.

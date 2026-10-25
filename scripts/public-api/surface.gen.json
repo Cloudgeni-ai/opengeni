@@ -9063,7 +9063,9 @@
       "sdk": [
         "OpenGeniClient.approveWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9074,7 +9076,9 @@
       "sdk": [
         "OpenGeniClient.rejectWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9085,7 +9089,9 @@
       "sdk": [
         "OpenGeniClient.removeWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "RemoveWorkspaceSkillRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9096,7 +9102,9 @@
       "sdk": [
         "OpenGeniClient.restoreWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "ApplyWorkspaceSkillRevisionRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -9107,7 +9115,9 @@
       "sdk": [
         "OpenGeniClient.saveWorkspaceSkill"
       ],
-      "request": [],
+      "request": [
+        "SaveWorkspaceSkillRequest"
+      ],
       "response": [
         "SkillWriteReceipt"
       ]
@@ -11050,6 +11060,20 @@
         "$": "object",
         "$.expectedObjectiveRevision": "integer!",
         "$.rationale": "string?"
+      }
+    },
+    "ApplyWorkspaceSkillRevisionRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.operationId": "string!",
+        "$.reason": "string!",
+        "$.removalOperationId": "string?",
+        "$.revisionId": "string!"
       }
     },
     "ApproveSlackUserLinkAccessRequest": {
@@ -24055,6 +24079,18 @@
         "$.idempotencyKey": "string?"
       }
     },
+    "RemoveWorkspaceSkillRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.operationId": "string!",
+        "$.reason": "string!"
+      }
+    },
     "RenewSessionRealtimeRequest": {
       "io": [
         "input"
@@ -24882,6 +24918,25 @@
         "$": "object",
         "$.body": "string!",
         "$.expectedRevision": "integer?"
+      }
+    },
+    "SaveWorkspaceSkillRequest": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.deletions": "array?",
+        "$.deletions[]": "string",
+        "$.expectedRevisionId": "string! null",
+        "$.expectedScopeVersion": "integer!",
+        "$.files": "array!",
+        "$.files[]": "ref(SkillFile)",
+        "$.operationId": "string!",
+        "$.reason": "string!",
+        "$.scope": "enum?=[\"\\\"organization\\\"\",\"\\\"user\\\"\",\"\\\"workspace\\\"\"]",
+        "$.skillId": "string!",
+        "$.stableKey": "string!"
       }
     },
     "ScheduledTask": {
@@ -27521,6 +27576,16 @@
       }
     },
     "SkillArtifactFile": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.content": "string!",
+        "$.path": "string!"
+      }
+    },
+    "SkillFile": {
       "io": [
         "input"
       ],

@@ -62,7 +62,8 @@ import {
 } from "../workspace-tool-gateway";
 import { sanitizeFilename } from "./files";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
-import { parseRequestBody, parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { routeRetired } from "../http/deprecation";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage, documentIndexer, getDocumentServices } = deps;
@@ -168,10 +169,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!hasAccountAdminAuthority(authorization)) {
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
-    const query = ListDocumentMigrationAuditQuery.safeParse(c.req.query());
-    if (!query.success) {
-      throw new HTTPException(400, { message: "invalid document migration audit query" });
-    }
+    const query = parseRequestQuery(ListDocumentMigrationAuditQuery, c.req.query(), {
+      status: 400,
+      message: "invalid document migration audit query",
+    });
     try {
       return c.json(
         ListDocumentDefaultCollectionBackfillRunsResponse.parse(
@@ -180,7 +181,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
             accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
-            ...query.data,
+            ...query,
           }),
         ),
       );
@@ -203,10 +204,13 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const runId = RunDocumentDefaultCollectionBackfillRequest.shape.runId.safeParse(
       c.req.param("runId"),
     );
-    const query = GetDocumentDefaultCollectionBackfillAuditQuery.safeParse(c.req.query());
-    if (!runId.success || !query.success) {
+    if (!runId.success) {
       throw new HTTPException(400, { message: "invalid document migration audit query" });
     }
+    const query = parseRequestQuery(GetDocumentDefaultCollectionBackfillAuditQuery, c.req.query(), {
+      status: 400,
+      message: "invalid document migration audit query",
+    });
     try {
       return c.json(
         DocumentDefaultCollectionBackfillAudit.parse(
@@ -216,7 +220,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             actorSubjectId: authorization.grant.subjectId,
             accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
             runId: runId.data,
-            ...query.data,
+            ...query,
           }),
         ),
       );
@@ -236,10 +240,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!hasAccountAdminAuthority(authorization)) {
       throw new HTTPException(403, { message: "missing permission: account:admin" });
     }
-    const query = ListDocumentMigrationAuditQuery.safeParse(c.req.query());
-    if (!query.success) {
-      throw new HTTPException(400, { message: "invalid document migration audit query" });
-    }
+    const query = parseRequestQuery(ListDocumentMigrationAuditQuery, c.req.query(), {
+      status: 400,
+      message: "invalid document migration audit query",
+    });
     try {
       return c.json(
         ListOrganizationDocumentAuthorityReclassificationsResponse.parse(
@@ -248,7 +252,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             actorSubjectId: authorization.grant.subjectId,
             accountAdminAuthorization: requireAccountAdminAuthorizationStamp(authorization),
-            ...query.data,
+            ...query,
           }),
         ),
       );
@@ -382,7 +386,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
       try {
-        const query = ListDocumentAuthorityReclassificationsQuery.parse(c.req.query());
+        const query = parseRequestQuery(ListDocumentAuthorityReclassificationsQuery, c.req.query());
         return c.json(
           ListDocumentAuthorityReclassificationsResponse.parse(
             await listDocumentAuthorityReclassifications(db, {
@@ -574,10 +578,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   ]) {
     app.post(path, async (c) => {
       await requireAccessGrant(c, deps, c.req.param("workspaceId")!, "documents:search");
-      throw new HTTPException(410, {
-        message:
-          "Document search moved to /knowledge/entries/search. Pending Knowledge is available through its review view.",
-      });
+      throw routeRetired(
+        "POST /v1/workspaces/:workspaceId/knowledge/entries/search",
+        "Document search moved to /knowledge/entries/search. Pending Knowledge is available through its review view.",
+      );
     });
   }
 

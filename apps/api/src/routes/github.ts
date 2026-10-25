@@ -99,7 +99,7 @@ import {
   completeGitHubAppConnect,
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery } from "../http/request-body";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -419,7 +419,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (installationId === null || repositoryId === null) {
         throw new HTTPException(400, { message: "invalid GitHub repository identity" });
       }
-      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      const query = parseRequestQuery(ListGitHubRepositoryBranchesQuery, c.req.query());
       try {
         return c.json(
           await listWorkspaceGitHubRepositoryBranches(deps, {

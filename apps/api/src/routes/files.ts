@@ -72,7 +72,7 @@ import {
   buildWorkspaceToolGatewayMcpServer,
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery } from "../http/request-body";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
@@ -440,11 +440,14 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/files", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "files:read");
-    const parsed = FileListRequest.safeParse({
-      ...c.req.query(),
-      ...(c.req.query("limit") !== undefined ? { limit: Number(c.req.query("limit")) } : {}),
-    });
-    if (!parsed.success) throw new HTTPException(422, { message: "Invalid file list request" });
+    const parsed = parseRequestQuery(
+      FileListRequest,
+      {
+        ...c.req.query(),
+        ...(c.req.query("limit") !== undefined ? { limit: Number(c.req.query("limit")) } : {}),
+      },
+      { status: 422, message: "Invalid file list request" },
+    );
     c.header("cache-control", "private, no-store");
     return c.json(
       FileListResponse.parse(
@@ -452,7 +455,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
           accountId: grant.accountId,
           workspaceId,
           subjectId: grant.subjectId,
-          ...parsed.data,
+          ...parsed,
         }).catch((error: unknown) => {
           if (error instanceof ZodError)
             throw new HTTPException(422, { message: "Invalid file cursor" });

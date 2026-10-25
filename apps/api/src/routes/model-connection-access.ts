@@ -43,6 +43,7 @@ import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origi
 import { parsePathParam } from "../http/path-identifier";
 import { codexRouteDisposition } from "./codex-core";
 import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
+import { parseRequestBody } from "../http/request-body";
 
 const Kind = z.enum([
   "codex",
@@ -292,10 +293,12 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     app.put(path, async (c) => {
       // Access of a provider on the shared core lives there; the frozen legacy row is never written.
       const { connection, core } = await target(c, true);
-      const parsed = ModelConnectionAccessPolicy.safeParse(await c.req.json().catch(() => null));
-      if (!parsed.success)
-        throw new HTTPException(422, { message: "Invalid connection access policy" });
-      const policy = parsed.data;
+      const parsed = parseRequestBody(
+        ModelConnectionAccessPolicy,
+        await c.req.json().catch(() => null),
+        { status: 422, message: "Invalid connection access policy" },
+      );
+      const policy = parsed;
       if (policy.sharePersonal && (!core || connection.workspaceId !== null))
         throw new HTTPException(422, {
           message: "Personal sharing requires the organization subscription route",

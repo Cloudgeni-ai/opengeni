@@ -51,9 +51,7 @@ export type OrganizationMcpCaller =
  * its own read permission.
  */
 export const READ_ONLY_POST_ACTIONS: ReadonlySet<string> = new Set([
-  "/v1/workspaces/:workspaceId/knowledge/search",
   "/v1/workspaces/:workspaceId/knowledge/entries/search",
-  "/v1/workspaces/:workspaceId/document-bases/:baseId/search",
   "/v1/workspaces/:workspaceId/sessions/:sessionId/fs/read",
   "/v1/workspaces/:workspaceId/sessions/:sessionId/git/diff",
   "/v1/workspaces/:workspaceId/integrations/preview",
@@ -63,6 +61,8 @@ export const READ_ONLY_POST_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 
 const MAX_RESPONSE_BYTES = 256 * 1024;
+/** Room left for the status, truncation note and hint around a trimmed body. */
+const RESULT_ENVELOPE_BYTES = 2 * 1024;
 const STREAM_READ_MS = 2_000;
 
 export const OrganizationActionSearchInput = z
@@ -226,8 +226,8 @@ function words(value: string): string[] {
     .filter(Boolean);
 }
 
-/** Actions an MCP caller can complete: browser-only ones are left out. */
-const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly);
+/** Actions an MCP caller can complete: browser-only and retired ones are left out. */
+const CALLABLE_ACTIONS = ACTION_CATALOG.filter((entry) => !entry.browserOnly && !entry.retired);
 const DESCRIPTIONS = new Map(
   CALLABLE_ACTIONS.map((entry) => [entry.id, actionDescription(entry)] as const),
 );
@@ -311,6 +311,7 @@ export function describeActionResult(id: string): CallToolResult {
   const entry = findAction(id);
   if (!entry) return failure(`No action "${id}". Search for it first.`);
   if (entry.browserOnly) return browserOnly(entry);
+  if (entry.retired) return retired(entry);
   return json(describeAction(entry));
 }
 
@@ -323,6 +324,7 @@ export function describeAction(entry: ActionCatalogEntry) {
     path: entry.path,
     ...(description ? { description } : {}),
     pathParameters: pathParameters(entry.path),
+    ...(entry.query ? { queryParameters: entry.query } : {}),
     input: entry.request.map((name) => ({
       name,
       in: reads ? "query" : "body",
@@ -340,6 +342,7 @@ export async function callOrganizationAction(
   const entry = findAction(input.id);
   if (!entry) return failure(`No action "${input.id}". Search for it first.`);
   if (entry.browserOnly) return browserOnly(entry);
+  if (entry.retired) return retired(entry);
   const reads = entry.method === "GET" || entry.method === "HEAD";
   if (
     context.caller.kind === "person" &&
@@ -394,10 +397,14 @@ export async function callOrganizationAction(
     });
   }
   const response = await context.dispatch(request);
-  return await toolResult(response);
+  return await toolResult(response, entry, input.query);
 }
 
-async function toolResult(response: Response): Promise<CallToolResult> {
+async function toolResult(
+  response: Response,
+  entry: ActionCatalogEntry,
+  query: z.infer<typeof OrganizationActionCallInput>["query"],
+): Promise<CallToolResult> {
   const status = response.status;
   const location = response.headers.get("location");
   if (status >= 300 && status < 400 && location) {
@@ -416,7 +423,13 @@ async function toolResult(response: Response): Promise<CallToolResult> {
     const bytes = new Uint8Array(await response.arrayBuffer());
     const truncated = bytes.byteLength > MAX_RESPONSE_BYTES;
     const kept = truncated ? bytes.slice(0, MAX_RESPONSE_BYTES) : bytes;
-    if (/json/i.test(contentType) && !truncated) {
+    const trimmed =
+      truncated && /json/i.test(contentType) ? wholeItemsThatFit(bytes, entry, query) : null;
+    if (trimmed) {
+      result.body = trimmed.body;
+      result.truncated = trimmed.truncated;
+      result.hint = trimmed.hint;
+    } else if (/json/i.test(contentType) && !truncated) {
       result.body = JSON.parse(new TextDecoder().decode(kept) || "null");
     } else if (/^text\/|json|xml|yaml|javascript/i.test(contentType) || contentType === "") {
       result.body = new TextDecoder().decode(kept);
@@ -424,7 +437,7 @@ async function toolResult(response: Response): Promise<CallToolResult> {
       result.contentType = contentType;
       result.base64 = Buffer.from(kept).toString("base64");
     }
-    if (truncated)
+    if (truncated && !trimmed)
       result.truncated = { returnedBytes: MAX_RESPONSE_BYTES, totalBytes: bytes.byteLength };
   }
   if (
@@ -437,6 +450,98 @@ async function toolResult(response: Response): Promise<CallToolResult> {
     content: [{ type: "text", text: JSON.stringify(result) }],
     ...(status >= 400 ? { isError: true } : {}),
   };
+}
+
+type TrimmedResult = {
+  body: unknown;
+  truncated: Record<string, unknown>;
+  hint: string;
+};
+
+/**
+ * A JSON list too large for one result keeps as many whole items as fit, so
+ * the body stays valid JSON, with how to fetch the rest: a top-level array,
+ * or the largest array in a top-level object (`items`, `sessions`, ...).
+ * Anything else, or an item larger than the whole result, gets the plain byte
+ * cut instead (null).
+ */
+function wholeItemsThatFit(
+  bytes: Uint8Array,
+  entry: ActionCatalogEntry,
+  query: Record<string, unknown>,
+): TrimmedResult | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder().decode(bytes));
+  } catch {
+    return null;
+  }
+  const budget = MAX_RESPONSE_BYTES - RESULT_ENVELOPE_BYTES;
+  let field: string | undefined;
+  let items: unknown[];
+  let fixedBytes = 2;
+  if (Array.isArray(value)) {
+    items = value;
+  } else if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const arrays = Object.entries(record).filter(
+      (pair): pair is [string, unknown[]] => Array.isArray(pair[1]) && pair[1].length > 0,
+    );
+    const largest = arrays
+      .map(([name, list]) => [name, list, jsonBytes(list)] as const)
+      .sort((left, right) => right[2] - left[2])[0];
+    if (!largest) return null;
+    [field, items] = [largest[0], largest[1]];
+    fixedBytes = jsonBytes({ ...record, [field]: [] });
+  } else {
+    return null;
+  }
+  let used = fixedBytes;
+  let count = 0;
+  for (const item of items) {
+    const size = jsonBytes(item) + (count > 0 ? 1 : 0);
+    if (used + size > budget) break;
+    used += size;
+    count += 1;
+  }
+  if (count === 0 || count === items.length) return null;
+  const kept = items.slice(0, count);
+  return {
+    body: field ? { ...(value as Record<string, unknown>), [field]: kept } : kept,
+    truncated: {
+      returnedItems: count,
+      totalItems: items.length,
+      ...(field ? { field } : {}),
+      returnedBytes: used,
+      totalBytes: bytes.byteLength,
+    },
+    hint: pagingHint(entry, query, count, items.length),
+  };
+}
+
+function pagingHint(
+  entry: ActionCatalogEntry,
+  query: Record<string, unknown>,
+  count: number,
+  total: number,
+): string {
+  const lead = `Only the first ${count} of the ${total} items in this response fit in one result.`;
+  const parameters = new Set(entry.query ?? []);
+  if (parameters.has("offset")) {
+    const offset = Number(query.offset ?? 0);
+    const next = (Number.isSafeInteger(offset) && offset > 0 ? offset : 0) + count;
+    return `${lead} Call again with query offset=${next} and limit=${count} for the next items.`;
+  }
+  if (parameters.has("limit")) {
+    const cursor =
+      parameters.has("cursor") && query.cursor !== undefined ? " and the same cursor" : "";
+    return `${lead} Call again with query limit=${count}${cursor} to get pages that fit, then page on from there; a cursor in this response skips the omitted items.`;
+  }
+  return `${lead} This action has no paging parameters; narrow the request if it takes filters.`;
+}
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value) ?? "null");
 }
 
 async function readStream(response: Response): Promise<string> {
@@ -473,6 +578,14 @@ function json(value: unknown): CallToolResult {
 function browserOnly(entry: ActionCatalogEntry): CallToolResult {
   return failure(
     `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+  );
+}
+
+/** A removed action: name the action that replaced it instead of calling it. */
+function retired(entry: ActionCatalogEntry): CallToolResult {
+  const replacement = entry.retired ? findAction(entry.retired) : undefined;
+  return failure(
+    `${entry.id} was removed. Use ${replacement ? `the ${replacement.id} action (${entry.retired})` : entry.retired} instead; describe it for its input.`,
   );
 }
 

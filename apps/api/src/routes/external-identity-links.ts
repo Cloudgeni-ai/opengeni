@@ -28,7 +28,12 @@ import {
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
+import {
+  parseRequestBody,
+  parseRequestJson,
+  parseRequestQuery,
+  readRequestJson,
+} from "../http/request-body";
 import { parsePathParam } from "../http/path-identifier";
 
 function nativeConfirmation(authorization: AccessGrantAuthorization) {
@@ -55,9 +60,11 @@ export function registerExternalIdentityLinkRoutes(app: Hono, deps: ApiRouteDeps
     );
     if (!externalActorContinuationForAuthorization(authorization))
       nativeConfirmation(authorization);
-    const parsedCursor = z.string().uuid().optional().safeParse(c.req.query("cursor"));
-    if (!parsedCursor.success) throw new HTTPException(400, { message: "Invalid link cursor" });
-    const cursor = parsedCursor.data;
+    const parsedCursor = parseRequestQuery(z.string().uuid().optional(), c.req.query("cursor"), {
+      status: 400,
+      message: "Invalid link cursor",
+    });
+    const cursor = parsedCursor;
     const grant = authorization.grant;
     return c.json(
       await withWorkspaceSubjectRls(deps.db, grant.workspaceId, grant.subjectId, async (tx) => {

@@ -28,13 +28,14 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(422, { message: "Invalid workspace learning request" });
-  }
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "Invalid workspace learning request",
+  });
+  return parsed;
 }
 
 function learningError(error: unknown): never {
@@ -70,30 +71,31 @@ export function registerWorkspaceLearningRoutes(app: Hono, deps: ApiRouteDeps): 
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:read");
-    const query = WorkspaceLearningPolicyHistoryQuery.safeParse({
-      limit: context.req.query("limit"),
-    });
-    if (!query.success) {
-      throw new HTTPException(422, { message: "Invalid workspace learning history query" });
-    }
+    const query = parseRequestQuery(
+      WorkspaceLearningPolicyHistoryQuery,
+      {
+        limit: context.req.query("limit"),
+      },
+      { status: 422, message: "Invalid workspace learning history query" },
+    );
     try {
       const [policy, decisions, lifecycle] = await Promise.all([
         listWorkspaceLearningPolicyHistory(deps.db, {
           accountId: grant.accountId,
           workspaceId,
-          limit: query.data.limit,
+          limit: query.limit,
         }),
         listGovernedLearningDecisionReceipts(deps.db, {
           workspaceId,
           subjectId: grant.subjectId,
           principalKind: grant.principalKind ?? "",
-          limit: query.data.limit,
+          limit: query.limit,
         }),
         listGovernedLearningActivationHistory(deps.db, {
           workspaceId,
           subjectId: grant.subjectId,
           principalKind: grant.principalKind ?? "",
-          limit: query.data.limit,
+          limit: query.limit,
         }),
       ]);
       return context.json(

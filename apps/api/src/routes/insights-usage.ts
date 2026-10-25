@@ -31,6 +31,7 @@ import { createHash } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import { requireSelectedAccount, withBillingUsageActor } from "./billing";
 import { createInFlightCoalescer } from "./insights";
+import { parseRequestQuery } from "../http/request-body";
 import {
   createInsightsCredentialPartition,
   createInsightsResponseCache,
@@ -228,14 +229,20 @@ export function registerInsightsUsageRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/insights/sites", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    const query = InsightsSiteUsageQuery.safeParse(insightsQueryParameters(c.req.queries()));
-    if (!query.success) throw new HTTPException(400, { message: "invalid Site Insights query" });
+    const query = parseRequestQuery(
+      InsightsSiteUsageQuery,
+      insightsQueryParameters(c.req.queries()),
+      {
+        status: 400,
+        message: "invalid Site Insights query",
+      },
+    );
     const viewer = await siteViewerForGrant(deps.db, grant);
     const response = await insightsWithFriendlyTimeout(() =>
       getInsightsSiteUsage(deps.db, {
         accountId: grant.accountId,
         workspaceId,
-        query: query.data,
+        query,
         viewerSubjectId: viewer.subjectId,
       }),
     );

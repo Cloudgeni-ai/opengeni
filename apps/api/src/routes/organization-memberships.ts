@@ -99,7 +99,7 @@ import {
   assertOrganizationUserSetupDeliveryConfigured,
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
-import { readRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
@@ -232,13 +232,11 @@ async function requireOrganizationAdministrator(
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(422, {
-      message: "invalid organization membership request",
-    });
-  }
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "invalid organization membership request",
+  });
+  return parsed;
 }
 
 function parseId(schema: z.ZodString, value: string, label: string): string {
@@ -401,12 +399,10 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
 
   app.get("/v1/organization-invitations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
-    const query = ListOrganizationInvitationsPageQuery.safeParse(context.req.query());
-    if (!query.success) {
-      throw new HTTPException(422, {
-        message: "invalid organization invitation page",
-      });
-    }
+    const query = parseRequestQuery(ListOrganizationInvitationsPageQuery, context.req.query(), {
+      status: 422,
+      message: "invalid organization invitation page",
+    });
     try {
       if (session.user.emailVerified) {
         await bindPendingOrganizationInvitationsForVerifiedEmail(deps.db, {
@@ -418,8 +414,8 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         ListOrganizationInvitationsPageResponse.parse(
           await listSelfOrganizationInvitations(deps.db, {
             subjectId,
-            ...(query.data.cursor === undefined ? {} : { cursor: query.data.cursor }),
-            limit: query.data.limit,
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+            limit: query.limit,
           }),
         ),
       );
@@ -842,20 +838,18 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       context.req.param("organizationId"),
       "organization id",
     );
-    const query = ListOrganizationInvitationsPageQuery.safeParse(context.req.query());
-    if (!query.success) {
-      throw new HTTPException(422, {
-        message: "invalid organization invitation page",
-      });
-    }
+    const query = parseRequestQuery(ListOrganizationInvitationsPageQuery, context.req.query(), {
+      status: 422,
+      message: "invalid organization invitation page",
+    });
     try {
       return context.json(
         ListOrganizationInvitationsPageResponse.parse(
           await listOrganizationInvitations(deps.db, {
             organizationId,
             actorSubjectId: subjectId,
-            ...(query.data.cursor === undefined ? {} : { cursor: query.data.cursor }),
-            limit: query.data.limit,
+            ...(query.cursor === undefined ? {} : { cursor: query.cursor }),
+            limit: query.limit,
           }),
         ),
       );

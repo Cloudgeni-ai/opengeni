@@ -883,6 +883,11 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "upstream_unavailable",
     "tab_not_responding",
     "tab_crashed",
+    /**
+     * The resource or route no longer exists (HTTP 410). A retired route's
+     * details carry `code: "route_retired"` and the `replacement` to call.
+     */
+    "gone",
     "internal_error",
   ]),
 );

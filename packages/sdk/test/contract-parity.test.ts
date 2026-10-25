@@ -134,6 +134,9 @@ import {
   ProposeRigChangeRequest as ContractProposeRigChangeRequest,
   UpdateWorkspaceMemberRequest as ContractUpdateWorkspaceMemberRequest,
   WorkspaceMember as ContractWorkspaceMember,
+  SaveWorkspaceSkillRequest as ContractSaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest as ContractApplyWorkspaceSkillRevisionRequest,
+  RemoveWorkspaceSkillRequest as ContractRemoveWorkspaceSkillRequest,
 } from "@opengeni/contracts";
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
@@ -275,6 +278,11 @@ import type {
   WorkspaceMember,
 } from "../src/types";
 import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/transcription";
+import type {
+  ApplyWorkspaceSkillRevisionRequest,
+  RemoveWorkspaceSkillRequest,
+  SaveWorkspaceSkillRequest,
+} from "../src/skills";
 
 // The SDK ships hand-written general wire types so ordinary entries do not
 // import the contracts runtime. This suite pins them to `@opengeni/contracts`:
@@ -1445,4 +1453,39 @@ test("workspace timer wire types match contracts", async () => {
       WorkspacePauseTimerRequest.safeParse({ ...request, pauseInSeconds: seconds }).success,
     ).toBe(false);
   }
+});
+
+test("Skill write requests the SDK sends are the ones the API validates", () => {
+  // Client -> server, both ways: the SDK sends exactly the contract's input.
+  const toContract = {
+    save: (value: SaveWorkspaceSkillRequest): z.input<typeof ContractSaveWorkspaceSkillRequest> =>
+      value,
+    apply: (
+      value: ApplyWorkspaceSkillRevisionRequest,
+    ): z.input<typeof ContractApplyWorkspaceSkillRevisionRequest> => value,
+    remove: (
+      value: RemoveWorkspaceSkillRequest,
+    ): z.input<typeof ContractRemoveWorkspaceSkillRequest> => value,
+  };
+  const fromContract = {
+    save: (value: z.input<typeof ContractSaveWorkspaceSkillRequest>): SaveWorkspaceSkillRequest =>
+      value,
+    apply: (
+      value: z.input<typeof ContractApplyWorkspaceSkillRevisionRequest>,
+    ): ApplyWorkspaceSkillRevisionRequest => value,
+    remove: (
+      value: z.input<typeof ContractRemoveWorkspaceSkillRequest>,
+    ): RemoveWorkspaceSkillRequest => value,
+  };
+  expect(Object.keys(toContract)).toEqual(Object.keys(fromContract));
+  const save: SaveWorkspaceSkillRequest = {
+    operationId: "00000000-0000-4000-8000-000000000001",
+    skillId: "00000000-0000-4000-8000-000000000002",
+    expectedRevisionId: null,
+    expectedScopeVersion: 0,
+    stableKey: "release-operator",
+    files: [{ path: "SKILL.md", content: "---\nname: release-operator\n---\n" }],
+    reason: "Create",
+  };
+  expect(ContractSaveWorkspaceSkillRequest.parse(save).scope).toBe("workspace");
 });

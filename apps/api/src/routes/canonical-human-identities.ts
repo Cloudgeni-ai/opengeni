@@ -26,6 +26,7 @@ import { z } from "zod";
 import { admitManagedSignInMutation } from "./managed-sign-in-methods";
 import { managedAuthSecretRequestDigest } from "@opengeni/core/managed-auth-session-sets";
 import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
+import { parseRequestBody } from "../http/request-body";
 
 const BindingId = z.string().uuid();
 
@@ -40,11 +41,11 @@ async function requestIdentity(context: Context, deps: ApiRouteDeps) {
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) {
-    throw new HTTPException(422, { message: "Invalid canonical human identity request" });
-  }
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "Invalid canonical human identity request",
+  });
+  return parsed;
 }
 
 function bindingId(context: Context): string {

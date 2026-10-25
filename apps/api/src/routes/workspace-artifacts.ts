@@ -74,13 +74,16 @@ import {
   workspaceArtifactDownloads,
   readArtifactObject,
 } from "../site-uploads";
+import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 const ArtifactId = z.string().uuid();
 
 async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
-  const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success) throw new HTTPException(422, { message: "Invalid artifact request" });
-  return parsed.data;
+  const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+    status: 422,
+    message: "Invalid artifact request",
+  });
+  return parsed;
 }
 
 function parseVersionId(value: string | undefined): string | undefined {
@@ -302,16 +305,19 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
-    const query = WorkspaceArtifactListQuery.safeParse({
-      limit: context.req.query("limit"),
-      cursor: context.req.query("cursor"),
-      status: context.req.query("status"),
-      sourceSessionId: context.req.query("sourceSessionId"),
-    });
-    if (!query.success) throw new HTTPException(422, { message: "Invalid artifact list query" });
+    const query = parseRequestQuery(
+      WorkspaceArtifactListQuery,
+      {
+        limit: context.req.query("limit"),
+        cursor: context.req.query("cursor"),
+        status: context.req.query("status"),
+        sourceSessionId: context.req.query("sourceSessionId"),
+      },
+      { status: 422, message: "Invalid artifact list query" },
+    );
     if (
-      query.data.sourceSessionId &&
-      !(await canReadProvenanceSession(deps, grant, query.data.sourceSessionId))
+      query.sourceSessionId &&
+      !(await canReadProvenanceSession(deps, grant, query.sourceSessionId))
     ) {
       throw new HTTPException(404, { message: "Session not found" });
     }
@@ -324,12 +330,10 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
               workspaceId,
               await siteViewerForGrant(deps.db, grant),
               {
-                limit: query.data.limit,
-                ...(query.data.cursor ? { cursor: query.data.cursor } : {}),
-                ...(query.data.status ? { status: query.data.status } : {}),
-                ...(query.data.sourceSessionId
-                  ? { sourceSessionId: query.data.sourceSessionId }
-                  : {}),
+                limit: query.limit,
+                ...(query.cursor ? { cursor: query.cursor } : {}),
+                ...(query.status ? { status: query.status } : {}),
+                ...(query.sourceSessionId ? { sourceSessionId: query.sourceSessionId } : {}),
               },
             ),
           ),

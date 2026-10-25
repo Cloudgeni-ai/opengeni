@@ -52,6 +52,7 @@ import {
   type EditableArtifactRouteDependencies,
 } from "./editable-artifacts";
 import { fileAuthoritySubjectIdForGrant } from "./files";
+import { parseRequestQuery } from "../http/request-body";
 
 type Dependencies = ApiRouteDeps & EditableArtifactRouteDependencies;
 const editableKinds = new Set(["document", "spreadsheet", "presentation"]);
@@ -168,10 +169,11 @@ export function registerArtifactCatalogRoutes(app: Hono, deps: Dependencies): vo
     const workspaceId = context.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(context, deps, workspaceId);
     const grant = authorization.grant;
-    const parsed = ArtifactCatalogListQuery.safeParse(context.req.query());
-    if (!parsed.success)
-      throw new HTTPException(422, { message: "Invalid artifact catalog query" });
-    const query = parsed.data;
+    const parsed = parseRequestQuery(ArtifactCatalogListQuery, context.req.query(), {
+      status: 422,
+      message: "Invalid artifact catalog query",
+    });
+    const query = parsed;
     const artifactsAllowed = hasPermission(grant.permissions, "artifacts:read");
     const filesAllowed = hasPermission(grant.permissions, "files:read");
     if (!artifactsAllowed && !filesAllowed)

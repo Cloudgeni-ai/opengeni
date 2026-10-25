@@ -3020,7 +3020,7 @@ describe("API component integration", () => {
       error: {
         status: 422,
         code: "validation_failed",
-        message: "invalid session event",
+        message: expect.stringStartingWith("invalid session event: "),
         retryable: false,
       },
     });
@@ -3440,7 +3440,7 @@ describe("API component integration", () => {
       error: {
         status: 422,
         code: "validation_failed",
-        message: "invalid session event",
+        message: expect.stringStartingWith("invalid session event: "),
         retryable: false,
       },
     });

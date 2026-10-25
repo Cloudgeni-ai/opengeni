@@ -16,17 +16,17 @@ import {
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { parseRequestBody, parseRequestQuery } from "../http/request-body";
 
 export function registerFeedbackRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/feedback", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
     await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const parsed = CreateFeedbackRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success)
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "Invalid feedback",
-      });
+    const parsed = parseRequestBody(CreateFeedbackRequest, await c.req.json().catch(() => null), {
+      status: 400,
+      message: "Invalid feedback",
+    });
     // Agent turns must not manufacture user satisfaction evidence. Product SDK
     // credentials are allowed but retain their own authenticated author/kind.
     if (
@@ -42,13 +42,13 @@ export function registerFeedbackRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           principalKind: grant.principalKind ?? null,
-          request: parsed.data,
+          request: parsed,
         });
       let result;
-      if (parsed.data.sessionId) {
+      if (parsed.sessionId) {
         await requireAccessGrant(c, deps, workspaceId, "sessions:read");
         const authorization = await requireSessionAuthorization(deps, grant, {
-          sessionId: parsed.data.sessionId,
+          sessionId: parsed.sessionId,
           operation: "session.feedback.write",
           surface: "http",
         });
@@ -65,25 +65,26 @@ export function registerFeedbackRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/feedback", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const query = z
-      .object({
+    const query = parseRequestQuery(
+      z.object({
         sessionId: z.string().uuid().optional(),
         includeTurns: z
           .enum(["true", "false"])
           .default("true")
           .transform((value) => value === "true"),
         limit: z.coerce.number().int().min(1).max(100).default(50),
-      })
-      .safeParse(c.req.query());
-    if (!query.success) throw new HTTPException(400, { message: "Invalid feedback query" });
+      }),
+      c.req.query(),
+      { status: 400, message: "Invalid feedback query" },
+    );
     try {
       const read = () =>
-        listOwnFeedback(deps.db, { workspaceId, subjectId: grant.subjectId, ...query.data });
+        listOwnFeedback(deps.db, { workspaceId, subjectId: grant.subjectId, ...query });
       let feedback;
-      if (query.data.sessionId) {
+      if (query.sessionId) {
         await requireAccessGrant(c, deps, workspaceId, "sessions:read");
         const authorization = await requireSessionAuthorization(deps, grant, {
-          sessionId: query.data.sessionId,
+          sessionId: query.sessionId,
           operation: "session.read",
           surface: "http",
         });
