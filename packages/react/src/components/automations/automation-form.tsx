@@ -22,6 +22,8 @@ import {
   type AutomationDraftIssues,
 } from "./automation-model";
 import { AutomationWhenField } from "./automation-when-field";
+import { withTemplateSources } from "./automation-template-model";
+import type { EventSourceChoice } from "./event-source-model";
 import type { EventSourceLogoResolver } from "./event-source-tile";
 
 export interface AutomationFormProps {
@@ -38,7 +40,7 @@ export interface AutomationFormProps {
   loadEventTypes: (sourceId: string) => Promise<EventTypeDescriptor[]>;
   sourceLogo?: EventSourceLogoResolver | undefined;
   /** Opens the host's "Add a source" page; offered when no source fits. */
-  onAddSource?: (() => void) | undefined;
+  onAddSource?: ((choice?: EventSourceChoice) => void) | undefined;
   /** Arguments a new MCP subscription starts with, such as `{ projectId }`. */
   argumentDefaults?: Readonly<Record<string, unknown>> | undefined;
   /** Saves the draft. Throw to keep the form open; the error's message is shown. */
@@ -66,6 +68,13 @@ export function AutomationForm({
 }: AutomationFormProps) {
   const t = useOpenGeniText();
   const [draft, setDraft] = useState(initial);
+  // A template's triggers take the person's own sources once those load.
+  const [filledFrom, setFilledFrom] = useState(sources);
+  if (sources !== filledFrom) {
+    setFilledFrom(sources);
+    const events = withTemplateSources(draft.events, sources);
+    if (events !== draft.events) setDraft({ ...draft, events });
+  }
   const [issues, setIssues] = useState<AutomationDraftIssues>({});
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);

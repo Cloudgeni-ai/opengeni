@@ -75,6 +75,7 @@ import {
   losslessText,
 } from "./lossless-columns";
 
+export * from "./automation-templates-schema";
 export * from "./editable-artifacts-schema";
 export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";

@@ -27,11 +27,16 @@ an agent reliably, without a second execution engine beside scheduled tasks.
   - an **app** Opengeni already connects to and receives events from directly
     (GitHub through the platform GitHub App, Slack through the Slack app), or
     reads changes from (Gmail, through the owner's Gmail connection);
-  - an **MCP connection** whose server offers the events extension.
+  - an **MCP connection** whose server offers the events extension;
+  - **this workspace** itself: things that happen in Opengeni, such as a
+    meeting's transcript becoming ready.
 - **Event.** One normalized occurrence: source, type, time, subject, actor,
   a one-line summary and bounded data. Every source produces the same shape.
 - **Run.** One execution of an automation: an existing `scheduled_task_runs`
   row. An event run records the trigger and the events it carries.
+- **Template.** A starting point for a new automation: a name, a description,
+  the message, a schedule and event triggers that name a kind of source
+  rather than a source. Using one opens the ordinary form, filled in.
 
 An event trigger names a source, one or more event types, optional conditions
 on event fields, and whether events made by Opengeni's own bots count. For an
@@ -203,6 +208,42 @@ delivery as `ignored`.
   the feed retries every 15 minutes and the first good read unblocks them.
   Other failures back off and block after an hour. Adding another app of this
   kind is one adapter.
+
+### This workspace
+
+Things that happen in Opengeni itself are events too. Today these are meeting
+recordings (`recording_events`, the facts workspace webhooks already send);
+the general internal event spine comes later and adds its types to the same
+source.
+
+- **One source per person.** A "This workspace" source shows its owner the
+  workspace's events that person may see, so it is private to them like a
+  mailbox, and there is at most one per person in a workspace. Creating it
+  again returns the existing one, so clients add it on first use without a
+  setup step. A workspace-level caller (an API key alone) gets 422.
+- **A feed read as the owner.** It has no route and is read like Gmail's
+  feed, but every 15 seconds and from the database: the owner's own
+  recordings and those shared with the workspace, under the owner's row
+  security, so a trigger only ever sees what its owner may see. Recording
+  events are stamped when written, not when committed, so each read looks
+  back 10 minutes and skips events the source already stored; the first read
+  only learns where "now" is.
+- **Types** are the recording event types: `recording.started`,
+  `recording.finished`, `recording.transcript.ready`,
+  `recording.transcript.failed`, `recording.transcript.current_changed`,
+  `recording.speakers.updated`, `recording.notes.updated` and
+  `recording.deleted`; the catalog is keyed by the contract's list, so a new
+  recording type can't be left out. Data carries the
+  recording id, its title (the owner may see it, unlike a webhook receiver),
+  purpose, state, visibility and external reference, so an agent reads the
+  meeting with its meeting tools, and `recordedByYou`: whether the source's
+  owner recorded it, so a trigger can keep to the person's own meetings and
+  leave a teammate's shared meeting to that teammate's automation. A browser recording an agent made, and
+  notes an agent saved (`data.sessionId` names its chat), count as
+  Opengeni's own events, so an automation that writes a meeting's notes
+  doesn't wake one listening for saved notes unless that trigger opts in.
+- **Delivery log.** Each read with new events is one delivery whose body is
+  the events read, so it replays the same.
 
 ### MCP Events
 
@@ -425,6 +466,80 @@ the owner explicitly narrows them.
   app's form and the panel share the "When" field and the automation model.
 - **Agent tools.** See [Agent tools](#agent-tools).
 
+## Templates
+
+A template is where a new automation starts: "Meeting notes", "Review new pull
+requests", "Morning brief". Using one opens the ordinary form, filled in, and
+nothing is created until the person saves. There are three kinds:
+
+- **Built-in** templates ship with `@opengeni/react/automations`
+  (`builtinAutomationTemplates(t)`), in the host's language. The web app
+  offers them all; an embedder chooses which, if any, to offer.
+- **Embedder** templates are the host's own, passed to `AutomationsPanel` as
+  `templates` in the same shape.
+- **Workspace** templates are saved from an automation ("Save as template")
+  and stored per workspace in `automation_templates`, so everyone in the
+  workspace finds them in the web app and in the panel. Whoever saved one and
+  workspace admins can rename or delete it.
+
+A template holds the message, a schedule without a time zone (a calendar time
+or an interval, read in the viewer's time zone, or none), and event triggers
+with the run policy. A trigger names the kind of source (and the webhook
+adapter or MCP server), its event types, conditions, arguments and whether
+Opengeni's own events count. A template saved from an automation also keeps
+the id of a source shared with the workspace; a private source is never
+named, so the next person's own source of that kind is used. When the form
+opens it picks the saved source if the person can use it, else their first
+active source of that kind; "This workspace" and the host's `eventServers`
+are added on first use, and any other kind asks the person to add a source.
+The destination, owner, accounts and access are never part of a template:
+they come from where the template is used, as for any new automation.
+A new automation that listens on a source only its owner sees ("This
+workspace", a mailbox, an MCP connection) starts out Only me in the web app;
+the person can still share it.
+
+The built-in **Meeting notes** template listens on "This workspace" for
+`recording.transcript.ready` where `data.purpose` is `meeting` and
+`data.recordedByYou` is true (two people using the template each write up
+their own meetings, never each other's shared ones), and asks the
+agent to read the meeting named by `data.recordingId` and write notes from the
+transcript and the person's own notes: a short summary, decisions and action
+items with owners and due dates. It replies with the notes and also saves them
+on the meeting when its tools can. Where notes are kept is the meetings
+tools' business, not the template's.
+
+**Where they show.** The web app has a Templates page (Automations, then
+Templates) with the built-in templates and the workspace's saved ones; New
+automation links there, and `?template=<slug or id>` opens the form filled
+in. `AutomationsPanel` takes three props:
+
+- `templates`: the host's own templates, offered under "Templates". None by
+  default.
+- `workspaceTemplates`: offer the workspace's saved templates and "Save as
+  template". On by default; a server without the routes (404) hides both.
+- `workspaceEvents`: offer "This workspace" as a source. Off by default,
+  since a host whose workspace records nothing has nothing to listen to; a
+  template whose trigger needs it is left out while it is off.
+
+With any template on offer, New automation opens a chooser ("Start from
+scratch", then the templates) instead of the empty form. Sources that need no
+setting up ("This workspace" and the host's `eventServers`) appear in the
+source picker before the person has one, through `useEventSourceStandIns`,
+which creates the real source when the automation is saved. A trigger that
+is still waiting for a source of its kind keeps the template's
+`templateSource`, and the editor says which kind to add.
+
+**Stored templates.** Templates are a client concept plus one stored list:
+the server validates and stores workspace templates
+(`/v1/workspaces/:workspaceId/automation-templates`, list, create, update,
+delete) and never turns one into an automation itself. Reading needs
+`scheduled_tasks:run` and saving `scheduled_tasks:manage`; each template
+says whether the viewer may change it (`viewerAccess` is `manage` for whoever
+saved it and for workspace admins, otherwise `use`). A workspace keeps up to
+200; saving more returns 409. A named `sourceId` that is not a workspace
+source of the trigger's kind is refused with 422. Agent tools do not list
+templates.
+
 ## Old substrate
 
 The `/v1/workspaces/:workspaceId/automations/*` routes, the
@@ -476,3 +591,5 @@ major. PR Review moves to an automation with a GitHub pull-request trigger.
 5. UI and the waiting state.
 6. Agent tools and event rendering (model-facing, reviewed as one draft PR).
 7. PR Review on automations; old substrate deprecated.
+8. Templates (built-in, embedder and workspace) and the "This workspace"
+   source with meeting events, with the built-in Meeting notes template.

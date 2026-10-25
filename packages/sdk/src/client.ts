@@ -36,17 +36,22 @@ import type {
 } from "./artifact-catalog";
 import type { ToolActionReview, ToolReviewDetailsPage } from "@opengeni/contracts";
 import type {
+  AutomationTemplateResponse,
+  CreateAutomationTemplateRequest,
   CreateEventSourceRequest,
   CreateEventSourceResponse,
   EventDelivery,
   EventSource,
   EventTypeDescriptor,
+  ListAutomationTemplatesResponse,
   ListEventDeliveriesResponse,
   ListInboundEventsResponse,
   RotateEventSourceSecretResponse,
   SendTestEventRequest,
   SendTestEventResponse,
+  UpdateAutomationTemplateRequest,
   UpdateEventSourceRequest,
+  WorkspaceAutomationTemplate,
 } from "@opengeni/contracts";
 import type {
   SiteDataCollectionDefinitionRequest,
@@ -7613,6 +7618,51 @@ export class OpenGeniClient {
       eventTypes: EventTypeDescriptor[];
     }>("GET", `/v1/workspaces/${workspaceId}/event-sources/${sourceId}/event-types`);
     return response.eventTypes;
+  }
+
+  // --- Automation templates ---------------------------------------------------
+  // Templates saved in a workspace, for anyone in it to start an automation
+  // from. Using one fills the automation form; nothing is created until the
+  // automation is saved. Whoever saved one, or an admin, can change it.
+
+  async listAutomationTemplates(workspaceId: string): Promise<WorkspaceAutomationTemplate[]> {
+    const response = await this.requestJson<ListAutomationTemplatesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/automation-templates`,
+    );
+    return response.templates;
+  }
+
+  async createAutomationTemplate(
+    workspaceId: string,
+    request: CreateAutomationTemplateRequest,
+  ): Promise<WorkspaceAutomationTemplate> {
+    const response = await this.requestJson<AutomationTemplateResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/automation-templates`,
+      request,
+    );
+    return response.template;
+  }
+
+  async updateAutomationTemplate(
+    workspaceId: string,
+    templateId: string,
+    request: UpdateAutomationTemplateRequest,
+  ): Promise<WorkspaceAutomationTemplate> {
+    const response = await this.requestJson<AutomationTemplateResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/automation-templates/${templateId}`,
+      request,
+    );
+    return response.template;
+  }
+
+  async deleteAutomationTemplate(workspaceId: string, templateId: string): Promise<void> {
+    await this.requestJson<unknown>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/automation-templates/${templateId}`,
+    );
   }
 
   // --- Vaults ---------------------------------------------------------------

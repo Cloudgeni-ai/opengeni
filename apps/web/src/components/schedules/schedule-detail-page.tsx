@@ -23,6 +23,7 @@ import {
   type ReactNode,
 } from "react";
 import {
+  BookmarkPlusIcon,
   CalendarClockIcon,
   CopyIcon,
   LinkIcon,
@@ -36,6 +37,8 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { t } from "@opengeni/react/app/lib/console-text";
+import { AutomationTemplateDialog, automationTemplateFromTask } from "@opengeni/react/automations";
 import { modelDisplayName } from "@opengeni/react";
 
 import { Button } from "@opengeni/react/ui/button";
@@ -171,6 +174,7 @@ export function ScheduleDetailPage({
   const [clock, setClock] = useState(() => new Date());
   const [tab, setTab] = useState("overview");
   const [renaming, setRenaming] = useState(false);
+  const [savingTemplate, setSavingTemplate] = useState(false);
   const eventTriggers = useEventTriggersEnabled();
   // Source names and states for the When section; read only when it has triggers.
   const listens = load.status === "ready" && hasEventTriggers(load.task);
@@ -509,6 +513,16 @@ export function ScheduleDetailPage({
                       Duplicate
                     </DropdownMenuItem>
                   ) : null}
+                  {perms.canDuplicate ? (
+                    <DropdownMenuItem
+                      // A trigger's kind of source comes from its source.
+                      disabled={listens && eventSources.sources === undefined}
+                      onSelect={() => setSavingTemplate(true)}
+                    >
+                      <BookmarkPlusIcon />
+                      Save as template
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem onSelect={copyLink}>
                     <LinkIcon />
                     Copy link
@@ -589,6 +603,25 @@ export function ScheduleDetailPage({
         workspaceId={workspaceId}
         onOpenChange={setRenaming}
         onRenamed={() => void refresh(true)}
+      />
+      <AutomationTemplateDialog
+        open={savingTemplate}
+        onOpenChange={setSavingTemplate}
+        mode="save"
+        initial={{ name: task.name, description: "" }}
+        onSubmit={async (values) => {
+          const saved = await client.createAutomationTemplate(
+            workspaceId,
+            automationTemplateFromTask(t, task, eventSources.sources ?? [], {
+              ...values,
+              now: new Date(),
+            }),
+          );
+          toast.success("Saved as a template", {
+            description: saved.name,
+            action: { label: "Templates", onClick: go.templates },
+          });
+        }}
       />
     </DetailPage>
   );

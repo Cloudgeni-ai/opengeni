@@ -23,7 +23,8 @@ export type EventSourceChoice =
   | "github"
   | "slack"
   | "gmail"
-  | "mcp";
+  | "mcp"
+  | "workspace";
 
 export interface EventSourceChoiceMeta {
   choice: EventSourceChoice;
@@ -43,6 +44,7 @@ type EventSourceChoiceFacts = Omit<EventSourceChoiceMeta, "name" | "description"
 
 /** Every choice in the order "Add a source" offers them. */
 const CHOICE_FACTS: readonly EventSourceChoiceFacts[] = [
+  { choice: "workspace", providerDomain: null, setup: "automatic", audience: "personal" },
   { choice: "github", providerDomain: "github.com", setup: "automatic", audience: "workspace" },
   { choice: "slack", providerDomain: "slack.com", setup: "automatic", audience: "workspace" },
   { choice: "gmail", providerDomain: "mail.google.com", setup: "automatic", audience: "personal" },
@@ -53,7 +55,15 @@ const CHOICE_FACTS: readonly EventSourceChoiceFacts[] = [
 ];
 
 function choiceFacts(choice: EventSourceChoice): EventSourceChoiceFacts {
-  return CHOICE_FACTS.find((entry) => entry.choice === choice)!;
+  // A kind from a newer server than this client still shows, plainly.
+  return (
+    CHOICE_FACTS.find((entry) => entry.choice === choice) ?? {
+      choice,
+      providerDomain: null,
+      setup: "automatic",
+      audience: "personal",
+    }
+  );
 }
 
 /** The choice's name: the app's own name, or what the kind is called. */
@@ -73,6 +83,10 @@ export function eventSourceChoiceName(t: OpenGeniText, choice: EventSourceChoice
       return t("automations.source.mcp.name");
     case "webhook":
       return t("automations.source.webhook.name");
+    case "workspace":
+      return t("automations.source.workspace.name");
+    default:
+      return String(choice);
   }
 }
 
@@ -92,6 +106,10 @@ function choiceDescription(t: OpenGeniText, choice: EventSourceChoice): string {
       return t("automations.source.mcp.description");
     case "webhook":
       return t("automations.source.webhook.description");
+    case "workspace":
+      return t("automations.source.workspace.description");
+    default:
+      return "";
   }
 }
 
@@ -149,10 +167,14 @@ export function eventSourceSubjectOfChoice(
 export function eventSourceAddLabel(t: OpenGeniText, choice: EventSourceChoice): string {
   if (choice === "webhook") return t("automations.source.addWebhook");
   if (choice === "mcp") return t("automations.source.addMcp");
+  if (choice === "workspace") return t("automations.source.addWorkspace");
   return t("automations.source.add", { name: eventSourceChoiceName(t, choice) });
 }
 
-/** "GitHub", "Linear webhook", "Webhook", "MCP server": the kind, not the name. */
+/**
+ * "GitHub", "Linear webhook", "Webhook", "MCP server", "Workspace events": the
+ * kind, not the name.
+ */
 export function eventSourceKindLabel(
   t: OpenGeniText,
   source: Pick<EventSource, "kind" | "adapter">,
@@ -161,6 +183,7 @@ export function eventSourceKindLabel(
   if (choice === "linear" || choice === "sentry")
     return t("automations.source.kind.appWebhook", { app: eventSourceChoiceName(t, choice) });
   if (choice === "webhook") return t("automations.source.kind.webhook");
+  if (choice === "workspace") return t("automations.source.kind.workspace");
   return eventSourceChoiceName(t, choice);
 }
 
@@ -269,6 +292,7 @@ export function createEventSourceRequest(
       ...(name ? { name } : {}),
     };
   }
+  if (input.choice === "workspace") return { kind: "workspace", ...(name ? { name } : {}) };
   return { kind: input.choice as "github" | "slack", ...(name ? { name } : {}) };
 }
 

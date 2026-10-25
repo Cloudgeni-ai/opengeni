@@ -14,7 +14,18 @@ import { defineSchema } from "./define-schema";
  * embed these schemas.
  */
 
-export const EVENT_SOURCE_KINDS = ["webhook", "github", "slack", "gmail", "mcp"] as const;
+/**
+ * `workspace` is "This workspace": things that happen in Opengeni itself, such
+ * as a meeting's transcript becoming ready, as one person may see them.
+ */
+export const EVENT_SOURCE_KINDS = [
+  "webhook",
+  "github",
+  "slack",
+  "gmail",
+  "mcp",
+  "workspace",
+] as const;
 export const EventSourceKind = /* @__PURE__ */ defineSchema(() => z.enum(EVENT_SOURCE_KINDS));
 export type EventSourceKind = z.infer<typeof EventSourceKind>;
 
@@ -156,6 +167,16 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
           kind: z.literal("mcp"),
           serverId: z.string().min(1).max(256),
           connectionId: Uuid.optional(),
+          name: EventSourceName.optional(),
+        })
+        .strict(),
+      z
+        .object({
+          /**
+           * The caller's own "This workspace" source. There is one per person,
+           * so creating it again returns the existing one.
+           */
+          kind: z.literal("workspace"),
           name: EventSourceName.optional(),
         })
         .strict(),

@@ -16,8 +16,17 @@ import { ComboboxSelect, SelectMenu, type SelectOption } from "../../ui/select-m
 import { cn } from "../../lib/cn";
 import { EventArgumentsField } from "./event-arguments-field";
 import { eventArgumentsForEvent } from "./event-arguments-model";
-import { eventSourceKindLabel } from "./event-source-model";
+import {
+  eventSourceAddLabel,
+  eventSourceChoiceName,
+  eventSourceKindLabel,
+  type EventSourceChoice,
+} from "./event-source-model";
 import { EventSourceTile, type EventSourceLogoResolver } from "./event-source-tile";
+import {
+  automationTemplateSourceChoice,
+  eventSourceFitsTemplate,
+} from "./automation-template-model";
 import {
   EVENT_CONDITION_OPERATORS,
   EVENT_TRIGGER_CONDITIONS_MAX,
@@ -27,6 +36,7 @@ import {
   eventConditionOperatorLabel,
   eventTypeIssue,
   eventTypeLabel,
+  eventTypesLabel,
   newEventConditionDraft,
   newEventTriggerDraft,
   type EventConditionDraft,
@@ -99,8 +109,11 @@ export interface EventTriggersFieldProps {
   issues?: EventTriggersIssues | undefined;
   /** The source's brand logo, from the host's connector catalog. */
   sourceLogo?: EventSourceLogoResolver | undefined;
-  /** Opens the host's "Add a source" page; offered when no source fits. */
-  onAddSource?: (() => void) | undefined;
+  /**
+   * Opens the host's "Add a source" page; offered when no source fits. Gets
+   * the kind a template's trigger asks for, when it asks for one.
+   */
+  onAddSource?: ((choice?: EventSourceChoice) => void) | undefined;
   /** Offer "Run once, then finish" (default true). */
   allowOnce?: boolean | undefined;
   /**
@@ -216,7 +229,7 @@ export interface EventTriggerEditorProps {
   eventTypes: EventTypesState | undefined;
   issues?: EventTriggerIssues | undefined;
   sourceLogo?: EventSourceLogoResolver | undefined;
-  onAddSource?: (() => void) | undefined;
+  onAddSource?: ((choice?: EventSourceChoice) => void) | undefined;
   /** Arguments a new MCP subscription starts with; see `EventTriggersField`. */
   argumentDefaults?: Readonly<Record<string, unknown>> | undefined;
   /** Move focus to the source picker when the block appears. */
@@ -241,6 +254,9 @@ export function EventTriggerEditor({
   const t = useOpenGeniText();
   const blockRef = useRef<HTMLDivElement>(null);
   const source = sources?.find((candidate) => candidate.id === value.sourceId);
+  /** What a template asked for, while no source of that kind is chosen. */
+  const wanted = !value.sourceId ? value.templateSource : undefined;
+  const wantedChoice = wanted ? automationTemplateSourceChoice(wanted) : undefined;
   const descriptors = eventTypes?.status === "ready" ? eventTypes.eventTypes : [];
   const schemaOf = (types: readonly string[]) =>
     types
@@ -282,9 +298,15 @@ export function EventTriggerEditor({
             variant={sourceOptions.length > 8 ? "combobox" : "menu"}
             options={sourceOptions}
             value={value.sourceId || null}
-            onValueChange={(sourceId) =>
-              onChange({ ...value, sourceId, eventTypes: [], conditions: [], argumentsText: "" })
-            }
+            onValueChange={(sourceId) => {
+              const picked = sources?.find((candidate) => candidate.id === sourceId);
+              // A source of the kind the template asked for keeps its events.
+              onChange(
+                wanted && picked && eventSourceFitsTemplate(wanted, picked)
+                  ? { ...value, sourceId }
+                  : { ...value, sourceId, eventTypes: [], conditions: [], argumentsText: "" },
+              );
+            }}
             placeholder={
               sources === undefined
                 ? t("automations.editor.loadingSources")
@@ -296,7 +318,11 @@ export function EventTriggerEditor({
               onAddSource ? (
                 <span>
                   {t("automations.editor.noSources")}{" "}
-                  <button type="button" className="og-link" onClick={onAddSource}>
+                  <button
+                    type="button"
+                    className="og-link"
+                    onClick={() => onAddSource(wantedChoice)}
+                  >
                     {t("automations.editor.addSource")}
                   </button>
                 </span>
@@ -322,6 +348,30 @@ export function EventTriggerEditor({
           <Trash2Icon aria-hidden="true" />
         </Button>
       </div>
+      {wanted && wantedChoice && sources !== undefined ? (
+        <p className="m-0 text-sm leading-5 text-fg-muted">
+          {t("automations.editor.templateWants", {
+            events: eventTypesLabel(t, value.eventTypes),
+            source:
+              wanted.kind === "mcp" && wanted.mcpServerId
+                ? wanted.mcpServerId
+                : eventSourceChoiceName(t, wantedChoice),
+          })}
+          {onAddSource ? (
+            <>
+              {" "}
+              <button
+                type="button"
+                className="og-link"
+                onClick={() => onAddSource(wantedChoice)}
+                disabled={disabled}
+              >
+                {eventSourceAddLabel(t, wantedChoice)}
+              </button>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {value.sourceId ? (
         <>
           <Field

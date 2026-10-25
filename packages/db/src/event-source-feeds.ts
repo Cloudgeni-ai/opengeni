@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { rawRows, withWorkspaceRls, type Database } from "./database";
+import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 import { automationsListenTo } from "./event-trigger-listening";
 import {
   recordEventDeliveryInTransaction,
@@ -210,5 +210,84 @@ export async function getEventSourceFeed(
       .where(feedIs(workspaceId, sourceId))
       .limit(1);
     return row ? mapFeed(row) : null;
+  });
+}
+
+/** One recording fact as a "This workspace" source reads it. */
+export type WorkspaceRecordingEvent = {
+  id: string;
+  recordingId: string;
+  type: string;
+  /** What workspace webhooks send as `data`: ids, states and counts. */
+  data: Record<string, unknown>;
+  occurredAt: Date;
+  /** The recording's title and purpose; null once the recording is deleted. */
+  title: string | null;
+  purpose: string | null;
+};
+
+export type WorkspaceRecordingEventsRead = {
+  events: WorkspaceRecordingEvent[];
+  /** The database clock when it read, the next read's position. */
+  readAt: Date;
+};
+
+/**
+ * The recording events a person may see that a source has not stored yet,
+ * oldest first, written after `since`. It reads as that person, so their own
+ * recordings and those shared with the workspace are all it ever sees.
+ * Events are stamped when they are written rather than when they commit, so
+ * callers pass a `since` well before their last read and rely on the
+ * "not stored yet" filter for what they already have.
+ */
+export async function listWorkspaceRecordingEventsForSource(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sourceId: string;
+    subjectId: string;
+    since: Date;
+    limit: number;
+  },
+): Promise<WorkspaceRecordingEventsRead> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const rows = await rawRows<{
+      id: string;
+      recording_id: string;
+      type: string;
+      data: Record<string, unknown>;
+      occurred_at: Date | string;
+      title: string | null;
+      purpose: string | null;
+    }>(
+      tx,
+      sql`select event.id, event.recording_id, event.type, event.data, event.occurred_at,
+          recording.title, recording.purpose
+        from recording_events event
+        left join recordings recording
+          on recording.workspace_id = event.workspace_id and recording.id = event.recording_id
+        where event.workspace_id = ${input.workspaceId}
+          and event.occurred_at > ${input.since.toISOString()}::timestamptz
+          and not exists (
+            select 1 from inbound_events stored
+            where stored.source_id = ${input.sourceId}::uuid and stored.stream_key = ''
+              and stored.external_id = event.id::text)
+        order by event.occurred_at, event.id
+        limit ${Math.max(1, Math.min(input.limit, 500))}`,
+    );
+    const [clock] = await rawRows<{ now: Date | string }>(tx, sql`select clock_timestamp() as now`);
+    const asDate = (value: Date | string) => (value instanceof Date ? value : new Date(value));
+    return {
+      events: rows.map((row) => ({
+        id: row.id,
+        recordingId: row.recording_id,
+        type: row.type,
+        data: row.data,
+        occurredAt: asDate(row.occurred_at),
+        title: row.title,
+        purpose: row.purpose,
+      })),
+      readAt: asDate(clock!.now),
+    };
   });
 }

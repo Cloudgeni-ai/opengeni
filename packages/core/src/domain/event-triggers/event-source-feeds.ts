@@ -14,10 +14,11 @@ import type { Observability } from "@opengeni/observability";
 import { gmailFeed } from "./gmail-source";
 import { McpEventSourceUnavailableError, type McpEventsFetch } from "./mcp-event-source-client";
 import { postTriggerNotices } from "./trigger-notices";
+import { workspaceFeed } from "./workspace-source";
 
 /**
  * Reads the sources whose events Opengeni takes from the app's own change
- * history (Gmail). One step reads one source's feed as the source's owner,
+ * history (Gmail), or from its own database ("This workspace"). One step reads one source's feed as the source's owner,
  * records what changed since its cursor and advances the cursor, while a
  * runnable automation listens to the source. A feed nothing listens to
  * forgets its cursor and idles; triggers and source changes wake it.
@@ -73,6 +74,7 @@ export class EventSourceFeedBlocked extends Error {
 
 const FEED_ADAPTERS: Partial<Record<EventSourceRecord["kind"], EventSourceFeedAdapter>> = {
   gmail: gmailFeed,
+  workspace: workspaceFeed,
 };
 
 const LEASE_MS = 5 * 60_000;

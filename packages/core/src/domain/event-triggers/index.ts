@@ -19,3 +19,5 @@ export * from "./trigger-notices";
 export * from "./webhook-adapters";
 export * from "./webhook-signatures";
 export * from "./webhook-url";
+export * from "./workspace-events";
+export * from "./workspace-source";
