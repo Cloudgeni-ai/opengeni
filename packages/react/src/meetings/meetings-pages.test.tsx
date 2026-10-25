@@ -26,8 +26,12 @@ afterAll(() => {
 
 const { MeetingsListPage } = await import("./meetings-list-page");
 const { MeetingDetailPage } = await import("./meeting-detail-page");
-const { createMeetingRecorderStore, MeetingRecorderStoreProvider } =
-  await import("./recorder-context");
+const {
+  createMeetingRecorderStore,
+  MeetingRecorderProvider,
+  MeetingRecorderStoreProvider,
+  useMeetingRecorder,
+} = await import("./recorder-context");
 const { createMeetingsFixture } = await import("../testing/meetings-fixture");
 
 async function render(node: React.ReactNode) {
@@ -213,6 +217,45 @@ describe("Meetings list", () => {
     } finally {
       await view.unmount();
     }
+  });
+});
+
+describe("Recorder provider", () => {
+  test("records with the host's own client, once the host knows its workspace", async () => {
+    const requests: string[] = [];
+    const client = {
+      requestJson: async (method: string, path: string) => {
+        requests.push(`${method} ${path}`);
+        return {};
+      },
+    };
+    const seen: { recorder: ReturnType<typeof useMeetingRecorder>["recorder"] } = {
+      recorder: null,
+    };
+    function Probe() {
+      seen.recorder = useMeetingRecorder().recorder;
+      return null;
+    }
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const mount = (workspaceId: string | null) =>
+      act(async () => {
+        root.render(
+          <MeetingRecorderProvider workspaceId={workspaceId} client={client}>
+            <Probe />
+          </MeetingRecorderProvider>,
+        );
+      });
+    await mount(null);
+    await settle(100);
+    expect(seen.recorder).toBeNull();
+    await mount("workspace-1");
+    const deadline = Date.now() + 3_000;
+    while (!seen.recorder && Date.now() < deadline) await settle(50);
+    expect(seen.recorder?.state).toBe("idle");
+    await act(async () => root.unmount());
+    container.remove();
   });
 });
 

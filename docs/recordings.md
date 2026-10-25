@@ -83,7 +83,9 @@ the console uses:
 - `MeetingRecorderProvider`: mount it once above the routes, so a recording
   keeps going while the person moves around. In the desktop app it also
   carries out the call notifications ("Record this meeting?"); pass
-  `onOpenMeetings` and `onOpenMeeting` to say where those open.
+  `onOpenMeetings` and `onOpenMeeting` to say where those open. A host
+  without an `OpenGeniProvider` above its routes passes its SDK `client`,
+  and `workspaceId={null}` until it knows the workspace.
 - `MeetingsListPage`: the recorder plus the searchable list. Pass
   `externalRef` to show only the meetings that belong to something of yours,
   such as a project, and to give new recordings started there the same id;

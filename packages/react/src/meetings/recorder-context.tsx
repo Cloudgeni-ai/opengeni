@@ -112,11 +112,19 @@ async function hasLocalRecordings(): Promise<boolean> {
 
 export function MeetingRecorderProvider({
   workspaceId,
+  client,
   onOpenMeetings,
   onOpenMeeting,
   children,
 }: {
-  workspaceId: string;
+  /** The workspace recordings go to; null while the host is still finding it. */
+  workspaceId: string | null;
+  /**
+   * The SDK client the recorder uploads with, for a host that mounts this
+   * above its routes without an <OpenGeniProvider> there. The provider's
+   * client otherwise.
+   */
+  client?: object | undefined;
   /** Show the Meetings page, where a desktop call notification's recording starts. */
   onOpenMeetings?: (() => void) | undefined;
   /** Show one meeting, after a desktop call notification stopped its recording. */
@@ -138,9 +146,14 @@ export function MeetingRecorderProvider({
   return (
     <MeetingRecorderContext.Provider value={store}>
       {children}
-      {active ? (
+      {active && workspaceId ? (
         <Suspense fallback={null}>
-          <LazyRecorderHost key={workspaceId} store={store} />
+          <LazyRecorderHost
+            key={workspaceId}
+            store={store}
+            workspaceId={workspaceId}
+            client={client}
+          />
         </Suspense>
       ) : null}
     </MeetingRecorderContext.Provider>
