@@ -83,6 +83,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 runtime: image.meta().runtime.clone(),
             }),
             profile: profile.exists().then_some(profile),
+            image: self.record.config.image,
         };
         let receipt = match self.archive_files(&files).await {
             Ok(receipt) => receipt,

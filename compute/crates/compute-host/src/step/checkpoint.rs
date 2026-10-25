@@ -285,6 +285,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 runtime: image.meta().runtime.clone(),
             }),
             profile: profile.exists().then_some(profile),
+            image: self.record.config.image,
         };
         if let Err(outcome) = self.archive_files(&files).await {
             return outcome;
