@@ -204,18 +204,25 @@ impl Api {
         };
         let (mut looked, mut was_held) = (Instant::now(), held(group));
         loop {
-            let next = looked + (*left).min(FROZEN_LOOK);
-            tokio::select! {
+            // While held, nothing is spent before the next look.
+            let wait = if was_held {
+                FROZEN_LOOK
+            } else {
+                (*left).min(FROZEN_LOOK)
+            };
+            let done = tokio::select! {
                 biased;
-                done = work.as_mut() => return Some(done),
-                () = tokio::time::sleep_until(next) => {}
-            }
+                done = work.as_mut() => Some(done),
+                () = tokio::time::sleep_until(looked + wait) => None,
+            };
             let (now, is_held) = (Instant::now(), held(group));
             if !(was_held || is_held) {
                 *left = left.saturating_sub(now - looked);
-                if left.is_zero() {
-                    return None;
-                }
+            }
+            // Work that finished is charged its last stretch too, for the
+            // part of the request still to come.
+            if done.is_some() || (left.is_zero() && !is_held) {
+                return done;
             }
             (looked, was_held) = (now, is_held);
         }
@@ -327,6 +334,32 @@ mod tests {
             matches!(error, ApiError::Status { status: 400, .. }),
             "{error}"
         );
+    }
+
+    /// The connect and the exchange share one limit: what the first uses
+    /// is gone for the second, whether or not the client watches a group.
+    #[tokio::test]
+    async fn the_parts_of_a_request_share_its_time() {
+        let dir = tempdir::Dir::new();
+        let own = dir.path().join("vm");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("cgroup.freeze"), "0").unwrap();
+        std::fs::write(own.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        for api in [
+            Api::new("unused"),
+            Api::new("unused").held_by(Cgroup::at(&own)),
+        ] {
+            let mut left = Duration::from_millis(200);
+            let first = pin!(tokio::time::sleep(Duration::from_millis(80)));
+            assert_eq!(api.until(&mut left, first).await, Some(()));
+            assert!(
+                left <= Duration::from_millis(125),
+                "{left:?} left after 80 ms of 200"
+            );
+            let second = pin!(std::future::pending::<()>());
+            assert_eq!(api.until(&mut left, second).await, None);
+            assert_eq!(left, Duration::ZERO);
+        }
     }
 
     /// A self-deleting temporary directory, to avoid a dependency for tests.
