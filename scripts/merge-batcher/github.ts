@@ -20,7 +20,7 @@ import { baseJobClasses } from "./base-failure";
 import type { MainOutcome } from "./shadow-ci";
 import { join } from "node:path";
 import { DiskCache } from "./cache";
-import { retryRead, ProviderError } from "./read-retry";
+import { retryRead, ProviderError, type ReadRetryClock } from "./read-retry";
 export { ProviderError } from "./read-retry";
 import {
   capacityDecision,
@@ -179,7 +179,7 @@ export class GitHubReader {
     // Each retry gets its own timeout; the enclosing inventory retains its
     // independent 120-second fail-closed observation deadline.
     const { signal: _signal, ...request } = init;
-    return retryRead(this.transport, input, request).catch((error) => {
+    return retryRead(this.transport, input, request, this.readRetryClock).catch((error) => {
       if (error instanceof ProviderError && error.retryAfterSeconds > 0)
         this.blockedUntil = Math.max(
           this.blockedUntil,
@@ -192,6 +192,9 @@ export class GitHubReader {
     readonly config: Config,
     readonly auth: GitHubAuth,
     readonly transport: typeof fetch = fetch,
+    // Tests inject a clock so mocked provider errors exercise the real
+    // backoff schedule without sleeping. Production uses the wall clock.
+    private readonly readRetryClock?: ReadRetryClock,
   ) {
     this.cache = new DiskCache(
       join(config.outputDir, `provider-cache-${digest(config.repository)}.json`),
