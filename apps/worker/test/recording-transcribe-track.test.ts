@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import type { RecordingTranscriptionProvider } from "@opengeni/core";
 import { transcribeTrack } from "../src/activities/recordings";
 import { ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
@@ -69,12 +69,16 @@ async function probeSeconds(bytes: Uint8Array, fileName: string): Promise<number
 }
 
 describe.skipIf(!hasFfmpeg)("transcribeTrack", () => {
+  // A skipped describe still runs its body, so the tone is made only when the tests run.
   const audio = {
-    bytes: opusWebm(25),
+    bytes: new Uint8Array(),
     mimeType: "audio/webm",
     fileName: "track-1.webm",
     extension: "webm",
   };
+  beforeAll(() => {
+    audio.bytes = opusWebm(25);
+  });
   const request = { model: "m", diarize: false };
 
   test("sends a track the model takes as it is, untouched", async () => {
