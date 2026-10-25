@@ -37662,6 +37662,17 @@
       "usePendingMeetingStart": "value",
       "VoiceActions": "type"
     },
+    "@opengeni/react/meetings-recorder": {
+      "createMeetingRecorderStore": "value",
+      "MeetingRecorder": "type",
+      "MeetingRecorderProvider": "value",
+      "MeetingRecorderStore": "type",
+      "MeetingRecorderStoreProvider": "value",
+      "MeetingStartRequest": "type",
+      "useMeetingRecorder": "value",
+      "useMeetingRecorderState": "value",
+      "usePendingMeetingStart": "value"
+    },
     "@opengeni/react/messages": {
       "createOpenGeniText": "value",
       "englishMessages": "value",

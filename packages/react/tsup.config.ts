@@ -60,6 +60,7 @@ export default defineConfig({
     "src/realtime.ts",
     "src/recordings.ts",
     "src/meetings.ts",
+    "src/meetings-recorder.ts",
     "src/automations.ts",
     "src/artifacts.ts",
     "src/artifacts-spreadsheet.ts",
