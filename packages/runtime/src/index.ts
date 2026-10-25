@@ -216,6 +216,7 @@ import {
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
   restoreDirectDeferredCallArgumentTypes,
+  type ConnectedToolAccount,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { createToolSelector } from "./tool-discovery-decision";
@@ -3642,6 +3643,26 @@ function maybeInstallLazyToolTransport(
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
     harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
+    () => {
+      // A labelled account route is a connected account; its display metadata
+      // names the connector and, when there are several, the account.
+      const accounts = new Map<string, ConnectedToolAccount>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+          continue;
+        for (const name of server.modelToolNames()) {
+          const display = server.toolDisplayMetadata(name);
+          if (!display?.connector) continue;
+          accounts.set(name, {
+            source: server.registryId,
+            label: display.accountLabel
+              ? `${display.connector} (${display.accountLabel})`
+              : display.connector,
+          });
+        }
+      }
+      return accounts;
+    },
   );
 }
 

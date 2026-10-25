@@ -4,6 +4,7 @@ import { prepareAgentTools } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing/settings";
 import type { McpConnectionAccountBinding } from "@opengeni/contracts";
 import {
+  apiIntegrationAccountLabels,
   expandApiIntegrationAccountRoutes,
   expandMcpAccountRoutes,
 } from "../src/activities/mcp-account-routes";
@@ -195,6 +196,7 @@ describe("installed API Integration worker adapters", () => {
         mcpServers: [
           {
             id: item.serverId,
+            name: item.name,
             url: item.baseUrl,
             connectionRef: item.connectionRef!,
           },
@@ -260,6 +262,30 @@ describe("installed API Integration worker adapters", () => {
       expect(integrations.map((value) => value.serverId)).toEqual(
         bindings.map((binding) => binding.serverId),
       );
+      // Integration routes are labelled exactly like connector routes, so the
+      // model and people can tell the accounts apart, and the turn can name
+      // every connected account.
+      const labels = apiIntegrationAccountLabels({
+        integrations: [item],
+        bindings,
+        tools: routed.tools,
+      });
+      expect([...labels]).toEqual([...routed.accountLabels]);
+      expect(labels.get(bindings[0]!.serverId)).toEqual({
+        model: "Inventory API — Personal: Alice",
+        connector: "Inventory API",
+        providerDomain: item.providerDomain,
+        account: "Alice",
+      });
+      const single = apiIntegrationAccountLabels({
+        integrations: [item],
+        bindings: bindings.slice(0, 1),
+        tools: routed.tools,
+      });
+      expect(single.get(bindings[0]!.serverId)).not.toHaveProperty("account");
+      expect(
+        apiIntegrationAccountLabels({ integrations: [item], bindings: null, tools: routed.tools }),
+      ).toEqual(new Map());
       expect(() =>
         expandApiIntegrationAccountRoutes({
           integrations: [item],

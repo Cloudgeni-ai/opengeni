@@ -35,6 +35,7 @@ import {
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
 import {
   accountRouteAuthNeededPayload,
+  apiIntegrationAccountLabels,
   expandApiIntegrationAccountRoutes,
   expandMcpAccountRoutes,
 } from "../mcp-account-routes";
@@ -1002,7 +1003,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(credentialRestriction ? { credentialRestriction } : {}),
         inputWaitReplyGuard: async (request) =>
           (await eventing.inputWaitReplyGuard?.(request)) ?? null,
-        mcpAccountLabels: accountRoutes.accountLabels,
+        // Integration routes are labelled like connector routes, so every
+        // connected account names its connector to the model and in reviews.
+        mcpAccountLabels: new Map([
+          ...accountRoutes.accountLabels,
+          ...apiIntegrationAccountLabels({
+            integrations: installedApiIntegrations,
+            bindings: turn.mcpAccountBindings,
+            tools: turnTools,
+          }),
+        ]),
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,

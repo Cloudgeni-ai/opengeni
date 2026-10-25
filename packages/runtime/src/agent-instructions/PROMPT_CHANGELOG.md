@@ -1,5 +1,26 @@
 # Modular prompt changelog
 
+Several connected accounts. No prompt or tool description text changes for
+the common case. When the person has more than one connected account (for
+example Gmail and Outlook Mail), the first `tool_search` result in a run that
+shows the model a tool reaching one of them, but not all, now names the
+others, in a new `connectedAccounts` field (a developer message right after
+the result on native search routes, joined with any `notConnected` notice):
+`These tools reach Gmail. Also connected: Outlook Mail. If the request could
+mean those accounts too (the person's email, calendar or files), check each
+that fits, or say which account you checked and offer the others.` That text
+is 200 bytes plus the account labels (217 bytes in that example), at most ten
+named and the rest counted, once per run and only in that one search result.
+Before, "Have I got any new emails?" loaded only Gmail's search tool and the
+answer silently covered Gmail alone. People with one connected account, or
+searches that load only first-party tools, see exactly what they did before;
+loads by exact name never carry it. API integration routes (Outlook Mail and
+other Microsoft 365 or OpenAPI integrations) are now labelled like connector
+routes, so with two or more accounts of one integration their tool
+descriptions gain the existing `Account: … Use only this account…` first line,
+a deploy-time description change in that case only. Earlier requests are
+unchanged.
+
 Connect cards in fewer calls. No prompt or tool description text changes.
 `tool_search` now also covers integrations the person could connect: when no
 installed tool clearly matches a query, it looks the query up in the
