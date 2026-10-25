@@ -193,7 +193,7 @@ export function LiveTranscript({
           aria-label={msg("meetings.liveTranscript.liveTranscriptText")}
           tabIndex={0}
           className={cn(
-            "max-h-64 min-h-16 overflow-y-auto rounded-[10px] px-3 py-2.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+            "max-h-64 min-h-16 overflow-y-auto rounded-[10px] px-3 py-2.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden",
             // Older text above fades out, so a clipped first line reads as "scroll up".
             scroll.above && "[mask-image:linear-gradient(to_bottom,transparent,black_2.5rem)]",
           )}

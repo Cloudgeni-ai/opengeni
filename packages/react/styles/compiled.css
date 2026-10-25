@@ -575,7 +575,6 @@
     --radius-2xl: 1rem;
     --ease-out: cubic-bezier(0, 0, 0.2, 1);
     --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
-    --animate-ping: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
     --blur-sm: 8px;
     --blur-md: 12px;
     --aspect-video: 16 / 9;
@@ -2571,7 +2570,7 @@
     animation: og-waveform 1.15s var(--og-ease-in-out) infinite;
   }
 :where(.og-root).animate-ping,:where(.og-root) .animate-ping {
-    animation: var(--animate-ping);
+    animation: og-ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
   }
 :where(.og-root).animate-pulse,:where(.og-root) .animate-pulse {
     animation: og-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
@@ -8027,12 +8026,6 @@
       }
     }
   }
-:where(.og-root).focus-visible\:outline-none,:where(.og-root) .focus-visible\:outline-none {
-    &:focus-visible {
-      --tw-outline-style: none;
-      outline-style: none;
-    }
-  }
 :where(.og-root).focus-visible\:ring-inset,:where(.og-root) .focus-visible\:ring-inset {
     &:focus-visible {
       --tw-ring-inset: inset;
@@ -12567,6 +12560,12 @@
     opacity: 0.35;
   }
 }
+@keyframes og-ping {
+  75%, 100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
 @keyframes og-blink {
   0%, 100% {
     opacity: 1;
@@ -16240,11 +16239,5 @@
 @media (pointer:coarse) {
   :where(.og-root).session-capability-card__open [data-slot="button"],:where(.og-root) .session-capability-card__open [data-slot="button"],:where(.og-root) .session-capability-card__form [data-slot="button"],:where(.og-root)  .session-capability-card__form [data-slot="button"],:where(.og-root) .session-capability-card__choice-label,:where(.og-root)  .session-capability-card__choice-label {
     min-height: 44px;
-  }
-}
-@keyframes ping {
-  75%, 100% {
-    transform: scale(2);
-    opacity: 0;
   }
 }
