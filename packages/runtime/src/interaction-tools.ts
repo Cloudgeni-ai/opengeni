@@ -858,6 +858,7 @@ const ComputerOpenInput = z
     name: z.string().trim().min(1).max(200).optional(),
     placement: InteractionPlacement.optional(),
     includeScreenshot: z.boolean().optional(),
+    applicationId: z.string().trim().min(1).max(1_024).optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -877,7 +878,15 @@ const ComputerOpenInput = z
     }
   });
 const ComputerOpenOutput = z
-  .object({ session: ComputerSession, targets: z.array(ComputerTarget) })
+  .object({
+    session: ComputerSession,
+    targets: z.array(ComputerTarget),
+    /** The launch of `applicationId`: its receipt observes the app's window. */
+    launch: ComputerActionReceipt.optional(),
+    /** The window of `applicationId` that was already open, observed instead
+     *  of launching the app again. */
+    existing: ComputerObservation.optional(),
+  })
   .strict();
 const CurrentComputerSessionId = z
   .string()
@@ -2533,13 +2542,25 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "computer", "open"],
     title: "Open or reuse computer",
     description:
-      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Set includeScreenshot=true to also get a still image of the screen in the same call when its visual state matters. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
+      "Open a ComputerSession on the current agent placement, reuse a relevant live session by default, or attach to an explicit workspace ComputerSession. To use another machine's screen, sandbox_swap to it first. Returns exact apps/windows/screens. Set includeScreenshot=true to also get a still image of the screen in the same call when its visual state matters. For a task about one app, pass applicationId (an app name, or on macOS its bundle ID such as com.apple.calculator) to launch or find it in the background and observe its window in the same call. Call it first for any computer task; computer_observe and computer_act then work on the session it returns. Read and operate other apps through them rather than scripting them with osascript, which makes macOS ask the person for permission and hangs the command. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.",
     input: ComputerOpenInput,
     output: ComputerOpenOutput,
     readOnly: false,
     idempotent: true,
-    modelText: computerOpenText,
-    execute: async ({ includeScreenshot, ...value }, context) => {
+    modelText: (output, context) => {
+      const opened = computerOpenText(output);
+      const existing = output.existing;
+      if (existing) {
+        if (context.caller.kind === "model") rememberComputerReading(existing);
+        return `${opened}\nNot launched: the app is already open in ${existing.target.id}; act on that target with the observation below.\n${computerObservationText(existing)}`;
+      }
+      const launch = output.launch;
+      if (!launch) return opened;
+      if (launch.observation && context.caller.kind === "model")
+        rememberComputerReading(launch.observation);
+      return `${opened}\n${computerActionText(launch)}`;
+    },
+    execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
       const opened = await openComputer(
         input.transport,
         input.workspaceId,
@@ -2548,12 +2569,49 @@ export function createInteractionAttemptToolDefinitions(
         context,
       );
       currentComputer.use(opened.session.id);
-      if (!includeScreenshot) return opened;
-      // The computer is already open. A failed capture must not turn its result
-      // into an error the model could answer by opening another computer.
-      const target = openedScreenshotTarget(opened.targets);
+      // The computer is already open. A failed launch or capture must not turn
+      // its result into an error the model could answer by opening another
+      // computer: the result says what failed instead.
+      const notes: Array<{ type: "text"; text: string }> = [];
+      let result: z.input<typeof ComputerOpenOutput> = opened;
+      let appWindow: { id: string; targetGeneration: string } | null = null;
+      if (applicationId) {
+        const launched = await launchOpenedComputerApp(
+          input.transport,
+          input.workspaceId,
+          opened,
+          applicationId,
+          context,
+        );
+        if ("existing" in launched) {
+          result = { ...opened, existing: launched.existing };
+          currentComputer.use(opened.session.id, launched.existing.target.id);
+          appWindow = launched.existing.target;
+        } else if ("note" in launched) notes.push({ type: "text", text: launched.note });
+        else {
+          result = { ...opened, launch: launched.launch };
+          const observed = launched.launch.observation?.target;
+          if (launched.launch.state === "completed" && observed) {
+            // Later reads and actions without a target start in the app.
+            currentComputer.use(opened.session.id, observed.id);
+            if (observed.kind === "window") appWindow = observed;
+          } else if (launched.launch.state === "completed") {
+            notes.push({
+              type: "text",
+              text: `The computer opened and ${applicationId} started, but its window could not be read. Check computer_targets for its window.`,
+            });
+          } else if (launched.launch.state !== "failed") {
+            notes.push({ type: "text", text: launchMayHaveRunNote(applicationId) });
+          }
+        }
+      }
+      if (!includeScreenshot)
+        return notes.length ? new InteractionExecutionResult(result, notes) : result;
+      // With a launched app, its window; otherwise the screen.
+      const target = appWindow ?? openedScreenshotTarget(opened.targets);
       if (!target)
-        return new InteractionExecutionResult(opened, [
+        return new InteractionExecutionResult(result, [
+          ...notes,
           {
             type: "text" as const,
             text: "The computer opened, but it has no screen or window to capture a screenshot of.",
@@ -2568,7 +2626,8 @@ export function createInteractionAttemptToolDefinitions(
         // As in computer_observe: pixels of a target that changed since the
         // computer listed it would not match the targets the result names.
         if (frame.targetGeneration !== target.targetGeneration)
-          return new InteractionExecutionResult(opened, [
+          return new InteractionExecutionResult(result, [
+            ...notes,
             {
               type: "text" as const,
               text: "The computer opened, but its screen changed while it was captured; observe it for a current screenshot.",
@@ -2576,7 +2635,8 @@ export function createInteractionAttemptToolDefinitions(
           ]);
         rememberFullFrame(opened.session.id, target.id, frame);
         const image = await compactComputerImage(frame.data, frame.mediaType);
-        return new InteractionExecutionResult(opened, [
+        return new InteractionExecutionResult(result, [
+          ...notes,
           {
             type: "text" as const,
             text: `Screenshot of ${target.id}: frameId ${frame.frameId}, ${frame.width}x${frame.height} pixels; use these pixels for pointer coordinates.`,
@@ -2588,7 +2648,8 @@ export function createInteractionAttemptToolDefinitions(
           },
         ]);
       } catch (error) {
-        return new InteractionExecutionResult(opened, [
+        return new InteractionExecutionResult(result, [
+          ...notes,
           {
             type: "text" as const,
             text: `The computer opened, but its screenshot could not be captured: ${screenshotFailureReason(error)}`,
@@ -4182,6 +4243,171 @@ async function openComputer(
         ? (await transport.listComputerTargets(workspaceId, session.id)).targets
         : [],
   };
+}
+
+/**
+ * Find `applicationId` already open in a computer `computer_open` just opened,
+ * or launch it. A macOS launch finds a running app exactly, so there it is
+ * always launched. Windows and Linux start another copy, so a listed window of
+ * the app is observed instead. A launch acts on no window's contents, so any listed
+ * target carries it: the screen when there is one. Its receipt observes the
+ * app's window. A launch that cannot run is a note on the opened result, never
+ * an error that would hide the open computer. A retried call sends the same
+ * operation ID; when the computer refuses it because the launch already ran
+ * (with another fence) or the reply was lost, the recorded receipt answers.
+ */
+async function launchOpenedComputerApp(
+  transport: InteractionTransport,
+  workspaceId: string,
+  opened: {
+    session: { id: string; platform: "linux" | "macos" | "windows" | null };
+    targets: readonly ComputerTarget[];
+  },
+  applicationId: string,
+  context: AttemptToolExecutionContext,
+): Promise<
+  | { launch: z.input<typeof ComputerActionReceipt> }
+  | { existing: z.input<typeof ComputerObservation> }
+  | { note: string }
+> {
+  const open =
+    opened.session.platform === "macos"
+      ? null
+      : openComputerAppWindow(opened.targets, applicationId);
+  if (open) {
+    const existing = await Promise.resolve()
+      .then(() => transport.observeComputerTarget(workspaceId, opened.session.id, open.id))
+      .catch(() => null);
+    // A window that cannot be read (closed meanwhile) is launched as usual.
+    if (existing) return { existing };
+  }
+  const carrier = opened.targets.find((target) => target.kind === "screen") ?? opened.targets[0];
+  if (!carrier)
+    return {
+      note: `The computer opened, but it has no screen or window to launch ${applicationId} from.`,
+    };
+  const operationId = derivedOperationId(
+    "computer-open-launch",
+    context.operationId,
+    opened.session.id,
+  );
+  try {
+    return {
+      launch: await transport.actInComputer(workspaceId, opened.session.id, {
+        operationId,
+        targetId: carrier.id,
+        expectedTargetGeneration: carrier.targetGeneration,
+        expectedObservationId: null,
+        expectedFrameId: null,
+        action: { type: "launch", applicationId },
+      }),
+    };
+  } catch (error) {
+    const recorded = await Promise.resolve()
+      .then(() => transport.getComputerActionReceipt(workspaceId, opened.session.id, operationId))
+      .catch(() => null);
+    if (recorded) return { launch: recorded };
+    if (error instanceof OpenGeniApiError && error.outcomeUnknown)
+      return {
+        note: `${launchMayHaveRunNote(applicationId)} (${screenshotFailureReason(error)})`,
+      };
+    return {
+      note: `The computer opened, but ${applicationId} could not be launched: ${screenshotFailureReason(error)}`,
+    };
+  }
+}
+
+function launchMayHaveRunNote(applicationId: string): string {
+  return `The computer opened, but the launch of ${applicationId} has no known outcome: it may have started. Check computer_targets for its window before launching it again.`;
+}
+
+/** A target's name or ID compared without case or spaces. */
+function appKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/gu, "");
+}
+
+/** An app name or ID as it is compared. A reverse-DNS ID (org.gnome.gedit)
+ * keeps its full form as `id`, and only its last part as a plain name. Any
+ * other value's plain names are the value as given, its file name without
+ * path or extension (C:\\Windows\\notepad.exe, gedit.desktop) and a packaged
+ * app's family name (Family_publisher!App). */
+type AppNameForms = { id: string | null; names: Set<string> };
+
+function appNameForms(value: string): AppNameForms {
+  const names = new Set<string>();
+  const add = (form: string | undefined) => {
+    const key = form === undefined ? "" : appKey(form);
+    if (key) names.add(key);
+  };
+  const file = value.trim().split(/[\\/]/u).at(-1) ?? "";
+  const bare = file.replace(/\.(?:exe|app|desktop)$/iu, "");
+  const family = bare.includes("!") ? bare.split("!")[0]!.replace(/_[a-z0-9]+$/iu, "") : bare;
+  if (/^[^.\s]+(?:\.[^.\s]+){2,}$/u.test(family)) {
+    add(family.split(".").at(-1));
+    return { id: appKey(family), names };
+  }
+  add(value);
+  add(file);
+  add(bare);
+  add(family);
+  return { id: null, names };
+}
+
+/** Whether two app names or IDs name the same app: two reverse-DNS IDs only
+ * in full, anything else by a shared plain name. */
+function sameApp(wanted: AppNameForms, value: string): boolean {
+  const other = appNameForms(value);
+  if (wanted.id !== null && other.id !== null) return wanted.id === other.id;
+  return [...other.names].some((name) => wanted.names.has(name));
+}
+
+/**
+ * A listed window of `applicationId`, or null: a window whose app identity
+ * names it, else a window of a listed app target that names it (by ID or
+ * name), else a window with no app identity whose title is the app's name or
+ * ends with it as a document window's does ("Untitled - Notepad"). The window
+ * used last, then the focused one, is preferred. A window on another Space
+ * cannot be read and is skipped.
+ */
+export function openComputerAppWindow(
+  targets: readonly ComputerTarget[],
+  applicationId: string,
+): ComputerTarget | null {
+  const wanted = appNameForms(applicationId);
+  const names = (id: string | null) => id !== null && sameApp(wanted, id);
+  const windows = targets.filter((target) => target.kind === "window" && !target.offScreen);
+  const best = (found: readonly ComputerTarget[]) =>
+    found.find((target) => target.current) ??
+    found.find((target) => target.focused) ??
+    found[0] ??
+    null;
+  const byId = windows.filter((target) => names(target.applicationId));
+  if (byId.length > 0) return best(byId);
+  const apps = new Set(
+    targets
+      .filter(
+        (target) =>
+          target.kind === "app" &&
+          target.processId !== null &&
+          (names(target.applicationId) || wanted.names.has(appKey(target.title))),
+      )
+      .map((target) => target.processId),
+  );
+  const byApp = windows.filter((target) => target.processId !== null && apps.has(target.processId));
+  if (byApp.length > 0) return best(byApp);
+  return best(
+    windows.filter((target) => {
+      if (target.applicationId !== null) return false;
+      const title = appKey(target.title);
+      return [...wanted.names].some(
+        (form) =>
+          title === form ||
+          title.endsWith(`-${form}`) ||
+          title.endsWith(`\u2013${form}`) ||
+          title.endsWith(`\u2014${form}`),
+      );
+    }),
+  );
 }
 
 type InteractionPlacementTransport = InteractionTransport &

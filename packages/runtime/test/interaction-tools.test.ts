@@ -26,6 +26,7 @@ import {
   INTERACTION_ATTEMPT_TOOL_NAMES,
   createInteractionAttemptToolDefinitions,
   nativeCuaSchema,
+  openComputerAppWindow,
   type UserSetupCardPoster,
 } from "../src/interaction-tools";
 import { computerObservationText } from "../src/computer-model-text";
@@ -4438,6 +4439,499 @@ describe("interaction attempt tools", () => {
     expect(observed).toBe(1);
   });
 
+  test("computer_open with applicationId launches the app and observes its window in one call", async () => {
+    const window = computerTarget();
+    const screen: ComputerTarget = { ...computerTarget(), id: "screen-1", kind: "screen" };
+    const appWindow = { ...computerTarget(), id: "window-calculator", title: "Calculator" };
+    const session = {
+      ...discoveredComputerSession(randomUUID(), sessionId),
+      lifecycle: "active" as const,
+      placement: { kind: "connected_machine" as const, sandboxId: randomUUID() },
+      controller: {
+        controllerId: "controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      },
+      platform: "macos" as const,
+      adapter: "opengeni.cua.macos.v1",
+      seatId: "seat-1",
+      displayId: "aqua",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: true,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    };
+    const requests: ComputerActionRequest[] = [];
+    let observed = 0;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listComputerSessions: async () => ({ revision: 0, sessions: [session] }),
+        listComputerTargets: async () => ({ computerSessionId, targets: [window, screen] }),
+        observeComputerTarget: async () => {
+          observed += 1;
+          return computerObservation(window);
+        },
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          requests.push(value);
+          return {
+            ...computerReceipt(value.operationId, computerObservation(appWindow)),
+            targetId: value.targetId,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_act"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const environment = createAttemptToolEnvironment({
+      scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 7 },
+      generation: 3,
+      definitions,
+    });
+    const operationId = randomUUID();
+    const open = (args: Record<string, unknown>, id = operationId) =>
+      environment.callModel({
+        operationId: id,
+        modelName: "interaction__computer_open",
+        subjectId: "model:test",
+        arguments: { placement: session.placement, ...args },
+      });
+    const result = await open({ applicationId: "com.apple.calculator" });
+    // The launch rides on the screen target, fenced from the target list.
+    expect(observed).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      targetId: "screen-1",
+      expectedTargetGeneration: screen.targetGeneration,
+      expectedObservationId: null,
+      expectedFrameId: null,
+      action: { type: "launch", applicationId: "com.apple.calculator" },
+    });
+    const text = (result.content[0] as { text: string }).text;
+    expect(text).toContain("2 targets:");
+    expect(text).toContain(
+      "This action opened window-calculator; act on that target with the observation below.",
+    );
+    expect(result.structuredContent).toMatchObject({
+      launch: { state: "completed", observation: { target: { id: "window-calculator" } } },
+    });
+
+    // A retried call repeats the same launch operation; a plain open launches nothing.
+    await open({ applicationId: "com.apple.calculator" });
+    expect(requests[1]!.operationId).toBe(requests[0]!.operationId);
+    const plain = await open({}, randomUUID());
+    expect(requests).toHaveLength(2);
+    expect(plain.structuredContent).not.toHaveProperty("launch");
+  });
+
+  test("computer_open with applicationId and includeScreenshot captures the app's window, and a failed launch keeps the open", async () => {
+    const session: ComputerSession = {
+      ...discoveredComputerSession(computerSessionId, sessionId),
+      lifecycle: "active",
+      controller: {
+        controllerId: "synthetic-controller",
+        controllerGeneration: "controller-1",
+        placementInstanceId: "placement-1",
+      },
+      platform: "macos",
+      adapter: "opengeni.cua.macos.v1",
+      seatId: "seat-1",
+      displayId: "aqua",
+      capabilities: {
+        semanticObservation: true,
+        appDiscovery: true,
+        appLaunch: true,
+        windowCapture: true,
+        screenCapture: true,
+        semanticActions: true,
+        pointerInput: true,
+        keyboardInput: true,
+        clipboard: true,
+        backgroundActions: true,
+        parallelApps: true,
+      },
+    };
+    const screen: ComputerTarget = { ...computerTarget(), id: "screen-1", kind: "screen" };
+    const appWindow: ComputerTarget = {
+      ...computerTarget(),
+      id: "window-calculator",
+      title: "Calculator",
+    };
+    const image = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+    const captures: Array<{ targetId: string; options: unknown }> = [];
+    let launchFails = false;
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [screen, appWindow],
+        }),
+        observeComputerTarget: async (_w, _s, targetId) =>
+          computerObservation(targetId === appWindow.id ? appWindow : screen),
+        actInComputer: async (_workspaceId, _computerSessionId, value) => {
+          if (launchFails) throw new Error("This Mac is locked. Unlock it to use desktop capture.");
+          return { ...computerReceipt(value.operationId, computerObservation(appWindow)) };
+        },
+        captureComputerTarget: async (_workspaceId, _sessionId, targetId, _o, options) => {
+          captures.push({ targetId, options });
+          return {
+            frameId: `frame-${captures.length}`,
+            computerSessionId,
+            controllerGeneration: "controller-1",
+            targetId,
+            targetGeneration: appWindow.targetGeneration,
+            sequence: 0,
+            mediaType: "image/jpeg",
+            width: options?.region ? 400 : 640,
+            height: options?.region ? 300 : 400,
+            capturedAt: now,
+            sha256: "0".repeat(64),
+            ...(options?.region
+              ? {
+                  region: options.region,
+                  regionFrame: options.regionFrame ?? { width: 1, height: 1 },
+                }
+              : {}),
+            data: image,
+          };
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const [open, observe] = definitions;
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+
+    const launched = await open!.execute(
+      { computerSessionId, applicationId: "com.apple.calculator", includeScreenshot: true },
+      context(),
+    );
+    expect(launched.isError).toBeFalsy();
+    // The launched app's window is photographed, not the screen.
+    expect(captures).toEqual([{ targetId: "window-calculator", options: undefined }]);
+    expect(launched.content[1]).toEqual({
+      type: "text",
+      text: "Screenshot of window-calculator: frameId frame-1, 640x400 pixels; use these pixels for pointer coordinates.",
+    });
+    expect(launched.structuredContent).toMatchObject({
+      launch: { state: "completed", observation: { target: { id: "window-calculator" } } },
+    });
+
+    // That screenshot is the full frame a zoom without a target is measured on.
+    await observe!.execute({ region: { x: 0, y: 0, width: 100, height: 100 } }, context());
+    expect(captures[1]).toEqual({
+      targetId: "window-calculator",
+      options: {
+        region: { x: 0, y: 0, width: 100, height: 100 },
+        regionFrame: { width: 640, height: 400 },
+      },
+    });
+
+    // A launch that cannot run says why on the opened computer, not as an error.
+    launchFails = true;
+    const failed = await open!.execute(
+      { computerSessionId, applicationId: "com.apple.calculator" },
+      context(),
+    );
+    expect(failed.isError).toBeFalsy();
+    expect(failed.structuredContent).toMatchObject({ session: { id: computerSessionId } });
+    expect(failed.structuredContent).not.toHaveProperty("launch");
+    expect(failed.content[1]).toEqual({
+      type: "text",
+      text: "The computer opened, but com.apple.calculator could not be launched: This Mac is locked. Unlock it to use desktop capture.",
+    });
+  });
+
+  test("finds an app's open window on each platform's target shape", () => {
+    const target = (fields: Partial<ComputerTarget>): ComputerTarget => ({
+      ...computerTarget(),
+      focused: false,
+      ...fields,
+    });
+    const screen = target({ id: "screen-1", kind: "screen", applicationId: null, title: "Screen" });
+    // macOS: windows carry the app's bundle ID.
+    const calculator = target({ id: "mac-window", applicationId: "com.apple.calculator" });
+    expect(openComputerAppWindow([screen, calculator], "com.apple.Calculator")?.id).toBe(
+      "mac-window",
+    );
+    expect(openComputerAppWindow([screen, calculator], "Calculator")?.id).toBe("mac-window");
+    // Reverse-DNS IDs name the same app only in full.
+    expect(openComputerAppWindow([screen, calculator], "com.example.calculator")).toBeNull();
+    // Windows (CUA): the window names its process's executable.
+    const notepad = target({
+      id: "win-notepad",
+      applicationId: "Notepad.exe",
+      title: "Untitled - Notepad",
+    });
+    const calc = target({
+      id: "win-calc",
+      applicationId: "CalculatorApp.exe",
+      title: "Calculator",
+      processId: 7,
+    });
+    for (const id of ["notepad", "Notepad.exe", "C:\\Windows\\System32\\notepad.exe"])
+      expect(openComputerAppWindow([screen, notepad, calc], id)?.id).toBe("win-notepad");
+    expect(
+      openComputerAppWindow(
+        [screen, notepad, calc],
+        "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+      ),
+    ).toBeNull();
+    // A window with an identity is never matched by its title.
+    expect(openComputerAppWindow([screen, notepad, calc], "calculator")).toBeNull();
+    expect(openComputerAppWindow([screen, notepad, calc], "calculatorapp")?.id).toBe("win-calc");
+    // A window with no identity is matched only by the app's name as its
+    // title, or its title's last part.
+    const untitled = target({ id: "win-untitled", applicationId: null, title: "Calculator" });
+    expect(openComputerAppWindow([screen, untitled], "calculator")?.id).toBe("win-untitled");
+    const page = target({ id: "page", applicationId: null, title: "Calculator help - Browser" });
+    expect(openComputerAppWindow([screen, page], "calculator")).toBeNull();
+    // Linux (AT-SPI): an app target names the app; its windows share its process.
+    const geditApp = target({
+      id: "app-gedit",
+      kind: "app",
+      applicationId: null,
+      title: "gedit",
+      processId: 51,
+    });
+    const geditWindow = target({
+      id: "linux-window",
+      applicationId: null,
+      title: "notes.txt (~/Documents)",
+      processId: 51,
+    });
+    expect(openComputerAppWindow([screen, geditApp, geditWindow], "org.gnome.gedit")?.id).toBe(
+      "linux-window",
+    );
+    expect(openComputerAppWindow([screen, geditApp, geditWindow], "gedit.desktop")?.id).toBe(
+      "linux-window",
+    );
+    // Linux (CUA): the window names its window class.
+    const cuaGedit = target({
+      id: "cua-gedit",
+      applicationId: "Gedit",
+      title: "Untitled Document 1 - gedit",
+    });
+    expect(openComputerAppWindow([screen, cuaGedit], "gedit")?.id).toBe("cua-gedit");
+    expect(openComputerAppWindow([screen, cuaGedit], "org.gnome.gedit")?.id).toBe("cua-gedit");
+    const textEditor = target({ id: "cua-text", applicationId: "org.gnome.TextEditor" });
+    expect(openComputerAppWindow([screen, textEditor], "org.gnome.TextEditor")?.id).toBe(
+      "cua-text",
+    );
+    expect(openComputerAppWindow([screen, textEditor], "org.kde.TextEditor")).toBeNull();
+    // A window of another app is never matched by its title, nor an unreadable one.
+    const other = target({ id: "other", applicationId: "com.example.editor", title: "Notepad" });
+    expect(openComputerAppWindow([screen, other], "notepad")).toBeNull();
+    const away = target({ id: "away", applicationId: "com.apple.calculator", offScreen: true });
+    expect(openComputerAppWindow([screen, away], "com.apple.calculator")).toBeNull();
+    // The window used last wins over the focused one.
+    const front = target({ id: "front", applicationId: "com.apple.calculator", focused: true });
+    const last = target({ id: "last", applicationId: "com.apple.calculator", current: true });
+    expect(openComputerAppWindow([front, last], "com.apple.calculator")?.id).toBe("last");
+    expect(openComputerAppWindow([screen, notepad], "TextEdit")).toBeNull();
+  });
+
+  test("computer_open with applicationId observes an already-open window instead of launching another copy", async () => {
+    const screen: ComputerTarget = {
+      ...computerTarget(),
+      id: "screen-1",
+      kind: "screen",
+      applicationId: null,
+    };
+    const notepad: ComputerTarget = {
+      ...computerTarget(),
+      id: "cua:window:7:1",
+      applicationId: null,
+      title: "Untitled - Notepad",
+      focused: false,
+    };
+    let session = activeComputerSession();
+    const launches: ComputerActionRequest[] = [];
+    const observed: string[] = [];
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [screen, notepad],
+        }),
+        observeComputerTarget: async (_w, _s, targetId) => {
+          observed.push(targetId);
+          return computerObservation(targetId === notepad.id ? notepad : screen);
+        },
+        captureComputerTarget: async (_w, _s, targetId) => ({
+          frameId: "frame-1",
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targetId,
+          targetGeneration: notepad.targetGeneration,
+          sequence: 0,
+          mediaType: "image/jpeg" as const,
+          width: 640,
+          height: 400,
+          capturedAt: now,
+          sha256: "0".repeat(64),
+          data: Uint8Array.of(0xff, 0xd8, 0xff, 0xd9),
+        }),
+        actInComputer: async (_w, _s, value) => {
+          launches.push(value);
+          return computerReceipt(value.operationId, computerObservation(notepad));
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open", "computer_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const context = () => ({
+      operationId: randomUUID(),
+      caller: { kind: "model" as const, subjectId: "model:test" },
+    });
+    const result = await definitions[0]!.execute(
+      { computerSessionId, applicationId: "notepad.exe" },
+      context(),
+    );
+    expect(launches).toHaveLength(0);
+    expect(observed).toEqual([notepad.id]);
+    expect(result.structuredContent).toMatchObject({ existing: { target: { id: notepad.id } } });
+    expect(result.structuredContent).not.toHaveProperty("launch");
+    expect((result.content[0] as { text: string }).text).toContain(
+      `Not launched: the app is already open in ${notepad.id}; act on that target with the observation below.`,
+    );
+    // The open window is the current target for the next read.
+    await definitions[1]!.execute({}, context());
+    expect(observed.at(-1)).toBe(notepad.id);
+
+    // A macOS launch finds the running app itself, so no window is guessed.
+    session = { ...session, platform: "macos" };
+    observed.length = 0;
+    const mac = await definitions[0]!.execute(
+      { computerSessionId, applicationId: "notepad.exe" },
+      context(),
+    );
+    expect(launches).toHaveLength(1);
+    expect(observed).toEqual([]);
+    expect(mac.structuredContent).toMatchObject({ launch: { state: "completed" } });
+    expect(mac.structuredContent).not.toHaveProperty("existing");
+  });
+
+  test("computer_open never reports a launch that ran, or may have run, as failed", async () => {
+    const screen: ComputerTarget = {
+      ...computerTarget(),
+      id: "screen-1",
+      kind: "screen",
+      applicationId: null,
+    };
+    const appWindow: ComputerTarget = {
+      ...computerTarget(),
+      id: "window-app",
+      applicationId: "com.example.app",
+    };
+    const session = activeComputerSession();
+    let act: () => Promise<ComputerActionReceipt> = async () => {
+      throw new Error("unset");
+    };
+    let recorded: () => Promise<ComputerActionReceipt> = async () => {
+      throw new OpenGeniApiError(404, "Not found");
+    };
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        getComputerSession: async () => session,
+        listComputerTargets: async () => ({
+          computerSessionId,
+          controllerGeneration: "controller-1",
+          targets: [screen],
+        }),
+        actInComputer: async () => await act(),
+        getComputerActionReceipt: async () => await recorded(),
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const open = async () =>
+      await definitions[0]!.execute(
+        { computerSessionId, applicationId: "com.example.app" },
+        { operationId: randomUUID(), caller: { kind: "model" as const, subjectId: "model:test" } },
+      );
+    const unknownNote =
+      "The computer opened, but the launch of com.example.app has no known outcome: it may have started. Check computer_targets for its window before launching it again.";
+
+    // A retry whose fence changed is refused; the first try's receipt answers.
+    act = async () => {
+      throw new OpenGeniApiError(409, "operation ID reused with another request", {
+        code: "operation_conflict",
+      });
+    };
+    recorded = async () => computerReceipt(randomUUID(), computerObservation(appWindow));
+    const retried = await open();
+    expect(retried.isError).toBeFalsy();
+    expect(retried.structuredContent).toMatchObject({
+      launch: { state: "completed", observation: { target: { id: "window-app" } } },
+    });
+    expect(retried.content).toHaveLength(1);
+
+    // A lost reply with nothing recorded may still have launched the app.
+    act = async () => {
+      throw new OpenGeniApiError(504, "Gateway timeout", { outcomeUnknown: true });
+    };
+    recorded = async () => {
+      throw new OpenGeniApiError(404, "Not found");
+    };
+    const lost = await open();
+    expect(lost.isError).toBeFalsy();
+    expect((lost.content[1] as { text: string }).text.startsWith(unknownNote)).toBe(true);
+
+    // So may a launch the computer itself reports with an unknown outcome.
+    act = async () => ({
+      ...computerReceipt(randomUUID(), computerObservation(screen)),
+      state: "outcome_unknown",
+      observation: null,
+      error: { code: "outcome_unknown", message: "The action timed out", retryable: false },
+    });
+    const timedOut = await open();
+    expect(timedOut.content[1]).toEqual({ type: "text", text: unknownNote });
+
+    // A launch that completed but read no window says the app started.
+    act = async () => ({
+      ...computerReceipt(randomUUID(), computerObservation(screen)),
+      observation: null,
+    });
+    const unread = await open();
+    expect(unread.content[1]).toEqual({
+      type: "text",
+      text: "The computer opened and com.example.app started, but its window could not be read. Check computer_targets for its window.",
+    });
+
+    // A definite refusal still says it could not launch.
+    act = async () => {
+      throw new OpenGeniApiError(422, "no installed application has bundle id com.example.app");
+    };
+    const refused = await open();
+    expect((refused.content[1] as { text: string }).text).toContain(
+      "The computer opened, but com.example.app could not be launched:",
+    );
+  });
+
   test("an action naming its observation is fenced from the target list without a re-read", async () => {
     const target = computerTarget();
     const observation = computerObservation(target);
@@ -6471,6 +6965,35 @@ function externalAuthRun(): AuthRun {
 /** A controller that has nothing recorded under the operation ID asked for. */
 async function noRecordedReceipt(): Promise<never> {
   throw new OpenGeniApiError(404, "operation not found", { code: "resource_not_found" });
+}
+
+function activeComputerSession(): ComputerSession {
+  return {
+    ...discoveredComputerSession(computerSessionId, sessionId),
+    lifecycle: "active",
+    controller: {
+      controllerId: "synthetic-controller",
+      controllerGeneration: "controller-1",
+      placementInstanceId: "placement-1",
+    },
+    platform: "windows",
+    adapter: "opengeni.cua.windows.v1",
+    seatId: "seat-1",
+    displayId: "display-1",
+    capabilities: {
+      semanticObservation: true,
+      appDiscovery: true,
+      appLaunch: true,
+      windowCapture: true,
+      screenCapture: true,
+      semanticActions: true,
+      pointerInput: true,
+      keyboardInput: true,
+      clipboard: true,
+      backgroundActions: true,
+      parallelApps: true,
+    },
+  };
 }
 
 function partialTransport(value: Partial<InteractionTransport>): InteractionTransport {
