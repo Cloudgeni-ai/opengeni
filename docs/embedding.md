@@ -764,7 +764,9 @@ surfaces in `apps/api/src/`.
 
 Workspace permissions answer whether a principal may use a capability at all.
 An embedding host may additionally own per-session ownership, sharing, and
-revocation by binding `AppDependencies.sessionAuthorization`:
+revocation by binding `AppDependencies.sessionAuthorization` (a host that runs
+the packaged `startApi` entry instead of mounting `createApp(deps)` passes the
+same port as `startApi({ sessionAuthorization })`):
 
 ```ts
 type SessionAuthorizationPort = {
