@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessGrant } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, type DbClient } from "@opengeni/db";
+import { bootstrapWorkspace, createAgentProfile, createDb, type DbClient } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -116,4 +116,59 @@ test("PG: Send from a Customize-on composer with no pinned connectors creates th
   };
   expect(after.text).toBe("");
   expect(after.revision).toBe(saved.revision + 1);
+}, 180_000);
+
+// Starting from a saved agent fills `agent` and `tools` from the profile, but
+// the person's saved draft never held them. The draft check must compare the
+// request the composer sent, or every Send with an agent answered 409
+// NEW_SESSION_DRAFT_CONFLICT.
+test("PG: Send from a draft with a saved agent creates the chat wearing it", async () => {
+  if (!client) return;
+  const f = await fixture();
+  const profile = await createAgentProfile(client.db, {
+    accountId: f.grant.accountId,
+    workspaceId: f.grant.workspaceId,
+    name: "Annie",
+    avatar: { kind: "emoji", emoji: "🦉", hue: 235 },
+    config: {
+      agent: {
+        instructions: "Review pull requests.",
+        capabilities: { from: "all", browser: false },
+      },
+      tools: [],
+    },
+  });
+  const draftPath = `/v1/workspaces/${f.grant.workspaceId}/new-session-draft`;
+  const remote = (await (await f.request("GET", draftPath)).json()) as { revision: number };
+  const draft = {
+    text: "Review #5247",
+    resources: [],
+    tools: [],
+    toolsProvided: false,
+    model: f.settings.openaiModel,
+    reasoningEffort: f.settings.openaiReasoningEffort,
+    latencyMode: "standard",
+    modelProvided: true,
+    options: { visibility: "workspace" },
+  };
+  const saved = (await (
+    await f.request("PUT", draftPath, { ...draft, expectedRevision: remote.revision })
+  ).json()) as { revision: number };
+  const created = await f.request("POST", `/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    initialMessage: draft.text,
+    visibility: "workspace",
+    resources: [],
+    model: draft.model,
+    reasoningEffort: draft.reasoningEffort,
+    latencyMode: draft.latencyMode,
+    agentProfileId: profile.id,
+    clientEventId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+    expectedNewSessionDraftRevision: saved.revision,
+  });
+  expect(created.status, await created.clone().text()).toBe(202);
+  expect(await created.json()).toMatchObject({
+    instructions: "Review pull requests.",
+    agentProfile: { profileId: profile.id, profileVersion: 1, name: "Annie" },
+  });
 }, 180_000);

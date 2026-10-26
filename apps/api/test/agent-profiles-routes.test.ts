@@ -38,7 +38,7 @@ beforeAll(async () => {
     environmentsEncryptionKey: encryptionKey,
   };
   enabledSettings = testSettings({ ...base, agentProfilesEnabled: true }) as Settings;
-  disabledSettings = testSettings(base) as Settings;
+  disabledSettings = testSettings({ ...base, agentProfilesEnabled: false }) as Settings;
 }, 180_000);
 
 afterAll(async () => {

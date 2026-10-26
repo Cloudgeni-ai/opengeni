@@ -162,7 +162,13 @@ describe("sessions started from or switched to an agent profile (real PostgreSQL
       create({ initialMessage: "Archived", agentProfileId: profile.id }),
     ).rejects.toMatchObject({ status: 422 });
 
-    const off = buildDeps(testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" }));
+    const off = buildDeps(
+      testSettings({
+        databaseUrl: shared!.appUrl,
+        sandboxBackend: "none",
+        agentProfilesEnabled: false,
+      }),
+    );
     await expect(
       create({ initialMessage: "Flag off", agentProfileId: profile.id }, off),
     ).rejects.toMatchObject({ status: 422 });

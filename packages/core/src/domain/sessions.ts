@@ -2606,6 +2606,7 @@ async function createSessionForRequestInFileScope(
 ): Promise<CreateSessionRequestOutcome> {
   // A saved agent profile fills the fields this request omits before parsing,
   // so its values behave exactly like caller-supplied ones.
+  const callerRawPayload = rawPayload;
   const profileExpansion = await expandCreateSessionPayloadWithAgentProfile(
     unresolvedDeps,
     workspaceId,
@@ -3495,13 +3496,21 @@ async function createSessionForRequestInFileScope(
       message: "The submitted session options are not represented by the new-session draft",
     });
   }
+  // The saved new-chat draft holds what the person chose, never the fields a
+  // saved agent profile filled in, so compare against the caller's own request.
+  const draftAgent = profileExpansion.agentProfile
+    ? CreateSessionRequest.parse(callerRawPayload).agent
+    : payload.agent;
+  const draftToolsProvided = profileExpansion.agentProfile
+    ? hasOwnProperty(callerRawPayload, "tools")
+    : toolsProvided;
   const expectedNewSessionDraftSnapshot: NewSessionDraftSnapshot | null =
     payload.expectedNewSessionDraftRevision !== undefined
       ? {
           text: payload.initialMessage ?? "",
           resources,
-          tools: toolsProvided ? requestedTools : [],
-          toolsProvided,
+          tools: draftToolsProvided ? requestedTools : [],
+          toolsProvided: draftToolsProvided,
           model,
           reasoningEffort,
           latencyMode,
@@ -3527,7 +3536,7 @@ async function createSessionForRequestInFileScope(
             ...(payload.firstPartyMcpTools
               ? { firstPartyMcpTools: payload.firstPartyMcpTools }
               : {}),
-            ...(payload.agent ? { agent: payload.agent } : {}),
+            ...(draftAgent ? { agent: draftAgent } : {}),
           },
         }
       : null;

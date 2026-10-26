@@ -281,6 +281,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:control"
   },
   {
+    "id": "applySessionAgentProfile",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/agent-profile",
+    "request": [
+      "ApplySessionAgentProfileRequest"
+    ],
+    "response": [
+      "Session"
+    ]
+  },
+  {
     "id": "approveDeviceEnrollment",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/enrollments/device/approve",
@@ -329,6 +340,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SkillWriteReceipt"
     ],
     "permission": "workspace:read"
+  },
+  {
+    "id": "archiveAgentProfile",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/archive",
+    "request": [],
+    "response": [
+      "AgentProfile"
+    ]
   },
   {
     "id": "archiveKnowledgeEntry",
@@ -882,6 +902,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "CreateAdditionalOrganizationResponse"
     ],
     "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
+  },
+  {
+    "id": "createAgentProfile",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles",
+    "request": [
+      "CreateAgentProfileRequest"
+    ],
+    "response": [
+      "AgentProfile"
+    ]
   },
   {
     "id": "createApiKey",
@@ -3041,6 +3072,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getAgentProfile",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId",
+    "request": [],
+    "response": [
+      "AgentProfile"
+    ]
+  },
+  {
     "id": "getAttachedBrowser",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/attached-browsers/:deviceId",
@@ -4788,6 +4828,29 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningOverrideRecord"
+    ]
+  },
+  {
+    "id": "listAgentProfiles",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles",
+    "request": [
+      "AgentProfileStatus"
+    ],
+    "query": [
+      "status"
+    ],
+    "response": [
+      "AgentProfileListResponse"
+    ]
+  },
+  {
+    "id": "listAgentProfileVersions",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/versions",
+    "request": [],
+    "response": [
+      "AgentProfileVersionListResponse"
     ]
   },
   {
@@ -8028,6 +8091,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "restoreAgentProfile",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/restore",
+    "request": [],
+    "response": [
+      "AgentProfile"
+    ]
+  },
+  {
     "id": "restoreKnowledgeEntry",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/knowledge/entries/:entryId/restore",
@@ -9165,6 +9237,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "github:manage"
   },
   {
+    "id": "updateAgentProfile",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId",
+    "request": [
+      "UpdateAgentProfileRequest"
+    ],
+    "response": [
+      "AgentProfile"
+    ]
+  },
+  {
     "id": "updateAppRegistration",
     "method": "PATCH",
     "path": "/v1/workspaces/:workspaceId/pr-review/registrations/:registrationId",
@@ -9672,6 +9755,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "Session"
     ],
     "permission": "sessions:control"
+  },
+  {
+    "id": "updateSessionAgentIdentity",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/agent-identity",
+    "request": [
+      "UpdateSessionAgentIdentityRequest"
+    ],
+    "response": [
+      "Session"
+    ]
   },
   {
     "id": "updateSessionArchive",
