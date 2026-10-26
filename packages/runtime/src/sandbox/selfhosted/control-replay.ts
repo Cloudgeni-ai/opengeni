@@ -197,18 +197,18 @@ export class ControlReplyRecovery {
         connectionCurrent,
       ).catch(() => {});
     }
-    const ageMs = Math.max(
-      0,
-      Math.floor((performance.now() - token.receivedAt) * (1 - ELAPSED_RATE_ALLOWANCE)),
-    );
+    const elapsedMs = Math.max(0, performance.now() - token.receivedAt);
+    const ageMs = Math.floor(elapsedMs * (1 - ELAPSED_RATE_ALLOWANCE));
     const delivery = `${subject}.replay.${token.id}.${ageMs}.${lifetimeMs}`;
+    // The machine's receipt now ends that much sooner, so stop retrying sooner
+    // too: a late retry should not meet an expired receipt instead of its reply.
     const reply = await this.retry(
       conn,
       subject,
       delivery,
       payload,
       timeoutMs,
-      deadline,
+      deadline - (elapsedMs - ageMs),
       readySubject,
       connectionCurrent,
     );
