@@ -26,6 +26,7 @@ mod lease;
 mod leased;
 mod link;
 mod listen;
+mod lossy;
 mod record;
 mod tls;
 
@@ -52,6 +53,7 @@ pub use guard::{
 pub use lease::{terms_of, wire_terms};
 pub use leased::Leased;
 pub use link::MetricsRoute;
+pub use lossy::Lossy;
 pub use record::LeaseFile;
 pub use tls::{Tls, TlsFiles};
 

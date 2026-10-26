@@ -44,9 +44,10 @@ OOMScoreAdjust=-1000
 # or the watchdog resets the machine and every sandbox on it loses its
 # programs. So its turn comes before any VM's or the agent's (the lowest
 # real-time priority, which also lets its few allocations draw on the
-# kernel's reserve), and it locks its memory in at its start, so a host
-# swapping under guests that hold more than it has never makes it wait on
-# the disk for its own code.
+# kernel's reserve), it locks its memory in as it starts, so a host
+# swapping under guests that hold more than it has does not make it wait
+# on the disk for its own code, and it waits on neither the journal nor
+# systemd (docs/operations.md says what this does not cover).
 CPUSchedulingPolicy=fifo
 CPUSchedulingPriority=1
 
