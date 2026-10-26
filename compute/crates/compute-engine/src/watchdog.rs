@@ -5,9 +5,17 @@
 //! watchdog) loaded with the lease terms' timeout and `nowayout`, so that
 //! closing the device, even after the magic `V`, never disarms it. The
 //! guard checks both before it relies on the device, and never writes `V`.
+//!
+//! Opening an armed device feeds it, and so does closing it, since the
+//! kernel cannot stop it then. So the guard opens it only when it may feed
+//! it, and has systemd keep it open (its file descriptor store) for as long
+//! as the guard's service is loaded: a guard that ends, however it ends,
+//! then does not close it, and the next guard takes it over without
+//! opening it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write as _};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -23,12 +31,29 @@ impl Watchdog {
     /// cannot be disarmed. Opening arms it: from then on the caller feeds
     /// it at least once a timeout, or the machine reboots.
     pub fn open(device: &Path, timeout: Duration) -> io::Result<Self> {
-        let sysfs = sysfs_dir(device)?;
-        let read = |name: &str| -> io::Result<String> {
-            fs::read_to_string(sysfs.join(name)).map(|value| value.trim().to_owned())
-        };
-        check(&read("timeout")?, &read("nowayout")?, timeout)?;
+        checked(device, timeout)?;
         let file = OpenOptions::new().write(true).open(device)?;
+        Ok(Self { file })
+    }
+
+    /// Takes over `file`, `device` opened by an earlier guard (and kept open
+    /// since), after the same checks as [`Self::open`] and that `file` is
+    /// that device. It is armed already, and nothing feeds it until the
+    /// caller does.
+    pub fn adopt(file: File, device: &Path, timeout: Duration) -> io::Result<Self> {
+        checked(device, timeout)?;
+        let kept = rustix::fs::fstat(&file)?;
+        let wanted = rustix::fs::stat(device)?;
+        let character = |stat: &rustix::fs::Stat| {
+            rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::CharacterDevice
+        };
+        if !character(&kept) || !character(&wanted) || kept.st_rdev != wanted.st_rdev {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("the kept file is not the watchdog {}", device.display()),
+            ));
+        }
         Ok(Self { file })
     }
 
@@ -37,6 +62,21 @@ impl Watchdog {
         // Any byte but `V` feeds it.
         self.file.write_all(b"k")
     }
+}
+
+impl AsFd for Watchdog {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.file.as_fd()
+    }
+}
+
+/// Checks `device`'s timeout and `nowayout` as `sysfs` shows them.
+fn checked(device: &Path, timeout: Duration) -> io::Result<()> {
+    let sysfs = sysfs_dir(device)?;
+    let read = |name: &str| -> io::Result<String> {
+        fs::read_to_string(sysfs.join(name)).map(|value| value.trim().to_owned())
+    };
+    check(&read("timeout")?, &read("nowayout")?, timeout)
 }
 
 /// The `sysfs` directory of watchdog `device`: `/dev/watchdogN` is
