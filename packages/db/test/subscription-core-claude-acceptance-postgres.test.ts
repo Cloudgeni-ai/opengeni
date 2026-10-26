@@ -1,16 +1,13 @@
 /**
  * M4 C2b: Claude on the shared core's writers, as the restricted application
- * role, once Claude is registered and its cutover receipt and switch row
- * exist (C3 ships both; this process and database stand in for them).
+ * role, with Claude registered and its cutover receipt recorded by the
+ * migrations, so every new organization starts switched to the shared core.
  * Connect writes Claude's credential formats and the adapter-owned provider
  * state through the neutral writers; a personal connection exists only in the
  * person's own Personal workspace; a reconnect is fenced on the connection's
  * row version and keeps its Claude identity; acceptance writes the claude v2
  * entry next to Codex's for the exact owner only; and after the receipt no
  * acceptance computes Claude's v1 value from live state.
- *
- * The shipped registry is used unchanged. Only the historical database
- * cutover receipt is withheld; no retired runtime is restored.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -219,36 +216,14 @@ async function generation(org: Org, provider: string): Promise<number> {
 }
 
 let org: Org | null = null;
-/** The owner's acceptance before the receipt, with the retired v1 default. */
-let beforeReceipt: { v2: unknown; claude: unknown } | null = null;
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-claude-acceptance", {
-    withheldMigrations: [
-      "0748_subscription_core_claude_cutover.sql",
-      "0751_subscription_core_legacy_retirement.sql",
-    ],
-  });
+  shared = await acquireSharedTestDatabase("subscription-core-claude-acceptance");
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = db.createDb(shared.appUrl, { max: 4 });
   org = await organization();
   await legacyOrganizationPool(org);
-  const own = await session(org, org.personalWorkspaceId, "user_private");
-  beforeReceipt = await accept(org, org.personalWorkspaceId, own.id, "owner");
-  // C3's registration: the registry row and the drained cutover's receipt.
-  await shared.admin`
-    insert into opengeni_private.subscription_core_providers (provider, extra_credits,
-      primary_setting_column)
-    values ('claude', false, 'claude_primary_connection_id')`;
-  await shared.admin`
-    insert into opengeni_private.subscription_provider_cutover_receipts (
-      provider, migration, committed_at, seed_rotation
-    ) values ('claude', '0899_subscription_core_claude_cutover.sql', clock_timestamp(),
-      '{"mode":"spread"}')`;
-  await shared.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${org.accountId}::uuid, 'claude', true)`;
 }, 180_000);
 
 afterAll(async () => {
@@ -267,10 +242,6 @@ describe.skipIf(!realDb)("Claude on the shared core's writers (M4 C2b)", () => {
     expect(role).toEqual({ currentUser: "opengeni_app", superuser: false, bypassRls: false });
     expect(productionProviderIds).toContain("claude");
     expect(realRegistry.subscriptionCoreProviderIds()).toContain("claude");
-  });
-
-  test("before the receipt new work uses the inert v1 default, not the retired pool", () => {
-    expect(beforeReceipt!.claude).toEqual({ version: 1, scope: "workspace" });
   });
 
   test("a Claude access change wakes from Claude's binding", () => {

@@ -80,7 +80,7 @@ if (process.env.OPENGENI_VERIFY_SERVER_RUNTIME === "1") {
               const path='./packages/db/src/'+name;
               const source=readFileSync(path,'utf8');
               if (!source.includes('async function migrate(')) return;
-              if (!existsSync(join(dirname(fileURLToPath(new URL(path,import.meta.url))),'../drizzle/0000_initial.sql'))) {
+              if (!existsSync(join(dirname(fileURLToPath(new URL(path,import.meta.url))),'../drizzle/0977_baseline_01.sql'))) {
                 const sqlDirectory=join(dirname(fileURLToPath(new URL(path,import.meta.url))),'../drizzle');
                 if (!readdirSync(sqlDirectory).some(name=>name.endsWith('.sql'))) throw new Error('missing relative migration ledger');
               }

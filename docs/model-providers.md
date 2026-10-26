@@ -351,8 +351,7 @@ provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
 Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
 `withOrganizationDirectCredential` in `packages/config/src/index.ts`,
 `packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
-`loadOrganizationModelProviderCredential`), migration
-`packages/db/drizzle/0898_organization_direct_openai_model_providers.sql`,
+`loadOrganizationModelProviderCredential`),
 `settingsWithOrganizationProviderCredentials` in
 `packages/core/src/model-provider-credentials.ts`,
 `apps/api/src/routes/organization-model-providers.ts`, and the organization

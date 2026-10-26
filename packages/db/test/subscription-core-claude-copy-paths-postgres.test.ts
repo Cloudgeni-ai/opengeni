@@ -434,15 +434,7 @@ let foreign: { grant: Grant; caller: Agent; target: { id: string } } | null = nu
 
 beforeAll(async () => {
   if (!realDb) return;
-  shared = await acquireSharedTestDatabase("subscription-core-claude-copy-paths", {
-    // This suite constructs pre-cutover carriers, then installs its own
-    // receipt. Neither provider cutover may pre-mark those source rows.
-    withheldMigrations: [
-      "0747_subscription_core_xai_cutover.sql",
-      "0748_subscription_core_claude_cutover.sql",
-      "0751_subscription_core_legacy_retirement.sql",
-    ],
-  });
+  shared = await acquireSharedTestDatabase("subscription-core-claude-copy-paths");
   if (!shared) throw new Error("Real PostgreSQL is required");
   client = createDb(shared.appUrl, { max: 6 });
   // Every source is accepted before the receipt.
@@ -453,17 +445,13 @@ beforeAll(async () => {
   const foreignTarget = await session(foreignGrant, { parentSessionId: foreignCaller.sessionId });
   await submit(foreignGrant, foreignTarget.id, "the owner's own work");
   foreign = { grant: foreignGrant, caller: foreignCaller, target: { id: foreignTarget.id } };
-  // Inert before the receipt: no provider holds records.
-  const [before] = await rawRows<{ providers: string[] }>(
-    client.db,
-    sql`select opengeni_private.subscription_authority_compat_providers() as providers`,
-  );
-  expect(before!.providers).toEqual([]);
-  await shared.admin`
-    insert into opengeni_private.subscription_provider_cutover_receipts (
-      provider, migration, committed_at, seed_rotation
-    ) values ('claude', '0799_subscription_core_claude_cutover.sql', clock_timestamp(),
-      '{"mode":"spread"}')`;
+  // Every source above predates the receipt, as on a deployment that drained
+  // its cutover: re-stamp the append-only receipt past them.
+  await shared.admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update opengeni_private.subscription_provider_cutover_receipts
+      set committed_at = clock_timestamp() where provider = 'claude'`;
+  });
   // What the drained cutover wrote for the recorded world's sources.
   const sources = recorded;
   await cutoverRecord(sources.grant, { kind: "session_turn", id: sources.caller.turnId }, SHARED);
@@ -505,7 +493,7 @@ describe.skipIf(!realDb)("Claude compatibility copies on every path (M4 C2b)", (
       client!.db,
       sql`select opengeni_private.subscription_authority_compat_providers() as providers`,
     );
-    expect(providers!.providers).toEqual(["claude"]);
+    expect(providers!.providers).toEqual(["claude", "xai"]);
   });
 
   for (const name of ["recorded", "missed"] as const) {
