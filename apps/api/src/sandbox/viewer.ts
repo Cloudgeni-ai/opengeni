@@ -91,6 +91,7 @@ import {
 } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 import { establishCachedChannelAHandle } from "./channel-a";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /** The minimal services a viewer op needs: the DB + settings (lease cadence +
  *  the sandbox client construction the leaf reads from settings). The bus is
@@ -1428,7 +1429,7 @@ async function tryMintActiveSelfhostedStream(
     console.warn(
       `[tryMintActiveSelfhostedStream] resume failed for agent=${sandbox.enrollmentId} ` +
         `port=${input.port} epoch=${session.activeEpoch}: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
+        `${errorMessage(error)}`,
     );
     return null;
   }
@@ -1518,7 +1519,7 @@ export async function mintSelfhostedStream(
     console.warn(
       `[mintSelfhostedStream] relay stream mint degraded to transport:null ` +
         `(session=${input.sessionId} port=${input.port} epoch=${input.activeEpoch}): ` +
-        `${error instanceof Error ? error.message : String(error)}`,
+        `${errorMessage(error)}`,
     );
     if (error instanceof StreamPortUnavailableError) {
       return null;

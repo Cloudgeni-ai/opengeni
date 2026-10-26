@@ -120,6 +120,7 @@ import {
 import { BrowserWindowParking } from "./window-parking";
 import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
 import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
+import { errorMessage, isRecord } from "@opengeni/contracts/values";
 
 /** The request deadline that carries an action is derived from this bound and
  * the other declared waits (see browserActionDeadlineMs). */
@@ -992,7 +993,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                   event: "browser.window_parking.failed",
                   browserSessionId: this.browserSessionId,
                   phase,
-                  error: error instanceof Error ? error.message : String(error),
+                  error: errorMessage(error),
                   at: new Date().toISOString(),
                 }),
               ),
@@ -11131,10 +11132,6 @@ function flattenFrameTree(root: PageFrameTree): MainFrame[] {
 
 function frameTreeFingerprint(frames: readonly MainFrame[]): string {
   return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

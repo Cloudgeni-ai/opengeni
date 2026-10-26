@@ -19,6 +19,7 @@ export type {
 } from "@opengeni/contracts";
 import { OpenGeniApiError } from "./errors";
 import type { RetainedArtifactReference } from "./types";
+import { isRecord } from "@opengeni/contracts/values";
 
 /** Public Browser/Computer protocol version. Driver and provider details stay private. */
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
@@ -3373,8 +3374,4 @@ async function sha256Hex(value: Uint8Array): Promise<string> {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

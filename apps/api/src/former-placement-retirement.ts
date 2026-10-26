@@ -16,6 +16,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { deriveBrowserControllerAdminToken } from "./browser-controller-authority";
 import { withFormerConnectedMachine, type ChannelAServices } from "./sandbox/channel-a";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type FormerPlacementControllerClient = Pick<
   BrowserControlClient,
@@ -147,7 +148,7 @@ export async function retireFormerPlacementControllers(
       connectedSandboxId,
       resource: controller?.resource ?? null,
       resourceId: controller?.resourceId ?? null,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   };
   try {
@@ -285,7 +286,7 @@ export async function retireSourceFormerPlacements(
     console.warn("interaction.former_placement_retirement_failed", {
       workspaceId: grant.workspaceId,
       sourceSessionId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
   return results;

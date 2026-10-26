@@ -62,6 +62,7 @@ import {
   type LiveTranscriptTransport,
   type LiveWebSocketConstructor,
 } from "./recording-live";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export * from "./recording-live";
 
@@ -1133,10 +1134,6 @@ async function guarded<T>(work: () => Promise<T>): Promise<T> {
     }
     throw error;
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 // --- Local stores -------------------------------------------------------------

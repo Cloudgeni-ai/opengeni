@@ -67,6 +67,7 @@ import {
   useSessionRealtime,
 } from "./session-realtime";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export {
   codexRealtimeAdmissionAllowed,
@@ -372,7 +373,7 @@ function NewSessionRealtimeControlView(
       const started = await onStart(selectedModelId);
       if (!started) setError(t("realtime.realtimeControl.theVoiceSessionCouldNot"));
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError(errorMessage(cause));
     } finally {
       setStarting(false);
     }

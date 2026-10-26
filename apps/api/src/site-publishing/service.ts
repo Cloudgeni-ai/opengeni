@@ -63,6 +63,7 @@ import { createSiteEdgeSync, type SiteEdgeSync } from "./edge-sync";
 import { effectiveSiteLimits, sourceSiteLimitProfile, storedSiteLimitProfileKind } from "./limits";
 import { requireSitePlatformOpen, requireSitePlatformQuota } from "./platform-usage";
 import { readSitePublicationReadiness } from "./readiness";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Published Sites: publication management, the host map, and the work that
@@ -232,7 +233,7 @@ function createEffects(
             await run();
           } catch (error) {
             console.warn(`[site-publishing] ${name} failed`, {
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             });
           } finally {
             running -= 1;
@@ -540,7 +541,7 @@ export async function notifySitePublicationChanged(
   } catch (error) {
     console.warn("[site-publishing] could not record a Site change", {
       siteId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage(error),
     });
   }
 }
@@ -682,7 +683,7 @@ export async function stopSiteViewers(
     } catch (error) {
       console.warn("[site-publishing] could not revoke viewer sessions", {
         siteId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }
@@ -724,7 +725,7 @@ export async function stopSiteViewers(
             console.warn("[site-publishing] could not cancel a Site conversation", {
               siteId,
               sessionId,
-              error: error instanceof Error ? error.message : String(error),
+              error: errorMessage(error),
             });
           }
         }

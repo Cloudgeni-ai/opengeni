@@ -182,6 +182,7 @@ import {
 } from "./slack-app-home";
 import { importSlackReactionImage, type ImportedSlackReactionImage } from "../slack-reaction-files";
 import { parseRequestJson } from "../http/request-body";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export const SLACK_INTERACTION_MAX_BODY_BYTES = 256 * 1024;
 export const SLACK_SIGNATURE_REPLAY_WINDOW_SECONDS = 300;
@@ -564,7 +565,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     } catch (error) {
       console.error("[slack-interactions] recording the Slack event failed", {
         workspaceId: installation.workspaceId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
     const event = record(payload.event);

@@ -155,6 +155,7 @@ import type {
   UpdateWorkspaceSettingsRequest,
   Workspace,
 } from "./types";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Transport and sign-in functions the app state calls. Pass one stable object
@@ -1012,7 +1013,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     } catch (error) {
       return {
         resources: lastValidResources.current,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       };
     }
   }, [

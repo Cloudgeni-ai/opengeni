@@ -65,6 +65,7 @@ import { directRequestAbandonCommand, relayConfigFromSettings } from "./routing"
 import { agentBackgroundCommandDeps } from "./agent-background-commands";
 import { createSecretResolver } from "../domain/vaults/secret-resolver";
 import { managedSessionGroupBackend, sessionGroupMachinePresentation } from "./runtime-settings";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type FleetServices = {
   db: Database;
@@ -775,7 +776,7 @@ export async function preflightCreateTimeSandboxTarget(
   } catch (error) {
     return {
       ok: false,
-      reason: error instanceof Error ? error.message : String(error),
+      reason: errorMessage(error),
       code: "invalid_working_directory",
     };
   }
@@ -903,7 +904,7 @@ export async function swapActiveSandbox(
             swapped: false,
             activeSandboxId: pointer.activeSandboxId,
             activeEpoch: pointer.activeEpoch,
-            reason: error instanceof Error ? error.message : String(error),
+            reason: errorMessage(error),
             code: "invalid_working_directory",
           };
         }
@@ -1271,7 +1272,7 @@ export async function executeRunOnSelfhostedMachine(
     // Nothing was dispatched. Let the MCP boundary preserve the canonical
     // secret error envelope and its missing/approval cards, as the gateway did.
     if (isSecretReferenceError(error)) throw error;
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = errorMessage(error);
     return {
       target,
       kind: op.kind,

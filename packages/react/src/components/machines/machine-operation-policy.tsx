@@ -2,6 +2,7 @@ import { AlertTriangleIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { MachineOperationPolicy, UpdateMachineOperationPolicyRequest } from "@opengeni/sdk";
 import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type MachineOperationPolicyEditorProps = {
   policy: MachineOperationPolicy;
@@ -88,7 +89,7 @@ export function MachineOperationPolicyEditor({
         expectedRevision: policy.revision,
       });
     } catch (error) {
-      setValidationError(error instanceof Error ? error.message : String(error));
+      setValidationError(errorMessage(error));
     }
   };
 

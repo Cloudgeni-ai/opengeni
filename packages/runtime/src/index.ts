@@ -612,6 +612,7 @@ import type {
   SerializedHumanInputInterruption,
   SerializedInteractionInterventionInterruption,
 } from "./run-events";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // The Agents SDK's debug namespaces can otherwise serialize complete model
 // inputs/outputs and tool arguments/results. These getters read process.env on
@@ -7667,7 +7668,7 @@ function boundedMcpToolResult(result: AttemptToolResultValue): AttemptToolResult
 
 function exactErrorMessage(error: unknown): string {
   try {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   } catch {
     return "MCP tool call failed";
   }
@@ -11387,7 +11388,7 @@ function sandboxFileDownloadFailure(
     fileId: download.fileId,
     filename: download.filename,
     path: targetPath,
-    reason: error instanceof Error ? error.message : String(error),
+    reason: errorMessage(error),
     ...(exitCode !== null ? { exitCode } : {}),
     ...(output ? { output } : {}),
   };
@@ -14193,7 +14194,7 @@ export async function runRigSetupHook(
       result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",
       payload: {
@@ -14447,7 +14448,7 @@ export async function runRepositoryCloneHook(
       type: "sandbox.operation.failed",
       payload: {
         ...payload,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       },
     });
     throw error;
@@ -14551,7 +14552,7 @@ export async function runAzureCliLoginHook(
       type: "sandbox.operation.failed",
       payload: {
         ...payload,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       },
     });
     throw error;

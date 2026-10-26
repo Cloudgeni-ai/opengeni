@@ -140,6 +140,7 @@ import type { CodexCredentialPolicySnapshotV1 } from "@opengeni/contracts";
 import { armAndReconcileCodexCapacityWait } from "./capacity";
 
 import { providerRecoveryCause, recordProviderRecoveryOutcome } from "../../../src/activities/agent-turn/provider-recovery-metrics";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -1508,9 +1509,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           cooldownSeconds: codexCredentialFailure.cooldownSeconds,
           detail:
             codexCredentialFailure.kind === "quota"
-              ? error instanceof Error
-                ? error.message
-                : String(error)
+              ? errorMessage(error)
               : "the same accepted turn is waiting for eligible credential capacity",
           allAccounts,
           planEntitlement: codexPlanEntitlement?.waitPayload ?? null,
@@ -1888,7 +1887,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     await historySink.reconcileConversationTruth();
     const failurePayload = codexUsageLimitFailurePayload(
       usageLimit,
-      error instanceof Error ? error.message : String(error),
+      errorMessage(error),
     );
     if (
       !(await eventing.settle!({

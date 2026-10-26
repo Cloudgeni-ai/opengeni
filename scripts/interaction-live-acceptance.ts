@@ -31,6 +31,7 @@ import {
   type InteractionLatencyMetric,
 } from "./interaction-acceptance-contract";
 import { RfbAcceptanceProbe, type RfbUpdate } from "./rfb-acceptance-probe";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const RELAY_TAG_OPEN = 1;
 const RELAY_TAG_OPEN_ACK = 2;
@@ -1391,7 +1392,7 @@ async function acceptanceStep<T>(label: string, operation: () => Promise<T>): Pr
   try {
     return await operation();
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     throw new Error(`${label} failed: ${message}`, { cause: error });
   }
 }

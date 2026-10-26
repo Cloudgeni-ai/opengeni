@@ -11,6 +11,7 @@ import {
   type HostWorkspaceRootIdentity,
 } from "../host-archive-spool";
 import { SandboxConfigError } from "../errors";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const execFileAsync = promisify(execFile);
 type NativeProbe = (
@@ -336,7 +337,7 @@ function errorCode(error: unknown): unknown {
 }
 
 function reasonOf(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 300);
+  return errorMessage(error).slice(0, 300);
 }
 
 /** True only when both the recorded SDK path and its canonical receipt root

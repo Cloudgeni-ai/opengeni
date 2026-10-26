@@ -37,6 +37,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src/index";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -739,7 +740,7 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
         from sessions source where source.id = ${parent.session.id}::uuid`;
     } catch (error) {
       childInsertState = nestedPostgresSqlState(error);
-      childInsertMessage = error instanceof Error ? error.message : String(error);
+      childInsertMessage = errorMessage(error);
     }
     expect(childInsertState).toBe("42501");
     expect(childInsertMessage).toContain("child session authority must match its locked parent");

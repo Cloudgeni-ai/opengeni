@@ -7,6 +7,7 @@ export default defineConfig({
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
     "src/learning-refusal.ts",
+    "src/values.ts",
     "src/usage-allowances.ts",
     "src/session-usage-limits.ts",
     "src/session-usage-limit-refusal.ts",

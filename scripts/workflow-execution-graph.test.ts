@@ -25,6 +25,7 @@ import {
   parseRestrictedYaml,
   type WorkflowExecutionGraphManifest,
 } from "./workflow-execution-graph";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const root = resolve(import.meta.dir, "..");
 const workflowPath = ".github/workflows/fixture.yml";
@@ -854,7 +855,7 @@ describe("workflow execution graph manifest", () => {
           error = caught;
         }
         expect(error).toBeInstanceOf(Error);
-        const message = error instanceof Error ? error.message : String(error);
+        const message = errorMessage(error);
         expect(message).toBe(`${workflowPath} contains invalid UTF-8`);
         expect(message).not.toContain(String(malformedByte));
         errors.push(message);

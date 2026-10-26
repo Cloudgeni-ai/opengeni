@@ -21,6 +21,7 @@ import {
   invokePreparedAgentTool,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
+import { errorMessage } from "@opengeni/contracts/values";
 
 export type OpenSuffixResumeOutcome =
   | { action: "continue" }
@@ -238,7 +239,7 @@ export async function resultItemForOpenSuffixMember(input: {
       output,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     return memberResult({
       callId: input.row.callId,
       name,

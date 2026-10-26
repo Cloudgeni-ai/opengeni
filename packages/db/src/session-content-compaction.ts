@@ -7,6 +7,7 @@ import {
   encodeModelContextSnapshotContent,
   writeSessionContentBlobs,
 } from "./session-content-blobs";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * Rewrite rows stored before session content blobs existed into the
@@ -188,9 +189,9 @@ export async function runSessionContentCompactionCli(): Promise<void> {
       batchSize: batchArgument ? Number(batchArgument.split("=")[1]) : 100,
       onRowError: (candidate, error) =>
         console.error(
-          `[session-content] ${candidate.kind} ${candidate.attemptId} failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+          `[session-content] ${candidate.kind} ${candidate.attemptId} failed: ${errorMessage(
+            error,
+          )}`,
         ),
     });
     console.log(`[session-content] ${JSON.stringify(outcome)}`);

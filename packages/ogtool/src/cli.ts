@@ -22,6 +22,7 @@ import { omitStructuredContentTextDuplicates, type AttemptToolResult } from "@op
 import packageManifest from "../package.json" with { type: "json" };
 import { compactOutput, parseListOptions } from "./catalog-discovery";
 import { readToolArguments } from "./tool-argument-source";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const PACKAGE_NAME = "@opengeni/ogtool";
 const VERSION = packageManifest.version;
@@ -271,7 +272,7 @@ export async function imageSaveFailureOutput(
       ...printed,
       imageSaveError: {
         operationId,
-        message: error instanceof Error ? error.message : String(error),
+        message: errorMessage(error),
         note: "The call completed; only saving its image failed. Do not repeat the call.",
       },
     } as AttemptToolResult,
@@ -402,6 +403,6 @@ void main().catch((error: unknown) => {
     error && typeof error === "object" && "code" in error
       ? String((error as { code: unknown }).code)
       : null;
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`${errorMessage(error)}\n`);
   process.exitCode = code === "tool_outcome_unknown" ? 3 : 1;
 });
