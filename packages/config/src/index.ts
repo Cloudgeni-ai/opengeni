@@ -72,6 +72,9 @@ import {
   type VideoGenerationResolution,
   type FirstPartyMcpToolName as FirstPartyMcpToolNameType,
   type Session,
+  ModelResidencyDeclaration,
+  ModelResidencyV1,
+  UNKNOWN_MODEL_RESIDENCY,
 } from "@opengeni/contracts";
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
@@ -1141,6 +1144,9 @@ const SettingsSchema = z.object({
   // registry provider's models. validateSettings parses this at boot so a
   // malformed registry / unresolvable key / id collision fails fast.
   modelProvidersJson: z.string().default("[]"),
+  // Where the built-in OpenAI/Azure provider processes data (a residency
+  // declaration). Unset means a built-in rule: Azure is unknown, never EU.
+  builtinModelResidencyJson: z.string().optional(),
   // Codex (ChatGPT) subscription: when enabled, a per-workspace connected
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
@@ -3383,6 +3389,9 @@ const RegistryModelSchema = z
     hostedWebSearch: z.boolean().optional(), // legacy compatibility input/projection
     capabilities: ModelCapabilitiesV1Schema.optional(),
     pricing: z.union([ModelPricingSchema, ModelPricingScheduleSchema]).optional(),
+    // Where this route processes data, overriding the provider's declaration.
+    // Only operator registry providers may declare it; see docs/eu-only-inference.md.
+    residency: ModelResidencyDeclaration.optional(),
     // Reserved normalized contracts are derived by Opengeni in V1. Generic
     // registry JSON must not opt itself into workspace BYOK or reattribute cost.
     credentialSource: z.never().optional(),
@@ -3503,6 +3512,8 @@ const RegistryProviderSchema = z
     defaultHeaders: z.record(z.string(), z.string()).optional(),
     publicDefaultQueryNames: z.array(z.string().min(1)).optional(),
     publicDefaultHeaderNames: z.array(z.string().min(1)).optional(),
+    // Where this provider's models process data unless a model overrides it.
+    residency: ModelResidencyDeclaration.optional(),
     // V1 derives these from provider kind. Workspace BYOK is deliberately not a
     // registry switch and requires a separately reviewed encrypted broker.
     credentialSource: z.never().optional(),
@@ -3510,6 +3521,24 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    if (!operatorDeclaresResidency(provider.kind)) {
+      if (provider.residency !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["residency"],
+          message: `${provider.kind} providers use a reviewed built-in residency rule and cannot declare their own`,
+        });
+      }
+      provider.models.forEach((model, index) => {
+        if (model.residency !== undefined) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["models", index, "residency"],
+            message: `${provider.kind} providers use a reviewed built-in residency rule and cannot declare their own`,
+          });
+        }
+      });
+    }
     if (provider.azureEntra !== undefined) {
       if (provider.kind !== "direct-azure-organization") {
         ctx.addIssue({
@@ -3813,6 +3842,7 @@ const CodexCatalogModelSchema = RegistryModelSchema.safeExtend({
   upstreamModelId: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
   capabilities: ModelCapabilitiesV1Schema,
   pricing: z.never().optional(),
+  residency: z.never().optional(),
 })
   .strict()
   .superRefine((model, context) => {
@@ -4202,6 +4232,8 @@ export interface ConfiguredModel {
   };
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion: string;
+  /** Where this route processes data, and the evidence. Unknown is never EU. */
+  residency: ModelResidencyV1;
   contextWindowTokens?: number | undefined;
   effectiveContextWindowTokens?: number | undefined;
   autoCompactTokenLimit?: number | undefined;
@@ -5529,6 +5561,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     opperApiKey: optional("OPENGENI_OPPER_API_KEY"),
     managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
+    builtinModelResidencyJson: optional("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
     experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
     experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
@@ -7985,6 +8018,202 @@ function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
   return { kind: "deployment", mechanism: "api_key" };
 }
 
+/** Only operator-declared providers (deployment registry) may declare residency. */
+export function operatorDeclaresResidency(
+  kind: RegistryProviderKind | InternalRegistryProvider["kind"],
+): boolean {
+  return kind === "api-key" || kind === "anonymous";
+}
+
+function residencyIsDeclared(residency: ModelResidencyV1 | undefined): boolean {
+  return (
+    residency !== undefined &&
+    residency.evidence.source !== "built_in_rule" &&
+    residency.evidence.source !== "none"
+  );
+}
+
+const RESIDENCY_RULES_REVIEWED_AT = "2026-10-26";
+
+function builtInResidencyRule(
+  geography: ModelResidencyV1["geography"],
+  deploymentType: ModelResidencyV1["deploymentType"],
+  reference: string,
+): ModelResidencyV1 {
+  return {
+    geography,
+    deploymentType,
+    regions: [],
+    evidence: {
+      source: "built_in_rule",
+      reference,
+      verifiedAt: RESIDENCY_RULES_REVIEWED_AT,
+    },
+  };
+}
+
+function normalizedResidencyDeclaration(
+  declaration: z.output<typeof ModelResidencyDeclaration>,
+): ModelResidencyV1 {
+  return ModelResidencyV1.parse({
+    geography: declaration.geography,
+    deploymentType: declaration.deploymentType,
+    regions: [...declaration.regions],
+    evidence: {
+      source: declaration.evidence.source,
+      reference: declaration.evidence.reference,
+      verifiedAt: declaration.evidence.verifiedAt,
+    },
+  });
+}
+
+/**
+ * Where a registry route processes data. Operator providers use their reviewed
+ * declaration (model over provider); every other provider kind uses a
+ * code-owned rule. Undeclared is unknown, and unknown is never EU.
+ */
+export function registryModelResidency(
+  provider: Pick<InternalRegistryProvider, "kind"> & {
+    residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
+  },
+  model: { residency?: z.output<typeof ModelResidencyDeclaration> | undefined } = {},
+): ModelResidencyV1 {
+  switch (provider.kind) {
+    case "api-key":
+    case "anonymous": {
+      const declared = model.residency ?? provider.residency;
+      return declared ? normalizedResidencyDeclaration(declared) : UNKNOWN_MODEL_RESIDENCY;
+    }
+    case "codex-subscription":
+      return builtInResidencyRule(
+        "us",
+        "subscription",
+        "ChatGPT Codex subscription (chatgpt.com/backend-api/codex) offers no regional processing control.",
+      );
+    case "xai-subscription":
+      return builtInResidencyRule(
+        "us",
+        "subscription",
+        "SuperGrok subscription (api.x.ai) offers no EU processing option.",
+      );
+    case "claude-subscription-workspace":
+    case "claude-subscription-organization":
+      return builtInResidencyRule(
+        "global",
+        "subscription",
+        "Claude subscription on api.anthropic.com; inference_geo accepts only us or global. https://docs.anthropic.com/en/docs/build-with-claude/data-residency",
+      );
+    case "anthropic-workspace":
+    case "anthropic-organization":
+      return builtInResidencyRule(
+        "global",
+        "provider_default",
+        "Anthropic API (api.anthropic.com); inference_geo accepts only us or global. https://docs.anthropic.com/en/docs/build-with-claude/data-residency",
+      );
+    case "vercel-gateway-managed":
+    case "vercel-gateway-workspace":
+    case "vercel-gateway-organization":
+      return builtInResidencyRule(
+        "global",
+        "gateway",
+        "Vercel AI Gateway routes to any provider region unless an inference region is requested; Opengeni requests none.",
+      );
+    case "openrouter-managed":
+    case "openrouter-workspace":
+    case "openrouter-organization":
+      return builtInResidencyRule(
+        "global",
+        "gateway",
+        "OpenRouter routes to providers worldwide; EU routing (eu.openrouter.ai) is enterprise-only and not used.",
+      );
+    case "opper-managed":
+    case "opper-workspace":
+    case "opper-organization":
+      return builtInResidencyRule(
+        "unknown",
+        "gateway",
+        "Opper's processing location depends on the route and is not verified per request.",
+      );
+    case "direct-openai-workspace":
+    case "direct-openai-organization":
+      return builtInResidencyRule(
+        "us",
+        "provider_default",
+        "api.openai.com processes in the US by default; EU data residency projects use eu.api.openai.com, which this connection does not target.",
+      );
+    case "direct-azure-workspace":
+    case "direct-azure-organization":
+      return builtInResidencyRule(
+        "unknown",
+        "unknown",
+        "The connection does not record the Azure deployment type, which can be GlobalStandard.",
+      );
+    default: {
+      const _exhaustive: never = provider.kind;
+      return _exhaustive;
+    }
+  }
+}
+
+const builtinResidencyCache = new WeakMap<Settings, ModelResidencyV1>();
+
+/**
+ * Where the built-in OpenAI or Azure provider processes data:
+ * `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` when the operator declared it, else
+ * a rule. Azure without a declaration is unknown because GlobalStandard
+ * deployments may process in any Azure region.
+ */
+export function builtinModelResidency(settings: Settings): ModelResidencyV1 {
+  const cached = builtinResidencyCache.get(settings);
+  if (cached) return cached;
+  let residency: ModelResidencyV1;
+  if (settings.builtinModelResidencyJson !== undefined) {
+    residency = normalizedResidencyDeclaration(
+      parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson),
+    );
+  } else if (settings.openaiProvider === "azure") {
+    residency = builtInResidencyRule(
+      "unknown",
+      "unknown",
+      "No OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declaration; Azure GlobalStandard deployments may process in any Azure region.",
+    );
+  } else if (settings.openaiBaseUrl) {
+    residency = builtInResidencyRule(
+      "unknown",
+      "unknown",
+      "Custom OpenAI-compatible base URL without an OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declaration.",
+    );
+  } else {
+    residency = builtInResidencyRule(
+      "us",
+      "provider_default",
+      "api.openai.com processes in the US by default.",
+    );
+  }
+  builtinResidencyCache.set(settings, residency);
+  return residency;
+}
+
+export function parseBuiltinModelResidencyJson(
+  value: string,
+): z.output<typeof ModelResidencyDeclaration> {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(value);
+  } catch {
+    throw new Error("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON must be a JSON object");
+  }
+  const parsed = ModelResidencyDeclaration.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(
+      `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON is invalid: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+        .join("; ")}`,
+    );
+  }
+  return parsed.data;
+}
+
 function staticRequestMetadataForDigest(provider: ResolvedModelProvider): {
   anthropic?: ResolvedModelProvider["anthropic"];
   headers: Array<{
@@ -8084,6 +8313,11 @@ function definitionVersionFor(
     // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
     pricing: model.pricing ?? null,
+    // An operator's residency declaration is executable identity: changing
+    // where a route processes data fails accepted turns instead of silently
+    // moving them. Built-in rules and unknown records are code-reviewed or
+    // carry no claim, so they stay out and existing digests are unchanged.
+    ...(residencyIsDeclared(model.residency) ? { residency: model.residency } : {}),
   });
   return `sha256:${createHash("sha256")
     .update("opengeni:model-definition:v1\n", "utf8")
@@ -8796,6 +9030,7 @@ export function configuredModels(
         deployment: { upstreamModelId: id, wireApi: "responses" },
         credentialSource: builtinProvider.credentialSource,
         billing: builtinProvider.billing,
+        residency: builtinModelResidency(settings),
         capabilities,
         ...(pricingSchedules[id] === undefined ? {} : { pricing: pricingSchedules[id] }),
         ...builtinContextLimitsForModel(settings, id),
@@ -8836,6 +9071,7 @@ export function configuredModels(
           deployment: { upstreamModelId, wireApi: provider.api },
           credentialSource: resolvedProvider.credentialSource,
           billing: resolvedProvider.billing,
+          residency: registryModelResidency(provider, model),
           capabilities,
           ...(pricingSchedules[model.id] === undefined
             ? {}
@@ -11528,6 +11764,9 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   }
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
+  if (settings.builtinModelResidencyJson !== undefined) {
+    parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson);
+  }
   if (
     settings.productAccessMode === "configured" &&
     !["local", "test"].includes(settings.environment) &&

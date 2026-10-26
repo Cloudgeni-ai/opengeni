@@ -814,6 +814,11 @@ Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 [`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
+Residency: every route carries `ConfiguredModel.residency`; EU status comes
+only from that record (`isEuResidency`), and unknown is never EU. Canonical:
+`packages/contracts/src/model-residency.ts` and
+[`eu-only-inference.md`](eu-only-inference.md).
+
 Model display: outside Models settings a model is its clean name plus its maker's
 logo, never a routing prefix, connection id or organization/workspace scope.
 `packages/contracts/src/model-display.ts` (`modelDisplayName`, `modelVendor`, re-exported

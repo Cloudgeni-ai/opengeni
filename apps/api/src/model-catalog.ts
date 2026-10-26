@@ -7,6 +7,7 @@ import {
 } from "@opengeni/config";
 import {
   ClientModel,
+  projectClientModelResidency,
   WorkspaceModelCatalogResponse,
   type DefaultModelSelection,
   type WorkspaceModelCatalogResponse as WorkspaceModelCatalogResponseType,
@@ -97,6 +98,7 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     capabilities: model.capabilities,
     ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
     definitionVersion: model.definitionVersion,
+    residency: projectClientModelResidency(model.residency),
   });
 }
 
