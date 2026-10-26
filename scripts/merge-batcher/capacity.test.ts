@@ -9,7 +9,9 @@ import {
   DEFAULT_PROVIDER_JOB_LIMIT,
   MAIN_PRE_FANOUT_JOBS,
   observeMainQueue,
+  runnerJobDemand,
   scanRunnerDemand,
+  selfHostedJob,
 } from "./model";
 
 const MAIN = { head_branch: "main", path: ".github/workflows/ci.yml", event: "push" };
@@ -684,5 +686,213 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
       .sort();
     expect(early).toEqual(["automation-admission", "merge-content", "plan"]);
     expect(early.length).toBe(MAIN_PRE_FANOUT_JOBS);
+  });
+});
+
+describe("hosted-pool accounting counts only GitHub-hosted jobs", () => {
+  const HOSTED = { labels: ["ubuntu-latest"] };
+  const SELF = { labels: ["self-hosted", "linux", "x64", "opengeni-main-gcp"] };
+  const BATCH = {
+    head_branch: "queue/live/b1",
+    path: ".github/workflows/batch-ci.yml",
+    event: "push",
+  };
+  const scan = (runs: Run[], jobs: Record<number, unknown[]>, maxInflight = 1) =>
+    scanRunnerDemand({
+      get: provider(runs, jobs).get,
+      batchWorkflow: ".github/workflows/batch-ci.yml",
+      baseBranch: "main",
+      maxInflight,
+      now: () => NOW,
+    });
+  const live = async (runs: Run[], jobs: Record<number, unknown[]>) => {
+    const cfg = config({
+      BATCHER_MODE: "active",
+      BATCHER_RUNNER_BUDGET: "52",
+      BATCHER_MAIN_RESERVE: "30",
+    });
+    const prefix = `https://api.github.com/repos/${cfg.repository}/`;
+    const p = provider(runs, jobs);
+    const transport = (async (url: string | URL | Request) =>
+      Response.json(await p.get(String(url).slice(prefix.length)))) as unknown as typeof fetch;
+    const github = new GitHubReader(cfg, new GitHubAuth({}), transport);
+    await github.mainBusy();
+    return github.lastHeadroom;
+  };
+  /** A fanned-out main run: the 3 early jobs plus the given fan-out. */
+  const fannedMain = (...fanout: unknown[][]) => [...prePlan(), ...fanout.flat()];
+
+  test("runnerJobDemand skips self-hosted jobs but still validates their status", () => {
+    const mixed = [
+      { status: "queued", ...HOSTED },
+      { status: "in_progress", ...HOSTED },
+      { status: "requested", ...HOSTED },
+      { status: "queued", ...SELF },
+      { status: "in_progress", ...SELF },
+      { status: "requested", ...SELF },
+      { status: "in_progress", labels: ["Self-Hosted", "opengeni-batch-gcp"] },
+      { status: "completed", ...SELF },
+    ];
+    expect(runnerJobDemand(mixed)).toBe(3);
+    expect(runnerJobDemand(mixed.filter((job) => job.labels !== HOSTED.labels))).toBe(0);
+    // Unknown or missing status fails closed even on a self-hosted job.
+    expect(runnerJobDemand([...mixed, { status: "surprise", ...SELF }])).toBeNull();
+    expect(runnerJobDemand([...mixed, { ...SELF }])).toBeNull();
+    expect(selfHostedJob({ status: "queued", ...SELF })).toBe(true);
+    expect(selfHostedJob({ status: "queued", ...HOSTED })).toBe(false);
+  });
+
+  test("missing or non-array labels count as hosted demand (conservative)", async () => {
+    const unlabelled = [
+      { status: "queued" },
+      { status: "queued", labels: null },
+      { status: "queued", labels: "self-hosted" },
+      { status: "queued", labels: { 0: "self-hosted" } },
+      { status: "queued", labels: [] },
+      { status: "queued", labels: [1, null, "self-hosted-ish"] },
+    ];
+    for (const job of unlabelled) expect(selfHostedJob(job)).toBe(false);
+    expect(runnerJobDemand(unlabelled)).toBe(unlabelled.length);
+    const runs: Run[] = [{ id: 1100, status: "in_progress", ...MAIN }];
+    const s = await scan(runs, {
+      1100: fannedMain(
+        many(20, "in_progress", SELF),
+        unlabelled.map((job) => ({ ...job, created_at: iso(30) })),
+      ),
+    });
+    if (!s.ok) throw new Error(`held ${s.hold}`);
+    expect(s).toMatchObject({
+      mainDemand: unlabelled.length,
+      mainQueuedJobs: unlabelled.length,
+      latestMain: { runId: 1100, queuedJobs: unlabelled.length, oldestQueuedSeconds: 30 },
+    });
+    expect(capacityDecision({ ...s, ...production, ...defaults }).capacity.hold).toBe(
+      "main-queued",
+    );
+  });
+
+  test("queued and running self-hosted main jobs neither hold nor consume the hosted pool", async () => {
+    const runs: Run[] = [{ id: 1200, status: "in_progress", ...MAIN }];
+    // The full ~46-job fan-out on opengeni-main-gcp, 30 of them still waiting for a GCP runner.
+    const jobs = {
+      1200: fannedMain(
+        many(30, "queued", { ...SELF, created_at: iso(300) }),
+        many(16, "in_progress", { ...SELF, created_at: iso(400), started_at: iso(100) }),
+      ),
+    };
+    const s = await scan(runs, jobs);
+    if (!s.ok) throw new Error(`held ${s.hold}`);
+    expect(s).toMatchObject({
+      mainDemand: 0,
+      otherDemand: 0,
+      mainQueuedJobs: 0,
+      preFanoutMainRuns: [],
+      latestMain: {
+        runId: 1200,
+        queuedJobs: 0,
+        oldestQueuedSeconds: null,
+        maxStartWaitSeconds: null,
+      },
+    });
+    const d = capacityDecision({ ...s, ...production, ...defaults });
+    expect(d).toMatchObject({
+      allowed: true,
+      reservedMain: 30,
+      capacity: { hold: null, providerRequired: 0 + 28 + 18, mainQueuedJobs: 0 },
+    });
+    // Both production readers agree: no main-queued hold and no hosted occupancy.
+    const headroom = await live(runs, jobs);
+    expect(headroom).toMatchObject({
+      allowed: true,
+      occupied: 0,
+      mainDemand: 0,
+      capacity: { hold: null, mainQueuedJobs: 0, latestMain: { queuedJobs: 0 } },
+    });
+    expect(await readHeadroom({ fresh: provider(runs, jobs).get }, 52, 30)).toMatchObject({
+      allowed: true,
+      capacity: { hold: null, providerRequired: 46 },
+    });
+    // The same fan-out on hosted runners holds, as before.
+    const hosted = {
+      1200: fannedMain(
+        many(30, "queued", { ...HOSTED, created_at: iso(300) }),
+        many(16, "in_progress", HOSTED),
+      ),
+    };
+    const h = await scan(runs, hosted);
+    if (!h.ok) throw new Error(`held ${h.hold}`);
+    expect(h).toMatchObject({ mainDemand: 46, mainQueuedJobs: 30 });
+    expect(capacityDecision({ ...h, ...production, ...defaults }).capacity.hold).toBe(
+      "main-queued",
+    );
+  });
+
+  test("mixed hosted and self-hosted jobs: only hosted ones are main, other and Batch demand", async () => {
+    const runs: Run[] = [
+      { id: 1300, status: "in_progress", ...MAIN },
+      { id: 1290, status: "in_progress", ...MAIN }, // older rerun, self-hosted queue only
+      { id: 1400, status: "in_progress", ...OTHER },
+      { id: 1500, status: "in_progress", ...BATCH },
+    ];
+    const jobs = {
+      1300: fannedMain(
+        many(40, "in_progress", SELF),
+        many(5, "queued", { ...SELF, created_at: iso(500) }),
+        many(2, "in_progress", { ...HOSTED, created_at: iso(90), started_at: iso(60) }),
+      ),
+      1290: fannedMain(many(4, "queued", { ...SELF, created_at: iso(900) })),
+      1400: [...many(3, "in_progress", HOSTED), ...many(6, "in_progress", SELF)],
+      1500: [
+        ...many(2, "in_progress", HOSTED),
+        ...many(17, "in_progress", { labels: ["self-hosted", "opengeni-batch-gcp"] }),
+      ],
+    };
+    const s = await scan(runs, jobs, 2);
+    if (!s.ok) throw new Error(`held ${s.hold}`);
+    expect(s).toMatchObject({
+      mainDemand: 2,
+      otherDemand: 3 + 2,
+      observedBatchDemand: 2,
+      // The per-candidate hosted reservation floor is unchanged.
+      reservedBatchDemand: CANDIDATE_SLOTS,
+      occupiedBatchSlots: 1,
+      mainQueuedJobs: 0,
+      preFanoutMainRuns: [],
+      latestMain: {
+        runId: 1300,
+        queuedJobs: 0,
+        oldestQueuedSeconds: null,
+        maxStartWaitSeconds: 30,
+      },
+    });
+    const d = capacityDecision({ ...s, ...production, ...defaults });
+    // Effective other = 5 - 2 + 18 = 21, so 21 + max(30, 2) + 18 = 69 > 52 holds
+    // first; the provider pool would need 2 + 21 + 28 + 18 = 69 hosted jobs.
+    expect(d.capacity).toMatchObject({ hold: "repository-budget", providerRequired: 69 });
+    // A single hosted main job waiting for a runner still holds beside self-hosted ones.
+    const queued = {
+      ...jobs,
+      1290: fannedMain(many(4, "queued", { ...SELF, created_at: iso(900) }), [
+        { status: "queued", ...HOSTED, created_at: iso(45) },
+      ]),
+    };
+    const q = await scan(runs, queued, 2);
+    if (!q.ok) throw new Error(`held ${q.hold}`);
+    expect(q).toMatchObject({ mainDemand: 3, mainQueuedJobs: 1 });
+    expect(capacityDecision({ ...q, ...production, ...defaults }).capacity.hold).toBe(
+      "main-queued",
+    );
+  });
+
+  test("pre-fan-out stays label-agnostic: a self-hosted plan phase is not proof about the fan-out", async () => {
+    const runs: Run[] = [{ id: 1600, status: "in_progress", ...MAIN }];
+    const s = await scan(runs, {
+      1600: many(MAIN_PRE_FANOUT_JOBS, "in_progress", { ...SELF, created_at: iso(10) }),
+    });
+    if (!s.ok) throw new Error(`held ${s.hold}`);
+    expect(s).toMatchObject({ mainDemand: 0, mainQueuedJobs: 0, preFanoutMainRuns: [1600] });
+    expect(capacityDecision({ ...s, ...production, ...defaults }).capacity.hold).toBe(
+      "main-pre-fanout",
+    );
   });
 });

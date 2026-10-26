@@ -253,16 +253,34 @@ export interface Headroom {
 // hold no runner, and a run without materialized jobs (for example a run held
 // by its concurrency group) is only a placeholder. Any other or missing status
 // returns null so callers hold instead of treating unknown demand as free.
+// Self-hosted jobs (see `selfHostedJob`) are validated the same way but never
+// count: they do not draw from the GitHub-hosted pool.
 const RUNNER_DEMAND_JOB_STATUSES = new Set(["queued", "in_progress", "requested"]);
 const IDLE_JOB_STATUSES = new Set(["waiting", "pending", "completed"]);
+/**
+ * A job whose `labels` include `self-hosted` (any case; runner label matching
+ * is case-insensitive) can only run on a self-hosted runner, for example
+ * `[self-hosted, linux, x64, opengeni-main-gcp]`, so it never holds or requests
+ * a GitHub-hosted runner. Every other job, including one whose `labels` field
+ * is missing or not an array, is GitHub-hosted demand (conservative).
+ */
+export function selfHostedJob(job: unknown): boolean {
+  if (job === null || typeof job !== "object") return false;
+  const labels = (job as { labels?: unknown }).labels;
+  return (
+    Array.isArray(labels) &&
+    labels.some((label) => typeof label === "string" && label.toLowerCase() === "self-hosted")
+  );
+}
 export function runnerJobDemand(jobs: readonly unknown[]): number | null {
   let demand = 0;
   for (const job of jobs) {
     const status =
       job !== null && typeof job === "object" ? (job as { status?: unknown }).status : undefined;
     if (typeof status !== "string") return null;
-    if (RUNNER_DEMAND_JOB_STATUSES.has(status)) demand++;
-    else if (!IDLE_JOB_STATUSES.has(status)) return null;
+    if (RUNNER_DEMAND_JOB_STATUSES.has(status)) {
+      if (!selfHostedJob(job)) demand++;
+    } else if (!IDLE_JOB_STATUSES.has(status)) return null;
   }
   return demand;
 }
@@ -359,7 +377,10 @@ export type RunnerScan =
       reservedBatchDemand: number;
       /** Newest active full-main push CI run (highest run ID), or null when none is active. */
       latestMain: LatestMainObservation | null;
-      /** Jobs `queued` or `requested` for a runner across every active full-main run. */
+      /**
+       * GitHub-hosted jobs `queued` or `requested` for a runner across every
+       * active full-main run; self-hosted jobs are excluded.
+       */
       mainQueuedJobs: number;
       /**
        * Active full-main runs, not proven approval-only, whose complete job page
@@ -381,11 +402,12 @@ export type RunnerScan =
  */
 export const MAIN_PRE_FANOUT_JOBS = 3;
 /**
- * Runner waits observed on the newest active full-main landing run. Queue
- * times are measured from each job's `created_at`: `oldestQueuedSeconds` is the
- * age of the oldest job still `queued` or `requested`, and `maxStartWaitSeconds`
- * the largest `started_at - created_at` among started jobs. Unparseable
- * timestamps yield null measurements; they never create capacity.
+ * GitHub-hosted runner waits observed on the newest active full-main landing
+ * run; self-hosted jobs are not measured. Queue times are measured from each
+ * job's `created_at`: `oldestQueuedSeconds` is the age of the oldest hosted job
+ * still `queued` or `requested`, and `maxStartWaitSeconds` the largest
+ * `started_at - created_at` among started hosted jobs. Unparseable timestamps
+ * yield null measurements; they never create capacity.
  */
 export interface LatestMainObservation {
   runId: number;
@@ -661,12 +683,17 @@ export async function scanRunnerDemand(input: {
       run.event === "push";
     if (isMain) {
       mainDemand += demand;
-      mainQueuedJobs += jobs.filter((job) =>
-        RUNNER_WAIT_JOB_STATUSES.has(String((job as { status?: unknown }).status)),
+      mainQueuedJobs += jobs.filter(
+        (job) =>
+          !selfHostedJob(job) &&
+          RUNNER_WAIT_JOB_STATUSES.has(String((job as { status?: unknown }).status)),
       ).length;
       // A proven approval-only run (for example an old rerun awaiting
       // environment approval) is idle and does not freeze admission; it can
       // only start after approval, which a later observation sees.
+      // Pre-fan-out is deliberately label-agnostic: the labels of jobs the
+      // fan-out has not created yet are unknown, so a self-hosted plan phase
+      // is not proof that the fan-out stays off the hosted pool.
       if (!approvalOnly && jobs.length <= MAIN_PRE_FANOUT_JOBS) preFanoutMainRuns.push(id);
       // GitHub run IDs increase with creation; a rerun keeps its original ID,
       // so the highest active ID is the newest landing's run.
@@ -704,6 +731,7 @@ export function observeMainQueue(
   let maxStart: number | null = null;
   let unmeasured = false;
   for (const job of jobs) {
+    if (selfHostedJob(job)) continue;
     const j = (job ?? {}) as { status?: unknown; created_at?: unknown; started_at?: unknown };
     const created = typeof j.created_at === "string" ? Date.parse(j.created_at) : NaN;
     if (typeof j.status === "string" && RUNNER_WAIT_JOB_STATUSES.has(j.status)) {
@@ -726,9 +754,11 @@ export function observeMainQueue(
 }
 
 /**
- * GitHub's documented concurrent-job default for the Team plan. The org has no
- * self-hosted or larger runners, so every repository in the organization draws
- * from this one hosted pool; it is not a reserved allocation for this repository.
+ * GitHub's documented concurrent-job default for the Team plan. Every
+ * GitHub-hosted job in the organization draws from this one hosted pool; it is
+ * not a reserved allocation for this repository. Self-hosted jobs (for example
+ * main CI on `opengeni-main-gcp`) use their own runners and are excluded from
+ * observed demand; see `selfHostedJob`.
  */
 export const DEFAULT_PROVIDER_JOB_LIMIT = 60;
 /**
@@ -741,7 +771,11 @@ export const DEFAULT_PROVIDER_JOB_LIMIT = 60;
  * maximum. It is a measured assumption from one window, not an observation.
  */
 export const DEFAULT_OTHER_REPOSITORY_ALLOWANCE = 28;
-/** Peak hosted jobs one Batch CI candidate can request (16 unit shards + source, rounded up). */
+/**
+ * Peak hosted jobs one Batch CI candidate can request (16 unit shards + source,
+ * rounded up). This reservation floor assumes Batch CI runs on GitHub-hosted
+ * runners; moving Batch CI to self-hosted runners needs a separate split of it.
+ */
 export const CANDIDATE_SLOTS = 18;
 export type CapacityHold =
   | "main-pre-fanout"
@@ -765,16 +799,17 @@ export interface CapacityObservation {
  * 1. No active full-main run is before its fan-out (see `MAIN_PRE_FANOUT_JOBS`);
  *    its imminent fan-out (up to 46 runner-holding jobs measured) would not fit
  *    beside a candidate.
- * 2. No active full-main run has a job waiting for a runner (`queued` or
- *    `requested`). Main CI is never gated, cancelled or skipped; only new
- *    candidates wait while main is short of runners.
+ * 2. No active full-main run has a GitHub-hosted job waiting for a runner
+ *    (`queued` or `requested`). Main CI is never gated, cancelled or skipped;
+ *    only new candidates wait while main is short of hosted runners.
  * 3. The existing repository allocation: other + max(main reserve, main) +
  *    18 <= runner budget (52/30/18 in the qualified configuration).
  * 4. The provider pool: main + other + other-repository allowance + 18 <=
  *    provider job limit (with defaults, observed repository demand <= 14).
  *
  * Invalid limits fail closed first. Approval-only runs contribute no demand
- * and never count as pre-fan-out.
+ * and never count as pre-fan-out. Main and other demand, queued main jobs and
+ * observed Batch demand count GitHub-hosted jobs only (see `selfHostedJob`).
  */
 export function capacityDecision(input: {
   mainDemand: number;
