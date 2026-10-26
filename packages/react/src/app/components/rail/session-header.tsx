@@ -10,6 +10,7 @@ import { archiveActionLabel } from "../../lib/archive-session";
 // (and screenshotted) in isolation. `CanvasTopStrip` in session-shell owns the
 // data wiring and passes the real slots.
 import { t } from "../../lib/console-text";
+import { cn } from "../../lib/utils";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../../../workstream-control-event";
 import {
   SessionStatus as SessionStatusBadge,
@@ -283,16 +284,28 @@ export function SessionHeader({
           not a chat has a parent, a Site or automations. The parent link
           leads into the title; what only some chats have comes last, so the
           title and access chips never move when a chat gains one. The title
-          takes every pixel the actions leave and truncates first. */}
-      <div className="flex min-w-20 flex-[1_1_5rem] items-center gap-1.5">
-        <SessionAncestryBreadcrumb
-          workspaceId={session.workspaceId}
-          parentSessionId={session.parentSessionId}
-          ancestors={ancestors}
-          loading={lineageLoading}
-          error={lineageError}
-        />
-        <SessionTitleEditor session={session} rename={rename} />
+          takes every pixel the actions leave and truncates first. When the
+          row is crowded, the parent link and the title split it evenly (each
+          up to its natural width), so neither squeezes the other to nothing;
+          a narrow title area (`titlegroup`) shows only the arrow back. */}
+      <div className="@container/titlegroup flex min-w-20 flex-[1_1_5rem] items-center gap-1.5">
+        <div
+          className={cn(
+            "grid min-w-0 items-center gap-x-1.5",
+            session.parentSessionId
+              ? "grid-cols-[minmax(1.5rem,max-content)_minmax(0,max-content)] pointer-coarse:grid-cols-[minmax(2.75rem,max-content)_minmax(0,max-content)]"
+              : "grid-cols-[minmax(0,max-content)]",
+          )}
+        >
+          <SessionAncestryBreadcrumb
+            workspaceId={session.workspaceId}
+            parentSessionId={session.parentSessionId}
+            ancestors={ancestors}
+            loading={lineageLoading}
+            error={lineageError}
+          />
+          <SessionTitleEditor session={session} rename={rename} />
+        </div>
         {/* Below lg the lifecycle is a dot beside the title; the full badge
             and connection pill take over from lg. */}
         <CompactSessionStatus
