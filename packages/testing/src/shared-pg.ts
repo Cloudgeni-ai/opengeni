@@ -1,7 +1,17 @@
-import { execFile } from "node:child_process";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { execFile, spawn } from "node:child_process";
+import { readFileSync, readlinkSync } from "node:fs";
+import {
+  appendFile,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat as statPath,
+  writeFile,
+} from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
@@ -42,6 +52,25 @@ const execFileAsync = promisify(execFile);
 // with pgvector installed. It must name a superuser maintenance connection:
 // this harness creates isolated test databases and restricted roles there, but
 // never starts/stops the server or changes the supplied maintenance database.
+//
+// REAPING ORPHANS
+// ---------------
+// A test process that is killed or crashes never drops its database, and the
+// server outlives every run, so orphans used to pile up until the disk filled.
+// Every database the harness creates now carries its owner (host, boot id, pid
+// namespace, pid, process start time) as its database comment, and every
+// acquisition stamps the template it clones with a last-used time. At most
+// once per REAP_INTERVAL_MS per state directory, an acquisition (or the last
+// holder's release) starts one detached background reaper (`--reap` below,
+// logic in reapOrphanedTestDatabases) that drops, without FORCE:
+//   - per-test `og_<label>_<12 hex>` databases with no connections whose owner
+//     provably died on this machine;
+//   - unowned ones (older checkouts) idle with no connections and no
+//     transactions across a 15-minute window of reaper passes;
+//   - templates unused for 7 days, except this checkout's own (a clone whose
+//     template vanished rebuilds it under the lock).
+// Reaping is best effort: it never blocks or fails a test, and its notes go to
+// `reaper.log` in the state directory. OPENGENI_TEST_PG_REAP=0 turns it off.
 // ---------------------------------------------------------------------------
 
 // Keep the fixed cross-process listener outside Linux's default ephemeral client
@@ -157,6 +186,11 @@ const STATE_DIR = join(
 const LOCK_DIR = join(STATE_DIR, "lock");
 const LOCK_OWNER_FILE = join(LOCK_DIR, "owner.json");
 const CONTAINER_STATE_FILE = join(STATE_DIR, "container.json");
+const REAPER_MARKER_FILE = join(STATE_DIR, "reaper.json");
+const REAPER_OBSERVATIONS_FILE = join(STATE_DIR, "reaper-observations.json");
+const REAPER_LOG_FILE = join(STATE_DIR, "reaper.log");
+const REAP_INTERVAL_MS = 5 * 60_000;
+const TEMPLATE_STAMP_REFRESH_MS = 60 * 60_000;
 
 type LockOwner = {
   pid: number;
@@ -572,6 +606,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
       }
       await ensureAppRole();
       await ensureTemplateBuilt();
+      await maybeStartReaper();
       // Native servers are externally owned, not Docker generations. Release
       // drops only the database allocated by this acquisition, never the server.
       return { generation: "native", token: crypto.randomUUID(), native: true };
@@ -662,6 +697,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
     // crashed partial). Inside the lock so exactly one process pays the
     // migration; every acquire after that just clones from it.
     await ensureTemplateBuilt();
+    await maybeStartReaper();
     const latestState = await readContainerState();
     const holders = latestState?.generation === generation ? latestState.holders : {};
     for (const [token, holder] of Object.entries(holders)) {
@@ -725,6 +761,10 @@ async function releaseContainer(handle: ContainerHandle): Promise<void> {
     // desktop runtime's asynchronous port-proxy teardown, causing every later
     // PostgreSQL test to report the database unavailable.
     await writeContainerState(state);
+    // The last live holder leaving is a good moment to tidy up.
+    if (Object.values(state.holders).every((holder) => !processIsAlive(holder.pid))) {
+      await maybeStartReaper();
+    }
   });
 }
 
@@ -735,6 +775,7 @@ async function createDatabase(dbName: string): Promise<void> {
   const root = postgres(ADMIN_URL, { max: 1 });
   try {
     await root.unsafe(`CREATE DATABASE "${dbName}"`);
+    await recordDatabaseOwner(root, dbName);
   } finally {
     await root.end().catch(() => undefined);
   }
@@ -750,14 +791,24 @@ async function cloneFromTemplate(dbName: string, withheld: readonly string[] = [
   const root = postgres(ADMIN_URL, { max: 1 });
   try {
     const deadline = Date.now() + 30_000;
+    let rebuilt = false;
     for (;;) {
       try {
         await root.unsafe(
           `CREATE DATABASE "${dbName}" TEMPLATE "${await templateDbName(withheld)}"`,
         );
+        await recordDatabaseOwner(root, dbName);
+        await stampTemplateUse(root, await templateDbName(withheld));
         return;
       } catch (err) {
         const message = String((err as { message?: string })?.message ?? err);
+        if (!rebuilt && isMissingTemplateError(err)) {
+          // The reaper pruned a long-unused template (or someone dropped it)
+          // after this process checked it: rebuild it under the lock, once.
+          rebuilt = true;
+          await withLock(() => ensureTemplateBuilt(withheld));
+          continue;
+        }
         if (
           /being accessed by other users|source database/i.test(message) &&
           Date.now() < deadline
@@ -779,6 +830,143 @@ async function dropDatabaseAndRelease(dbName: string, handle: ContainerHandle): 
   await dropper.unsafe(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`).catch(() => undefined);
   await dropper.end().catch(() => undefined);
   await releaseContainer(handle);
+}
+
+/**
+ * Record this process as the database's owner so the reaper can tell an
+ * orphan (owner provably dead) from a database a live test is using. Best
+ * effort: without the record the reaper falls back to its idle-window rule.
+ */
+async function recordDatabaseOwner(root: postgres.Sql, dbName: string): Promise<void> {
+  await root
+    .unsafe(`COMMENT ON DATABASE ${quoteIdent(dbName)} IS ${quoteLiteral(databaseOwnerComment())}`)
+    .catch(
+      (error: unknown) => void reaperNote(`could not record owner of ${dbName}: ${String(error)}`),
+    );
+}
+
+function isMissingTemplateError(error: unknown): boolean {
+  const details = error as { code?: unknown; message?: unknown };
+  return (
+    details?.code === "3D000" &&
+    typeof details.message === "string" &&
+    /template database .* does not exist/iu.test(details.message)
+  );
+}
+
+const stampedTemplates = new Set<string>();
+
+/**
+ * Refresh the template's last-used stamp (once per process, and only when it
+ * is over an hour old) so the reaper keeps templates checkouts still use.
+ * Writes only the shared catalog comment; it never connects to the template.
+ * Best effort.
+ */
+async function stampTemplateUse(root: postgres.Sql, template: string): Promise<void> {
+  if (stampedTemplates.has(template)) return;
+  stampedTemplates.add(template);
+  try {
+    const [row] = await root`
+      SELECT shobj_description(oid, 'pg_database') AS comment
+        FROM pg_database WHERE datname = ${template} AND datistemplate`;
+    if (!row) return;
+    const stamp = parseTemplateStamp(row.comment as string | null);
+    if (stamp && Date.now() - stamp.lastUsedAt < TEMPLATE_STAMP_REFRESH_MS) return;
+    await root.unsafe(
+      `COMMENT ON DATABASE ${quoteIdent(template)} IS ${quoteLiteral(templateStampComment(Date.now()))}`,
+    );
+  } catch (error) {
+    void reaperNote(`could not stamp template ${template}: ${String(error)}`);
+  }
+}
+
+function reaperNote(note: string): Promise<void> {
+  return (async () => {
+    await mkdir(STATE_DIR, { recursive: true });
+    const size = await statPath(REAPER_LOG_FILE).then(
+      (info) => info.size,
+      () => 0,
+    );
+    if (size > 256 * 1024) await rm(REAPER_LOG_FILE, { force: true });
+    await appendFile(
+      REAPER_LOG_FILE,
+      `${new Date().toISOString()} pid=${process.pid} ${note.split("\n")[0]}\n`,
+    );
+  })().catch(() => undefined);
+}
+
+/**
+ * Start the detached reaper unless one ran within REAP_INTERVAL_MS or is still
+ * running. Called under the container lock, which makes the marker check and
+ * update atomic across this state directory's processes. Never throws.
+ */
+async function maybeStartReaper(): Promise<void> {
+  if (process.env.OPENGENI_TEST_PG_REAP === "0") return;
+  try {
+    const marker = await readFile(REAPER_MARKER_FILE, "utf8")
+      .then((source) => JSON.parse(source) as { pid?: unknown; startedAt?: unknown })
+      .catch(() => null);
+    if (
+      marker &&
+      typeof marker.startedAt === "number" &&
+      (Date.now() - marker.startedAt < REAP_INTERVAL_MS ||
+        // A previous pass still running (bounded by its own deadline; past
+        // that the pid has most likely been reused by something else).
+        (Date.now() - marker.startedAt < 4 * REAP_INTERVAL_MS &&
+          typeof marker.pid === "number" &&
+          marker.pid > 0 &&
+          processIsAlive(marker.pid)))
+    ) {
+      return;
+    }
+    const child = spawn(process.execPath, ["--no-env-file", SHARED_PG_MODULE, "--reap"], {
+      cwd: STATE_DIR,
+      detached: true,
+      stdio: "ignore",
+      env: process.env,
+    });
+    child.on("error", (error) => void reaperNote(`could not start the reaper: ${String(error)}`));
+    child.unref();
+    await writeFile(
+      REAPER_MARKER_FILE,
+      JSON.stringify({ pid: child.pid ?? 0, startedAt: Date.now() }),
+      "utf8",
+    );
+  } catch (error) {
+    void reaperNote(`could not start the reaper: ${String(error)}`);
+  }
+}
+
+const SHARED_PG_MODULE = fileURLToPath(import.meta.url);
+
+/** One reaper pass for this harness's cluster; see reapOrphanedTestDatabases. */
+export async function reapSharedTestDatabases(
+  options: { dryRun?: boolean } = {},
+): Promise<ReapResult> {
+  // Test-only: confine a pass to one uniquely named scope so regression tests
+  // never touch other runs' databases on a shared server.
+  const scope = process.env.OPENGENI_TEST_PG_REAP_SCOPE?.trim();
+  const scoped = scope && /^og_[a-z0-9_]+$/u.test(scope) ? scope : undefined;
+  const result = await reapOrphanedTestDatabases({
+    ...options,
+    ...(scoped ? { scopePrefix: scoped, templatePrefix: `${scoped}template_` } : {}),
+    adminUrl: ADMIN_URL,
+    observationsPath: REAPER_OBSERVATIONS_FILE,
+    protectedTemplates: [await templateDbName().catch(() => "")],
+    withTemplateLock: withLock,
+  });
+  if (
+    !options.dryRun &&
+    (result.dropped.length > 0 || result.templatesDropped.length > 0 || result.errors.length > 0)
+  ) {
+    await reaperNote(
+      `reaped ${result.dropped.length} database(s) and ${result.templatesDropped.length} template(s), kept ${result.kept}` +
+        (result.errors.length > 0
+          ? `; ${result.errors.length} note(s): ${result.errors.slice(0, 5).join("; ")}`
+          : ""),
+    );
+  }
+  return result;
 }
 
 function unavailableSharedTestDatabase(): null {
@@ -950,6 +1138,7 @@ export async function acquireOwnerMigratedTestDatabase(
          NOCREATEDB NOREPLICATION PASSWORD '${ownerPassword}'`,
     );
     await root.unsafe(`CREATE DATABASE "${dbName}" OWNER "${ownerRole}"`);
+    await recordDatabaseOwner(root, dbName);
     await root.end().catch(() => undefined);
 
     admin = postgres(adminUrl, { max: 2 });
@@ -1142,4 +1331,512 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Best-effort reaping of orphaned per-test databases and stale templates in
+// the shared test PostgreSQL (see REAPING ORPHANS in the header).
+//
+// Every per-test database is created by a live test process and normally
+// dropped by its `release()`. A process that is killed, crashes or times out
+// never drops it, and on a long-lived shared server those orphans fill the
+// disk. The reaper finds them and drops them, with one safety rule: never
+// drop a database a live test may be using or about to use.
+//
+// - Ownership. Right after creating a database the harness records its owner
+//   (host, boot id, pid namespace, pid and process start time) as the
+//   database comment. A database whose owner ran on this same host, boot and
+//   pid namespace and is no longer running (or whose pid now belongs to a
+//   different process) is an orphan.
+// - Everything else (no owner record, for example a database made by an
+//   older checkout, or one owned by a process we cannot see) is an orphan only
+//   after it stays without connections and without any transaction activity
+//   across several reaper passes spanning `idleWindowMs`.
+// - Drops never use FORCE, so a database that gains a connection is skipped
+//   instead of broken. Only `og_<label>_<12 hex>` names are considered;
+//   templates, `postgres` and every other database are never per-test
+//   candidates.
+// - Templates carry a last-used stamp written on each acquisition. A
+//   template whose stamp is older than `templateRetentionMs` is pruned, except
+//   the templates this checkout uses. A clone whose template vanished rebuilds
+//   it (cloneFromTemplate), and the template build is lock-guarded.
+// Every failure is reported in the result and never thrown.
+// ---------------------------------------------------------------------------
+
+export const DB_OWNER_COMMENT_PREFIX = "opengeni-test-db:v1 ";
+export const TEMPLATE_COMMENT_PREFIX = "opengeni-test-template:v1 ";
+
+export type ProcessIdentity = {
+  host: string;
+  /** Linux boot id; "" where unavailable. */
+  boot: string;
+  /** Linux pid namespace (`pid:[inode]`); "" where unavailable. */
+  pidns: string;
+};
+
+export type DatabaseOwner = ProcessIdentity & {
+  pid: number;
+  /** Process start time in clock ticks since boot (Linux); "" where unavailable. */
+  start: string;
+};
+
+function readTrimmed(path: string): string {
+  try {
+    return readFileSync(path, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** The machine-and-namespace identity a pid is meaningful in. */
+export function currentProcessIdentity(): ProcessIdentity {
+  let pidns = "";
+  try {
+    pidns = readlinkSync("/proc/self/ns/pid");
+  } catch {
+    // not Linux
+  }
+  return { host: hostname(), boot: readTrimmed("/proc/sys/kernel/random/boot_id"), pidns };
+}
+
+/** Start time of `pid` (field 22 of /proc/<pid>/stat), "" if unknown. */
+export function processStartTime(pid: number): string {
+  const stat = readTrimmed(`/proc/${pid}/stat`);
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  return fields[19] ?? "";
+}
+
+export function currentDatabaseOwner(): DatabaseOwner {
+  return {
+    ...currentProcessIdentity(),
+    pid: process.pid,
+    start: processStartTime(process.pid),
+  };
+}
+
+export function databaseOwnerComment(owner: DatabaseOwner = currentDatabaseOwner()): string {
+  return `${DB_OWNER_COMMENT_PREFIX}${JSON.stringify(owner)}`;
+}
+
+export function parseDatabaseOwnerComment(comment: string | null): DatabaseOwner | null {
+  if (!comment?.startsWith(DB_OWNER_COMMENT_PREFIX)) return null;
+  try {
+    const value = JSON.parse(comment.slice(DB_OWNER_COMMENT_PREFIX.length)) as Partial<
+      Record<keyof DatabaseOwner, unknown>
+    >;
+    if (
+      typeof value.host !== "string" ||
+      typeof value.boot !== "string" ||
+      typeof value.pidns !== "string" ||
+      typeof value.start !== "string" ||
+      typeof value.pid !== "number" ||
+      !Number.isSafeInteger(value.pid) ||
+      value.pid <= 0
+    ) {
+      return null;
+    }
+    return {
+      host: value.host,
+      boot: value.boot,
+      pidns: value.pidns,
+      pid: value.pid,
+      start: value.start,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export type OwnerStatus = "alive" | "dead" | "unknown";
+
+/**
+ * "dead" only when the owner provably ran in this exact host, boot and pid
+ * namespace and its pid is gone or now belongs to a different process.
+ * Anything we cannot see from here is "unknown", never "dead".
+ */
+export function ownerStatus(
+  owner: DatabaseOwner,
+  here: ProcessIdentity = currentProcessIdentity(),
+  probe: { alive: (pid: number) => boolean; startTime: (pid: number) => string } = {
+    alive: processIsAlive,
+    startTime: processStartTime,
+  },
+): OwnerStatus {
+  if (owner.host !== here.host || owner.boot !== here.boot || owner.pidns !== here.pidns) {
+    return "unknown";
+  }
+  if (!probe.alive(owner.pid)) return "dead";
+  if (owner.start !== "") {
+    const start = probe.startTime(owner.pid);
+    // A readable, different start time means the pid was reused.
+    if (start !== "" && start !== owner.start) return "dead";
+  }
+  return "alive";
+}
+
+export type TemplateStamp = { lastUsedAt: number };
+
+export function templateStampComment(now: number): string {
+  return `${TEMPLATE_COMMENT_PREFIX}${JSON.stringify({ lastUsedAt: now })}`;
+}
+
+export function parseTemplateStamp(comment: string | null): TemplateStamp | null {
+  if (!comment?.startsWith(TEMPLATE_COMMENT_PREFIX)) return null;
+  try {
+    const value = JSON.parse(comment.slice(TEMPLATE_COMMENT_PREFIX.length)) as {
+      lastUsedAt?: unknown;
+    };
+    return typeof value.lastUsedAt === "number" && Number.isFinite(value.lastUsedAt)
+      ? { lastUsedAt: value.lastUsedAt }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function quoteIdent(name: string): string {
+  return `"${name.replaceAll('"', '""')}"`;
+}
+
+export function quoteLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+/** `og_<label up to 24>_<12 hex>`, the harness's per-test naming scheme. */
+export function isPerTestDatabaseName(
+  name: string,
+  scopePrefix = "og_",
+  templatePrefix = "og_test_template_",
+): boolean {
+  if (!scopePrefix.startsWith("og_") || !name.startsWith(scopePrefix)) return false;
+  if (name.startsWith(templatePrefix)) return false;
+  return /^og_[a-z0-9_]{0,24}_[0-9a-f]{12}$/u.test(name);
+}
+
+export function isTemplateDatabaseName(
+  name: string,
+  templatePrefix = "og_test_template_",
+): boolean {
+  return new RegExp(`^${escapeRegExp(templatePrefix)}[0-9a-f]{12}(_w[0-9a-f]{8})?$`, "u").test(
+    name,
+  );
+}
+
+type Observation = { oid: string; xacts: string; since: number };
+type ObservationState = { databases: Record<string, Observation> };
+
+async function readObservations(path: string): Promise<ObservationState> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<ObservationState>;
+    if (parsed.databases && typeof parsed.databases === "object") {
+      const databases: Record<string, Observation> = {};
+      for (const [name, entry] of Object.entries(parsed.databases)) {
+        if (
+          entry &&
+          typeof entry.oid === "string" &&
+          typeof entry.xacts === "string" &&
+          typeof entry.since === "number"
+        ) {
+          databases[name] = entry;
+        }
+      }
+      return { databases };
+    }
+  } catch {
+    // missing or unreadable: start over (only delays legacy reaping)
+  }
+  return { databases: {} };
+}
+
+async function writeObservations(path: string, state: ObservationState): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(state), "utf8");
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
+}
+
+export type ReapOptions = {
+  /** Superuser maintenance URL of the shared cluster. */
+  adminUrl: string;
+  /** Where idle observations of unowned databases persist between passes. */
+  observationsPath: string;
+  /** Only databases whose names start with this (and match the scheme). */
+  scopePrefix?: string;
+  templatePrefix?: string;
+  /** Templates never pruned (this checkout's). */
+  protectedTemplates?: readonly string[];
+  /** Run template pruning under the harness's container lock. */
+  withTemplateLock?: <T>(fn: () => Promise<T>) => Promise<T>;
+  pruneTemplates?: boolean;
+  /** Classify and report without dropping or stamping anything. */
+  dryRun?: boolean;
+  idleWindowMs?: number;
+  templateRetentionMs?: number;
+  maxDrops?: number;
+  deadlineMs?: number;
+  now?: () => number;
+  here?: ProcessIdentity;
+  probe?: { alive: (pid: number) => boolean; startTime: (pid: number) => string };
+};
+
+export type ReapResult = {
+  /** Dropped (or, in a dry run, would drop). */
+  dropped: string[];
+  kept: number;
+  templatesDropped: string[];
+  errors: string[];
+};
+
+export const DEFAULT_IDLE_WINDOW_MS = 15 * 60_000;
+export const DEFAULT_TEMPLATE_RETENTION_MS = 7 * 24 * 60 * 60_000;
+
+type DatabaseRow = {
+  oid: string;
+  datname: string;
+  datistemplate: boolean;
+  invalid: boolean;
+  comment: string | null;
+  connections: number;
+  xacts: string;
+};
+
+function short(error: unknown): string {
+  const message = String((error as { message?: unknown })?.message ?? error);
+  return message.split("\n")[0]!.slice(0, 200);
+}
+
+/**
+ * One reaping pass. Never throws: every failure (unreachable server, failed
+ * drop, lock timeout, missing privilege) is recorded in `errors`.
+ */
+export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<ReapResult> {
+  const result: ReapResult = { dropped: [], kept: 0, templatesDropped: [], errors: [] };
+  const now = options.now ?? Date.now;
+  const started = now();
+  const scopePrefix = options.scopePrefix ?? "og_";
+  const templatePrefix = options.templatePrefix ?? "og_test_template_";
+  const idleWindowMs = options.idleWindowMs ?? DEFAULT_IDLE_WINDOW_MS;
+  const maxDrops = options.maxDrops ?? 200;
+  const deadline = started + (options.deadlineMs ?? 5 * 60_000);
+  const here = options.here ?? currentProcessIdentity();
+  let sql: postgres.Sql | null = null;
+  try {
+    sql = postgres(options.adminUrl, {
+      max: 1,
+      connect_timeout: 10,
+      onnotice: () => undefined,
+      // Never wait on a database someone is creating, cloning or dropping.
+      connection: { lock_timeout: 2000, statement_timeout: 120_000, application_name: "og-reaper" },
+    });
+    const rows = (await sql`
+      SELECT d.oid::text AS oid, d.datname, d.datistemplate,
+             d.datconnlimit = -2 AS invalid,
+             shobj_description(d.oid, 'pg_database') AS comment,
+             (SELECT count(*)::int FROM pg_stat_activity a WHERE a.datid = d.oid) AS connections,
+             coalesce(s.xact_commit + s.xact_rollback, 0)::text AS xacts
+        FROM pg_database d
+        LEFT JOIN pg_stat_database s ON s.datid = d.oid
+       WHERE starts_with(d.datname, ${scopePrefix})
+    `) as unknown as DatabaseRow[];
+
+    const observations = await readObservations(options.observationsPath);
+    const nextObservations: ObservationState = { databases: {} };
+    const candidates: DatabaseRow[] = [];
+    for (const row of rows) {
+      if (row.datistemplate || !isPerTestDatabaseName(row.datname, scopePrefix, templatePrefix)) {
+        continue;
+      }
+      if (row.connections > 0) {
+        result.kept += 1;
+        continue;
+      }
+      if (row.invalid) {
+        // A half-dropped database nobody can connect to.
+        candidates.push(row);
+        continue;
+      }
+      const owner = parseDatabaseOwnerComment(row.comment);
+      const status = owner ? ownerStatus(owner, here, options.probe) : "unknown";
+      if (status === "dead") {
+        candidates.push(row);
+        continue;
+      }
+      if (status === "alive") {
+        result.kept += 1;
+        continue;
+      }
+      // Unknown owner: orphan only after staying idle across the window.
+      const previous = observations.databases[row.datname];
+      const since =
+        previous && previous.oid === row.oid && previous.xacts === row.xacts
+          ? previous.since
+          : now();
+      nextObservations.databases[row.datname] = { oid: row.oid, xacts: row.xacts, since };
+      if (now() - since >= idleWindowMs) {
+        candidates.push(row);
+      } else {
+        result.kept += 1;
+      }
+    }
+
+    for (const row of candidates) {
+      if (result.dropped.length >= maxDrops || now() > deadline) {
+        result.kept += 1;
+        continue;
+      }
+      if (options.dryRun) {
+        result.dropped.push(row.datname);
+        continue;
+      }
+      try {
+        // No FORCE: a database that gained a connection fails here and is kept.
+        await sql.unsafe(`DROP DATABASE IF EXISTS ${quoteIdent(row.datname)}`);
+        result.dropped.push(row.datname);
+        delete nextObservations.databases[row.datname];
+      } catch (error) {
+        result.kept += 1;
+        result.errors.push(`${row.datname}: ${short(error)}`);
+        continue;
+      }
+      // acquireOwnerMigratedTestDatabase's per-database login role.
+      const ownerRole = `${row.datname}_owner`.slice(0, 63);
+      try {
+        const [role] = await sql`SELECT 1 FROM pg_roles WHERE rolname = ${ownerRole}`;
+        if (role) await sql.unsafe(`DROP ROLE IF EXISTS ${quoteIdent(ownerRole)}`);
+      } catch (error) {
+        result.errors.push(`${ownerRole}: ${short(error)}`);
+      }
+    }
+
+    try {
+      if (!options.dryRun) await writeObservations(options.observationsPath, nextObservations);
+    } catch (error) {
+      result.errors.push(`observations: ${short(error)}`);
+    }
+
+    if (options.pruneTemplates !== false && !options.dryRun) {
+      await pruneStaleTemplates(sql, rows, {
+        templatePrefix,
+        protectedTemplates: new Set(options.protectedTemplates ?? []),
+        retentionMs: options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
+        withLock: options.withTemplateLock ?? ((fn) => fn()),
+        now,
+        deadline,
+        result,
+      });
+    }
+  } catch (error) {
+    result.errors.push(short(error));
+  } finally {
+    await sql?.end({ timeout: 5 }).catch(() => undefined);
+  }
+  return result;
+}
+
+async function pruneStaleTemplates(
+  sql: postgres.Sql,
+  rows: DatabaseRow[],
+  context: {
+    templatePrefix: string;
+    protectedTemplates: Set<string>;
+    retentionMs: number;
+    withLock: <T>(fn: () => Promise<T>) => Promise<T>;
+    now: () => number;
+    deadline: number;
+    result: ReapResult;
+  },
+): Promise<void> {
+  const { result } = context;
+  for (const row of rows) {
+    if (
+      !row.datistemplate ||
+      !isTemplateDatabaseName(row.datname, context.templatePrefix) ||
+      context.protectedTemplates.has(row.datname)
+    ) {
+      continue;
+    }
+    const stamp = parseTemplateStamp(row.comment);
+    if (!stamp) {
+      // Built by a checkout that predates stamping: start its clock now.
+      try {
+        await sql.unsafe(
+          `COMMENT ON DATABASE ${quoteIdent(row.datname)} IS ${quoteLiteral(templateStampComment(context.now()))}`,
+        );
+      } catch (error) {
+        result.errors.push(`${row.datname}: ${short(error)}`);
+      }
+      continue;
+    }
+    if (
+      context.now() - stamp.lastUsedAt < context.retentionMs ||
+      context.now() > context.deadline
+    ) {
+      continue;
+    }
+    try {
+      const dropped = await context.withLock(() => dropTemplate(sql, row, context));
+      if (dropped) result.templatesDropped.push(row.datname);
+    } catch (error) {
+      result.errors.push(`${row.datname}: ${short(error)}`);
+    }
+  }
+}
+
+/**
+ * Drop one stale template. Called under the container lock, so no harness
+ * process is building templates meanwhile. Every step is pinned to the oid
+ * observed earlier, and a template that was used again (fresh stamp), has a
+ * connection or a clone in progress is kept.
+ */
+async function dropTemplate(
+  sql: postgres.Sql,
+  row: DatabaseRow,
+  context: { retentionMs: number; now: () => number; result: ReapResult },
+): Promise<boolean> {
+  const [current] = await sql`
+    SELECT shobj_description(d.oid, 'pg_database') AS comment,
+           (SELECT count(*)::int FROM pg_stat_activity a
+             WHERE a.datid = d.oid
+                OR (position(d.datname IN coalesce(a.query, '')) > 0
+                    AND a.state = 'active' AND a.pid <> pg_backend_pid())) AS busy
+      FROM pg_database d
+     WHERE d.oid = ${row.oid}::oid AND d.datname = ${row.datname} AND d.datistemplate`;
+  if (!current) return false;
+  const stamp = parseTemplateStamp(current.comment as string | null);
+  if (!stamp || context.now() - stamp.lastUsedAt < context.retentionMs || current.busy > 0) {
+    return false;
+  }
+  // PostgreSQL refuses to drop a template; unmark it first, and restore the
+  // mark if the drop does not go through (for example a clone holds it).
+  await sql`UPDATE pg_database SET datistemplate = false WHERE oid = ${row.oid}::oid AND datistemplate`;
+  try {
+    await sql.unsafe(`DROP DATABASE IF EXISTS ${quoteIdent(row.datname)}`);
+    return true;
+  } catch (error) {
+    await sql`UPDATE pg_database SET datistemplate = true WHERE oid = ${row.oid}::oid`.catch(
+      () => undefined,
+    );
+    context.result.errors.push(`${row.datname}: ${short(error)}`);
+    return false;
+  }
+}
+
+// Detached reaper entry point, started by maybeStartReaper().
+if (import.meta.main && process.argv.includes("--reap")) {
+  const dryRun = process.argv.includes("--dry-run");
+  await reapSharedTestDatabases({ dryRun }).then(
+    (result) => {
+      if (dryRun) console.log(JSON.stringify(result, null, 2));
+    },
+    (error: unknown) => reaperNote(`reaper failed: ${String(error)}`),
+  );
+  process.exit(0);
 }
