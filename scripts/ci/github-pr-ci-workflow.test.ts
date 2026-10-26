@@ -115,6 +115,9 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   const changesets = steps[index("scripts/ci/changeset-plan.ts")];
   expect(changesets.run).toContain("set -euo pipefail");
   expect(changesets.run).toContain("bun scripts/generate-site-browser-runtime.ts --check");
+  expect(changesets.run).toContain(
+    "bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'",
+  );
   expect(changesets.if).toBeUndefined();
   expect(changesets["continue-on-error"]).toBeUndefined();
   // Cheapest checks first; every one runs before the selected unit files.

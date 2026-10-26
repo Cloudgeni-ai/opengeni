@@ -82,12 +82,15 @@ jobs:
       - name: Install contract dependencies
         run: bun install --frozen-lockfile
       # Seconds-cheap Batch source contracts run here first, so a PR cannot
-      # fail a whole batch on them (same scripts as batch-source.ts).
-      - name: Check pending changesets and committed Site runtime
+      # fail a whole batch on them (same scripts as batch-source.ts). The
+      # workflow graph is otherwise checked only by unit tests that a
+      # workflow-changing PR defers to Batch.
+      - name: Check pending changesets, Site runtime and workflow graph
         run: |
           set -euo pipefail
           bun scripts/ci/changeset-plan.ts
           bun scripts/generate-site-browser-runtime.ts --check
+          bun scripts/workflow-execution-graph.ts --git-tree 'HEAD^{tree}'
       - name: Fast lint gate
         run: bun run lint
       - uses: actions/download-artifact@v4

@@ -82,7 +82,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "16ca8ce1cce01001b92877c9043bf9c52411d488f07209604a24a4717b756968"
+      "sha256": "b5ca7a626049863df31111e8c351b81d62261e3e9e516a4b8fb023954ab2ed21"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -1520,8 +1520,8 @@
     {
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "fast",
-      "step": "Check pending changesets and committed Site runtime",
-      "sha256": "ccbd01abb8277fb0eb2f7825a8f8f3aaf557ef8a7a44f4f8341e8f3f9917c02d"
+      "step": "Check pending changesets, Site runtime and workflow graph",
+      "sha256": "3bb3d452ae5d74d7c7d15ed86d661e9bfdf43237569105850cab433309d4a735"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",

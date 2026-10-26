@@ -559,7 +559,9 @@ covers Batch's seconds-cheap source contracts, lint, impacted types and at most
 The cheap source contracts are the shared pending-changeset release plan
 (`scripts/ci/changeset-plan.ts`, also used by Batch: an unknown package, a mixed
 ignored/not-ignored changeset or an ignored-only plan fails the PR), the committed
-Site runtime check, and the impact plan's guards except lint (its own step),
+Site runtime check, the committed workflow execution graph (otherwise only a unit
+test that workflow-changing PRs defer to Batch), and the impact plan's guards
+except lint (its own step),
 `subscription-contract` (about 20 seconds) and the output-producing guards Batch
 also defers. A broken changeset or stale public API snapshot therefore fails its
 own PR instead of a batch of up to 15.
