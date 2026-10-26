@@ -1436,7 +1436,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceGatewayCustomModel"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "createWorkspaceInstructionPolicyDraft",
@@ -1471,7 +1472,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceOpenRouterCustomModel"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "createWorkspaceOpperCustomModel",
@@ -1480,7 +1482,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "CreateWorkspaceOpperCustomModelRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "createWorkspaceWebhook",
@@ -1907,14 +1910,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "DeleteWorkspaceGatewayCustomModelRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceModelAccessPolicy",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/model-policy",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceOpenRouterCustomModel",
@@ -1923,7 +1928,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "DeleteWorkspaceOpenRouterCustomModelRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceOpperCustomModel",
@@ -1932,7 +1938,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "DeleteWorkspaceOpperCustomModelRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "deleteWorkspaceWebhook",
@@ -4831,6 +4838,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "query": [
       "cursor",
+      "includeSubSessions",
       "kind",
       "limit",
       "q",
@@ -6805,21 +6813,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/revisions",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/learning/revisions/:revisionId/activate",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/revisions/:revisionId/activate",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/learning/rollback",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/rollback",
     "request": [],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/data/get",
@@ -8719,7 +8730,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "WorkspaceInferenceControlResponse"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "setWorkspacePauseTimer",
@@ -8728,7 +8740,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "WorkspacePauseTimerRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "sitePublicationPath",
@@ -9867,7 +9880,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "VideoGenerationPolicy"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateWorkspace",
@@ -9926,7 +9940,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "UpdateWorkspaceModelPolicyRequest"
     ],
-    "response": []
+    "response": [],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateWorkspaceModelAccountSettings",
@@ -9949,7 +9964,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Workspace"
-    ]
+    ],
+    "permission": "workspace:admin"
   },
   {
     "id": "updateWorkspaceWebhook",

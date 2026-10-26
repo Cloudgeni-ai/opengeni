@@ -178,6 +178,7 @@ import {
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
+  type VideoGenerationUnavailableResult,
   IN_PROCESS_INTEGRATION_TOOL_FAMILY_DOMAINS,
   firstPartyToolFamily,
   integrationToolFamily,
@@ -2295,9 +2296,13 @@ export type BuildAgentOptions = {
           context: { toolCallId: string },
         ) => Promise<unknown>;
       };
-  /** Host-owned durable asynchronous video-generation boundary for this turn. */
+  /**
+   * Host-owned durable asynchronous video-generation boundary for this turn.
+   * Both calls read the workspace's live state, so a turn can turn video on
+   * and use it; while video can't run they return an `unavailable` result.
+   */
   videoGeneration?: {
-    capabilities: () => Promise<VideoGenerationCapabilities>;
+    capabilities: () => Promise<VideoGenerationCapabilities | VideoGenerationUnavailableResult>;
     execute: (
       input: import("@opengeni/contracts").GenerateVideoToolInput,
       context: { toolCallId: string },

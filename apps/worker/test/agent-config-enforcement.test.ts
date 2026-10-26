@@ -110,6 +110,8 @@ type FixtureOptions = {
     phase: "tool-preparation" | "agent-build",
   ) => Promise<Awaited<ReturnType<typeof db.getWorkspaceVideoGenerationPolicy>>>;
   videoEnabled?: boolean;
+  /** Build the runtime agent without the video adapter, as before it was always attached. */
+  withoutVideoAdapter?: boolean;
   lazy?: boolean;
   productMcp?: boolean;
   builtins?: boolean;
@@ -299,10 +301,15 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         agentOptions.onToolCancellationFence?.(
           runtimeExports.createTurnToolCancellationController(),
         );
+      const { videoGeneration, ...withoutVideo } = agentOptions;
       return buildOpenGeniAgent(
         options.videoEnabled ? { ...runSettings, sandboxBackend: "none" } : runSettings,
         resources,
-        { ...agentOptions, model },
+        {
+          ...withoutVideo,
+          ...(videoGeneration && !options.withoutVideoAdapter ? { videoGeneration } : {}),
+          model,
+        },
       );
     },
   } satisfies Pick<OpenGeniRuntime, "prepareTools" | "buildAgent">;
@@ -583,6 +590,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
         video: buildOptions?.videoGeneration !== undefined,
       } satisfies AgentMediaAttachment,
       skillCatalog: toolRuntime.skillCatalog,
+      modelVisibleSkillCatalogText: built.modelVisibleSkillCatalogText,
       skillCatalogWrites,
       governanceWrites,
       selectedServerIds: policy.turnTools.map((tool) => tool.id).sort(),
@@ -1160,7 +1168,8 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
           },
           videoEnabled: true,
         });
-        expect(captured.metadataReads).toEqual({ skillDescriptors: 0, videoPolicy: 1 });
+        // The video tools read the policy when called, never at turn start.
+        expect(captured.metadataReads).toEqual({ skillDescriptors: 0, videoPolicy: 0 });
         expect(reads.mock.calls.filter(([path]) => String(path).includes("bundled_"))).toEqual([]);
         expect(captured.skillCatalog).toEqual([]);
         expect(captured.names).not.toContain("skill_read");
@@ -1177,26 +1186,34 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
     },
   );
 
-  test("disabled Skills still fail when agent build's live video-policy read fails", async () => {
+  test("a failing live video-policy read fails the video tool call, not the turn's start", async () => {
     const phases: string[] = [];
     const failure = new Error("live video policy unavailable");
-    await expect(
-      captureWorkerRequest({
-        agent: agentConfig("all", "skills", false),
-        loadVideoPolicy: async (phase) => {
-          phases.push(phase);
-          throw failure;
-        },
-      }),
-    ).rejects.toBe(failure);
-    expect(phases).toEqual(["agent-build"]);
+    const captured = await captureWorkerRequest({
+      agent: agentConfig("all", "skills", false),
+      videoEnabled: true,
+      loadVideoPolicy: async (phase) => {
+        phases.push(phase);
+        throw failure;
+      },
+    });
+    expect(phases).toEqual([]);
+    expect(captured.names).toContain("generate_video");
+    // The tool's own call reads the live policy, and its failure is the call's.
+    const live = spyOn(db, "getWorkspaceVideoGenerationPolicy").mockRejectedValue(failure);
+    try {
+      await expect(captured.buildOptions.videoGeneration!.capabilities()).rejects.toBe(failure);
+      expect(live).toHaveBeenCalledTimes(1);
+    } finally {
+      live.mockRestore();
+    }
   });
 
   test.each(["read", "manage"] as const)(
-    "enabled Skills %s retain metadata failures and the later live video-policy read",
+    "enabled Skills %s retain metadata failures and their video-policy read",
     async (skills) => {
       const failure = new Error("Skill metadata unavailable");
-      for (const failingRead of ["descriptors", "initial-video", "live-video"] as const) {
+      for (const failingRead of ["descriptors", "initial-video"] as const) {
         const phases: string[] = [];
         await expect(
           captureWorkerRequest({
@@ -1207,11 +1224,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
             },
             loadVideoPolicy: async (phase) => {
               phases.push(phase);
-              if (
-                failingRead === "initial-video" ||
-                (failingRead === "live-video" && phase === "agent-build")
-              )
-                throw failure;
+              if (failingRead === "initial-video") throw failure;
               return {
                 schemaVersion: 1,
                 revision: 0,
@@ -1222,12 +1235,38 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
             },
           }),
         ).rejects.toBe(failure);
-        expect(phases).toEqual(
-          failingRead === "live-video" ? ["tool-preparation", "agent-build"] : ["tool-preparation"],
-        );
+        expect(phases).toEqual(["tool-preparation"]);
       }
     },
   );
+
+  test("with video off, attaching the video tools leaves the first model request byte-identical", async () => {
+    const off = async () => ({
+      schemaVersion: 1 as const,
+      revision: 4,
+      fundingSource: "workspace_gateway" as const,
+      enabledModelIds: [],
+      defaultModelId: null,
+    });
+    const attached = await captureWorkerRequest({
+      agent: agentConfig("all", "skills", "read"),
+      videoEnabled: true,
+      lazy: true,
+      loadVideoPolicy: off,
+    });
+    const before = await captureWorkerRequest({
+      agent: agentConfig("all", "skills", "read"),
+      videoEnabled: true,
+      lazy: true,
+      loadVideoPolicy: off,
+      withoutVideoAdapter: true,
+    });
+    expect(attached.deferredNames).toContain("generate_video");
+    expect(attached.deferredNames).toContain("get_video_generation_capabilities");
+    expect(before.deferredNames).not.toContain("generate_video");
+    expect(JSON.stringify(attached.request)).toBe(JSON.stringify(before.request));
+    expect(attached.modelVisibleSkillCatalogText).toBe(before.modelVisibleSkillCatalogText);
+  });
 
   test.each([false, "read", "manage"] as const)(
     "skills %s exposes only its permitted tool family",

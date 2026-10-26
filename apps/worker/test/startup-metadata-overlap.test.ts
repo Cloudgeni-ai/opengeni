@@ -10,16 +10,19 @@ const pairs = [
     bindings: ["skillConfiguration", "sharedSkillDescriptors"],
     readers: ["getWorkspaceVideoGenerationPolicy", "listSkillDescriptors"],
   },
-  {
-    name: "agent metadata",
-    file: "agent-build.ts",
-    functionName: "buildTurnAgent",
-    bindings: ["sessionInstructions", "videoGenerationPolicy"],
-    readers: ["recoveryAwareSessionInstructions", "getWorkspaceVideoGenerationPolicy"],
-  },
 ] as const;
 
-function readPair(pair: (typeof pairs)[number]) {
+// Agent build reads recovery truth once; the video tools read the live video
+// policy themselves, on every call, so it is no longer paired here.
+const agentBuild = {
+  name: "agent metadata",
+  file: "agent-build.ts",
+  functionName: "buildTurnAgent",
+  bindings: ["sessionInstructions"],
+  readers: ["recoveryAwareSessionInstructions"],
+} as const;
+
+function readPair(pair: (typeof pairs)[number] | typeof agentBuild) {
   const source = readFileSync(
     new URL(`../src/activities/agent-turn/${pair.file}`, import.meta.url),
     "utf8",
@@ -134,23 +137,15 @@ for (const pair of pairs) {
             [pair.bindings[1]]: "value-1",
           });
           expect(f.writes()).toBe(1);
-          expect(f.calls[0]!.args).toEqual(
-            pair.name === "agent metadata"
-              ? [f.db, f.input.workspaceId, f.session]
-              : [f.db, f.input.workspaceId],
-          );
-          expect(f.calls[1]!.args).toEqual(
-            pair.name === "agent metadata"
-              ? [f.db, f.input.workspaceId]
-              : [
-                  f.db,
-                  {
-                    accountId: f.input.accountId,
-                    workspaceId: f.input.workspaceId,
-                    subjectId: f.deps.fileAuthoritySubjectId,
-                  },
-                ],
-          );
+          expect(f.calls[0]!.args).toEqual([f.db, f.input.workspaceId]);
+          expect(f.calls[1]!.args).toEqual([
+            f.db,
+            {
+              accountId: f.input.accountId,
+              workspaceId: f.input.workspaceId,
+              subjectId: f.deps.fileAuthoritySubjectId,
+            },
+          ]);
         } finally {
           for (const [index, read] of f.reads.entries()) read.resolve(`value-${index}`);
           await f.running;
@@ -206,7 +201,7 @@ function callOffsets(node: Node, name: string): number[] {
 
 test("paired reads retain authority placement, separate live video reads and fenced catalog ordering", () => {
   const tools = readPair(pairs[0]);
-  const agent = readPair(pairs[1]);
+  const agent = readPair(agentBuild);
   const toolNode = { type: "BlockStatement", body: tools.body } as Node;
   const agentNode = { type: "BlockStatement", body: agent.body } as Node;
   const toolRead = callOffsets(toolNode, "getWorkspaceVideoGenerationPolicy");

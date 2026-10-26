@@ -345,6 +345,16 @@ const ACCESS_GATES = new Set([
 ]);
 
 /**
+ * Shared access checks that take no permission argument, with the one they
+ * require. Workspace settings need workspace:admin; only a Personal
+ * workspace's own named owner gets in without it, and nobody acting through
+ * another product is that owner.
+ */
+const FIXED_PERMISSION_GATES: Readonly<Record<string, string>> = {
+  requireWorkspaceSettingsGrant: "workspace:admin",
+};
+
+/**
  * The permission a route requires before it does anything else: the one its
  * handler passes to a shared access check (`await requireAccessGrant(c, deps,
  * workspaceId, "sessions:read")`) in its opening declarations and statements,
@@ -369,7 +379,10 @@ function gatePermission(sources: readonly string[]): { permission?: string } {
       if (!expressions) return null;
       for (const expression of expressions) {
         const call = expression?.type === "AwaitExpression" ? expression.argument : null;
-        if (call?.type !== "CallExpression" || !ACCESS_GATES.has(calleeName(call) ?? "")) continue;
+        if (call?.type !== "CallExpression") continue;
+        const fixed = FIXED_PERMISSION_GATES[calleeName(call) ?? ""];
+        if (fixed !== undefined) return fixed;
+        if (!ACCESS_GATES.has(calleeName(call) ?? "")) continue;
         const last = (call.arguments as AstNode[]).at(-1);
         return last?.type === "Literal" &&
           typeof last.value === "string" &&

@@ -1,0 +1,6 @@
+---
+"@opengeni/contracts": minor
+"@opengeni/runtime": patch
+---
+
+Asking for a video in a workspace where video generation is off now gets a plain answer instead of a hunt for a tool that isn't there. `get_video_generation_capabilities` and `generate_video` stay attached wherever the deployment has object storage and a sandbox, and each call reads the workspace's live video policy and credential, so a chat can turn video on and generate in the same turn. While video can't run, both return a new `unavailable` result (`VideoGenerationUnavailableResult`, now part of `VideoGenerationToolResult`): when Opengeni credits can pay, it states the price of a 5-second clip and carries `turnOn`, the exact `updateVideoGenerationPolicy` app action call built from the live policy revision; otherwise it says how a workspace admin can turn it on, or that this deployment can't make videos. A credit or workspace-limit refusal at admission is the same plain result rather than a tool error. The `videoGeneration` adapter's `capabilities()` may now return that result. Workspace settings routes (including `updateVideoGenerationPolicy`) carry `workspace:admin` in the action catalog, so they aren't offered to people acting through another product without it.
