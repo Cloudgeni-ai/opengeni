@@ -277,13 +277,22 @@ only after its whole fleet runs the candidate. A release may instead boot the
 candidate with the flag already on when the notice protocol is unchanged:
 `packages/contracts/src/child-lifecycle-notice-protocol.gen.json` (rendered by
 `bun scripts/generate-child-lifecycle-notice-protocol.ts`, checked by the
-contracts test) describes every kind name, the gated kinds and their wake
-classes, every exported `CHILD_*` limit, and the input JSON Schema of each
-gated payload, including the message and source of every refinement and value
-rewrite. Release tooling compares that file at the live and the candidate
-revision and keeps the second rollout unless both are byte-identical. A change
-an older consumer would treat differently but the rendering cannot see, such
-as a field whose meaning changes, must bump
+contracts test) describes every kind name, the classifications, the gated
+kinds and their wake classes, the paused-notice classification rule, every
+exported `CHILD_*` limit, and the input JSON Schema of each gated payload with
+the full definition of every check (limits, patterns with flags, formats, URL
+restrictions, value rewrites). A refinement is accepted only from a helper that
+records its limit as data (`UTF8_BYTE_LIMIT_CHECKS`); any other or conditional
+refinement, pipe, transform or preprocessing step fails the generator. Release
+tooling compares that file at the live and the candidate revision and keeps
+the second rollout unless both are byte-identical.
+
+The rendering cannot see what a field means or what the producers in
+`packages/db` write outside the payload schema: the `sourceId` older consumers
+use to supersede pending notices, the dedupe keys (pinned by
+`packages/db/test/child-lifecycle-notice-protocol-pin.test.ts`), the
+classification chosen per kind, `summary` and `lineage`, and how a consumer
+supersedes, wakes on or renders a notice. Changing any of them must bump
 `CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION`.
 
 An idle `child_terminal_result` is result-bearing. The idle settlement that

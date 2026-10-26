@@ -16,14 +16,17 @@ import * as contracts from "./index";
  * two-step rollout.
  *
  * The rendering covers every kind name, the gated kinds, their wake classes,
- * every exported `CHILD_*` limit, and each gated payload variant's input JSON
- * Schema including the message and source of every refinement. Bump
- * `CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION` for any change an older consumer
- * could handle differently that this rendering cannot see (for example a field
- * whose meaning changes while its schema stays the same).
+ * the classifications, the paused-notice classification rule, every exported
+ * `CHILD_*` limit, and each gated payload variant's input JSON Schema plus
+ * the full definition of every check on every node (limits, patterns with
+ * flags, formats, URL restrictions). A refinement is accepted only from a
+ * helper that records its limit as data (`UTF8_BYTE_LIMIT_CHECKS`) and is
+ * recorded with that limit, its message and its source. Any other
+ * refinement, a conditional (`when`) refinement, a pipe, transform or
+ * preprocessing step is refused, so the rendering never calls two different
+ * schemas identical. `CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION` covers what a
+ * schema cannot express.
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 1;
-
 export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_FORMAT = "opengeni.child-lifecycle-notice-protocol/v1";
 
 /** The child lifecycle kinds produced only while the rollout flag is on. */
@@ -58,9 +61,12 @@ function sortJson(value: unknown): Json {
   throw new Error(`child lifecycle notice protocol: cannot render ${typeof value}`);
 }
 
-type ZodInternals = {
-  _zod: { def: { type: string; checks?: Array<{ _zod: { def: Record<string, unknown> } }> } };
-};
+type ZodCheckInternals = { _zod: { def: Record<string, unknown> } };
+type ZodInternals = { _zod: { def: Record<string, unknown> & { type: string } } };
+
+function isZodNode(value: unknown): boolean {
+  return value !== null && typeof value === "object" && "_zod" in value;
+}
 
 function refinementMessage(error: unknown): string | null {
   if (typeof error === "string") return error;
@@ -79,11 +85,55 @@ function refinementMessage(error: unknown): string | null {
 }
 
 /**
- * Input JSON Schema of one schema. Refinements are invisible to JSON Schema,
- * so each one is recorded with its message and source; a refinement without a
- * message string is refused, because its limit could change unseen. Value
- * rewrites (for example trim) are recorded by source, and pipes, transforms
- * and preprocessing, whose input side JSON Schema does not show, are refused.
+ * The data of one definition. Nested schemas are rendered by their own JSON
+ * Schema node, so only their position is kept; library functions (zod's own
+ * `when` guards and error factories) are internals of the locked zod version
+ * and are omitted; patterns keep their flags.
+ */
+function definitionData(value: unknown): unknown {
+  if (isZodNode(value)) return "<schema>";
+  if (value instanceof RegExp) return { regex: value.source, flags: value.flags };
+  if (typeof value === "function") return undefined;
+  if (typeof value === "bigint") return `${value}n`;
+  if (Array.isArray(value)) return value.map(definitionData);
+  if (value !== null && typeof value === "object") {
+    const data: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) data[key] = definitionData(entry);
+    return data;
+  }
+  if (typeof value === "number" && !Number.isFinite(value)) return String(value);
+  return value;
+}
+
+function checkData(check: ZodCheckInternals, owner: string): unknown {
+  const def = check._zod.def;
+  if (def.check === "custom") {
+    const maxBytes = contracts.UTF8_BYTE_LIMIT_CHECKS.get(check);
+    if (maxBytes === undefined) {
+      throw new Error(
+        `child lifecycle notice protocol: a ${owner} refinement does not record its limit as data`,
+      );
+    }
+    if (def.when !== undefined) {
+      throw new Error(`child lifecycle notice protocol: a ${owner} refinement is conditional`);
+    }
+    const message = refinementMessage(def.error);
+    if (message === null) {
+      throw new Error(`child lifecycle notice protocol: a ${owner} refinement has no message`);
+    }
+    return { check: "custom", utf8MaxBytes: maxBytes, message, source: String(def.fn) };
+  }
+  if (def.check === "overwrite") return { check: "overwrite", source: String(def.tx) };
+  const data = definitionData(def) as Record<string, unknown>;
+  const message = refinementMessage(def.error);
+  if (message !== null) data.message = message;
+  return data;
+}
+
+/**
+ * Input JSON Schema of one schema, with every node's own definition data and
+ * checks recorded beside it (`x-opengeni-def`), because JSON Schema drops
+ * refinements, regex flags and URL restrictions.
  */
 export function childLifecycleNoticeSchemaFingerprint(schema: z.ZodType): Json {
   return sortJson(
@@ -95,29 +145,12 @@ export function childLifecycleNoticeSchemaFingerprint(schema: z.ZodType): Json {
         if (def.type === "pipe" || def.type === "transform") {
           throw new Error(`child lifecycle notice protocol: a ${def.type} cannot be fingerprinted`);
         }
-        const refinements: Array<{ message: string; source: string }> = [];
-        const rewrites: string[] = [];
-        for (const check of def.checks ?? []) {
-          const checkDef = check._zod.def;
-          if (checkDef.check === "overwrite") {
-            rewrites.push(String(checkDef.tx));
-            continue;
-          }
-          if (checkDef.check !== "custom") continue;
-          const message = refinementMessage(checkDef.error);
-          if (message === null) {
-            throw new Error(
-              `child lifecycle notice protocol: a ${def.type} refinement has no message string`,
-            );
-          }
-          refinements.push({ message, source: String(checkDef.fn) });
-        }
-        if (refinements.length > 0) {
-          (ctx.jsonSchema as Record<string, unknown>)["x-opengeni-refinements"] = refinements;
-        }
-        if (rewrites.length > 0) {
-          (ctx.jsonSchema as Record<string, unknown>)["x-opengeni-rewrites"] = rewrites;
-        }
+        const { checks, ...rest } = def;
+        const recorded = definitionData(rest) as Record<string, unknown>;
+        recorded.checks = ((checks as ZodCheckInternals[] | undefined) ?? []).map((check) =>
+          checkData(check, def.type),
+        );
+        (ctx.jsonSchema as Record<string, unknown>)["x-opengeni-def"] = recorded;
       },
     }),
   );
@@ -144,6 +177,7 @@ export function childLifecycleNoticeProtocol(): Json {
   for (const [name, value] of Object.entries(contracts)) {
     if (
       /^CHILD_[A-Z0-9_]+$/.test(name) &&
+      name !== "CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION" &&
       (typeof value === "number" || typeof value === "string")
     ) {
       limits[name] = value;
@@ -151,14 +185,21 @@ export function childLifecycleNoticeProtocol(): Json {
   }
   return sortJson({
     format: CHILD_LIFECYCLE_NOTICE_PROTOCOL_FORMAT,
-    revision: CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION,
+    revision: contracts.CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION,
     kinds: [...contracts.SessionSystemUpdateKind.options],
+    classifications: [...contracts.SystemUpdateClassification.options],
     childLifecycleKinds: [...contracts.CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS],
     flagGatedKinds: [...FLAG_GATED_CHILD_LIFECYCLE_NOTICE_KINDS],
     wakeClasses: Object.fromEntries(
       FLAG_GATED_CHILD_LIFECYCLE_NOTICE_KINDS.map((kind) => [
         kind,
         contracts.SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind],
+      ]),
+    ),
+    pausedClassification: Object.fromEntries(
+      (["human", "api", "agent"] as const).map((actor) => [
+        actor,
+        contracts.childPausedClassification(actor),
       ]),
     ),
     limits,

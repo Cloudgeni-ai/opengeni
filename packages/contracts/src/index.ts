@@ -10433,10 +10433,31 @@ export const CHILD_REQUIRES_ACTION_MAX_REQUESTS = 20;
 export const CHILD_PAUSED_REASON_MAX_BYTES = 2 * 1024;
 export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
 
-const boundedUtf8String = (maxBytes: number) =>
-  primitives.string.refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
-    message: `must be at most ${maxBytes} UTF-8 bytes`,
-  });
+/**
+ * Revision of the child lifecycle notice protocol rendered in
+ * `child-lifecycle-notice-protocol.gen.json`. Bump it for any change an older
+ * consumer could see that the rendering does not capture: what a field means,
+ * the `sourceId`, dedupe keys, classification, summary or lineage the
+ * producers write, or how a consumer supersedes, wakes on or renders a notice.
+ */
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 1;
+
+/**
+ * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
+ * notice protocol records limits as data. Validation and JSON Schema output
+ * are unaffected.
+ */
+export const UTF8_BYTE_LIMIT_CHECKS: WeakMap<object, number> = new WeakMap();
+
+const boundedUtf8String = (maxBytes: number) => {
+  const schema = primitives.string.refine(
+    (value) => new TextEncoder().encode(value).byteLength <= maxBytes,
+    { message: `must be at most ${maxBytes} UTF-8 bytes` },
+  );
+  const check = schema._zod.def.checks?.at(-1);
+  if (check) UTF8_BYTE_LIMIT_CHECKS.set(check, maxBytes);
+  return schema;
+};
 
 /**
  * Compact copy of one question of a child's blocking request: enough for the
