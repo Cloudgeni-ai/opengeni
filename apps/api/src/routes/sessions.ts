@@ -4339,6 +4339,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               authorization,
               delegatedSignInChangesEnabled:
                 settings.delegatedSignInAppActionChangesEnabled === true,
+              // Only `changes` is read here; nothing is frozen.
+              workspaceSettings: false,
             })?.changes === "confirm",
           payload,
           mcpCredentialUpdates,

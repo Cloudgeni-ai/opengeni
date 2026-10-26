@@ -225,7 +225,12 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
-import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
+import {
+  hasPermission,
+  requirePermission,
+  workspaceSettingsAuthorized,
+  type AccessGrantAuthorization,
+} from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";
@@ -2645,12 +2650,15 @@ async function createSessionForRequestInFileScope(
     });
   }
   // What the first message may do through app actions, frozen with its turn.
-  // A pure function of the request's own grant, computed once it is valid.
+  // Computed from the request's own grant once it is valid.
   const initialAppActionGrant = turnAppActionGrant({
     grant,
     authorization,
     delegatedSignInChangesEnabled:
       unresolvedDeps.settings.delegatedSignInAppActionChangesEnabled === true,
+    workspaceSettings:
+      authorization !== undefined &&
+      (await workspaceSettingsAuthorized(unresolvedDeps, authorization, workspaceId)),
   });
   const db = unresolvedDeps.db;
   const visibilityProvided = hasOwnProperty(rawPayload, "visibility");
@@ -4722,6 +4730,9 @@ async function acceptSessionUserMessageInFileScope(
       grant,
       authorization: input.authorization,
       delegatedSignInChangesEnabled: deps.settings.delegatedSignInAppActionChangesEnabled === true,
+      workspaceSettings:
+        input.authorization !== undefined &&
+        (await workspaceSettingsAuthorized(deps, input.authorization, workspaceId)),
     });
     const {
       accepted,
