@@ -15,6 +15,7 @@ import { isTextEntryTarget } from "../lib/keyboard-targets";
 import {
   canPan,
   clampView,
+  clickZoomDirection,
   fitView,
   MAX_ZOOM,
   minScale,
@@ -233,6 +234,11 @@ function wheelPixels(event: WheelEvent, delta: number) {
  * Cmd/Ctrl + wheel and trackpad or touch pinch zoom around the pointer, and a
  * drag or plain scroll pans a zoomed image. The image is laid out at its
  * zoomed pixel size (not a CSS transform scale), so it stays sharp.
+ *
+ * Only a click on the image itself zooms. A click beside it, at any zoom,
+ * calls `onBackdropClick` (closing a lightbox) or does nothing. The zoom
+ * cursor sits on the image, so the backdrop keeps a plain arrow and the
+ * image shows the zoom its click will actually make.
  */
 export function ZoomPanSurface({
   controller,
@@ -249,7 +255,7 @@ export function ZoomPanSurface({
   alt: string;
   /** The image's pixel size when known up front, so it is laid out before it loads. */
   naturalSize?: ZoomSize | null | undefined;
-  /** A click beside a fitted image, such as closing a lightbox. */
+  /** A click beside the image, at any zoom, such as closing a lightbox. */
   onBackdropClick?: (() => void) | undefined;
   onError?: ((event: SyntheticEvent<HTMLImageElement>) => void) | undefined;
   className?: string | undefined;
@@ -418,14 +424,21 @@ export function ZoomPanSurface({
     setDragging(false);
     if (event.type !== "pointerup" || !current || current.moved) return;
     const point = local(event);
-    if (onBackdropClick && (!view || view.fit) && !insideImage(point, event)) onBackdropClick();
+    if (!insideImage(point, event)) onBackdropClick?.();
     else if (view) controller.toggleAt(point);
   };
 
   const pannable = !!view && !!image && !!viewport && canPan(view, image, viewport);
-  const zoomedOut = !!view && view.fit;
-  // A small image is fitted above actual size, so a click shrinks it to 100%.
-  const clickShrinks = zoomedOut && view.scale > 1;
+  const clickZoom = view && image && viewport ? clickZoomDirection(view, image, viewport) : null;
+  const imageCursor = dragging
+    ? "cursor-grabbing"
+    : pannable
+      ? "cursor-grab"
+      : clickZoom === "in"
+        ? "cursor-zoom-in"
+        : clickZoom === "out"
+          ? "cursor-zoom-out"
+          : undefined;
   return (
     <div
       ref={surface}
@@ -437,13 +450,7 @@ export function ZoomPanSurface({
       onPointerCancel={onPointerEnd}
       className={cn(
         "absolute inset-0 touch-none overflow-hidden select-none",
-        dragging
-          ? "cursor-grabbing"
-          : pannable
-            ? "cursor-grab"
-            : zoomedOut && !clickShrinks
-              ? "cursor-zoom-in"
-              : "cursor-zoom-out",
+        dragging && "cursor-grabbing",
         className,
       )}
     >
@@ -453,6 +460,7 @@ export function ZoomPanSurface({
         alt={alt}
         draggable={false}
         data-zoom-scale={view ? view.scale.toFixed(3) : undefined}
+        data-zoom-click={clickZoom ?? undefined}
         onLoad={(event) => {
           const element = event.currentTarget;
           if (element.naturalWidth > 0 && element.naturalHeight > 0)
@@ -477,7 +485,10 @@ export function ZoomPanSurface({
             : undefined
         }
         className={cn(
-          "pointer-events-none block",
+          // The image takes the pointer only for its cursor; presses still reach
+          // the surface, which decides between zoom and backdrop by position.
+          "block [-webkit-touch-callout:none]",
+          imageCursor,
           !view && "absolute inset-0 m-auto max-h-[calc(100%-2rem)] max-w-[calc(100%-2rem)]",
           imageClassName,
         )}

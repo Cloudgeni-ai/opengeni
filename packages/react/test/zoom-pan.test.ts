@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { zoomShortcut } from "../src/components/zoom-pan-image";
 import {
   canPan,
+  clickZoomDirection,
   fitScale,
   fitView,
   panBy,
@@ -18,6 +19,27 @@ const large = { width: 2000, height: 1500 };
 const small = { width: 200, height: 100 };
 
 describe("zoom geometry", () => {
+  test("a click's zoom direction is what the click actually does", () => {
+    // A large image fits below actual size: a click enlarges it to 100%.
+    const largeFit = fitView(large, viewport);
+    expect(clickZoomDirection(largeFit, large, viewport)).toBe("in");
+    // ...and a click at 100% returns it to the fitted size.
+    const largeActual = toggleAt(largeFit, { x: 500, y: 400 }, large, viewport);
+    expect(clickZoomDirection(largeActual, large, viewport)).toBe("out");
+
+    // A small image is enlarged to fit: a click shrinks it to 100%...
+    const smallFit = fitView(small, viewport);
+    expect(clickZoomDirection(smallFit, small, viewport)).toBe("out");
+    // ...and the next click enlarges it again, so the cursor must flip to zoom-in.
+    const smallActual = toggleAt(smallFit, { x: 500, y: 400 }, small, viewport);
+    expect(smallActual.scale).toBe(1);
+    expect(clickZoomDirection(smallActual, small, viewport)).toBe("in");
+
+    // Zoomed past fit with the buttons: a click goes back to fit, smaller.
+    const stepped = zoomTo(smallFit, 3, { x: 500, y: 400 }, small, viewport);
+    expect(clickZoomDirection(stepped, small, viewport)).toBe("out");
+  });
+
   test("fitting shrinks large images and enlarges small ones at most 2x", () => {
     expect(fitScale(large, viewport)).toBeCloseTo(968 / 2000);
     expect(fitScale(small, viewport)).toBe(2);
