@@ -304,6 +304,55 @@ e2e(
   60_000,
 );
 
+// A page that renders its rows anew as it scrolls (a virtual or endless
+// list) removes or replaces the link, or hides it, while the driver waits for
+// the scroll to settle. The click refuses plainly, with nothing pressed.
+for (const [change, script, refusal] of [
+  [
+    "removes the link",
+    'document.getElementById("builder").remove()',
+    "(locator_not_found: browser element is no longer present)",
+  ],
+  [
+    "replaces the link with a look-alike",
+    'const old=document.getElementById("builder");old.replaceWith(old.cloneNode(true))',
+    "(locator_not_found: browser element is no longer present)",
+  ],
+  [
+    "hides the link",
+    'document.getElementById("builder").style.display="none"',
+    "(invalid_action: browser element has no box on the page to act on; it is hidden or not rendered)",
+  ],
+] as const) {
+  e2e(
+    `a click refuses plainly when the page ${change} while the driver waits after its scroll`,
+    async () => {
+      const page = fixture([
+        projectPage(
+          "apply",
+          "",
+          [
+            'document.addEventListener("pointerdown",(event)=>log.push("press "+where(event)),true);',
+            'document.addEventListener("click",(event)=>log.push("click "+where(event)),true);',
+            `addEventListener("scroll",()=>setTimeout(()=>{${script}},60),{once:true});`,
+          ].join(""),
+        ),
+      ]);
+      await withSession(page, async ({ evaluate, act, settles }) => {
+        const result = await act({ type: "click", locator: link("Builder") });
+        // The driver's scroll ran the page's scroll listeners, so the outcome
+        // stays unknown, but the receipt says plainly why nothing was pressed.
+        expect(result.state).toBe("outcome_unknown");
+        expect(result.error?.message).toContain(refusal);
+        expect(result.error?.message).not.toContain("box model");
+        expect(settles()).toBe(1);
+        expect(await evaluate("log")).toEqual([]);
+      });
+    },
+    60_000,
+  );
+}
+
 e2e(
   "a link that moves from under the arriving pointer is refused as moved; a real cover keeps its refusal",
   async () => {

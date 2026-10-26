@@ -362,17 +362,23 @@ function classifyActionFailure(error: unknown, command: BrowserActionCommandValu
  * render (hidden, or drawn by the browser rather than the page) has no box to
  * scroll to or point at. Null for any other reply. */
 export function scrollRefusal(message: string): InteractionDefiniteDriverError | null {
-  if (/no node with given id|node is detached/iu.test(message))
-    return new InteractionDefiniteDriverError(
-      "locator_not_found",
-      "browser element is no longer present",
-    );
-  if (/does not have a layout object/iu.test(message))
-    return new InteractionDefiniteDriverError(
-      "invalid_action",
-      "browser element has no box on the page to act on; it is hidden or not rendered",
-    );
+  if (/no node with given id|node is detached/iu.test(message)) return elementGone();
+  if (/does not have a layout object/iu.test(message)) return elementUnrendered();
   return null;
+}
+
+function elementGone(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "locator_not_found",
+    "browser element is no longer present",
+  );
+}
+
+function elementUnrendered(): InteractionDefiniteDriverError {
+  return new InteractionDefiniteDriverError(
+    "invalid_action",
+    "browser element has no box on the page to act on; it is hidden or not rendered",
+  );
 }
 
 /** Page reads cannot complete while a JavaScript dialog is open: the page's
@@ -6975,7 +6981,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // the target is measured only once it has stopped moving.
     if (!unscrolled)
       await this.settleAfterScroll(state, backendDOMNodeId, frameId ?? settleFrameId);
-    let point = await this.centerPoint(state, backendDOMNodeId);
+    let point = await this.centerPoint(state, backendDOMNodeId).catch(async (error: unknown) => {
+      throw (
+        (await this.unmeasuredRefusal(state, backendDOMNodeId, frameId ?? settleFrameId, error)) ??
+        error
+      );
+    });
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
       const visible =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
@@ -7005,6 +7016,34 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       point = revealed;
     }
     return point;
+  }
+
+  /**
+   * The definite refusal for a target Chromium could not measure: the page
+   * removed or replaced it (a list that renders its rows anew as it scrolls,
+   * possibly while the driver waited for the scroll to settle), or it is no
+   * longer rendered. Null for any other failure, which stays as it is.
+   */
+  private async unmeasuredRefusal(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+    error: unknown,
+  ): Promise<InteractionDefiniteDriverError | null> {
+    // -32001: the tab's session is gone, which is not about this element.
+    if (!(error instanceof CdpProtocolError) || error.code === -32_001) return null;
+    const known = scrollRefusal(error.message);
+    if (known || !/could not compute box model/iu.test(error.message)) return known;
+    // Read in an isolated world where there is one, out of reach of page
+    // scripts that redefine isConnected.
+    const connected = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      "function () { return this.isConnected; }",
+      [],
+      frameId === undefined || this.engine === "lightpanda" ? {} : { isolatedFrameId: frameId },
+    ).catch(() => false);
+    return connected === true ? elementUnrendered() : elementGone();
   }
 
   /**
