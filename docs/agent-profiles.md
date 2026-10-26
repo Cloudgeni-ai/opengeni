@@ -134,7 +134,7 @@ name, role, emoji and drafted instructions itself) or switching to a saved agent
 that already does the work. It creates nothing: it validates the proposal (an
 active name already taken returns the saved agents so the agent can suggest
 reuse) and records it on the chat (`sessions.agent_profile_suggestion`,
-migration `0982`, display state only), returning an `agent_profile_suggestion`
+migration `0998`, display state only), returning an `agent_profile_suggestion`
 receipt. The chat shows the newest one (streamed receipt first, then the kept
 copy, so it survives a reload when tool steps are not loaded) as a card: "Review and save" opens the
 prefilled Save as agent page; "Switch to <name>" applies the saved agent; "Not

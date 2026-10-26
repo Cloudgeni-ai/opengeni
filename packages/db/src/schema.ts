@@ -5425,7 +5425,7 @@ export const sessions = pgTable(
     // The identity this chat's agent wears (migration 0997, agent profiles).
     // Display snapshot only; NULL is the default agent identity.
     agentProfile: jsonb("agent_profile").$type<SessionAgentProfile>(),
-    // The newest agent-profile suggestion in this chat (migration 0982).
+    // The newest agent-profile suggestion in this chat (migration 0998).
     agentProfileSuggestion: jsonb(
       "agent_profile_suggestion",
     ).$type<SessionAgentProfileSuggestion>(),
