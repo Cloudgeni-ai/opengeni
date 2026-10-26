@@ -16,6 +16,7 @@ import {
   CdpTransportError,
   CdpSessionDetachedError,
   CdpProtocolError,
+  CdpResponseRefusedError,
   BrowserSupervisor,
   ComputerSupervisor,
   LatestBrowserFrameSubscription,
@@ -504,6 +505,39 @@ describe("BrowserControlServer", () => {
         expect(failure.error).toEqual({ code, message, retryable: true });
       },
       { screenshotError: new InteractionControllerError(code, message, true) },
+    );
+  });
+
+  test("a screenshot too large to transfer says so and names a smaller capture", async () => {
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const screenshot = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/screenshot`,
+          { token: viewToken },
+        );
+        expect(screenshot.status).toBe(400);
+        const failure = (await screenshot.json()) as { error: unknown };
+        expect(failure.error).toEqual({
+          code: "invalid_action",
+          message:
+            "the page's screenshot is too large to transfer; capture the viewport instead of the full page, or use JPEG",
+          retryable: false,
+        });
+      },
+      {
+        screenshotError: new CdpResponseRefusedError(
+          "Page.captureScreenshot",
+          "too_large",
+          40 * 1024 * 1024,
+        ),
+      },
     );
   });
 
