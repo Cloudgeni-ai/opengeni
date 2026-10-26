@@ -219,7 +219,19 @@ test("app notices keep clear of the desktop window controls", async () => {
         await open("&update=0&signin");
         const signIn = page.locator("[data-app-notice] [data-slot='notice']");
         await signIn.getByText("Google is now connected").waitFor();
-        clear((await signIn.boundingBox())!);
+        const signInBox = (await signIn.boundingBox())!;
+        clear(signInBox);
+        // Centred as in a browser wherever that already clears the controls.
+        if (width === 1000 && platform !== "windows") {
+          expect(Math.abs(signInBox.x - ((width - 768) / 2 + 16))).toBeLessThanOrEqual(1);
+        }
+        if (desktopTitleBar) {
+          expect(
+            await page
+              .locator("[data-app-notice]")
+              .evaluate((el) => getComputedStyle(el).getPropertyValue("-webkit-app-region")),
+          ).toBe("drag");
+        }
         await open("&update=0&paused");
         const banner = page.locator("[data-canvas] > [data-slot='notice']");
         await banner.getByText("Agent work is paused").waitFor();

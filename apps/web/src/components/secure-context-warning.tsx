@@ -36,7 +36,7 @@ export function SecureContextWarning({
   if (productAccessMode === "managed" || issue === null) return null;
 
   return (
-    <div role="alert" data-app-notice className="shrink-0 px-3 pt-3">
+    <div role="alert" data-app-notice data-window-drag className="shrink-0 px-3 pt-3">
       <Notice tone="waiting" title="Secure connection required">
         {issue === "insecure_context"
           ? "Opengeni is open over HTTP. Configure HTTPS or use a secure URL. File uploads, microphone access, voice recordings, and some artifact features may not work."

@@ -66,42 +66,46 @@ export function SignInCallbackNotice({
   const ownReceipt = receipt && (userId === null || receipt.userId === userId) ? receipt : null;
   if (!shownMessage && !ownReceipt && !returned) return null;
   return (
-    <div role="alert" data-app-notice className="mx-auto w-full max-w-3xl px-4 pt-3">
-      <Notice
-        tone={shownMessage ? "failed" : "info"}
-        title={shownMessage ? "Sign-in needs attention" : "Review your sign-in methods"}
-        action={
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setMessage(null);
-              setReturned(false);
-              clearSignInChangeFeedback();
-            }}
-          >
-            Dismiss
-          </Button>
-        }
-      >
-        {shownMessage ?? ownReceipt?.message ?? (
-          <>
-            The provider returned to Opengeni. Sign in with an existing method if asked, then review
-            your current connections in{" "}
-            <a className="underline underline-offset-2" href="/settings/security">
-              Personal settings → Security
-            </a>
-            .
-          </>
-        )}
-        {ownReceipt && userId === null ? (
-          <p className="mt-1">
-            {accountContactEmail(ownReceipt.email)
-              ? `Sign in again as ${ownReceipt.email} with a remaining sign-in method to continue.`
-              : "Sign in again with a remaining passkey to continue."}
-          </p>
-        ) : null}
-      </Notice>
+    // The full width, so on the desktop it can move the window; the box is
+    // centred inside (window-control clearance in apps/web/src/styles.css).
+    <div role="alert" data-app-notice="centered" data-window-drag className="pt-3">
+      <div className="mx-auto w-full max-w-3xl px-4">
+        <Notice
+          tone={shownMessage ? "failed" : "info"}
+          title={shownMessage ? "Sign-in needs attention" : "Review your sign-in methods"}
+          action={
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setMessage(null);
+                setReturned(false);
+                clearSignInChangeFeedback();
+              }}
+            >
+              Dismiss
+            </Button>
+          }
+        >
+          {shownMessage ?? ownReceipt?.message ?? (
+            <>
+              The provider returned to Opengeni. Sign in with an existing method if asked, then
+              review your current connections in{" "}
+              <a className="underline underline-offset-2" href="/settings/security">
+                Personal settings → Security
+              </a>
+              .
+            </>
+          )}
+          {ownReceipt && userId === null ? (
+            <p className="mt-1">
+              {accountContactEmail(ownReceipt.email)
+                ? `Sign in again as ${ownReceipt.email} with a remaining sign-in method to continue.`
+                : "Sign in again with a remaining passkey to continue."}
+            </p>
+          ) : null}
+        </Notice>
+      </div>
     </div>
   );
 }

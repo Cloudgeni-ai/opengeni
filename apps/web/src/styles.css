@@ -210,6 +210,20 @@ html[data-desktop="windows"] [data-app-notice] {
   padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
 }
 
+/* The sign-in notice is a centred box (48rem with 1rem inset): it moves only
+   as far as it must to clear the controls, so wide windows keep it centred. */
+html[data-desktop="macos"] [data-app-notice="centered"] {
+  padding-left: clamp(0px, calc(904px - 100%), 68px);
+}
+
+html[data-desktop="windows"] [data-app-notice="centered"] {
+  padding-right: clamp(
+    0px,
+    calc(2 * var(--og-caption-buttons-width) + 752px - 100%),
+    calc(var(--og-caption-buttons-width) - 0.5rem)
+  );
+}
+
 html:is([data-desktop="macos"], [data-desktop="windows"]) #opengeni-api-update-notice {
   min-height: var(--og-caption-row-height, 56px);
 }
