@@ -1,8 +1,11 @@
 import { t } from "../../lib/console-text";
-import { useEffect, useRef, useState } from "react";
-import { ConnectController } from "@opengeni/connect";
-import { ConnectSetup, useConnect } from "../../../connect";
-import { attachSessionCapability } from "../../../session-capability-policy";
+import { useRef, useState } from "react";
+import type { ConnectController } from "@opengeni/connect";
+import { ConnectSetup } from "../../../connect";
+import {
+  usePreparedMcpSetupAccess,
+  usePreparedMcpSetupAttempt,
+} from "../../../components/prepared-mcp-setup-flow";
 import type { AuthNeededItem } from "../../../timeline";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Button } from "../../../ui/button";
@@ -47,47 +50,19 @@ export function PreparedMcpSetupCard(props: Props) {
 
 function ScopedCard({ item, client, workspaceId, sessionId, canConfigure, onConfigured }: Props) {
   const page = usePage();
-  const [proposal] = useState(() => item.setupRequest!);
-  const [controller, setController] = useState<ConnectController | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [retry, setRetry] = useState(0);
-  const [beginKey, setBeginKey] = useState(`mcp-card:${item.id}`);
+  const [returnUrl] = useState(() => new URL(new URL(page.href()).pathname, page.origin()).href);
+  const setup = usePreparedMcpSetupAttempt({ client, workspaceId, item, canConfigure, returnUrl });
+  const { proposal, controller, failed } = setup;
   const configured = useRef(onConfigured);
   configured.current = onConfigured;
-  useEffect(() => {
-    if (!canConfigure || !proposal.mcpSetup || !proposal.ownership) return;
-    let active = true;
-    const next = new ConnectController(client.connectTransport(), workspaceId);
-    setController(next);
-    setFailed(false);
-    // The card identity is a stable operation key, including across reload and
-    // Strict Mode. Never recover an unrelated pending setup by provider alone.
-    void next
-      .begin({
-        providerId: "mcp-headers",
-        ownership: proposal.ownership,
-        mcpSetup: proposal.mcpSetup,
-        idempotencyKey: beginKey,
-        returnUrl: new URL(new URL(page.href()).pathname, page.origin()).href,
-      })
-      .catch(() => {
-        if (active) setFailed(true);
-      });
-    return () => {
-      active = false;
-      next.dispose();
-    };
-  }, [page, client, workspaceId, canConfigure, proposal, beginKey, retry]);
 
   const contents = !canConfigure ? (
-    <p role="status">
-      Someone with connection and integration management access needs to connect this server.
-    </p>
+    <p role="status">{t("preparedMcpSetup.needsManager")}</p>
   ) : failed ? (
     <div role="alert">
-      <p>Could not load this connection setup. Your key has not been submitted.</p>
-      <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>
-        Reload setup
+      <p>{t("preparedMcpSetup.loadFailed")}</p>
+      <Button variant="outline" onClick={setup.reload}>
+        {t("preparedMcpSetup.reloadSetup")}
       </Button>
     </div>
   ) : controller ? (
@@ -97,24 +72,24 @@ function ScopedCard({ item, client, workspaceId, sessionId, canConfigure, onConf
       workspaceId={workspaceId}
       sessionId={sessionId}
       onConfigured={() => configured.current?.()}
-      onRestart={(previousId) => setBeginKey(`mcp-restart:${previousId}`)}
+      onRestart={setup.restart}
     />
   ) : (
-    <p role="status">Preparing the key form…</p>
+    <p role="status">{t("preparedMcpSetup.preparing")}</p>
   );
   return (
     <SessionCapabilityFrame
       name={proposal.name}
       subtitle={proposal.endpointUrl}
       logo={null}
-      typeLabel="MCP server"
+      typeLabel={t("sessionMcpCapabilityCard.mcpServer")}
       description={proposal.rationale}
       skill={false}
       expanded={false}
       complete={false}
-      actionLabel="Connect"
+      actionLabel={t("preparedMcpSetup.connect")}
       opensDialog={false}
-      note="Keys stay in the protected form, never in chat. The server and headers are already configured."
+      note={t("preparedMcpSetup.note")}
       onOpen={() => {}}
       onClose={() => {}}
       inlineSetup={contents}
@@ -137,40 +112,13 @@ function PreparedSetup({
   onConfigured(): void | Promise<void>;
   onRestart(previousId: string): void;
 }) {
-  const view = useConnect(controller);
-  const [access, setAccess] = useState<"pending" | "ready" | "failed">("pending");
-  const [retry, setRetry] = useState(0);
-  const notify = useRef(onConfigured);
-  notify.current = onConfigured;
-  const id =
-    view.attempt?.state === "complete" && view.attempt.integrationInstalled
-      ? view.attempt.mcpCapabilityId
-      : undefined;
-  useEffect(() => {
-    if (!id) return;
-    let active = true;
-    setAccess("pending");
-    void (async () => {
-      const item = (await client.listCapabilities(workspaceId)).items.find(
-        (entry) => entry.id === id,
-      );
-      if (!active) return;
-      if (!item?.enabled) throw new Error("Connection not yet visible");
-      // Existing CAS-fenced selection preserves all other choices and cannot
-      // widen a parent's ceiling or the currently accepted attempt's tools.
-      await attachSessionCapability(t, client, workspaceId, sessionId, item, () => active);
-      if (!active) return;
-      setAccess("ready");
-      // A host refresh failure cannot undo a verified connection or turn it
-      // into a reason to resubmit credentials.
-      void Promise.resolve(notify.current()).catch(() => {});
-    })().catch(() => {
-      if (active) setAccess("failed");
-    });
-    return () => {
-      active = false;
-    };
-  }, [client, workspaceId, sessionId, id, retry]);
+  const {
+    view,
+    connectedCapabilityId: id,
+    access,
+    restartable,
+    recheckAccess,
+  } = usePreparedMcpSetupAccess({ t, controller, client, workspaceId, sessionId, onConfigured });
 
   return (
     <>
@@ -181,26 +129,23 @@ function PreparedSetup({
           throw new Error("Prepared key setup does not use OAuth");
         }}
       />
-      {view.attempt && ["cancelled", "expired"].includes(view.attempt.state) ? (
+      {restartable && view.attempt ? (
         <Button variant="outline" onClick={() => onRestart(view.attempt!.id)}>
-          Start a new setup
+          {t("preparedMcpSetup.startNewSetup")}
         </Button>
       ) : null}
       {id ? (
         access === "ready" ? (
-          <p role="status">Connected. Its tools are available from your next message.</p>
+          <p role="status">{t("preparedMcpSetup.connected")}</p>
         ) : access === "failed" ? (
           <div role="alert">
-            <p>
-              Connected, but chat access could not be confirmed. Your key is saved; do not submit it
-              again.
-            </p>
-            <Button variant="outline" onClick={() => setRetry((value) => value + 1)}>
-              Check chat access
+            <p>{t("preparedMcpSetup.chatAccessFailed")}</p>
+            <Button variant="outline" onClick={recheckAccess}>
+              {t("preparedMcpSetup.checkChatAccess")}
             </Button>
           </div>
         ) : (
-          <p role="status">Connected. Checking this chat's tool access…</p>
+          <p role="status">{t("preparedMcpSetup.checkingChatAccess")}</p>
         )
       ) : null}
     </>

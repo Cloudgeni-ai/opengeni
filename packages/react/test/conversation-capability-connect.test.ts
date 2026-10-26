@@ -116,7 +116,9 @@ describe("inChatConnectDecision", () => {
 
   test("leaves the default row while loading or when the proxy owns chat setup", () => {
     expect(inChatConnectDecision(request(), { status: "loading" }, true).kind).toBe("default");
-    expect(inChatConnectDecision(request(), { status: "failed" }, true).kind).toBe("default");
+    expect(inChatConnectDecision(request(), { status: "failed", retry() {} }, true).kind).toBe(
+      "default",
+    );
     expect(inChatConnectDecision(request(), ready(CONNECT), false).kind).toBe("default");
   });
 

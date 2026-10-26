@@ -18,14 +18,18 @@ import {
   SessionActionsButton,
   SessionHeaderTitle,
   useNativeTimelineTheme,
+  type NativeInChatConnectOptions,
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
 import type { OpenGeniLinkTarget } from "@opengeni/sdk";
+import { desktopAppReturnUrl } from "@opengeni/contracts";
 import * as Haptics from "expo-haptics";
+import * as SecureStore from "expo-secure-store";
+import * as WebBrowser from "expo-web-browser";
 import { Stack, router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Alert, Pressable, Text, View } from "react-native";
+import { Alert, Linking, Pressable, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useAccount } from "@/account";
 import { BrandMark } from "@/brand-mark";
@@ -113,7 +117,7 @@ export default function SessionScreen() {
   }>();
   // Opened from the inbox, a notification or a link: land on that moment.
   const focusSequence = at && /^[1-9][0-9]*$/u.test(at) ? Number(at) : undefined;
-  const { client, models, workspaceId: currentWorkspaceId } = useAccount();
+  const { account, client, models, workspaceId: currentWorkspaceId } = useAccount();
   // A session opened from elsewhere names its own workspace, so the screens
   // underneath keep theirs and Back returns to them unchanged.
   const workspaceId = workspace || currentWorkspaceId;
@@ -129,6 +133,7 @@ export default function SessionScreen() {
       <LiveSession
         client={client}
         models={models}
+        baseUrl={account?.baseUrl ?? null}
         sessionId={id}
         workspaceId={workspaceId}
         focusSequence={focusSequence}
@@ -137,16 +142,78 @@ export default function SessionScreen() {
   );
 }
 
+/** Where the system sign-in browser hands back to the app (app.json `scheme`). */
+const CONNECT_RETURN_PREFIX = "opengeni://open";
+
+/**
+ * Where a connect card remembers the attempt it is waiting on, so setup picks
+ * up again when the app was closed mid-sign-in. Only the attempt id is kept;
+ * the server checks who may recover it.
+ */
+const connectAttemptHints = {
+  read(key: string): string | null {
+    try {
+      return SecureStore.getItem(attemptHintKey(key));
+    } catch {
+      return null;
+    }
+  },
+  remember(key: string, attemptId: string): void {
+    try {
+      SecureStore.setItem(attemptHintKey(key), attemptId);
+    } catch {
+      /* Recovery hint only. */
+    }
+  },
+  forget(key: string): void {
+    void SecureStore.deleteItemAsync(attemptHintKey(key)).catch(() => undefined);
+  },
+};
+
+/** Secure storage keys allow letters, digits, ".", "-" and "_" only. */
+function attemptHintKey(key: string): string {
+  return key.replace(/[^A-Za-z0-9._-]/gu, "_");
+}
+
+/**
+ * Connect requests in this conversation sign in through the system sign-in
+ * browser. The provider returns to the deployment's hand-back page, which
+ * opens this conversation in the app again.
+ */
+function inChatConnectOptions(
+  baseUrl: string | null,
+  workspaceId: string,
+  sessionId: string,
+): NativeInChatConnectOptions | undefined {
+  if (!baseUrl) return undefined;
+  const origin = baseUrl.replace(/\/+$/u, "");
+  const conversation = `${origin}${webPaths.session(workspaceId, sessionId)}`;
+  return {
+    browser: {
+      openAuthSession: (url) => WebBrowser.openAuthSessionAsync(url, CONNECT_RETURN_PREFIX),
+      dismiss: () => WebBrowser.dismissAuthSession(),
+    },
+    returnUrl: desktopAppReturnUrl(conversation, origin),
+    openUrl: (url) => void Linking.openURL(url),
+    attemptHints: connectAttemptHints,
+  };
+}
+
 function LiveSession(props: {
   focusSequence?: number | undefined;
   client: ReturnType<typeof useAccount>["client"];
   models: ReturnType<typeof useAccount>["models"];
+  baseUrl: string | null;
   sessionId: string;
   workspaceId: string;
 }) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
+  const inChatConnect = useMemo(
+    () => inChatConnectOptions(props.baseUrl, props.workspaceId, props.sessionId),
+    [props.baseUrl, props.workspaceId, props.sessionId],
+  );
   // Reading the session reads its replies in the inbox, on arrival and on leaving.
   const { client: inboxClient, sessionId: readSessionId } = props;
   useFocusEffect(
@@ -460,6 +527,7 @@ function LiveSession(props: {
         onCopy={(text) => void copyText(text)}
         onOpenSession={(sessionId) => router.push(`/session/${sessionId}`)}
         bottomInset={insets.bottom}
+        inChatConnect={inChatConnect}
         computeLabel={computeLabel}
         feedback={feedback}
         composer={{

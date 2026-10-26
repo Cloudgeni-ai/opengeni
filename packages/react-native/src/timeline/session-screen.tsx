@@ -4,6 +4,7 @@ import {
   personalMachineCopy,
   useSessionStart,
   type AgentMessageItem,
+  type AuthNeededItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
 import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
@@ -54,6 +55,7 @@ import {
 import { SessionCommandsList, SessionSignals } from "./session-signals";
 import type { ClientModel, OpenGeniClient, Session, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
+import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-chat-connect";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
@@ -101,6 +103,14 @@ export interface NativeSessionScreenProps extends Omit<
   approvalMessages?: ApprovalStripProps["messages"];
   /** Reads the commands panel (the full client; omit to hide command details). */
   client?: OpenGeniClient | undefined;
+  /**
+   * Let people finish an agent's "connect your account" request in the chat,
+   * with the web conversation's cards: sign-in opens the system sign-in
+   * browser and comes back to the app, keys go into the secure field, and the
+   * agent continues once setup is done. Needs `client`; omit to show the
+   * request as a row.
+   */
+  inChatConnect?: NativeInChatConnectOptions | undefined;
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
   /** Translations for the strings the native surfaces draw (merged over any provider above). */
@@ -125,6 +135,7 @@ export function NativeSessionScreen({
   humanInputMessages,
   approvalMessages,
   client,
+  inChatConnect,
   models,
   timelineMessages,
   renderComposer,
@@ -147,6 +158,7 @@ export function NativeSessionScreen({
           humanInputMessages={humanInputMessages}
           approvalMessages={approvalMessages}
           client={client}
+          inChatConnect={inChatConnect}
           models={models}
           renderComposer={renderComposer}
           renderMessageActions={hostMessageActions}
@@ -168,6 +180,7 @@ function SessionScreenBody({
   humanInputMessages,
   approvalMessages,
   client,
+  inChatConnect,
   models,
   renderComposer,
   renderMessageActions: hostMessageActions,
@@ -202,6 +215,18 @@ function SessionScreenBody({
   const items = useMemo(
     () => conversationTimeline(controller.timeline, queue, composer),
     [controller.timeline, queue, composer],
+  );
+  const stockAuthNeeded = useNativeInChatConnect({
+    client,
+    workspaceId: controller.workspaceId,
+    sessionId: controller.sessionId,
+    items,
+    options: inChatConnect,
+  });
+  const hostAuthNeeded = timelineProps.renderAuthNeeded;
+  const renderAuthNeeded = useCallback(
+    (item: AuthNeededItem) => hostAuthNeeded?.(item) ?? stockAuthNeeded?.(item),
+    [hostAuthNeeded, stockAuthNeeded],
   );
   const status = controller.sessionStatus;
   const paused = queue.effectiveControl?.state === "paused";
@@ -251,6 +276,7 @@ function SessionScreenBody({
         contentInsetBottom={composerHeight + 20}
         overlayInsetBottom={composerHeight}
         renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
+        renderAuthNeeded={renderAuthNeeded}
         renderUserAttachments={
           timelineProps.renderUserAttachments ??
           (client
@@ -297,6 +323,7 @@ function SessionScreenBody({
                 respondingRequestId={humanInput.respondingRequestId}
                 error={humanInput.mutationError?.message}
                 messages={humanInputMessages}
+                renderMarkdown={timelineProps.renderMarkdown}
                 onSubmit={(requestId, response) =>
                   humanInput.respond(requestId, response).then(() => undefined)
                 }
