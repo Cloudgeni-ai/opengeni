@@ -624,6 +624,32 @@ describe("BrowserControlClient", () => {
           message: expect.stringContaining("controller image"),
         },
       });
+      // An option added after the controller's release is named, with what to do instead.
+      await expect(
+        browser.action({
+          ...command,
+          operationId: randomUUID(),
+          action: {
+            type: "batch" as const,
+            actions: [
+              {
+                type: "click" as const,
+                locator: { kind: "text" as const, text: "Save", exact: true },
+              },
+            ],
+          },
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        error: {
+          code: "unsupported",
+          retryable: false,
+          message:
+            "This browser's controller image is older than this server and does not accept " +
+            '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
+            "the element by its ref. Updating the controller image adds support.",
+        },
+      });
       rejected = { status: 404, code: "resource_not_found", message: "route not found" };
       await expect(browser.readDom(command.targetId, read)).rejects.toMatchObject({
         status: 409,
@@ -633,7 +659,7 @@ describe("BrowserControlClient", () => {
           message: expect.stringContaining("focused DOM reads"),
         },
       });
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       for (const error of [
         { status: 404, code: "target_not_found", message: "browser target not found" },
         { status: 404, code: "resource_not_found", message: "browser session not found" },
@@ -659,7 +685,7 @@ describe("BrowserControlClient", () => {
           message: expect.stringContaining("browser recording"),
         },
       });
-      expect(requests).toHaveLength(7);
+      expect(requests).toHaveLength(8);
     } finally {
       server.stop(true);
     }
@@ -2453,6 +2479,86 @@ function failure(status: number, code: string, message: string): Response {
     { status },
   );
 }
+
+test("an older agent's controller refusal names the newer option without replaying", async () => {
+  const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+  let calls = 0;
+  let rejected = { status: 400, code: "invalid_action", message: "browser action is invalid" };
+  const session: BrowserControlPlacementSession = {
+    async exec() {
+      throw new Error("the native transport must not start a process");
+    },
+    async execWithInput() {
+      throw new Error("the native transport must not start a process");
+    },
+    async ensureBrowserControl() {
+      return { port: 9, sidecarGeneration: "sidecar-1" };
+    },
+    async browserControlHttp() {
+      calls += 1;
+      return {
+        kind: "response",
+        status: rejected.status,
+        headers: new Map([["content-type", "application/json"]]),
+        body: new TextEncoder().encode(
+          JSON.stringify({
+            protocolVersion: BROWSER_CONTROL_PROTOCOL_VERSION,
+            ok: false,
+            error: { code: rejected.code, message: rejected.message, retryable: false },
+          }),
+        ),
+      };
+    },
+  };
+  const client = new BrowserControlClient(session, {
+    adminToken,
+    nativeAuthority: { scopeId: randomUUID(), scopeGeneration: "connection-1" },
+  });
+  const browser = client.sessionClient({ reference, controlToken, viewToken });
+  expect(client.controllerRunsInAgent()).toBe(true);
+  await expect(
+    browser.action({
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      ...reference,
+      targetId: "target-1",
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+      actor: { kind: "system", subjectId: "test" },
+      action: { type: "click", locator: { kind: "text", text: "Save", exact: true } },
+    }),
+  ).rejects.toMatchObject({
+    status: 409,
+    error: {
+      code: "unsupported",
+      retryable: false,
+      message:
+        "This browser's controller runs in an older Opengeni agent that does not accept " +
+        '"exact" on a text or label locator. Nothing ran. Retry without "exact", or target ' +
+        "the element by its ref. Updating the agent adds support.",
+    },
+  });
+  rejected = { status: 404, code: "resource_not_found", message: "route not found" };
+  await expect(
+    browser.readDom("target-1", {
+      kind: "element",
+      locator: { kind: "css", selector: "#name" },
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+    }),
+  ).rejects.toMatchObject({
+    status: 409,
+    error: {
+      code: "unsupported",
+      message:
+        "browser controller does not support focused DOM reads; it runs in an older Opengeni " +
+        "agent, and updating the agent adds support",
+    },
+  });
+  expect(calls).toBe(2);
+});
 
 test("serializes only explicit internal directory recovery and refuses navigation/restore combinations before I/O", async () => {
   const reference = { browserSessionId: randomUUID(), controllerGeneration: "synthetic-recovery" };
