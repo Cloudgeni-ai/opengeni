@@ -44,6 +44,14 @@ await og.updateScheduledTask(workspaceId, task.id, {
 
 Each run uses that chat's own model and tools and runs as the schedule owner. Updates keep fields you omit; `expectedExecutionDigest` rejects a conflicting edit. If moving `targetSessionId` would change the run's settings, the API returns a conflict; repeat with `adoptSessionSettings: true` to accept.
 
+`overlapPolicy` decides what a run into a chat does when the chat is still busy:
+
+- `buffer_one` (the default; `allow_concurrent` is the same in a chat): the run waits and starts when the current turn finishes.
+- `skip`: the run is dropped, and the next one runs as normal.
+- `steer`: if the busy turn is this task's own earlier run, the new run reaches it at its next model step, like a person's Steer. The tool calls of that step finish, and the agent then reads the new run together with the work so far. A turn anyone else started still finishes first. Use it for a chat agent that reacts to events, so a burst of messages is handled as one conversation instead of a queue of separate replies.
+
+Runs in a new chat (`new_session_per_run`) never wait, so `steer` is only accepted for tasks that continue a chat.
+
 ## From your product's events
 
 A scheduled task can also run when something happens: give it `events`, and each event that matches one of its triggers starts a run. Events come from an **event source**:

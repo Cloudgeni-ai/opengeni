@@ -43067,12 +43067,14 @@ export async function recordSkippedContextCompaction(
 /**
  * Whether a Steer is waiting for this session's running turn: a queued prompt
  * marked `delivery: "steer"` (human, API, or a queue row an agent steered) or
- * a pending Agent Steer instruction. Steer admission leaves a live attempt
- * running, and the worker reads this before each model request: a pending
- * Steer is delivered at that model-step boundary by settling the running turn
- * `superseded` (reason `steer`, `atModelStep`), after the completed step's
- * tool calls and results are recorded, so nothing in flight is cut off. The
- * Steer then runs next on the same history.
+ * a pending Agent Steer instruction, or, while the running turn is a run of an
+ * automation whose overlap is `steer`, a pending later run of that same
+ * automation. Steer admission leaves a live attempt running, and the worker
+ * reads this before each model request: a pending Steer is delivered at that
+ * model-step boundary by settling the running turn `superseded` (reason
+ * `steer`, `atModelStep`), after the completed step's tool calls and results
+ * are recorded, so nothing in flight is cut off. The Steer then runs next on
+ * the same history.
  *
  * This unlocked read only decides whether that settlement is worth trying.
  * The settlement's `requirePendingSteer` precondition re-checks the same
@@ -43148,7 +43150,63 @@ async function pendingSteerExists(
       ),
     )
     .limit(1);
-  return agentSteer !== undefined;
+  if (agentSteer) return true;
+  return await pendingAutomationSteerExists(db, workspaceId, sessionId, turnId);
+}
+
+/**
+ * A later run of the automation that owns the running turn waits in the chat,
+ * and that automation hands its running turn over (`overlapPolicy: "steer"`).
+ * Only the automation's own turn yields: a person's turn, a goal continuation
+ * or another automation's run never matches, so they finish first and the run
+ * is delivered after them as usual. The waiting run must be deliverable as it
+ * stands (dispatched with its accepted execution, the claim's own preclaim
+ * rule), so a run the claim would refuse never ends the turn for nothing.
+ */
+async function pendingAutomationSteerExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<boolean> {
+  const turns = schema.sessionTurns;
+  const runs = schema.scheduledTaskRuns;
+  const tasks = schema.scheduledTasks;
+  const updates = schema.sessionSystemUpdates;
+  const [row] = await rawRows<{ present: number }>(
+    db,
+    sql`select 1 as present
+      from ${turns} running_turn
+      join ${runs} running_run
+        on running_run.workspace_id = running_turn.workspace_id
+        and running_run.id = running_turn.scheduled_task_run_id
+      join ${tasks} task
+        on task.workspace_id = running_run.workspace_id
+        and task.id = running_run.task_id
+      where running_turn.workspace_id = ${workspaceId}
+        and running_turn.session_id = ${sessionId}
+        and running_turn.id = ${turnId}
+        and task.overlap_policy = 'steer'
+        and task.status = 'active'
+        and task.deleted_at is null
+        and exists (
+          select 1
+          from ${updates} waiting
+          join ${runs} waiting_run
+            on waiting_run.workspace_id = waiting.workspace_id
+            and waiting_run.id = waiting.scheduled_task_run_id
+          where waiting.workspace_id = running_turn.workspace_id
+            and waiting.session_id = running_turn.session_id
+            and waiting.kind = 'scheduled_occurrence'
+            and waiting.state = 'pending'
+            and waiting_run.task_id = task.id
+            and waiting_run.id <> running_run.id
+            and waiting_run.status = 'dispatched'
+            and waiting_run.accepted_execution_snapshot is not null
+        )
+      limit 1`,
+  );
+  return row !== undefined;
 }
 
 /**

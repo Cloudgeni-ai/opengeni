@@ -78,4 +78,42 @@ describe("conversational scheduling input", () => {
       prompt: "Updated message",
     });
   });
+
+  test("steer is offered with each overlap choice explained, and only for runs into a chat", () => {
+    const overlap = scheduledTaskCreateToolInput().shape.overlapPolicy;
+    expect(overlap.unwrap().options).toEqual(["allow_concurrent", "skip", "buffer_one", "steer"]);
+    for (const value of ["buffer_one", "allow_concurrent", "skip", "steer"])
+      expect(overlap.description).toContain(value);
+
+    expect(
+      resolveScheduledTaskCreateInput({ ...message, overlapPolicy: "steer" }, sessionId),
+    ).toMatchObject({ runMode: "existing_session", overlapPolicy: "steer" });
+    const { prompt, ...base } = message;
+    expect(
+      resolveScheduledTaskCreateInput(
+        { ...base, runMode: "reusable_session", overlapPolicy: "steer", agentConfig: { prompt } },
+        sessionId,
+      ).overlapPolicy,
+    ).toBe("steer");
+    expect(() =>
+      resolveScheduledTaskCreateInput(
+        {
+          ...base,
+          runMode: "new_session_per_run",
+          overlapPolicy: "steer",
+          agentConfig: { prompt },
+        },
+        sessionId,
+      ),
+    ).toThrow("overlapPolicy steer needs an automation that continues a chat");
+    expect(
+      UpdateScheduledTaskRequest.safeParse({
+        runMode: "new_session_per_run",
+        overlapPolicy: "steer",
+      }).success,
+    ).toBe(false);
+    expect(UpdateScheduledTaskRequest.parse({ overlapPolicy: "steer" })).toEqual({
+      overlapPolicy: "steer",
+    });
+  });
 });

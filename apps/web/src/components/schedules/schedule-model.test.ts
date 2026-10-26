@@ -222,6 +222,34 @@ describe("schedule requests", () => {
     expect(request.overlapPolicy).toBe("skip");
   });
 
+  test("steer is saved for a chat and dropped when an edit moves the automation to new chats", () => {
+    const initial: ScheduleDraft = {
+      ...base(),
+      runMode: "existing_session",
+      targetSessionId: "chat",
+      overlapPolicy: "steer",
+    };
+    const stored = task({ runMode: "existing_session", targetSessionId: "chat" });
+    expect(
+      updateRequestFromDraft(stored, initial, { ...initial, overlapPolicy: "skip" }, { now: NOW })
+        .overlapPolicy,
+    ).toBe("skip");
+    expect(
+      updateRequestFromDraft(stored, { ...initial, overlapPolicy: "skip" }, initial, { now: NOW })
+        .overlapPolicy,
+    ).toBe("steer");
+    const moved = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, runMode: "new_session_per_run", targetSessionId: "" },
+      { now: NOW },
+    );
+    expect(moved).toMatchObject({
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+    });
+  });
+
   test("Secrets narrowing is sent only when vaults are picked, and cleared back to all", () => {
     const vaultIds = ["00000000-0000-4000-8000-0000000000a1"];
     const all = createRequestFromDraft(base(), { now: NOW, learningScope: "workspace" });

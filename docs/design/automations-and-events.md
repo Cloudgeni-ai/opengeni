@@ -75,6 +75,11 @@ MCP source the trigger also holds the subscription arguments the server's
      occurrence: a run into an existing chat with `skip` needs that chat to be
      idle, and otherwise its update waits in the chat for the current turn;
      a new-chat-per-run automation starts a chat per batch.
+     `steer` (only for an automation that continues a chat) hands the
+     automation's own running turn over at its next model step, like a
+     person's Steer, so the agent reads the new run together with the work it
+     has done so far. A turn anyone else started still finishes first. In a
+     chat, `allow_concurrent` and `buffer_one` both mean the run waits.
    - *Storm guard*: at most `maxRunsPerHour` event runs in a rolling hour
      (default 30; schedules and manual runs never count). Further events wait
      in the inbox and arrive together in the next allowed run. The owner is

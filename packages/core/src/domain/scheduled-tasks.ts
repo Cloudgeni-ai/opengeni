@@ -15,6 +15,7 @@ import {
   mergeResourceRefs,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES,
+  scheduledTaskRunModeContinuesChat,
 } from "@opengeni/contracts";
 import {
   resolveSessionFirstPartyMcpTools,
@@ -476,7 +477,11 @@ export async function createValidatedScheduledTask(input: {
     reusableSessionCanPost: null,
     verifySlackChannel: input.verifySlackChannel,
   });
-  if (knowledgeAction && input.payload.overlapPolicy === "allow_concurrent")
+  if (
+    knowledgeAction &&
+    input.payload.overlapPolicy !== "skip" &&
+    input.payload.overlapPolicy !== "buffer_one"
+  )
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
@@ -1712,10 +1717,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       action: knowledgeSource,
     });
   }
-  if (
-    knowledgeSource &&
-    (input.payload.overlapPolicy ?? input.existing.overlapPolicy) === "allow_concurrent"
-  )
+  const nextOverlapPolicy = input.payload.overlapPolicy ?? input.existing.overlapPolicy;
+  if (knowledgeSource && nextOverlapPolicy !== "skip" && nextOverlapPolicy !== "buffer_one")
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   if (
     knowledgeSource?.destination.kind === "personal" &&
@@ -1726,6 +1729,11 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     });
   const existingTarget = input.existing.targetSessionId;
   const nextRunMode = input.payload.runMode ?? input.existing.runMode;
+  if (nextOverlapPolicy === "steer" && !scheduledTaskRunModeContinuesChat(nextRunMode))
+    throw new HTTPException(422, {
+      message:
+        "overlapPolicy steer needs an automation that continues a chat (runMode existing_session or reusable_session)",
+    });
   const materializedReusable =
     input.existing.runMode === "reusable_session" &&
     nextRunMode === "reusable_session" &&

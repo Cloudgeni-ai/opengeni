@@ -1470,6 +1470,18 @@ steering). A turn that a Steer replaced while it only waited (an approval, a
 question or capacity; its `turn.superseded` names `targetTurnId` or
 `targetUpdateId`) also closes quietly, and its approvals stop being
 actionable. A queued Send is unaffected and still runs after the whole turn.
+An automation that continues a chat can ask for the same handover with
+`overlapPolicy: "steer"`. While a turn that one of its runs started is still
+running, its next run (a `scheduled_occurrence` update for a dispatched run of
+the same automation) counts as a waiting Steer for that turn only: the shared
+predicate behind `hasPendingSteerForTurn` matches it, so the steer watch, the
+model-step admission and the `requirePendingSteer` re-check all treat it like a
+person's Steer, and the run is then claimed on the unchanged history. A turn
+anyone else started (a person, a goal continuation, another automation) never
+matches, so the run waits for it as a queued run does. The waiting-Steer path
+that replaces an approval, question or capacity wait reads only queued Steer
+messages and Agent Steer instructions, so an automation run never closes a wait
+for a person; it hands over at the first model step after the wait resumes.
 `steerQueueItem` with `interrupt: true` (an API option on the Steer's turn as
 `steerMessage` returned it; the web and React Native surfaces no longer offer
 it)
