@@ -35,8 +35,12 @@ function requestMethod(input: unknown, init: unknown): string {
   return HTTP_METHODS.has(upper) ? upper : "_OTHER";
 }
 
-/** The fetch implementation a `traceFetch` wrapper calls. */
-const TRACED_FETCH_TARGET = Symbol("opengeni.tracedFetchTarget");
+/**
+ * The fetch implementation each `traceFetch` wrapper calls, keyed by the exact
+ * wrapper. Private to this module, so no other object (a Proxy, a function
+ * inheriting from a wrapper) can claim to be one.
+ */
+const tracedFetchTargets = new WeakMap<object, unknown>();
 
 /**
  * The fetch implementation that actually performs a call: `fetchImpl` itself,
@@ -46,10 +50,8 @@ const TRACED_FETCH_TARGET = Symbol("opengeni.tracedFetchTarget");
  */
 export function tracedFetchTarget<F>(fetchImpl: F): F {
   let target: unknown = fetchImpl;
-  while (typeof target === "function") {
-    const next: unknown = (target as { [TRACED_FETCH_TARGET]?: unknown })[TRACED_FETCH_TARGET];
-    if (next === undefined) break;
-    target = next;
+  while (typeof target === "function" && tracedFetchTargets.has(target)) {
+    target = tracedFetchTargets.get(target);
   }
   return target as F;
 }
@@ -94,7 +96,7 @@ export function traceFetch<F extends (input: never, init?: never) => Promise<Res
       fetchImpl as unknown as Record<string, unknown>
     )[key];
   }
-  Object.defineProperty(traced, TRACED_FETCH_TARGET, { value: fetchImpl });
+  tracedFetchTargets.set(traced, fetchImpl);
   return traced as unknown as F;
 }
 
