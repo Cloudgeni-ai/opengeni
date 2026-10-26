@@ -175,6 +175,20 @@ export type CodemodeBrowserScreenshot = CodemodeLocalImage &
     metadata: CodemodeBrowserScreenshotMetadata;
   }>;
 
+export type CodemodeComputerScreenshotOptions = {
+  /** Only this rectangle of the target's last full screenshot, in that screenshot's pixels. */
+  region?: { x: number; y: number; width: number; height: number } | undefined;
+  /** Save the image at this exact path. Existing files are never overwritten. */
+  saveTo?: string | undefined;
+};
+
+export type CodemodeComputerScreenshot = CodemodeLocalImage &
+  Readonly<{
+    /** The observation read with the image: its frameId and capturedFrame size
+     * address pointer actions on it. Pixel bytes stay in the local image file. */
+    observation: ComputerObservation;
+  }>;
+
 export type CodemodeBrowserAgentNode = Readonly<{
   ref: string;
   role: string;
@@ -1406,6 +1420,39 @@ export class CodemodeComputerTarget {
       { computerSessionId: this.computerSessionId, targetId: this.id },
       callOptions,
     );
+  }
+
+  /** Observe the window or screen and write its screenshot to a local file
+   * (`saveTo`, or a private temporary file), like a browser tab's screenshot. */
+  async screenshot(
+    options: CodemodeComputerScreenshotOptions = {},
+    callOptions: CodemodeCallOptions = {},
+  ): Promise<CodemodeComputerScreenshot> {
+    const result = await (
+      await this.client()
+    ).callPath(
+      PATH.computerObserve,
+      {
+        computerSessionId: this.computerSessionId,
+        targetId: this.id,
+        ...(options.region === undefined ? {} : { region: options.region }),
+      },
+      callOptions,
+    );
+    if (result.isError) throw new CodemodeToolExecutionError(result);
+    if (!result.structuredContent) {
+      throw new Error("Codemode tool interaction.computer.observe returned no structured content");
+    }
+    if (!result.content.some((content) => content.type === "image")) {
+      throw new Error(
+        `${this.id} returned no screenshot: an app target has only its accessibility tree, so take the screenshot of one of its windows or of the screen`,
+      );
+    }
+    const [image] = await materializeCodemodeImages(result, {
+      ...(options.saveTo === undefined ? {} : { saveTo: options.saveTo }),
+      requireOne: true,
+    });
+    return { ...image!, observation: result.structuredContent as ComputerObservation };
   }
 
   async act(

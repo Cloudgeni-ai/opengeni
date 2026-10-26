@@ -1149,8 +1149,10 @@ export class CuaComputerBackend implements ComputerBackend {
     const hosts = this.sheetHosts(target).slice(0, 4);
     const near = (a: number, b: number) => Math.abs(a - b) <= 2;
     const shown: Target[] = [];
+    let unread = 0;
     for (const host of hosts) {
       const reading = await this.observeTarget(host.native.id).catch(() => null);
+      if (!reading) unread += 1;
       if (
         reading?.roots.some(
           (node) =>
@@ -1164,13 +1166,21 @@ export class CuaComputerBackend implements ComputerBackend {
       )
         shown.push(host);
     }
+    const hostList = hosts.map((host) => host.native.id).join(", ");
+    // Every window it lies within was read and none shows it: pointing at
+    // them again would only lead back here.
+    if (!shown.length && hosts.length && !unread)
+      return new ComputerBackendError(
+        "target_stale",
+        `${target.native.id} cannot be read through accessibility, on its own or in the window it belongs to (one of ${hostList}), so its controls cannot be used from here: use another way the page or app offers, such as another sign-in method, or ask the person to finish it at the computer`,
+        false,
+        false,
+      );
     return new ComputerBackendError(
       "target_stale",
       shown.length === 1
         ? `${target.native.id} is a sheet attached to the window ${shown[0]!.native.id}, and its controls are read and used through that window: observe ${shown[0]!.native.id} and act on its refs`
-        : `${target.native.id} cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of ${hosts
-            .map((host) => host.native.id)
-            .join(", ")}) and act on its refs`,
+        : `${target.native.id} cannot be read on its own. If it is a sheet or panel of another window of this app, its controls are in that window's observation: observe the window it belongs to (one of ${hostList}) and act on its refs`,
       false,
       false,
     );
@@ -1196,6 +1206,19 @@ export class CuaComputerBackend implements ComputerBackend {
     const others = [...this.targetsById.values()]
       .filter((other) => other !== target && other.pid === target.pid)
       .map((other) => other.native.id);
+    // The focused window is one of the others; when every one of them has
+    // already proven unreadable, acting on it is no way forward.
+    if (others.length && others.every((id) => this.unreadableSheets.has(id)))
+      return new ComputerBackendError(
+        code,
+        `Keys reach only the focused window of a background app, and that window (one of ${others
+          .slice(0, 5)
+          .join(
+            ", ",
+          )}) cannot be read through accessibility, so none were sent and none can reach it from here: use another way the page or app offers, such as another sign-in method, or ask the person to finish it at the computer`,
+        false,
+        false,
+      );
     return new ComputerBackendError(
       code,
       `Keys reach only the focused window of a background app, and another of its windows has focus${
@@ -1754,7 +1777,9 @@ export class CuaComputerBackend implements ComputerBackend {
   ): Promise<Operation[]> {
     if (command.action.type === "batch") throw unsupported("A batch cannot contain a batch");
     if (command.action.type === "pointer" && command.action.clickCount === 2) {
-      throw unsupported("CUA click continuation is unavailable");
+      throw unsupported(
+        'This computer cannot turn an earlier click into a double-click, so nothing was sent: send one pointer action with action "double_click" at that point instead',
+      );
     }
     const target = await this.target(command.targetId);
     if (target.native.targetGeneration !== command.expectedTargetGeneration)

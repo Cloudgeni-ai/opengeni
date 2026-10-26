@@ -3661,7 +3661,8 @@ export const ComputerAction = /* @__PURE__ */ defineSchema(() =>
           context.addIssue({
             code: "custom",
             path: ["continuationOfOperationId"],
-            message: "clickCount 2 requires exactly one prior first-click operation",
+            message:
+              'clickCount 2 and continuationOfOperationId go together: continuationOfOperationId names the earlier click that clickCount 2 turns into a double-click; to double-click in one action, use action "double_click" instead',
           });
         }
         if (action.action === "drag" && (action.endX === undefined || action.endY === undefined)) {

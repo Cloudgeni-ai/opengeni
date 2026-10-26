@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createAttemptToolEnvironment } from "@opengeni/codemode";
-import { BrowserAction, BrowserActionBatch } from "@opengeni/contracts";
+import { BrowserAction, BrowserActionBatch, ComputerAction } from "@opengeni/contracts";
 import { jsonSchemaToTypeScript } from "@opengeni/tool-gateway";
 import { z } from "zod";
 import {
@@ -131,5 +131,15 @@ describe("interaction tool model schema", () => {
       "Interaction tool arguments are invalid: action.actions.1.key: expected string, received undefined.",
     );
     expect(explain({ type: "teleport" })).toContain("action.type: Invalid discriminator value.");
+  });
+
+  test("a double-click by clickCount alone names the action that does it in one step", () => {
+    const parsed = z.object({ action: ComputerAction }).safeParse({
+      action: { type: "pointer", frameId: "frame-1", action: "click", x: 5, y: 5, clickCount: 2 },
+    });
+    if (parsed.success) throw new Error("expected invalid arguments");
+    expect(describeInvalidToolArguments(parsed.error)).toBe(
+      'Interaction tool arguments are invalid: action.continuationOfOperationId: clickCount 2 and continuationOfOperationId go together: continuationOfOperationId names the earlier click that clickCount 2 turns into a double-click; to double-click in one action, use action "double_click" instead.',
+    );
   });
 });

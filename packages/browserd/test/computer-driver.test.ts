@@ -123,8 +123,11 @@ describe("ComputerDriver", () => {
           expect(transport.dispatched?.action).toEqual(continuation.action);
           expect(transport.dispatched?.operationId).toBe(continuation.operationId);
         } else {
+          // The refusal names the action that does double-click here.
           await expect(driver.validate(continuation)).rejects.toMatchObject({
             code: "unsupported",
+            message:
+              'This computer cannot turn an earlier click into a double-click, so nothing was sent: send one pointer action with action "double_click" at that point instead',
           });
           await expect(driver.dispatch(continuation)).rejects.toMatchObject({
             code: "unsupported",

@@ -462,7 +462,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
     ) {
       throw new ComputerBackendError(
         "unsupported",
-        "computer click continuation is unavailable",
+        'This computer cannot turn an earlier click into a double-click, so nothing was sent: send one pointer action with action "double_click" at that point instead',
         false,
         false,
       );

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFile, rm } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { AttemptToolResult, BrowserDownload } from "@opengeni/contracts";
 import {
   CodemodeClient,
@@ -197,6 +198,52 @@ describe("Opengeni Codemode interaction facade", () => {
       ]);
     } finally {
       await rm(dirname(screenshot.path), { recursive: true, force: true });
+    }
+  });
+
+  test("saves a computer window's screenshot to a file with its observation", async () => {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X9p8AAAAASUVORK5CYII=",
+      "base64",
+    );
+    const observation = {
+      observationId: "observation-1",
+      frameId: "frame-1",
+      capturedFrame: { width: 1, height: 1 },
+    };
+    const fake = fakeClient((path, args) => {
+      if (path !== "interaction.computer.observe") throw new Error(`unexpected path: ${path}`);
+      if (args.targetId === "app-1") return result(observation);
+      return {
+        content: [
+          { type: "text", text: "window" },
+          { type: "image", data: png.toString("base64"), mimeType: "image/png" },
+        ],
+        structuredContent: observation,
+      };
+    });
+    const computer = createOpenGeniCodemode(fake.client).computers.use(computerSessionId);
+    const directory = await mkdtemp(join(tmpdir(), "computer-screenshot-"));
+    try {
+      const saveTo = join(directory, "window.png");
+      const region = { x: 0, y: 0, width: 1, height: 1 };
+      const shot = await computer.targets.use("window-1").screenshot({ saveTo, region });
+      expect(shot).toMatchObject({ path: saveTo, mimeType: "image/png", sizeBytes: png.length });
+      expect(shot.observation as unknown).toEqual(observation);
+      expect(await readFile(saveTo)).toEqual(png);
+      await expect(computer.targets.use("window-1").screenshot({ saveTo })).rejects.toMatchObject({
+        code: "EEXIST",
+      });
+      await expect(computer.targets.use("app-1").screenshot()).rejects.toThrow(
+        "app-1 returned no screenshot: an app target has only its accessibility tree",
+      );
+      expect(fake.calls.map((call) => call.args)).toEqual([
+        { computerSessionId, targetId: "window-1", region },
+        { computerSessionId, targetId: "window-1" },
+        { computerSessionId, targetId: "app-1" },
+      ]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
