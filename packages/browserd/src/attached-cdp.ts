@@ -171,7 +171,10 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
     return new ReconnectingAttachedBridge(options, await connector(options), connector);
   }
 
-  async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+  async request<T = unknown>(
+    payload: Readonly<Record<string, unknown>>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<T> {
     if (this.stopped)
       throw new AttachedBrowserBridgeError(
         "transport_failed",
@@ -196,7 +199,7 @@ export class ReconnectingAttachedBridge implements AttachedBrowserBridgeTranspor
       );
     }
     try {
-      return await client.request<T>(payload);
+      return await client.request<T>(payload, options);
     } catch (error) {
       if (client.closed && this.client === pending) this.client = null;
       throw error;
@@ -585,7 +588,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private async sendNow<T>(
     method: string,
     params: Readonly<Record<string, unknown>>,
-    options: { sessionId?: string },
+    options: { sessionId?: string; timeoutMs?: number },
   ): Promise<T> {
     try {
       if (options.sessionId) {
@@ -604,14 +607,20 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         const attachment = this.tabAttachments.get(tabId);
         let response: { result: unknown };
         try {
-          response = await this.bridge.request<{ result: unknown }>({
-            type: "debugger.command",
-            tabId,
-            sessionId: nestedSessionId(options.sessionId),
-            ...(attachment === undefined ? {} : { attachment }),
-            method,
-            params,
-          });
+          response = await withinTimeout(
+            this.bridge.request<{ result: unknown }>(
+              {
+                type: "debugger.command",
+                tabId,
+                sessionId: nestedSessionId(options.sessionId),
+                ...(attachment === undefined ? {} : { attachment }),
+                method,
+                params,
+              },
+              options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs },
+            ),
+            options.timeoutMs,
+          );
         } catch (error) {
           if (
             error instanceof AttachedBrowserBridgeError &&
@@ -730,9 +739,13 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     };
   }
 
-  /** Whether the tab is the active one in its window, as Chrome reports it. */
-  async tabShown(targetId: string): Promise<boolean | null> {
-    const listed = await this.bridge.request<{ tabs: AttachedTab[] }>({ type: "tabs.list" });
+  /** Whether the tab is the active one in its window, as Chrome reports it.
+   * The extension has no single-tab lookup, so this lists the profile's tabs. */
+  async tabShown(targetId: string, options: { timeoutMs?: number } = {}): Promise<boolean | null> {
+    const listed = await withinTimeout(
+      this.bridge.request<{ tabs: AttachedTab[] }>({ type: "tabs.list" }, options),
+      options.timeoutMs,
+    );
     return requireTabs(listed.tabs).find((tab) => tab.id === targetId)?.active ?? null;
   }
 
@@ -1405,6 +1418,28 @@ function requireTab(value: unknown): AttachedTab {
 function tabUrl(value: unknown): string | null {
   if (typeof value !== "string" || value.length === 0) return null;
   return value.length > MAX_TAB_URL_LENGTH ? value.slice(0, MAX_TAB_URL_LENGTH) : value;
+}
+
+/** A bridge reply waited for no longer than the caller allowed, whichever
+ * bridge carries it. The command may still arrive or finish in Chrome. */
+async function withinTimeout<T>(reply: Promise<T>, timeoutMs: number | undefined): Promise<T> {
+  if (timeoutMs === undefined) return await reply;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new AttachedBrowserBridgeError("timeout", "attached browser command timed out", true),
+        ),
+      Math.max(1, Math.ceil(timeoutMs)),
+    );
+  });
+  try {
+    return await Promise.race([reply, expired]);
+  } finally {
+    clearTimeout(timer);
+    reply.catch(() => undefined);
+  }
 }
 
 function mapBridgeError(method: string, error: unknown, sessionId?: string): Error {
