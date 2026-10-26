@@ -183,9 +183,31 @@ export class ToolSearchIndex {
     return selected;
   }
 
+  /**
+   * For a result that cannot list compact candidates (native search loads
+   * schemas or nothing): when bestMatches declines, each clause's strongest
+   * relevant tool and every tool tied with it. Relevant means the tool's name
+   * or capability sentence contains one of the query's own words; a match only
+   * through operation synonyms, long guidance or parameter names is not
+   * enough, so an unrelated query still finds nothing.
+   */
+  leadingMatches(query: string): Tool[] {
+    const selected: Tool[] = [];
+    for (const clause of query.split(/[;\n]+/).filter((part) => words(part).length > 0)) {
+      const relevant = this.rankClause(clause).filter((hit) => hit.namesQueryWord);
+      const best = relevant[0];
+      if (!best) continue;
+      for (const hit of relevant) {
+        if (hit.score !== best.score) break;
+        if (!selected.includes(hit.tool)) selected.push(hit.tool);
+      }
+    }
+    return selected;
+  }
+
   private rankClause(
     query: string,
-  ): Array<{ tool: Tool; score: number; resourceCoverage: number }> {
+  ): Array<{ tool: Tool; score: number; resourceCoverage: number; namesQueryWord: boolean }> {
     const tokens = [...new Set(words(query))];
     if (!tokens.length) return [];
     const queryWeights = new Map(tokens.map((token) => [token, 1]));
@@ -230,7 +252,12 @@ export class ToolSearchIndex {
             doc.resources.length
           : 0;
         const resourceCoverage = Math.max(queryCoverage, nameCoverage);
-        return { tool: doc.tool, score, resourceCoverage };
+        const namesQueryWord = tokens.some(
+          (token) =>
+            !GENERIC_QUERY_TERMS.has(token) &&
+            (doc.fields[0]!.frequencies.has(token) || doc.fields[1]!.frequencies.has(token)),
+        );
+        return { tool: doc.tool, score, resourceCoverage, namesQueryWord };
       })
       .filter((hit) => hit.score > 0)
       .sort((a, b) => b.score - a.score);

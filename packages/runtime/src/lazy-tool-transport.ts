@@ -766,11 +766,13 @@ export class LazyToolRuntime {
     signal?.throwIfAborted();
     const { query, names, limit } = parseSearchArgs(rawArguments);
     if (names !== undefined) {
-      return {
+      const loaded: GenericSearchMarker = {
         version: 2,
         output: this.genericSearchOutput(rawArguments),
         tools: structuredClone(this.searchDisclosure(rawArguments)),
       };
+      const accounts = this.connectedAccountsNotice(loaded);
+      return accounts ? this.withNotice(loaded, "connectedAccounts", accounts) : loaded;
     }
     const pool = this.searchableTools(this.currentTools);
     this.searchIndex ??= new ToolSearchIndex(pool);
@@ -780,8 +782,15 @@ export class LazyToolRuntime {
       .filter(isFunctionTool)
       .map((t) => t.name);
     const clear = this.decisionModel ? strong : [];
-    const strongest = this.searchIndex
-      .bestMatches(query)
+    const best = this.searchIndex.bestMatches(query);
+    // A native result shows loaded tools or nothing, never compact candidates:
+    // where ranking found relevant tools but no single clear best, load the
+    // strongest of them rather than answer that nothing matched.
+    const strongest = (
+      best.length || this.transport === "generic_dispatch"
+        ? best
+        : this.searchIndex.leadingMatches(query)
+    )
       .filter(isFunctionTool)
       .map((t) => t.name);
     // Either integration setup tool brings the other. A search no installed

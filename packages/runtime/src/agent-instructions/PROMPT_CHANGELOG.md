@@ -1,5 +1,22 @@
 # Modular prompt changelog
 
+Vague searches on native search routes. No prompt, tool description or new
+text. A native `tool_search` result can only load tools, not list compact
+candidates, so when ranking found tools but no single clear best (an exact tie
+between two hits, or a top hit whose name and capability sentence share no
+resource word with the query) the model used to see "No matching tools found".
+It now loads each clause's strongest relevant tool and any tools tied with it,
+within the search limit. Relevant means the tool's name or capability
+sentence contains one of the query's own words, so a query that matches only
+through an operation synonym, long guidance or parameter names, or nothing at
+all, still loads nothing. "Search and read user's email inbox recent unread
+emails" now loads Gmail's `search_messages` instead of nothing. Generic
+dispatch routes, which list compact candidates, are unchanged. The existing
+`connectedAccounts` notice above now also follows a load by exact names (for
+example after browsing a group with `tool_list`) when it is the turn's first
+result reaching one of several connected accounts; its text is unchanged.
+Only new search results differ; nothing earlier in a conversation changes.
+
 Several connected accounts. No prompt or tool description text changes for
 the common case. When the person has more than one connected account (for
 example Gmail and Outlook Mail) that serve the same need, the first
