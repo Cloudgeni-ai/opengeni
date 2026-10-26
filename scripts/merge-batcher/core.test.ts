@@ -1579,11 +1579,23 @@ describe("integration boundaries and queue-only shadow CI", () => {
     );
     expect(await f.git.inspect(m.tipSha)).toEqual(m);
   });
-  test("control-plane changes are singleton barriers and require explicit review prose", () => {
+  test("control-plane heads run alone when oldest but do not underfill preceding ordinary batches", () => {
     const p = { ...pull(2), controlPlane: true };
     expect(bindingKey(p)).not.toBe(bindingKey(pull(2)));
-    expect(fifo([pull(1), p, pull(3)], 16).map((x) => x.number)).toEqual([1]);
+    expect(fifo([pull(1), p, pull(3)], 16).map((x) => x.number)).toEqual([1, 3]);
     expect(fifo([p, pull(3)], 16)).toEqual([p]);
+    const queue = [pull(5), pull(1), p, pull(4), pull(3)];
+    const selected = fifo(queue, 3);
+    expect(selected.map((x) => x.number)).toEqual([1, 3, 4]);
+    expect(
+      fifo(
+        queue.filter((x) => !selected.some((chosen) => chosen.number === x.number)),
+        3,
+      ),
+    ).toEqual([p]);
+    const version = { ...pull(4), headRef: "changeset-release/main" };
+    expect(fifo([pull(5), version, p, pull(3), pull(1)], 16).map((x) => x.number)).toEqual([1, 3]);
+    expect(fifo([version, pull(5)], 16)).toEqual([version]);
     const input: PullInput = {
       number: 2,
       headSha: p.headSha,

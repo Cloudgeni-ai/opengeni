@@ -66,10 +66,11 @@ export function fifo(pulls: Pull[], cap: number): Pull[] {
   );
   if (ordered[0]?.headRef === "changeset-release/main" || ordered[0]?.controlPlane)
     return ordered.slice(0, 1);
-  const barrier = ordered.findIndex(
-    (p) => p.headRef === "changeset-release/main" || p.controlPlane,
-  );
-  return ordered.slice(0, Math.min(cap, barrier < 0 ? ordered.length : barrier));
+  const barrier = ordered.findIndex((p) => p.headRef === "changeset-release/main");
+  return ordered
+    .slice(0, barrier < 0 ? ordered.length : barrier)
+    .filter((p) => !p.controlPlane)
+    .slice(0, cap);
 }
 export function descendants(id: string, candidates: Candidate[]): string[] {
   const ids = new Set([id]);
