@@ -22,17 +22,24 @@
 //! VMM wrote from just before that reading until every write it had
 //! started by the disk's read has returned (see
 //! [`HostAgent::disk_growth_readings`]).
+//!
+//! A sandbox may ask for a longer disk than its image's
+//! ([`SandboxConfig::disk_mib`]): its copy is made that long at once, the
+//! new end a hole its guest's file system grows into, and it is booked at
+//! that length like any disk.
 
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use compute_core::{DiskSpace, Input, SandboxId};
-use compute_engine::{Engine, Writes};
+use compute_engine::{Engine, VmSpec, Writes};
 use tokio::task::JoinSet;
 
 use crate::disk_growth::{self, Headroom};
-use crate::layout::copy_size;
+use crate::layout::{Paths, copy_size, vm_spec};
 use crate::protocol::SandboxConfig;
+use crate::state::Record;
 use crate::store::{OwnerEpoch, Store};
 
 use super::{HostAgent, HostError, Reply};
@@ -54,6 +61,61 @@ const WRITE_SLACK: u64 = 1 << 20;
 /// [`Engine::settle_writes`]). A VM whose writes have not by then books
 /// all its disk may take, for that reading.
 const SETTLE_WITHIN: Duration = Duration::from_millis(100);
+
+/// Makes the disk at `path` at least `length` bytes long and returns how
+/// long it is. Its new end is a hole, which takes no disk until the guest
+/// writes there; the length lasts a crash, as the record that vouches for
+/// it, written next, must.
+pub(super) fn lengthen(path: &Path, length: u64) -> io::Result<u64> {
+    let disk = std::fs::OpenOptions::new().write(true).open(path)?;
+    let found = disk.metadata()?.len();
+    if found >= length {
+        return Ok(found);
+    }
+    disk.set_len(length)?;
+    disk.sync_all()?;
+    Ok(length)
+}
+
+/// The disk of a ready sandbox a create claims, which the claim makes as
+/// long as the create asks for (see [`ClaimedDisk::lengthen`]).
+#[derive(Debug)]
+pub(super) struct ClaimedDisk {
+    /// Its VM's spec, which names its drives.
+    spec: VmSpec,
+    disk: PathBuf,
+    /// How long its guest was told the disk is, at its fill.
+    known: Option<u64>,
+}
+
+impl ClaimedDisk {
+    /// Makes the disk as long as `config` asks for, and tells the paused
+    /// guest of `vm` if that is longer than it knows: the guest learns it
+    /// as it next runs, and grows its file system to fit. Returns its
+    /// length, or why it could not be done.
+    pub(super) async fn lengthen<E: Engine>(
+        self,
+        engine: &E,
+        vm: &E::Vm,
+        config: &SandboxConfig,
+    ) -> Result<u64, String> {
+        let (disk, wanted) = (self.disk, config.clone());
+        let length = tokio::task::spawn_blocking(move || {
+            let found = std::fs::metadata(&disk)?.len();
+            lengthen(&disk, wanted.disk_bytes(found))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("could not lengthen its disk: {error}"))?;
+        if self.known != Some(length) {
+            engine
+                .resize_drives(vm, &self.spec)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(length)
+    }
+}
 
 /// Work that waits for the next disk reading to say whether the disk can
 /// take it.
@@ -88,13 +150,35 @@ pub(super) enum Room {
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
+    /// The disk of ready sandbox `record`, for a claim of it.
+    pub(super) fn claimed_disk(&self, record: &Record) -> ClaimedDisk {
+        let paths = Paths::of(&self.root, record);
+        ClaimedDisk {
+            spec: vm_spec(record, &paths, &self.images),
+            disk: paths.disk,
+            known: record.allocation.disk_bytes,
+        }
+    }
+
+    /// How long `image`'s disk is, or the base image's: the base image's
+    /// length when the agent started if it cannot be read now.
+    fn image_length(&self, image: Option<ImageId>) -> u64 {
+        std::fs::metadata(self.image_path(image)).map_or(self.base_length, |found| found.len())
+    }
+
     /// The most a sandbox's disk, a copy of `image` or the base image, may
     /// take: its length in whole allocation units, and the blocks that map
     /// them (see [`disk_growth::disk_bound`]). The base image's length when
     /// the agent started, if the image's cannot be read now.
     pub(super) fn disk_bound(&self, image: Option<ImageId>) -> u64 {
-        let length =
-            std::fs::metadata(self.image_path(image)).map_or(self.base_length, |found| found.len());
+        disk_growth::disk_bound(self.image_length(image), self.allocation_unit)
+    }
+
+    /// The most a new sandbox of `config` may take of its disk: its
+    /// image's grown to the length `config` asks for, if longer (see
+    /// [`SandboxConfig::disk_bytes`]), as [`Self::disk_bound`] counts it.
+    pub(super) fn new_disk_bound(&self, config: &SandboxConfig) -> u64 {
+        let length = config.disk_bytes(self.image_length(config.image));
         disk_growth::disk_bound(length, self.allocation_unit)
     }
 

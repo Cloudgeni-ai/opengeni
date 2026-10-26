@@ -77,6 +77,7 @@ fn sandbox(owner: HostId) -> SandboxRow {
         spec: Spec {
             image: "base".into(),
             config: SandboxConfig {
+                disk_mib: None,
                 vcpus: 1,
                 memory_mib: 256,
                 memory_request_mib: None,

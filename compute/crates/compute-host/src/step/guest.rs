@@ -1,11 +1,11 @@
 //! What a step tells the guest, over its notice port (see
 //! [`crate::restore_notice`]): that it was restored, and to write its disks
-//! out before it is saved.
+//! out before it is saved; and, through its VMM, that its disk grew.
 
 use std::time::{Duration, Instant};
 
 use compute_core::{Failure, Outcome};
-use compute_engine::Engine;
+use compute_engine::{Engine, EngineError};
 
 use super::Job;
 use crate::restore_notice::{ask_sync, tell_restored};
@@ -29,6 +29,19 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(30);
 const SYNC_LIMIT: Duration = Duration::from_secs(10);
 
 impl<E: Engine, S: Store> Job<E, S> {
+    /// Tells a guest restored from its template's memory, before it runs,
+    /// how long its disk is: that memory knows the template's disk, and the
+    /// sandbox's own may have been made longer (see
+    /// [`compute_engine::Engine::resize_drives`]). A guest that has yet to
+    /// learn which sandbox it is still runs on that memory; one that asked
+    /// for no disk length kept the template's.
+    pub(super) async fn tell_disk_length(&self, vm: &E::Vm) -> Result<(), EngineError> {
+        if self.record.identity != Identity::Pending || self.record.config.disk_mib.is_none() {
+            return Ok(());
+        }
+        self.engine.resize_drives(vm, &self.spec).await
+    }
+
     /// Has the running guest write out what it holds for its disks before
     /// it pauses to be saved, so its saved disk is whole without the memory
     /// saved beside it, as when its host is lost (see

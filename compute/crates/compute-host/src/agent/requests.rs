@@ -689,11 +689,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// Makes the files of the new sandbox `record` describes in the
-    /// background, from `template` if it has one, then records it;
-    /// [`Event::Prepared`] says how it went.
+    /// background, from `template` if it has one, its disk as long as it
+    /// asks for, then records it; [`Event::Prepared`] says how it went.
     fn prepare(&self, mut record: Record, template: Option<Arc<Template>>, reply: Reply<()>) {
         let (id, ordinal) = (record.id, record.ordinal);
         let image = record.config.image;
+        let sized = record.config.clone();
         let sources = self.warm.as_ref().map(|warm| Arc::clone(&warm.sources));
         let link = Images::link(&record);
         let paths = Paths::new(&self.root, id);
@@ -736,7 +737,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 if let (Some(net), Some(link)) = (&networks, &link) {
                     net.ensure(link)?;
                 }
-                Ok((start, std::fs::metadata(&paths.disk)?.len()))
+                // A copy of a template is as long as the template's, which
+                // its memory image says the guest's disk is: the first wake
+                // tells the guest it grew (see `Step::restore`).
+                let copied = std::fs::metadata(&paths.disk)?.len();
+                let length = super::disk::lengthen(&paths.disk, sized.disk_bytes(copied))?;
+                Ok((start, length))
             })
             .await
             .unwrap_or_else(|error| Err(io::Error::other(error)));

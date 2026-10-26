@@ -893,6 +893,11 @@ impl<E: Engine, S: Store> Job<E, S> {
             }
         };
         notes::phase("load");
+        // Before the image is marked stale, so a failure may try it again.
+        if let Err(error) = self.tell_disk_length(&vm).await {
+            let outcome = self.end_with_memory(vm, live_memory, failure(&error)).await;
+            return (outcome, After::NoVm);
+        }
         let archived = self.record.archived;
         // A restore continues the saved execution: the generation stays.
         let running = Change::new().image(false).archived(false);

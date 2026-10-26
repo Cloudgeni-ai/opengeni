@@ -1189,7 +1189,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// by while it runs; and what a wake from object storage writes
     /// locally: its disk, the memory image its pager fills, and its device
     /// state. A disk of unknown length counts as a copy of its image as it
-    /// is today, as a new sandbox's is.
+    /// is today grown to the length `config` asks for, as a new sandbox's
+    /// is.
     fn size(&self, config: &SandboxConfig, disk_bytes: Option<u64>) -> Size {
         let limit = u64::from(config.memory_mib) << 20;
         let request = if self.reserve_whole {
@@ -1198,7 +1199,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             u64::from(config.memory_request()) << 20
         };
         let disk = disk_bytes.map_or_else(
-            || self.disk_bound(config.image),
+            || self.new_disk_bound(config),
             |length| crate::disk_growth::disk_bound(length, self.allocation_unit),
         );
         Size {

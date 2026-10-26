@@ -94,6 +94,7 @@ async fn linked_lab_with(root: PathBuf, world: Arc<super::World>, hub: Hub) -> L
 
 fn config(gateway: &Gateway, ticket: &str) -> SandboxConfig {
     SandboxConfig {
+        disk_mib: None,
         image: None,
         vcpus: 1,
         memory_mib: 256,

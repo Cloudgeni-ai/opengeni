@@ -1146,6 +1146,10 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("set_memory_limit", error))
     }
 
+    async fn resize_drives(&self, vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {
+        drives::resize(vm, spec).await
+    }
+
     fn cpu_time(&self, vm: &FirecrackerVm) -> Result<Duration, EngineError> {
         vm.cgroup
             .cpu_time()

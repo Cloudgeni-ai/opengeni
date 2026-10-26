@@ -316,6 +316,24 @@ pub trait Engine: Send + Sync + 'static {
         ))
     }
 
+    /// Tells the guest of `vm`, started from `spec`, how long each of its
+    /// writable drives is now: their files grew since it last learned
+    /// that, at its boot or in the state it was restored from. A paused
+    /// guest learns it when it next runs. Engines whose drives cannot
+    /// change length report an error, and the VM keeps the drives it had.
+    fn resize_drives(
+        &self,
+        vm: &Self::Vm,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        let _ = (vm, spec);
+        std::future::ready(Err(EngineError::new(
+            ErrorKind::Transient,
+            "resize_drives",
+            "this engine cannot change a drive's length",
+        )))
+    }
+
     /// Resolves once the VM process has ended for any reason, including
     /// [`Engine::stop`]. The future does not borrow the VM, so the host can
     /// watch for a VM dying on its own while a step uses it.
