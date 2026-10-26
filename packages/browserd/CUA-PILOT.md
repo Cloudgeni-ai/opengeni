@@ -223,9 +223,12 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   performs it on any of them; CUA reports such an app, and its page controls
   (not its selects, which take set_value) are invoked by role. Keys for a shortcut
   whose menu item is disabled while the app is in the background (Terminal's
-  Close Window) are reported as a likely no-op. A click or key press CUA
-  could only send, with no element changed after it, is reported as possibly
-  not taken effect.
+  Close Window) are reported as a likely no-op.
+- On every CUA adapter (macOS, Windows, and isolated Linux desktops), a single
+  click, double-click or key press the driver reports as unverifiable, with no
+  element changed after it, is reported as possibly not taken effect. The
+  native Linux helper (the default for Linux host desktops) does not report
+  unconfirmed input, so its results never carry that line.
 - Linux supports semantic background actions within its isolated X11 seat;
   foreground pointer input stays inside that seat. Unsupported native background
   pointer requests are refused. Web/application acceptance is still required.
