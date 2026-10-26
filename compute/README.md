@@ -393,7 +393,9 @@ The baseline is the E2B JS SDK 2.56.0. One listener (`--e2b-listen`,
 connect, pause, kill, set the timeout, list templates) and traffic to
 `<port>-<id>.<domain>`, or to one address with the `E2b-Sandbox-Id` and
 `E2b-Sandbox-Port` headers. Templates name an image and a shape
-(`--e2b-template base=<image>:2x1024`). With `--e2b-tls-cert` and
+(`--e2b-template base=<image>:2x1024`), and may name the disk their
+sandboxes get (`--e2b-template ci=<image>:4x8192x65536`, in MiB, as a
+create's `disk_mib`). With `--e2b-tls-cert` and
 `--e2b-tls-key` it serves HTTPS itself, with one certificate for the API's
 name and `*.<domain>`; without them it speaks plain HTTP behind a load
 balancer that terminates TLS.
