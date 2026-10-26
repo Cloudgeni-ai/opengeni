@@ -196,6 +196,13 @@ const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
 // Still captures share the target/input queue. Bound the whole read phase so
 // a renderer that stops producing pixels cannot hold it for successive CDP deadlines.
 const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
+/** A person's own Chrome cannot take the managed launch switch that copies a
+ * fresh surface, so a capture of a tab another tab covers in its window waits
+ * for a redraw Chrome never shows. Viewport captures there give up after this
+ * long with a plain reason instead of the whole capture deadline. */
+const CONNECTED_CHROME_CAPTURE_STALL_MS = 3_000;
+const CONNECTED_CHROME_CAPTURE_STALLED =
+  "browser screenshot stalled: Chrome did not draw this tab within 3 s, which happens while another tab is in front of it in its window; select it with browser_tabs to capture it, or read it with browser_observe";
 /** Longest a viewport capture waits for the compositor to present a just
  * changed emulated viewport before publishing what it has. */
 const STALE_SURFACE_SETTLE_MS = 1_500;
@@ -1856,15 +1863,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               const response = await this.screenshotRead(
                 "Page.captureScreenshot",
                 deadline,
-                async (timeoutMs) =>
-                  await this.sendTarget<{ data?: unknown }>(
-                    state,
-                    "Page.captureScreenshot",
-                    capture,
-                    {
-                      timeoutMs,
-                    },
-                  ),
+                async (timeoutMs) => {
+                  const stallBound =
+                    this.engine === "chrome" && !normalized.fullPage
+                      ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
+                      : timeoutMs;
+                  try {
+                    return await this.sendTarget<{ data?: unknown }>(
+                      state,
+                      "Page.captureScreenshot",
+                      capture,
+                      { timeoutMs: stallBound },
+                    );
+                  } catch (error) {
+                    if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
+                      throw new InteractionControllerError(
+                        "timeout",
+                        CONNECTED_CHROME_CAPTURE_STALLED,
+                        true,
+                      );
+                    }
+                    throw error;
+                  }
+                },
               );
               const data = decodeBoundedBase64Image(response.data);
               return { data, dimensions: imageDimensions(data, normalized.format) };
