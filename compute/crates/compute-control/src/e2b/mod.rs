@@ -128,6 +128,10 @@ pub struct Template {
     pub image: String,
     pub vcpus: u8,
     pub memory_mib: u32,
+    /// The disk, in MiB, its sandboxes get at least (see
+    /// [`compute_protocol::host::SandboxConfig::disk_mib`]); their image's
+    /// length when `None`.
+    pub disk: Option<u32>,
     /// The disk size reported to callers.
     pub disk_mib: u64,
 }
@@ -162,6 +166,7 @@ impl Default for Settings {
                     image: "base".into(),
                     vcpus: 2,
                     memory_mib: 1024,
+                    disk: None,
                     disk_mib: 4096,
                 },
             )]),
