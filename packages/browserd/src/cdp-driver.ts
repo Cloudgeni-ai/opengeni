@@ -238,6 +238,12 @@ const COMMITTED_LOADER_HISTORY = 16;
 const SCREENSHOT_DOCUMENT_ATTEMPTS = 3;
 /** Bound for each step that keeps scrollbar gutters during a full-page capture. */
 const SCROLLBAR_STYLE_TIMEOUT_MS = 2_000;
+/** What a full-page capture changed to keep its scrollbar gutters, and how to undo it. */
+type ScrollbarLayout = {
+  viewportWidth: number | null;
+  inexact: boolean;
+  restore: () => Promise<void>;
+};
 /** Most scrollers whose gutter a full-page capture keeps by selector. */
 const MAX_PINNED_SCROLLERS = 256;
 /**
@@ -253,9 +259,15 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
   if (!root) return null;
   const limit = ${MAX_PINNED_SCROLLERS};
   const pinned = [];
+  // A gutter the page already keeps stable (either edge or both) needs no
+  // rule, which could only change it; its scrollbar still has to be
+  // re-evaluated afterwards.
+  const stable = [];
+  const pin = (selector, style) =>
+    (String(style.scrollbarGutter).startsWith("stable") ? stable : pinned).push(selector);
   const refresh = new Set();
   let overflow = false;
-  if (innerWidth - root.clientWidth >= 1) pinned.push(":root");
+  if (innerWidth - root.clientWidth >= 1) pin(":root", getComputedStyle(root));
   if (innerHeight - root.clientHeight >= 1) refresh.add(":root");
   // Changing a rule restyles every element its last compound could match, so
   // that compound names the element's tag, id and first class as well.
@@ -291,8 +303,8 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
       const vertical = wide - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth) >= 1;
       const horizontal = tall - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth) >= 1;
       if (!vertical && !horizontal) continue;
-      const kept = vertical && !host && pinned.length < limit;
-      if (kept) pinned.push(path(element));
+      const kept = vertical && !host && pinned.length + stable.length < limit;
+      if (kept) pin(path(element), style);
       if (horizontal || !kept) {
         if (refresh.size < limit) refresh.add(path(host ?? element));
         else overflow = true;
@@ -300,7 +312,7 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
     }
   };
   visit(document, null);
-  return { viewportWidth: innerWidth, pinned, refresh: overflow ? [":root"] : [...refresh] };
+  return { viewportWidth: innerWidth, pinned, stable, refresh: overflow ? [":root"] : [...refresh] };
 })()`;
 const STYLE_READ_EXPRESSION =
   "document.documentElement ? getComputedStyle(document.documentElement).color : null";
@@ -1932,9 +1944,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               deadline,
               async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
             );
-            const layout = normalized.fullPage
-              ? await this.keepScrollbarLayout(state, deadline)
-              : null;
+            let layout: ScrollbarLayout | null = null;
             try {
               const metrics = await this.screenshotRead(
                 "Page.getLayoutMetrics",
@@ -1953,6 +1963,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               let scrollY = metrics.viewport.y;
               let pixelRatio = metrics.pixelRatio;
               if (normalized.fullPage) {
+                // A page too large to capture fails before any style changes.
+                // Keeping the gutters changes no layout, so these metrics hold.
+                assertImageDimensions(
+                  Math.ceil(Math.max(metrics.content.width, metrics.viewport.width)),
+                  Math.ceil(metrics.content.height),
+                );
+                layout = await this.keepScrollbarLayout(state, deadline);
                 // The capture keeps the page's own layout width, scrollbar
                 // gutter included, so the image is as wide as the tab's viewport.
                 cssWidth = Math.max(metrics.content.width, layout?.viewportWidth ?? 0);
@@ -2098,7 +2115,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async keepScrollbarLayout(
     state: TargetState,
     deadline: number,
-  ): Promise<{ viewportWidth: number | null; inexact: boolean; restore: () => Promise<void> }> {
+  ): Promise<ScrollbarLayout> {
     const unchanged = { viewportWidth: null, inexact: false, restore: async () => {} };
     let found: unknown;
     try {
@@ -2117,26 +2134,32 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       typeof found.viewportWidth !== "number" ||
       !Number.isFinite(found.viewportWidth) ||
       found.viewportWidth <= 0 ||
-      !Array.isArray(found.pinned) ||
-      !found.pinned.every((selector) => typeof selector === "string") ||
-      !Array.isArray(found.refresh) ||
-      !found.refresh.every((selector) => typeof selector === "string")
+      !isSelectorList(found.pinned) ||
+      !isSelectorList(found.stable) ||
+      !isSelectorList(found.refresh)
     ) {
       return unchanged;
     }
     const viewportWidth = found.viewportWidth;
-    const pinned = found.pinned as string[];
-    const refresh = found.refresh as string[];
+    const pinned = found.pinned;
+    const refresh = found.refresh;
     const inexact = refresh.length > 0;
-    if (pinned.length === 0 && !inexact) return { viewportWidth, inexact, restore: async () => {} };
+    // Scrollbars that need a style change of their own afterwards.
+    const restyle = [...refresh, ...found.stable];
+    if (pinned.length === 0 && restyle.length === 0) {
+      return { viewportWidth, inexact, restore: async () => {} };
+    }
+    // Every step stays within the capture's own deadline.
+    const stepTimeout = () =>
+      Math.max(1, Math.min(SCROLLBAR_STYLE_TIMEOUT_MS, deadline - Date.now()));
     let styleSheetId: string | null = null;
     try {
-      await this.sendTarget(state, "CSS.enable", {}, { timeoutMs: SCROLLBAR_STYLE_TIMEOUT_MS });
+      await this.sendTarget(state, "CSS.enable", {}, { timeoutMs: stepTimeout() });
       const created = await this.sendTarget<{ styleSheetId?: unknown }>(
         state,
         "CSS.createStyleSheet",
         { frameId: state.frame.id },
-        { timeoutMs: SCROLLBAR_STYLE_TIMEOUT_MS },
+        { timeoutMs: stepTimeout() },
       );
       if (typeof created.styleSheetId !== "string") throw new Error("no inspector stylesheet");
       styleSheetId = created.styleSheetId;
@@ -2145,7 +2168,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           state,
           "CSS.setStyleSheetText",
           { styleSheetId, text: `${pinned.join(",")}{scrollbar-gutter:stable!important}` },
-          { timeoutMs: SCROLLBAR_STYLE_TIMEOUT_MS },
+          { timeoutMs: stepTimeout() },
         );
       }
     } catch {
@@ -2157,38 +2180,43 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const restore = async () => {
       if (restored) return;
       restored = true;
+      const sheet = styleSheetId;
       try {
-        if (styleSheetId === null) return;
+        if (sheet === null) return;
         const setText = async (text: string) =>
           await this.sendTarget(
             state,
             "CSS.setStyleSheetText",
-            { styleSheetId, text },
-            { timeoutMs: SCROLLBAR_STYLE_TIMEOUT_MS },
+            { styleSheetId: sheet, text },
+            { timeoutMs: stepTimeout() },
           );
-        // A style change on a scroller re-evaluates its scrollbars. The
-        // removed gutter rule does that for every pinned element. Scrollbars
-        // the sheet could not pin (horizontal ones, those inside shadow
-        // trees) need a change of their own: scrollbar-color is inherited
-        // into shadow trees and changes no layout. That change needs a style
-        // pass before the sheet is cleared, or the two would cancel out, so a
-        // style read forces one. The final clear needs none: the page's next
-        // frame or layout read applies it, before anything can see layout,
-        // and the capture does not wait for the restyle of a large document.
-        if (inexact) {
-          await setText(`${refresh.join(",")}{scrollbar-color:GrayText Canvas!important}`);
-          await this.evaluateIsolated(state, STYLE_READ_EXPRESSION, SCROLLBAR_STYLE_TIMEOUT_MS);
+        try {
+          // A style change on a scroller re-evaluates its scrollbars. The
+          // removed gutter rule does that for every pinned element. Scrollbars
+          // the sheet could not pin (horizontal ones, those inside shadow
+          // trees) and gutters the page keeps stable itself need a change of
+          // their own: scrollbar-color is inherited
+          // into shadow trees and changes no layout. That change needs a style
+          // pass before the sheet is cleared, or the two would cancel out, so
+          // a style read forces one.
+          if (restyle.length > 0 && deadline > Date.now()) {
+            await setText(`${restyle.join(",")}{scrollbar-color:GrayText Canvas!important}`);
+            await this.evaluateIsolated(state, STYLE_READ_EXPRESSION, stepTimeout());
+          }
+        } finally {
+          // Always clear the sheet, whatever the step above did: nothing of
+          // the capture may stay on the page. A busy page that misses this
+          // bound still runs the queued clear once it answers. The clear needs
+          // no style pass: the page's next frame or layout read applies it,
+          // before anything can see layout.
+          await setText("");
         }
-        await setText("");
       } catch {
         // The page may have moved to another document; its sheet went with it.
       } finally {
-        await this.sendTarget(
-          state,
-          "CSS.disable",
-          {},
-          { timeoutMs: SCROLLBAR_STYLE_TIMEOUT_MS },
-        ).catch(() => undefined);
+        await this.sendTarget(state, "CSS.disable", {}, { timeoutMs: stepTimeout() }).catch(
+          () => undefined,
+        );
       }
     };
     return { viewportWidth, inexact, restore };
@@ -11361,6 +11389,10 @@ function flattenFrameTree(root: PageFrameTree): MainFrame[] {
 
 function frameTreeFingerprint(frames: readonly MainFrame[]): string {
   return frames.map((frame) => `${frame.id}\0${frame.loaderId}`).join("\n");
+}
+
+function isSelectorList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((selector) => typeof selector === "string");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -842,6 +842,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
+      "X-OpenGeni-Browser-Frame",
+      "X-OpenGeni-Browser-Frame-Note",
       "X-OpenGeni-Conversation-Filter",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Covered-First",
