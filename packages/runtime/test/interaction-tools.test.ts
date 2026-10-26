@@ -2098,6 +2098,53 @@ describe("interaction attempt tools", () => {
       );
     });
 
+    test("browser_open naming a missing linked computer gets only the computer hint, whatever the computer names say", async () => {
+      const browser = openBrowser();
+      const computer = openComputer();
+      // A name that reads like the browser's refusal must not make the
+      // computer's refusal look like a missing BrowserSession.
+      computer.name = "Lab: BrowserSession not found";
+      const message = await run(
+        "browser_open",
+        { browserSessionId: browser.id, linkedComputerSessionId: randomUUID() },
+        {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [browser] }) as never,
+          listComputerSessions: async () => ({ revision: 1, sessions: [computer] }) as never,
+          getBrowserSession: async () => {
+            throw computerMissing();
+          },
+          openBrowserSession: async () => {
+            throw computerMissing();
+          },
+        },
+      );
+      expect(message).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${computer.id} "Lab: BrowserSession not found". Use one of these ids.`,
+      );
+    });
+
+    test("a missing session is recognised from the API's JSON refusal, flat or nested", async () => {
+      const open = openBrowser();
+      for (const body of [
+        JSON.stringify({ error: { code: "not_found", message: "BrowserSession not found" } }),
+        JSON.stringify({ code: "not_found", message: "BrowserSession not found" }),
+      ]) {
+        const message = await run(
+          "browser_clipboard",
+          { browserSessionId: randomUUID() },
+          {
+            listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+            readBrowserClipboard: async () => {
+              throw new OpenGeniApiError(404, body);
+            },
+          },
+        );
+        expect(message).toBe(
+          `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${open.id} "Research". Use one of these ids.`,
+        );
+      }
+    });
+
     test("computer_open and computer_lifecycle name the open ComputerSessions", async () => {
       const open = openComputer();
       const transport = {
