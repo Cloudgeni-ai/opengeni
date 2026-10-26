@@ -259,8 +259,9 @@ ends.
 
 `secret_get` is Opengeni's explicit, audited read of a plaintext value. The
 value it returns is shown as returned and is not masked again for the rest of
-that attempt, since the agent asked for it on purpose. Known values inside
-it (the password of a revealed database URL) are released with it. This holds for a
+that attempt, since the agent asked for it on purpose. Values inside it
+(the password of a revealed database URL) are released with it: they are
+shown as written wherever they appear, and not captured. This holds for a
 direct call and for a Codemode script's call, and a base64 result (a file
 field) reveals both the encoded and the decoded text. Only Opengeni's own
 `secret_get` reveals; a connector's tool with the same name does not.
@@ -350,13 +351,15 @@ secret part is replaced:
 - `password=` and `pwd=` values in connection strings: written without
   spaces around `=` (plain, quoted or in braces), as a URL query parameter or
   on a line that also has a host, server, database, user, port or SSL key
-  written the same way. A plain value ends at a comma, bracket or
-  parenthesis. Source code such as `const password = config.password;`,
-  `password=args.password` or `password=os.environ["DB_PW"]` is not a
-  connection string.
+  written the same way. In the `Key=value;` style (after `;`, `?`, `&` or at
+  a line start) a plain value runs to the next `;`. In the keyword style
+  (`host=db password=…`, `connect(…, password=…)`) it also ends at a comma,
+  bracket or parenthesis, and code such as `password=args.password` or
+  `password=os.environ["DB_PW"]` is not a value. Source code such as
+  `const password = config.password;` is not a connection string.
 - Azure `AccountKey=` (also `StorageAccountKey=`) and `SharedAccessKey=`
-  values written without spaces around `=` as a base64 key of at least 20
-  characters, and SAS `sig=` values.
+  values written without spaces around `=` as a base64 key of at least 40
+  characters with a digit (real keys have 88 or 44), and SAS `sig=` values.
 - PEM private key blocks, whole, cut off, or only their end (a later chunk of
   streamed output). A body needs at least 64 base64 characters. A cut-off
   key needs a line break right after its BEGIN line and covers only base64
@@ -415,8 +418,8 @@ Shape masking applies only to tool results and their stored copies (tool
 output, command output, Codemode settlements). Messages a person types,
 commands as written and files on disk are not changed. Shapes inside a
 value `secret_get` returned (for example the password of a revealed database
-URL) are neither captured nor masked, and a known value inside it is
-released with it (see What is known).
+URL) are neither captured nor masked, here or in other output (see What is
+known).
 
 ### Limits
 

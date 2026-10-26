@@ -975,7 +975,7 @@ export class SecretValueMemory {
       // Values that already have a reference are done; markers are retried.
       pending = collectSecretShapes(known, 256, {
         ...(this.options.skipKey ? { skipKey: this.options.skipKey } : {}),
-        keep: (match, text) => !this.insideRevealed(match, text),
+        keep: (match, text) => !this.insideRevealed(match, text) && !this.isRevealed(match.value),
       }).filter((match) => !isSecretReferenceMaskLabel(this.shapes.get(match.value) ?? ""));
     } catch (error) {
       this.report(stage, error);
@@ -1042,7 +1042,7 @@ export class SecretValueMemory {
 
   /** What replaces a detected shape: its capture, a known label, a marker, or nothing when revealed. */
   private shapeLabel = (match: SecretShapeMatch, text: string): string | null =>
-    this.insideRevealed(match, text)
+    this.insideRevealed(match, text) || this.isRevealed(match.value)
       ? null
       : (this.shapes.get(match.value) ??
         this.values.get(match.value) ??

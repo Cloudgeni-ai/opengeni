@@ -121,7 +121,9 @@ function isPlaceholder(value: string): boolean {
 }
 
 // `%(name)s` (Python format) and `@Name` (SQL or ADO.NET parameter).
-const TEMPLATE_PARAMETER = /^(?:%\([A-Za-z_][A-Za-z0-9_]*\)[sdr]?|@[A-Za-z_][A-Za-z0-9_]*)$/;
+// A parameter name is letters with at most one trailing digit (`@Password`,
+// `@p1`); `@dmin2024x` is a password.
+const TEMPLATE_PARAMETER = /^(?:%\([A-Za-z_][A-Za-z0-9_]*\)[sdr]?|@[A-Za-z_][A-Za-z_]*\d?)$/;
 
 /** `args.password`, `config.db.password`, `this.pw`: an expression in source code. */
 const MEMBER_ACCESS = /^[A-Za-z_$][\w$]*(?:\.[\w$]+)+$/;
@@ -152,7 +154,7 @@ const CONNECTION_KEY =
  * `const password = config.password;` is not.
  */
 function inConnectionString(text: string, match: RegExpExecArray, value: string): boolean {
-  if (value.length < 4 || value.startsWith("=") || MEMBER_ACCESS.test(value)) return false;
+  if (value.length < 4 || value.startsWith("=")) return false;
   const lead = match[0][0];
   if (lead === "?" || lead === "&") return true;
   const from = Math.max(0, match.index - CONNECTION_STRING_WINDOW);
@@ -191,24 +193,39 @@ const DETECTORS: readonly Detector[] = [
   },
   {
     kind: "connection-string-password",
-    // Written tight (`Password=…`), plain, braced or quoted.
+    // `Key=value;` style (after `;`, `?`, `&` or at a line start): plain,
+    // braced or quoted; a plain value runs to the next `;`.
     pattern:
-      /(?:^|[;?&\s"'({])(?:password|pwd)=(?:\{([^}\r\n]{1,256})(?=\})|'([^'\r\n]{1,256})(?=')|"([^"\r\n]{1,256})(?=")|([^;&\s"'<>{}()[\],=][^;&\s"'<>()[\],]{0,255}))/gim,
+      /(?:^|[;?&])(?:password|pwd)=(?:\{([^}\r\n]{1,256})(?=\})|'([^'\r\n]{1,256})(?=')|"([^"\r\n]{1,256})(?=")|([^;&\s"'<>{}=][^;&\s"'<>]{0,255}))/gim,
     secret: lastGroup,
     accept: inConnectionString,
+  },
+  {
+    kind: "connection-string-password",
+    // Keyword style (`host=db user=app password=…`, `connect(…, password=…)`):
+    // a plain value also ends at a comma, bracket or parenthesis, and code
+    // such as `password=args.password` is not a value.
+    pattern:
+      /[\s"'({](?:password|pwd)=(?:\{([^}\r\n]{1,256})(?=\})|'([^'\r\n]{1,256})(?=')|"([^"\r\n]{1,256})(?=")|([^;&\s"'<>{}()[\],=][^;&\s"'<>()[\],]{0,255}))/gi,
+    secret: lastGroup,
+    accept: (text, match, value) =>
+      !MEMBER_ACCESS.test(value) && inConnectionString(text, match, value),
   },
   {
     kind: "azure-account-key",
     // AccountKey=, also StorageAccountKey= and similar. Written tight with a
     // base64 key, so source code such as `accountKey = process.env.KEY` is not.
+    // Real keys are 88 (or 44) base64 characters.
     pattern:
-      /(?<![A-Za-z0-9])(?:[A-Za-z]{0,30})AccountKey=([A-Za-z0-9+/]{20,}={0,2})(?=$|[;\s"'`])/gi,
+      /(?<![A-Za-z0-9])(?:[A-Za-z]{0,30})AccountKey=([A-Za-z0-9+/]{40,}={0,2})(?=$|[;\s"'`\\])/gi,
     secret: (match) => match[1],
+    needsDigit: true,
   },
   {
     kind: "azure-shared-access-key",
-    pattern: /\bSharedAccessKey=([A-Za-z0-9+/]{20,}={0,2})(?=$|[;\s"'`])/gi,
+    pattern: /\bSharedAccessKey=([A-Za-z0-9+/]{40,}={0,2})(?=$|[;\s"'`\\])/gi,
     secret: (match) => match[1],
+    needsDigit: true,
   },
   {
     kind: "azure-sas-signature",
@@ -334,14 +351,41 @@ function keyBodyStart(text: string, at: number, floor: number): number {
   return start;
 }
 
+/** The first entry of a sorted list that is at least `at` (binary search). */
+function firstAtLeast(sorted: readonly number[], at: number): number {
+  let low = 0;
+  let high = sorted.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (sorted[middle]! < at) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+/**
+ * Linear in the text: END lines are collected once (by their exact marker)
+ * and each BEGIN looks up its END with a binary search, never by searching
+ * the rest of the text.
+ */
 function privateKeyMatches(text: string, out: SecretShapeMatch[]): void {
+  const ends: Array<{ at: number; line: string }> = [];
+  const endsByMarker = new Map<string, number[]>();
+  PRIVATE_KEY_END.lastIndex = 0;
+  for (let endLine = PRIVATE_KEY_END.exec(text); endLine; endLine = PRIVATE_KEY_END.exec(text)) {
+    ends.push({ at: endLine.index, line: endLine[0] });
+    const positions = endsByMarker.get(endLine[0]);
+    if (positions) positions.push(endLine.index);
+    else endsByMarker.set(endLine[0], [endLine.index]);
+  }
   const found: Array<[number, number]> = [];
   PRIVATE_KEY_BEGIN.lastIndex = 0;
   for (let begin = PRIVATE_KEY_BEGIN.exec(text); begin; begin = PRIVATE_KEY_BEGIN.exec(text)) {
     const start = begin.index;
     const endMarker = `-----END ${begin[1] ?? ""}PRIVATE KEY${begin[2] ?? ""}-----`;
     const bodyStart = start + begin[0].length;
-    const endAt = text.indexOf(endMarker, bodyStart);
+    const positions = endsByMarker.get(endMarker);
+    const endAt = positions ? (positions[firstAtLeast(positions, bodyStart)] ?? -1) : -1;
     let end: number;
     if (endAt >= 0 && endAt - start <= PRIVATE_KEY_MAX_CHARS) {
       end = endAt + endMarker.length;
@@ -359,13 +403,14 @@ function privateKeyMatches(text: string, out: SecretShapeMatch[]): void {
   }
   // The rest of a key whose BEGIN line is not in this text, for example a
   // later chunk of streamed command output: the body back to where it starts.
-  PRIVATE_KEY_END.lastIndex = 0;
-  for (let endLine = PRIVATE_KEY_END.exec(text); endLine; endLine = PRIVATE_KEY_END.exec(text)) {
-    const at = endLine.index;
-    if (found.some(([from, to]) => at >= from && at < to)) continue;
+  // Both lists are in text order, so one pointer finds the enclosing key.
+  let next = 0;
+  for (const { at, line } of ends) {
+    while (next < found.length && found[next]![1] <= at) next += 1;
+    if (next < found.length && found[next]![0] <= at) continue;
     const start = keyBodyStart(text, at, Math.max(0, at - PRIVATE_KEY_MAX_CHARS));
     if (keyBodyChars(text, start, at) < PRIVATE_KEY_MIN_BODY_CHARS) continue;
-    const end = at + endLine[0].length;
+    const end = at + line.length;
     out.push({ kind: "private-key", start, end, value: text.slice(start, end) });
   }
 }

@@ -416,7 +416,7 @@ describe("review regressions, round 2", () => {
     Array.from({ length: lines }, (_, index) => `FAKEkeyBODY${index}`.padEnd(64, "A")).join("\n");
 
   test("Azure key names in source code are not keys", () => {
-    const key = `${repeat("FAKEkey0", 4)}==`;
+    const key = `${repeat("FAKEkey0", 6)}==`;
     for (const line of [
       "const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;",
       "storageAccountKey = getStorageKeyFromVault(name)",
@@ -518,5 +518,59 @@ describe("review regressions, round 2", () => {
     memory.remember(bearer, "[opengeni credential: codemode token]");
     memory.reveal(`Authorization: Bearer ${bearer}`);
     expect(memory.mask(bearer)).toBe("[opengeni credential: codemode token]");
+  });
+});
+
+describe("review regressions, round 3", () => {
+  test("the private-key scan stays linear on many BEGIN lines", () => {
+    const begins = "-----BEGIN PRIVATE KEY-----\n".repeat(50_000);
+    const escaped = `"-----BEGIN RSA PRIVATE KEY-----\\n${"QUJDRA".repeat(20)}\\n" `.repeat(20_000);
+    const grep = "src/fixture.ts:12: const key = '-----BEGIN RSA PRIVATE KEY-----';\n".repeat(
+      8_000,
+    );
+    for (const text of [begins, escaped, grep]) {
+      const started = performance.now();
+      detectSecretShapes(text);
+      // Generous: the shared machine is heavily loaded. Quadratic took minutes.
+      expect(performance.now() - started).toBeLessThan(10_000);
+    }
+  });
+
+  test("a password released by a reveal is readable in other output too", async () => {
+    const memory = new SecretValueMemory();
+    const captured: SecretShapeMatch[] = [];
+    memory.setShapeCapturer(async (matches) => {
+      captured.push(...matches);
+      return new Map(matches.map((match) => [match.value, ref("Task/url-password-0/password")]));
+    });
+    const password = "FAKE-Pw-0000-distinct";
+    await memory.captureShapes(`postgres://u:${password}@db:5432/app`);
+    expect(captured).toHaveLength(1);
+    memory.reveal(`postgres://u:${password}@db:5432/app`);
+    const elsewhere = `psql postgres://admin:${password}@replica:5432/app`;
+    await memory.captureShapes(elsewhere);
+    expect(captured).toHaveLength(1);
+    expect(memory.maskToolOutput(elsewhere)).toBe(elsewhere);
+  });
+
+  test("Key=value; connection strings keep their full password", () => {
+    for (const [line, value] of [
+      ["Server=db;User Id=app;Password=Fa(ke)pw99;Encrypt=true", "Fa(ke)pw99"],
+      ["Server=db;User Id=app;Password=Fake.Pw2024;", "Fake.Pw2024"],
+      ["Server=db;User Id=app;Password=@dmin2024x;", "@dmin2024x"],
+      ["Server=db;User Id=app;Password=Fake,pw,2024;", "Fake,pw,2024"],
+    ] as const) {
+      expect(kinds(line)).toEqual([["connection-string-password", value]]);
+    }
+    // Keyword style still ends at a comma and ignores code.
+    expect(kinds("connect(host=db, user=app, password=args.password)")).toEqual([]);
+  });
+
+  test("Azure keys need a digit and 40 characters; an escaped line break ends one", () => {
+    expect(kinds("accountKey=getStorageAccountKeyFromEnvironment;")).toEqual([]);
+    const key = `${repeat("FAKEkey0", 11)}==`;
+    expect(kinds(`{"conn":"AccountName=a;AccountKey=${key}\\nnext"}`)).toEqual([
+      ["azure-account-key", key],
+    ]);
   });
 });
