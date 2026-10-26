@@ -55488,6 +55488,74 @@ export async function summarizeSessionRecoveryBacklog(
   return summary;
 }
 
+/** What currently holds a durable queued turn, from its session's own state. */
+export const QUEUED_TURN_HOLDS = [
+  "ready",
+  "behind_active_turn",
+  "paused",
+  "failed",
+  "requires_action",
+  "waiting_capacity",
+  "cancelled",
+] as const;
+
+export type QueuedTurnHold = (typeof QUEUED_TURN_HOLDS)[number];
+
+export type QueuedTurnHoldSummary = {
+  count: number;
+  /** Age of the oldest queued turn in this class; 0 when the class is empty. */
+  oldestAgeSeconds: number;
+};
+
+const SUMMARIZE_QUEUED_TURNS_BY_HOLD = "opengeni_private.summarize_queued_turns_by_hold()";
+
+/**
+ * Content-free cross-workspace classification of every `status = 'queued'`
+ * turn by what holds it (migration 0988). The classes sum to
+ * {@link countQueuedTurns}. Only `ready` prompts are waiting for dispatch;
+ * the rest wait for a running turn, Resume, a new message, or a person.
+ *
+ * 0988 creates the routine with its runtime EXECUTE withheld for one release
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
+ * grants it, this returns null. The grant is checked in a separate statement:
+ * EXECUTE is checked when a statement starts.
+ */
+export async function summarizeQueuedTurnsByHold(
+  db: Database,
+): Promise<Record<QueuedTurnHold, QueuedTurnHoldSummary> | null> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`
+      select has_function_privilege(
+        to_regprocedure(${SUMMARIZE_QUEUED_TURNS_BY_HOLD})::oid, 'EXECUTE'
+      ) as granted
+    `,
+  );
+  if (grant?.granted !== true) return null;
+  const summary = Object.fromEntries(
+    QUEUED_TURN_HOLDS.map((hold) => [hold, { count: 0, oldestAgeSeconds: 0 }]),
+  ) as Record<QueuedTurnHold, QueuedTurnHoldSummary>;
+  const rows = await rawRows<{
+    hold: string;
+    count: number | string;
+    oldest_age_seconds: number | string;
+  }>(
+    db,
+    sql`
+      select hold, count, oldest_age_seconds
+      from opengeni_private.summarize_queued_turns_by_hold()
+    `,
+  );
+  for (const row of rows) {
+    if (!(row.hold in summary)) continue;
+    summary[row.hold as QueuedTurnHold] = {
+      count: Number(row.count),
+      oldestAgeSeconds: Number(row.oldest_age_seconds),
+    };
+  }
+  return summary;
+}
+
 export type ContextCompactionPendingSummary = {
   pendingCount: number;
   oldestStartedAt: Date | null;
