@@ -143,6 +143,27 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   expect(excluded(guards.run).sort()).toEqual([...batchExcluded, "lint"].sort());
 });
 
+test("PR fast checks build Batch's production web bundle whenever the plan selects it", () => {
+  const { jobs } = workflow("pr-ci");
+  const plan = jobs.plan.steps.find((step: any) => step.id === "plan").run as string;
+  expect(plan.indexOf("pr-fast-plan.ts")).toBeLessThan(plan.indexOf("web_bundle="));
+  expect(plan).toContain(`jq '.prWebBundle == true' "$RUNNER_TEMP/pr-plan.json"`);
+  expect(jobs.plan.outputs.web_bundle).toBe("${{ steps.plan.outputs.web_bundle }}");
+  const steps = jobs.fast.steps as any[];
+  const pr = steps.find((step) => step.name === "Production web bundle");
+  expect(pr.if).toBe("${{ needs.plan.outputs.web_bundle == 'true' }}");
+  expect(pr["continue-on-error"]).toBeUndefined();
+  expect(steps.indexOf(pr)).toBeLessThan(
+    steps.findIndex((step) => step.name === "Test every selected unit file"),
+  );
+  const batch = Object.values(workflow("batch-ci").jobs as Record<string, any>)
+    .flatMap((job) => job.steps ?? [])
+    .find((step: any) => step.name === "Production web bundle");
+  // Same command and environment as Batch, minus its receipt wrapper.
+  expect(batch.env).toEqual(pr.env);
+  expect(batch.run.endsWith(` -- ${pr.run}`)).toBe(true);
+});
+
 test("write-capable supersession handler executes trusted base only on a new PR push", () => {
   const handler = workflow("pr-ci-superseded");
   expect(handler.on.pull_request_target.types).toEqual(["synchronize"]);

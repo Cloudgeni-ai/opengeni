@@ -35,6 +35,7 @@ jobs:
       docs_only: ${{ steps.identity.outputs.docs_only }}
       head: ${{ steps.identity.outputs.head }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
+      web_bundle: ${{ steps.plan.outputs.web_bundle }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,6 +60,7 @@ jobs:
           bun scripts/ci/impact.ts --base "$BASE_SHA" --head "$HEAD_SHA" --output "$RUNNER_TEMP/pr-impact.json"
           bun scripts/ci/pr-fast-plan.ts --plan "$RUNNER_TEMP/pr-impact.json" --output "$RUNNER_TEMP/pr-plan.json"
           echo "unit_count=$(jq '.unitTests | length' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
+          echo "web_bundle=$(jq '.prWebBundle == true' "$RUNNER_TEMP/pr-plan.json")" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: pr-impact-plan
@@ -107,6 +109,15 @@ jobs:
           --exclude publish-closure --exclude sdk-compat --exclude example-builds
       - name: Check affected types
         run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
+      # Batch source contracts' "Production web bundle" step, whenever the web
+      # app or anything it builds from is affected: its chunk guards otherwise
+      # fail a whole batch.
+      - name: Production web bundle
+        if: ${{ needs.plan.outputs.web_bundle == 'true' }}
+        env:
+          NODE_ENV: production
+        run: >-
+          bash -euo pipefail -c 'bun run --cwd apps/web build && bun build apps/web/src/server.ts --target=bun --outfile="$RUNNER_TEMP/web-server/server.ts"'
       - name: Test every selected unit file
         if: ${{ needs.plan.outputs.docs_only != 'true' && needs.plan.outputs.unit_count != '0' }}
         env:

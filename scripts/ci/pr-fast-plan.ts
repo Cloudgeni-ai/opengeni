@@ -3,7 +3,40 @@ import { createImpactPlan, type ImpactPlan } from "./impact";
 import { createWorkspaceGraph } from "./workspace";
 
 export const PR_UNIT_FILE_CAP = 40;
-type Input = Pick<ImpactPlan, "schemaVersion" | "mode" | "changedFiles" | "unitTests" | "reasons">;
+type Input = Pick<ImpactPlan, "schemaVersion" | "mode" | "changedFiles" | "unitTests" | "reasons"> &
+  Partial<Pick<ImpactPlan, "affectedPackages">>;
+
+/**
+ * Cross-package inventory tests that failed batches when a PR changed what
+ * they enumerate without its own selection reaching them (another package,
+ * past the cap, or broad impact). They run on the PR whenever a listed path
+ * prefix changes, in addition to the capped direct-package units.
+ */
+export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string[] }[] = [
+  {
+    test: "apps/api/test/organization-mcp.test.ts",
+    areas: ["apps/api/src/", "packages/contracts/src/", "scripts/public-api/surface.gen.json"],
+  },
+  {
+    test: "packages/sdk/test/client-coverage.test.ts",
+    areas: ["packages/sdk/src/", "packages/contracts/src/", "scripts/public-api/surface.gen.json"],
+  },
+  {
+    test: "packages/sdk/test/browser-client-surface.test.ts",
+    areas: ["packages/sdk/src/", "packages/react/src/", "apps/web/src/"],
+  },
+  {
+    test: "scripts/workflow-execution-graph.test.ts",
+    areas: [".github/", "scripts/workflow-execution-graph"],
+  },
+  {
+    test: "scripts/release-schema-contract.test.ts",
+    areas: ["packages/db/drizzle/", "scripts/release-schema-contract", "scripts/migration-schema"],
+  },
+];
+
+/** Workspaces whose change can break the production web bundle Batch builds. */
+export const PR_WEB_BUNDLE_PACKAGES = ["opengeni-web", "@opengeni/browser-extension"];
 
 /** Admission sampling only; the original full Batch plan is never changed. */
 export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: readonly string[]) {
@@ -39,12 +72,29 @@ export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: r
     createImpactPlan(plan.changedFiles.filter((path) => !path.startsWith(".changeset/"))).mode ===
       "focused";
   const selectDirect = plan.mode === "focused" || changesetOnlyFull;
-  const unitTests = selectDirect ? direct.slice(0, PR_UNIT_FILE_CAP) : [];
+  const pinned = PR_INVENTORY_TESTS.filter(
+    ({ test, areas }) =>
+      inventory.includes(test) &&
+      plan.changedFiles.some((path) => areas.some((area) => path.startsWith(area))),
+  ).map(({ test }) => test);
+  const unitTests = [
+    ...pinned,
+    ...(selectDirect
+      ? direct.filter((path) => !pinned.includes(path)).slice(0, PR_UNIT_FILE_CAP)
+      : []),
+  ];
+  // Full impact lists every workspace as affected, so it builds the bundle too.
+  const webBundle =
+    plan.mode !== "docs" &&
+    (plan.mode === "full" ||
+      !Array.isArray(plan.affectedPackages) ||
+      plan.affectedPackages.some((name) => PR_WEB_BUNDLE_PACKAGES.includes(name)));
   return {
     ...plan,
     unitTests,
+    prWebBundle: webBundle,
     prAdmissionUnits: {
-      policy: "direct-packages-capped-v1",
+      policy: "direct-packages-capped-v2",
       reason:
         plan.mode === "full" && !changesetOnlyFull
           ? "broad-impact-deferred-to-batch"
@@ -58,6 +108,7 @@ export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: r
       cap: PR_UNIT_FILE_CAP,
       originalCount: inventory.length,
       directCount: direct.length,
+      inventoryTests: pinned,
       selectedCount: unitTests.length,
       deferredCount: inventory.length - unitTests.length,
     },

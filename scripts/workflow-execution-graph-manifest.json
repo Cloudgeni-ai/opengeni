@@ -82,7 +82,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "45a25db687bd39e11c4514d1c1c748bfb317c1e65aab6a09ea75e60fe9921609"
+      "sha256": "db881ad9e57520bf89f698aa8edb144296ba7a750035dbd8144fdf4a8eb58582"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -1574,6 +1574,12 @@
     {
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "fast",
+      "step": "Production web bundle",
+      "sha256": "af182ee1514b8529711e5cec667b53efdec4899104d33c32fa6b6e40bffb4ade"
+    },
+    {
+      "workflow": ".github/workflows/pr-ci.yml",
+      "job": "fast",
       "step": "Test every selected unit file",
       "sha256": "deb77911f6adb7986708a8b658fd8a8152704359c67db0ba55fcc2622f1ffb0b"
     },
@@ -1587,7 +1593,7 @@
       "workflow": ".github/workflows/pr-ci.yml",
       "job": "plan",
       "step": "Plan all affected files",
-      "sha256": "7e6c3820a130bd5a6da344c626fa48f0737b8962fdc5795a04c87cd9df1871ec"
+      "sha256": "6b8414536d24b2a540d30803806d5cc2f100b1933b36eae9b87b7044abe25ff5"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
