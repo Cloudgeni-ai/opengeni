@@ -18,7 +18,7 @@ type Handler = (args: Record<string, unknown>) => Promise<CallToolResult>;
 
 const grant = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID() } as AccessGrant;
 
-function tools(authority: SessionAppActionAuthority) {
+function tools(authority: SessionAppActionAuthority, options: { canPay?: boolean } = {}) {
   const requests: Request[] = [];
   const real = createSessionAdminReach({
     db: {} as never,
@@ -29,6 +29,9 @@ function tools(authority: SessionAppActionAuthority) {
       origin: "http://opengeni.test",
       dispatch: async (request) => {
         requests.push(request);
+        if (options.canPay === false) {
+          return Response.json({ error: "missing permission: billing:manage" }, { status: 403 });
+        }
         if (request.url.endsWith("/v1/billing/checkout")) {
           return Response.json({
             checkoutSessionId: "cs_test_a1",
@@ -131,7 +134,27 @@ test("a billing portal link says it's only for this person, and a refused page h
     body: {},
   });
   expect(refused.isError).toBe(true);
-  const parsed = JSON.parse((refused.content[0] as { text: string }).text);
-  expect(parsed.status).toBe(403);
-  expect(parsed.note).toBeUndefined();
+  const text = (refused.content[0] as { text: string }).text;
+  expect(text).toStartWith("Nothing was run:");
+  expect(text).not.toContain("note");
+});
+
+test("someone who can't pay, such as an embed's own user, gets a plain refusal, not the route's 403", async () => {
+  // An embed's external user can use the chat's workspace but holds no
+  // organization billing permission; the route refuses with a permission name
+  // that means nothing to them.
+  const { call, requests } = tools(
+    {
+      kind: "read_only",
+      subjectId: `user:${crypto.randomUUID()}`,
+      permissions: ["workspace:read", "sessions:create", "sessions:control"],
+    },
+    { canPay: false },
+  );
+  const refused = await call(checkout);
+  expect(refused.isError).toBe(true);
+  expect((refused.content[0] as { text: string }).text).toBe(
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't buy credits here. Tell them an owner or admin of the organization can add credits in the app.",
+  );
+  expect(requests).toHaveLength(1);
 });

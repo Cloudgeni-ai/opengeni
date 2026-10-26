@@ -4836,6 +4836,8 @@ export const englishMessages = {
   "timeline.paymentPage.billingPortal": "Billing",
   "timeline.paymentPage.buyCredits": "Buy credits",
   "timeline.paymentPage.continueToPayment": "Continue to payment",
+  "timeline.paymentPage.checkFailed":
+    "Couldn't check your payment from here. If you paid, your credits still arrive.",
   "timeline.paymentPage.creditsAdded": "You added {amount} in credits",
   "timeline.paymentPage.creditsGotFree": "You got {amount} in free credits",
   "timeline.paymentPage.expired": "This payment page expired. Nothing was charged.",

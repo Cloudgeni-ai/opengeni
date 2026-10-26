@@ -135,10 +135,13 @@ export const SESSION_EVENT_PRESENTED_APP_ACTIONS = {
 export type PresentedAppActionId = keyof typeof SESSION_EVENT_PRESENTED_APP_ACTIONS;
 
 /**
- * The whitespace a call's action id is trimmed of before it's matched: ASCII
- * only, so the history query (Postgres `btrim`) and every client agree.
+ * The whitespace a call's action id is trimmed of before it's matched: exactly
+ * what `String.prototype.trim` removes, as the action runner trims the id
+ * (`findAppAction`), spelled out so the history query (Postgres `btrim`) and
+ * every client agree.
  */
-export const SESSION_EVENT_APP_ACTION_ID_SPACE = " \t\n\r\f\v";
+export const SESSION_EVENT_APP_ACTION_ID_SPACE =
+  " \t\n\v\f\r\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
 
 /** Every name that calls one of {@link SESSION_EVENT_PRESENTED_APP_ACTIONS}: each id and its "METHOD /path". */
 export const SESSION_EVENT_PRESENTED_APP_ACTION_NAMES: readonly string[] = Object.entries(

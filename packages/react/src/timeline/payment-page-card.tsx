@@ -58,20 +58,33 @@ export function PaymentPageActivityProvider({
  * A conversation's payment cards check payments through its own client
  * (the app's, or an embed's session proxy), unless a provider around the
  * conversation already says how. Clients without the billing read can't confirm.
+ *
+ * An agent's checkout is for the chat's organization unless it names another,
+ * so a host that knows that organization passes it as `accountId`: without it
+ * the read is for the person's default organization. (An embed's session proxy
+ * already reads the chat workspace's organization whatever the browser sends.)
  */
 export function ClientPaymentPageActivity({
   client,
+  accountId: chatAccountId,
   children,
 }: {
   client: unknown;
+  /** The chat's organization, for checkouts that don't name one. */
+  accountId?: string | null | undefined;
   children: ReactNode;
 }) {
   const readCheckout = useMemo((): PaymentPageActivity["readCheckout"] => {
     const reader = client as Partial<Pick<OpenGeniClient, "getBillingCheckout">> | null;
     if (typeof reader?.getBillingCheckout !== "function") return undefined;
-    return ({ checkoutSessionId, accountId }) =>
-      reader.getBillingCheckout!(checkoutSessionId, accountId ? { accountId } : {});
-  }, [client]);
+    return ({ checkoutSessionId, accountId, signal }) => {
+      const account = accountId ?? chatAccountId ?? undefined;
+      return reader.getBillingCheckout!(checkoutSessionId, {
+        ...(account ? { accountId: account } : {}),
+        signal,
+      });
+    };
+  }, [client, chatAccountId]);
   const outer = useContext(PaymentPageActions);
   return (
     <PaymentPageActivityProvider readCheckout={outer.readCheckout ?? readCheckout}>
@@ -168,9 +181,15 @@ function usd(amount: number): string {
  * epoch, or 0): see the timing above. `openedHere` is false for a page opened
  * before this card was shown, which checks once.
  */
-function useCheckoutStanding(page: PaymentPage, opened: number, openedHere: boolean): Standing {
+function useCheckoutStanding(
+  page: PaymentPage,
+  opened: number,
+  openedHere: boolean,
+): { standing: Standing; checkFailed: boolean } {
   const { readCheckout, onCredited } = useContext(PaymentPageActions);
   const [standing, setStanding] = useState<Standing>({ state: "unknown" });
+  // The last check failed: the card says it can't confirm instead of waiting on.
+  const [checkFailed, setCheckFailed] = useState(false);
   const settled = standing.state === "paid" || standing.state === "expired";
   const onCreditedRef = useRef(onCredited);
   onCreditedRef.current = onCredited;
@@ -199,14 +218,19 @@ function useCheckoutStanding(page: PaymentPage, opened: number, openedHere: bool
         });
         if (controller.signal.aborted) return;
         const next = standingOf(status);
+        setCheckFailed(false);
         setStanding(next);
         if (next.state === "paid") onCreditedRef.current?.(status);
         // Paid, credits on their way: keep checking until they land.
         if (status.status === "complete") regular = true;
         // Back here with the page still open: they cancelled or left it.
         else if (returned) regular = false;
-      } catch {
-        // A dropped read changes nothing; the next check tries again.
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setCheckFailed(true);
+        // A refused or unknown checkout won't change by asking again; a
+        // dropped connection might, so only that keeps the regular checks.
+        if ((error as { retryable?: unknown } | null)?.retryable === false) regular = false;
       } finally {
         busy = false;
         if (!controller.signal.aborted) schedule();
@@ -227,7 +251,7 @@ function useCheckoutStanding(page: PaymentPage, opened: number, openedHere: bool
     };
   }, [readCheckout, checkoutSessionId, accountId, settled, opened, openedHere]);
 
-  return standing;
+  return { standing, checkFailed };
 }
 
 /** Whether a page nobody opened here has outlived its link; flips when it does. */
@@ -256,7 +280,7 @@ export function PaymentPageCard({ page }: { page: PaymentPage }) {
   const watched = page.kind === "credits" ? page.checkoutSessionId : undefined;
   const [opened, setOpened] = useState(() => openedAt(watched));
   const [openedHere, setOpenedHere] = useState(false);
-  const standing = useCheckoutStanding(page, opened, openedHere);
+  const { standing, checkFailed } = useCheckoutStanding(page, opened, openedHere);
   const linkExpired = useLinkExpired(page, opened);
   const amount = page.amountUsd !== undefined ? usd(page.amountUsd) : null;
   const confirmsHere = Boolean(watched && readCheckout);
@@ -308,7 +332,9 @@ export function PaymentPageCard({ page }: { page: PaymentPage }) {
       ? t("timeline.paymentPage.opensBillingPage")
       : confirmsHere
         ? opened > 0
-          ? t("timeline.paymentPage.waitingForPayment")
+          ? checkFailed
+            ? t("timeline.paymentPage.checkFailed")
+            : t("timeline.paymentPage.waitingForPayment")
           : t("timeline.paymentPage.opensSecurePageConfirms")
         : t("timeline.paymentPage.opensSecurePage");
 

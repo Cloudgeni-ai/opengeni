@@ -13,14 +13,23 @@ import { notifyCreditBalanceChanged } from "../lib/credit-balance-events";
  * through its own (see ClientPaymentPageActivity), and here also refreshes
  * every balance the app shows.
  */
-export function ChatPaymentPages({ children }: { children: ReactNode }) {
+export function ChatPaymentPages({
+  accountId,
+  children,
+}: {
+  /** The chat workspace's organization: an agent's checkout is for it unless it names another. */
+  accountId: string | null | undefined;
+  children: ReactNode;
+}) {
   const { client } = useAppContext();
   const onCredited = useCallback((status: BillingCheckoutStatus) => {
     if (status.balance) notifyCreditBalanceChanged(status.balance.accountId);
   }, []);
   return (
     <PaymentPageActivityProvider onCredited={onCredited}>
-      <ClientPaymentPageActivity client={client}>{children}</ClientPaymentPageActivity>
+      <ClientPaymentPageActivity client={client} accountId={accountId}>
+        {children}
+      </ClientPaymentPageActivity>
     </PaymentPageActivityProvider>
   );
 }

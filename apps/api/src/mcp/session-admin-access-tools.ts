@@ -96,6 +96,17 @@ const PAYMENT_PAGE: Record<PresentedAppActionPage, string> = {
     "The chat shows the person this page as a button that opens it, so you needn't repeat the link. Anyone with this link can change the organization's payment method or plan until it expires, so give it only to this person, never in a shared place.",
 };
 
+// A payment page the person isn't allowed to open: the route's 403 names a
+// permission, which neither they nor the agent should have to decode.
+const PAYMENT_PAGE_FORBIDDEN: Record<PresentedAppActionPage, string> = {
+  credits:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't buy credits here. Tell them an owner or admin of the organization can add credits in the app.",
+  subscription:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't subscribe here. Tell them an owner or admin of the organization can change the plan in the app.",
+  portal:
+    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't open its billing page here. Tell them an owner or admin of the organization can do it in the app.",
+};
+
 const CallInput = z4.object({
   id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
   pathParameters: z4
@@ -370,7 +381,7 @@ export function registerSessionAdminAccessTools(input: {
           query: args.query,
           ...(args.body !== undefined ? { body: args.body } : {}),
         },
-        page ? { note: PAYMENT_PAGE[page] } : {},
+        page ? { note: PAYMENT_PAGE[page], billingForbidden: PAYMENT_PAGE_FORBIDDEN[page] } : {},
       );
     },
   );

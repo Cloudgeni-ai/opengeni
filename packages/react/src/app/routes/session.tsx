@@ -1431,7 +1431,15 @@ export function SessionRoute({
         session={session}
         events={events}
         connectionState={connectionState}
-        primary={<ChatPaymentPages>{chatPane}</ChatPaymentPages>}
+        primary={
+          <ChatPaymentPages
+            accountId={
+              context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId
+            }
+          >
+            {chatPane}
+          </ChatPaymentPages>
+        }
         onReloadSession={refreshSession}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}

@@ -14,6 +14,7 @@ import {
 import {
   isPresentedSessionToolCall,
   presentedAppActionId,
+  SESSION_EVENT_APP_ACTION_ID_SPACE,
   SESSION_EVENT_PRESENTED_APP_ACTION_NAMES,
   SESSION_EVENT_PRESENTED_APP_ACTIONS,
 } from "../src/session-history";
@@ -77,6 +78,23 @@ test("opening a checkout needs no confirmation in the chat; a billing portal lin
   }
 });
 
+test("an action id is trimmed of exactly what the action runner trims", () => {
+  // findAppAction trims with String.prototype.trim; the card and the history
+  // query use this set, so an id the runner accepts is never one they miss.
+  for (let code = 0; code <= 0xffff; code += 1) {
+    const char = String.fromCharCode(code);
+    expect([code, SESSION_EVENT_APP_ACTION_ID_SPACE.includes(char)]).toEqual([
+      code,
+      char.trim() === "",
+    ]);
+  }
+  for (const char of SESSION_EVENT_APP_ACTION_ID_SPACE) {
+    const padded = `${char}createBillingCheckout${char}`;
+    expect(findAppAction(padded)?.id).toBe("createBillingCheckout");
+    expect(presentedAppActionId(padded)).toBe("createBillingCheckout");
+  }
+});
+
 test("every name a presented app action goes by is the catalog's own, and only those match", () => {
   for (const [id, { route, page }] of Object.entries(SESSION_EVENT_PRESENTED_APP_ACTIONS)) {
     // The id and its "METHOD /path" are the same catalog action, as findAppAction reads them.
@@ -85,7 +103,14 @@ test("every name a presented app action goes by is the catalog's own, and only t
     expect(`${entry!.method} ${entry!.path}`).toBe(route);
     expect(findAppAction(route)).toBe(entry);
     expect(appActionPaymentPage(entry!)).toBe(page);
-    for (const name of [id, route, ` ${route}\n`, `\t${id} `]) {
+    for (const name of [
+      id,
+      route,
+      ` ${route}\n`,
+      `\t${id} `,
+      `\u00a0${id}\u3000`,
+      `\ufeff${route}`,
+    ]) {
       expect<string | undefined>(presentedAppActionId(name)).toBe(id);
       expect(
         isPresentedSessionToolCall({ name: "admin_action_call", arguments: { id: name } }),
@@ -103,7 +128,7 @@ test("every name a presented app action goes by is the catalog's own, and only t
     "getBilling",
     "createBillingCheckoutX",
     "post /v1/billing/checkout",
-    "\u00a0createBillingCheckout",
+    "\u200bcreateBillingCheckout",
     7,
     null,
   ]) {

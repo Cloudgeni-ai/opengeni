@@ -383,6 +383,103 @@ describe("payment pages in the chat", () => {
     }
   });
 
+  test("a checkout that names no organization is read for the chat's organization", async () => {
+    // The agent's checkout omits accountId, so it is for the chat's
+    // organization, which needn't be the person's default.
+    const chatAccountId = crypto.randomUUID();
+    const reads: (string | undefined)[] = [];
+    const client = {
+      getBillingCheckout: async (_id: string, options: { accountId?: string }) => {
+        reads.push(options.accountId);
+        return status("granted", "complete");
+      },
+    };
+    const item = checkoutCall({
+      arguments: JSON.stringify({ id: "createBillingCheckout", body: { amountUsd: 20 } }),
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const rendered = await renderComponent(
+      <ClientPaymentPageActivity client={client} accountId={chatAccountId}>
+        <Renderer item={item} />
+      </ClientPaymentPageActivity>,
+    );
+    try {
+      await act(async () => {
+        click(rendered.container.querySelector<HTMLAnchorElement>("a[href]")!);
+      });
+      await act(async () => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      await flush();
+      expect(reads).toEqual([chatAccountId]);
+      expect(rendered.container.textContent).toContain("You added $20 in credits");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a check still running when the card goes away is cancelled", async () => {
+    const signals: AbortSignal[] = [];
+    const client = {
+      getBillingCheckout: (_id: string, options: { signal?: AbortSignal }) => {
+        signals.push(options.signal!);
+        return new Promise<BillingCheckoutStatus>(() => undefined);
+      },
+    };
+    const item = checkoutCall();
+    const Renderer = defaultToolRegistry.resolve(item);
+    const rendered = await renderComponent(
+      <ClientPaymentPageActivity client={client}>
+        <Renderer item={item} />
+      </ClientPaymentPageActivity>,
+    );
+    await act(async () => {
+      click(rendered.container.querySelector<HTMLAnchorElement>("a[href]")!);
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flush();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(false);
+    await rendered.unmount();
+    expect(signals[0]!.aborted).toBe(true);
+  });
+
+  test("a check that fails says so instead of waiting on", async () => {
+    await withVirtualClock(async () => {
+      let reads = 0;
+      const item = checkoutCall();
+      const Renderer = defaultToolRegistry.resolve(item);
+      const rendered = await renderComponent(
+        <PaymentPageActivityProvider
+          readCheckout={async () => {
+            reads += 1;
+            throw Object.assign(new Error("API 404: checkout not found"), { retryable: false });
+          }}
+        >
+          <Renderer item={item} />
+        </PaymentPageActivityProvider>,
+      );
+      try {
+        await act(async () => {
+          click(rendered.container.querySelector<HTMLAnchorElement>("a[href]")!);
+        });
+        await flush(2_100);
+        expect(reads).toBe(1);
+        expect(rendered.container.textContent).toContain(
+          "Couldn't check your payment from here. If you paid, your credits still arrive.",
+        );
+        expect(rendered.container.textContent).not.toContain("Waiting for your payment");
+        // A refusal doesn't change by asking again: no regular checks follow.
+        await flush(5 * 60_000);
+        expect(reads).toBe(1);
+      } finally {
+        await rendered.unmount();
+      }
+    });
+  });
+
   test("without a way to check, the card still opens the page and promises nothing", async () => {
     const item = checkoutCall();
     const Renderer = defaultToolRegistry.resolve(item);

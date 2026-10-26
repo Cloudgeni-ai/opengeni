@@ -700,6 +700,10 @@ export function createSessionProxyHandler(
           // workspace's own organization, read as the user, so Opengeni checks
           // their billing:read on that organization and that the checkout is
           // its own. The browser can't name another organization.
+          // Like the other account-level reads above, it runs before `refuse`
+          // and `authorizeSession`: it names no chat, and it can only read,
+          // with the user's own permission, a checkout of this workspace's
+          // organization.
           const grant = await getSessionProxyWorkspaceGrant(client, workspaceId, call);
           const checkoutUrl = new URL(
             client.apiUrl(`/v1/billing/checkout/${encodeURIComponent(rest[1]!)}`),
