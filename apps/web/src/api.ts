@@ -934,6 +934,21 @@ export async function completeSelfServiceOrganizationSetup(input: {
   });
 }
 
+/**
+ * The person went Back after their organization exists and chose again: their
+ * new answer becomes the current one, so the new-chat page follows it on every
+ * device.
+ */
+export async function changeSignupUseCase(input: {
+  organizationId: string;
+  useCase: "everyday" | "embed" | "cloud";
+}): Promise<{ useCase: "everyday" | "embed" | "cloud" }> {
+  return await authRequest<{ useCase: "everyday" | "embed" | "cloud" }>(
+    "/organization-onboarding/use-case",
+    { method: "PUT", body: JSON.stringify(input) },
+  );
+}
+
 export async function completeOrganizationUserSetup(input: {
   token: string;
   name: string;

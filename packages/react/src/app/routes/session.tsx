@@ -3488,6 +3488,11 @@ function SessionChatPane(props: {
           })}
           message={sessionCreditRefusal.message}
           workspaceId={props.session.workspaceId}
+          accountId={workspaceAccountId}
+          canReadBilling={
+            Boolean(workspaceAccountId) &&
+            hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:read")
+          }
           canBuyCredits={canBuyCredits}
           canConnectModel={canConnectModel}
           continuing

@@ -5795,6 +5795,12 @@ export type ManagedOrganizationMembership = {
    * longer sees or starts new work there. Absent means on.
    */
   personalWorkspacesEnabled?: boolean | undefined;
+  /**
+   * The person's current answer to "How do you want to use Opengeni?" for
+   * this organization: get help with everyday things, add agents to a product,
+   * or run agents in the cloud. Absent when the server keeps no answer for them.
+   */
+  signupUseCase?: "everyday" | "embed" | "cloud" | undefined;
 };
 
 export type ListManagedOrganizationMembershipsResponse = {

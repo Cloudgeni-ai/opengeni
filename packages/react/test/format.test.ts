@@ -267,6 +267,19 @@ describe("composerSubmissionErrorMessage", () => {
     expect(COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText)).not.toContain("Codex");
   });
 
+  test("the credit sentences stay true with no credit at all and with credit for other models", () => {
+    // The app's credit notice beside them says which of the two applies.
+    for (const sentence of [
+      COMPOSER_PAYMENT_REQUIRED_MESSAGE(englishText),
+      CREDIT_EXHAUSTION_MESSAGE(englishText),
+    ]) {
+      expect(sentence).toStartWith("There aren't enough credits for this model.");
+      expect(sentence).toContain("Add credits, or choose another model.");
+      expect(sentence).not.toContain("they cover");
+      expect(sentence).not.toContain("remaining");
+    }
+  });
+
   test("a published Site's assistant refusals read plainly; only busy is retryable", () => {
     const refusal = (status: number, code: string) =>
       new OpenGeniApiError(

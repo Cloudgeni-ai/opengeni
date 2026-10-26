@@ -21,6 +21,7 @@ import {
 import { CreditAmountPicker } from "./credit-amount-picker";
 import { Notice } from "../../ui/notice";
 import { useAppContext } from "../app-context";
+import { useCreditBalance } from "./credits/use-credit-balance";
 import { userErrorText } from "../../ui/api-error";
 import { validTopupAmount } from "../lib/format";
 import { analyticsAction } from "../../ui/analytics-actions";
@@ -235,37 +236,14 @@ export function EmptyCreditsNotice({
   onAddCredits?: (() => void) | undefined;
 }) {
   const client = useAppContext().client;
-  const [legacyEmpty, setEmpty] = useState(false);
   // The balance is positive but this model can't use it (for example free
   // credit for other models), so "you don't have any" would be untrue. Only
-  // that much is known, so the words claim no more.
-  const [someCredit, setSomeCredit] = useState(false);
-  const [stripeEnabled, setStripeEnabled] = useState(false);
-
-  useEffect(() => {
-    setEmpty(false);
-    setSomeCredit(false);
-    setStripeEnabled(false);
-    if (!accountId || !canReadBilling) return;
-    let active = true;
-    void client
-      .getBilling({ accountId })
-      .then((summary) => {
-        if (!active) return;
-        setEmpty(summary.mode !== "disabled" && summary.balance.balanceMicros <= 0);
-        setSomeCredit(summary.balance.balanceMicros > 0);
-        setStripeEnabled(summary.mode === "stripe");
-      })
-      .catch(() => {
-        if (!active) return;
-        setEmpty(false);
-        setSomeCredit(false);
-        setStripeEnabled(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [accountId, canReadBilling, client]);
+  // that much is known, so the words claim no more. The chat's refusal
+  // notice words the same two states the same way.
+  const { balance } = useCreditBalance(client, accountId, canReadBilling);
+  const someCredit = balance?.someCredit ?? false;
+  const stripeEnabled = balance?.stripeEnabled ?? false;
+  const legacyEmpty = Boolean(balance?.billingEnabled && !balance.someCredit);
 
   const empty =
     stripeEnabled && (creditFunding === undefined ? legacyEmpty : creditFunding === "unavailable");
