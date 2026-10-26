@@ -36,6 +36,10 @@
       "types": "./src/expo.ts",
       "default": "./src/expo.ts"
     },
+    "./meetings": {
+      "types": "./src/meetings/index.ts",
+      "default": "./src/meetings/index.ts"
+    },
     "./recordings": {
       "types": "./src/recordings/index.ts",
       "default": "./src/recordings/index.ts"
