@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`16cc78ff3e02ed861680c687ca96152e58cb3ae7`: upstream `cua-driver-rs-v0.37.0`
+`0c5a796952212e6b13b503ba548d5e7f643e1201`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -215,10 +215,13 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
   lists no press and is part of Chromium's own window controls, which accept
   any press and ignore it (a point on a tab hits the tab strip, not the tab),
   the routed pixel click is sent instead; that click takes about 1.3 to 1.7 s
-  against about 0.7 s for the press. Chromium lists no AXPress on page
-  elements in the accessibility mode the adapter enables, but performs it on
-  any of them; CUA reports such an app, and its page controls (not its
-  selects, which take set_value) are invoked by role. Keys for a shortcut
+  against about 0.7 s for the press. When Chromium answers the hit test for a
+  point on a page with the window itself (seen in a background window after
+  switching tabs), the element under the point is found by its frame and
+  pressed; the routed click would not reach the page. Chromium lists no
+  AXPress on page elements in the accessibility mode the adapter enables, but
+  performs it on any of them; CUA reports such an app, and its page controls
+  (not its selects, which take set_value) are invoked by role. Keys for a shortcut
   whose menu item is disabled while the app is in the background (Terminal's
   Close Window) are reported as a likely no-op. A click or key press CUA
   could only send, with no element changed after it, is reported as possibly
@@ -247,7 +250,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/16cc78ff3e02ed861680c687ca96152e58cb3ae7/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/0c5a796952212e6b13b503ba548d5e7f643e1201/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
