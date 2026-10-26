@@ -142,6 +142,52 @@ export function managedPasskeysAvailable(settings: Pick<Settings, "publicBaseUrl
   }
 }
 
+const PASSKEY_STORAGE_GRANT_TTL_MS = 60_000;
+const passkeyStorageGrants = new WeakMap<object, { granted: boolean; checkedAt: number }>();
+
+/**
+ * Whether the runtime may use passkey storage yet: DML on `auth_passkeys` and
+ * EXECUTE on `mutate_managed_passkey`. Migration 0998 withholds both until a
+ * release that knows them is the previous release (runtime-posture
+ * RUNTIME_DEFERRED_FULL_DML_TABLES and DEFERRED_RUNTIME_TARGET_ROUTINES), and
+ * passkeys stay off until a later migration grants them. Checked at most once
+ * a minute per database client, in its own statement because privileges are
+ * checked when a statement starts.
+ */
+export async function refreshManagedPasskeyStorageGrant(
+  db: Pick<Database, "execute">,
+): Promise<boolean> {
+  const cached = passkeyStorageGrants.get(db);
+  if (cached && Date.now() - cached.checkedAt < PASSKEY_STORAGE_GRANT_TTL_MS) {
+    return cached.granted;
+  }
+  const result = await db.execute(sql`
+    select coalesce(
+      has_table_privilege(to_regclass('auth_passkeys'), 'SELECT')
+        and has_table_privilege(to_regclass('auth_passkeys'), 'INSERT')
+        and has_table_privilege(to_regclass('auth_passkeys'), 'UPDATE')
+        and has_table_privilege(to_regclass('auth_passkeys'), 'DELETE')
+        and has_function_privilege(
+          to_regprocedure('mutate_managed_passkey(text, text, jsonb)'), 'EXECUTE'),
+      false
+    ) as granted`);
+  const rows = (Array.isArray(result) ? result : (result as { rows: unknown[] }).rows) as {
+    granted: boolean | null;
+  }[];
+  const granted = rows[0]?.granted === true;
+  passkeyStorageGrants.set(db, { granted, checkedAt: Date.now() });
+  return granted;
+}
+
+/**
+ * The last known passkey storage grant for this database client; false until
+ * `refreshManagedPasskeyStorageGrant` has seen it granted. Request paths that
+ * offer passkeys refresh it first.
+ */
+export function managedPasskeyStorageGranted(db: Pick<Database, "execute">): boolean {
+  return passkeyStorageGrants.get(db)?.granted === true;
+}
+
 export function managedPasskeyDefaultName(aaguid: string | null): string {
   return (aaguid && KNOWN_PROVIDERS[aaguid]) || "Passkey";
 }

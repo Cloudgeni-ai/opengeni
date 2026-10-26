@@ -84,6 +84,26 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
+ * Target-schema runtime capabilities whose EXECUTE is withheld for one
+ * release, for the same reason as DEFERRED_RUNTIME_PRIVATE_ROUTINES: until a
+ * binary that knows them is the previous release, readiness accepts each with
+ * or without runtime EXECUTE (never PUBLIC). 0998 withholds the passkey
+ * mutation; until a later migration grants it, passkeys stay off.
+ */
+export const DEFERRED_RUNTIME_TARGET_ROUTINES = [
+  "mutate_managed_passkey(text, text, jsonb)",
+] as const;
+
+/**
+ * Non-RLS tables whose runtime DML is withheld for the same reason: the
+ * previous release rejects DML on an unknown non-RLS table. Each is known here
+ * with no required privileges; readiness accepts either no direct DML or
+ * exactly SELECT, INSERT, UPDATE and DELETE (never a partial grant). 0998
+ * withholds the passkey credentials table.
+ */
+export const RUNTIME_DEFERRED_FULL_DML_TABLES = ["auth_passkeys"] as const;
+
+/**
  * The tables each runtime definer reads or writes as its owner. Once they all
  * exist, the routine must exist too.
  */
@@ -2247,7 +2267,6 @@ export const RUNTIME_FULL_DML_TABLES = [
   "api_keys",
   "audit_events",
   "auth_identities",
-  "auth_passkeys",
   "auth_rate_limits",
   "auth_sessions",
   "auth_users",
@@ -2883,6 +2902,8 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
 ]);
 const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
 const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
+const DEFERRED_TARGET_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_TARGET_ROUTINES);
+const DEFERRED_FULL_DML_TABLE_NAMES = new Set<string>(RUNTIME_DEFERRED_FULL_DML_TABLES);
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -4021,6 +4042,27 @@ export function evaluateRuntimeDatabasePosture(
       // RLS governs row DML, not TRUNCATE, REFERENCES, TRIGGER or MAINTAIN.
       for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
     }
+    if (!options.tablePrivileges && DEFERRED_FULL_DML_TABLE_NAMES.has(table.name)) {
+      // Withheld runtime DML (see RUNTIME_DEFERRED_FULL_DML_TABLES): none or all four.
+      for (const privilege of FULL_DML_PRIVILEGES) toleratedPrivileges.add(privilege);
+      const tableGranted = new Set(
+        FULL_DML_PRIVILEGES.filter(
+          (privilege) => privileges.find(([name]) => name === privilege)?.[1] === true,
+        ),
+      );
+      // has_any_column_privilege is also true for a table-level grant, so only
+      // column privileges the table grant doesn't cover are column-only.
+      const columnOnly = (table.columnPrivileges ?? []).filter(
+        (privilege) => !tableGranted.has(privilege as (typeof FULL_DML_PRIVILEGES)[number]),
+      );
+      if (
+        (tableGranted.size > 0 && tableGranted.size < FULL_DML_PRIVILEGES.length) ||
+        columnOnly.length > 0
+      ) {
+        const partial = [...new Set([...tableGranted, ...columnOnly])];
+        violations.push(`table ${table.name} grants partial runtime DML: ${partial.join(", ")}`);
+      }
+    }
     if (table.owner === expectedRole) {
       violations.push(`runtime role owns table ${table.name}`);
     }
@@ -4691,7 +4733,7 @@ export function evaluateRuntimeDatabasePosture(
         `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match schema owner ${targetSchemaOwner}`,
       );
     }
-    if (!routine.execute) {
+    if (!routine.execute && !DEFERRED_TARGET_ROUTINE_NAMES.has(routine.name)) {
       violations.push(`runtime role lacks target-schema capability ${routine.name}`);
     }
     const publicPolicyPredicate = RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET.has(

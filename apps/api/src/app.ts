@@ -399,6 +399,7 @@ import {
 import {
   managedPasskeySignInOffered,
   managedPasskeySignUpOffered,
+  refreshManagedPasskeysOffered,
   registerManagedPasskeyRoutes,
 } from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
@@ -1606,6 +1607,7 @@ export function createAppComposition(deps: AppDependencies): {
             },
           }
         : undefined;
+    await refreshManagedPasskeysOffered(deps);
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
@@ -1683,7 +1685,7 @@ export function createAppComposition(deps: AppDependencies): {
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(
-          deps.settings,
+          deps,
           deps.settings.productAccessMode === "managed"
             ? await managedAuthNewSignupsGate.signupsOpen()
             : true,
@@ -2686,15 +2688,19 @@ async function requireMcpAccessGrantAuthorization(
   return authorization;
 }
 
-function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabled: boolean) {
+function clientAuthConfig(
+  deps: Pick<AppDependencies, "settings" | "db">,
+  newSignupsEnabled: boolean,
+) {
+  const settings = deps.settings;
   if (settings.productAccessMode === "managed") {
     return {
       mode: "managedSession" as const,
       session: "cookie" as const,
       emailVerificationRequired: managedAuthRequiresEmailVerification(settings),
       newSignupsEnabled,
-      passkeySignIn: managedPasskeySignInOffered({ settings }),
-      passkeySignUp: managedPasskeySignUpOffered({ settings }, newSignupsEnabled),
+      passkeySignIn: managedPasskeySignInOffered(deps),
+      passkeySignUp: managedPasskeySignUpOffered(deps, newSignupsEnabled),
       ...(settings.signupChallengeEnabled
         ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
         : {}),

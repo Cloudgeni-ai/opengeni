@@ -1387,6 +1387,15 @@ one public hostname does not sign in on another. Migration 0998 is rolling: it
 adds `auth_passkeys` and the `mutate_managed_passkey` routine, and counts a
 passkey as a usable sign-in method.
 
+Passkeys ship in two releases. The previous release's readiness check refuses
+runtime access to a table and routine it doesn't know, so 0998 withholds both
+from the runtime role and provisioning keeps them withheld; until then the
+server offers no passkeys (client config reports `passkeySignIn: false`) and
+the sign-in-method routes refuse passkey changes. A later migration grants
+them once a release containing 0998 is the previous release, and passkeys turn
+on by themselves within a minute of that grant. Granting them by hand does not
+stick: provisioning revokes them again.
+
 - Anyone signed in can add passkeys under their sign-in methods and sign in
   with one instead of a password. Removing the last usable method is refused as
   before.

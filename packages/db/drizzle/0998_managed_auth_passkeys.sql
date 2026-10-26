@@ -20,6 +20,12 @@
 -- The previous release never reads the new table and keeps every routine
 -- signature; it does not offer `passkey` as a usable provider, so its own
 -- last-method check is unchanged.
+-- The previous release's readiness check rejects runtime DML on an unknown
+-- non-RLS table and an unknown definer the runtime can call, so this
+-- migration withholds both from every non-owner (runtime-posture
+-- RUNTIME_DEFERRED_FULL_DML_TABLES and DEFERRED_RUNTIME_TARGET_ROUTINES) and
+-- provisioning keeps them withheld. Passkeys stay off until a later migration
+-- grants them, once a release that knows them is the previous release.
 SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE auth_passkeys (
@@ -165,10 +171,71 @@ SELECT pg_temp.patch_sign_in_routine_0998('mutate_managed_sign_in_method(text,te
         OR (a.provider_id='passkey' AND EXISTS (SELECT 1 FROM auth_passkeys k WHERE k.user_id=p_user)))) THEN$new$]
 ]);
 
-DO $passkey_grants$
+-- Default privileges may have granted the new objects to a runtime role
+-- (embedded deployments provision their own). Every non-owner grantee loses
+-- them; a grant this migration cannot revoke fails it loudly instead of the
+-- previous fleet's readiness.
+DO $passkey_grants_deferred$
+DECLARE
+  grantee_name text;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT SELECT, INSERT, UPDATE, DELETE ON auth_passkeys TO opengeni_app;
-    GRANT EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) TO opengeni_app;
+  REVOKE ALL ON TABLE auth_passkeys FROM PUBLIC;
+  FOR grantee_name IN
+    SELECT DISTINCT pg_catalog.pg_get_userbyid(acl.grantee)
+    FROM pg_catalog.pg_proc routine
+    CROSS JOIN LATERAL pg_catalog.aclexplode(routine.proacl) acl
+    WHERE routine.oid = 'mutate_managed_passkey(text, text, jsonb)'::regprocedure
+      AND acl.grantee <> 0
+      AND acl.grantee <> routine.proowner
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) FROM %I CASCADE',
+      grantee_name
+    );
+  END LOOP;
+  -- REVOKE on a table also revokes its column privileges.
+  FOR grantee_name IN
+    SELECT DISTINCT pg_catalog.pg_get_userbyid(grants.grantee)
+    FROM (
+      SELECT acl.grantee, relation.relowner AS owner
+      FROM pg_catalog.pg_class relation
+      CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) acl
+      WHERE relation.oid = 'auth_passkeys'::regclass
+      UNION
+      SELECT acl.grantee, relation.relowner
+      FROM pg_catalog.pg_attribute attribute
+      JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+      CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) acl
+      WHERE attribute.attrelid = 'auth_passkeys'::regclass
+    ) grants
+    WHERE grants.grantee <> 0
+      AND grants.grantee <> grants.owner
+  LOOP
+    EXECUTE pg_catalog.format(
+      'REVOKE ALL PRIVILEGES ON TABLE auth_passkeys FROM %I CASCADE',
+      grantee_name
+    );
+  END LOOP;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_proc routine
+    CROSS JOIN LATERAL pg_catalog.aclexplode(routine.proacl) acl
+    WHERE routine.oid = 'mutate_managed_passkey(text, text, jsonb)'::regprocedure
+      AND acl.grantee <> routine.proowner
+  ) OR EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_class relation
+    CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) acl
+    WHERE relation.oid = 'auth_passkeys'::regclass
+      AND acl.grantee <> relation.relowner
+  ) OR EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_attribute attribute
+    JOIN pg_catalog.pg_class relation ON relation.oid = attribute.attrelid
+    CROSS JOIN LATERAL pg_catalog.aclexplode(attribute.attacl) acl
+    WHERE attribute.attrelid = 'auth_passkeys'::regclass
+      AND acl.grantee <> relation.relowner
+  ) THEN
+    RAISE EXCEPTION 'a non-owner grant on auth_passkeys or mutate_managed_passkey survived 0998';
   END IF;
-END $passkey_grants$;
+END $passkey_grants_deferred$;

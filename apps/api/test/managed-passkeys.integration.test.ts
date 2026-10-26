@@ -5,7 +5,11 @@ import {
   getCanonicalHumanIdentityProjection,
   synchronizeCanonicalHumanLoginBindings,
 } from "@opengeni/db/canonical-human-identities";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import type { ManagedEmailMessage, ManagedEmailTransport } from "@opengeni/core";
@@ -29,6 +33,9 @@ beforeAll(async () => {
   shared = (await acquireSharedTestDatabase("managed-passkeys")) ?? undefined;
   if (!shared) throw new Error("Managed passkey integration requires PostgreSQL");
   admin = shared.admin;
+  // 0998 withholds passkey storage from the runtime for a release; these
+  // tests run as the deployment will once a later migration grants it.
+  await grantDeferredRuntimeAccess(admin);
   client = createDb(shared.appUrl, { max: 8, rlsStrategy: "force" });
 }, 900_000);
 afterAll(async () => {
@@ -36,7 +43,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-function runtime(overrides: Record<string, unknown> = {}) {
+function runtime(overrides: Record<string, unknown> = {}, db: DbClient["db"] = client.db) {
   const messages: ManagedEmailMessage[] = [];
   const transport: ManagedEmailTransport = {
     sender: "auth@example.test",
@@ -56,11 +63,11 @@ function runtime(overrides: Record<string, unknown> = {}) {
     managedAuthPasskeySignUpEnabled: true,
     ...overrides,
   });
-  const auth = createManagedAuth(settings, client.db, transport)!;
-  const adapter = createBetterAuthSessionAdapter(auth, client.db);
+  const auth = createManagedAuth(settings, db, transport)!;
+  const adapter = createBetterAuthSessionAdapter(auth, db);
   const app = createApp({
     settings,
-    db: client.db,
+    db,
     managedAuth: auth,
     managedAuthSessionAdapter: adapter,
     managedEmailTransport: transport,
@@ -404,5 +411,46 @@ describe("passkey sign-in and passkey-only accounts", () => {
     expect(await options.json()).toMatchObject({
       code: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED",
     });
+  });
+
+  test("passkeys stay off until the runtime is granted passkey storage", async () => {
+    const person = await passwordFixture();
+    await admin.unsafe(`
+      REVOKE ALL ON TABLE auth_passkeys FROM opengeni_app;
+      REVOKE EXECUTE ON FUNCTION mutate_managed_passkey(text, text, jsonb) FROM opengeni_app;
+    `);
+    // A fresh client: the grant check is cached per database client.
+    const ungranted = createDb(shared!.appUrl, { max: 2, rlsStrategy: "force" });
+    try {
+      const rt = runtime({}, ungranted.db);
+      const config = (await (await rt.app.request("/v1/config/client")).json()) as {
+        auth: Record<string, unknown>;
+      };
+      expect(config.auth).toMatchObject({ passkeySignIn: false, passkeySignUp: false });
+      expect((await post(rt, "/v1/auth/passkey/sign-in/options", {})).status).toBe(404);
+      expect((await post(rt, "/v1/auth/passkey/sign-up/options", { name: "x" })).status).toBe(404);
+      const cookie = await legacyCookie(rt, person.token);
+      const listed = await methods(rt, cookie);
+      expect(listed.passkeys).toEqual([]);
+      expect(listed.passkeysAvailable).toBe(false);
+      const options = await post(rt, "/v1/auth/sign-in-methods/passkey/options", {}, { cookie });
+      expect(options.status).toBe(409);
+      expect(await options.json()).toMatchObject({ code: "SIGN_IN_METHOD_UNAVAILABLE" });
+      const remove = await post(
+        rt,
+        "/v1/auth/sign-in-methods/passkey/remove",
+        {
+          operationId: crypto.randomUUID(),
+          expectedIdentityId: listed.identityId,
+          expectedIdentityRevision: listed.identityRevision,
+          passkeyId: crypto.randomUUID(),
+        },
+        { cookie },
+      );
+      expect(remove.status).toBe(409);
+    } finally {
+      await grantDeferredRuntimeAccess(admin);
+      await ungranted.close();
+    }
   });
 });
