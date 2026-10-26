@@ -429,10 +429,13 @@ const STACKED = fixture([
   '<dialog id="first" aria-label="First"><button id="inner">Inner</button></dialog>',
   '<dialog id="second" aria-label="Second">Discard changes?</dialog>',
   '<x-dialog id="host"></x-dialog>',
+  '<app-shell id="shell"></app-shell>',
   "<script>",
   "globalThis.log=[];",
   'for (const id of ["outside","inner"]) document.getElementById(id).addEventListener("click",()=>log.push(id));',
   'document.getElementById("host").attachShadow({mode:"open"}).innerHTML = \'<dialog style="width:200px;height:80px;margin:0;left:500px;top:300px">Shadow</dialog>\';',
+  'document.getElementById("shell").attachShadow({mode:"open"}).innerHTML = "<x-dialog></x-dialog>";',
+  'document.getElementById("shell").shadowRoot.querySelector("x-dialog").attachShadow({mode:"open"}).innerHTML = \'<dialog style="width:200px;height:80px;margin:0;left:500px;top:300px">Nested</dialog>\';',
   "</script>",
 ]);
 
@@ -469,6 +472,19 @@ e2e(
         "browser element is covered by x-dialog at its center",
       );
       await evaluate('document.getElementById("host").shadowRoot.querySelector("dialog").close()');
+
+      // The same dialog component wrapped in an app component: two open
+      // shadow roots deep.
+      const nestedDialog =
+        'document.getElementById("shell").shadowRoot.querySelector("x-dialog").shadowRoot.querySelector("dialog")';
+      await evaluate(`${nestedDialog}.showModal()`);
+      const nested = await click(css("#outside"));
+      expect(nested.state).not.toBe("completed");
+      expect(nested.error?.message).toContain(
+        "browser element is covered by app-shell at its center",
+      );
+      await evaluate(`${nestedDialog}.close()`);
+
       const outside = await click(css("#outside"));
       expect(outside.error ?? null).toBeNull();
       expect(outside.state).toBe("completed");

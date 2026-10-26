@@ -9803,9 +9803,19 @@ const SHOWN_PART_HELPER = `
       if (modals.length && !modals.some((modal) => owns(modal, target))) return true;
       // The modal on top, when it does not hold the target: one stacked over
       // the target's own modal (a confirm opened from a dialog), or one in an
-      // open shadow root, which the document's query does not reach.
+      // open shadow root, which the document's query does not reach. The
+      // stack names only the outermost host, so first follow the hit down
+      // through open shadow roots (an app component wrapping a dialog
+      // component) to the element really on top.
       const box = target.getBoundingClientRect();
-      const over = topHit(target, box.left + box.width / 2, box.top + box.height / 2);
+      const ox = box.left + box.width / 2;
+      const oy = box.top + box.height / 2;
+      let over = topHit(target, ox, oy);
+      for (let depth = 0; depth < 32 && over instanceof Element && over.shadowRoot; depth += 1) {
+        const inner = over.shadowRoot.elementsFromPoint(ox, oy)[0];
+        if (!inner || inner === over) break;
+        over = inner;
+      }
       for (let node = over; node instanceof Element; node = flatParent(node)) {
         const modal = node.matches(":modal") ? node : node.shadowRoot?.querySelector(":modal");
         if (modal && !owns(modal, target)) return true;
