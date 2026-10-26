@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   acquireLease,
   activateBrowserSession,
+  recordBrowserSessionDisplay,
   activateComputerSession,
   ATTACHED_BROWSER_SESSION_CAPABILITIES,
   bindBrowserSessionNetworkRouteAuthority,
@@ -295,6 +296,56 @@ describe("durable BrowserSession lifecycle", () => {
     for (const display of [undefined, null] as const) {
       expect("display" in (await activate(display))).toBe(false);
     }
+  });
+
+  test("a recovered controller's relaunch replaces the display, only for its own generation", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const operationId = crypto.randomUUID();
+    const prepared = await prepareBrowserSessionCreate(client.db, {
+      ...createInput(scope, operationId),
+      headless: false,
+    });
+    const browserSessionId = prepared.session.id;
+    const controllerGeneration = crypto.randomUUID();
+    await dispatchBrowserSessionOperation(client.db, {
+      ...scope,
+      operationId,
+      browserSessionId,
+      controllerGeneration,
+    });
+    await activateBrowserSession(client.db, {
+      ...scope,
+      operationId,
+      browserSessionId,
+      controller: {
+        controllerId: "browserd:test",
+        controllerGeneration,
+        placementInstanceId: "placement:test",
+      },
+      engineVersion: null,
+      display: "window",
+    });
+    const record = (display: "window" | "offscreen" | null, generation = controllerGeneration) =>
+      recordBrowserSessionDisplay(client.db, {
+        ...scope,
+        browserSessionId,
+        controllerGeneration: generation,
+        display,
+      });
+    const stored = async () =>
+      (await getBrowserSession(client.db, { ...scope, browserSessionId })).display;
+
+    // Another generation never overwrites the active one's report.
+    expect(await record("offscreen", crypto.randomUUID())).toBe(false);
+    expect(await stored()).toBe("window");
+    // The same generation's relaunch landed offscreen this time.
+    expect(await record("offscreen")).toBe(true);
+    expect(await stored()).toBe("offscreen");
+    expect(await record("offscreen")).toBe(false);
+    // A relaunch that reports nothing leaves it unknown, not the old value.
+    expect(await record(null)).toBe(true);
+    expect(await stored()).toBeUndefined();
   });
 
   test("lists idle saveable browsers on one controller instance, least recently used first", async () => {
@@ -2088,6 +2139,7 @@ describe("durable BrowserSession lifecycle", () => {
       operationId,
       actorSubjectId: scope.subjectId,
       controller,
+      display: "offscreen",
     });
     expect(continued.session).toMatchObject({
       id: browserSessionId,
@@ -2097,6 +2149,8 @@ describe("durable BrowserSession lifecycle", () => {
         controllerGeneration: active.controllerGeneration,
         placementInstanceId: "placement:restarted",
       },
+      // The continuing controller's relaunch decides the display.
+      display: "offscreen",
     });
     expect(continued.operation).toMatchObject({ operationId, kind: "resume", state: "completed" });
     expect(

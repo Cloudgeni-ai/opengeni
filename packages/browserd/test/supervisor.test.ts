@@ -190,15 +190,18 @@ describe("BrowserSupervisor", () => {
   });
 
   test("names what to use instead when a headed browser has no window", () => {
+    // Model-visible text: exact strings and bytes, kept short because a Mac
+    // managed browser is offscreen by default.
     const mac = offscreenBrowserNotice("darwin");
-    expect(mac).toContain("no window on this computer's screen");
-    expect(mac).toContain("security key or PIN prompt cannot appear");
-    expect(mac).toContain("placement attached_device");
-    expect(mac).toContain("browser_open with linkedComputerSessionId");
+    expect(mac).toBe(
+      "A person sees it only in the live view; for a step they must do at this Mac, use placement attached_device, or computer_open then browser_open with linkedComputerSessionId.",
+    );
+    expect(Buffer.byteLength(mac)).toBe(172);
     const linux = offscreenBrowserNotice("linux");
-    expect(linux).toContain("no graphical display");
-    expect(linux).toContain("placement attached_device");
-    expect(linux).not.toContain("linkedComputerSessionId");
+    expect(linux).toBe(
+      "A person sees it only in the live view; for a step that needs a real window, use placement attached_device.",
+    );
+    expect(Buffer.byteLength(linux)).toBe(107);
   });
 
   test("holds the browser's windows presented for each use and while a live view is open", async () => {

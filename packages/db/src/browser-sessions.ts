@@ -2394,6 +2394,8 @@ export async function continueExpiredBrowserSessionResume(
     operationId: string;
     actorSubjectId: string;
     controller: InteractionControllerBinding;
+    /** How the controller relaunched this headed browser, when it reports it. */
+    display?: "window" | "offscreen" | null;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
   const digest = lifecycleRequestDigest(input.browserSessionId, "resume", input.actorSubjectId);
@@ -2455,6 +2457,7 @@ export async function continueExpiredBrowserSessionResume(
           controllerId: input.controller.controllerId,
           controllerGeneration: input.controller.controllerGeneration,
           placementInstanceId: input.controller.placementInstanceId,
+          display: input.display ?? null,
           controllerHeartbeatAt: now,
           lastUsedAt: now,
           updatedAt: now,
@@ -2938,6 +2941,47 @@ export async function completeBrowserSessionEnd(
           session: browserSessionFromRows(sessionRow, associations),
           operation: operationReceipt(operationRow, false),
         });
+      }),
+  );
+}
+
+/** Record the display a controller reports after relaunching an active
+ * browser in place (recovery of a lost controller). Only the generation that
+ * relaunched it may write, so a newer generation's value is never overwritten.
+ * Returns whether the stored value changed. */
+export async function recordBrowserSessionDisplay(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    browserSessionId: string;
+    controllerGeneration: string;
+    display: "window" | "offscreen" | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockBrowserSession(tx, input.workspaceId, input.browserSessionId);
+        const [updated] = await tx
+          .update(schema.browserSessions)
+          .set({ display: input.display, updatedAt: new Date() })
+          .where(
+            and(
+              eq(schema.browserSessions.workspaceId, input.workspaceId),
+              eq(schema.browserSessions.id, input.browserSessionId),
+              eq(schema.browserSessions.lifecycle, "active"),
+              eq(schema.browserSessions.controllerGeneration, input.controllerGeneration),
+              sql`${schema.browserSessions.display} is distinct from ${input.display}`,
+            ),
+          )
+          .returning({ id: schema.browserSessions.id });
+        if (!updated) return false;
+        await advanceWorkspaceInteractionRevision(tx, input.accountId, input.workspaceId);
+        return true;
       }),
   );
 }

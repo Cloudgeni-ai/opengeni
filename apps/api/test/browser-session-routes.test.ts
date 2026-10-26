@@ -93,6 +93,7 @@ test("automatic managed directory recovery preserves current authority and refus
       sourceChecks: number;
       touches: number;
       lost: number;
+      displays: string[];
     }[];
     expect(results).toEqual([
       {
@@ -104,6 +105,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 2,
         touches: 2,
         lost: 0,
+        displays: ["own:offscreen"],
       },
       ...["unknown", "unattested"].map((scenario) => ({
         scenario,
@@ -114,6 +116,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 2,
         touches: 2,
         lost: 0,
+        displays: [],
       })),
       ...["token-changed", "generation-changed", "route-changed", "machine-moved"].map(
         (scenario) => ({
@@ -125,6 +128,7 @@ test("automatic managed directory recovery preserves current authority and refus
           sourceChecks: 2,
           touches: 1,
           lost: 0,
+          displays: [],
         }),
       ),
       {
@@ -136,6 +140,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 2,
         touches: 2,
         lost: 0,
+        displays: [],
       },
       {
         scenario: "access-revoked",
@@ -146,6 +151,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 2,
         touches: 1,
         lost: 0,
+        displays: [],
       },
       {
         scenario: "ephemeral",
@@ -156,6 +162,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 1,
         touches: 1,
         lost: 1,
+        displays: [],
       },
       {
         scenario: "lightpanda",
@@ -166,6 +173,7 @@ test("automatic managed directory recovery preserves current authority and refus
         sourceChecks: 1,
         touches: 1,
         lost: 0,
+        displays: ["own:offscreen"],
       },
     ]);
   } finally {
@@ -343,6 +351,7 @@ async function automaticBrowserRecoveryFixture() {
     sourceChecks: 0,
     touches: 0,
     lost: 0,
+    displays: [] as string[],
   };
   mock.module(resolveFromApi("@opengeni/db"), () => ({
     ...db,
@@ -373,6 +382,15 @@ async function automaticBrowserRecoveryFixture() {
     terminalizeStaleConnectedInteractionPlacement: async () => ({ sourcePlacementChanged: false }),
     markEphemeralBrowserSessionLost: async () => {
       state.lost++;
+      return true;
+    },
+    recordBrowserSessionDisplay: async (
+      _db: unknown,
+      input: { browserSessionId: string; controllerGeneration: string; display: string | null },
+    ) => {
+      state.displays.push(
+        `${input.browserSessionId === browserSessionId && input.controllerGeneration === controllerGeneration ? "own" : "other"}:${input.display}`,
+      );
       return true;
     },
   }));
@@ -523,7 +541,8 @@ async function automaticBrowserRecoveryFixture() {
       if (["unknown", "unattested"].includes(state.scenario))
         return failure(409, "resource_unavailable");
       state.recovered = true;
-      return success({ browserSessionId, controllerGeneration, observation });
+      // The relaunch reports how it showed the browser this time.
+      return success({ browserSessionId, controllerGeneration, observation, display: "offscreen" });
     },
   });
   const channelHref = new URL("../sandbox/channel-a.ts", routeHref).href;
@@ -610,6 +629,7 @@ async function automaticBrowserRecoveryFixture() {
           sourceChecks: 0,
           touches: 0,
           lost: 0,
+          displays: [],
         };
         opens = 0;
         const response = await app.request(
@@ -657,6 +677,7 @@ async function automaticBrowserRecoveryFixture() {
         sourceChecks: 0,
         touches: 0,
         lost: 0,
+        displays: [],
       };
       const response = await app.request(
         `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${browserSessionId}/targets`,
@@ -671,6 +692,7 @@ async function automaticBrowserRecoveryFixture() {
         sourceChecks: state.sourceChecks,
         touches: state.touches,
         lost: state.lost,
+        displays: state.displays,
       });
     }
     console.log(JSON.stringify(results));
@@ -1402,8 +1424,21 @@ describe("BrowserSession route discipline", () => {
     expect(binding).toContain("isMissingLinkedComputerControllerSession(error)");
   });
 
-  test("records the display the controller launched with on create and resume, never the requested mode", async () => {
+  test("records the display every controller launch reports, never the requested mode", async () => {
     const source = await readFile(routeUrl, "utf8");
+    // Every launch through the controller stores what that launch reported:
+    // create, resume, in-place recovery of a lost controller, and continuing
+    // an expired resume on its working copy. A new launch path must be added
+    // here and store its display too.
+    const launches = [...source.matchAll(/(\S+) = await client\.createSession\(/gu)].map(
+      (match) => match[1],
+    );
+    expect(launches).toEqual(["launch.result", "resumed.result", "recovered", "adopted.result"]);
+    const after = (marker: string, call: string) => {
+      const start = source.indexOf(call, source.indexOf(marker));
+      expect(start).toBeGreaterThan(0);
+      return source.slice(start, source.indexOf("});", start));
+    };
     const activations = [...source.matchAll(/await activateBrowserSession\(deps\.db, \{/gu)];
     expect(activations).toHaveLength(2);
     const createStart = source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"');
@@ -1412,14 +1447,15 @@ describe("BrowserSession route discipline", () => {
     expect(createActivation.slice(0, createActivation.indexOf("});"))).toContain(
       "display: launch.result?.display ?? null,",
     );
-    const resumeStart = source.indexOf("resumed.result = await client.createSession(");
-    expect(resumeStart).toBeGreaterThan(0);
-    const resumeActivation = source.slice(
-      source.indexOf("await activateBrowserSession(", resumeStart),
-    );
-    expect(resumeActivation.slice(0, resumeActivation.indexOf("});"))).toContain(
-      "display: resumed.result?.display ?? null,",
-    );
+    expect(
+      after("resumed.result = await client.createSession(", "await activateBrowserSession("),
+    ).toContain("display: resumed.result?.display ?? null,");
+    expect(
+      after("const recovered = await client.createSession(", "recordBrowserSessionDisplay("),
+    ).toContain("display: recovered.display ?? null,");
+    expect(
+      after("adopted.result = await client.createSession(", "continueExpiredBrowserSessionResume("),
+    ).toContain("display: adopted.result?.display ?? null,");
   });
 
   test("uses linked and native displays without bootstrapping a standalone desktop", async () => {

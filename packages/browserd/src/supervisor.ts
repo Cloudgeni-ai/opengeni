@@ -3962,14 +3962,15 @@ function displayOf(runtime: Runtime): { display?: "window" | "offscreen" } {
   return display ? { display } : {};
 }
 
-/** One plain paragraph for the agent when a headed browser was launched
- * offscreen: what that means for a person at the machine, and what to use for
- * a step only they can do. On macOS a managed browser is offscreen so it never
- * takes over the person's screen; on Linux only when there is no display. */
+/** One short line for the agent when a headed browser was launched offscreen
+ * (the session line already says it has no window): what a person at the
+ * machine can see, and what to use for a step only they can do. On macOS a
+ * managed browser is offscreen so it never takes over the person's screen; on
+ * Linux only when there is no display. */
 export function offscreenBrowserNotice(platform: NodeJS.Platform): string {
   return platform === "darwin"
-    ? "This browser runs offscreen: it has no window on this computer's screen, so a person there cannot see it and browser dialogs such as a security key or PIN prompt cannot appear. A person can still use the page through the live view. For a step a person must do at the computer, use their own Chrome (placement attached_device), or call computer_open and then browser_open with linkedComputerSessionId for a browser with a real window."
-    : "This machine has no graphical display, so this browser runs offscreen with no window and browser dialogs such as a security key or PIN prompt cannot appear. A person can still use the page through the live view. For a step that needs a real browser window, use the person's own Chrome (placement attached_device).";
+    ? "A person sees it only in the live view; for a step they must do at this Mac, use placement attached_device, or computer_open then browser_open with linkedComputerSessionId."
+    : "A person sees it only in the live view; for a step that needs a real window, use placement attached_device.";
 }
 
 /** Virtual WebAuthn needs the CDP WebAuthn domain and browser-level target
