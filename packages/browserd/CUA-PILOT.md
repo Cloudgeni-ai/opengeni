@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`ddb42abeabc5a61858023a7ac0974a79564d5498`: upstream `cua-driver-rs-v0.37.0`
+`16cc78ff3e02ed861680c687ca96152e58cb3ae7`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -211,15 +211,18 @@ and cleanup of a launched non-GUI process. CI builds and runs it on x64 and arm6
 - Mac background input never makes the window focused, so pages that need a
   focused document (passkey and other WebAuthn prompts, some clipboard reads)
   refuse what it sends. A background pixel click is delivered as an
-  accessibility press on the element under the point; when the element is a
-  checkbox or an unselected radio button (a browser tab) whose value does not
-  show the press, or is part of Chromium's own window controls, which accept
+  accessibility press on the element under the point, once. When the element
+  lists no press and is part of Chromium's own window controls, which accept
   any press and ignore it (a point on a tab hits the tab strip, not the tab),
-  the routed pixel click is sent instead. Chromium lists no
-  AXPress on page elements in the accessibility mode the adapter enables, but
-  performs it on any of them, so a page's controls are invoked by role. Keys
-  for a shortcut whose menu item is disabled while the app is in the
-  background (Terminal's Close Window) are reported as a likely no-op.
+  the routed pixel click is sent instead; that click takes about 1.3 to 1.7 s
+  against about 0.7 s for the press. Chromium lists no AXPress on page
+  elements in the accessibility mode the adapter enables, but performs it on
+  any of them; CUA reports such an app, and its page controls (not its
+  selects, which take set_value) are invoked by role. Keys for a shortcut
+  whose menu item is disabled while the app is in the background (Terminal's
+  Close Window) are reported as a likely no-op. A click or key press CUA
+  could only send, with no element changed after it, is reported as possibly
+  not taken effect.
 - Linux supports semantic background actions within its isolated X11 seat;
   foreground pointer input stays inside that seat. Unsupported native background
   pointer requests are refused. Web/application acceptance is still required.
@@ -244,7 +247,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/ddb42abeabc5a61858023a7ac0974a79564d5498/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/16cc78ff3e02ed861680c687ca96152e58cb3ae7/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

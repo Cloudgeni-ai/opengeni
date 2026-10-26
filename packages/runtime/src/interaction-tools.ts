@@ -1176,24 +1176,6 @@ export function createInteractionAttemptToolDefinitions(
   const computerSeen = new Map<string, Parameters<typeof computerObservationText>[0]>();
   const seenComputerKey = (observation: { computerSessionId: string; target: { id: string } }) =>
     `${observation.computerSessionId}\u0000${observation.target.id}`;
-  // The operations of single computer_act calls that sent raw input (a
-  // pointer click, a key press, typed text). No computer driver confirms
-  // that an app acted on raw input, so a receipt that shows no element
-  // changed says the input may not have taken effect.
-  const rawInputOperations = new Set<string>();
-  const rememberRawInput = (
-    operationId: string,
-    action: z.output<typeof ComputerActInput>["action"],
-  ) => {
-    const raw =
-      (action.type === "pointer" &&
-        (action.action === "click" || action.action === "double_click")) ||
-      action.type === "keyboard";
-    if (!raw) return;
-    rawInputOperations.add(operationId);
-    while (rawInputOperations.size > 32)
-      rawInputOperations.delete(rawInputOperations.values().next().value!);
-  };
   const rememberComputerReading = (
     observation: Parameters<typeof computerObservationText>[0] & { computerSessionId: string },
   ) => {
@@ -3011,19 +2993,15 @@ export function createInteractionAttemptToolDefinitions(
     idempotent: true,
     modelInputSchema: computerActModelInputSchema,
     modelText: (receipt, context) => {
-      const rawInput = !("steps" in receipt) && rawInputOperations.delete(receipt.operationId);
       const observation = receipt.observation;
       if (!observation || context.caller.kind !== "model") return computerActionText(receipt);
       const base = computerSeen.get(seenComputerKey(observation));
       rememberComputerReading(observation);
       const shown = base ? computerObservationDiff(base, observation) : null;
-      return computerActionText(
-        shown ? { ...receipt, observation: shown, ...(rawInput ? { rawInput } : {}) } : receipt,
-      );
+      return computerActionText(shown ? { ...receipt, observation: shown } : receipt);
     },
-    execute: async (requested, context) => {
-      rememberRawInput(context.operationId, requested.action);
-      return await onComputerWindow(
+    execute: async (requested, context) =>
+      await onComputerWindow(
         requested,
         async (window) => {
           const value: ResolvedComputerActInput = {
@@ -3104,8 +3082,7 @@ export function createInteractionAttemptToolDefinitions(
           "steps" in receipt && receipt.steps.at(-1)?.state !== "completed"
             ? null
             : receipt.observation?.target.id,
-      );
-    },
+      ),
   });
 
   add({

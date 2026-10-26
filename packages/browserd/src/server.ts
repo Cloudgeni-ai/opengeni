@@ -13,6 +13,7 @@ import {
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
+  COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BrowserActionCommand,
   BrowserDownloadExportRequest,
@@ -1025,12 +1026,20 @@ export class BrowserControlServer {
         request,
         async () => await supervisor.action(command),
       );
-      // Older clients parse receipts strictly. Return role stand-ins only to
-      // a caller that asked for them.
-      if (url.searchParams.get(COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER) === "1")
-        return success(receipt);
-      const { roleStandIns: _roleStandIns, ...withoutStandIns } = receipt;
-      return success(withoutStandIns);
+      // Older clients parse receipts strictly. Return role stand-ins and
+      // unconfirmed input only to a caller that asked for each.
+      const { roleStandIns, unconfirmedInput, ...plain } = receipt;
+      return success({
+        ...plain,
+        ...(roleStandIns &&
+        url.searchParams.get(COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER) === "1"
+          ? { roleStandIns }
+          : {}),
+        ...(unconfirmedInput &&
+        url.searchParams.get(COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER) === "1"
+          ? { unconfirmedInput }
+          : {}),
+      });
     }
     if (segments.length === 4 && segments[3] === "heartbeat") {
       if (request.method !== "POST") {

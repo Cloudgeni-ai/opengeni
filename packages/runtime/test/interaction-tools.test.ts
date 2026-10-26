@@ -3860,7 +3860,7 @@ describe("interaction attempt tools", () => {
     expect(await act()).toContain("No element changed since");
   });
 
-  test("a Computer click or key press that changed no element says it may not have taken effect", async () => {
+  test("a Computer click or key press the driver could not confirm that changed no element says it may not have taken effect", async () => {
     const target = computerTarget();
     const reading = {
       ...computerObservation(target),
@@ -3878,8 +3878,15 @@ describe("interaction attempt tools", () => {
     };
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({
-        actInComputer: async (_workspaceId, _computerSessionId, value) =>
-          computerReceipt(value.operationId, { ...reading, observationId: randomUUID() }),
+        // The driver reports raw input it could not confirm, as CUA does for
+        // a click or key press it only sent.
+        actInComputer: async (_workspaceId, _computerSessionId, value) => ({
+          ...computerReceipt(value.operationId, { ...reading, observationId: randomUUID() }),
+          ...(value.action.type === "pointer" ||
+          (value.action.type === "keyboard" && value.action.value !== "pagedown")
+            ? { unconfirmedInput: true as const }
+            : {}),
+        }),
       }),
       workspaceId,
       sessionId,
@@ -3900,13 +3907,15 @@ describe("interaction attempt tools", () => {
       return (result.content[0] as { text: string }).text;
     };
     const line =
-      "No element changed after this input, and apps do not confirm the input they receive, so it may not have taken effect: check the window before sending it again.";
+      "The app did not confirm this input and no element changed, so it may not have taken effect: check the window before sending it again.";
     const invoke = { type: "semantic", locator: { kind: "ref", ref: "e1" }, action: "invoke" };
     // The first reading in this attempt is shown whole.
     expect(await act(invoke)).not.toContain(line);
     const click = await act({ type: "pointer", action: "click", x: 10, y: 10, frameId: "f_1" });
     expect(click.split("\n")[1]).toBe(line);
     expect(await act({ type: "keyboard", action: "press", value: "cmd+w" })).toContain(line);
+    // A key press the driver did not report as unconfirmed reads as before.
+    expect(await act({ type: "keyboard", action: "press", value: "pagedown" })).not.toContain(line);
     // A semantic action that changed nothing reads as before.
     const unchanged = await act(invoke);
     expect(unchanged).toContain("No element changed since");

@@ -15,6 +15,7 @@ import {
   BROWSER_CONTROL_MAX_JSON_BYTES,
   BROWSER_CONTROL_PORT,
   COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER,
+  COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER,
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
@@ -2559,8 +2560,9 @@ export class ComputerControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate role stand-ins ignore this parameter.
-            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1`,
+            // Controllers that predate role stand-ins or unconfirmed input
+            // ignore these parameters.
+            path: `${this.path("actions")}?${COMPUTER_ACTION_RECEIPT_STAND_INS_PARAMETER}=1&${COMPUTER_ACTION_RECEIPT_UNCONFIRMED_INPUT_PARAMETER}=1`,
             token: this.controlToken,
             body: parsed,
             timeoutMs,

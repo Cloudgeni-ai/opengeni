@@ -14054,7 +14054,8 @@
         "$.roleStandIns[]": "ref(ComputerActionRoleStandIn)",
         "$.settledAt": "string! null",
         "$.state": "ref(InteractionOperationState)!",
-        "$.targetId": "string!"
+        "$.targetId": "string!",
+        "$.unconfirmedInput": "const?=[\"true\"]"
       }
     },
     "ComputerActionRequest": {
