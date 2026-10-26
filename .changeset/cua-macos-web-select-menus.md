@@ -1,0 +1,5 @@
+---
+"@opengeni/browserd": patch
+---
+
+On macOS, observing a window whose app is too busy to answer accessibility (some apps are while they show a menu) no longer fails with a server error after 7 s. CUA now bounds the requests that find the window by the read's time budget, and the observation comes back with the screenshot, marked as cut short because the app answered too slowly, while refs from the last reading keep working. A web `<select>` in a WebKit view (apps that embed a WKWebView) now works while its menu is open: `set_value` picks the option by name from the open menu (or opens it, picks and closes it), and invoking one of the menu's items is accepted instead of being refused as outside the window. The first reading of a WKWebView window no longer omits the web page: an element that times out once is asked again, and one that never answers marks the reading as cut short instead of disappearing.

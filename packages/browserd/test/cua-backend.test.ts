@@ -1080,6 +1080,53 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("reads an app that did not answer in time as an incomplete observation, keeping its refs", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let busy = false;
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_accessibility_tree && busy) {
+        // An app tracking an open menu answers no accessibility request:
+        // CUA reads nothing, keeps the last snapshot and says why.
+        const state = JSON.parse(response.structuredJson!);
+        delete state.snapshot_id;
+        Object.assign(state, {
+          elements: [],
+          tree_markdown: "",
+          truncated: true,
+          truncation_reason: "timeout",
+          nodes_pending: 1,
+          degraded: true,
+          degraded_reason: "ax_app_unresponsive: pid 42 did not answer accessibility",
+        });
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const first = await backend.observe(target.id);
+      busy = true;
+      const unanswered = await backend.observe(target.id);
+      expect(unanswered.roots).toEqual([]);
+      expect(unanswered.incomplete).toEqual({ reason: "time_budget", unreadCount: 1 });
+      expect(unanswered.observationId).not.toBe(first.observationId);
+      // A ref of the last reading still acts, naming the unanswered reading.
+      await backend.dispatch({
+        ...command(first),
+        expectedObservationId: unanswered.observationId,
+      });
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: "s1:0",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("invokes controls and opens their menu through the native button contract", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);

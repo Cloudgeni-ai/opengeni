@@ -1289,6 +1289,13 @@ export class CuaComputerBackend implements ComputerBackend {
       max_depth: 25,
     });
     const state = WindowState.parse(data);
+    if (
+      state.pid === target.pid &&
+      state.window_id === target.windowId &&
+      !state.snapshot_id &&
+      String(data.degraded_reason ?? "").startsWith("ax_app_unresponsive")
+    )
+      return this.unansweredObservation(targetId, target, state);
     if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id) {
       if (
         this.sheetHosts(target).length &&
@@ -1418,6 +1425,54 @@ export class CuaComputerBackend implements ComputerBackend {
     this.recentObservations.set(targetId, [...recent, observation]);
     while (this.recentObservations.size > 32)
       this.recentObservations.delete(this.recentObservations.keys().next().value!);
+    return observation;
+  }
+
+  /** A reading the app did not answer in time (CUA's ax_app_unresponsive):
+   * its main thread was busy, as while it shows a menu, so nothing was read.
+   * That says nothing about the window, and CUA keeps its last snapshot, so
+   * the refs of the last reading stay the ones actions resolve. The reading
+   * itself lists no elements and says it stopped because the app answered
+   * too slowly, beside the screenshot, instead of failing. */
+  private unansweredObservation(
+    targetId: string,
+    target: Target,
+    state: ReturnType<typeof WindowState.parse>,
+  ): ComputerBackendObservation {
+    const observation: ComputerBackendObservation = {
+      observationId: `${this.session}:unanswered:${randomUUID()}`,
+      target: {
+        ...target.native,
+        bounds: state.window_bounds ?? target.native.bounds,
+        focused: false,
+      },
+      frameId:
+        [...this.frames.entries()]
+          .reverse()
+          .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+      roots: [],
+      nodeCount: 0,
+      incomplete: {
+        reason: "time_budget",
+        unreadCount: Math.min(state.nodes_pending ?? 0, 1_000_000),
+      },
+      focusedRef: null,
+      changedRegions: [],
+    };
+    const last = this.observations.get(targetId);
+    // An action naming this reading acts on the last one's elements.
+    const actedOn = last ? { ...last, observationId: observation.observationId } : observation;
+    if (last) {
+      const signs = this.progress.get(last);
+      if (signs) this.progress.set(actedOn, signs);
+      const document = this.documents.get(last);
+      if (document !== undefined) this.documents.set(actedOn, document);
+    }
+    this.observations.delete(targetId);
+    this.observations.set(targetId, actedOn);
+    const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
+    this.recentObservations.delete(targetId);
+    this.recentObservations.set(targetId, [...recent, actedOn]);
     return observation;
   }
 
