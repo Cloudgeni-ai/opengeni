@@ -1,7 +1,8 @@
 project_id       = "opengeni-project"
 
 # name_prefix also sets the runtime secret id ("<name_prefix>-runtime"); the
-# chart's externalSecret remote key must match the runtime_secret_id output.
+# chart's externalSecret remote key must match the runtime_secret_id output,
+# because the runtime service account can read only that secret.
 name_prefix      = "opengeni-example"
 region           = "us-central1"
 zone             = "us-central1-a"

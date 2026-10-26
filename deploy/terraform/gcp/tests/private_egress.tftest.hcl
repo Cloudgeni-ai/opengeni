@@ -14,6 +14,14 @@ run "private_nodes_in_created_network_have_public_egress" {
     condition     = google_compute_router_nat.private_nodes[0].source_subnetwork_ip_ranges_to_nat == "LIST_OF_SUBNETWORKS" && one(google_compute_router_nat.private_nodes[0].subnetwork).source_ip_ranges_to_nat == toset(["ALL_IP_RANGES"])
     error_message = "NAT must cover all primary and secondary ranges of the created GKE subnet."
   }
+  assert {
+    condition     = google_compute_router_nat.private_nodes[0].enable_dynamic_port_allocation && !google_compute_router_nat.private_nodes[0].enable_endpoint_independent_mapping && google_compute_router_nat.private_nodes[0].min_ports_per_vm == 64 && google_compute_router_nat.private_nodes[0].max_ports_per_vm == 65536
+    error_message = "Pods share their node's NAT ports; allocation must grow on demand rather than cap at 64."
+  }
+  assert {
+    condition     = google_compute_router_nat.private_nodes[0].log_config[0].enable && google_compute_router_nat.private_nodes[0].log_config[0].filter == "ERRORS_ONLY"
+    error_message = "NAT allocation errors must be logged."
+  }
 }
 run "public_nodes_do_not_add_nat" {
   command = plan

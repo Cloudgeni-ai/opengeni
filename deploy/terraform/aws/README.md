@@ -16,7 +16,7 @@ public wss ingress must route both dials for a channel to the same replica
 relay replica runs. See `docs/deployment.md` (Connected Machines) for the full
 relay/NATS/secret wiring.
 - AWS Secrets Manager runtime secret placeholder.
-- Optional RDS PostgreSQL when `postgres.mode = "managed"`. Managed-VPC mode (`network.create_vpc = true`) allows PostgreSQL ingress from the VPC CIDR only. Existing-VPC mode (`network.create_vpc = false`) has no default source: set `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids` to the exact application sources, or validation fails.
+- Optional RDS PostgreSQL when `postgres.mode = "managed"`. Managed-VPC mode (`network.create_vpc = true`) allows PostgreSQL ingress from the VPC CIDR. Existing-VPC mode (`network.create_vpc = false`) allows it from the EKS cluster security group, which EKS attaches to the managed node group and so to the Opengeni pods; it never opens the shared network's address space. Add other clients with `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids` (`0.0.0.0/0` is rejected).
 - `temporal.mode = "officialChart"` output wiring for the stack-wrapper managed upstream Temporal chart, or `external` for Temporal Cloud/customer endpoints.
 
 Keep Opengeni workloads in the provider-neutral Helm chart. This root should only create cloud substrate and emit non-secret Helm values.
@@ -50,4 +50,6 @@ The official Temporal chart still needs durable Postgres databases prepared outs
 
 ### Upgrading PostgreSQL ingress
 
-Managed VPC deployments retain the existing `postgres_from_vpc[0]` resource address and VPC CIDR rule. Existing VPC deployments replace the legacy broad fallback with explicitly configured client CIDR and security group rules. Declare those sources before planning an upgrade and review the replacement rules before applying.
+Managed VPC deployments retain the existing `postgres_from_vpc[0]` resource address and VPC CIDR rule, so the plan shows no ingress change.
+
+Existing VPC deployments previously admitted `10.0.0.0/8`. The plan destroys that `postgres_from_vpc[0]` rule and creates `postgres_from_eks_cluster[0]` for the EKS cluster security group. Pods on this root's managed node group keep access. Any other client that reached RDS through the old range, such as a bastion, a migration runner outside the cluster or a Temporal server elsewhere, needs an entry in `postgres.allowed_client_cidrs` or `postgres.allowed_security_group_ids` before you apply.

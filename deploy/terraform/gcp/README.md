@@ -30,12 +30,25 @@ Private nodes on a network created by this root (`network.create_network = true`
 and `gke.enable_private_nodes = true`) get a regional Cloud Router and Cloud NAT.
 NAT covers the created subnet's primary and secondary ranges so nodes and pods
 can reach public model providers and external Temporal endpoints. Cloud NAT adds
-provider charges; public-node deployments do not create it.
+provider charges; public-node deployments do not create it. NAT ports are
+allocated dynamically per node (64 up to 65536) because all pods on a node share
+them, and allocation errors are logged.
 
 For `network.create_network = false`, the operator must supply internet egress
 for private nodes and pods, through existing Cloud NAT or another routing path.
 This root does not change routing on an existing network. See
 [Google's GKE NAT guidance](https://docs.cloud.google.com/nat/docs/nat-product-interactions).
+
+### Upgrading runtime secret access
+
+Earlier versions granted the runtime service account
+`roles/secretmanager.secretAccessor` on the whole project. It is now granted on
+the runtime secret only (`runtime_secret_id` output, `<name_prefix>-runtime`).
+The plan destroys `google_project_iam_member.runtime_secret_accessor` and creates
+`google_secret_manager_secret_iam_member.runtime_secret_accessor`. Before
+applying, confirm that the External Secrets `remoteRef`/`extract` key in your Helm
+values equals `runtime_secret_id`; a workload that read any other secret through
+this service account needs its own secret-level binding.
 
 ## Validate
 

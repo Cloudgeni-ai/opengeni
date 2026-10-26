@@ -44,6 +44,20 @@ resource "google_compute_router_nat" "private_nodes" {
   nat_ip_allocate_option             = "AUTO_ONLY"
   source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"
 
+  # Every pod on a node shares the node's NAT ports, and agent workloads hold
+  # many concurrent connections to the same model-provider endpoints. Grow the
+  # per-node allocation on demand instead of capping it at the 64-port default,
+  # and log only allocation failures so exhaustion is visible.
+  enable_dynamic_port_allocation      = true
+  enable_endpoint_independent_mapping = false
+  min_ports_per_vm                    = 64
+  max_ports_per_vm                    = 65536
+
+  log_config {
+    enable = true
+    filter = "ERRORS_ONLY"
+  }
+
   subnetwork {
     name                    = google_compute_subnetwork.this[0].id
     source_ip_ranges_to_nat = ["ALL_IP_RANGES"]

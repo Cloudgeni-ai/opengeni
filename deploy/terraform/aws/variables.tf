@@ -87,7 +87,7 @@ variable "kubernetes_workload_identity" {
 }
 
 variable "postgres" {
-  description = "Postgres mode. Use managed for RDS PostgreSQL or external to connect an existing compatible server. When postgres.mode is managed and network.create_vpc is false, declare the allowed RDS client sources through allowed_client_cidrs and/or allowed_security_group_ids; managed VPC mode allows the VPC CIDR only."
+  description = "Postgres mode. Use managed for RDS PostgreSQL or external to connect an existing compatible server. Managed RDS admits the created VPC CIDR (network.create_vpc = true) or the EKS cluster security group (network.create_vpc = false); allowed_client_cidrs and allowed_security_group_ids add further explicit clients."
   type = object({
     mode                       = string
     existing_host              = optional(string)
@@ -121,18 +121,17 @@ variable "postgres" {
   }
 
   validation {
-    condition     = alltrue([for cidr in var.postgres.allowed_client_cidrs : can(cidrhost(cidr, 0)) && can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", cidr))])
-    error_message = "postgres.allowed_client_cidrs entries must be valid IPv4 CIDR blocks."
+    condition = alltrue([
+      for cidr in var.postgres.allowed_client_cidrs :
+      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", cidr)) &&
+      try(cidrsubnet(cidr, 0, 0) == cidr && tonumber(split("/", cidr)[1]) > 0, false)
+    ])
+    error_message = "postgres.allowed_client_cidrs entries must be IPv4 CIDR blocks in network form (for example 10.20.0.0/16, not 10.20.1.5/16), and never 0.0.0.0/0."
   }
 
   validation {
     condition     = alltrue([for sg in var.postgres.allowed_security_group_ids : can(regex("^sg-([0-9a-f]{8}|[0-9a-f]{17})$", sg))])
     error_message = "postgres.allowed_security_group_ids entries must be EC2 security group ids: sg- followed by exactly 8 or 17 lowercase hexadecimal characters."
-  }
-
-  validation {
-    condition     = var.network.create_vpc || var.postgres.mode != "managed" || length(var.postgres.allowed_client_cidrs) + length(var.postgres.allowed_security_group_ids) > 0
-    error_message = "postgres.allowed_client_cidrs or postgres.allowed_security_group_ids must name at least one PostgreSQL client source when postgres.mode is managed and network.create_vpc is false."
   }
 }
 

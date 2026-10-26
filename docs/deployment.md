@@ -4444,7 +4444,7 @@ The AWS Terraform root lives at `deploy/terraform/aws`.
 
 It supports EKS, ECR, S3, AWS Secrets Manager, optional RDS PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.aws-managed.example.yaml` as the non-secret Helm values shape.
 
-When `postgres.mode = "managed"` runs against an existing VPC (`network.create_vpc = false`), the RDS security group has no default ingress source; declare the application sources with `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids`.
+With `postgres.mode = "managed"`, the RDS security group admits PostgreSQL from the created VPC CIDR, or from the EKS cluster security group when the root runs in an existing VPC (`network.create_vpc = false`). Declare any other client with `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids`. Existing-VPC deployments upgrading from the old `10.0.0.0/8` rule should read the upgrade note in `deploy/terraform/aws/README.md` first.
 
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed S3 URLs without per-application registration.
