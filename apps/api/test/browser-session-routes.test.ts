@@ -726,6 +726,37 @@ test("an agent's wait tells only the running browsers it holds, without using or
         touched: 0,
         deadline: results[1].deadline,
       },
+      // Input arrives before the deadline: the hold ends then, and only for
+      // that wait (a newer wait's hold is never shortened).
+      ...["answered", "ended-before-watch"].map((scenario, index) => ({
+        scenario,
+        records: ["held", "held", "cold-box"],
+        authorizations: ["session.read", "session.read", "session.read"],
+        routed: 2,
+        leaseReads: ["cold-box", "cold-box"],
+        holds: [
+          {
+            browser: "held",
+            exactAuthority: true,
+            body: {
+              controllerGeneration: "generation-held",
+              until: results[index + 2].deadline,
+            },
+          },
+          {
+            browser: "held",
+            exactAuthority: true,
+            body: {
+              controllerGeneration: "generation-held",
+              endedBeforeDeadline: true,
+              endsWaitUntil: results[index + 2].deadline,
+            },
+          },
+        ],
+        touched: 0,
+        deadline: results[index + 2].deadline,
+        watching: 0,
+      })),
     ]);
   } finally {
     if (child.exitCode === null) child.kill();
@@ -828,6 +859,8 @@ async function waitHoldFixture() {
   let leaseReads: string[] = [];
   let touched = 0;
   let holds: Array<Record<string, unknown>> = [];
+  let inputWait: { deadlineAt: string; reason: string } | null = null;
+  let listeners: Array<(events: Array<{ type: string; payload: unknown }>) => void> = [];
   mock.module(resolveFromApi("@opengeni/db"), () => ({
     ...db,
     listBrowserSessions: async (_db: unknown, input: { associatedSessionId?: string }) => ({
@@ -861,6 +894,7 @@ async function waitHoldFixture() {
       id: otherSessionId,
       workspaceId,
       activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
+      inputWait,
     }),
     touchBrowserSessionController: async () => {
       touched += 1;
@@ -893,10 +927,18 @@ async function waitHoldFixture() {
       if (request.method !== "POST" || route !== "wait-hold") {
         return Response.json({ protocolVersion: 1, ok: false }, { status: 500 });
       }
+      const body = (await request.json()) as Record<string, string>;
       holds.push({
         browser: names.get(browserSessionId!),
         exactAuthority: request.headers.get("authorization") === `Bearer ${expectedAdmin}`,
-        body: await request.json(),
+        // An end's own time is the moment the wait ended.
+        body: body.endsWaitUntil
+          ? {
+              controllerGeneration: body.controllerGeneration,
+              endedBeforeDeadline: Date.parse(body.until!) < Date.parse(body.endsWaitUntil),
+              endsWaitUntil: body.endsWaitUntil,
+            }
+          : body,
       });
       return Response.json({ protocolVersion: 1, ok: true, data: { held: true } });
     },
@@ -931,13 +973,24 @@ async function waitHoldFixture() {
   const { holdBrowsersForWait } = registerBrowserSessionRoutes(new Hono(), {
     settings: fixtureSettings({ delegationSecret: rootSecret }),
     db: {},
-    bus: {},
+    bus: {
+      subscribe: async (
+        _workspaceId: string,
+        _sessionId: string,
+        onEvents: (events: Array<{ type: string; payload: unknown }>) => void,
+      ) => {
+        listeners.push(onEvents);
+        return () => {
+          listeners = listeners.filter((listener) => listener !== onEvents);
+        };
+      },
+    },
   } as never);
   const originalWarn = console.warn;
   console.warn = () => {};
   try {
     const results = [];
-    for (const next of ["waiting", "machine-moved"]) {
+    for (const next of ["waiting", "machine-moved", "answered", "ended-before-watch"]) {
       scenario = next;
       records = [];
       authorizations = [];
@@ -945,13 +998,48 @@ async function waitHoldFixture() {
       leaseReads = [];
       touched = 0;
       holds = [];
+      listeners = [];
       const deadline = new Date(Date.now() + 25 * 60_000);
+      inputWait =
+        next === "ended-before-watch"
+          ? null
+          : { deadlineAt: deadline.toISOString(), reason: "Waiting in a queue." };
       await holdBrowsersForWait({
         grant,
         sessionId: waitingSessionId,
         deadline,
         signal: AbortSignal.timeout(10_000),
       });
+      if (next === "answered") {
+        for (let tries = 0; listeners.length === 0 && tries < 200; tries++) {
+          await Bun.sleep(5);
+        }
+        // Another wait's end changes nothing; this wait's end ends the hold.
+        for (const listener of listeners) {
+          listener([
+            {
+              type: "session.wait.finished",
+              payload: { outcome: "input", deadlineAt: new Date(0).toISOString() },
+            },
+          ]);
+        }
+        await Bun.sleep(20);
+        if (holds.length !== 1) throw new Error("another wait's end changed the hold");
+        inputWait = null;
+        for (const listener of listeners) {
+          listener([
+            {
+              type: "session.wait.finished",
+              payload: { outcome: "input", deadlineAt: deadline.toISOString() },
+            },
+          ]);
+        }
+      }
+      if (next === "answered" || next === "ended-before-watch") {
+        for (let tries = 0; (holds.length < 2 || listeners.length > 0) && tries < 400; tries++) {
+          await Bun.sleep(5);
+        }
+      }
       results.push({
         scenario: next,
         records: records.sort().reverse(),
@@ -961,6 +1049,9 @@ async function waitHoldFixture() {
         holds,
         touched,
         deadline: deadline.toISOString(),
+        ...(next === "answered" || next === "ended-before-watch"
+          ? { watching: listeners.length }
+          : {}),
       });
     }
     console.log(JSON.stringify(results));

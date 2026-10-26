@@ -563,16 +563,26 @@ export class BrowserControlServer {
         throw new ProtocolError("invalid_action", "method not allowed", 405);
       }
       const body = await readJsonObject(request);
-      assertOnlyKeys(body, ["controllerGeneration", "until"]);
+      assertOnlyKeys(body, ["controllerGeneration", "until", "endsWaitUntil"]);
       const controllerGeneration = requireGeneration(body.controllerGeneration);
       const until = Date.parse(requireString(body.until, "until", 64));
       if (!Number.isFinite(until)) {
         throw new ProtocolError("invalid_action", "until must be an ISO timestamp", 400);
       }
+      const endsWaitUntil =
+        body.endsWaitUntil === undefined
+          ? undefined
+          : Date.parse(requireString(body.endsWaitUntil, "endsWaitUntil", 64));
+      if (endsWaitUntil !== undefined && !Number.isFinite(endsWaitUntil)) {
+        throw new ProtocolError("invalid_action", "endsWaitUntil must be an ISO timestamp", 400);
+      }
       // Advisory and idempotent: it never launches, recovers or uses the
       // browser, so no lifecycle lock is needed.
       return success({
-        held: this.supervisor.holdForWait({ browserSessionId, controllerGeneration }, until),
+        held: await this.supervisor.holdForWait(
+          { browserSessionId, controllerGeneration },
+          endsWaitUntil === undefined ? { until } : { until, endsWaitUntil },
+        ),
       });
     }
     if (segments.length === 4 && segments[3] === "view-grants") {

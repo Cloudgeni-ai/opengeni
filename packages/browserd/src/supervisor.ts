@@ -67,6 +67,7 @@ import {
 } from "./cdp-driver";
 import { BrowserDownloadStore, type CompletedBrowserDownloadFile } from "./downloads";
 import {
+  readDetachedBrowserRecord,
   readDetachedBrowserRecords,
   removeDetachedBrowserRecord,
   writeDetachedBrowserRecord,
@@ -572,6 +573,10 @@ export class BrowserSupervisor {
   private idleReleaseTimer: ReturnType<typeof setInterval> | null = null;
   /** Browsers an earlier controller handed off that this one is stopping. */
   private readonly releasingDetached = new Map<string, Promise<unknown>>();
+  /** Wait holds on handed-off browsers this controller has not adopted, by
+   * browser session id (supervisor clock); see `holdForWait`. Read without
+   * yielding by the sweep, so a hold set before its claim always counts. */
+  private readonly detachedWaitHolds = new Map<string, number>();
   /** Handed-off browsers the last sweep found still waiting for their idle
    * time; the controller is not empty while any remain. */
   private detachedWaiting = 0;
@@ -822,10 +827,9 @@ export class BrowserSupervisor {
       )
         continue;
       if (this.closed) break;
-      if (
-        record.lastUsedAt > idleBefore ||
-        this.now() < waitHoldEnds(record.lastUsedAt, record.waitHoldUntil ?? null)
-      ) {
+      const waitHoldUntil =
+        this.detachedWaitHolds.get(browserSessionId) ?? record.waitHoldUntil ?? null;
+      if (idleSince(record.lastUsedAt, waitHoldUntil) > idleBefore) {
         waiting += 1;
         continue;
       }
@@ -841,6 +845,7 @@ export class BrowserSupervisor {
       this.releasingDetached.set(browserSessionId, release);
       try {
         await release;
+        this.detachedWaitHolds.delete(browserSessionId);
         released.push(browserSessionId);
       } catch (error) {
         waiting += 1;
@@ -1370,6 +1375,13 @@ export class BrowserSupervisor {
       // This controller holds the browser now; an earlier handoff record
       // must not outlive that.
       await removeDetachedBrowserRecord(runtime.sessionDirectory).catch(() => undefined);
+      // A wait hold set on the handed-off browser carries over: another
+      // session's use does not end the waiting session's wait.
+      const detachedHold = this.detachedWaitHolds.get(options.browserSessionId);
+      this.detachedWaitHolds.delete(options.browserSessionId);
+      if (detachedHold !== undefined && runtime.waitHoldUntil === null) {
+        runtime.waitHoldUntil = detachedHold;
+      }
       this.sessions.set(options.browserSessionId, runtime);
       const observation = runtime.creationObservation ?? (await this.currentObservation(runtime));
       runtime.creationObservation = null;
@@ -3408,19 +3420,64 @@ export class BrowserSupervisor {
    * Keeps a browser through a deliberate wait by the agent session using it:
    * the control plane sends the wait's deadline when the agent starts
    * waiting, and the idle release leaves the browser running, page state and
-   * all, until that deadline (see `waitHoldEnds` for the cap). This is not a
-   * use of the browser: its idle time still counts from its last request.
-   * A deadline already past clears the hold. A browser this controller does
-   * not hold is left alone, never launched for this. Returns whether the
-   * browser is held.
+   * all, until that deadline (see `waitHoldEnds` for the cap); the normal
+   * idle time then counts from the hold's end, so the turn the wait resumes
+   * finds its browser. This is not a use of the browser. A deadline already
+   * past clears the hold.
+   *
+   * With `endsWaitUntil`, the wait with that deadline ended at `until`
+   * (input arrived first): the hold ends there, and only if it is still that
+   * wait's, so a late end never shortens a newer wait.
+   *
+   * A browser handed off by an earlier controller and not adopted yet is
+   * held too, so a wait right after a restart or update keeps it. A browser
+   * this controller does not hold is left alone, never launched for this.
+   * Returns whether the browser is held.
    */
-  holdForWait(reference: BrowserSessionReference, until: number): boolean {
+  async holdForWait(reference: BrowserSessionReference, hold: WaitHold): Promise<boolean> {
     const runtime = this.sessions.get(reference.browserSessionId);
-    if (!runtime || runtime.options.controllerGeneration !== reference.controllerGeneration) {
-      return false;
+    if (runtime) {
+      if (runtime.options.controllerGeneration !== reference.controllerGeneration) return false;
+      runtime.waitHoldUntil = nextWaitHold(runtime.waitHoldUntil, hold, this.now());
+      return this.now() < waitHoldEnds(runtime.lastUsedAt, runtime.waitHoldUntil);
     }
-    runtime.waitHoldUntil = until > this.now() ? until : null;
-    return this.now() < waitHoldEnds(runtime.lastUsedAt, runtime.waitHoldUntil);
+    return await this.holdDetachedForWait(reference.browserSessionId, hold);
+  }
+
+  private detachedUnsettled(browserSessionId: string): boolean {
+    return (
+      this.closed ||
+      this.sessions.has(browserSessionId) ||
+      this.creating.has(browserSessionId) ||
+      this.ending.has(browserSessionId) ||
+      this.adopting.has(browserSessionId) ||
+      this.endingWorkingCopies.has(browserSessionId) ||
+      this.releasingDetached.has(browserSessionId)
+    );
+  }
+
+  /** The hold for a handed-off browser: kept in memory for the sweep and in
+   * its record, so a further restart keeps it too (best effort). */
+  private async holdDetachedForWait(browserSessionId: string, hold: WaitHold): Promise<boolean> {
+    if (this.detachedUnsettled(browserSessionId)) return false;
+    const sessionDirectory = join(this.rootDirectory, "sessions", browserSessionId);
+    const record = await readDetachedBrowserRecord(sessionDirectory, browserSessionId);
+    if (!record || this.detachedUnsettled(browserSessionId)) return false;
+    const current = this.detachedWaitHolds.get(browserSessionId) ?? record.waitHoldUntil ?? null;
+    const next = nextWaitHold(current, hold, this.now());
+    if (next === null) this.detachedWaitHolds.delete(browserSessionId);
+    else this.detachedWaitHolds.set(browserSessionId, next);
+    const { waitHoldUntil: _previous, ...unheld } = record;
+    await writeDetachedBrowserRecord(
+      sessionDirectory,
+      next === null ? unheld : { ...unheld, waitHoldUntil: next },
+    ).catch((error: unknown) => {
+      console.warn("browserd.detached_record_failed", {
+        browserSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    return this.now() < waitHoldEnds(record.lastUsedAt, next);
   }
 
   /** Keep the tabs a managed browser has as its controller stops it or lets
@@ -3912,8 +3969,7 @@ function idleReleasable(runtime: Runtime, idleBefore: number, now: number): bool
   const transport = runtime.options.transport.kind;
   return (
     (transport === "managed" || transport === "attached_chrome") &&
-    runtime.lastUsedAt <= idleBefore &&
-    now >= waitHoldEnds(runtime.lastUsedAt, runtime.waitHoldUntil) &&
+    idleSince(runtime.lastUsedAt, runtime.waitHoldUntil) <= idleBefore &&
     runtime.presence.size === 0 &&
     runtime.recording?.summary().state !== "recording" &&
     runtime.recovery === null &&
@@ -3935,6 +3991,24 @@ function idleReleasable(runtime: Runtime, idleBefore: number, now: number): bool
 export function waitHoldEnds(lastUsedAt: number, waitHoldUntil: number | null): number {
   if (waitHoldUntil === null) return Number.NEGATIVE_INFINITY;
   return Math.min(waitHoldUntil, lastUsedAt + BROWSER_WAIT_HOLD_MAX_MS);
+}
+
+/** Since when a browser counts as unused for its idle release: its last use,
+ * or the end of a wait hold after it, so the turn a wait resumes gets the
+ * normal idle time to use its browser again. */
+export function idleSince(lastUsedAt: number, waitHoldUntil: number | null): number {
+  return Math.max(lastUsedAt, waitHoldEnds(lastUsedAt, waitHoldUntil));
+}
+
+/** A wait hold sent by the control plane: a wait until `until`, or, with
+ * `endsWaitUntil`, the end at `until` of the wait with that deadline. */
+export type WaitHold = { until: number; endsWaitUntil?: number };
+
+function nextWaitHold(current: number | null, hold: WaitHold, now: number): number | null {
+  if (hold.endsWaitUntil !== undefined) {
+    return current === hold.endsWaitUntil ? Math.min(current, hold.until) : current;
+  }
+  return hold.until > now ? hold.until : null;
 }
 
 /** Whether the browser is still receiving a download. A store that cannot be

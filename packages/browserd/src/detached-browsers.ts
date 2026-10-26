@@ -75,6 +75,23 @@ export async function readDetachedBrowserRecords(
   return records;
 }
 
+/** The record a session directory holds for `browserSessionId`, or null when
+ * it has none or it cannot be read. */
+export async function readDetachedBrowserRecord(
+  sessionDirectory: string,
+  browserSessionId: string,
+): Promise<DetachedBrowserRecord | null> {
+  let text: string;
+  try {
+    text = await readFile(detachedBrowserRecordPath(sessionDirectory), "utf8");
+  } catch {
+    return null;
+  }
+  if (text.length > MAX_RECORD_BYTES) return null;
+  const record = parseDetachedBrowserRecord(text);
+  return record?.browserSessionId === browserSessionId ? record : null;
+}
+
 function parseDetachedBrowserRecord(text: string): DetachedBrowserRecord | null {
   let value: unknown;
   try {

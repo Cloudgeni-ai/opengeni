@@ -186,6 +186,7 @@ import {
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   type ApiRouteDeps,
+  type HoldBrowsersForWait,
   type ResolvedSessionAuthorization,
   retainCompletedBrowserDownloads,
   withBrowserDownloadFileOwner,
@@ -324,19 +325,6 @@ type BrowserPlacement = {
 };
 
 /**
- * Tells the controllers of the browsers an agent session holds that the
- * session is deliberately waiting until `deadline` (see
- * `BrowserControlClient.holdForWait`). Best effort: a browser it cannot reach
- * keeps its plain idle release.
- */
-export type HoldBrowsersForWait = (input: {
-  grant: AccessGrant;
-  sessionId: string;
-  deadline: Date;
-  signal: AbortSignal;
-}) => Promise<void>;
-
-/**
  * The browsers a deliberate wait by `sessionId` keeps: running ones the
  * session created or is using (not ones it only observed), used within
  * `BROWSER_WAIT_HOLD_MAX_MS`. The same rule decides whether a sandbox box
@@ -358,6 +346,15 @@ export function browsersHeldByWait(
           (association.relationship === "created" || association.relationship === "using"),
       ),
   );
+}
+
+/** Whether a session event says the wait with `deadline` finished (input
+ * arrived, it timed out, or a newer wait replaced it). */
+function endsWait(event: { type: string; payload: unknown }, deadline: Date): boolean {
+  if (event.type !== "session.wait.finished") return false;
+  const payload = event.payload as { deadlineAt?: unknown } | null;
+  const deadlineAt = typeof payload?.deadlineAt === "string" ? payload.deadlineAt : null;
+  return deadlineAt === null || Date.parse(deadlineAt) === deadline.getTime();
 }
 
 export function registerBrowserSessionRoutes(
@@ -5273,7 +5270,8 @@ export function registerBrowserSessionRoutes(
    * When an agent session arms an input wait, the browsers it holds keep
    * running, page state and all, until the wait's deadline (capped by
    * `BROWSER_WAIT_HOLD_MAX_MS` after their last use) instead of stopping as
-   * idle after a few minutes. Advisory and best effort: it never launches,
+   * idle after a few minutes. If the wait ends earlier (input arrived), the
+   * holds end then too. Advisory and best effort: it never launches,
    * recovers or counts as a use of a browser, never starts a sandbox, and a
    * browser it cannot reach keeps its plain idle release.
    */
@@ -5284,26 +5282,102 @@ export function registerBrowserSessionRoutes(
       associatedSessionId: input.sessionId,
       includeTerminal: false,
     });
+    const held = (
+      await Promise.all(
+        browsersHeldByWait(listed.sessions, input.sessionId, Date.now()).map(async (browser) =>
+          (await sendWaitHold(input, browser.id, input.deadline)) ? [browser] : [],
+        ),
+      )
+    ).flat();
+    if (held.length === 0) return;
+    const lastUse = Math.max(...held.map((browser) => Date.parse(browser.lastUsedAt)));
+    void endWaitHoldsEarly(
+      input,
+      held.map((browser) => browser.id),
+      Math.min(input.deadline.getTime(), lastUse + BROWSER_WAIT_HOLD_MAX_MS),
+    ).catch((error: unknown) => {
+      console.warn("browser.wait_hold_failed", {
+        workspaceId: input.grant.workspaceId,
+        sessionId: input.sessionId,
+        failure: interactionFailure(error),
+      });
+    });
+  }
+
+  /**
+   * Watches the waiting session until its holds end on their own and, if
+   * the wait finishes first, tells the browsers' controllers it ended then,
+   * so a wait answered early does not keep unused browsers to its deadline.
+   * Lost with this API process, in which case the holds run to their end.
+   */
+  async function endWaitHoldsEarly(
+    input: Parameters<HoldBrowsersForWait>[0],
+    browserSessionIds: readonly string[],
+    holdsEndAt: number,
+  ): Promise<void> {
+    const { grant, sessionId, deadline } = input;
+    let settle!: (endedEarly: boolean) => void;
+    const settled = new Promise<boolean>((resolve) => {
+      settle = resolve;
+    });
+    const timer = setTimeout(() => settle(false), Math.max(0, holdsEndAt - Date.now()));
+    timer.unref?.();
+    let unsubscribe: (() => void) | null = null;
+    try {
+      unsubscribe = await deps.bus.subscribe(grant.workspaceId, sessionId, (events) => {
+        if (events.some((event) => endsWait(event, deadline))) settle(true);
+      });
+      // The wait may have ended before the subscription.
+      const session = await getSession(deps.db, grant.workspaceId, sessionId);
+      const current = session?.inputWait?.deadlineAt;
+      if (!current || Date.parse(current) !== deadline.getTime()) settle(true);
+      if (!(await settled)) return;
+    } finally {
+      clearTimeout(timer);
+      unsubscribe?.();
+    }
+    const endedAt = new Date();
     await Promise.all(
-      browsersHeldByWait(listed.sessions, input.sessionId, Date.now()).map(async (browser) => {
-        try {
-          await holdBrowserForWait(input, browser.id);
-        } catch (error) {
-          console.warn("browser.wait_hold_failed", {
-            workspaceId: input.grant.workspaceId,
-            browserSessionId: browser.id,
-            failure: interactionFailure(error),
-          });
-        }
-      }),
+      browserSessionIds.map(
+        async (browserSessionId) =>
+          await sendWaitHold(
+            { ...input, signal: AbortSignal.timeout(30_000) },
+            browserSessionId,
+            endedAt,
+            deadline,
+          ),
+      ),
     );
+  }
+
+  /** Sends one browser's controller a wait's deadline or, with
+   * `endsWaitUntil`, that wait's early end; whether the browser is held.
+   * Failures are logged, never thrown. */
+  async function sendWaitHold(
+    input: Parameters<HoldBrowsersForWait>[0],
+    browserSessionId: string,
+    until: Date,
+    endsWaitUntil?: Date,
+  ): Promise<boolean> {
+    try {
+      return await holdBrowserForWait(input, browserSessionId, until, endsWaitUntil);
+    } catch (error) {
+      console.warn("browser.wait_hold_failed", {
+        workspaceId: input.grant.workspaceId,
+        browserSessionId,
+        failure: interactionFailure(error),
+      });
+      return false;
+    }
   }
 
   async function holdBrowserForWait(
     input: Parameters<HoldBrowsersForWait>[0],
     browserSessionId: string,
-  ): Promise<void> {
-    const { grant, deadline, signal } = input;
+    until: Date,
+    endsWaitUntil: Date | undefined,
+  ): Promise<boolean> {
+    const { grant, signal } = input;
     const workspaceId = grant.workspaceId;
     const record = await getBrowserSessionControlRecord(deps.db, {
       accountId: grant.accountId,
@@ -5312,14 +5386,14 @@ export function registerBrowserSessionRoutes(
     });
     await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.read");
     const binding = record.session.controller;
-    if (record.session.lifecycle !== "active" || !binding) return;
-    const hold = async (placement: BrowserPlacement): Promise<void> => {
+    if (record.session.lifecycle !== "active" || !binding) return false;
+    const hold = async (placement: BrowserPlacement): Promise<boolean> =>
       // Never touches the browser's own last use: the cap counts from it.
       await connectController(deps, grant, record, placement).holdForWait(
         { browserSessionId, controllerGeneration: binding.controllerGeneration },
-        deadline,
+        until,
+        endsWaitUntil ? { endsWaitUntil } : {},
       );
-    };
     const cached = await cachedBrowserPlacement(record);
     if (cached) return await hold(cached);
     const placement = record.session.placement;
@@ -5334,7 +5408,7 @@ export function registerBrowserSessionRoutes(
         (lease.liveness !== "warm" && lease.liveness !== "draining") ||
         lease.instanceId !== binding.placementInstanceId
       ) {
-        return;
+        return false;
       }
     }
     const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
@@ -5342,9 +5416,9 @@ export function registerBrowserSessionRoutes(
       placement.kind === "connected_machine" &&
       sourceSession.activeSandboxId !== placement.sandboxId
     ) {
-      return;
+      return false;
     }
-    await withBrowserPlacement(
+    return await withBrowserPlacement(
       sourceSession,
       grant,
       placement,

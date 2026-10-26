@@ -3306,19 +3306,81 @@ describe("same-working-directory controller restart", () => {
         const lastUse = clock;
         // A hold for another generation, or one already past, holds nothing.
         expect(
-          supervisor.holdForWait({ ...session, controllerGeneration: "other" }, clock + 60_000),
+          await supervisor.holdForWait(
+            { ...session, controllerGeneration: "other" },
+            { until: clock + 60_000 },
+          ),
         ).toBe(false);
-        expect(supervisor.holdForWait(session, clock - 1)).toBe(false);
+        expect(await supervisor.holdForWait(session, { until: clock - 1 })).toBe(false);
         // The agent waits 25 minutes, well past the 10 idle minutes.
-        expect(supervisor.holdForWait(session, lastUse + 25 * 60_000)).toBe(true);
+        expect(await supervisor.holdForWait(session, { until: lastUse + 25 * 60_000 })).toBe(true);
         clock = lastUse + 24 * 60_000;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
         expect(closes).toBe(0);
-        // The wait ended without the browser being used: the plain idle
-        // release applies again, so it stops on the next sweep.
-        clock = lastUse + 25 * 60_000;
+        // The wait timed out: the turn it resumes gets the normal idle time
+        // from then to use the browser again, and an unused browser then stops.
+        clock = lastUse + 35 * 60_000 - 1;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        clock = lastUse + 35 * 60_000;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
         expect(closes).toBe(1);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("a wait that ends early ends its hold there, and a late end never shortens a newer wait", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        idleReleaseMs: 10 * 60_000,
+        now: () => clock,
+        inspectOwnedProcess: async () => processState,
+        assertProfileUnused: async () => undefined,
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          close: async () => {
+            processState = "exited";
+          },
+          detach: async () => undefined,
+        }),
+      });
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const session = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        await supervisor.listTargets(session);
+        const lastUse = clock;
+        const firstDeadline = lastUse + 50 * 60_000;
+        expect(await supervisor.holdForWait(session, { until: firstDeadline })).toBe(true);
+        // Input arrives after 15 minutes: the hold ends then, not at the
+        // deadline, and the resumed turn gets the normal idle time from then.
+        clock = lastUse + 15 * 60_000;
+        expect(
+          await supervisor.holdForWait(session, { until: clock, endsWaitUntil: firstDeadline }),
+        ).toBe(false);
+        clock = lastUse + 25 * 60_000 - 1;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        // The resumed turn waits again before that; the first wait's end
+        // arriving late does not shorten the new one.
+        const secondDeadline = lastUse + 45 * 60_000;
+        expect(await supervisor.holdForWait(session, { until: secondDeadline })).toBe(true);
+        expect(
+          await supervisor.holdForWait(session, {
+            until: lastUse + 15 * 60_000,
+            endsWaitUntil: firstDeadline,
+          }),
+        ).toBe(true);
+        clock = lastUse + 55 * 60_000 - 1;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        clock = lastUse + 55 * 60_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
       } finally {
         await supervisor.close();
       }
@@ -3353,15 +3415,16 @@ describe("same-working-directory controller restart", () => {
         await supervisor.listTargets(session);
         const lastUse = clock;
         // Two 40-minute waits back to back; neither hold is a use.
-        expect(supervisor.holdForWait(session, clock + 40 * 60_000)).toBe(true);
+        expect(await supervisor.holdForWait(session, { until: clock + 40 * 60_000 })).toBe(true);
         clock += 39 * 60_000;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
         clock += 60_000;
-        expect(supervisor.holdForWait(session, clock + 40 * 60_000)).toBe(true);
+        expect(await supervisor.holdForWait(session, { until: clock + 40 * 60_000 })).toBe(true);
         expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
-        clock = lastUse + BROWSER_WAIT_HOLD_MAX_MS - 1;
+        // The hold ends at the cap; the normal idle time follows it.
+        clock = lastUse + BROWSER_WAIT_HOLD_MAX_MS + 10 * 60_000 - 1;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
-        clock = lastUse + BROWSER_WAIT_HOLD_MAX_MS;
+        clock = lastUse + BROWSER_WAIT_HOLD_MAX_MS + 10 * 60_000;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
       } finally {
         await supervisor.close();
@@ -3720,7 +3783,7 @@ describe("same-working-directory controller restart", () => {
         browserSessionId: options.browserSessionId,
         controllerGeneration: options.controllerGeneration,
       };
-      expect(first.holdForWait(session, clock + 20 * 60_000)).toBe(true);
+      expect(await first.holdForWait(session, { until: clock + 20 * 60_000 })).toBe(true);
       // Unused for 5 minutes, past its idle time, but its agent is waiting:
       // handed off with its page state rather than stopped.
       clock += 5 * 60_000;
@@ -3733,7 +3796,8 @@ describe("same-working-directory controller restart", () => {
 
       const second = await open();
       try {
-        clock = 1_000_000 + 20 * 60_000 - 1;
+        // Kept through the wait and the idle time after it.
+        clock = 1_000_000 + 21 * 60_000 - 1;
         expect(await second.releaseDetachedBrowsers()).toEqual([]);
         expect(stopped).toEqual([]);
         clock += 1;
@@ -3741,6 +3805,82 @@ describe("same-working-directory controller restart", () => {
         expect(stopped).toEqual([join(sessionDirectory, "profile")]);
       } finally {
         await second.close();
+      }
+    });
+  });
+
+  test("a wait armed after a controller restart keeps the browser the earlier controller handed off", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const stopped: string[] = [];
+      const open = () =>
+        BrowserSupervisor.open({
+          rootDirectory,
+          idleReleaseMs: 10 * 60_000,
+          now: () => clock,
+          inspectOwnedProcess: async () => processState,
+          assertProfileUnused: async () => undefined,
+          stopEndedProcess: async (profileDirectory) => {
+            stopped.push(profileDirectory);
+            processState = "exited";
+          },
+          createDriver: async (context) => ({
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            close: async () => {
+              processState = "exited";
+            },
+            detach: async () => undefined,
+          }),
+        });
+      const session = {
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: options.controllerGeneration,
+      };
+      const first = await open();
+      await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      await first.close();
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      const recordPath = join(sessionDirectory, "detached-browser.json");
+      const lastUse = clock;
+      const deadline = lastUse + 41 * 60_000;
+
+      // An update restarts the controller; the agent then waits 40 minutes.
+      const second = await open();
+      try {
+        clock = lastUse + 60_000;
+        expect(await second.holdForWait(session, { until: deadline })).toBe(true);
+        expect(JSON.parse(await readFile(recordPath, "utf8"))).toMatchObject({
+          waitHoldUntil: deadline,
+        });
+        // Past its 10 idle minutes, but held.
+        clock = lastUse + 11 * 60_000;
+        expect(await second.releaseDetachedBrowsers()).toEqual([]);
+        expect(stopped).toEqual([]);
+      } finally {
+        await second.close();
+      }
+
+      // Another restart keeps the hold from the record; input then arrives
+      // early and ends it, and the idle time counts from then.
+      const third = await open();
+      try {
+        clock = lastUse + 20 * 60_000;
+        expect(await third.releaseDetachedBrowsers()).toEqual([]);
+        expect(await third.holdForWait(session, { until: clock, endsWaitUntil: deadline })).toBe(
+          false,
+        );
+        const ended = clock;
+        clock = ended + 10 * 60_000 - 1;
+        expect(await third.releaseDetachedBrowsers()).toEqual([]);
+        clock = ended + 10 * 60_000;
+        expect(await third.releaseDetachedBrowsers()).toEqual([options.browserSessionId]);
+        expect(stopped).toEqual([join(sessionDirectory, "profile")]);
+        // Once stopped, nothing is held or launched for a later wait.
+        expect(await third.holdForWait(session, { until: clock + 60_000 })).toBe(false);
+      } finally {
+        await third.close();
       }
     });
   });

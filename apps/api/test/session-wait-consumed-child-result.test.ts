@@ -29,7 +29,8 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
-import { buildOpenGeniMcpServer, type McpServerOptions } from "../src/mcp/server";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { prepareWorkspaceToolGatewayForGrant } from "../src/workspace-tool-gateway";
 
 const AGENT_PERMISSIONS: Permission[] = ["sessions:read", "sessions:control", "sessions:create"];
 
@@ -326,8 +327,8 @@ async function deliverIdleResult(ws: Workspace, child: Attempt): Promise<void> {
   }
 }
 
-function agentMcp(ws: Workspace, attempt: Attempt, options: McpServerOptions = {}) {
-  const grant: AccessGrant = {
+function agentGrant(ws: Workspace, attempt: Attempt): AccessGrant {
+  return {
     accountId: ws.accountId,
     workspaceId: ws.workspaceId,
     subjectId: "worker:first-party-mcp",
@@ -341,7 +342,10 @@ function agentMcp(ws: Workspace, attempt: Attempt, options: McpServerOptions = {
       firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
     },
   };
-  return buildOpenGeniMcpServer(routeDeps(), grant, options);
+}
+
+function agentMcp(ws: Workspace, attempt: Attempt, deps: Partial<ApiRouteDeps> = {}) {
+  return buildOpenGeniMcpServer({ ...routeDeps(), ...deps }, agentGrant(ws, attempt));
 }
 
 /** How the worker's gateway marks a direct model call to the first-party server. */
@@ -1006,5 +1010,39 @@ describe("an armed wait keeps the session's browsers", () => {
       { sessionId: agent.sessionId, deadline: waited.deadlineAt, workspaceId: ws.workspaceId },
     ]);
     release();
+  });
+
+  test("a wait armed through the tool gateway holds the session's browsers too", async () => {
+    const ws = await workspace();
+    const agent = await start(ws, "Keep my place in the support queue.");
+    const holds: string[] = [];
+    const identity = { serverId: "opengeni", toolName: "wait_for_input" };
+    const prepared = await prepareWorkspaceToolGatewayForGrant(
+      {
+        ...routeDeps(),
+        settings: testSettings({
+          databaseUrl: shared.appUrl,
+          mcpServers: [{ id: "opengeni", url: "http://127.0.0.1:9/mcp", cacheToolsList: false }],
+        }),
+        holdBrowsersForWait: async ({ sessionId }) => {
+          holds.push(sessionId);
+        },
+      },
+      agentGrant(ws, agent),
+      [identity],
+    );
+    try {
+      const result = await prepared.toolGateway.call({
+        operationId: crypto.randomUUID(),
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity,
+        arguments: { reason: "Waiting for my turn in the queue.", timeoutSeconds: 600 },
+        caller: { kind: "codemode", subjectId: "worker:first-party-mcp" },
+      });
+      expect(result.isError).not.toBe(true);
+    } finally {
+      await prepared.close();
+    }
+    expect(holds).toEqual([agent.sessionId]);
   });
 });

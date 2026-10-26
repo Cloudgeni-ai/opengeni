@@ -2005,7 +2005,6 @@ export function createAppComposition(deps: AppDependencies): {
         reads.handOffToToolDispatch();
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
-          holdBrowsersForWait: browserSessionRoutes.holdBrowsersForWait,
           appActions: sessionScope
             ? {
                 access: {
@@ -2350,7 +2349,10 @@ export function createAppComposition(deps: AppDependencies): {
       }),
     log: (event, fields) => console.warn(event, fields),
   });
+  // Shared through the route deps, before any request, so every MCP server
+  // built for an agent (direct or through the tool gateway) gets it.
   const browserSessionRoutes = registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
+  routeDeps.holdBrowsersForWait = browserSessionRoutes.holdBrowsersForWait;
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
   registerDocumentRoutes(app, routeDeps);
   registerKnowledgeRoutes(app, routeDeps);

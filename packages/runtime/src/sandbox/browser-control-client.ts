@@ -919,8 +919,15 @@ export class BrowserControlClient {
    * controller holds the browser; false when it no longer runs this exact
    * generation or predates holds (an older agent or controller image, which
    * keeps its plain idle release).
+   *
+   * With `endsWaitUntil`, the wait with that deadline ended at `until`
+   * instead: the controller ends that wait's hold there, never a newer one.
    */
-  async holdForWait(reference: PlacementBrowserSessionReference, until: Date): Promise<boolean> {
+  async holdForWait(
+    reference: PlacementBrowserSessionReference,
+    until: Date,
+    options: { endsWaitUntil?: Date } = {},
+  ): Promise<boolean> {
     const binding = parseReference(reference);
     let data: unknown;
     try {
@@ -928,7 +935,11 @@ export class BrowserControlClient {
         method: "POST",
         path: `/v1/browser-sessions/${binding.browserSessionId}/wait-hold`,
         token: this.adminToken,
-        body: { controllerGeneration: binding.controllerGeneration, until: until.toISOString() },
+        body: {
+          controllerGeneration: binding.controllerGeneration,
+          until: until.toISOString(),
+          ...(options.endsWaitUntil ? { endsWaitUntil: options.endsWaitUntil.toISOString() } : {}),
+        },
       });
     } catch (error) {
       if (isLegacyRouteMiss(error)) return false;

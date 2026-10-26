@@ -351,11 +351,14 @@ describe("attached Chrome sessions leave no empty tabs or debugger behind", () =
         transport: TRANSPORT,
       });
       const tab = created.observation.target.id;
-      expect(supervisor.holdForWait(session, clock.now + 30 * MINUTE)).toBe(true);
+      expect(await supervisor.holdForWait(session, { until: clock.now + 30 * MINUTE })).toBe(true);
       clock.now += 29 * MINUTE;
       expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
       expect(chrome.attached.has(tab)).toBe(true);
-      clock.now += MINUTE;
+      // The wait's turn gets the normal 10 idle minutes after it.
+      clock.now += 11 * MINUTE - 1;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+      clock.now += 1;
       expect(await supervisor.releaseIdleBrowsers()).toEqual([session.browserSessionId]);
       expect(chrome.attached.has(tab)).toBe(false);
     });
