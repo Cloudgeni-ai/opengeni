@@ -851,7 +851,9 @@ export {
 
 export {
   PROVIDER_QUOTA_EXHAUSTED_CODE,
+  PROVIDER_QUOTA_RETRY_HINT_MS,
   classifyProviderQuotaError,
+  providerMessageRetryHintMs,
   providerQuotaExhaustedMessage,
   type ProviderQuotaExhaustion,
   type ProviderQuotaScope,
@@ -10597,7 +10599,7 @@ export type {
   ToolDecisionCandidate,
 } from "./tool-discovery-decision";
 
-export { MaxTurnsExceededError } from "@openai/agents";
+export { MaxTurnsExceededError, ToolCallError } from "@openai/agents";
 
 /**
  * Detects the agents SDK per-segment turn cap. The cap is a pacing valve, not
