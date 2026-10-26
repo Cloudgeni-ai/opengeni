@@ -24,6 +24,7 @@ import {
   markRecordingChunksUploaded,
   markRecordingDeleting,
   reserveRecordingChunks,
+  setRecordingTrackPrepared,
   updateWorkspaceSettings,
   type DbClient,
 } from "@opengeni/db";
@@ -272,8 +273,8 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     ]);
     const prepared = [...storage.objects.keys()].filter((key) => key.includes("/prepared/"));
     expect(prepared.sort()).toEqual([
-      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-0.webm`,
-      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-1.webm`,
+      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-0.timeline.webm`,
+      `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/track-1.timeline.webm`,
     ]);
     const stored = await getRecording(client.db, {
       ...recording.actor,
@@ -291,6 +292,39 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ["track-0", "Hello team."],
       ["speaker_0", "Hi"],
       ["speaker_1", "Yes"],
+    ]);
+
+    // A file prepared under the old name (before tracks kept their timeline)
+    // is built again, and the old file is removed.
+    const prefix = `workspaces/${recording.actor.workspaceId}/recordings/${recording.input.recordingId}/prepared/`;
+    const current = storage.objects.get(`${prefix}track-1.timeline.webm`)!;
+    storage.objects.delete(`${prefix}track-1.timeline.webm`);
+    storage.objects.set(`${prefix}track-1.webm`, current);
+    await setRecordingTrackPrepared(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      trackNumber: 1,
+      objectKey: `${prefix}track-1.webm`,
+      bytes: current.bytes.byteLength,
+      durationMilliseconds: 2_000,
+    });
+    const rebuilt = crypto.randomUUID();
+    await createRecordingTranscriptVersion(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+      versionId: rebuilt,
+      transcription: { providerId: "elevenlabs", model: "scribe_v2", options: {} },
+    });
+    expect(
+      await run.transcribeRecordingVersion({
+        ...recording.input,
+        versionId: rebuilt,
+        processingOwner: rebuilt,
+      }),
+    ).toEqual({ outcome: "complete" });
+    expect([...storage.objects.keys()].filter((key) => key.startsWith(prefix)).sort()).toEqual([
+      `${prefix}track-0.timeline.webm`,
+      `${prefix}track-1.timeline.webm`,
     ]);
 
     // A re-run reuses the prepared audio rather than rebuilding it.
@@ -311,7 +345,7 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
         processingOwner: second,
       }),
     ).toEqual({ outcome: "complete" });
-    expect(calls).toHaveLength(4);
+    expect(calls).toHaveLength(6);
   });
 
   test("our diarizer names the speakers when asked, and the model's stay if it fails", async () => {

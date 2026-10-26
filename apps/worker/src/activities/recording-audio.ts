@@ -97,7 +97,7 @@ export function preparedAudioFormat(container: RecordingAudioContainer): {
   codec: string;
 } {
   // MP4 (Safari) and ADTS (phones) sources are AAC; everything else is Opus.
-  // Keep the codec so a single run is only remuxed, never re-encoded.
+  // The prepared file keeps the source's codec.
   return container === "mp4" || container === "aac"
     ? { extension: "m4a", mimeType: "audio/mp4", muxer: "ipod", codec: "aac" }
     : { extension: "webm", mimeType: "audio/webm", muxer: "webm", codec: "libopus" };
@@ -228,6 +228,10 @@ export async function prepareRecordingTrackAudio(input: {
     ];
     let result: { stderr: string };
     if (runs.length === 1) {
+      // Re-encoded through the timeline filter rather than copied: a copy keeps
+      // the capture's holes, and a model that decodes the file itself would
+      // close them up and time its words early against our speaker turns and
+      // the player.
       result = await runFfmpeg(
         input.ffmpegPath,
         [
@@ -237,8 +241,12 @@ export async function prepareRecordingTrackAudio(input: {
           "-vn",
           "-map",
           "0:a:0",
+          "-af",
+          RECORDING_TIMELINE_FILTER,
           "-c:a",
-          "copy",
+          format.codec,
+          "-b:a",
+          format.codec === "aac" ? "64k" : "32k",
           "-f",
           format.muxer,
           output,

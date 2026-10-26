@@ -2,9 +2,11 @@
 "@opengeni/worker-bundle": patch
 ---
 
-A meeting transcript's times now match the recording all the way to the end. A desktop's
-computer-audio track can leave small holes in its timestamps, and the worker used to close
-them up when converting audio for a model and when placing words and speakers, so the
-transcript ran ahead of playback: about 33 seconds by the end of an 8-minute meeting, with
-the last words timed before the audio ended. The worker now fills each hole with silence,
-so words, speaker turns and pieces of long tracks stay on the recording's own timeline.
+Meeting transcripts and speaker names now stay in time with the recording when a capture
+leaves small holes in its timestamps, as a desktop's computer-audio track can (33 seconds of
+holes in an 8-minute meeting). Decoding closed those holes up, so words came out timed up to
+half a minute early, and a model that decoded the audio itself could disagree with our speaker
+turns. The worker now fills the holes with silence when it prepares a track, re-encoding it
+instead of copying it, and in every decode it does itself, so every model, word alignment,
+speaker detection and playback share the recording's own timeline. A track prepared before
+this change is prepared again the next time it is transcribed.

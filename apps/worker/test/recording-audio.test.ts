@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import {
   ffmpegReportedMilliseconds,
   prepareRecordingTrackAudio,
@@ -39,7 +40,7 @@ describe("recording audio", () => {
     ).toBe(62_250);
   });
 
-  test.skipIf(!hasFfmpeg)("one capture session is remuxed into one seekable file", async () => {
+  test.skipIf(!hasFfmpeg)("one capture session is joined into one seekable file", async () => {
     const parts = split(opusWebm(3), 3);
     const chunks = parts.map((_, index) => ({
       chunkNumber: index,
@@ -113,7 +114,7 @@ describe("recording audio", () => {
     }));
   }
 
-  test.skipIf(!hasFfmpeg)("a phone's ADTS chunks are joined and remuxed into one m4a", async () => {
+  test.skipIf(!hasFfmpeg)("a phone's ADTS chunks are joined into one m4a", async () => {
     const parts = adtsChunks(3, 0);
     expect(parts.every((part) => startsAdtsFrame(part.bytes))).toBe(true);
     const prepared = await prepareRecordingTrackAudio({
@@ -177,6 +178,54 @@ describe("recording audio", () => {
       }),
     ).rejects.toMatchObject({ code: "missing_chunk" });
   });
+
+  test.skipIf(!hasFfmpeg)(
+    "a capture with holes in its timestamps is prepared on its own timeline",
+    async () => {
+      // Ten seconds on the timeline, seven of audio. A model that decodes the
+      // prepared file itself must hear all ten, as our aligner, our diarizer
+      // and the player do, or its words and our speaker turns drift apart.
+      const parts = split(
+        gappedOpusWebm(10, [
+          [2, 4],
+          [6, 7],
+        ]),
+        4,
+      );
+      const prepared = await prepareRecordingTrackAudio({
+        chunks: parts.map((_, index) => ({
+          chunkNumber: index,
+          startMilliseconds: index * 2_500,
+          durationMilliseconds: 2_500,
+          objectKey: `k${index}`,
+        })),
+        mimeType: "audio/webm",
+        ffmpegPath,
+        readChunk: async (chunk) => parts[chunk.chunkNumber]!,
+      });
+      expect(Math.abs(prepared.durationMilliseconds - 10_000)).toBeLessThan(150);
+      const plain = spawnSync(
+        ffmpegPath,
+        [
+          "-nostdin",
+          "-loglevel",
+          "error",
+          "-i",
+          "pipe:0",
+          "-f",
+          "f32le",
+          "-ac",
+          "1",
+          "-ar",
+          "16000",
+          "pipe:1",
+        ],
+        { input: prepared.bytes, maxBuffer: 1 << 26 },
+      );
+      const heard = (plain.stdout as Buffer).byteLength / 4 / 16_000;
+      expect(Math.abs(heard - 10)).toBeLessThan(0.1);
+    },
+  );
 
   test.skipIf(!hasFfmpeg)(
     "a converted piece keeps the track's timeline across holes in its timestamps",

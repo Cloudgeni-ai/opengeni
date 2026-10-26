@@ -135,6 +135,13 @@ export type RecordingTranscriptOutcome = (
 /** A version lease outlives the longest provider call; retries reclaim it by owner. */
 const TRANSCRIPT_LEASE_SECONDS = 3 * 60 * 60;
 
+/**
+ * Names this worker's prepared track files (`track-1.timeline.webm`). Bump it
+ * when the preparation changes what a model or the player hears, so files
+ * made the old way are built again instead of reused.
+ */
+const PREPARED_AUDIO_REVISION = "timeline";
+
 export type RecordingActivityOptions = {
   /** Providers to offer instead of the deployment's own, such as fakes in tests. */
   registry?: RecordingTranscriptionProviderRegistry;
@@ -1081,12 +1088,20 @@ export function createRecordingActivities(
     const container = recordingAudioContainer(input.mimeType);
     if (!container) throw new PermanentRecordingFailure("invalid_audio");
     const format = preparedAudioFormat(container);
+    // Files made before tracks kept their timeline (holes closed up when a
+    // model decoded them) have the old name and are built again.
+    const objectKey = recordingPreparedTrackObjectKey({
+      workspaceId: input.actor.workspaceId,
+      recordingId: input.recordingId,
+      trackNumber: input.trackNumber,
+      extension: `${PREPARED_AUDIO_REVISION}.${format.extension}`,
+    });
     const existing = await getRecordingTrackPreparedObject(input.db, {
       ...input.actor,
       recordingId: input.recordingId,
       trackNumber: input.trackNumber,
     });
-    if (existing) {
+    if (existing?.objectKey === objectKey) {
       const stored = await input.objectStorage.getObjectBytes(existing.objectKey);
       if (stored && stored.bytes.byteLength === existing.bytes) {
         return {
@@ -1108,12 +1123,6 @@ export function createRecordingActivities(
       readChunk: async (chunk) =>
         (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
     });
-    const objectKey = recordingPreparedTrackObjectKey({
-      workspaceId: input.actor.workspaceId,
-      recordingId: input.recordingId,
-      trackNumber: input.trackNumber,
-      extension: prepared.extension,
-    });
     await input.objectStorage.putObject({
       key: objectKey,
       contentType: prepared.mimeType,
@@ -1134,6 +1143,10 @@ export function createRecordingActivities(
       if (error instanceof RecordingNotFoundError)
         await input.objectStorage.deleteObject(objectKey);
       throw error;
+    }
+    // The file this one replaces, made under an older name.
+    if (existing && existing.objectKey !== objectKey) {
+      await input.objectStorage.deleteObject(existing.objectKey).catch(() => undefined);
     }
     return { ...prepared, storedBytes: prepared.bytes.byteLength };
   }
