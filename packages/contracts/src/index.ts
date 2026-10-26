@@ -16663,7 +16663,7 @@ export const SiteConversationGroup = /* @__PURE__ */ defineSkillContractSchema((
     title: primitives.string,
     /** Root conversations in the group; 0 for a Site with none yet. */
     conversations: primitives.nonnegativeInteger,
-    /** When the Site last got a new published version (creation is the first). Its conversations, the chats that made it and opening it never move it. */
+    /** When the Site last got a new published version (creation is the first); for a viewer who cannot read the Site, when its first conversation here started. Its conversations, the chats that made it and opening it never move it. */
     updatedAt: primitives.dateTime,
     /** Creation time of the group's newest conversation, else of the Site. */
     createdAt: primitives.dateTime,

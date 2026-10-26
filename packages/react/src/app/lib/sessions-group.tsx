@@ -859,7 +859,10 @@ function siteRowSummaries(
     ] as const)
       merged[field] += summary[field];
     merged.attentionSince = earliestIso(merged.attentionSince, summary.attentionSince);
-    merged.updatedAt = laterIso(merged.updatedAt, summary.updatedAt);
+    // Every project's row of a readable Site has its newest publish; a Site
+    // the viewer cannot read keeps its first conversation's start, so a new
+    // conversation in another project never lifts it.
+    merged.updatedAt = earliestIso(merged.updatedAt, summary.updatedAt) ?? merged.updatedAt;
     merged.createdAt = laterIso(merged.createdAt, summary.createdAt);
   }
   return rows;
@@ -875,9 +878,10 @@ function siteRowSession(
   options: { workspaceId?: string | undefined; creator?: Session["createdBy"] | undefined },
 ): Session {
   // The server's row time is the Site's newest publish; a loaded conversation's
-  // messages never move it. Only a row the server did not send (an older chat
-  // that carries just a Site label) takes its conversation's time.
-  const updatedAt = summary ? summary.updatedAt : (latest?.updatedAt ?? "");
+  // messages never move it. A row the server did not send (past its bound, or
+  // an older chat that carries just a Site label) takes its conversation's
+  // start, which messages do not change either.
+  const updatedAt = summary ? summary.updatedAt : (latest?.createdAt ?? "");
   const createdAt = laterIso(summary?.createdAt ?? latest?.createdAt ?? "", latest?.createdAt);
   // Only the fields the rail reads for ordering, grouping and links. It is
   // never sent to the server or used for a session action.

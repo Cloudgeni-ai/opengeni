@@ -2595,6 +2595,23 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         privateOwnerSubjectId: subjectId,
         createdBy: { kind: "subject", subjectId },
       });
+    // A Site last published (here: first asked) long ago, whose conversation
+    // is active now and needs this person. Its row keeps its old time, but the
+    // bound must not cut it, or its conversation is listed nowhere.
+    const busySiteId = crypto.randomUUID();
+    const busy = await session({
+      ...workspace,
+      message: "Busy old Site",
+      metadata: { _opengeniSiteOrigin: { siteId: busySiteId, title: "Busy old Site" } },
+      privateOwnerSubjectId: subjectId,
+      createdBy: { kind: "subject", subjectId },
+    });
+    await admin.begin(async (tx) => {
+      await tx`set local session_replication_role = replica`;
+      await tx`update sessions set created_at = '2025-01-01T00:00:00.000Z',
+        updated_at = now() + interval '1 minute', status = 'requires_action'
+        where id = ${busy.id}`;
+    });
     const page = await listSessionEntriesForSubject(db, workspace.workspaceId, {
       subjectId,
       parentSessionId: null,
@@ -2606,6 +2623,17 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(page.siteGroupsTruncated).toBe(true);
     // The newest Sites are the ones kept.
     expect(page.siteGroups?.[0]?.title).toBe(`Site ${SITE_CONVERSATION_GROUP_LIMIT}`);
+    // The busy Site is kept, at its own old time (so it sorts last), and the
+    // two Sites nobody touched since are the ones cut.
+    expect(page.siteGroups?.at(-1)).toMatchObject({
+      siteId: busySiteId,
+      updatedAt: "2025-01-01T00:00:00.000Z",
+      attention: 1,
+    });
+    const titles = new Set(page.siteGroups?.map((group) => group.title));
+    expect(titles.has("Site 0")).toBe(false);
+    expect(titles.has("Site 1")).toBe(false);
+    expect(titles.has("Site 2")).toBe(true);
   }, 180_000);
 
   test("keeps project, creator, and date filters bound to their continuation cursor", async () => {

@@ -220,6 +220,28 @@ test("a loaded conversation's newer messages never move its Site row", () => {
   expect(site.children.map((n) => n.session.id)).toEqual(["busy"]);
 });
 
+test("a Site's first conversation in another project never lifts its merged row", () => {
+  const chat = session("chat", { metadata: {}, updatedAt: "2026-09-08T11:00:00Z" });
+  // A Site this viewer cannot read keeps each project's first conversation
+  // start; a rail without projects shows one row, at the earliest.
+  const roots = railRoots(
+    buildPinnedRailSections([chat], new Date("2026-09-08T13:00:00Z"), {
+      siteGroups: [
+        siteGroup({ conversations: 1, total: 1 }),
+        siteGroup({
+          channelId: "project-id",
+          conversations: 1,
+          total: 1,
+          updatedAt: "2026-09-08T12:00:00.000Z",
+          createdAt: "2026-09-08T12:00:00.000Z",
+        }),
+      ],
+    }),
+  );
+  expect(roots.map((n) => n.session.id)).toEqual(["chat", `site:${siteId}`]);
+  expect(roots[1]!.session.updatedAt).toBe("2026-09-08T09:00:00.000Z");
+});
+
 test("Site row keys round-trip their Site and project", () => {
   expect(parseSiteRowKey(siteRowKey(siteId))).toEqual({ siteId });
   expect(parseSiteRowKey(siteRowKey(siteId, null))).toEqual({ siteId, channelId: null });

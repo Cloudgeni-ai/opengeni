@@ -33738,7 +33738,7 @@ async function sessionListTotalsInScope(
   const rows = await rawRows<{
     needsYouCount: number;
     groups: SessionListTotals["groups"];
-    sites: SiteConversationGroup[] | null;
+    sites: Array<SiteConversationGroup & { rankAt?: string | null }> | null;
   }>(
     db,
     sql`
@@ -33913,7 +33913,8 @@ async function sessionListTotalsInScope(
       select site_id, row_channel_id as channel_id, count(*)::int as conversations,
         min(created_at) as first_created_at, max(created_at) as created_at,
         (array_agg(origin_title order by updated_at desc, id desc)
-          filter (where origin_title is not null))[1] as origin_title
+          filter (where origin_title is not null))[1] as origin_title,
+        max(updated_at) as activity_at
       from site_conv group by site_id, row_channel_id
     ), site_home as (
       -- A Site sits in the project of the chat that created it (the tree of
@@ -33961,7 +33962,7 @@ async function sessionListTotalsInScope(
     ), site_keys as (
       select * from site_conv_totals
       union all
-      select site_id, channel_id, 0, null, null, null from site_home
+      select site_id, channel_id, 0, null, null, null, null from site_home
     ), site_rows as (
       -- One row per Site and project. The title is the Site's current one when
       -- its audience includes this viewer (the catalog's rule; RLS only
@@ -33974,13 +33975,18 @@ async function sessionListTotalsInScope(
       -- updates to the Site's record add no version, so they never lift it
       -- either. A viewer who cannot read the Site sees no publishes, so its
       -- row keeps the time its first conversation here started, which
-      -- messages do not change. One extra row reports truncation.
+      -- messages do not change. Which rows the bound keeps is a separate
+      -- question: pinned rows first, then the later of the newest publish and
+      -- conversation activity, so a Site whose conversation runs or needs this
+      -- person is never cut for an old publish. One extra row reports
+      -- truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
         coalesce(site.published_at, key.first_created_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt",
-        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt"
+        sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt",
+        greatest(site.published_at, key.activity_at, key.first_created_at) as "rankAt"
       from site_keys key
       left join lateral (
         select artifact.title, artifact.status, artifact.created_at,
@@ -34000,7 +34006,7 @@ async function sessionListTotalsInScope(
       -- This person's archived Sites leave their sidebar; pinned ones lead.
       where (key.conversations > 0 or site.status = 'active') and sidebar.archived_at is null
         ${options.channelId !== undefined ? sql`and key.channel_id is not distinct from ${options.channelId}::uuid` : sql``}
-      order by 7 desc, 5 desc, 1, 2
+      order by 7 desc, 9 desc nulls last, 1, 2
       limit ${SITE_CONVERSATION_GROUP_LIMIT + 1}
     ), site_status as (
       -- Status counts follow project totals: active, unpinned trees only.
@@ -34030,7 +34036,8 @@ async function sessionListTotalsInScope(
     select (select count(*)::int from root_attention where needs_you) as "needsYouCount",
       coalesce((select jsonb_agg(to_jsonb(grouped)) from grouped), '[]'::jsonb) as groups,
       coalesce((select jsonb_agg(to_jsonb(site_grouped)
-        order by site_grouped."updatedAt" desc, site_grouped."siteId", site_grouped."channelId")
+        order by site_grouped.pinned desc, site_grouped."rankAt" desc nulls last,
+          site_grouped."siteId", site_grouped."channelId")
         from site_grouped), '[]'::jsonb) as sites
   `,
   );
@@ -34043,21 +34050,37 @@ async function sessionListTotalsInScope(
       ...group,
       attentionSince: iso(group.attentionSince),
     })),
-    sites: sites.slice(0, SITE_CONVERSATION_GROUP_LIMIT).map(({ pinned, pinnedAt, ...site }) => ({
-      ...site,
-      updatedAt: iso(site.updatedAt)!,
-      createdAt: iso(site.createdAt)!,
-      attentionSince: iso(site.attentionSince),
-      // Only a pinned row carries pin fields, so unpinned rows keep their shape.
-      ...(pinned ? { pinned: true, pinnedAt: iso(pinnedAt ?? null) } : {}),
-    })),
+    // The bound keeps rows in rank order; the kept rows then sort by their
+    // time, the newest publish.
+    sites: sites
+      .slice(0, SITE_CONVERSATION_GROUP_LIMIT)
+      .map(({ pinned, pinnedAt, rankAt: _rankAt, ...site }) => ({
+        ...site,
+        updatedAt: iso(site.updatedAt)!,
+        createdAt: iso(site.createdAt)!,
+        attentionSince: iso(site.attentionSince),
+        // Only a pinned row carries pin fields, so unpinned rows keep their shape.
+        ...(pinned ? { pinned: true as const, pinnedAt: iso(pinnedAt ?? null) } : {}),
+      }))
+      .sort(
+        (a, b) =>
+          compareCodePoints(b.updatedAt, a.updatedAt) ||
+          compareCodePoints(a.siteId, b.siteId) ||
+          // As SQL orders it: a Site's Default row (no project) last.
+          compareCodePoints(a.channelId ?? "\uffff", b.channelId ?? "\uffff"),
+      ),
     sitesTruncated: sites.length > SITE_CONVERSATION_GROUP_LIMIT,
   };
 }
 
+function compareCodePoints(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
- * Bound on Site rows per read. Rows sort by activity, so Sites nobody touched
- * for a long time fall past it; the Artifacts page lists every Site.
+ * Bound on Site rows per read. Pinned rows are kept first, then by the later of
+ * the newest publish and conversation activity, so Sites nobody touched for a
+ * long time fall past it; the Artifacts page lists every Site.
  */
 export const SITE_CONVERSATION_GROUP_LIMIT = 200;
 

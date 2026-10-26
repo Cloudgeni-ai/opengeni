@@ -29,7 +29,10 @@
   the rows and returns `siteGroups` with its first page: one complete row per
   Site and project with the viewer's conversation count over the requested
   archive scope, row time (its newest publish) and status counts, bounded to
-  the 200 most recently published (`siteGroupsTruncated` marks more). Its continuation pages
+  200 rows (`siteGroupsTruncated` marks more). The bound keeps pinned rows
+  first, then the latest by newest publish or conversation activity, so a Site
+  whose conversation is active or needs you is kept ahead of Sites nobody
+  touched; the kept rows still sort by their row time. Its continuation pages
   are ordinary default pages. `include` lists them as ordinary rows and is
   bound into its cursor; the sidebar uses it for search, Archived, pins and
   work a Site conversation spawned. Both use the same viewer authorization,
