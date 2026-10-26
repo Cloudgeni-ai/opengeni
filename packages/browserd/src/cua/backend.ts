@@ -144,6 +144,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * checked against a fresh observation, which mints new refs, so the ref is
    * resolved in the observation it came from and CUA validates its token. */
   private readonly recentObservations = new Map<string, ComputerBackendObservation[]>();
+  /** Readings the app did not answer (see unansweredObservation). They show
+   * no focused element, so keys are not sent on them. */
+  private readonly unansweredReadings = new WeakSet<ComputerBackendObservation>();
   /** CUA's element token behind each ref of a window's latest reading. CUA
    * accepts only the tokens of a window's latest snapshot; a ref outlives
    * readings for as long as its element stays (see stabilizeRefs). */
@@ -1203,6 +1206,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * - an element of a bubble or popover the window shows as its own takes
    *   accessibility actions (invoke, set_value) but no pointer or key input,
    *   which would land on the window under it;
+   * - an item of a menu the app has open over the window takes invoke, and
+   *   the control that opened the menu takes set_value, but pointer and key
+   *   input would not reach the menu;
    * - an element of another window of the app is that window's to act on,
    *   pointed at only when it is a target the caller can observe. */
   private async elementWindowRefusal(
@@ -1225,6 +1231,13 @@ export class CuaComputerBackend implements ComputerBackend {
       return new ComputerBackendError(
         code,
         "That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode === "element_in_open_menu")
+      return new ComputerBackendError(
+        code,
+        "That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
         false,
         false,
       );
@@ -1289,6 +1302,13 @@ export class CuaComputerBackend implements ComputerBackend {
       max_depth: 25,
     });
     const state = WindowState.parse(data);
+    if (
+      state.pid === target.pid &&
+      state.window_id === target.windowId &&
+      !state.snapshot_id &&
+      String(data.degraded_reason ?? "").startsWith("ax_app_unresponsive")
+    )
+      return this.unansweredObservation(targetId, target, state);
     if (state.pid !== target.pid || state.window_id !== target.windowId || !state.snapshot_id) {
       if (
         this.sheetHosts(target).length &&
@@ -1418,6 +1438,56 @@ export class CuaComputerBackend implements ComputerBackend {
     this.recentObservations.set(targetId, [...recent, observation]);
     while (this.recentObservations.size > 32)
       this.recentObservations.delete(this.recentObservations.keys().next().value!);
+    return observation;
+  }
+
+  /** A reading the app did not answer in time (CUA's ax_app_unresponsive):
+   * its main thread was busy, as while it shows a menu, so nothing was read.
+   * That says nothing about the window, and CUA keeps its last snapshot, so
+   * the refs of the last reading stay the ones actions resolve. The reading
+   * itself lists no elements and says it stopped because the app answered
+   * too slowly, beside the screenshot, instead of failing. It shows no
+   * focused element, so keys are refused on it (see unansweredReadings). */
+  private unansweredObservation(
+    targetId: string,
+    target: Target,
+    state: ReturnType<typeof WindowState.parse>,
+  ): ComputerBackendObservation {
+    const observation: ComputerBackendObservation = {
+      observationId: `${this.session}:unanswered:${randomUUID()}`,
+      target: {
+        ...target.native,
+        bounds: state.window_bounds ?? target.native.bounds,
+        focused: false,
+      },
+      frameId:
+        [...this.frames.entries()]
+          .reverse()
+          .find(([, frame]) => frame.targetId === targetId)?.[0] ?? null,
+      roots: [],
+      nodeCount: 0,
+      incomplete: {
+        reason: "time_budget",
+        unreadCount: Math.min(state.nodes_pending ?? 0, 1_000_000),
+      },
+      focusedRef: null,
+      changedRegions: [],
+    };
+    const last = this.observations.get(targetId);
+    // An action naming this reading acts on the last one's elements.
+    const actedOn = last ? { ...last, observationId: observation.observationId } : observation;
+    this.unansweredReadings.add(actedOn);
+    if (last) {
+      const signs = this.progress.get(last);
+      if (signs) this.progress.set(actedOn, signs);
+      const document = this.documents.get(last);
+      if (document !== undefined) this.documents.set(actedOn, document);
+    }
+    this.observations.delete(targetId);
+    this.observations.set(targetId, actedOn);
+    const recent = (this.recentObservations.get(targetId) ?? []).slice(-(RECENT_OBSERVATIONS - 1));
+    this.recentObservations.delete(targetId);
+    this.recentObservations.set(targetId, [...recent, actedOn]);
     return observation;
   }
 
@@ -2088,6 +2158,15 @@ export class CuaComputerBackend implements ComputerBackend {
         },
       ];
     }
+    // A reading the app did not answer showed no focused element: keys sent
+    // on it would go to one the caller never saw.
+    if (!laterInBatch && this.unansweredReadings.has(observed))
+      throw new ComputerBackendError(
+        "invalid_action",
+        "The app did not answer the latest reading of this window, so it shows no focused element and no keys were sent: observe the window again, then send them",
+        false,
+        false,
+      );
     // Window-scoped delivery never falls back to the foreground desktop. An
     // observed focused element is carried when CUA supplies that information.
     // After earlier actions of a batch the focus may have moved (clicking a
