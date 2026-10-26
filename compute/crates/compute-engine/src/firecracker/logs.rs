@@ -75,14 +75,30 @@ pub(super) fn halted(
 /// Whether the last line the guest of VM `name` wrote on the console kept
 /// at `path` is its kernel saying it halted. Only the last, and only once
 /// it is finished: a guest that wrote anything after, or is still writing
-/// its line, is not halted. Reads at most [`TAIL`] bytes.
+/// its line, is not halted. Reads at most [`TAIL`] bytes and the one
+/// before them, which says whether their first line is whole.
 fn says_halted(path: &Path, name: &str) -> io::Result<bool> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
-    file.seek(SeekFrom::Start(length.saturating_sub(TAIL)))?;
-    let mut tail = Vec::new();
-    file.take(TAIL).read_to_end(&mut tail)?;
-    Ok(last_line_halted(&tail, name))
+    let start = length.saturating_sub(TAIL + 1);
+    file.seek(SeekFrom::Start(start))?;
+    let mut read = Vec::new();
+    file.take(TAIL + 1).read_to_end(&mut read)?;
+    Ok(last_line_halted(whole_lines(&read, start), name))
+}
+
+/// What of `read`, read from `start` bytes into its file, begins with a
+/// whole line: all of it from the file's start, else only what follows
+/// its first newline. A read that begins inside a line has only its end,
+/// and the end of a line that mentions the kernel's words can be them
+/// exactly.
+fn whole_lines(read: &[u8], start: u64) -> &[u8] {
+    if start == 0 {
+        return read;
+    }
+    read.iter()
+        .position(|&byte| byte == b'\n')
+        .map_or(&[], |newline| &read[newline + 1..])
 }
 
 /// Whether the last line in `tail` that is neither blank nor the VMM's is
@@ -250,6 +266,42 @@ mod tests {
 
         std::fs::write(&path, "").unwrap();
         assert!(!says_halted(&path, NAME).unwrap());
+    }
+
+    /// A read of the console's end that begins inside a line drops that
+    /// line: its end alone can be the kernel's words exactly.
+    #[test]
+    fn a_line_the_tail_cut_is_not_the_guests_last_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(CONSOLE_LOG);
+        let halt = "reboot: System halted\n";
+        // One of the VMM's lines, long enough that it and the halt words
+        // fill the tail exactly.
+        let dated = format!("2026-10-26T17:10:44.801090024 [{NAME}:fc_api] ");
+        let pad = usize::try_from(TAIL).unwrap() - halt.len() - dated.len() - 1;
+        let vmm = format!("{dated}{}\n", "p".repeat(pad));
+        let with = |before: &str| {
+            std::fs::write(&path, format!("booted\n{before}{halt}{vmm}")).unwrap();
+            says_halted(&path, NAME).unwrap()
+        };
+        // The tail begins just after `observe `: the diagnostic's end is
+        // the halt words, but the line is the diagnostic's.
+        assert!(!with("healthcheck: expected but did not observe "));
+        assert!(!last_line_halted(
+            format!("booted\nhealthcheck: expected but did not observe {halt}{vmm}").as_bytes(),
+            NAME
+        ));
+        // The tail begins at the line itself: the byte before it is the
+        // newline that ends the line before, so the line is whole.
+        assert!(with(""));
+        // A file no longer than the tail is read whole.
+        std::fs::write(&path, format!("{halt}{vmm}")).unwrap();
+        assert!(says_halted(&path, NAME).unwrap());
+
+        assert_eq!(whole_lines(b"cut\nwhole\n", 0), b"cut\nwhole\n");
+        assert_eq!(whole_lines(b"cut\nwhole\n", 1), b"whole\n");
+        assert_eq!(whole_lines(b"\nwhole\n", 1), b"whole\n");
+        assert_eq!(whole_lines(b"no newline", 1), b"");
     }
 
     #[test]
