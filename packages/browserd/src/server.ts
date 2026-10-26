@@ -887,7 +887,9 @@ export class BrowserControlServer {
       if (!parsed.success) {
         throw new ProtocolError("invalid_action", "browser DOM read request is invalid", 400);
       }
-      return success(await this.supervisor.readDom(reference, targetId, parsed.data));
+      return await browserReadResponse("observation", () =>
+        this.supervisor.readDom(reference, targetId, parsed.data),
+      );
     }
     if (operation === "diagnostics" && request.method === "GET") {
       return success(

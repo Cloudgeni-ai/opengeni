@@ -263,6 +263,50 @@ describe("BrowserControlServer", () => {
     },
   );
 
+  test("classifies a page read whose tab debugging ended as a retryable observation failure", async () => {
+    let failing = false;
+    let attempts = 0;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = await request(server, "/v1/browser-sessions", {
+          method: "POST",
+          token: adminToken,
+          body: createBody(reference),
+        });
+        expect(created.status).toBe(201);
+        const path = `/v1/browser-sessions/${reference.browserSessionId}/targets/target-${reference.browserSessionId}/dom-read`;
+        const body = {
+          kind: "count",
+          selector: "button",
+          expectedTargetGeneration: "target-1",
+          expectedDocumentGeneration: "document-1",
+          expectedFrameId: "frame-1",
+        };
+        failing = true;
+        const failed = await request(server, path, { method: "POST", token: viewToken, body });
+        expect(failed.status).toBe(503);
+        expect(((await failed.json()) as { error: unknown }).error).toEqual({
+          code: "resource_unavailable",
+          message: "browser observation unavailable",
+          retryable: true,
+        });
+        expect(attempts).toBe(1);
+        failing = false;
+        expect(
+          (await request(server, path, { method: "POST", token: viewToken, body })).status,
+        ).toBe(200);
+      },
+      {
+        beforeDriverOperation(name) {
+          if (failing && name === "readDom") {
+            attempts++;
+            throw new CdpSessionDetachedError("DOM.resolveNode");
+          }
+        },
+      },
+    );
+  });
+
   test("metadata-only opening keeps exact control authority and the default observation response", async () => {
     const calls: string[] = [];
     await withServer(
@@ -1550,6 +1594,7 @@ async function withServer(
         | "listTargets"
         | "observe"
         | "targetState"
+        | "readDom"
         | "openTarget"
         | "openTargetWithInventory"
         | "dispatch",
@@ -1631,6 +1676,7 @@ function fakeDriver(
         | "listTargets"
         | "observe"
         | "targetState"
+        | "readDom"
         | "openTarget"
         | "openTargetWithInventory"
         | "dispatch",
@@ -1717,6 +1763,7 @@ function fakeDriver(
       };
     },
     async readDom(_targetId, domRequest) {
+      options.beforeDriverOperation?.("readDom");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,
