@@ -171,13 +171,16 @@ export async function readyBrowserRecordingOutputs(input: {
   objectStorage: Pick<ObjectStorage, "getObjectBytes" | "headObject">;
   videoKey: string;
   actionLogKey: string;
-  /** When the recording became ready (its row's updatedAt). */
-  readyAt: string;
+  /** How long ago the recording became ready, on the database's clock. */
+  readyForMs: number;
+  /** A monotonic clock that times the retries below. */
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   signal?: AbortSignal;
 }): Promise<{ actionLog: Uint8Array } | null> {
   const { objectStorage } = input;
+  const now = input.now ?? (() => performance.now());
+  const startedAt = now();
   const retry = {
     ...(input.sleep ? { sleep: input.sleep } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
@@ -196,14 +199,14 @@ export async function readyBrowserRecordingOutputs(input: {
       retry,
     ));
   if (actionLog && video) return { actionLog: actionLog.bytes };
-  const readyFor = (input.now ?? Date.now)() - Date.parse(input.readyAt);
+  const readyFor = input.readyForMs + (now() - startedAt);
   if (Number.isFinite(readyFor) && readyFor < BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS) {
     return null;
   }
   throw new ApiHttpError(503, {
     code: "upstream_unavailable",
     message:
-      "The recording's video was made, but storage still cannot read it back, so nothing was saved to the workspace. Stop the recording again later to save it.",
+      "The recording's video was made, but storage still cannot read it back, so nothing was saved to the workspace. Stop the recording again later, before its browser session ends, to save it.",
     retryable: true,
     outcomeUnknown: false,
     details: { code: "browser_recording_output_unreadable" },

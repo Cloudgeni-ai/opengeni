@@ -1431,7 +1431,7 @@ export function registerBrowserSessionRoutes(
           objectStorage,
           videoKey: video.objectKey,
           actionLogKey: video.actionLogObjectKey,
-          readyAt: existing.recording.updatedAt,
+          readyForMs: video.readyForMilliseconds,
           signal: context.req.raw.signal,
         });
         if (!readable) return progress("encoding");

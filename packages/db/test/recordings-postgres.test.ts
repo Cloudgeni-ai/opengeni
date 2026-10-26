@@ -1185,7 +1185,8 @@ describe("recordings", () => {
     expect(await completeBrowserRecordingVideo(db, { ...actor, recordingId, video })).toBe(true);
     expect(await completeBrowserRecordingVideo(db, { ...actor, recordingId, video })).toBe(false);
     expect(await claimBrowserRecordingVideo(db, { ...actor, recordingId })).toBeNull();
-    expect(await getBrowserRecordingVideo(db, { ...actor, recordingId })).toEqual({
+    const readyVideo = await getBrowserRecordingVideo(db, { ...actor, recordingId });
+    expect(readyVideo).toEqual({
       objectKey: videoKey,
       actionLogObjectKey: browserRecordingActionLogObjectKey({ ...actor, recordingId }),
       bytes: 2_000,
@@ -1194,7 +1195,11 @@ describe("recordings", () => {
       width: 1280,
       height: 720,
       frameCount: 60,
+      readyForMilliseconds: expect.any(Number),
     });
+    // How long ago it became ready, by the database's own clock.
+    expect(readyVideo!.readyForMilliseconds).toBeGreaterThanOrEqual(0);
+    expect(readyVideo!.readyForMilliseconds).toBeLessThan(60_000);
     const ready = await findBrowserRecording(db, {
       workspaceId: scope.workspaceId,
       subjectId: scope.member,

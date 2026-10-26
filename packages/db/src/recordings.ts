@@ -1195,7 +1195,9 @@ export async function failBrowserRecordingVideo(
   });
 }
 
-/** A browser recording's saved video, for copying it into a chat's files. */
+/** A browser recording's saved video, for copying it into a chat's files.
+ * `readyForMilliseconds` is how long ago it became ready, on the database's
+ * clock, so callers can time a grace window without comparing clocks. */
 export async function getBrowserRecordingVideo(
   db: Database,
   input: RecordingActor & { recordingId: string },
@@ -1208,10 +1210,18 @@ export async function getBrowserRecordingVideo(
   width: number;
   height: number;
   frameCount: number;
+  readyForMilliseconds: number;
 } | null> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const [row] = await tx
-      .select({ track: schema.recordingTracks, purpose: schema.recordings.purpose })
+      .select({
+        track: schema.recordingTracks,
+        purpose: schema.recordings.purpose,
+        readyForMilliseconds:
+          sql<number>`greatest(0, floor(extract(epoch from clock_timestamp() - ${schema.recordings.updatedAt}) * 1000))`.mapWith(
+            Number,
+          ),
+      })
       .from(schema.recordingTracks)
       .innerJoin(
         schema.recordings,
@@ -1248,6 +1258,7 @@ export async function getBrowserRecordingVideo(
       width: track.videoWidth,
       height: track.videoHeight,
       frameCount: track.videoFrameCount,
+      readyForMilliseconds: row!.readyForMilliseconds,
     };
   });
 }

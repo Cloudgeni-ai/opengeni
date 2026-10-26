@@ -243,8 +243,6 @@ describe("browserRecordingFailureStatus", () => {
 describe("readyBrowserRecordingOutputs", () => {
   const videoKey = "workspaces/w/recordings/r/prepared/track-0.mp4";
   const actionLogKey = "workspaces/w/recordings/r/prepared/track-0.actions.json";
-  const readyAt = "2026-10-26T19:28:38.000Z";
-  const readyAtMs = Date.parse(readyAt);
   const log = new TextEncoder().encode('{"actions":[]}');
 
   /** Storage that shows each object only after it was asked for it `misses` times. */
@@ -279,8 +277,8 @@ describe("readyBrowserRecordingOutputs", () => {
       objectStorage: objectStorage as never,
       videoKey,
       actionLogKey,
-      readyAt,
-      now: () => readyAtMs + sinceReadyMs,
+      readyForMs: sinceReadyMs,
+      now: () => 0,
       sleep: async () => undefined,
     });
 
@@ -324,7 +322,24 @@ describe("readyBrowserRecordingOutputs", () => {
       outcomeUnknown: false,
       details: { code: "browser_recording_output_unreadable" },
       message:
-        "The recording's video was made, but storage still cannot read it back, so nothing was saved to the workspace. Stop the recording again later to save it.",
+        "The recording's video was made, but storage still cannot read it back, so nothing was saved to the workspace. Stop the recording again later, before its browser session ends, to save it.",
     });
+  });
+
+  test("the time spent retrying counts toward the window, on the API's own monotonic clock", async () => {
+    // Ready 100 ms short of the window by the database's clock; the retries
+    // themselves take the rest of it.
+    let clock = 5_000;
+    const failure = await readyBrowserRecordingOutputs({
+      objectStorage: storage({ actionLog: 1_000 }).objectStorage as never,
+      videoKey,
+      actionLogKey,
+      readyForMs: BROWSER_RECORDING_OUTPUT_VISIBILITY_GRACE_MS - 100,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ details: { code: "browser_recording_output_unreadable" } });
   });
 });
