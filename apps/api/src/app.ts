@@ -141,6 +141,7 @@ import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
+  insufficientCreditsHttpError,
   DATABASE_CONTENTION_ERROR_DETAIL_CODE,
   DATABASE_UNAVAILABLE_ERROR_DETAIL_CODE,
   databaseContentionHttpError,
@@ -2424,6 +2425,7 @@ export function createAppComposition(deps: AppDependencies): {
             })
           : (sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
+            insufficientCreditsHttpError(rawError) ??
             subscriptionSettingsLockedHttpError(rawError) ??
             workspaceControlBusyHttpError(rawError) ??
             scheduledTaskTargetAccessHttpError(rawError) ??

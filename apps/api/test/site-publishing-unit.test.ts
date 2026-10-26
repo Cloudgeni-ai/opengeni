@@ -34,6 +34,9 @@ import {
 import { publicationAnswer } from "../src/mcp/site-publication-tools";
 import { scanSitePageUsage, siteReadinessWarnings } from "../src/site-publishing/readiness";
 import { siteClientAddressKey, siteOutsiderUnfundedRefusal } from "../src/site-publishing/runtime";
+import { siteUnfundedReason } from "../src/site-publishing/agent-model";
+import { insufficientCreditsHttpError } from "../src/http/api-error";
+import { HTTPException } from "hono/http-exception";
 import { siteAccessNarrowed } from "../src/site-publishing/service";
 import {
   siteSessionEventProjection,
@@ -519,10 +522,23 @@ describe("readiness", () => {
       page: null,
       agent: { enabled: true, tools: null },
       outsideModel: { kind: "same", model: "gpt-6-luna" },
-      outsideModelUnfunded: true,
+      outsideModelUnfunded: "no_credits",
     });
     expect(unfunded.map((warning) => warning.code)).toEqual(["agent_model_outside_no_credits"]);
     expect(unfunded[0]!.message).toContain("no credits for gpt-6-luna");
+    // A used-up allowance is not a credits problem: adding credits won't help.
+    const allowance = siteReadinessWarnings({
+      ...base,
+      page: null,
+      agent: { enabled: true, tools: null },
+      outsideModel: { kind: "same", model: "gpt-6-luna" },
+      outsideModelUnfunded: "allowance_exhausted",
+    });
+    expect(allowance.map((warning) => warning.code)).toEqual([
+      "agent_model_outside_allowance_used",
+    ]);
+    expect(allowance[0]!.message).toContain("usage allowance is used up");
+    expect(allowance[0]!.suggestion).not.toContain("credits");
     // No assistant, or a funded one: nothing to say.
     expect(
       siteReadinessWarnings({
@@ -530,7 +546,7 @@ describe("readiness", () => {
         page: null,
         agent: { enabled: false, tools: null },
         outsideModel: { kind: "same", model: "gpt-6-luna" },
-        outsideModelUnfunded: true,
+        outsideModelUnfunded: "no_credits",
       }),
     ).toEqual([]);
     expect(
@@ -539,7 +555,7 @@ describe("readiness", () => {
         page: null,
         agent: { enabled: true, tools: null },
         outsideModel: { kind: "fallback", model: "gpt-6" },
-        outsideModelUnfunded: false,
+        outsideModelUnfunded: null,
       }),
     ).toEqual([]);
   });
@@ -557,6 +573,7 @@ describe("a turn the workspace can't pay for, seen from outside the workspace", 
       code: "payment_required",
       message:
         "No credits available for this model. Choose a model covered by your promotional credits or add credits.",
+      details: { code: "insufficient_credits" },
     },
   };
 
@@ -576,10 +593,63 @@ describe("a turn the workspace can't pay for, seen from outside the workspace", 
       refusal({ error: { code: "allowance_exhausted", message: "Allowance used up" } }),
     );
     expect(allowance?.status).toBe(403);
+    expect(allowance!.details).toMatchObject({ reason: "allowance_exhausted" });
+  });
+
+  test("a translated refusal consumes the body; a passed-through one leaves it readable", async () => {
+    const passed = refusal({ error: { code: "payment_required", message: "Other" } });
+    expect(await siteOutsiderUnfundedRefusal({ kind: "guest" }, passed)).toBeNull();
+    expect(await passed.json()).toEqual({ error: { code: "payment_required", message: "Other" } });
+    const translated = refusal(noCredits);
+    expect(await siteOutsiderUnfundedRefusal({ kind: "guest" }, translated)).not.toBeNull();
+    expect(translated.bodyUsed || translated.body?.locked).toBeTruthy();
+  });
+
+  test("only credit and allowance refusals count as the workspace being unable to pay", () => {
+    expect(siteUnfundedReason({ allowed: true })).toBeNull();
+    expect(siteUnfundedReason({ allowed: false, code: "insufficient_credits", message: "x" })).toBe(
+      "no_credits",
+    );
+    expect(siteUnfundedReason({ allowed: false, code: "allowance_exhausted", message: "x" })).toBe(
+      "allowance_exhausted",
+    );
+    expect(
+      siteUnfundedReason({
+        allowed: false,
+        code: "max_monthly_cost_micros_per_account",
+        message: "monthly model cost limit reached",
+      }),
+    ).toBeNull();
+  });
+
+  test("core's no-credits refusal carries a stable details.code", () => {
+    const decision = { allowed: false, code: "insufficient_credits", message: "No credits" };
+    const mapped = insufficientCreditsHttpError(
+      new HTTPException(402, { message: "No credits", cause: decision }),
+    );
+    expect(mapped?.status).toBe(402);
+    expect(mapped?.code).toBe("payment_required");
+    expect(mapped?.details).toEqual({ code: "insufficient_credits" });
+    expect(mapped?.message).toBe("No credits");
+    for (const other of [
+      new HTTPException(402, { message: "x", cause: { ...decision, code: "allowance_exhausted" } }),
+      new HTTPException(429, { message: "x", cause: decision }),
+      new HTTPException(402, { message: "x" }),
+      new Error("x"),
+    ])
+      expect(insufficientCreditsHttpError(other)).toBeNull();
   });
 
   test("members, other refusals and the Site's own budgets pass through unchanged", async () => {
     expect(await siteOutsiderUnfundedRefusal({ kind: "member" }, refusal(noCredits))).toBeNull();
+    // Only a 402 that says why: an unexplained payment_required is not
+    // assumed to be the workspace's credits.
+    expect(
+      await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        refusal({ error: { code: "payment_required", message: "Something else" } }),
+      ),
+    ).toBeNull();
     expect(
       await siteOutsiderUnfundedRefusal(
         { kind: "guest" },

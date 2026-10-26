@@ -151,15 +151,22 @@ export async function resolveSiteOutsideModel(
   });
 }
 
-/** Core refusals that mean the workspace can't pay for the turn. */
-const UNFUNDED_LIMIT_CODES: ReadonlySet<string> = new Set([
-  "insufficient_credits",
-  "allowance_exhausted",
-]);
+/**
+ * Why the workspace can't pay for an outsider's turn: no credits for the
+ * model, or the workspace's usage allowance is used up.
+ */
+export type SiteAgentUnfundedReason = "no_credits" | "allowance_exhausted";
 
-/** Whether a core admission refusal (402) means the workspace can't pay. */
-export function siteUnfundedLimitCode(code: unknown): boolean {
-  return typeof code === "string" && UNFUNDED_LIMIT_CODES.has(code);
+/**
+ * The reason a core admission decision means the workspace can't pay, or
+ * null when it was allowed or refused for anything else (a static cap, for
+ * example, which a turn reports itself).
+ */
+export function siteUnfundedReason(decision: LimitDecision): SiteAgentUnfundedReason | null {
+  if (decision.allowed) return null;
+  if (decision.code === "insufficient_credits") return "no_credits";
+  if (decision.code === "allowance_exhausted") return "allowance_exhausted";
+  return null;
 }
 
 /**
@@ -182,4 +189,50 @@ export async function siteOutsideModelFunding(
     quantity: 1,
     model,
   });
+}
+
+/** How long `site.config` reuses a workspace's funding answer for a model. */
+export const SITE_OUTSIDE_FUNDING_MEMO_MS = 30_000;
+const SITE_OUTSIDE_FUNDING_MEMO_MAX = 2_000;
+const outsideFundingMemo = new Map<
+  string,
+  { reason: SiteAgentUnfundedReason | null; expiresAt: number }
+>();
+
+/**
+ * Why the workspace can't pay for an outsider's turn on this model, or null
+ * when it can (or was refused for something else), for `site.config`: a
+ * public read made on every visitor page load. The answer is reused per
+ * account, workspace and model for SITE_OUTSIDE_FUNDING_MEMO_MS, so a burst
+ * of visitors runs core's admission check once; adding credits shows within
+ * that window. A failed check is not remembered and is rethrown. Turns
+ * still run core's own admission, so a stale answer only changes whether
+ * the assistant is offered, never whether a turn is paid for.
+ */
+export async function siteOutsideModelUnfundedReason(
+  deps: { db: Database; settings: Settings },
+  scope: { accountId: string; workspaceId: string },
+  model: string,
+  now: number = Date.now(),
+): Promise<SiteAgentUnfundedReason | null> {
+  const key = `${scope.accountId}\u0000${scope.workspaceId}\u0000${model}`;
+  const memo = outsideFundingMemo.get(key);
+  if (memo && memo.expiresAt > now) return memo.reason;
+  const reason = siteUnfundedReason(await siteOutsideModelFunding(deps, scope, model));
+  outsideFundingMemo.delete(key);
+  if (outsideFundingMemo.size >= SITE_OUTSIDE_FUNDING_MEMO_MAX) {
+    for (const [stale, entry] of outsideFundingMemo)
+      if (entry.expiresAt <= now) outsideFundingMemo.delete(stale);
+    // Still full of live answers: drop the oldest (Map keeps insertion order).
+    const oldest = outsideFundingMemo.keys().next();
+    if (outsideFundingMemo.size >= SITE_OUTSIDE_FUNDING_MEMO_MAX && !oldest.done)
+      outsideFundingMemo.delete(oldest.value);
+  }
+  outsideFundingMemo.set(key, { reason, expiresAt: now + SITE_OUTSIDE_FUNDING_MEMO_MS });
+  return reason;
+}
+
+/** Forget remembered funding answers, for tests. */
+export function clearSiteOutsideFundingMemo(): void {
+  outsideFundingMemo.clear();
 }

@@ -83,7 +83,7 @@ import {
   resolveSiteOutsideModel,
   siteCreditModelIds,
   siteCreditModelSelections,
-  siteOutsideModelFunding,
+  siteOutsideModelUnfundedReason,
 } from "../site-publishing/agent-model";
 import { projectWorkspaceModelCatalog } from "../model-catalog";
 import {
@@ -1011,12 +1011,13 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         agentModel: host.publication.agent.model,
       }).catch(() => null);
       agent = choice !== null && choice.kind !== "unavailable";
-      // A model the workspace can't pay for answers only "no credits":
-      // report the assistant unavailable rather than offer it. A failed
-      // check leaves it offered; the turn's own admission still decides.
+      // A model the workspace can't pay for (no credits, or its allowance
+      // used up) would only refuse: report the assistant unavailable rather
+      // than offer it. Other refusals, such as a static monthly cap, and a
+      // failed check leave it offered; the turn's own admission decides.
       if (agent && choice && choice.kind !== "unavailable")
-        agent = await siteOutsideModelFunding(deps, host.scope, choice.model).then(
-          (decision) => decision.allowed,
+        agent = await siteOutsideModelUnfundedReason(deps, host.scope, choice.model).then(
+          (reason) => reason === null,
           () => true,
         );
     }

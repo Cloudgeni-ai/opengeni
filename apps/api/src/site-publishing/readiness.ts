@@ -21,7 +21,8 @@ import { defineSiteSqlQuery } from "../site-sql/service";
 import {
   resolveSiteOutsideModel,
   siteOutsideModelFunding,
-  siteUnfundedLimitCode,
+  siteUnfundedReason,
+  type SiteAgentUnfundedReason,
   type SiteOutsideModelChoice,
 } from "./agent-model";
 import { effectiveSiteAccess, siteGuestsAllowed } from "./viewer";
@@ -119,10 +120,11 @@ export type SiteReadinessInput = {
   queries: ReadonlyArray<{ name: string; audience: SiteSqlQueryAudience }>;
   outsideModel: SiteOutsideModelChoice | null;
   /**
-   * The workspace can't pay for the outside model right now (no credits for
-   * it, or its allowance is used up), so outsiders' turns are refused.
+   * Why the workspace can't pay for the outside model right now (no credits
+   * for it, or its usage allowance is used up), so outsiders' turns are
+   * refused; null or absent when it can.
    */
-  outsideModelUnfunded?: boolean;
+  outsideModelUnfunded?: SiteAgentUnfundedReason | null;
 };
 
 function audienceLabel(input: Pick<SiteReadinessInput, "access" | "guestsAllowed">): string {
@@ -230,7 +232,7 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
     });
   else if (
     input.agent.enabled &&
-    input.outsideModelUnfunded &&
+    input.outsideModelUnfunded === "no_credits" &&
     input.outsideModel &&
     input.outsideModel.kind !== "unavailable"
   )
@@ -238,6 +240,12 @@ export function siteReadinessWarnings(input: SiteReadinessInput): SitePublishWar
       code: "agent_model_outside_no_credits",
       message: `This workspace has no credits for ${input.outsideModel.model}, so ${who} can't use the assistant.`,
       suggestion: "Add credits, or pick a model your credits cover for the Site's assistant.",
+    });
+  else if (input.agent.enabled && input.outsideModelUnfunded === "allowance_exhausted")
+    add({
+      code: "agent_model_outside_allowance_used",
+      message: `This workspace's usage allowance is used up, so ${who} can't use the assistant.`,
+      suggestion: "Raise the workspace's usage allowance, or wait until it resets.",
     });
   return warnings.slice(0, 50);
 }
@@ -271,10 +279,10 @@ export async function readSitePublicationReadiness(
   const outsideModelUnfunded =
     outsideModel && outsideModel.kind !== "unavailable"
       ? await siteOutsideModelFunding(deps, scope, outsideModel.model).then(
-          (decision) => !decision.allowed && siteUnfundedLimitCode(decision.code),
-          () => false,
+          siteUnfundedReason,
+          () => null,
         )
-      : false;
+      : null;
   const site = await getPublishedSite(deps.db, scope, publication.siteId).catch(() => null);
   const version = site?.currentVersionId
     ? await getPublishedSiteVersion(

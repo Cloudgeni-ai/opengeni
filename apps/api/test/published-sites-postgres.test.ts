@@ -60,6 +60,7 @@ import { buildOrganizationMcpServer } from "../src/organization-mcp";
 import { sha256Hex, signSiteGatewayRequest } from "../src/site-publishing/gateway-signature";
 import type { SiteContentScanner } from "../src/site-publishing/content-scanner";
 import { siteRuntimeBudgetLimits } from "../src/site-publishing/runtime";
+import { clearSiteOutsideFundingMemo } from "../src/site-publishing/agent-model";
 import { SITE_AGENT_DEFAULTS_VERSION } from "../src/site-publishing/agent-session";
 import { moderateSiteAsPlatform } from "../src/site-publishing/platform";
 import {
@@ -3822,6 +3823,7 @@ test("the model follows the viewer: people outside the workspace never use a sub
 });
 
 test("an assistant the workspace can't pay for is unavailable to outsiders, not a purchase prompt", async () => {
+  clearSiteOutsideFundingMemo();
   // Credit limits on, and the account has no credits yet.
   const f = await fixture({ billingMode: "stripe" });
   const site = await f.live("Unfunded", { access: "public", agent: { enabled: true } });
@@ -3831,6 +3833,27 @@ test("an assistant the workspace can't pay for is unavailable to outsiders, not 
     );
   const start = (who: { visitor?: string; session?: string }) =>
     f.gateway(site.host, "POST", "/sessions", { ...who, body: { initialMessage: "Hi" } });
+  const send = (sessionId: string, who: { visitor?: string; session?: string }) =>
+    f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+      ...who,
+      body: { type: "user.message", payload: { text: "More" } },
+    });
+  const credits = async (micros: number) => {
+    const key = crypto.randomUUID();
+    await shared.admin`insert into credit_ledger_entries
+      (account_id, type, amount_micros, source_type, source_id, idempotency_key, occurred_at)
+      values (${f.accountId}, ${micros > 0 ? "grant" : "model_usage_debit"}, ${micros},
+        ${micros > 0 ? null : "model_response"}, ${micros > 0 ? null : `fixture:${key}`}, ${key}, now())`;
+  };
+  const unavailable = (refused: { status: number; json: any }, reason: string) => {
+    expect(refused.status, JSON.stringify(refused.json)).toBe(403);
+    expect(refused.json.error.message).toBe("This Site's assistant isn't available right now");
+    expect(refused.json.error.details).toMatchObject({
+      code: "not_available_for_viewer",
+      feature: "agent",
+      reason,
+    });
+  };
 
   const visitor = visitorId();
   const config = await f.gateway(site.host, "GET", "/site/config", { visitor });
@@ -3838,31 +3861,42 @@ test("an assistant the workspace can't pay for is unavailable to outsiders, not 
   expect(config.json.capabilities.agent).toBe(false);
   expect(config.json.agent.enabled).toBe(false);
   expect(await codes()).toContain("agent_model_outside_no_credits");
-  const refused = await start({ visitor });
-  expect(refused.status, JSON.stringify(refused.json)).toBe(403);
-  expect(refused.json.error.message).toBe("This Site's assistant isn't available right now");
-  expect(refused.json.error.details).toMatchObject({
-    code: "not_available_for_viewer",
-    feature: "agent",
-    reason: "no_credits",
-  });
+  unavailable(await start({ visitor }), "no_credits");
   // Nothing is left behind for the refused start.
   const [left] = await shared.admin`select count(*)::int as count from sessions
     where workspace_id = ${f.workspace.id}`;
   expect(left!.count).toBe(0);
-  // A member keeps the ordinary credit refusal, which they can act on.
+  // A member still sees the assistant and keeps the ordinary credit refusal,
+  // which they can act on, now with a stable details.code.
   const memberSession = await f.signIn(f.member, site.host);
+  const memberConfig = await f.gateway(site.host, "GET", "/site/config", {
+    session: memberSession,
+  });
+  expect(memberConfig.json.capabilities.agent).toBe(true);
   const member = await start({ session: memberSession });
   expect(member.status, JSON.stringify(member.json)).toBe(402);
+  expect(member.json.error).toMatchObject({
+    code: "payment_required",
+    details: { code: "insufficient_credits" },
+  });
 
-  // With credits, the same visitor's assistant works and the warning is gone.
-  await shared.admin`insert into credit_ledger_entries (account_id, type, amount_micros, idempotency_key)
-    values (${f.accountId}, 'grant', 5000000, ${`seed:${crypto.randomUUID()}`})`;
+  // With credits, the warning is gone at once and a turn starts. site.config
+  // reuses its answer briefly, so it shows the assistant once that lapses.
+  await credits(5_000_000);
+  expect(await codes()).not.toContain("agent_model_outside_no_credits");
+  const remembered = await f.gateway(site.host, "GET", "/site/config", { visitor });
+  expect(remembered.json.capabilities.agent).toBe(false);
+  clearSiteOutsideFundingMemo();
   const funded = await f.gateway(site.host, "GET", "/site/config", { visitor });
   expect(funded.json.capabilities.agent).toBe(true);
-  expect(await codes()).not.toContain("agent_model_outside_no_credits");
   const started = await start({ visitor });
   expect(started.status, JSON.stringify(started.json)).toBe(202);
+
+  // Credits run out mid-conversation: the next message gets the same plain
+  // refusal, not the purchase prompt.
+  await credits(-5_000_000);
+  unavailable(await send(started.json.id, { visitor }), "no_credits");
+  clearSiteOutsideFundingMemo();
 });
 
 test("legacy three-window settlement, release and conversion preserve newer reservations", async () => {
