@@ -4780,9 +4780,38 @@ async function reportingChatMove<T>(chatMove: ChatMoveRecord, run: () => Promise
   try {
     return await run();
   } catch (error) {
-    if (chatMove.moved && error instanceof Error && !error.message.startsWith(CHAT_MOVED_NOTE))
-      error.message = `${CHAT_MOVED_NOTE} ${error.message}`;
-    throw error;
+    throw chatMove.moved ? withChatMovedNote(error) : error;
+  }
+}
+
+/**
+ * A copy of `error` whose message leads with the moved note: the same type and
+ * fields (status, code, retryable and the rest), so it is handled exactly as
+ * the original. The original is never changed: its message may be read-only
+ * (a DOMException's is) and the SDK may share one failed read between callers.
+ * An error that cannot be copied is returned unchanged.
+ */
+function withChatMovedNote(error: unknown): unknown {
+  if (!(error instanceof Error) || error.message.startsWith(CHAT_MOVED_NOTE)) return error;
+  const message = `${CHAT_MOVED_NOTE} ${error.message}`;
+  try {
+    // A DOMException keeps its name and message in internal slots, so only its
+    // own constructor makes one (TimeoutError and AbortError from the SDK).
+    if (typeof DOMException !== "undefined" && error instanceof DOMException)
+      return new DOMException(message, error.name);
+    const copy = Object.create(
+      Object.getPrototypeOf(error) as object,
+      Object.getOwnPropertyDescriptors(error),
+    ) as Error;
+    Object.defineProperty(copy, "message", {
+      value: message,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+    return copy;
+  } catch {
+    return error;
   }
 }
 

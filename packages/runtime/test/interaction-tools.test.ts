@@ -8042,12 +8042,14 @@ describe("open reuses only a session on the chat's current machine", () => {
   for (const tool of ["computer_open", "browser_open"] as const) {
     test(`${tool} that moved the chat and then failed says the chat moved`, async () => {
       const swaps: string[] = [];
+      // One failed request the SDK may hand to more than one caller.
+      const shared = new OpenGeniApiError(409, "", {
+        code: "conflict",
+        retryable: false,
+        displayMessage: "That machine cannot start one now.",
+      });
       const refused = async () => {
-        throw new OpenGeniApiError(409, "", {
-          code: "conflict",
-          retryable: false,
-          displayMessage: "That machine cannot start one now.",
-        });
+        throw shared;
       };
       const definitions = createInteractionAttemptToolDefinitions({
         transport: {
@@ -8074,11 +8076,58 @@ describe("open reuses only a session on the chat's current machine", () => {
       );
       expect(swaps).toEqual([oldMachine]);
       expect(result.isError).toBe(true);
-      expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
-        "This chat moved to the requested machine; its commands and files now run there too. That machine cannot start one now.",
-      );
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: "conflict",
+          retryable: false,
+          message:
+            "This chat moved to the requested machine; its commands and files now run there too. That machine cannot start one now.",
+        },
+      });
+      // The note is on a copy: the original error is unchanged.
+      expect(shared.message).toBe("That machine cannot start one now.");
     });
   }
+
+  // A read that times out or aborts throws a DOMException, whose message is
+  // read-only. The error is still a DOMException of that name, with the note.
+  test("an open that moved the chat and then timed out keeps the DOMException with the note", async () => {
+    const timeout = new DOMException("The operation timed out.", "TimeoutError");
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => {
+            throw timeout;
+          },
+        }),
+        getSession: sessionRead(swappedMachine),
+        swapActiveSandbox: async (_workspaceId, _sessionId, request) => ({
+          swapped: true,
+          activeSandboxId: request.target,
+          activeEpoch: 2,
+        }),
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    let thrown: unknown;
+    try {
+      await definitions[0]!.execute(
+        { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+        context(),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(DOMException);
+    expect((thrown as DOMException).name).toBe("TimeoutError");
+    expect((thrown as DOMException).message).toBe(
+      "This chat moved to the requested machine; its commands and files now run there too. The operation timed out.",
+    );
+    expect(timeout.message).toBe("The operation timed out.");
+  });
 
   test("an open that fails without moving the chat does not mention a move", async () => {
     const definitions = createInteractionAttemptToolDefinitions({
