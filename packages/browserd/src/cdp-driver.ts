@@ -6634,6 +6634,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     frameId?: string,
   ): Promise<void> {
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
+    // Where the target was when the press was aimed, to tell a target that
+    // moved away from one that something covered.
+    const aimedAt =
+      backendDOMNodeId === null
+        ? null
+        : await this.centerPoint(state, backendDOMNodeId).catch(() => null);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
     const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
@@ -6673,13 +6679,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const blocked = await this.settleHitTargetGuard(state, guard, count);
     if (blocked !== null) {
       // The pointer did move there, so whatever its arrival did stands, and
-      // the refusal is reported as an unknown outcome.
+      // the refusal is reported as an unknown outcome. A target that is no
+      // longer where it was measured moved (the page was still reacting to
+      // a scroll), rather than being covered there.
       throw new InteractionDefiniteDriverError(
         "invalid_action",
-        `browser element is covered by ${coverName(blocked)} at its center; the click was not delivered`,
+        (await this.movedFrom(state, backendDOMNodeId, aimedAt))
+          ? `browser element moved as the click was sent, so the press fell on ${coverName(blocked)}; the click was not delivered; click it again`
+          : `browser element is covered by ${coverName(blocked)} at its center; the click was not delivered`,
         true,
       );
     }
+  }
+
+  /** Whether the target's center is now elsewhere than `before`, where it
+   * was when the press was aimed; false when either is unknown. */
+  private async movedFrom(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    before: { x: number; y: number } | null,
+  ): Promise<boolean> {
+    if (backendDOMNodeId === null || before === null) return false;
+    const now = await this.centerPoint(state, backendDOMNodeId).catch(() => null);
+    return now !== null && Math.max(Math.abs(now.x - before.x), Math.abs(now.y - before.y)) > 2;
   }
 
   /**
@@ -6927,6 +6949,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // and a later refusal stays an unknown outcome. When the target is already
     // in view nothing scrolls, and a refusal (covered, no box) is definite.
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
+    // Where scroll offsets cannot be read (a child frame), whether the
+    // target moved tells whether anything scrolled.
+    const boxBefore =
+      scrollBefore === null
+        ? await this.centerPoint(state, backendDOMNodeId).catch(() => null)
+        : null;
     const effectsBeforeScroll = state.actionEffectCount;
     if (state.nodeRoute) await this.scrollFrameOwnersIntoView(state, state.nodeRoute);
     const effectsBeforeElementScroll = state.actionEffectCount;
@@ -6941,11 +6969,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount = effectsBeforeElementScroll;
       throw scrollRefusal(error.message) ?? error;
     }
-    if (
-      scrollBefore !== null &&
-      (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
-    )
-      state.actionEffectCount = effectsBeforeScroll;
+    const unscrolled =
+      scrollBefore !== null
+        ? (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
+        : boxBefore !== null && !(await this.movedFrom(state, backendDOMNodeId, boxBefore));
+    if (unscrolled && scrollBefore !== null) state.actionEffectCount = effectsBeforeScroll;
+    // The page reacts to a scroll on its next frames (a sticky header that
+    // shrinks once the page scrolls, and the content it moves), so after one
+    // the target is measured only once it has stopped moving.
+    if (!unscrolled) await this.settleAfterScroll(state, backendDOMNodeId, frameId);
     let point = await this.centerPoint(state, backendDOMNodeId);
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
       const visible =
@@ -6976,6 +7008,28 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       point = revealed;
     }
     return point;
+  }
+
+  /**
+   * Waits, briefly and best effort, for the target to stop moving after the
+   * driver scrolled it into view: until its box has not changed for
+   * SCROLL_QUIET_MS of drawn frames, or SCROLL_SETTLE_LIMIT_MS. A page that
+   * does not draw frames (hidden, or an engine without them) has nothing to
+   * wait for.
+   */
+  private async settleAfterScroll(
+    state: TargetState,
+    backendDOMNodeId: number,
+    frameId: string | undefined,
+  ): Promise<void> {
+    if (this.engine === "lightpanda") return;
+    await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      STEADY_BOX_FUNCTION,
+      [{ value: SCROLL_QUIET_MS }, { value: SCROLL_SETTLE_LIMIT_MS }],
+      frameId === undefined ? {} : { isolatedFrameId: frameId },
+    ).catch(() => undefined);
   }
 
   private async centerPoint(
@@ -10226,6 +10280,50 @@ const SETTLE_FRAMES_FUNCTION = `function() {
       clearTimeout(timer);
       resolve(true);
     }));
+  });
+}`;
+
+/** After the driver's own scroll, a pointer action's target counts as
+ * settled once its box has not changed for this long: the page's scroll
+ * listeners, the frame callbacks and short timers they schedule (a header
+ * that shrinks once the page scrolls, often debounced), have run. */
+const SCROLL_QUIET_MS = 150;
+/** The longest that wait lasts (a target that keeps moving); within the
+ * action's dispatch allowance. */
+const SCROLL_SETTLE_LIMIT_MS = 600;
+
+// Resolves true once the target's box has stayed the same for quietMs over
+// at least two drawn frames, false at limitMs while it still moves, and true
+// at once in a page that draws no frames (hidden), or 100 ms after asking for
+// a frame that never comes.
+const STEADY_BOX_FUNCTION = `function(quietMs, limitMs) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return true;
+  if (document.visibilityState === "hidden") return true;
+  const box = () => {
+    const rect = element.getBoundingClientRect();
+    return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * 4)).join();
+  };
+  return new Promise((resolve) => {
+    const start = performance.now();
+    let last = box();
+    let changedAt = start;
+    let frames = 0;
+    const next = () => {
+      const timer = setTimeout(() => resolve(true), 100);
+      requestAnimationFrame(() => {
+        clearTimeout(timer);
+        const now = performance.now();
+        const current = box();
+        if (current !== last) changedAt = now;
+        last = current;
+        frames += 1;
+        if (frames >= 2 && now - changedAt >= quietMs) resolve(true);
+        else if (now - start >= limitMs) resolve(false);
+        else next();
+      });
+    };
+    next();
   });
 }`;
 
