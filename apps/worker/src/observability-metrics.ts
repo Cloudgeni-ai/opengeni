@@ -11,10 +11,13 @@ import {
 } from "@opengeni/contracts";
 import {
   ACTIVE_USER_WINDOWS,
+  QUEUED_TURN_HOLDS,
   type ActiveUserWindow,
   type CreditGrantTotals,
   type IdleInteractionInspection,
   type ModelCallTiming,
+  type QueuedTurnHold,
+  type QueuedTurnHoldSummary,
   type SessionEventAppendPhaseObservation,
 } from "@opengeni/db";
 import {
@@ -776,9 +779,38 @@ export class ModelRequestLifecycleMetrics {
 export function recordTurnsQueuedGauge(observability: Observability, value: number): void {
   observability.setGauge({
     name: "opengeni_turns_queued",
-    help: "Current number of queued session turns.",
+    help: "Current number of durable queued session turns, including prompts held behind a running turn, a Pause, a failed turn or a required human action. Not a worker backlog; see opengeni_turns_queued_by_hold.",
     value,
   });
+}
+
+/**
+ * Split the durable queued-turn count by what holds each prompt. Only `ready`
+ * prompts are waiting for dispatch; an old `ready` prompt is a stranded queue.
+ * Every class is always published so an emptied class drops to 0.
+ */
+export function recordQueuedTurnHoldGauges(
+  observability: Observability,
+  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary> | null,
+): void {
+  // Null until a later migration grants 0988's withheld runtime EXECUTE:
+  // publish nothing rather than a misleading all-zero split.
+  if (!summary) return;
+  for (const hold of QUEUED_TURN_HOLDS) {
+    const entry = summary[hold];
+    observability.setGauge({
+      name: "opengeni_turns_queued_by_hold",
+      help: "Durable queued session turns by what holds them: ready (waiting for dispatch), behind_active_turn, paused, failed (resumes on the next message), requires_action, waiting_capacity or cancelled.",
+      labels: { hold },
+      value: nonnegativeFinite(entry?.count ?? 0),
+    });
+    observability.setGauge({
+      name: "opengeni_turns_queued_oldest_age_seconds",
+      help: "Age in seconds of the oldest durable queued session turn in each hold class; 0 when the class is empty.",
+      labels: { hold },
+      value: nonnegativeFinite(entry?.oldestAgeSeconds ?? 0),
+    });
+  }
 }
 
 /**
