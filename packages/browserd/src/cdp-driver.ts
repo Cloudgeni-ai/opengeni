@@ -5681,9 +5681,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Whether the connection reports this tab as not the one shown in its
    * window. Page signals cannot tell: focus emulation keeps every agent tab
-   * "visible" and drawing. Unknown counts as shown. */
-  /** Whether the connection reports the tab as not shown, asked within the
-   * capture deadline; a slow or failed answer counts as shown. */
+   * "visible" and drawing. It is asked within the capture deadline; an
+   * unknown, slow or failed answer counts as shown. */
   private async tabBehind(state: TargetState, deadline: number): Promise<boolean> {
     const timeoutMs = Math.min(TAB_SHOWN_TIMEOUT_MS, deadline - Date.now());
     if (timeoutMs <= 0) return false;
