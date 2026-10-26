@@ -55,6 +55,9 @@ async function fixture() {
     unresolved: false,
     classic: false,
     queueReady: true,
+    mergeable: true as boolean | null,
+    detailHead: sha,
+    detailDraft: false,
     autoEnabled: false,
     autoTimeline: true,
     autoCurrentHead: sha,
@@ -177,6 +180,16 @@ async function fixture() {
             auto_merge: state.autoEnabled ? {} : null,
           },
         ];
+      else if (path === "pulls/1" || path === "pulls/2")
+        body = {
+          state: "open",
+          draft: state.detailDraft,
+          mergeable: state.mergeable,
+          head: { sha: state.detailHead },
+          base: { ref: "main" },
+          labels: state.queueReady ? [{ name: "queue-ready" }] : [],
+          auto_merge: state.autoEnabled ? {} : null,
+        };
       else if (path === "branches/main") body = { protected: state.protected };
       else if (path === "branches/main/protection")
         return Response.json({}, { status: state.protectionStatus });
@@ -267,6 +280,33 @@ async function fixture() {
     ),
   };
 }
+test.each(["label", "auto"])(
+  "conflicting %s request is reported even before fast checks pass",
+  async (source) => {
+    const f = await fixture();
+    f.state.queueReady = source === "label";
+    f.state.autoEnabled = source === "auto";
+    f.state.mergeable = false;
+    f.state.hosted = false;
+    const result = await f.reader.ready();
+    expect(result.ready).toEqual([]);
+    expect(result.conflicts).toEqual([{ number: 1, headSha: sha }]);
+  },
+);
+test("unknown mergeability, changed head, drafts and unmarked PRs do not produce conflict notices", async () => {
+  const f = await fixture();
+  f.state.mergeable = null;
+  expect((await f.reader.ready()).conflicts).toEqual([]);
+  f.state.mergeable = false;
+  f.state.detailHead = "b".repeat(40);
+  expect((await f.reader.ready()).conflicts).toEqual([]);
+  f.state.detailHead = sha;
+  f.state.detailDraft = true;
+  expect((await f.reader.ready()).conflicts).toEqual([]);
+  f.state.detailDraft = false;
+  f.state.queueReady = false;
+  expect((await f.reader.ready()).conflicts).toEqual([]);
+});
 test("real reader never fetches prose evidence and binds hosted exact-head proof", async () => {
   const f = await fixture();
   const result = await f.reader.ready();

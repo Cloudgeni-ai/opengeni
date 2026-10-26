@@ -1,5 +1,6 @@
 import {
   bindingKey,
+  digest,
   compareText,
   ejectionKey,
   type BatchSpec,
@@ -15,6 +16,7 @@ import {
 import { failedBaseHold } from "./base-failure";
 
 export type Action =
+  | { kind: "conflict-notice"; number: number; headSha: string }
   | { kind: "wait"; reason: string }
   | { kind: "record"; ledger: Ledger; reason: string }
   | { kind: "build"; spec: BatchSpec; publish: boolean; recoveryIndex: number | null }
@@ -88,6 +90,13 @@ export function descendants(id: string, candidates: Candidate[]): string[] {
   return [...ids];
 }
 export function plan(o: Observation, c: Config): Action {
+  // Notices are diagnostic effects, not admission or a reason to weaken a
+  // candidate hold. Persist one intent per head even while other CI is held.
+  const conflict = o.conflicts?.find(
+    ({ number, headSha }) =>
+      !o.ledger.effects[digest({ kind: "comment", key: `conflict:${headSha}`, number })],
+  );
+  if (conflict) return { kind: "conflict-notice", ...conflict };
   // Latency is diagnostic, not permission to suppress recovery or admission.
   // All evidence, provenance and single-slot guards remain in planCandidate.
   return planCandidate(o, c);

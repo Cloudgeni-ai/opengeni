@@ -31,11 +31,12 @@ export interface Reader {
   observe(): Promise<Observation>;
 }
 export type Effect =
+  | { kind: "conflict-notice"; number: number; headSha: string }
   | { kind: "record" }
   | { kind: "publish"; branch: string; manifest: Manifest }
   | { kind: "land"; manifest: Manifest; expectedBase: string; headRefresh?: HeadRefresh }
   | { kind: "retry"; run: Run }
-  | { kind: "announce"; number: number; body: string; key: string }
+  | { kind: "announce"; number: number; body: string; key: string; commentKey?: string }
   | { kind: "park"; number: number; body: string; key: string };
 /** Final read-only validation found contention; no transaction was attempted. */
 export class ReplanRequired extends Error {}
@@ -402,6 +403,8 @@ export class Controller {
         key: item.batchId,
         body: `Parked ${item.pull.headSha}: singleton Batch CI failed. Auto-merge disable requested. Push a fix or explicitly re-enable auto-merge to retry; label toggles do not retry. Logs: https://github.com/${this.config.repository}/actions/runs/${item.runId}/attempts/${item.attempt}.\n\n<!-- batcher-parking:${item.batchId} -->`,
       };
+    } else if (action.kind === "conflict-notice") {
+      effect = action;
     } else if (action.kind === "announce") {
       const key = bindingKey(action.ejection.pull);
       ledger.ejected = ledger.ejected.map((e) =>
@@ -411,7 +414,13 @@ export class Controller {
         kind: "announce",
         number: action.ejection.pull.number,
         key,
-        body: `Merge batcher excluded exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
+        ...(action.ejection.reason === "merge-tree conflict against candidate predecessor"
+          ? { commentKey: `conflict:${action.ejection.pull.headSha}` }
+          : {}),
+        body:
+          action.ejection.reason === "merge-tree conflict against candidate predecessor"
+            ? `Not queued: this PR conflicts with main or an earlier PR in this batch. Rebase or merge main into it and push; it re-queues automatically once required checks pass. Exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}.\n\n<!-- batcher-ejection:${key} -->`
+            : `Merge batcher excluded exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
       };
     }
     if (this.config.mode === "active") {
