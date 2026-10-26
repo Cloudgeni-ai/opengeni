@@ -382,20 +382,17 @@ recoveryE2e(
       expect(urls).toEqual(
         expect.arrayContaining([initialUrl, `http://127.0.0.1:${server.port}/second`]),
       );
-      // The tabs reopened with new IDs. A call still naming an old tab learns
-      // why it is gone and which reopened tab shows its page.
-      const reopenedSecond = reopened.find((target) => target.url.endsWith("/second"))!;
-      expect(reopenedSecond.id).not.toBe(second.target.id);
-      await expect(supervisor.targetState(options, second.target.id)).rejects.toMatchObject({
-        code: "target_not_found",
-        message:
-          "browser target does not exist: this browser was stopped after going unused for 1 minute and relaunched on its next call, so its tabs reopened with new IDs and unsaved page input may be lost; " +
-          `this tab's page is now tab ${reopenedSecond.id}`,
-      });
-      const reopenedFirst = reopened.find((target) => target.url === initialUrl)!;
-      await expect(supervisor.observe(options, first.observation.target.id)).rejects.toThrow(
-        `this tab's page is now tab ${reopenedFirst.id}`,
+      // The reopened tabs keep their IDs, so a call still naming one works.
+      expect(reopened.find((target) => target.url.endsWith("/second"))?.id).toBe(second.target.id);
+      expect(reopened.find((target) => target.url === initialUrl)?.id).toBe(
+        first.observation.target.id,
       );
+      expect((await supervisor.targetState(options, second.target.id)).targetId).toBe(
+        second.target.id,
+      );
+      const observed = await supervisor.observe(options, first.observation.target.id);
+      expect(observed.target.id).toBe(first.observation.target.id);
+      expect(observed.target.url).toBe(initialUrl);
       await supervisor.endSession(options, { removeState: true });
       await waitForProcessExit(relaunchedPid);
     } catch (error) {
@@ -449,10 +446,11 @@ recoveryE2e(
       now: () => clock,
     });
     let second: BrowserSupervisor | undefined;
+    let third: BrowserSupervisor | undefined;
     let browserPid: number | undefined;
     let relaunchedPid: number | undefined;
     try {
-      await first.createSession(options);
+      const firstTab = await first.createSession(options);
       const secondTab = await first.openTarget(options, `http://127.0.0.1:${server.port}/second`);
       browserPid = await chromiumProfilePid(profile);
       await first.close();
@@ -478,12 +476,27 @@ recoveryE2e(
       expect(urls).toEqual(
         expect.arrayContaining([initialUrl, `http://127.0.0.1:${server.port}/second`]),
       );
-      const reopenedSecond = reopened.find((target) => target.url.endsWith("/second"))!;
-      await expect(second.targetState(options, secondTab.target.id)).rejects.toThrow(
-        "browser target does not exist: this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call, so its tabs reopened with new IDs and unsaved page input may be lost; " +
-          `this tab's page is now tab ${reopenedSecond.id}`,
+      // The reopened tabs keep their IDs.
+      const tabIds = reopened.map((target) => target.id).sort();
+      expect(tabIds).toEqual([firstTab.observation.target.id, secondTab.target.id].sort());
+      expect((await second.targetState(options, secondTab.target.id)).targetId).toBe(
+        secondTab.target.id,
       );
-      await second.endSession(options, { removeState: true });
+
+      // A controller that reattaches to the same running browser gives its
+      // tabs the same IDs.
+      await second.close();
+      expect(processRunning(relaunchedPid)).toBe(true);
+      third = await openManagedRecoverySupervisor(rootDirectory, {
+        idleReleaseMs: 60_000,
+        now: () => clock,
+      });
+      await third.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      expect(await chromiumProfilePid(profile)).toBe(relaunchedPid);
+      expect((await third.listTargets(options)).map((target) => target.id).sort()).toEqual(tabIds);
+      const observed = await third.observe(options, secondTab.target.id);
+      expect(observed.target.url).toBe(`http://127.0.0.1:${server.port}/second`);
+      await third.endSession(options, { removeState: true });
       await waitForProcessExit(relaunchedPid);
     } catch (error) {
       for (const pid of [browserPid, relaunchedPid]) {
@@ -496,6 +509,7 @@ recoveryE2e(
     } finally {
       await first.close();
       await second?.close();
+      await third?.close();
       server.stop(true);
       await rm(directory, { recursive: true, force: true });
     }
@@ -713,19 +727,18 @@ e2e.each(["read", "capture"] as const)(
       const recovered = await supervisor.listTargets(session);
       expect(driverLifecycles).toBe(operation === "capture" ? 3 : 2);
       expect(recovered).toHaveLength(1);
-      expect(recovered[0]!.id).not.toBe(created.observation.target.id);
+      // The reopened tab keeps its ID.
+      expect(recovered[0]!.id).toBe(created.observation.target.id);
       expect(recovered[0]!.url).toBe(fixture("Recovery"));
 
+      // An action prepared on the lost browser's page is refused as stale,
+      // never applied to a page it did not see.
       const stale = await supervisor.action(clickCommand(created.observation));
       expect(stale.state).toBe("failed");
-      expect(stale.error?.code).toBe("target_not_found");
-      if (operation === "read") {
-        // The action names why its tab is gone and where its page is now.
-        expect(stale.error?.message).toBe(
-          "browser target does not exist: this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched, so its tabs reopened with new IDs and unsaved page input may be lost; " +
-            `this tab's page is now tab ${recovered[0]!.id}`,
-        );
-      }
+      expect(stale.error?.code).toBe("target_stale");
+      // Observed again under the same ID, the tab takes actions.
+      const fresh = await supervisor.observe(session, created.observation.target.id);
+      expect((await supervisor.action(clickCommand(fresh))).state).toBe("completed");
     } finally {
       await supervisor.close();
       await rm(directory, { recursive: true, force: true });

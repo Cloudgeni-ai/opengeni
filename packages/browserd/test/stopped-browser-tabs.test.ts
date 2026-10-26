@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   matchReopenedTabs,
+  readBrowserTabIds,
   tabUrlHash,
   takeStoppedBrowserTabs,
+  writeBrowserTabIds,
   writeStoppedBrowserTabs,
 } from "../src/stopped-browser-tabs";
 
@@ -137,6 +139,35 @@ test("the record describes only the next launch and ignores anything unreadable"
     );
     expect(await takeStoppedBrowserTabs(directory)).toBeNull();
     expect(await readdir(directory)).toEqual([]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a running browser's tab IDs are kept for a reattach until a browser has none", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ogb-tab-ids-"));
+  try {
+    expect(await readBrowserTabIds(directory)).toEqual([]);
+    const tabs = [
+      { tabId: "old-a", browserTargetId: "new-a" },
+      { tabId: "old-b", browserTargetId: "new-b" },
+    ];
+    await writeBrowserTabIds(directory, tabs);
+    // Read, not taken: every reattach to the same browser needs them.
+    expect(await readBrowserTabIds(directory)).toEqual(tabs);
+    expect(await readBrowserTabIds(directory)).toEqual(tabs);
+    await writeBrowserTabIds(directory, []);
+    expect(await readdir(directory)).toEqual([]);
+
+    await writeFile(join(directory, "browser-tab-ids.json"), "{not json");
+    expect(await readBrowserTabIds(directory)).toEqual([]);
+    await writeFile(
+      join(directory, "browser-tab-ids.json"),
+      JSON.stringify({ version: 1, tabs: [{ tabId: "old-a", browserTargetId: 7 }] }),
+    );
+    expect(await readBrowserTabIds(directory)).toEqual([]);
+    await writeFile(join(directory, "browser-tab-ids.json"), JSON.stringify({ version: 2, tabs }));
+    expect(await readBrowserTabIds(directory)).toEqual([]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -714,14 +714,15 @@ export type BrowserRuntimeSnapshot = {
 /** How many vanished tabs the driver remembers, to say why each is gone. */
 const MAX_GONE_TARGETS = 64;
 
-/** What the driver knows about a tab that no longer exists. */
+/** What the driver knows about a tab that no longer exists. A relaunched tab
+ * is one of an earlier browser that no tab of its relaunched successor took
+ * over (reopened tabs keep their IDs). */
 export type GoneBrowserTarget =
   | { kind: "closed"; at: string; byCloseCall: boolean }
   | {
       kind: "relaunched";
       reason: BrowserRelaunchReason;
       idleReleaseMinutes?: number;
-      replacementId: string | null;
     };
 
 const LIST_CURRENT_TABS = "list the current tabs and use one of their IDs";
@@ -748,10 +749,7 @@ export function goneBrowserTargetMessage(gone: GoneBrowserTarget | null): string
         : gone.reason === "browser_lost"
           ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
           : "this browser restarted to save its profile state";
-  const next = gone.replacementId
-    ? `this tab's page is now tab ${gone.replacementId}`
-    : LIST_CURRENT_TABS;
-  return `browser target does not exist: ${why}, so its tabs reopened with new IDs and unsaved page input may be lost; ${next}`;
+  return `browser target does not exist: ${why}, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; ${LIST_CURRENT_TABS}`;
 }
 
 function hasBrowserEmulation(
@@ -869,6 +867,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly autoSessions = new Map<string, string>();
   /** Page target last brought to the front by this controller, when known. */
   private frontTargetId: string | null = null;
+  /**
+   * Tab IDs callers see, keyed by the browser's own target ID, and back. A
+   * tab's ID is the browser's ID for it, except for a tab that a relaunched
+   * browser reopened: that tab keeps the ID it had before the relaunch
+   * (adoptTabIds). Everything inside this driver uses the browser's IDs. Every
+   * public method takes tab IDs and returns tab IDs.
+   */
+  private readonly tabIdsByBrowserId = new Map<string, string>();
+  private readonly browserIdsByTabId = new Map<string, string>();
   private readonly windowParking: BrowserWindowParking | null;
   /** Secret values this controller typed; redacted from everything it returns. */
   private readonly typedSecrets: TypedSecretMemory;
@@ -1252,15 +1259,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  async selectTarget(targetId: string): Promise<BrowserObservationValue> {
+  async selectTarget(tabId: string): Promise<BrowserObservationValue> {
+    const targetId = this.browserTargetIdOf(tabId);
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
     this.selectedTargetId = targetId;
     this.ownedTabsChanged();
-    return await this.observe(targetId);
+    return await this.observe(tabId);
   }
 
-  async closeTarget(targetId: string): Promise<BrowserTargetValue[]> {
+  async closeTarget(tabId: string): Promise<BrowserTargetValue[]> {
+    const targetId = this.browserTargetIdOf(tabId);
     if (!this.tabControl) {
       throw new InteractionDefiniteDriverError(
         "unsupported",
@@ -1523,7 +1532,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // A tab showing the browser's error page still belongs to the page it
       // failed to load; save that page so a later restore can retry it.
       const url = target.url.toLowerCase().startsWith("chrome-error:")
-        ? ((await this.errorPageDestination(target.id)) ?? target.url)
+        ? ((await this.errorPageDestination(this.browserTargetIdOf(target.id))) ?? target.url)
         : target.url;
       tabs.push({ url, selected: target.selected });
     }
@@ -1589,14 +1598,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return newest;
   }
 
-  async target(targetId: string): Promise<BrowserTargetValue | null> {
+  async target(tabId: string): Promise<BrowserTargetValue | null> {
+    const targetId = this.browserTargetIdOf(tabId);
     const connection = await this.ensureConnection();
     const info = (await this.targetInfos(connection)).find(
       (candidate) => candidate.targetId === targetId,
     );
     if (!info && this.closedBlankTargetIds.has(targetId))
       throw this.closedBlankTargetError(targetId);
-    if (!info && this.goneTargets.has(targetId)) throw this.missingTargetError(targetId);
+    if (!info && this.goneTargets.has(tabId)) throw this.missingTargetError(targetId);
     if (!info || !isVisibleTarget(info)) return null;
     const state = await this.ensureTargetState(info);
     // A JavaScript dialog blocks ordinary page-domain inspection. Keep the
@@ -1615,8 +1625,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return this.typedSecrets.redact(this.targetFromInfo(info, state));
   }
 
-  async observe(targetId: string): Promise<BrowserObservationValue> {
-    return this.typedSecrets.redact(await this.observeTarget(targetId));
+  async observe(tabId: string): Promise<BrowserObservationValue> {
+    return this.typedSecrets.redact(await this.observeTarget(this.browserTargetIdOf(tabId)));
   }
 
   private async observeTarget(targetId: string): Promise<BrowserObservationValue> {
@@ -1633,8 +1643,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** Refresh only the main-frame generation. No accessibility tree is read. */
-  async targetState(targetId: string): Promise<BrowserTargetStateValue> {
-    return await this.withTarget(targetId, async (state) => {
+  async targetState(tabId: string): Promise<BrowserTargetStateValue> {
+    return await this.withTarget(this.browserTargetIdOf(tabId), async (state) => {
       if (!state.dialog) {
         try {
           await this.untilDialog(state, async () => await this.refreshFrame(state));
@@ -1647,10 +1657,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async readDom(
-    targetId: string,
+    tabId: string,
     request: BrowserDomReadRequestValue,
   ): Promise<BrowserDomReadResponseValue> {
-    return await this.withTarget(targetId, async (state) => {
+    return await this.withTarget(this.browserTargetIdOf(tabId), async (state) => {
       if (request.kind === "count") {
         assertSafeDomReadSelector(request.selector);
       } else if (request.locator.kind === "css") {
@@ -1717,7 +1727,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return BrowserTargetState.parse({
       browserSessionId: this.browserSessionId,
       controllerGeneration: this.controllerGeneration,
-      targetId: state.targetId,
+      targetId: this.tabIdOf(state.targetId),
       targetGeneration: this.targetGeneration(state.targetId),
       documentGeneration: state.documentGeneration,
       frameId: state.frameGeneration,
@@ -1750,13 +1760,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async debug(
-    targetId: string,
+    tabId: string,
     options: {
       kinds?: readonly BrowserDiagnosticKind[];
       afterSequence?: number;
       limit?: number;
     } = {},
   ): Promise<BrowserDiagnosticBatchValue> {
+    const targetId = this.browserTargetIdOf(tabId);
     const kinds = options.kinds ? new Set(options.kinds) : null;
     const afterSequence = boundedNonnegativeInteger(
       options.afterSequence ?? 0,
@@ -1782,7 +1793,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       const batch = BrowserDiagnosticBatch.parse({
         browserSessionId: this.browserSessionId,
         controllerGeneration: this.controllerGeneration,
-        targetId,
+        targetId: this.tabIdOf(targetId),
         targetGeneration: this.targetGeneration(targetId),
         entries,
         cursor: limited
@@ -1795,9 +1806,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async captureScreenshot(
-    targetId: string,
+    tabId: string,
     options: BrowserScreenshotOptions = {},
   ): Promise<BrowserImageFrame> {
+    const targetId = this.browserTargetIdOf(tabId);
     // Lightpanda 0.3.5 implements this CDP method with an embedded static PNG,
     // not pixels from the current page. Never publish it as visual evidence.
     if (this.engine === "lightpanda") {
@@ -1936,10 +1948,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * page's latest state. Focus emulation keeps background tabs painting.
    */
   async recordFrames(
-    targetId: string,
+    tabId: string,
     onFrame: (jpeg: Uint8Array, capturedAtMs: number) => void,
     onEnd: (error: Error | null) => void,
   ): Promise<() => Promise<void>> {
+    const targetId = this.browserTargetIdOf(tabId);
     if (this.engine === "lightpanda") {
       throw new InteractionDefiniteDriverError(
         "unsupported",
@@ -2018,9 +2031,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   async subscribeFrames(
-    targetId: string,
+    tabId: string,
     options: BrowserFrameStreamOptions = {},
   ): Promise<BrowserFrameSubscription> {
+    const targetId = this.browserTargetIdOf(tabId);
     frameStreamDiagnostic("browser.frame.subscribe.begin", {
       browserSessionId: this.browserSessionId,
       targetId,
@@ -2136,7 +2150,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // Input counts as sent once an effectful command left browserd, so a later
     // unresponsive-tab deadline must keep the action's outcome uncertain.
     let effects: { state: TargetState; before: number } | undefined;
-    const observation = await this.withTarget(command.targetId, async (state, info) => {
+    const targetId = this.browserTargetIdOf(command.targetId);
+    const observation = await this.withTarget(targetId, async (state, info) => {
       effects = { state, before: state.actionEffectCount };
       if (!state.dialog) await this.refreshFrame(state);
       this.assertExpectedGenerations(command, state);
@@ -2405,7 +2420,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       throw error;
     });
-    this.refreshSubscribedFrame(command.targetId);
+    this.refreshSubscribedFrame(targetId);
     return redactInteractionSecretValues(observation, secretValues);
   }
 
@@ -2506,7 +2521,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       revision: this.clipboardRevision,
       text: this.clipboardText,
       source: this.clipboardSource,
-      sourceTargetId: this.clipboardSourceTargetId,
+      sourceTargetId: this.clipboardSourceTargetId
+        ? this.tabIdOf(this.clipboardSourceTargetId)
+        : null,
       updatedAt: this.clipboardUpdatedAt,
     });
   }
@@ -2667,7 +2684,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             void this.downloadEvents
               .begin({
                 guid,
-                targetId: state?.targetId ?? null,
+                targetId: state ? this.tabIdOf(state.targetId) : null,
                 suggestedFilename,
               })
               .catch(() => undefined);
@@ -4473,7 +4490,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       frameId: options.state.frameGeneration,
       browserSessionId: this.browserSessionId,
       controllerGeneration: this.controllerGeneration,
-      targetId: options.state.targetId,
+      targetId: this.tabIdOf(options.state.targetId),
       targetGeneration: this.targetGeneration(options.state.targetId),
       documentGeneration: options.state.documentGeneration,
       sequence: options.sequence,
@@ -7900,7 +7917,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private targetFromInfo(info: TargetInfo, state: TargetState | null): BrowserTargetValue {
     return BrowserTarget.parse({
-      id: info.targetId,
+      id: this.tabIdOf(info.targetId),
       browserSessionId: this.browserSessionId,
       controllerGeneration: this.controllerGeneration,
       targetGeneration: this.targetGeneration(info.targetId),
@@ -7971,12 +7988,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return info;
   }
 
-  /** No open tab has this ID: say why when this driver knows, and how to
-   * carry on. */
-  private missingTargetError(targetId: string | null): InteractionDefiniteDriverError {
+  /** The ID callers know a tab by, from the browser's ID for it. */
+  private tabIdOf(browserTargetId: string): string {
+    return this.tabIdsByBrowserId.get(browserTargetId) ?? browserTargetId;
+  }
+
+  /** The browser's ID for the tab a caller names. */
+  private browserTargetIdOf(tabId: string): string {
+    return this.browserIdsByTabId.get(tabId) ?? tabId;
+  }
+
+  /** No open tab has this browser target ID: say why when this driver knows,
+   * and how to carry on. */
+  private missingTargetError(browserTargetId: string | null): InteractionDefiniteDriverError {
     return new InteractionDefiniteDriverError(
       "target_not_found",
-      goneBrowserTargetMessage(targetId ? (this.goneTargets.get(targetId) ?? null) : null),
+      goneBrowserTargetMessage(
+        browserTargetId ? (this.goneTargets.get(this.tabIdOf(browserTargetId)) ?? null) : null,
+      ),
     );
   }
 
@@ -7984,37 +8013,72 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * any other close came from the page or from someone using the browser. */
   private rememberClosedTarget(targetId: string, byCloseCall = false): void {
     const closing = byCloseCall || this.closingTargetIds.has(targetId);
-    const existing = this.goneTargets.get(targetId);
+    const tabId = this.tabIdOf(targetId);
+    const existing = this.goneTargets.get(tabId);
     if (existing?.kind === "relaunched") return;
     if (existing && !closing) return;
     if (!closing && !this.firstSeenAt.has(targetId) && !this.states.has(targetId)) return;
-    this.rememberGoneTarget(targetId, {
+    this.rememberGoneTarget(tabId, {
       kind: "closed",
       at: this.timestamp().replace(/\.\d{3}Z$/u, "Z"),
       byCloseCall: closing,
     });
   }
 
-  private rememberGoneTarget(targetId: string, gone: GoneBrowserTarget): void {
-    this.goneTargets.delete(targetId);
-    this.goneTargets.set(targetId, gone);
+  private rememberGoneTarget(tabId: string, gone: GoneBrowserTarget): void {
+    this.goneTargets.delete(tabId);
+    this.goneTargets.set(tabId, gone);
     while (this.goneTargets.size > MAX_GONE_TARGETS) {
       this.goneTargets.delete(this.goneTargets.keys().next().value!);
     }
   }
 
-  /** The browser this driver runs replaced an earlier one, whose tabs it
-   * reopened with new IDs: a call naming an earlier tab learns why it is gone
-   * and which tab shows its page now. */
+  /**
+   * Give tabs the IDs they had before: each pair names a tab ID callers
+   * already hold and the browser's ID for the open tab it now names. A pair
+   * is skipped when either side already belongs to another tab, so one tab
+   * never has two IDs and one ID never names two tabs.
+   */
+  adoptTabIds(tabs: ReadonlyArray<{ tabId: string; browserTargetId: string }>): void {
+    for (const { tabId, browserTargetId } of tabs) {
+      if (tabId === browserTargetId) continue;
+      if (this.tabIdsByBrowserId.has(browserTargetId) || this.browserIdsByTabId.has(tabId))
+        continue;
+      // The ID names an open tab of its own (never true of IDs this driver
+      // has not seen, as browser target IDs are unique).
+      if (this.firstSeenAt.has(tabId) || this.states.has(tabId)) continue;
+      this.tabIdsByBrowserId.set(browserTargetId, tabId);
+      this.browserIdsByTabId.set(tabId, browserTargetId);
+      this.goneTargets.delete(tabId);
+    }
+  }
+
+  /** The tab IDs this driver gave tabs other than the browser's own IDs for
+   * them (adoptTabIds), for a later controller on the same browser. Tabs
+   * known to be closed are left out. */
+  adoptedTabIds(): Array<{ tabId: string; browserTargetId: string }> {
+    return [...this.tabIdsByBrowserId]
+      .filter(([, tabId]) => !this.goneTargets.has(tabId))
+      .map(([browserTargetId, tabId]) => ({ tabId, browserTargetId }));
+  }
+
+  /** The browser this driver runs replaced an earlier one and reopened its
+   * tabs. Each reopened tab keeps its earlier ID; a call naming an earlier tab
+   * that no reopened tab shows learns why it is gone. */
   noteRelaunchedTabs(relaunched: BrowserRelaunchedTabs): void {
+    this.adoptTabIds(
+      relaunched.tabs.flatMap((tab) =>
+        tab.replacementId ? [{ tabId: tab.targetId, browserTargetId: tab.replacementId }] : [],
+      ),
+    );
     for (const tab of relaunched.tabs) {
+      if (this.browserIdsByTabId.has(tab.targetId)) continue;
       this.rememberGoneTarget(tab.targetId, {
         kind: "relaunched",
         reason: relaunched.reason,
         ...(relaunched.idleReleaseMinutes !== undefined
           ? { idleReleaseMinutes: relaunched.idleReleaseMinutes }
           : {}),
-        replacementId: tab.replacementId,
       });
     }
   }
@@ -8022,7 +8086,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   /** The session closed its own empty tab when it last let go of the
    * person's browser: say so, and where to continue. */
   private closedBlankTargetError(targetId: string): InteractionDefiniteDriverError {
-    const current = this.selectedTargetId;
+    const current = this.selectedTargetId ? this.tabIdOf(this.selectedTargetId) : null;
     return new InteractionDefiniteDriverError(
       "target_not_found",
       `browser target does not exist: this session closed this empty tab when it last released the browser${current && current !== targetId ? `; its current tab is ${current}` : ""}`,
