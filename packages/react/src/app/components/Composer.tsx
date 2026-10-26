@@ -58,7 +58,7 @@ export function ConsoleComposer(props: {
   usageRefreshKey?: unknown | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back for editing. */
   queuedRecall?: ComposerQueuedRecall | undefined;
-  /** Work this session started is running; keeps Pause available while it is idle. */
+  /** Work this session started is running, or a wake is pending; keeps Pause available while it is idle. */
   running?: boolean | undefined;
 }) {
   const context = useAppContext();

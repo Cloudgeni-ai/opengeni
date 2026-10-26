@@ -176,7 +176,8 @@ export type UseChatComposerControllerOptions = {
   /**
    * A response is in progress; shows the Stop control under `runControl="stop"`.
    * Under `pause` it keeps Pause available while this conversation is idle,
-   * for example while work it started is still running.
+   * for example while work it started is still running or a wake (an agent's
+   * timed wait or a scheduled run) is pending.
    */
   running?: boolean | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back for editing. */
@@ -268,15 +269,10 @@ export function applyComposerTextareaHeight(
 }
 
 /**
- * Headless interaction layer for a chat composer. It is the single owner of
- * delivery guards, keyboard routing, command interception, drag/drop, focus,
- * confirmation, and feedback state used by both the preset and primitives.
- */
-/**
- * How long working controls stay after the work stops. Between a turn and the
- * queued message that follows it, the session and its queue settle through
- * separate updates; this keeps Pause and the Send wording from blinking
- * across that gap, and still clears them soon after the agent is done.
+ * How long Pause stays after the work stops. Between a turn and the queued
+ * message that follows it, the session and its queue settle through separate
+ * updates; this keeps Pause from blinking across that gap, and still clears
+ * it soon after the agent is done.
  */
 const WORKING_CONTROLS_LINGER_MS = 1_000;
 
@@ -305,6 +301,11 @@ function useLingeringTrue(value: boolean, lingerMs: number): boolean {
   return current.value || current.lingering;
 }
 
+/**
+ * Headless interaction layer for a chat composer. It is the single owner of
+ * delivery guards, keyboard routing, command interception, drag/drop, focus,
+ * confirmation, and feedback state used by both the preset and primitives.
+ */
 export function useChatComposerController({
   delivery,
   draft,
@@ -332,7 +333,11 @@ export function useChatComposerController({
   // nothing runs or waits the composer just sends. A delivery that does not
   // report `working` keeps the working controls, as before.
   const deliveryWorking = delivery.working ?? true;
-  const working = useLingeringTrue(deliveryWorking, WORKING_CONTROLS_LINGER_MS);
+  // Send's wording follows what Send does right now, like the Steer/Queue
+  // choice beside it. Only Pause lingers: pausing just after work stops is
+  // harmless, while a lingering "Queue message" would describe a Send that no
+  // longer queues.
+  const working = deliveryWorking;
   const workstreamWorking = useLingeringTrue(
     deliveryWorking || running,
     WORKING_CONTROLS_LINGER_MS,
@@ -859,11 +864,11 @@ export function useChatComposerController({
     submit,
     busySend: delivery.busySend ?? "queue",
     singleSend,
-    /** The agent works here (a turn runs or messages wait); Send uses its working wording. */
+    /** The agent works here (a turn runs or messages wait); Send uses its working wording and the Steer/Queue choice shows. */
     working,
-    /** This conversation or work it started is running; Pause is offered. */
+    /** This conversation, work it started or a pending wake keeps it working; Pause is offered (lingers briefly). */
     workstreamWorking,
-    alternateSend: delivery.sendAlternate ? (delivery.alternateSend ?? null) : null,
+    alternateSend: delivery.sendAlternate && working ? (delivery.alternateSend ?? null) : null,
     submittingMode,
     handleKeyDown,
     handlePaste,
@@ -1403,20 +1408,59 @@ export type ComposerPauseButtonProps = Omit<
   OwnedButtonProps
 >;
 
+/**
+ * Whether Pause is offered: `shown` while this conversation (or work it
+ * started, or a pending wake) keeps it working; `reserved` when Pause would be
+ * offered but nothing is working, so its room stays in the row (see
+ * {@link PauseButtonSlot}); `none` otherwise.
+ */
+function pausePresence(controller: ChatComposerController): "shown" | "reserved" | "none" {
+  if (
+    controller.runControl !== "pause" ||
+    !controller.effectiveControl ||
+    controller.paused ||
+    !controller.hasControl
+  )
+    return "none";
+  return controller.workstreamWorking ? "shown" : "reserved";
+}
+
+/** Pause's box, shared by the button and the room it keeps when hidden. */
+const PAUSE_BOX_CLASS = "inline-flex size-8 items-center justify-center pointer-coarse:size-11";
+/** On a narrow composer Pause steps aside while there is a draft. */
+const PAUSE_YIELDS_CLASS = "og-composer-pause-yields max-sm:hidden";
+
+/**
+ * Keeps Pause's room in the controls row while Pause is hidden because
+ * nothing is working. Placed at the end of the controls (whose free space is
+ * empty anyway), it leaves the controls exactly as wide as when Pause shows
+ * in the actions, so width-dependent controls such as the model picker's
+ * label keep one layout through every turn instead of jumping as Pause comes
+ * and goes. Invisible and hidden from assistive technology.
+ */
+export function PauseButtonSlot() {
+  const controller = useComposerController();
+  if (pausePresence(controller) !== "reserved") return null;
+  return (
+    <span
+      aria-hidden
+      data-og-composer-pause-slot=""
+      className={cn(
+        PAUSE_BOX_CLASS,
+        "invisible shrink-0",
+        controller.submitBlocker !== "empty" && PAUSE_YIELDS_CLASS,
+      )}
+    />
+  );
+}
+
 export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProps>(
   function ComposerPauseButton(
     { className, "aria-label": ariaLabel, title, children, ...props },
     ref,
   ) {
     const controller = useComposerController();
-    if (
-      controller.runControl !== "pause" ||
-      !controller.effectiveControl ||
-      controller.paused ||
-      !controller.hasControl ||
-      !controller.workstreamWorking
-    )
-      return null;
+    if (pausePresence(controller) !== "shown") return null;
     const busy = controller.pausing || controller.resuming;
     const tip = title ?? controller.messages.pauseTitle;
     // On a narrow composer, Send and its Queue/Steer choice need the room
@@ -1434,11 +1478,12 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
           disabled={busy}
           aria-label={ariaLabel ?? controller.messages.pauseAriaLabel}
           className={cn(
-            "inline-flex size-8 items-center justify-center rounded-og-md border border-og-border pointer-coarse:size-11",
+            PAUSE_BOX_CLASS,
+            "rounded-og-md border border-og-border",
             "bg-og-surface-2 text-og-fg-muted transition-colors duration-150",
             "hover:border-og-status-waiting/50 hover:text-og-status-waiting",
             "disabled:opacity-50",
-            yieldsToDraft && "og-composer-pause-yields max-sm:hidden",
+            yieldsToDraft && PAUSE_YIELDS_CLASS,
             className,
           )}
         >

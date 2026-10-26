@@ -868,4 +868,104 @@ describe("ChatComposer while the agent is idle", () => {
     expect(pauseButton()).toBeNull();
     expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
   });
+
+  test("Pause's room stays in the controls while it is hidden, so the row never changes width", async () => {
+    const slot = () =>
+      mounted!.container.querySelector<HTMLElement>("[data-og-composer-pause-slot]");
+    const controls = () => mounted!.container.querySelector<HTMLElement>(".og-composer-controls");
+    const boxOf = (element: Element | null) =>
+      (element?.className ?? "")
+        .split(/\s+/)
+        .filter((name) =>
+          /^(?:pointer-coarse:)?size-|^og-composer-pause-yields$|^max-sm:hidden$/.test(name),
+        )
+        .sort();
+    const base = composer(spy());
+    const render = (state: ComposerState, control = active) => (
+      <ChatComposer
+        composer={state}
+        effectiveControl={control}
+        controlsStart={<span data-model-controls="">Model</span>}
+      />
+    );
+    // Idle with an empty draft: no Pause, but its box keeps its room at the
+    // end of the controls, invisible and hidden from assistive technology.
+    const empty = { ...base, value: "", hasDraftContent: () => false, canSend: false };
+    mounted = await renderComponent(render({ ...empty, working: false }));
+    expect(pauseButton()).toBeNull();
+    expect(slot()).not.toBeNull();
+    expect(slot()?.getAttribute("aria-hidden")).toBe("true");
+    expect(slot()?.className).toContain("invisible");
+    expect(controls()?.lastElementChild).toBe(slot());
+    const idleBox = boxOf(slot());
+    // Working: Pause takes the same box in the actions and the room is released.
+    await mounted.rerender(render({ ...empty, working: true }));
+    expect(slot()).toBeNull();
+    expect(boxOf(pauseButton())).toEqual(idleBox);
+    // With a draft, both step aside on narrow composers the same way.
+    await mounted.rerender(render({ ...base, working: true }));
+    const draftBox = boxOf(pauseButton());
+    expect(draftBox).toContain("og-composer-pause-yields");
+    await mounted.rerender(render({ ...base, working: false }));
+    await wait(1_100);
+    expect(pauseButton()).toBeNull();
+    expect(boxOf(slot())).toEqual(draftBox);
+    // Paused (Pause is never offered there) or without control: no room either.
+    await mounted.rerender(render({ ...base, working: false }, { ...active, state: "paused" }));
+    expect(slot()).toBeNull();
+    await mounted.rerender(
+      <ChatComposer composer={{ ...base, working: false }} controlsStart={<span>Model</span>} />,
+    );
+    expect(slot()).toBeNull();
+  });
+
+  test("at the turn's end Steer and Send's queue wording leave together; only Pause lingers", async () => {
+    const base = composer(spy());
+    const render = (working: boolean) => (
+      <ChatComposer
+        composer={{
+          ...base,
+          working,
+          alternateSend: working ? "steer" : null,
+          sendAlternate: async () => true,
+        }}
+        effectiveControl={active}
+      />
+    );
+    const alternate = () => mounted!.container.querySelector("[data-og-composer-alternate-send]");
+    mounted = await renderComponent(render(true));
+    expect(alternate()).not.toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe(
+      "Queue message (Enter); steer with Cmd/Ctrl+Enter",
+    );
+    await mounted.rerender(render(false));
+    expect(alternate()).toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+    expect(pauseButton()).not.toBeNull();
+    // A host that reports a Steer choice while idle does not get it shown.
+    await mounted.rerender(
+      <ChatComposer
+        composer={{
+          ...base,
+          working: false,
+          alternateSend: "steer",
+          sendAlternate: async () => true,
+        }}
+        effectiveControl={active}
+      />,
+    );
+    expect(alternate()).toBeNull();
+  });
+
+  test("an idle conversation with a pending wake keeps Pause, with plain Send", async () => {
+    // The session route passes `running` while a timed wait or an automation
+    // can still wake the session; with nothing pending it shows only Send.
+    const state = { ...composer(spy()), working: false, alternateSend: null };
+    mounted = await renderComponent(
+      <ChatComposer composer={state} effectiveControl={active} running />,
+    );
+    expect(pauseButton()).not.toBeNull();
+    expect(mounted.container.querySelector("[data-og-composer-pause-slot]")).toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+  });
 });

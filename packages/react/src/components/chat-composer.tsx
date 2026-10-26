@@ -28,6 +28,7 @@ import {
   Input,
   ModelPicker,
   PauseButton,
+  PauseButtonSlot,
   PausedState,
   RestoredResources,
   Root,
@@ -117,7 +118,8 @@ export type ChatComposerProps = {
   /**
    * A response is in progress (drives the Stop control). Under `pause` it
    * keeps Pause available while the conversation itself is idle, for
-   * example while work it started is still running.
+   * example while work it started is still running or a wake (an agent's
+   * timed wait or a scheduled run) is pending.
    */
   running?: boolean | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back (`useQueuedPromptRecall`). */
@@ -267,6 +269,8 @@ export function ChatComposer({
                           {controlsStart}
                         </motion.span>
                       ) : null}
+                      {/* Pause's room while it is hidden, so the controls keep one width. */}
+                      <PauseButtonSlot />
                     </Controls>
                   ) : (
                     <Hint>{hint}</Hint>

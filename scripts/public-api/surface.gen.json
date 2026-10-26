@@ -38191,6 +38191,7 @@
       "SessionAutomationWait": "type",
       "sessionAutomationWaitLabel": "value",
       "sessionDisplayTitle": "value",
+      "sessionHasPendingWake": "value",
       "sessionHasUpcomingSchedule": "value",
       "sessionInputWait": "value",
       "SessionListRow": "type",
@@ -38200,7 +38201,8 @@
       "SessionRecencyGroup": "type",
       "sessionRenameSeed": "value",
       "sessionRepoLabel": "value",
-      "SessionStatusTone": "type"
+      "SessionStatusTone": "type",
+      "withLineageAutomationFacts": "value"
     },
     "@opengeni/react/session-realtime": {
       "CODEX_LIVE_MODEL": "value",
