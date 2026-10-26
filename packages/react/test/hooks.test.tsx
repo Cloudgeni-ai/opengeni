@@ -3000,6 +3000,7 @@ describe("useComposer queue-vs-steer", () => {
     expect(hook.result.current.busySend).toBe("steer");
     expect(hook.result.current.singleSend).toBe(false);
     expect(hook.result.current.alternateSend).toBe("queue");
+    expect(hook.result.current.working).toBe(true);
 
     await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
     await flushing(async () =>
@@ -3011,11 +3012,14 @@ describe("useComposer queue-vs-steer", () => {
     destination = "chat";
     await hook.rerender(undefined);
     expect(hook.result.current.alternateSend).toBeNull();
+    // Nothing runs or waits: the composer just sends.
+    expect(hook.result.current.working).toBe(false);
     await flushing(async () => expect(await hook.result.current.send("idle")).toBe(true));
     destination = "queue";
     control = { ...control, state: "paused", directState: "paused" };
     await hook.rerender(undefined);
     expect(hook.result.current.alternateSend).toBeNull();
+    expect(hook.result.current.working).toBe(false);
     await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
 
     expect(calls).toEqual([

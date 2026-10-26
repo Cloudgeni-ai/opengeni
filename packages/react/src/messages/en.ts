@@ -1150,6 +1150,7 @@ export const englishMessages = {
   "composerMessages.sendingFailedYourDraftIs":
     "Sending failed — your draft is still here. Try again.",
   "composerMessages.sendMessage": "Send message",
+  "composerMessages.sendMessageEnter": "Send message (Enter)",
   "composerMessages.showPauseDetails": "Show pause details",
   "composerMessages.singleSendBusyTitle": "Send (Enter): the agent reads it as soon as it can",
   "composerMessages.singleSendPausedPlaceholder":
