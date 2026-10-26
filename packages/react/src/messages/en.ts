@@ -3120,6 +3120,76 @@ export const englishMessages = {
   "native.presentation.you": "You",
   "native.presentation.youAnswered": "You answered",
   "native.presentation.yourInputIsNeeded": "Your input is needed",
+  "native.meetings.meetingView.aNewTranscriptIsMadeFromTheFullAudio":
+    "A new transcript is made from the full audio. The current one stays until it's ready, and speaker names carry over.",
+  "native.meetings.meetingView.delete": "Delete",
+  "native.meetings.meetingView.makePrivate": "Make private",
+  "native.meetings.meetingView.nameSpeaker": "Name speaker",
+  "native.meetings.meetingView.recordingNowTheTranscriptStarts":
+    "Recording now. The transcript starts when you stop.",
+  "native.meetings.meetingView.renameName": "Rename {name}",
+  "native.meetings.meetingView.searchPeopleOrTypeAName": "Search people or type a name",
+  "native.meetings.meetingView.shareWithWorkspace": "Share with workspace",
+  "native.meetings.meetingView.speakerName": "Speaker name",
+  "native.meetings.meetingView.thisMeetingCouldntLoad":
+    "This meeting couldn't load. It may have been deleted, or you may not have access.",
+  "native.meetings.meetingView.transcribeAgainQuestion": "Transcribe again?",
+  "native.meetings.meetingView.transcribingThisTakes":
+    "Transcribing. This takes a minute or two for an hour of audio.",
+  "native.meetings.meetingView.tryAgainInAMoment": "Try again in a moment.",
+  "native.meetings.meetingView.useName": "Use “{name}”",
+  "native.meetings.meetingView.waitingForTheRestOfTheAudio":
+    "Waiting for the rest of the audio. It uploads from the device that recorded it.",
+  "native.meetings.meetingsList.finishingTheUploadOfMeetingsRecordedEarlier_one":
+    "Finishing the upload of a meeting recorded earlier.",
+  "native.meetings.meetingsList.finishingTheUploadOfMeetingsRecordedEarlier_other":
+    "Finishing the upload of {count} meetings recorded earlier.",
+  "native.meetings.meetingsList.keepRecording": "Keep recording",
+  "native.meetings.meetingsList.meetingsCouldntLoadPullDown":
+    "Meetings couldn't load. Pull down to try again.",
+  "native.meetings.meetingsList.noMeetingsYetRecordOne":
+    "No meetings yet. Record one above, here or on the web, and its transcript shows up here.",
+  "native.meetings.meetingsList.noSoundIsReachingTheMicrophone":
+    "No sound is reaching the microphone. Check that it isn't muted or covered.",
+  "native.meetings.meetingsList.openSettings": "Open Settings",
+  "native.meetings.meetingsList.recent": "Recent",
+  "native.meetings.meetingsList.recordAMeeting": "Record a meeting",
+  "native.meetings.meetingsList.recordedDuration": "Recorded {duration}",
+  "native.meetings.meetingsList.recordsWithThisPhoneSMicrophone":
+    "Records with this phone's microphone, even when the screen is locked. When you stop, you get a transcript of who said what.",
+  "native.meetings.meetingsList.showsWhatSSaid": "Shows what's said as it's said.",
+  "native.meetings.meetingsList.starting": "Starting…",
+  "native.meetings.meetingsList.startRecordingAMeeting": "Start recording a meeting",
+  "native.meetings.meetingsList.stopRecording": "Stop recording?",
+  "native.meetings.meetingsList.theMeetingIsUploadedAndTranscribed":
+    "The meeting is uploaded and transcribed.",
+  "native.meetings.meetingsList.thisVersionOfTheAppCantRecord":
+    "This version of the app can't record. Update it to record meetings on this phone.",
+  "native.meetings.meetingsList.untitledMeeting": "Untitled meeting",
+  "native.meetings.phoneText.anotherAppOrACall":
+    "Another app or a call is using it. Try again when it's free.",
+  "native.meetings.phoneText.connecting": "Connecting…",
+  "native.meetings.phoneText.dateTime": "{date}, {time}",
+  "native.meetings.phoneText.itAddsAboutPerHour": "It adds about ${value} per hour of audio.",
+  "native.meetings.phoneText.itUsesExtraTranscriptionCredit": "It uses extra transcription credit.",
+  "native.meetings.phoneText.keepsRecordingWhenLocked":
+    "Keeps recording when the screen is locked or you switch apps. Audio is saved on this phone as you go.",
+  "native.meetings.phoneText.microphoneAccessIsOff": "Microphone access is off",
+  "native.meetings.phoneText.noConnectionRecordingContinues":
+    "No connection right now. Recording continues, and the audio stays on this phone until it uploads.",
+  "native.meetings.phoneText.noConnectionTheAudioStays":
+    "No connection right now. The audio stays on this phone and uploads when you're back online.",
+  "native.meetings.phoneText.pausedWhileAnotherAppUses":
+    "Paused while another app or a call uses the microphone. Recording continues by itself when it's free.",
+  "native.meetings.phoneText.reconnecting": "Reconnecting…",
+  "native.meetings.phoneText.theMicrophoneIsBusy": "The microphone is busy",
+  "native.meetings.phoneText.theRecordingIsSavedOnThisPhone":
+    "The recording is saved on this phone and uploads again the next time you open the app.",
+  "native.meetings.phoneText.thisVersionCanTRecord": "This build can't record",
+  "native.meetings.phoneText.turnOnTheMicrophoneInSettings":
+    "Turn on the microphone for this app in Settings, then start again.",
+  "native.meetings.phoneText.updateTheAppToRecord":
+    "Update the app to record meetings on this phone.",
   "native.realtime.agentCall.canTCallThisSession": "Can't call this session",
   "native.realtime.agentCall.connecting": "Connecting…",
   "native.realtime.agentCall.couldnTStartTheCall": "Couldn't start the call",

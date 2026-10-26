@@ -14,6 +14,7 @@
       "@opengeni/react-native/webrtc": ["../../packages/react-native/src/webrtc.ts"],
       "@opengeni/react-native/adapters": ["../../packages/react-native/src/adapters.ts"],
       "@opengeni/react-native/recordings": ["../../packages/react-native/src/recordings/index.ts"],
+      "@opengeni/react-native/meetings": ["../../packages/react-native/src/meetings/index.ts"],
       "zod": ["../../node_modules/zod"],
       "zod/*": ["../../node_modules/zod/*"],
       "*": ["./node_modules/@types/*", "./node_modules/*"],
