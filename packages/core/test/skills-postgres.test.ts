@@ -342,10 +342,11 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null, personal = 
 async function markPersonalWorkspace(
   f: Awaited<ReturnType<typeof fixture>>,
   ownerSubjectId: string,
+  status: "active" | "suspended" = "active",
 ) {
   await shared!.admin`
     insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
-    values (${f.context.accountId}, ${ownerSubjectId}, 'active', ${f.context.workspaceId})`;
+    values (${f.context.accountId}, ${ownerSubjectId}, ${status}, ${f.context.workspaceId})`;
 }
 
 async function saveWorkspaceSkill(f: Awaited<ReturnType<typeof fixture>>) {
@@ -611,7 +612,43 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect(approved.removed).toBe(true);
     expect(await readSkill(client.db, review.context, kept.skillId)).toBeNull();
 
-    // Off refuses before anything changes.
+    // A directly installed workspace Skill is the owner's too.
+    const key = crypto.randomUUID();
+    const content = skillMarkdown("Installed Personal workspace Skill");
+    const hash = createHash("sha256").update(content).digest("hex");
+    const installed = await installPortableSkill(client.db, {
+      ...automatic.context,
+      subjectId: automatic.human.actor.subjectId,
+      skillActor: automatic.human.actor,
+      capabilityId: `skill:${key}`,
+      pluginKey: `skill/test/${key}`,
+      source: "github",
+      sourceUrl: "https://example.test/skills",
+      repositoryUrl: "https://example.test/repo",
+      sourceCommit: "a".repeat(40),
+      sourcePath: key,
+      name: "test-skill",
+      description: "Test Skill folder",
+      contentSha256: hash,
+      totalBytes: Buffer.byteLength(content),
+      files: [
+        { path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256: hash },
+      ],
+    });
+    expect(
+      (
+        await removeSkill(
+          client.db,
+          agentRemoval(automatic, {
+            skillId: installed.skillReceipt.skillId,
+            revisionId: installed.skillReceipt.revisionId,
+          }),
+        )
+      ).removed,
+    ).toBe(true);
+    expect(await listInstalledPortableSkills(client.db, automatic.context.workspaceId)).toEqual([]);
+
+    // Off refuses before the Skill is read; this pins that ordering, not 0988.
     const off = await fixture("off", true);
     await markPersonalWorkspace(off, off.human.actor.subjectId);
     const guarded = await saveWorkspaceSkill(off);
@@ -643,6 +680,32 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     );
     expect(await readSkill(client.db, foreignOwner.context, foreignSkill.skillId)).not.toBeNull();
 
+    // An owner whose membership is not active is not a verified owner.
+    const suspended = await fixture("automatic", true);
+    await markPersonalWorkspace(suspended, suspended.human.actor.subjectId, "suspended");
+    const suspendedSkill = await saveWorkspaceSkill(suspended);
+    await expectDatabaseGuard(
+      removeSkill(client.db, agentRemoval(suspended, suspendedSkill)),
+      "Skill outside accepted learning scope",
+    );
+    expect(await readSkill(client.db, suspended.context, suspendedSkill.skillId)).not.toBeNull();
+
+    // A removal never names a scope, even its Skill's own one, in either kind
+    // of workspace.
+    for (const f of [sharedWorkspace, foreignOwner]) {
+      const skill = f === sharedWorkspace ? sharedSkill : foreignSkill;
+      const { accountId, workspaceId, actor, ...request } = agentRemoval(f, skill);
+      await expectDatabaseGuard(
+        applySkillLifecycle(
+          client.db,
+          { accountId, workspaceId, actor },
+          { ...request, operation: "remove", scope: "workspace" },
+        ),
+        "Skill scope is not available to this chat",
+      );
+      expect(await readSkill(client.db, f.context, skill.skillId)).not.toBeNull();
+    }
+
     // Another person's personal Skill stays out of reach of the owner's chat.
     const owner = await fixture("automatic", true);
     await markPersonalWorkspace(owner, owner.human.actor.subjectId);
@@ -658,7 +721,10 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       skillId: crypto.randomUUID(),
       operationId: crypto.randomUUID(),
     });
-    await expect(removeSkill(client.db, agentRemoval(owner, othersSkill))).rejects.toThrow();
+    await expectDatabaseGuard(
+      removeSkill(client.db, agentRemoval(owner, othersSkill)),
+      "Skill is outside authorized scope",
+    );
     expect(
       await readSkill(
         client.db,
@@ -2472,6 +2538,32 @@ describe("one chat Skill confirmation", () => {
     const after =
       await shared.admin`SELECT id,questions,response FROM session_human_input_requests WHERE session_id=${f.agent.actor.sessionId} ORDER BY id`;
     expect(after).toEqual(before);
+  });
+
+  test("in a Personal workspace the owner confirms their chat's workspace Skill removal in chat", async () => {
+    if (!client || !shared) return;
+    const f = await fixture("suggest", true);
+    await markPersonalWorkspace(f, f.human.actor.subjectId);
+    const saved = await saveWorkspaceSkill(f);
+    const pending = await removeSkill(client.db, agentRemoval(f, saved));
+    expect(pending).toMatchObject({ outcome: "pending", removed: false });
+    expect(skillReviewHumanInput(pending.skillReview!).questions[0]!.label).toBe(
+      "Permanently delete this Skill?",
+    );
+    const requestId = await answeredSkillInput(
+      f,
+      pending.skillReview!,
+      ["save"],
+      f.human.actor.subjectId,
+      { serializeWire: true },
+    );
+    const result = await confirmSkillHumanResponse(client.db, {
+      ...f.context,
+      subjectId: f.human.actor.subjectId,
+      requestId,
+    });
+    expect(result).toMatchObject({ outcome: "applied", removed: true, removedScope: "workspace" });
+    expect(await readSkill(client.db, f.context, saved.skillId)).toBeNull();
   });
 
   test("direct agent Skill installation returns one bound chat review and activates installed files", async () => {

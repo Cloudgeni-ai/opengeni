@@ -10,6 +10,10 @@
 -- proposal for the owner, Off refuses). Shared workspaces keep the 0824 rule:
 -- a private chat removes only its person's own Skills, and nobody else's
 -- personal Skill is reachable.
+-- A removal never chooses a destination, so an explicit scope on it is
+-- refused: otherwise a request naming the Skill's own scope would skip the
+-- cross-scope check below. The agent tool sends no scope on a removal, so
+-- previous binaries are unaffected.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
@@ -19,6 +23,17 @@ BEGIN
   SELECT pg_get_functiondef(format('%I.skill_apply_lifecycle(uuid,uuid,jsonb,jsonb)', current_schema())::regprocedure)
     INTO STRICT definition;
 
+  -- 1. A removal names no destination.
+  anchor := $a$    IF p_request ? 'scope' AND p_request->>'scope' IS DISTINCT FROM scope THEN
+      IF NOT ((scope='user' AND p_request->>'scope'='workspace')$a$;
+  replacement := $r$    IF p_request ? 'scope' AND p_request->>'scope' IS DISTINCT FROM scope THEN
+      IF operation='remove' OR NOT ((scope='user' AND p_request->>'scope'='workspace')$r$;
+  IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
+    RAISE EXCEPTION 'skill_apply_lifecycle removal scope anchor drifted';
+  END IF;
+  definition := replace(definition, anchor, replacement);
+
+  -- 2. The owner's own Personal workspace Skills.
   anchor := $a$      IF operation='remove' OR NOT ((head.scope='workspace' AND scope='user')
         OR (head.scope='user' AND scope='workspace' AND learning_actor->>'subjectId' IS NOT NULL)) THEN
         RAISE EXCEPTION 'Skill outside accepted learning scope' USING ERRCODE='42501'; END IF;$a$;

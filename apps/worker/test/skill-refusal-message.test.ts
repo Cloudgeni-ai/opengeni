@@ -15,7 +15,9 @@ describe("skillRefusalMessage", () => {
     expect(message).toContain(
       "in a shared workspace, a private chat removes only personal Skills and a shared chat only workspace Skills",
     );
-    expect(message).toContain("the person can remove it on the Skills page");
+    expect(message).toContain(
+      "a workspace Skill or the person's own Skill can still be removed on the Skills page by someone who manages Skills",
+    );
     // A Personal workspace owner's chat may remove its workspace Skills
     // (migration 0988), so the refusal no longer claims a blanket rule.
     expect(message).not.toContain("(a private chat removes only personal Skills");
