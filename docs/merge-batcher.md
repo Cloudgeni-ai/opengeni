@@ -251,11 +251,27 @@ settings are explicit; the cache should remain a batcher-owned bare repository.
 | `BATCHER_FETCH_TIMEOUT_SECONDS` | `600` for cold/large Git fetches; other Git commands retain a 60-second bound |
 | `BATCHER_MISSING_RUN_SECONDS` | `900` before a never-started workflow becomes an abandoned infrastructure hold |
 | `BATCHER_LEASE_SECONDS` | `120`, durable provider lease, not local leadership |
+| `BATCHER_OWNER_ID` | Random per process; a supervisor that runs one `--once` child at a time passes one UUID per control generation (see below) |
 | `PORT` | `8080` |
 | `GH_TOKEN` or `GITHUB_TOKEN` | Existing repository token; never baked into the image |
 | `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY` | Alternative App authentication; private key PEM supplied at runtime |
 
 An existing token is preferred over App authentication when both are configured.
+
+`BATCHER_OWNER_ID` is the durable lease owner. Without it every process is its own
+owner, so a supervisor spawning `run --once` children waits out each predecessor's
+lease and acts only every other cycle. A supervisor generates one UUID when it
+adopts a control generation and passes it to every child of that generation; a
+new START gets a new ID. Sharing it is safe only because the supervisor never
+starts a child before the previous one has provably exited. It does not bypass
+anything: every write still needs the state-ref compare-and-swap and epoch fence,
+and processes with another owner, including other generations, still wait for
+the lease. Never configure the same ID for concurrently running processes.
+Because a running generation now renews the lease continuously, operator
+`recover-effect` and `recover-missing-run` commands (random owners) are fenced
+until the controller is stopped: STOP first, then run them. The supervisor
+reports the generation's owner as `controllerOwner` in `/status` and in each
+`writer_started` record for attribution.
 App authentication mints a short-lived installation token; in shadow it requests
 only contents/actions/pull_requests/issues **read** permissions. That auth exchange
 does not mutate repository refs, comments, labels, workflows or checks. The
