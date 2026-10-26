@@ -256,6 +256,9 @@ const billingPortalSurfaceFiles = new Set([
   // Generated organization MCP action metadata likewise records, never serves,
   // the billing route; calls dispatch through the canonical route's own guards.
   "packages/contracts/src/app-action-catalog.gen.ts",
+  // Names the route a chat's action call may use, to show the page it opens;
+  // records, never serves, the route.
+  "packages/contracts/src/session-history.ts",
 ]);
 
 export function checkBillingPortalSurface(file: string, text: string, out: Finding[]): void {

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_STEP_TYPES,
   isPresentedSessionToolCall,
@@ -567,7 +568,12 @@ test("SQL keeps app action calls that open a payment page, like isPresentedSessi
     // The "METHOD /path" naming, with surrounding whitespace (what the action
     // runner trims, Unicode included), as text and as an object.
     { name: "opengeni__admin_action_call", arguments: '{"id":" POST /v1/billing/checkout\\n"}' },
-    { name: "admin_action_call", arguments: { id: "\tPOST /v1/billing/portal " } },
+    {
+      name: "admin_action_call",
+      arguments: {
+        id: `\t${SESSION_EVENT_PRESENTED_APP_ACTIONS.createBillingPortalSession.route} `,
+      },
+    },
     {
       name: "opengeni__admin_action_call",
       arguments: '{"id":"\\u00a0createBillingCheckout\\u3000"}',

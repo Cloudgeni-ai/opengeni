@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { AccessGrant } from "@opengeni/contracts";
+import { SESSION_EVENT_PRESENTED_APP_ACTIONS, type AccessGrant } from "@opengeni/contracts";
 
 import {
   createSessionAdminReach,
@@ -39,7 +39,10 @@ function tools(authority: SessionAppActionAuthority, options: { canPay?: boolean
             amountUsd: 20,
           });
         }
-        if (request.url.endsWith("/v1/billing/portal")) {
+        if (
+          `${request.method} ${new URL(request.url).pathname}` ===
+          SESSION_EVENT_PRESENTED_APP_ACTIONS.createBillingPortalSession.route
+        ) {
           return Response.json({ url: "https://billing.stripe.com/p/session/x" });
         }
         return Response.json({ error: "forbidden" }, { status: 403 });

@@ -68,7 +68,11 @@ test("opening a checkout needs no confirmation in the chat; a billing portal lin
   }
   // The same action named by its route reads the same.
   expect(appActionCallNeedsConfirmation({ id: "POST /v1/billing/checkout" })).toBe(false);
-  expect(appActionCallNeedsConfirmation({ id: "POST /v1/billing/portal" })).toBe(true);
+  expect(
+    appActionCallNeedsConfirmation({
+      id: SESSION_EVENT_PRESENTED_APP_ACTIONS.createBillingPortalSession.route,
+    }),
+  ).toBe(true);
   // A subscription change charges at once, so it still asks.
   expect(appActionCallNeedsConfirmation({ id: "upgradeBillingSubscription" })).toBe(true);
   expect(appActionCallNeedsConfirmation({ id: "createOrganizationInvitation" })).toBe(true);
