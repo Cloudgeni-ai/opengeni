@@ -2569,7 +2569,6 @@ export const englishMessages = {
     "The live transcription provider is busy right now.",
   "meetings.recorderPanel.theLiveTranscriptionProviderRefused":
     "Live transcription rejected the workspace's key. Ask an admin to check it.",
-  "meetings.recorderPanel.theLiveTranscriptUsesExtra": "Uses extra transcription credit.",
   "meetings.recorderPanel.theMeetingWasDeletedOr":
     "The meeting was deleted, or you no longer have access to it.",
   "meetings.recorderPanel.theServerRefusedTheAudio": "The server refused the audio.",
@@ -3177,7 +3176,6 @@ export const englishMessages = {
   "native.meetings.phoneText.connecting": "Connecting…",
   "native.meetings.phoneText.dateTime": "{date}, {time}",
   "native.meetings.phoneText.itAddsAboutPerHour": "It adds about ${value} per hour of audio.",
-  "native.meetings.phoneText.itUsesExtraTranscriptionCredit": "It uses extra transcription credit.",
   "native.meetings.phoneText.keepsRecordingWhenLocked":
     "Keeps recording when the screen is locked or you switch apps.",
   "native.meetings.phoneText.microphoneAccessIsOff": "Microphone access is off",

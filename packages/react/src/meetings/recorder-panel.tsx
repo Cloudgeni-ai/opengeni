@@ -855,7 +855,9 @@ export function RecorderOptions({
               {msg("meetings.recorderPanel.liveTranscript")}
             </DropdownMenuCheckboxItem>
             <DropdownMenuNote>
-              {msg("meetings.recorderPanel.showsWhatSSaidAs")} {liveCostHint(live.usdPerHour, msg)}
+              {[msg("meetings.recorderPanel.showsWhatSSaidAs"), liveCostHint(live.usdPerHour, msg)]
+                .filter(Boolean)
+                .join(" ")}
             </DropdownMenuNote>
             <DropdownMenuSeparator />
           </>
@@ -873,11 +875,14 @@ export function RecorderOptions({
   );
 }
 
-/** The live preview is billed on top of the transcript, so say so where it's switched on. */
+/**
+ * What the live preview adds to the bill, where it's switched on; empty when
+ * this workspace isn't charged by the hour for it.
+ */
 export function liveCostHint(usdPerHour: number | null, msg: OpenGeniText = defaultText): string {
   return usdPerHour !== null
     ? msg("meetings.recorderPanel.theLiveTranscriptAddsAbout", { value: usdPerHour.toFixed(2) })
-    : msg("meetings.recorderPanel.theLiveTranscriptUsesExtra");
+    : "";
 }
 
 function recorderHint(

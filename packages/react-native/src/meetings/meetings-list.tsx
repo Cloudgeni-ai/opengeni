@@ -519,9 +519,12 @@ function RecorderCard({
                     color: c["fg-muted"],
                   }}
                 >
-                  {liveOn
-                    ? `${msg("native.meetings.meetingsList.showsWhatSSaid")} ${liveCostHint(msg, liveTranscript.usdPerHour)}`
-                    : msg("native.meetings.meetingsList.showsWhatSSaid")}
+                  {[
+                    msg("native.meetings.meetingsList.showsWhatSSaid"),
+                    liveOn ? liveCostHint(msg, liveTranscript.usdPerHour) : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                 </Text>
               </View>
               <Switch

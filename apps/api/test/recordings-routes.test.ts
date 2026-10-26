@@ -672,13 +672,30 @@ describe("recording routes", () => {
       providerName: "Azure Speech",
       model: "MAI-Transcribe-2",
       available: true,
-      usdPerHour: 0.1,
+      // The deployment covers it and charges no credits, so it costs this
+      // workspace nothing per hour.
+      usdPerHour: null,
       capabilities: { batch: true, live: false, diarization: false, wordTimestamps: true },
     });
-    // Without a workspace key, ElevenLabs stays unavailable.
-    expect(
-      models.body.models.find((model: { model: string }) => model.model === "scribe_v2").available,
-    ).toBe(false);
+    // Without a workspace key, ElevenLabs stays unavailable; on its own key
+    // the workspace pays the list price.
+    const scribe = models.body.models.find(
+      (model: { model: string }) => model.model === "scribe_v2",
+    );
+    expect(scribe.available).toBe(false);
+    expect(scribe.usdPerHour).toBeGreaterThan(0);
+  });
+
+  test("a deployment's model shows a price where its use is charged in credits", async () => {
+    const settings = { recordingWordAlignment: true } as const;
+    const free = await fixture({ settings });
+    const charged = await fixture({ settings: { ...settings, usageLimitsMode: "managed" } });
+    const priceOf = async (scope: Awaited<ReturnType<typeof fixture>>) =>
+      (await scope.owner.call("GET", "/recording-models")).body.models.find(
+        (model: { providerId: string }) => model.providerId === "openai",
+      ).usdPerHour;
+    expect(await priceOf(free)).toBeNull();
+    expect(await priceOf(charged)).toBeGreaterThan(0);
   });
 
   test("a deployment that aligns words itself offers text-only models for meetings", async () => {
