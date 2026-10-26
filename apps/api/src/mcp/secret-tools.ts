@@ -10,6 +10,8 @@ import {
   SecretDeleteInput,
   SecretGetInput,
   SecretMoveInput,
+  SecretProfileGetInput,
+  SecretProfileSetInput,
   SecretSaveInput,
   SecretSearchInput,
   type AccessGrant,
@@ -17,7 +19,12 @@ import {
 } from "@opengeni/contracts";
 import {
   createVaultService,
+  getSessionCredentialProfile,
+  getWorkspaceCredentialProfile,
   hasLiteralPermission,
+  hasPermission,
+  isCredentialProfileError,
+  setCredentialProfile,
   isVaultError,
   requireLiveAgentAttemptAuthorization,
   vaultErrorCodeForProvider,
@@ -44,6 +51,9 @@ function toolError(code: string, message: string, details?: Record<string, unkno
     ],
   };
 }
+
+/** Changing a profile level needs that level's settings permission too. */
+class ProfilePermissionError extends Error {}
 
 function result(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
@@ -175,5 +185,78 @@ export function registerSecretTools(
         (principal, service) => service.archiveForAgent(principal, SecretDeleteInput.parse(input)),
         "write",
       ),
+  );
+  // Credential profiles: names mapped to references that Opengeni adds to the
+  // environment of every command. The tools read and store references only;
+  // `secret_*` naming keeps the gateway from resolving them.
+  async function runProfile(fn: (callerSessionId: string) => Promise<unknown>) {
+    try {
+      const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+      return result(await fn(attempt.callerSessionId));
+    } catch (error) {
+      if (isCredentialProfileError(error)) {
+        return toolError(error.code, error.message, error.details);
+      }
+      if (error instanceof ProfilePermissionError) {
+        return toolError("permission_denied", error.message);
+      }
+      throw error;
+    }
+  }
+
+  server.registerTool(
+    "secret_profile_get",
+    {
+      description:
+        "Show the credential profile: environment variables (such as GH_TOKEN or AZURE_CLIENT_SECRET) that Opengeni fills from saved secrets in every command you run, without putting them in the command. scope session (default) shows this chat's own additions and the full list your commands receive (workspace entries plus this chat and the chats that started it); scope workspace shows the workspace profile. Shows names and references, never values.",
+      inputSchema: SecretProfileGetInput.shape,
+    },
+    (input) =>
+      runProfile(async (callerSessionId) => {
+        const parsed = SecretProfileGetInput.parse(input);
+        return parsed.scope === "workspace"
+          ? await getWorkspaceCredentialProfile(deps.db, { workspaceId: grant.workspaceId })
+          : await getSessionCredentialProfile(deps.db, {
+              workspaceId: grant.workspaceId,
+              sessionId: callerSessionId,
+            });
+      }),
+  );
+
+  server.registerTool(
+    "secret_profile_set",
+    {
+      description:
+        'Replace the credential profile so every command gets these environment variables from saved secrets, for example {name: "GH_TOKEN", reference: "{{secret:Vault/Item/value}}"}. Write references as you would in a command; they are stored as references and resolved for each command. Variables a command sets itself win, and an entry that cannot be resolved is skipped with a note. gitHelper true lets git use GH_TOKEN for github.com over HTTPS. scope session (default) applies to this chat and the chats it starts; scope workspace applies to every chat and needs workspace admin. An empty entries list with no gitHelper clears that level.',
+      inputSchema: SecretProfileSetInput.shape,
+    },
+    (input) =>
+      runProfile(async (callerSessionId) => {
+        const parsed = SecretProfileSetInput.parse(input);
+        const workspaceScope = parsed.scope === "workspace";
+        const settingsPermission = workspaceScope ? "workspace:admin" : "sessions:control";
+        if (!hasPermission(grant.permissions, settingsPermission, grant.permissionMode)) {
+          throw new ProfilePermissionError(
+            `changing the ${workspaceScope ? "workspace" : "chat"} credential profile needs ${settingsPermission}`,
+          );
+        }
+        const profile = await setCredentialProfile(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: workspaceScope ? null : callerSessionId,
+          subjectId: grant.subjectId,
+          profile: {
+            entries: parsed.entries,
+            ...(parsed.gitHelper !== undefined ? { gitHelper: parsed.gitHelper } : {}),
+          },
+          updatedBySessionId: callerSessionId,
+        });
+        return workspaceScope
+          ? { profile }
+          : await getSessionCredentialProfile(deps.db, {
+              workspaceId: grant.workspaceId,
+              sessionId: callerSessionId,
+            });
+      }),
   );
 }

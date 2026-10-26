@@ -156,6 +156,7 @@ implementation: `packages/contracts/src/secret-references.ts`,
 | `exec_command` (every sandbox backend) | The command is spliced so each reference becomes a shell variable `OPENGENI_SECRET_n`, quoted correctly for its context. Values reach the process through native env where Opengeni owns the exec, or a 0600 env file that is sourced and deleted in the same command. Commands without references are untouched. |
 | Connected machines | POSIX hosts use `/bin/sh`, Windows uses PowerShell; values travel in `ExecRequest.env`. `cmd.exe`, fish and unknown shells return `unsupported_shell`. No run credentials or tokens are copied onto machines. |
 | `run_on` | The gateway preserves references and escapes for the target delivery boundary. Exec uses the same shell splicing and per-command env/file delivery as `exec_command`, including `secretfile`; file writes resolve content once; reads resolve nothing. |
+| Credential profiles | Opt-in variables (for example `GH_TOKEN`) added to the environment of every `exec_command` and `run_on` exec, resolved per command through the same resolver. The command text is unchanged. See [Credential profiles](#credential-profiles). |
 | `write_stdin`, `apply_patch`, `view_image` | Resolved in the runtime wrapper; stored patches and inputs keep the reference. |
 | `{{secretfile:…}}` | Written to a 0600 file under `/tmp/opengeni-private/secrets/` and replaced by its path; removed at attempt end. Use it for binary values and anything over 100 KiB. |
 | MCP connectors, Codex apps, Codemode `ogtool` | Arguments are resolved after approval and passed only to the executing call; the journal, approval and receipts keep the reference. `secretfile` is not allowed in ordinary tool arguments; Opengeni's `run_on` retains its exec delivery boundary through these callers. Inside a shell command, `ogtool call` arguments are command text: escape a reference there (`\{{secret:Item}}`) or the shell resolves it before the tool sees it. |
@@ -207,7 +208,103 @@ Variable Sets used to inject every value into every sandbox as environment
 variables. That is gone: nothing is injected, and a value exists in a process
 only while a command that references it runs. Scripts that read ambient
 variables should take them from a reference instead, for example
-`API_TOKEN={{secret:Stripe}} ./deploy.sh`.
+`API_TOKEN={{secret:Stripe}} ./deploy.sh`, or from a credential profile when
+every command should have the variable.
+
+## Credential profiles
+
+A credential profile is an opt-in list of environment variable names, each
+mapped to one secret reference. Opengeni adds those variables to the
+environment of every command an agent runs, so CLIs such as `gh`, `az` or
+`terraform` find their credentials without the agent writing references into
+each command or into the prompts of the chats it starts.
+
+```json
+{
+  "entries": [
+    { "name": "GH_TOKEN", "reference": "{{secret:cloudgeni-cloud-auth/CLOUDGENI_GITHUB_TOKEN/value}}" },
+    { "name": "AZURE_CLIENT_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_CLIENT_ID/value}}" },
+    { "name": "AZURE_CLIENT_SECRET", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_CLIENT_SECRET/value}}" },
+    { "name": "AZURE_TENANT_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_TENANT_ID/value}}" },
+    { "name": "AZURE_SUBSCRIPTION_ID", "reference": "{{secret:cloudgeni-cloud-auth/AZURE_SUBSCRIPTION_ID/value}}" }
+  ],
+  "gitHelper": true
+}
+```
+
+**Levels.** A workspace has at most one profile, used by every chat in it. A
+chat can add its own profile, which the chats it starts inherit, the same way
+the vault policy propagates. A command receives the workspace entries, then
+each chat's entries from the root chat down to its own; a nearer level
+replaces an entry with the same name. `gitHelper` follows the nearest level
+that sets it and is off by default. Nothing is configured until someone sets a
+profile.
+
+**Delivery.** For each `exec_command` (including commands that keep running in
+the background) and each `run_on` exec, the runtime resolves the effective
+profile through the attempt's `SecretResolver`, so the vault policy, "Ask me
+each time" approvals and the audit trail apply exactly as for a written
+reference. Values ride the same in-memory carry as references
+(`packages/runtime/src/sandbox/secret-delivery.ts`): Connected Machines receive
+them in `ExecRequest.env`, and managed sandboxes export them from the 0600 env
+file that is sourced and deleted in the same command. They exist only in the
+command's process environment, never in the command text, stored tool
+arguments, events, git config or files left on the machine. Profile variables
+are applied first, so anything the command sets itself (`GH_TOKEN=… gh …`,
+`export`, a reference) wins. The profile is read again at most every few
+seconds, so a change applies to the next commands without restarting anything.
+
+**Lenient.** A profile never fails a command. An entry that cannot be resolved
+(missing secret, policy, waiting for approval, provider unavailable, too large
+or binary) is skipped and the command runs without it; the tool result ends
+with a short note such as `[Note: credential profile skipped AZURE_TENANT_ID
+(secret not found)]`. An entry waiting for the person's approval is asked for
+once per attempt; approving it with "Allow once" covers one command, so use a
+longer approval for an item every command needs. Notes never show values.
+Entries resolve only after the command's own references resolved. Entries from
+connected vaults (1Password and similar) are read per command and count toward
+the per-attempt provider read limit, so prefer Opengeni vaults for profile
+items that every command uses.
+
+**Git helper.** With `gitHelper: true` and `GH_TOKEN` set by the profile,
+each command also gets per-command git configuration through
+`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n`: for
+`https://github.com` it first clears the machine's own credential helpers and
+then adds one that answers git's `get` request with `GH_TOKEN` from the
+environment (user `x-access-token`). Nothing is written to global or repository
+git config, and other hosts keep the machine's configuration. `gh` reads
+`GH_TOKEN` directly.
+
+**Rules.** Names use letters, digits and underscores, do not start with a
+digit, are unique ignoring case, and never start with `OPENGENI_` (reserved).
+Each entry holds exactly one `{{secret:…}}` reference; `secretfile` references
+are not accepted. An escaped reference (`\{{secret:…}}`, as written for
+hand-off tools) is stored unescaped. At most 32 entries; the same 100 KiB per
+value and 256 KiB per command caps apply. Saving an empty profile clears that
+level. Changes are audited as `credential_profile.updated` or
+`credential_profile.cleared` with variable names only.
+
+**Configuring.** Reading needs `secrets:list`. Changing needs `secrets:write`
+plus `workspace:admin` for the workspace profile, or `sessions:control` and
+the chat's tool-policy access for a chat profile. Use the HTTP routes below or
+the `secret_profile_get` and `secret_profile_set` agent tools; there is no web
+UI yet. Profiles hold references, never values.
+
+**Masking hook.** Every value a profile delivers is passed to the attempt's
+`onValuesDelivered` hook (`createCredentialEnvironment`), so known-value
+masking of tool output can cover profile values too, including an `env` dump.
+
+## Masking decision
+
+A Knowledge decision of 5 August 2026 removed heuristic redaction and kept
+content exact. After two staging incidents on 26 October 2026 (database
+connection strings printed by a command, and a resolved token stored in a
+chat's first message), Bendik's delegate approved two narrow exceptions that
+supersede that decision for these cases only: masking of known secret values
+(values Opengeni resolved or delivered, credential profile values included)
+before storage and before the model sees them, and masking of narrow,
+high-precision secret-shaped strings in tool output. Other content stays
+exact.
 
 ## Asking a person
 
@@ -335,6 +432,8 @@ With the `secrets` capability on, agents get:
 | `secret_get` | Reveal a value to the model. Agents do not hold `secrets:read` by default. | `secrets:read` |
 | `secret_move` | Move or copy an item between vaults. | `secrets:write` |
 | `secret_delete` | Archive an item. | `secrets:write` |
+| `secret_profile_get` | Show the [credential profile](#credential-profiles): this chat's additions and what its commands receive (`scope: "session"`, the default), or the workspace profile. Names and references only. | `secrets:list` |
+| `secret_profile_set` | Replace this chat's profile (inherited by the chats it starts) or, with `scope: "workspace"`, the workspace profile. References are stored as written, never resolved. | `secrets:write`, plus `sessions:control` (chat) or `workspace:admin` (workspace) |
 
 Discovery with no filters lists items; an empty query is not required. Keep
 the same filters when following `nextCursor`. Provider freshness is reported
@@ -471,6 +570,8 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `POST …/fields/:fieldId/reveal`; `GET …/fields/:fieldId/versions`; `POST …/fields/:fieldId/restore` | Plaintext, history, version restore |
 | `GET, PUT /vaults/:vaultId/items/:itemId/approval`; `POST …/approval/grants/:grantId/revoke` | "Ask me each time" marks and the approvals in force |
 | `PUT /sessions/:sessionId/vault-policy`; `GET /sessions/:sessionId/secrets` | Session policy and the secrets a session has used |
+| `GET, PUT /credential-profile` | The workspace [credential profile](#credential-profiles): `{profile}`; `PUT` takes `{entries, gitHelper?}` and needs `workspace:admin` and `secrets:write` |
+| `GET, PUT /sessions/:sessionId/credential-profile` | A chat's own profile and its effective profile `{profile, effective}`; `PUT` needs `sessions:control` and `secrets:write` |
 | `POST /connections/1password/install`; `GET /connections/1password/service-accounts`; `GET /connections/:connectionId/provider-vaults` | 1Password connections |
 | `PUT /connections/:connectionId/1password/token`; `DELETE /connections/:connectionId/1password` | Replace a 1Password token; disconnect (unlinks its vaults) |
 | `POST /vaults/link`; `POST /vaults/:vaultId/sync` | Provider vaults |

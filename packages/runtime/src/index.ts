@@ -511,6 +511,7 @@ import {
   type TurnSandboxCommandSession,
   type TurnToolCancellationFence,
 } from "./sandbox/turn-tool-cancellation";
+import type { CredentialEnvironment } from "./sandbox/credential-profile-delivery";
 import {
   withRetainableSessionImageOutputHook,
   type RetainableSessionImageOutputHook,
@@ -2539,6 +2540,12 @@ export type BuildAgentOptions = {
    * recorded keeps the references. Omitted: references pass through literally.
    */
   secretResolver?: SecretResolver | null;
+  /**
+   * The attempt's credential profile: variables added to the environment of
+   * every sandbox command (exec_command and background commands), resolved
+   * through `secretResolver`. Omitted: commands get no profile variables.
+   */
+  credentials?: CredentialEnvironment | null;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -3485,6 +3492,7 @@ export function buildOpenGeniAgent(
         ? { onToolCancellationFence: options.onToolCancellationFence }
         : {}),
       ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+      ...(options.credentials ? { credentials: options.credentials } : {}),
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
@@ -4756,6 +4764,7 @@ export function buildAgentCapabilities(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
     secretResolver?: SecretResolver | null;
+    credentials?: CredentialEnvironment | null;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
   return buildAgentCapabilitiesFromComposition(
@@ -4785,15 +4794,20 @@ function buildAgentCapabilitiesFromComposition(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
     secretResolver?: SecretResolver | null;
+    credentials?: CredentialEnvironment | null;
   },
 ): ReturnType<typeof Capabilities.default> {
   // A secret resolver needs the controller's wrappers even without a turn
   // signal: they are where references are resolved below every recorder.
   const toolCancellation =
-    options.turnCancellationSignal || options.onToolCancellationFence || options.secretResolver
+    options.turnCancellationSignal ||
+    options.onToolCancellationFence ||
+    options.secretResolver ||
+    options.credentials
       ? createTurnToolCancellationController(options.turnCancellationSignal, {
           cutPolling: settings.experimentCutPolling,
           ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+          ...(options.credentials ? { credentials: options.credentials } : {}),
         })
       : null;
   if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);

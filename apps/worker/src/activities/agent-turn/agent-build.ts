@@ -31,7 +31,7 @@ import {
 } from "@opengeni/config";
 import { type CodexRequestContext, supportsReasoningConfiguration } from "@opengeni/codex";
 import { executeCoreXaiImageGeneration } from "../xai-image-generation";
-import { rigProviderImageContentHash } from "@opengeni/core";
+import { createSessionCredentialEnvironment, rigProviderImageContentHash } from "@opengeni/core";
 import {
   admitVideoGenerationRequest,
   managedVideoGenerationCredentialLease,
@@ -738,6 +738,21 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             ),
         )
       : undefined;
+  // One resolver per attempt, shared by exec references and the credential
+  // profile so approvals, audit and caching stay consistent.
+  const attemptResolver = createAttemptSecretResolver({
+    db,
+    bus,
+    settings: eventing.modelRunSettings,
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: turn.executionGeneration,
+    agent: session.agent,
+    vaultAccess: deps.vaultAccess,
+  });
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -800,19 +815,15 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
-        // W1: `{{secret:…}}` references resolve at the exec boundary.
-        secretResolver: createAttemptSecretResolver({
+        // W1: `{{secret:…}}` references resolve at the exec boundary, and the
+        // session's credential profile adds its variables to every command
+        // through the same resolver.
+        secretResolver: attemptResolver,
+        credentials: createSessionCredentialEnvironment({
           db,
-          bus,
-          settings: eventing.modelRunSettings,
-          accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          turnId: turn.id,
-          attemptId: input.attemptId,
-          executionGeneration: turn.executionGeneration,
-          agent: session.agent,
-          vaultAccess: deps.vaultAccess,
+          resolver: attemptResolver,
         }),
         onToolCancellationFence: (fence) => {
           eventing.toolCancellationFenceRef.current = fence;

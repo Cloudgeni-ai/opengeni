@@ -337,6 +337,7 @@ import {
   provisionSandbox,
   runOnSandbox,
   createRunOnSecretResolver,
+  createSessionCredentialEnvironment,
   swapActiveSandbox,
   type FleetContext,
   type FleetServices,
@@ -4643,6 +4644,17 @@ function registerFleetTools(
             await runOnSandbox(services, await fleetContext(), target, typedOp, {
               ...(transientExecEnvironment ? { transientExecEnvironment } : {}),
               ...(secretResolver ? { secretResolver } : {}),
+              // The session's credential profile reaches run_on commands too.
+              ...(secretResolver && claims && typedOp.kind === "exec"
+                ? {
+                    credentials: createSessionCredentialEnvironment({
+                      db: deps.db,
+                      workspaceId: grant.workspaceId,
+                      sessionId: claims.sessionId,
+                      resolver: secretResolver,
+                    }),
+                  }
+                : {}),
             }),
             userSetupCard("run_on", target),
           ),

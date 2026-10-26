@@ -246,6 +246,13 @@ describe("first-party MCP tool visibility policy", () => {
       "secret_search",
     ]);
     expect(secretTools(["secrets:list"], all)).toEqual(["secret_search"]);
+    // Credential profile tools: reading needs secrets:list, changing secrets:write.
+    const profiles: FirstPartyMcpToolName[] = ["secret_profile_get", "secret_profile_set"];
+    expect(secretTools(["secrets:list", "secrets:write"], profiles)).toEqual([
+      "secret_profile_get",
+      "secret_profile_set",
+    ]);
+    expect(secretTools(["secrets:list"], profiles)).toEqual(["secret_profile_get"]);
     // Capability off: the resolved selection holds no secret tools.
     expect(secretTools(["secrets:list", "secrets:write", "secrets:read"], ["session_get"])).toEqual(
       [],

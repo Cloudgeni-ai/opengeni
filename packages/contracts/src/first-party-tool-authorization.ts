@@ -181,6 +181,11 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   secret_get: { sessionRequired: true, allOf: ["secrets:read"] },
   secret_move: { sessionRequired: true, allOf: ["secrets:write"] },
   secret_delete: { sessionRequired: true, allOf: ["secrets:write"] },
+  // Credential profiles: reading names item references (secret metadata);
+  // changing one also needs workspace:admin (workspace) or sessions:control
+  // (session), checked when the tool runs.
+  secret_profile_get: { sessionRequired: true, allOf: ["secrets:list"] },
+  secret_profile_set: { sessionRequired: true, allOf: ["secrets:write"] },
   // Retired (RETIRED_SECRET_TOOL_NAMES): never registered; kept for stored selections.
   variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
   environment_list: { allOf: ["variable-sets:list", "secrets:list"] },

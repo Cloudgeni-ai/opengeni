@@ -441,6 +441,20 @@ export {
   type SecretStdinCarry,
 } from "./secret-delivery";
 
+// Credential profiles: per-command environment variables resolved from secret
+// references at the same exec boundary (docs/secrets.md).
+export {
+  CREDENTIAL_PROFILE_GIT_HELPER,
+  CREDENTIAL_PROFILE_GIT_TOKEN_VARIABLE,
+  createCredentialEnvironment,
+  credentialProfileGitHelperEnvironment,
+  credentialProfileNoteText,
+  withCredentialProfileNotes,
+  type CreateCredentialEnvironmentInput,
+  type CredentialEnvironment,
+  type CredentialEnvironmentResult,
+} from "./credential-profile-delivery";
+
 // Session-specific Codemode token routing. The manifest retains one stable
 // legacy pointer for warm-box env parity; every session command selects its own
 // hashed token file off-manifest.

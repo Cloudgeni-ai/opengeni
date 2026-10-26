@@ -35,6 +35,7 @@ import {
 } from "./model-call-timing";
 export * from "./human-input-secret-answers";
 export * from "./secret-use-approvals";
+export * from "./credential-profiles";
 export * from "./connected-machine-audience";
 import { type ActiveSandboxPointer } from "./active-sandbox";
 import { sessionRetentionFromRow } from "./session-archive";

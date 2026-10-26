@@ -370,6 +370,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   secret_get: "secrets",
   secret_move: "secrets",
   secret_delete: "secrets",
+  secret_profile_get: "secrets",
+  secret_profile_set: "secrets",
   // Retired variable-set names select their secret_* successors.
   variable_set_list: "secrets",
   environment_list: "secrets",

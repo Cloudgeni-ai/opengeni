@@ -14,6 +14,7 @@ import { type ControlRequest, type ControlResponse, type ExecRequest } from "@op
 import {
   FakeOpRunner,
   InMemoryOpStreamTransport,
+  createCredentialEnvironment,
   type ControlRpc,
 } from "@opengeni/runtime/sandbox";
 import { createStaticSecretResolver } from "@opengeni/vaults/testing";
@@ -499,5 +500,58 @@ describe("run_on secret delivery (DL-9)", () => {
     const off = await runOn(machine, { kind: "exec", cmd: "echo {{secret:Canary}}" }, false);
     expect(off.ok).toBe(true);
     expect(machine.execs[0]!.env).not.toHaveProperty("OPENGENI_SECRET_0");
+  });
+});
+
+describe("run_on credential profiles", () => {
+  test("exec receives profile variables in ExecRequest.env; a failing entry is noted", async () => {
+    const machine = new CapturingMachine("/home/user/project");
+    const resolver = createStaticSecretResolver({ Token: "ghp_fakeRunOnProfileToken" });
+    const ref = (name: string) => ["{", "{secret:", name, "}}"].join("");
+    const credentials = createCredentialEnvironment({
+      resolver,
+      load: async () => ({
+        entries: [
+          {
+            name: "GH_TOKEN",
+            reference: ref("Token"),
+            source: { scope: "workspace", sessionId: null },
+          },
+          {
+            name: "AZURE_TENANT_ID",
+            reference: ref("Missing"),
+            source: { scope: "workspace", sessionId: null },
+          },
+        ],
+        gitHelper: false,
+      }),
+    });
+    const result = await executeRunOnSelfhostedMachine(
+      {
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: CONNECTION_INSTANCE,
+        workspaceRoot: machine.workspaceRoot,
+        controlRpc: machine,
+        opStream: machine.opStream,
+        relay: { host: "relay.test", tls: true },
+        controlTimeoutMs: 30_000,
+        execTimeoutMs: 120_000,
+        secretResolver: resolver,
+        credentials,
+      },
+      "target",
+      { kind: "exec", cmd: "gh pr list" },
+    );
+    expect(result.ok).toBe(true);
+    const exec = machine.execs[0]!;
+    // The command runs exactly as given, in the machine's own shell.
+    expect(exec.command).toEqual(["gh pr list"]);
+    expect(exec.shell).toBe(true);
+    expect(exec.env).toEqual({ GH_TOKEN: "ghp_fakeRunOnProfileToken" });
+    expect(result.credentialProfileNote).toBe(
+      "[Note: credential profile skipped AZURE_TENANT_ID (secret not found)]",
+    );
+    expect(JSON.stringify(result)).not.toContain("ghp_fake");
   });
 });

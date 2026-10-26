@@ -108,6 +108,8 @@ import {
   clearSecretFilesCommand,
   secretEnvFileContent,
   secretEnvFilePath,
+  carryHasReferences,
+  profileEnvironmentOf,
   secretExecCarryFor,
   secretExecEnvironment,
   spliceCarry,
@@ -2724,17 +2726,26 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const cmd = (args as { cmd?: unknown }).cmd;
     const carry = secretExecCarryFor(cmd);
     if (!carry || typeof cmd !== "string") return args;
-    // Managed sandboxes run commands through POSIX sh. A carry the tool
-    // wrapper could not splice (no turn-cancellation wrapper) is spliced here.
-    const spliced = spliceCarry(carry, "posix");
-    const command = carry.spliced ? cmd : cmd.split(carry.command).join(spliced.text);
     const writer: SecretFileWriter = async (file) =>
       await withoutProviderCommandHandle(() =>
         writeSecretFileOnBackend(session, file, backend.kind),
       );
-    const env = await secretExecEnvironment(carry, spliced, writer);
+    let command = cmd;
+    let env: Record<string, string> = {};
+    if (carryHasReferences(carry)) {
+      // Managed sandboxes run commands through POSIX sh. A carry the tool
+      // wrapper could not splice (no turn-cancellation wrapper) is spliced here.
+      const spliced = spliceCarry(carry, "posix");
+      command = carry.spliced ? cmd : cmd.split(carry.command).join(spliced.text);
+      env = await secretExecEnvironment(carry, spliced, writer);
+    }
+    // Credential profile variables ride the same file, ahead of the command,
+    // so variables the command sets itself still win.
     const envFile = secretEnvFilePath(carry.scope);
-    await writer({ path: envFile, content: new TextEncoder().encode(secretEnvFileContent(env)) });
+    await writer({
+      path: envFile,
+      content: new TextEncoder().encode(secretEnvFileContent(env, profileEnvironmentOf(carry))),
+    });
     this.secretScopes.add(carry.scope);
     return { ...(args as Record<string, unknown>), cmd: withSecretEnvFilePrefix(command, envFile) };
   }
