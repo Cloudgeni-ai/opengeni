@@ -336,6 +336,78 @@ the storage backstop rather than at the tool.
 Masking never fails a tool call or a turn. An internal error keeps the text
 as it was and writes a metadata-only diagnostic.
 
+### Secret-shaped values in tool output
+
+Some secrets were never in a vault, for example a database URL a command
+prints from a Kubernetes secret. Tool results (and their stored copies) are
+also searched with a small set of high-precision detectors, and only the
+secret part is replaced:
+
+- The password of a URL with userinfo, any scheme (`postgres`, `mysql`,
+  `mongodb+srv`, `redis`, `amqps`, `https` and others):
+  `postgres://user:<masked>@host:5432/db` keeps the user, host and database.
+- `password=` and `pwd=` values in connection strings: written without
+  spaces around `=` (plain, quoted or in braces), as a URL query parameter or
+  on a line that also has a host, server, database, user, port or SSL key
+  written the same way. Source code such as `const password = config.password;`
+  is not a connection string.
+- Azure `AccountKey=` (also `StorageAccountKey=`), `SharedAccessKey=` and SAS
+  `sig=` values.
+- PEM private key blocks, whole, cut off, or only their end (a later chunk of
+  streamed output). A body needs at least 64 base64 characters.
+- Well-known token formats: GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
+  `github_pat_`), OpenAI (`sk-proj-`, `sk-svcacct-` and `sk-admin-` keys of 40
+  or more characters, and legacy `sk-` keys without hyphens), Anthropic
+  (`sk-ant-`), Slack (`xox?-`), Stripe secret and restricted keys, npm,
+  GitLab, Google `AIza`, 1Password service account tokens, Opengeni's own
+  bearers (`ogk_` and `ogp_` keys, and the signed `ogd_`, `oge_`, `ogr_` and
+  `ogs_` envelopes) and JWTs. URLs are also found inside JSON-escaped text.
+
+Tokens must contain a digit, and placeholders such as `${PASSWORD}`,
+`$(cat file)`, `<password>`, `****`, `your_account_key_here` or the word
+`password` are ignored. There is no generic
+"long random string" rule: UUIDs, git SHAs, base64 data, prose such as
+"password: required" and URLs without a password stay untouched.
+
+Each detected value is saved into the root session's Task vault (hosted and
+encrypted), as one item per value: a login item for passwords, an API key
+item for tokens and keys, a secure note for private keys. The item name is
+the kind plus the first 16 hex characters of an HMAC-SHA256 of the value,
+keyed with the deployment's encryption key, so the same value maps to the
+same item and is saved once. The value is replaced by a reference to that
+item, for example `{{secret:Task/url-password-0123456789abcdef/password}}`,
+so the agent can still use it in a later command without seeing it. A URL
+with the reference in its password position works when used whole in a
+command. The value is saved exactly as it appeared, so a key found inside
+JSON keeps its escaped line breaks. An existing item is reused only while it
+still holds the same value.
+
+A detected value is masked wherever a detector finds it. It also joins the
+attempt's known values, and so is masked in any text afterwards, only when
+it is distinctive: at least 16 characters with three kinds of characters
+(lower case, upper case, digits, others), or 24 with two, and not the user
+name beside it. A weak or common password such as `postgres` would otherwise
+mask ordinary words.
+
+The save runs as the agent attempt, with the same Task vault access as
+`secret_save` to Task, and is audited like any other secret write
+(`vault.item.created`, metadata only). A tool result waits at most 5 seconds
+for it. Up to 16 values are saved per result, four at a time; the rest are
+saved from a later result. A root session's Task vault holds at most 200
+captured items. When saving is not possible (the secrets capability is off,
+the attempt cannot write to the Task vault, the capture or vault limit is
+reached, any error), the value is replaced by a marker such as
+`[masked url password]` and the tool call still succeeds. After three failed
+saves in a row an attempt stops trying and writes markers. A save that
+finishes after the wait upgrades the marker to the reference from the next
+result on.
+
+Shape masking applies only to tool results and their stored copies (tool
+output, command output, Codemode settlements). Messages a person types,
+commands as written and files on disk are not changed. Shapes inside a
+value `secret_get` returned (for example the password of a revealed database
+URL) are neither captured nor masked.
+
 ### Limits
 
 - Text a person types, and files on disk, are not changed.
@@ -349,6 +421,10 @@ as it was and writes a metadata-only diagnostic.
   that attempt.
 - The past-uses lookup reads at most 500 audit rows per refresh, newest
   first, so in a very long session tree the oldest uses may not be loaded.
+- Shape detectors read the first 4,000,000 characters of one text.
+- A URL password or connection string split across two stored output chunks
+  is masked where the output is read whole, not in the stored chunks. A
+  private key split that way is masked in both chunks.
 
 Masking is a safety net. It is not a reason to print secrets.
 
@@ -358,8 +434,14 @@ The matchers are pure and deterministic and live in `@opengeni/contracts`
 (`packages/contracts/src/secret-value-masking.ts`): `SecretValueMemory`,
 `compileSecretValueMasks`, `maskSecretValues`, `maskSecretValuesInText`,
 `maskSecretValuesInError`, `secretValueForms`, `isBase64DataUrl`, the
-`secret_get` reveal helpers and the label helpers. The database backstop is
-`withSecretValueMasking` and `maskSecretValuesForStorage` in `@opengeni/db`.
+`secret_get` reveal helpers and the label helpers. The shape detectors live in
+`packages/contracts/src/secret-shape-masking.ts` (also the
+`@opengeni/contracts/secret-shape-masking` subpath): `detectSecretShapes`,
+`collectSecretShapes`, `maskSecretShapesInText`, `maskSecretShapes`,
+`SECRET_SHAPE_KINDS` and `secretShapeMaskLabel`. The database backstop is
+`withSecretValueMasking`, `maskSecretValuesForStorage` and
+`maskToolOutputForStorage` in `@opengeni/db`. Item names for captured values
+come from `secretShapeItemName` in `@opengeni/core`.
 Browser and desktop observations use the same engine with a 4-character
 minimum for typed values.
 
