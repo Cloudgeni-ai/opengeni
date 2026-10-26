@@ -56,8 +56,9 @@ to check:
 
 1. Make or edit it in the sandbox: `python-docx` for Word. For a new PDF, write
    one HTML file (`@page { size: A4; margin: 18mm } body { margin: 0 }`) and
-   print it: `chromium --headless --no-sandbox --user-data-dir=/tmp/pdf-profile
-   --no-pdf-header-footer --print-to-pdf=out.pdf in.html`.
+   print it: `chromium --headless --no-sandbox --log-level=3
+   --user-data-dir=/tmp/pdf-profile --no-pdf-header-footer
+   --print-to-pdf=out.pdf in.html`.
    Managed sandboxes already include python-docx and Chromium, and no
    LibreOffice, pandoc or PDF library, so do not check for tools or install any
    for a new file; run `pip install <package>` only if an import fails or a
@@ -65,7 +66,7 @@ to check:
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content. For a PDF made from HTML, check
-   the layout once instead: `chromium --headless --no-sandbox
+   the layout once instead: `chromium --headless --no-sandbox --log-level=3
    --user-data-dir=/tmp/pdf-profile --hide-scrollbars --window-size=658,986
    --screenshot=page.png in.html` (the first page), then view the image.
 4. Publish the file with `sandbox_file_publish` and reply with a short summary

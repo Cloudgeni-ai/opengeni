@@ -11,7 +11,8 @@ mutable PPTX shadow or publish a sandbox deck over user edits.
 The exception is a file the user sends to be changed, or a requested file
 format the artifact cannot export; see "Requested PowerPoint files" below.
 
-Read [references/api.md](references/api.md) before editing.
+Read [references/api.md](references/api.md) before editing a presentation
+artifact; a sent or requested file (below) does not need it.
 When using `skill_read`, request that relative path from this Skill; reading
 does not materialize a local folder. Use an existing local copy only when the
 Skill was installed or explicitly checked out to the filesystem.
@@ -42,9 +43,13 @@ in your context lists that format), so do not load artifact tools just to check:
 1. Make or edit it in the sandbox with `python-pptx`. Managed sandboxes already
    include python-pptx and no slide renderer, so do not check for tools or
    install one for a routine deck; run `pip install <package>` only if an
-   import fails. Keep the layout simple enough to trust without a render: 16:9,
-   a title and a few short lines per slide in boxes sized for them, and the
-   talking points in speaker notes.
+   import fails. Keep the layout simple enough to trust without a render. The
+   default template's layouts are drawn for 4:3, so for a new 16:9 deck
+   (`Inches(13.333)` by `Inches(7.5)`) build every slide on the blank layout
+   (`slide_layouts[6]`) with your own text boxes, 12.1 in wide at 0.6 in from
+   the left, word wrap on. Text fits without a render when the title is one
+   line of at most 45 characters at 36 pt and the body is at most six lines of
+   at most 60 characters at 24 pt; put the talking points in speaker notes.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content: each slide's text and notes, and

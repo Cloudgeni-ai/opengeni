@@ -96,9 +96,22 @@ test("Office file Skills give the managed-sandbox fast path without probing", as
     expect(text).toContain("unless an export tool already in your context lists that format");
     expect(text).not.toContain("is unavailable or does not list that format");
   }
-  expect(documents).toContain("--print-to-pdf=out.pdf in.html");
-  expect(documents).toContain("--screenshot=page.png in.html");
+  expect(documents).toContain(
+    "chromium --headless --no-sandbox --log-level=3 --user-data-dir=/tmp/pdf-profile --no-pdf-header-footer --print-to-pdf=out.pdf in.html",
+  );
+  expect(documents).toContain(
+    "chromium --headless --no-sandbox --log-level=3 --user-data-dir=/tmp/pdf-profile --hide-scrollbars --window-size=658,986 --screenshot=page.png in.html",
+  );
   expect(documents).not.toContain("soffice");
+  // The template's placeholder layouts are 4:3; a 16:9 deck uses the blank
+  // layout with its own boxes and a fit rule instead of a render.
+  expect(presentations).toContain("build every slide on the blank layout (`slide_layouts[6]`)");
+  expect(presentations).toContain(
+    "the title is one line of at most 45 characters at 36 pt and the body is at most six lines of at most 60 characters at 24 pt",
+  );
+  for (const text of [documents, presentations]) {
+    expect(text).toContain("a sent or requested file (below) does not need it.");
+  }
   // The renderer is an explicit, narrow install, never assumed to be present.
   expect(
     presentations.indexOf("apt-get install -y --no-install-recommends libreoffice-impress"),
