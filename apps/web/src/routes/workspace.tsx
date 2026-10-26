@@ -68,8 +68,9 @@ type SlackAccessState = {
 
 function useWorkspaceManagementLocation(workspaceId: string) {
   // The URL can advance while Outlet still renders the outgoing matches.
-  // Choose its shell from those same matches, or a pending settings navigation
-  // removes RailProvider from a session that still needs it.
+  // Choose the shell from those same matches, so a pending navigation does not
+  // remount the outgoing page inside the other shell (a session inside the
+  // settings shell, or settings inside the sessions shell).
   return useMatches({
     select: (matches) => {
       const match = matches.at(-1);

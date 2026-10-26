@@ -1,3 +1,4 @@
+import "@/navigation-host";
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -10,7 +11,8 @@ import {
 } from "@tanstack/react-router";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import type { AppContextValue } from "./context";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
@@ -33,19 +35,35 @@ const context = {
   refreshWorkspaceMcpServers: async () => {},
 } as unknown as AppContextValue;
 
-// Keep the actual router, workspace branch and RailProvider/useRail. Only the
-// service subscriptions and unrelated shell contents are replaced.
-mock.module("@/context", () => ({ useAppContext: () => context }));
+// Keep the actual router, workspace shell selection, RailProvider/useRail and
+// action system. Only service subscriptions and the two shells' contents are
+// replaced, so the test observes which shell wraps the rendered page.
+const passthrough = ({ children }: { children: ReactNode }) => children;
+const openGeni = await import("@opengeni/react");
 mock.module("@opengeni/react", () => ({
-  OpenGeniProvider: ({ children }: { children: ReactNode }) => children,
-  SecretsUiProvider: ({ children }: { children: ReactNode }) => children,
+  ...openGeni,
+  OpenGeniProvider: passthrough,
+  SecretsUiProvider: passthrough,
   useOpenGeni: () => ({ workspaceControlConnectionState: "connected" }),
 }));
-mock.module("@/components/desktop/this-computer", () => ({
-  DesktopThisComputerProvider: ({ children }: { children: ReactNode }) => children,
+const thisComputer = await import("@opengeni/react/app/components/desktop/this-computer");
+mock.module("@opengeni/react/app/components/desktop/this-computer", () => ({
+  ...thisComputer,
+  DesktopThisComputerProvider: passthrough,
 }));
-mock.module("@/lib/stream-health", () => ({ useStreamHealthTelemetry() {} }));
-mock.module("@/lib/secrets-ui", () => ({ webSecretsUi: {} }));
+const appShots = await import("@opengeni/react/app/components/desktop/app-shots");
+mock.module("@opengeni/react/app/components/desktop/app-shots", () => ({
+  ...appShots,
+  AppShotCoordinator: () => null,
+}));
+mock.module("@/components/meetings/recorder-provider", () => ({
+  ConsoleMeetingRecorderProvider: passthrough,
+}));
+const streamHealth = await import("@opengeni/react/app/lib/stream-health");
+mock.module("@opengeni/react/app/lib/stream-health", () => ({
+  ...streamHealth,
+  useStreamHealthTelemetry() {},
+}));
 mock.module("@/components/rail/rail-shell", () => ({
   RailShell: ({ children }: { children: ReactNode }) => <div data-shell="sessions">{children}</div>,
 }));
@@ -56,7 +74,6 @@ mock.module("@/components/settings/workspace-settings-shell", () => ({
 }));
 
 const { WorkspaceShellRoute } = await import("./routes/workspace");
-const { useRail } = await import("./components/rail/rail-context");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -68,6 +85,10 @@ afterAll(() => {
   mock.restore();
   GlobalRegistrator.unregister();
 });
+
+function shellText(container: HTMLElement, shell: "sessions" | "settings"): string {
+  return container.querySelector(`[data-shell="${shell}"]`)?.textContent ?? "";
+}
 
 test.each(["settings", "organization", "machines", "insights", "rigs/sample"])(
   "pending navigation between a session and %s keeps the rendered page's shell",
@@ -119,9 +140,16 @@ test.each(["settings", "organization", "machines", "insights", "rigs/sample"])(
     try {
       await router.load();
       await act(async () => {
-        root.render(<RouterProvider router={router} />);
+        root.render(
+          <AppContext.Provider value={context}>
+            <RouterProvider router={router} />
+          </AppContext.Provider>,
+        );
       });
-      expect(container.textContent).toContain("Session in");
+      expect(shellText(container, "sessions")).toContain(`Session in ${workspaceId}`);
+
+      // Session -> destination: the URL advances while the destination loader
+      // is pending and Outlet still renders the session.
       let navigation!: Promise<void>;
       await act(async () => {
         navigation = router.navigate({ href: `/workspaces/${workspaceId}/${destination}` });
@@ -130,16 +158,17 @@ test.each(["settings", "organization", "machines", "insights", "rigs/sample"])(
       expect(router.state.location.pathname).toEndWith(`/${destination}`);
       expect(router.state.matches.at(-1)?.pathname).toEndWith("/sessions/sample");
       expect(errors).toEqual([]);
-      expect(container.querySelector('[data-shell="sessions"]')?.textContent).toContain(
-        "Session in",
-      );
+      expect(shellText(container, "sessions")).toContain("Session in");
+      expect(shellText(container, "settings")).toBe("");
       await act(async () => {
         finishLoading();
         await navigation;
       });
-      expect(container.querySelector('[data-shell="settings"]')?.textContent).toContain(
-        "Settings content",
-      );
+      expect(shellText(container, "settings")).toContain("Settings content");
+      expect(shellText(container, "sessions")).toBe("");
+
+      // Destination -> session: the settings page stays in its own shell until
+      // the session route is presented.
       holdSession = true;
       await act(async () => {
         navigation = router.navigate({ href: `/workspaces/${workspaceId}/sessions/another` });
@@ -147,16 +176,13 @@ test.each(["settings", "organization", "machines", "insights", "rigs/sample"])(
       });
       expect(router.state.location.pathname).toEndWith("/sessions/another");
       expect(router.state.matches.at(-1)?.pathname).toEndWith(`/${destination}`);
-      expect(container.querySelector('[data-shell="settings"]')?.textContent).toContain(
-        "Settings content",
-      );
+      expect(shellText(container, "settings")).toContain("Settings content");
+      expect(shellText(container, "sessions")).toBe("");
       await act(async () => {
         finishSession();
         await navigation;
       });
-      expect(container.querySelector('[data-shell="sessions"]')?.textContent).toContain(
-        "Session in",
-      );
+      expect(shellText(container, "sessions")).toContain("Session in");
       expect(errors).toEqual([]);
     } finally {
       finishLoading();
