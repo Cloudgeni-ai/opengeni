@@ -691,16 +691,18 @@ dispatch-ref workflow edits. These bursts are queued by GitHub rather than withh
 solely because PR jobs occupy runners. This is not a provider capacity guarantee:
 the Batch may wait for runners. Active Batch reservations, complete-inventory
 checks, unknown workflow/status handling and non-PR/main capacity holds remain.
-The traffic-shadow reader keeps its original all-workflow accounting. Observe
+The traffic-shadow reader keeps its original all-workflow accounting, likewise
+counting GitHub-hosted jobs only. Observe
 actual run/job creation and start timestamps to measure provider queue delay.
 
 `stage.json` headroom now also records `capacity`: the configured limit and
-allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (queued or
-requested jobs across all active main runs), `preFanoutMainRuns` (their run IDs),
-and `latestMain` (newest main run ID, jobs
-waiting for runners, oldest current queue age, and the largest `started_at -
-created_at` among started jobs, all measured from the job timestamps). These are
-measured main queue waits, not predicted candidate latency.
+allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (GitHub-hosted
+queued or requested jobs across all active main runs), `preFanoutMainRuns` (their
+run IDs), and `latestMain` (newest main run ID, GitHub-hosted jobs waiting for
+runners, oldest current hosted queue age, and the largest `started_at -
+created_at` among started hosted jobs, all measured from the job timestamps).
+Self-hosted jobs are not measured there. These are measured hosted main queue
+waits, not predicted candidate latency.
 stage.json exposes the measured occupied/reserved slots, configured budget and
 decision. These are explicit repository allocations, not a claim that GitHub
 granted a custom quota or that other repositories are idle. Jobs can expand or

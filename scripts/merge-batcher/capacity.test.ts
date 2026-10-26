@@ -734,12 +734,20 @@ describe("hosted-pool accounting counts only GitHub-hosted jobs", () => {
       { status: "completed", ...SELF },
     ];
     expect(runnerJobDemand(mixed)).toBe(3);
-    expect(runnerJobDemand(mixed.filter((job) => job.labels !== HOSTED.labels))).toBe(0);
+    expect(runnerJobDemand(mixed.filter((job) => selfHostedJob(job)))).toBe(0);
     // Unknown or missing status fails closed even on a self-hosted job.
     expect(runnerJobDemand([...mixed, { status: "surprise", ...SELF }])).toBeNull();
     expect(runnerJobDemand([...mixed, { ...SELF }])).toBeNull();
     expect(selfHostedJob({ status: "queued", ...SELF })).toBe(true);
     expect(selfHostedJob({ status: "queued", ...HOSTED })).toBe(false);
+  });
+
+  test("a full scan still holds on an unknown status of a self-hosted main job", async () => {
+    const runs: Run[] = [{ id: 1050, status: "in_progress", ...MAIN }];
+    for (const odd of [{ status: "surprise", ...SELF }, { ...SELF }]) {
+      const s = await scan(runs, { 1050: fannedMain(many(10, "in_progress", SELF), [odd]) });
+      expect(s).toMatchObject({ ok: false, hold: "unknown-job-status" });
+    }
   });
 
   test("missing or non-array labels count as hosted demand (conservative)", async () => {
