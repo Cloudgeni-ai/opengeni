@@ -536,8 +536,22 @@ request concurrency, not inventory size or provider latency. There are no 64-run
 or 32-run admission limits. A
 120-second scan deadline is checked before each request and after the last
 response; an overrun or provider error holds. Each listing requires a stable
-reported total, correctly sized pages and unique identities across pages;
-inconsistent pages and run identity drift hold rather than admitting partial
+reported total, correctly sized pages and unique identities across pages. A
+listing whose rows disagree with GitHub's reported `total_count` (count drift,
+short or long pages, repeated identities) is **re-read once** before anything
+holds; malformed pages and invalid identities do not retry. If a run's
+latest-job listing still disagrees after that re-read (GitHub's `filter=latest`
+count can include jobs it does not return), the live reader uses the distinct
+rows actually returned, lists the run in `partialJobRuns` and adds a warning
+to the headroom reason. Such a partial listing never proves a run
+approval-only and never seeds the approval cache. Job counts are informational
+for slot one, so publication of the first Batch proceeds; any additional slot
+(`occupiedBatchSlots > 0`) stays closed ("Additional Batch slots require a
+complete job inventory"), because an undercount there could overrun the runner
+budget. Run listings, which bound the Batch slots, stay strict: a run-listing
+mismatch that survives the re-read still holds publication and retry. The
+traffic-shadow reader keeps the strict job hold. None of these holds delay a
+tested landing. Run identity drift holds rather than admitting partial
 demand. A run is **approval-only** only when
 the following complete-job proof establishes it. The live reader may reuse that
 proof for at most 15 minutes only for main push CI whose sole waiting job is

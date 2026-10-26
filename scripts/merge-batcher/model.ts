@@ -347,6 +347,12 @@ export type RunnerScanHold =
 export type RunnerScan =
   | {
       ok: true;
+      /**
+       * Runs whose latest-job listing still disagreed with GitHub's reported
+       * `total_count` after one re-read; their demand uses the rows actually
+       * returned. Only with `tolerateJobCountMismatch`; otherwise such a scan holds.
+       */
+      partialJobRuns?: number[];
       mainDemand: number;
       otherDemand: number;
       scannedRuns: number;
@@ -424,6 +430,13 @@ export async function scanRunnerDemand(input: {
     get(key: string): Promise<unknown>;
     set(key: string, value: unknown): Promise<void>;
   };
+  /**
+   * After one strict re-read, accept a latest-job listing whose rows disagree
+   * with GitHub's reported total (for example `filter=latest` after a rerun)
+   * and report the run in `partialJobRuns`. Run listings always stay strict:
+   * they bound the Batch slots.
+   */
+  tolerateJobCountMismatch?: boolean;
 }): Promise<RunnerScan> {
   const now = input.now ?? Date.now;
   const started = now();
@@ -447,10 +460,25 @@ export async function scanRunnerDemand(input: {
     return hold("invalid-run");
   // IDs are mandatory across paginated responses so overlap cannot hide a gap.
   // Single-page job fixtures may omit IDs; run identities are always validated below.
+  // A listing whose rows disagree with its reported total (count drift, short
+  // or long pages, repeated identities) is re-read once before it holds:
+  // GitHub's count and rows can transiently differ. Malformed pages do not retry.
   async function list(path: string, key: "workflow_runs" | "jobs") {
+    const first = await read(path, key, false);
+    if (!("error" in first) || first.error !== "mismatch") return first;
+    const second = await read(path, key, key === "jobs" && input.tolerateJobCountMismatch === true);
+    return "error" in second && second.error === "mismatch"
+      ? ({ error: "incomplete" } as const)
+      : second;
+  }
+  // Lenient reads use the rows actually returned: they stop at the first short
+  // page, skip repeated identities and mark the listing partial. Malformed
+  // pages, invalid identities and the deadline still fail.
+  async function read(path: string, key: "workflow_runs" | "jobs", lenient: boolean) {
     const items: unknown[] = [];
     const ids = new Set<number>();
     let total: number | undefined;
+    let partial = false;
     for (let pageNumber = 1; ; pageNumber++) {
       if (now() - started > deadline) return { error: "deadline" } as const;
       const page = (await input.get(`${path}&per_page=100&page=${pageNumber}`)) as Record<
@@ -464,20 +492,44 @@ export async function scanRunnerDemand(input: {
         Array.isArray(page) ||
         !Number.isSafeInteger(count) ||
         (count as number) < 0 ||
-        !Array.isArray(values) ||
-        (total !== undefined && count !== total)
+        !Array.isArray(values)
       )
         return { error: "incomplete" } as const;
+      if (lenient) {
+        if ((total !== undefined && count !== total) || values.length > 100) partial = true;
+        total ??= count as number;
+        for (const value of values) {
+          const id =
+            value !== null && typeof value === "object"
+              ? (value as { id?: unknown }).id
+              : undefined;
+          if (id !== undefined) {
+            if (!Number.isSafeInteger(id) || (id as number) <= 0)
+              return { error: "incomplete" } as const;
+            if (ids.has(id as number)) {
+              partial = true;
+              continue;
+            }
+            ids.add(id as number);
+          }
+          items.push(value);
+        }
+        if (values.length < 100)
+          return { items, partial: partial || items.length !== total } as const;
+        continue;
+      }
+      if (total !== undefined && count !== total) return { error: "mismatch" } as const;
       total ??= count as number;
       if (values.length !== Math.min(100, total - items.length))
-        return { error: "incomplete" } as const;
+        return { error: "mismatch" } as const;
       for (const value of values) {
         const id =
           value !== null && typeof value === "object" ? (value as { id?: unknown }).id : undefined;
         if (key === "workflow_runs" && runId(id) === null) return { error: "invalid-run" } as const;
         if (total > 100 || id !== undefined) {
-          if (!Number.isSafeInteger(id) || (id as number) <= 0 || ids.has(id as number))
+          if (!Number.isSafeInteger(id) || (id as number) <= 0)
             return { error: "incomplete" } as const;
+          if (ids.has(id as number)) return { error: "mismatch" } as const;
           ids.add(id as number);
         }
         items.push(value);
@@ -561,6 +613,7 @@ export async function scanRunnerDemand(input: {
     runnerRelevantRuns = 0,
     mainQueuedJobs = 0;
   const preFanoutMainRuns: number[] = [];
+  const partialJobRuns: number[] = [];
   let latestMain: { id: number; jobs: unknown[] } | null = null;
   // Bound independent read-only job observations without serializing provider
   // latency across the entire inventory. Pagination within each run remains
@@ -624,6 +677,7 @@ export async function scanRunnerDemand(input: {
             input.approvalCache &&
             eligible &&
             !("error" in page) &&
+            !("partial" in page && page.partial) &&
             publicReleaseApprovalJobs(run, page.items)
           )
             await input.approvalCache
@@ -643,6 +697,9 @@ export async function scanRunnerDemand(input: {
     if (now() - started > deadline) return hold("deadline");
     const page = pages[index]!;
     if ("error" in page) return hold(page.error === "incomplete" ? "incomplete-jobs" : page.error);
+    // A partial job listing counts the rows it returned and never proves idleness.
+    const partial = "partial" in page && page.partial;
+    if (partial) partialJobRuns.push(id);
     scannedRuns++;
     if (reused.has(id)) cachedApprovalOnlyRuns++;
     const jobs = page.items;
@@ -652,7 +709,7 @@ export async function scanRunnerDemand(input: {
       observedBatchDemand += demand;
       reservedBatchDemand += Math.max(demand, CANDIDATE_SLOTS);
     }
-    const approvalOnly = !listedNotWaiting.has(id) && approvalOnlyRun(run, jobs);
+    const approvalOnly = !partial && !listedNotWaiting.has(id) && approvalOnlyRun(run, jobs);
     if (approvalOnly) approvalOnlyRuns++;
     else runnerRelevantRuns++;
     const isMain =
@@ -678,6 +735,7 @@ export async function scanRunnerDemand(input: {
   if (finished - started > deadline) return hold("deadline");
   return {
     ok: true,
+    partialJobRuns: partialJobRuns.sort((a, b) => a - b),
     mainDemand,
     otherDemand,
     scannedRuns,
