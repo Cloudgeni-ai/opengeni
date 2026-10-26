@@ -3737,13 +3737,57 @@ const PLACEMENT_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
   "computer_open",
   "browser_open",
 ]);
-/** First-party tools that change what a ComputerSession shows. A model that
- * writes `computer_act` and then `computer_observe` in one response means the
- * observation after the action; started together, the read could be served
- * before the action ran and show the window as it was. A read that lands
- * between an action's own fresh read and its dispatch also replaces the
- * reading the action was fenced on. */
-const STATE_CHANGING_TOOL_FAMILIES: ReadonlySet<string> = new Set(["computer_act"]);
+/** Browser tools whose calls act on one tab; the other browser tools (tabs,
+ * open, lifecycle and so on) act on the whole BrowserSession. */
+const BROWSER_TAB_TOOL_FAMILIES: ReadonlySet<string> = new Set([
+  "browser_act",
+  "browser_observe",
+  "browser_screenshot",
+  "browser_read",
+]);
+
+function stringArgument(args: unknown, name: string): string | undefined {
+  const value =
+    args && typeof args === "object" ? (args as Record<string, unknown>)[name] : undefined;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * The ordering keys of one computer or browser call: the ComputerSession it
+ * names (`computer:<id>`), or for the browser the BrowserSession and, for a
+ * tool that acts on one tab, that tab (`browser:<id>:<tab>`). A call that
+ * names no session acts on the chat's current one, which may be any of them,
+ * so its key is the bare `computer` or `browser`, ordered with every call of
+ * that kind. An open that names no session starts or finds one of its own and
+ * has no key, so several opens of one response still run together. Undefined
+ * for the other tools, whose calls are never ordered by key.
+ */
+export function interactionOrderKeys(
+  family: string,
+): ((toolCall: { arguments: string }) => string[]) | undefined {
+  const computer = family.startsWith("computer_");
+  if (!computer && !family.startsWith("browser_")) return undefined;
+  const opens = PLACEMENT_MOVING_TOOL_FAMILIES.has(family);
+  return (toolCall) => {
+    let args: unknown;
+    try {
+      args = JSON.parse(toolCall.arguments);
+    } catch {
+      args = undefined;
+    }
+    if (computer) {
+      const session = stringArgument(args, "computerSessionId");
+      if (session) return [`computer:${session}`];
+      return opens ? [] : ["computer"];
+    }
+    const session = stringArgument(args, "browserSessionId");
+    if (!session) return opens ? [] : ["browser"];
+    const tab = BROWSER_TAB_TOOL_FAMILIES.has(family)
+      ? stringArgument(args, "targetId")
+      : undefined;
+    return [tab ? `browser:${session}:${tab}` : `browser:${session}`];
+  };
+}
 
 /** Whether one call's arguments name a Connected Machine placement. */
 export function callNamesConnectedMachine(toolCall: { arguments: string }): boolean {
@@ -3772,11 +3816,15 @@ export function callNamesConnectedMachine(toolCall: { arguments: string }): bool
  * that program's single call and is not ordered against the response's other
  * calls.
  *
- * computer_act runs in model order too (see STATE_CHANGING_TOOL_FAMILIES): an
- * observation written after an action in one response shows the window after
- * it, one written before it shows the window before it, and no read of the
- * response lands between the action's own fresh read and its dispatch. The
- * response's other calls still wait for the action, as they do for a swap.
+ * Computer and browser calls that use the same ComputerSession, or the same
+ * BrowserSession tab, also run in model order among themselves (see
+ * interactionOrderKeys). A model that writes an action and then an
+ * observation in one response means the state after the action; started
+ * together, the read could be served first and show the window as it was, or
+ * land between an unfenced action's own fresh read and its dispatch and
+ * replace the reading the action was fenced on. Calls on other sessions or
+ * tabs, and every other tool, stay parallel with them. Native CUA tools are
+ * of the computer_act family, so they are ordered the same way.
  */
 export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
@@ -3784,11 +3832,12 @@ export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
     (await listMcpTools(resolutionContext)).map((tool) => {
       if (tool.type !== "function") return tool;
       const family = toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "";
-      if (ROUTE_MOVING_TOOL_FAMILIES.has(family) || STATE_CHANGING_TOOL_FAMILIES.has(family))
-        return { ...tool, exclusiveExecution: true };
+      if (ROUTE_MOVING_TOOL_FAMILIES.has(family)) return { ...tool, exclusiveExecution: true };
+      const executionOrderKeys = interactionOrderKeys(family);
+      const ordered = executionOrderKeys ? { ...tool, executionOrderKeys } : tool;
       if (PLACEMENT_MOVING_TOOL_FAMILIES.has(family))
-        return { ...tool, exclusiveExecution: callNamesConnectedMachine };
-      return tool;
+        return { ...ordered, exclusiveExecution: callNamesConnectedMachine };
+      return ordered;
     });
   const clone = agent.clone?.bind(agent);
   if (clone) {
