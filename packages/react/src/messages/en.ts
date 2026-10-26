@@ -2306,7 +2306,7 @@ export const englishMessages = {
   "meetings.detailPage.noTranscriptYet": "No transcript yet.",
   "meetings.detailPage.notThem": "Not them",
   "meetings.detailPage.onlyDoThisIfValue":
-    "Only do this if {value} agreed. Later meetings will suggest their name when they speak. Only a voice profile is kept, not audio, until someone forgets it in Settings.",
+    "Only do this if {value} agreed. Later meetings will suggest their name when they speak. Only a voice profile is kept, never audio, and it can be forgotten in Settings.",
   "meetings.detailPage.onlyMe": "Only me",
   "meetings.detailPage.onlyYouCanOpenIt": "Only you can open it.",
   "meetings.detailPage.onlyYouCanSeeThis": "Only you can see this now",
