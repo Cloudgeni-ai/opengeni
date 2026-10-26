@@ -416,7 +416,10 @@ or the person's) for that category, as of acceptance: Off refuses it, and Review
 first leaves a pending proposal in that owner's review. Work with no verified
 initiating person cannot choose a personal destination, nobody else's personal
 Skill is reachable, permanent Skill deletion stays within the chat's own scope,
-and shared Knowledge still cannot point at private evidence.
+and shared Knowledge still cannot point at private evidence. The one deletion
+exception is the verified owner's chat in their own Personal workspace: that
+workspace has no other member, so the chat may also permanently remove its
+workspace Skills under the chat's own Skills mode (migration 0988).
 
 Only-me chats in a shared workspace can be scheduled as existing-session targets.
 A selected personal connector source creates an owner-only session for each run,

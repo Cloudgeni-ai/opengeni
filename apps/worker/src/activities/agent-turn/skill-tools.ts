@@ -64,7 +64,7 @@ const TELL_PERSON =
 const NOT_PERMITTED_REASONS: ReadonlyMap<string, string> = new Map([
   [
     "Skill outside accepted learning scope",
-    "the Skill belongs to another person or the organization, or this chat can't remove it (a private chat removes only personal Skills, a shared chat only workspace Skills)",
+    "the Skill belongs to another person or the organization, or this chat can't remove it (in a shared workspace, a private chat removes only personal Skills and a shared chat only workspace Skills; the person can remove it on the Skills page)",
   ],
   [
     "Skill scope is not available to this chat",
