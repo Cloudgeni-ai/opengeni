@@ -21,7 +21,11 @@ import {
   WorkspaceInstructionPolicyRevision,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireWorkspaceSettingsGrant,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   activateWorkspaceInstructionPolicyRevision,
   createWorkspaceInstructionPolicyDraft,
@@ -168,7 +172,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
 
   app.post(`${base}/drafts`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     assertBoundedActor(grant.subjectId);
     const request = await parseBody(context, CreateWorkspaceInstructionPolicyDraftRequest);
     try {
@@ -197,7 +201,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
 
   app.post(`${base}/import-legacy`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     assertBoundedActor(grant.subjectId);
     const request = await parseBody(context, ImportLegacyWorkspaceInstructionPolicyDraftRequest);
     try {
@@ -237,7 +241,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
 
   app.post(`${base}/onboarding-proposals`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     assertBoundedActor(grant.subjectId);
     const request = await parseBody(
       context,
@@ -293,7 +297,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
 
   app.post(`${base}/rollback`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     assertBoundedActor(grant.subjectId);
     const request = await parseBody(context, RollbackWorkspaceInstructionPolicyRequest);
     try {
@@ -335,7 +339,7 @@ export function registerWorkspaceInstructionPolicyRoutes(app: Hono, deps: ApiRou
 
   app.post(`${base}/:revisionId/activate`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     assertBoundedActor(grant.subjectId);
     const revisionId = parseRevisionId(context);
     const request = await parseBody(context, ActivateWorkspaceInstructionPolicyRequest);

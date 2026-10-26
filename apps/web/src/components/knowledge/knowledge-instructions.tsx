@@ -314,7 +314,7 @@ export function InstructionsPage({
           ) : null,
           !canEdit
             ? personal
-              ? "Editing isn't available yet"
+              ? "Only the owner can change these"
               : "Only workspace admins can change these"
             : null,
         ]}
