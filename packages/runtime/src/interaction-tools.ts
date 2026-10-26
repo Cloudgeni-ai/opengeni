@@ -5834,7 +5834,9 @@ type MissingSessionUse = "current" | "required" | "open";
 /** The most open sessions a missing-id hint lists. */
 const MISSING_SESSION_HINT_LIMIT = 5;
 
-/** The API found no session of this kind with the requested id. */
+/** The API found no session of this kind with the requested id. Read from the
+ * API's own refusal in the response body, never the display message: a hint
+ * already added to it lists session names, which could contain any text. */
 function isMissingSessionError(
   error: unknown,
   kind: InteractionSessionKind,
@@ -5842,8 +5844,27 @@ function isMissingSessionError(
   return (
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
-    new RegExp(`(?:^|: )${kind} not found\\b`, "u").test(error.message)
+    new RegExp(`(?:^|: )${kind} not found\\b`, "u").test(apiRefusalText(error))
   );
+}
+
+/** The refusal text the API sent: the message of its JSON error envelope
+ * (nested under "error" or flat), or else the plain-text body. */
+function apiRefusalText(error: OpenGeniApiError): string {
+  try {
+    const decoded: unknown = JSON.parse(error.body);
+    if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+      const record = decoded as Record<string, unknown>;
+      const envelope =
+        record.error && typeof record.error === "object" && !Array.isArray(record.error)
+          ? (record.error as Record<string, unknown>)
+          : record;
+      if (typeof envelope.message === "string") return envelope.message;
+    }
+  } catch {
+    // A plain-text body.
+  }
+  return error.body.trim();
 }
 
 /** The API's refusal for a missing session id, followed by the open sessions
