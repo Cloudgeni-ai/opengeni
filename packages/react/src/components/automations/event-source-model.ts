@@ -384,10 +384,35 @@ export function pastedWebhookSetup(
   }
   return {
     app: eventSourceChoiceName(t, app),
-    secretName: t(`automations.paste.${app}.secretName`),
-    urlStep: t(`automations.paste.${app}.urlStep`),
-    secretStep: t(`automations.paste.${app}.secretStep`),
+    ...appWebhookPasteText(t, app),
   };
+}
+
+/** Each app's steps, with every catalog key written out so the catalog check can find it. */
+function appWebhookPasteText(
+  t: OpenGeniText,
+  app: AppWebhookChoice,
+): Omit<PastedWebhookSetup, "app"> {
+  switch (app) {
+    case "linear":
+      return {
+        secretName: t("automations.paste.linear.secretName"),
+        urlStep: t("automations.paste.linear.urlStep"),
+        secretStep: t("automations.paste.linear.secretStep"),
+      };
+    case "sentry":
+      return {
+        secretName: t("automations.paste.sentry.secretName"),
+        urlStep: t("automations.paste.sentry.urlStep"),
+        secretStep: t("automations.paste.sentry.secretStep"),
+      };
+    case "tailscale":
+      return {
+        secretName: t("automations.paste.tailscale.secretName"),
+        urlStep: t("automations.paste.tailscale.urlStep"),
+        secretStep: t("automations.paste.tailscale.secretStep"),
+      };
+  }
 }
 
 /** The request that adds a source of the chosen kind; an unnamed webhook takes the kind's name. */

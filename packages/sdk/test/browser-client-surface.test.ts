@@ -191,6 +191,16 @@ const deprecatedTranscriptionRecordingMethods = [
   "uploadTranscriptionRecordingChunk",
 ];
 
+// #6256 deleted web code that no screen reached: the native Atlassian sources
+// editor, the replaced Slack channel picker for automations and an unused
+// artifact publish helper. These public SDK methods stay for hosts and existing
+// SDK callers; agents reach the same actions through their tools.
+const retiredDeadWebConsumerMethods = [
+  "listScheduledTaskSlackChannels",
+  "publishSandboxFileArtifact",
+  "saveAtlassianSources",
+];
+
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return source.match(new RegExp(`\\b${escaped}\\b`, "g"))?.length ?? 0;
@@ -259,6 +269,7 @@ describe("browser client runtime surface", () => {
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
         ...deprecatedTranscriptionRecordingMethods,
+        ...retiredDeadWebConsumerMethods,
       ].sort(),
     );
   });
