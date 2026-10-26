@@ -282,6 +282,10 @@ export function usePolledValue<T>(
     return promise;
   }, [load, run]);
 
+  // The read lifecycle: a query (re)start reads at once and its end cancels
+  // the read in flight. The poll interval is not part of the query, so
+  // changing it (for example when live list hints take over from polling)
+  // never aborts or repeats a read; only the polling effect below reschedules.
   useEffect(() => {
     // Every (re)start begins a fresh streak; a pending retry belongs to the
     // previous query or visibility period.
@@ -298,30 +302,8 @@ export function usePolledValue<T>(
     }
     retryLiveRef.current = true;
     setLoading(true);
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const schedule = () => {
-      if (cancelled || pollIntervalMs === undefined || pollIntervalMs <= 0) return;
-      timer = setTimeout(() => {
-        timer = null;
-        void run().finally(schedule);
-      }, pollIntervalMs);
-    };
-    void run().finally(schedule);
-    if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
-      return () => {
-        cancelled = true;
-        retryLiveRef.current = false;
-        cancelTransientRetry();
-        generation.current += 1;
-        requestAbortRef.current?.abort();
-        inFlightRef.current = null;
-        trailingRefreshRef.current = null;
-      };
-    }
+    void run();
     return () => {
-      cancelled = true;
-      if (timer !== null) clearTimeout(timer);
       retryLiveRef.current = false;
       cancelTransientRetry();
       generation.current += 1;
@@ -329,7 +311,29 @@ export function usePolledValue<T>(
       inFlightRef.current = null;
       trailingRefreshRef.current = null;
     };
-  }, [run, enabled, pageLive, pollIntervalMs, cancelTransientRetry]);
+  }, [run, enabled, pageLive, cancelTransientRetry]);
+
+  // Polling: each read is followed by the next one interval later. The first
+  // interval starts when the read in flight settles (or now, when none is).
+  useEffect(() => {
+    if (!enabled || !pageLive || pollIntervalMs === undefined || pollIntervalMs <= 0) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (cancelled) return;
+      timer = setTimeout(() => {
+        timer = null;
+        void run().finally(schedule);
+      }, pollIntervalMs);
+    };
+    const pending = inFlightRef.current;
+    if (pending?.load === load) void pending.promise.finally(schedule);
+    else schedule();
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [run, load, enabled, pageLive, pollIntervalMs]);
 
   const identityMatches = stateIdentity.load === load;
   return {
