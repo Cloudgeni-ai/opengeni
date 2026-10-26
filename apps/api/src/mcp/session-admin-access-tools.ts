@@ -165,7 +165,7 @@ function isExternalPerson(subjectId: string): boolean {
 function externalPersonCanRun(entry: ActionCatalogEntry, authority: ActingAuthority): boolean {
   if (!actionInOneWorkspace(entry)) return false;
   if (authority.kind === "full_access") return true;
-  if (authority.kind === "read_only" && appActionChangesState(entry)) return false;
+  if (authority.kind === "read_only" && appActionNeedsConfirmation(entry)) return false;
   if (appActionCallCarriesSecrets(entry, undefined)) return false;
   return (
     entry.permission === undefined ||

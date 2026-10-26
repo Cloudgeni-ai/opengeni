@@ -17,8 +17,12 @@ export function ChatPaymentPages({
   accountId,
   children,
 }: {
-  /** The chat workspace's organization: an agent's checkout is for it unless it names another. */
-  accountId: string | null | undefined;
+  /**
+   * The chat's organization: an agent's checkout is for it unless it names
+   * another. Undefined while the chat is still loading, so no check goes to
+   * another organization in the meantime.
+   */
+  accountId: string | undefined;
   children: ReactNode;
 }) {
   const { client } = useAppContext();
@@ -27,7 +31,11 @@ export function ChatPaymentPages({
   }, []);
   return (
     <PaymentPageActivityProvider onCredited={onCredited}>
-      <ClientPaymentPageActivity client={client} accountId={accountId}>
+      <ClientPaymentPageActivity
+        client={client}
+        accountId={accountId}
+        accountPending={accountId === undefined}
+      >
         {children}
       </ClientPaymentPageActivity>
     </PaymentPageActivityProvider>

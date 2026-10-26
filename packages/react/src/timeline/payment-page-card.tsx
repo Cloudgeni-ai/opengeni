@@ -63,20 +63,34 @@ export function PaymentPageActivityProvider({
  * so a host that knows that organization passes it as `accountId`: without it
  * the read is for the person's default organization. (An embed's session proxy
  * already reads the chat workspace's organization whatever the browser sends.)
+ * A host still finding out the chat's organization sets `accountPending`:
+ * checks wait for it instead of asking the default organization and failing.
  */
 export function ClientPaymentPageActivity({
   client,
   accountId: chatAccountId,
+  accountPending = false,
   children,
 }: {
   client: unknown;
   /** The chat's organization, for checkouts that don't name one. */
   accountId?: string | null | undefined;
+  /** The chat's organization isn't known yet: checks wait until it is. */
+  accountPending?: boolean | undefined;
   children: ReactNode;
 }) {
   const readCheckout = useMemo((): PaymentPageActivity["readCheckout"] => {
     const reader = client as Partial<Pick<OpenGeniClient, "getBillingCheckout">> | null;
     if (typeof reader?.getBillingCheckout !== "function") return undefined;
+    if (accountPending) {
+      // Settles only when the card stops this check, which it does once the
+      // organization is known and this reader is replaced.
+      return ({ signal }) =>
+        new Promise<never>((_, reject) => {
+          if (signal.aborted) reject(signal.reason);
+          else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+    }
     return ({ checkoutSessionId, accountId, signal }) => {
       const account = accountId ?? chatAccountId ?? undefined;
       return reader.getBillingCheckout!(checkoutSessionId, {
@@ -84,7 +98,7 @@ export function ClientPaymentPageActivity({
         signal,
       });
     };
-  }, [client, chatAccountId]);
+  }, [client, chatAccountId, accountPending]);
   const outer = useContext(PaymentPageActions);
   return (
     <PaymentPageActivityProvider readCheckout={outer.readCheckout ?? readCheckout}>

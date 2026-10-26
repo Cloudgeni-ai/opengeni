@@ -418,6 +418,100 @@ describe("payment pages in the chat", () => {
     }
   });
 
+  test("after a reload, a card waits for the chat's organization before it checks", async () => {
+    // Opened before the reload, and the chat's organization isn't known yet:
+    // asking the default organization would fail and flash "Couldn't check".
+    const chatAccountId = crypto.randomUUID();
+    const reads: (string | undefined)[] = [];
+    const client = {
+      getBillingCheckout: async (_id: string, options: { accountId?: string }) => {
+        reads.push(options.accountId);
+        if (options.accountId !== chatAccountId) {
+          throw Object.assign(new Error("API 404: checkout not found"), { retryable: false });
+        }
+        return status("granted", "complete");
+      },
+    };
+    const item = checkoutCall({
+      arguments: JSON.stringify({ id: "createBillingCheckout", body: { amountUsd: 20 } }),
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const before = await renderComponent(
+      <ClientPaymentPageActivity client={client} accountId={chatAccountId}>
+        <Renderer item={item} />
+      </ClientPaymentPageActivity>,
+    );
+    await act(async () => {
+      click(before.container.querySelector<HTMLAnchorElement>("a[href]")!);
+    });
+    await before.unmount();
+    reads.length = 0;
+
+    const view = (account: string | undefined) => (
+      <ClientPaymentPageActivity
+        client={client}
+        accountId={account}
+        accountPending={account === undefined}
+      >
+        <Renderer item={item} />
+      </ClientPaymentPageActivity>
+    );
+    const reloaded = await renderComponent(view(undefined));
+    try {
+      await flush();
+      expect(reads).toEqual([]);
+      expect(reloaded.container.textContent).toContain("Waiting for your payment");
+      expect(reloaded.container.textContent).not.toContain("Couldn't check");
+      await reloaded.rerender(view(chatAccountId));
+      await flush();
+      expect(reads).toEqual([chatAccountId]);
+      expect(reloaded.container.textContent).toContain("You added $20 in credits");
+    } finally {
+      await reloaded.unmount();
+    }
+  });
+
+  test("after a dropped connection the card keeps checking, for at most 30 minutes", async () => {
+    await withVirtualClock(async () => {
+      let reads = 0;
+      const item = checkoutCall();
+      const Renderer = defaultToolRegistry.resolve(item);
+      const rendered = await renderComponent(
+        <PaymentPageActivityProvider
+          readCheckout={async () => {
+            reads += 1;
+            // No `retryable: false`: the connection dropped, asking again may work.
+            throw new TypeError("Failed to fetch");
+          }}
+        >
+          <Renderer item={item} />
+        </PaymentPageActivityProvider>,
+      );
+      try {
+        await act(async () => {
+          click(rendered.container.querySelector<HTMLAnchorElement>("a[href]")!);
+        });
+        await flush(2_100);
+        expect(reads).toBe(1);
+        expect(rendered.container.textContent).toContain("Couldn't check your payment from here.");
+        // Every 2 s for the first minute, then every 15 s.
+        await flush(60_000);
+        const afterFirstMinute = reads;
+        expect(afterFirstMinute).toBeGreaterThanOrEqual(29);
+        await flush(60_000);
+        expect(reads - afterFirstMinute).toBe(4);
+        // Thirty minutes after opening the page, the checks stop for good.
+        await flush(30 * 60_000);
+        const atCap = reads;
+        expect(atCap).toBeLessThanOrEqual(afterFirstMinute + 4 * 29);
+        await flush(60 * 60_000);
+        expect(reads).toBe(atCap);
+      } finally {
+        await rendered.unmount();
+      }
+    });
+  });
+
   test("a check still running when the card goes away is cancelled", async () => {
     const signals: AbortSignal[] = [];
     const client = {

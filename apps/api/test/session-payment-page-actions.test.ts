@@ -127,6 +127,7 @@ test("a billing portal link says it's only for this person, and a refused page h
   expect(note).not.toContain("like any other");
   expect(note).not.toContain("confirms");
 
+  // A 403 that isn't a missing billing permission keeps the route's own answer.
   const refused = await call({
     id: "createSubscriptionCheckout",
     pathParameters: {},
@@ -134,27 +135,56 @@ test("a billing portal link says it's only for this person, and a refused page h
     body: {},
   });
   expect(refused.isError).toBe(true);
-  const text = (refused.content[0] as { text: string }).text;
-  expect(text).toStartWith("Nothing was run:");
-  expect(text).not.toContain("note");
+  const parsed = JSON.parse((refused.content[0] as { text: string }).text);
+  expect(parsed).toMatchObject({ status: 403, body: { error: "forbidden" } });
+  expect(parsed.note).toBeUndefined();
 });
 
-test("someone who can't pay, such as an embed's own user, gets a plain refusal, not the route's 403", async () => {
-  // An embed's external user can use the chat's workspace but holds no
-  // organization billing permission; the route refuses with a permission name
-  // that means nothing to them.
-  const { call, requests } = tools(
-    {
-      kind: "read_only",
-      subjectId: `user:${crypto.randomUUID()}`,
-      permissions: ["workspace:read", "sessions:create", "sessions:control"],
-    },
-    { canPay: false },
-  );
-  const refused = await call(checkout);
-  expect(refused.isError).toBe(true);
-  expect((refused.content[0] as { text: string }).text).toBe(
-    "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't buy credits here. Tell them an owner or admin of the organization can add credits in the app.",
-  );
-  expect(requests).toHaveLength(1);
+const PLAIN_REFUSAL =
+  "Nothing was run: the person who sent this message can't manage this organization's billing, so they can't buy credits here. Tell them an owner or admin of the organization can add credits in the app.";
+
+test("a member without billing rights gets a plain refusal, in the app and through the SDK proxy", async () => {
+  // A person of the organization who can use this chat's workspace but not
+  // manage billing: the route refuses with a permission name that means
+  // nothing to them. In the web app the turn runs with a confirmation;
+  // through the SDK session proxy it runs read-only.
+  for (const kind of ["confirm", "read_only"] as const) {
+    const { call, requests } = tools(
+      {
+        kind,
+        subjectId: `user:${crypto.randomUUID()}`,
+        permissions: ["workspace:read", "sessions:create", "sessions:control"],
+      },
+      { canPay: false },
+    );
+    const refused = await call(checkout);
+    expect(refused.isError).toBe(true);
+    expect((refused.content[0] as { text: string }).text).toBe(PLAIN_REFUSAL);
+    expect(requests).toHaveLength(1);
+  }
+});
+
+test("someone who uses Opengeni through another product gets that refusal first, before anything runs", async () => {
+  // A real embed person is an external user with one workspace: billing is
+  // never theirs, so they are told it isn't available here, never sent to the app.
+  for (const kind of ["full_access", "read_only"] as const) {
+    const { call, requests } = tools(
+      {
+        kind,
+        subjectId: `external_user:${crypto.randomUUID()}`,
+        permissions: ["workspace:read", "sessions:create", "sessions:control"],
+      },
+      { canPay: false },
+    );
+    const refused = await call(checkout);
+    expect(refused.isError).toBe(true);
+    const text = (refused.content[0] as { text: string }).text;
+    expect(text).toStartWith(
+      "Nothing was run: this person uses Opengeni through another product, so app actions reach only this chat's workspace",
+    );
+    expect(text).toContain("billing");
+    expect(text).not.toBe(PLAIN_REFUSAL);
+    expect(text).not.toContain("in the app");
+    expect(requests).toHaveLength(0);
+  }
 });

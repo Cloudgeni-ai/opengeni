@@ -1434,6 +1434,7 @@ export function SessionRoute({
         primary={
           <ChatPaymentPages
             accountId={
+              session?.accountId ??
               context.workspaces.find((candidate) => candidate.id === workspaceId)?.accountId
             }
           >
