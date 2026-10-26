@@ -3805,6 +3805,19 @@ with standalone relays but do not supply routes for affinity-free multi-replica
 pairing. Existing pre-upgrade producer channels acquire routes when re-registered.
 No frontend protocol change or special ingress-controller configuration is needed.
 
+### Viewer input on the relay
+
+The relay enforces each viewer token's `mode` and stream binding. Every token
+must name the machine and stream it opens. A `view` token only watches. Typing
+into a terminal, ending its shell, and typed desktop input require a `control`
+token, and every input or close must name the stream the connection opened. The
+API mints terminal tokens with `control` for a viewer holding `terminal:attach`;
+desktop tokens stay `view`, and the agent still applies the owner's
+screen-control consent. Input from a socket that a reconnect replaced is
+dropped. Roll out the API before, or together with, the relay: a relay that
+enforces `mode` drops keystrokes from terminal tokens an older API minted as
+`view` until the viewer refreshes its token.
+
 ### Runtime-secret keys
 
 Set these in the runtime secret (never a committed values file) when enabling
