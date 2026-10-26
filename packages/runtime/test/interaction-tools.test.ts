@@ -8037,6 +8037,81 @@ describe("open reuses only a session on the chat's current machine", () => {
     );
   });
 
+  // The move outlasts a failed open: the error says the chat moved, so the
+  // model does not assume it is still on its old machine.
+  for (const tool of ["computer_open", "browser_open"] as const) {
+    test(`${tool} that moved the chat and then failed says the chat moved`, async () => {
+      const swaps: string[] = [];
+      const refused = async () => {
+        throw new OpenGeniApiError(409, "", {
+          code: "conflict",
+          retryable: false,
+          displayMessage: "That machine cannot start one now.",
+        });
+      };
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: {
+          ...partialTransport({
+            listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+            listBrowserSessions: async () => ({ revision: 0, sessions: [] }),
+            createComputerSession: refused,
+            createBrowserSession: refused,
+          }),
+          getSession: sessionRead(swappedMachine),
+          swapActiveSandbox: async (_workspaceId, _sessionId, request) => {
+            swaps.push(request.target);
+            return { swapped: true, activeSandboxId: request.target, activeEpoch: 2 };
+          },
+        },
+        workspaceId,
+        sessionId,
+        selectedTools: [tool],
+        permissions: ["sessions:read", "sessions:control"],
+      });
+      const result = await definitions[0]!.execute(
+        { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+        context(),
+      );
+      expect(swaps).toEqual([oldMachine]);
+      expect(result.isError).toBe(true);
+      expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+        "This chat moved to the requested machine; its commands and files now run there too. That machine cannot start one now.",
+      );
+    });
+  }
+
+  test("an open that fails without moving the chat does not mention a move", async () => {
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: {
+        ...partialTransport({
+          listComputerSessions: async () => ({ revision: 0, sessions: [] }),
+          createComputerSession: async () => {
+            throw new OpenGeniApiError(409, "", {
+              code: "conflict",
+              retryable: false,
+              displayMessage: "That machine cannot start one now.",
+            });
+          },
+        }),
+        getSession: sessionRead(oldMachine),
+        swapActiveSandbox: async () => {
+          throw new Error("already on that machine");
+        },
+      },
+      workspaceId,
+      sessionId,
+      selectedTools: ["computer_open"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { placement: { kind: "connected_machine", sandboxId: oldMachine } },
+      context(),
+    );
+    expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+      "That machine cannot start one now.",
+    );
+  });
+
   test("a personal machine not yet allowed shows its card from computer_open in one call", async () => {
     const posted: unknown[] = [];
     let created = 0;

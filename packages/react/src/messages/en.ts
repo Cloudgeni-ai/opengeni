@@ -1704,6 +1704,10 @@ export const englishMessages = {
   "hooks.useMachines.itsComputerIsntWorking": "Its computer isn't working properly right now.",
   "hooks.useMachines.itsComputerCouldntBeRestored": "Its computer couldn't be restored.",
   "hooks.useMachines.tryAgain": "Try again.",
+  "hooks.useMachines.thatMachineHasntReported":
+    "That machine hasn't reported its workspace folder. Update the agent on it and reconnect, then try again.",
+  "hooks.useMachines.thisChatSWorkingFolder":
+    "This chat's working folder isn't inside that machine's workspace. Start a new chat on that machine instead.",
   "hooks.useMachines.onlyTheMachineSOwner": "Only the machine's owner can use it in this chat.",
   "hooks.useMachines.theMachineSOwnerHas":
     "The machine's owner has not allowed this chat to use it.",

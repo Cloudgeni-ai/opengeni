@@ -1860,24 +1860,28 @@ export function createInteractionAttemptToolDefinitions(
     },
     execute: async (value, context) => {
       const chatMove: ChatMoveRecord = { moved: false };
-      const opened = await withSessionHint(
-        "BrowserSession",
-        value.browserSessionId,
-        "open",
+      const opened = await reportingChatMove(
+        chatMove,
         async () =>
           await withSessionHint(
-            "ComputerSession",
-            value.linkedComputerSessionId,
-            "required",
+            "BrowserSession",
+            value.browserSessionId,
+            "open",
             async () =>
-              await openBrowser(
-                input.transport,
-                input.workspaceId,
-                input.sessionId,
-                value,
-                context,
-                extension.installUrl,
-                chatMove,
+              await withSessionHint(
+                "ComputerSession",
+                value.linkedComputerSessionId,
+                "required",
+                async () =>
+                  await openBrowser(
+                    input.transport,
+                    input.workspaceId,
+                    input.sessionId,
+                    value,
+                    context,
+                    extension.installUrl,
+                    chatMove,
+                  ),
               ),
           ),
       );
@@ -2723,18 +2727,22 @@ export function createInteractionAttemptToolDefinitions(
     },
     execute: async ({ includeScreenshot, applicationId, ...value }, context) => {
       const chatMove: ChatMoveRecord = { moved: false };
-      const { unavailable, ...opened } = await withSessionHint(
-        "ComputerSession",
-        value.computerSessionId,
-        "open",
+      const { unavailable, ...opened } = await reportingChatMove(
+        chatMove,
         async () =>
-          await openComputer(
-            input.transport,
-            input.workspaceId,
-            input.sessionId,
-            value,
-            context,
-            chatMove,
+          await withSessionHint(
+            "ComputerSession",
+            value.computerSessionId,
+            "open",
+            async () =>
+              await openComputer(
+                input.transport,
+                input.workspaceId,
+                input.sessionId,
+                value,
+                context,
+                chatMove,
+              ),
           ),
       );
       currentComputer.use(opened.session.id);
@@ -4761,6 +4769,22 @@ type ChatMoveRecord = { moved: boolean };
  * the move outlasts the open, so later commands and files run there too. */
 const CHAT_MOVED_NOTE =
   "This chat moved to the requested machine; its commands and files now run there too.";
+
+/**
+ * Run an open that may move this chat, so a failure after the move still says
+ * the chat moved: the model must not assume it is on its old machine. The
+ * note leads the error's message, which every error result is built from, so
+ * bounding a long message never drops it.
+ */
+async function reportingChatMove<T>(chatMove: ChatMoveRecord, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (chatMove.moved && error instanceof Error && !error.message.startsWith(CHAT_MOVED_NOTE))
+      error.message = `${CHAT_MOVED_NOTE} ${error.message}`;
+    throw error;
+  }
+}
 
 /**
  * Move this chat to the Connected Machine an open names when it runs on
