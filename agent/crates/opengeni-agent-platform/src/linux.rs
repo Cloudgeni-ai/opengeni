@@ -2170,13 +2170,56 @@ pub fn validate_linux_named_key_chord(name: &str) -> PlatformResult<()> {
 }
 
 /// The keysyms of one named key or chord, modifiers first, for compositors
-/// that accept keysym input directly (GNOME Wayland remote desktop).
+/// that accept keysym input directly but silently drop keysyms the layout
+/// lacks (GNOME Wayland remote desktop).
+///
+/// `layout_display` names an X display that mirrors the compositor's layout
+/// (Xwayland). When it is reachable every keysym is checked against that
+/// layout; otherwise the keysyms are returned unchecked.
 ///
 /// # Errors
 ///
-/// The same unsupported-input failures as [`validate_linux_named_key_chord`].
-pub fn linux_named_key_chord_keysyms(name: &str) -> PlatformResult<Vec<u32>> {
-    parse_named_key_chord(name)
+/// The same unsupported-input failures as [`validate_linux_named_key_chord`],
+/// and one naming the first keysym the layout lacks.
+pub fn linux_named_key_chord_keysyms(
+    layout_display: Option<&str>,
+    name: &str,
+) -> PlatformResult<Vec<u32>> {
+    let keysyms = parse_named_key_chord(name)?;
+    layout_named_keysyms(layout_mapping(layout_display).as_ref(), keysyms)
+}
+
+fn layout_named_keysyms(
+    mapping: Option<&X11KeyboardMapping>,
+    keysyms: Vec<u32>,
+) -> PlatformResult<Vec<u32>> {
+    if let Some(missing) = mapping.and_then(|mapping| {
+        keysyms
+            .iter()
+            .find(|&&keysym| mapping.resolve(keysym).is_none())
+    }) {
+        return Err(PlatformError::Unsupported(format!(
+            "X11 keymap does not expose named key/chord component {missing:#x}"
+        )));
+    }
+    Ok(keysyms)
+}
+
+/// The keymap of a layout display (Xwayland), or `None` when it is absent or
+/// unreachable.
+fn layout_mapping(layout_display: Option<&str>) -> Option<X11KeyboardMapping> {
+    layout_display
+        .and_then(|display| {
+            // Xwayland runs as the user; its socket file and server are
+            // checked like any other display before the cookie is sent.
+            X11Display {
+                server: XServerCheck::AgentUser,
+                ..X11Display::named(display)
+            }
+            .connect()
+            .ok()
+        })
+        .and_then(|(conn, _)| keyboard_mapping(&conn))
 }
 
 /// The keysym that types each character of `text` in the active keyboard
@@ -2195,18 +2238,7 @@ pub fn linux_layout_text_keysyms(
     layout_display: Option<&str>,
     text: &str,
 ) -> PlatformResult<Vec<u32>> {
-    let mapping = layout_display
-        .and_then(|display| {
-            // Xwayland runs as the user; its socket file and server are
-            // checked like any other display before the cookie is sent.
-            X11Display {
-                server: XServerCheck::AgentUser,
-                ..X11Display::named(display)
-            }
-            .connect()
-            .ok()
-        })
-        .and_then(|(conn, _)| keyboard_mapping(&conn));
+    let mapping = layout_mapping(layout_display);
     text.chars()
         .map(|character| match &mapping {
             None => Ok(keysyms::text_keysym(character)),
@@ -3048,7 +3080,7 @@ mod tests {
             vec![0xffe9, 0xffbf]
         );
         assert_eq!(
-            linux_named_key_chord_keysyms("Shift+F10").unwrap(),
+            linux_named_key_chord_keysyms(None, "Shift+F10").unwrap(),
             vec![0xffe1, 0xffc7]
         );
     }
@@ -3063,9 +3095,34 @@ mod tests {
             assert!(!accepted.contains("CapsLock"), "{error}");
             assert!(!accepted.contains("NumLock"), "{error}");
             assert!(accepted.contains("ScrollLock"), "{error}");
-            assert!(linux_named_key_chord_keysyms(chord).is_err(), "{chord}");
+            assert!(
+                linux_named_key_chord_keysyms(None, chord).is_err(),
+                "{chord}"
+            );
             assert!(validate_linux_named_key_chord(chord).is_err(), "{chord}");
         }
+    }
+
+    #[test]
+    fn keysym_input_refuses_named_keys_the_layout_lacks() {
+        // A compositor taking keysyms drops one its layout lacks while
+        // reporting success, so a chord is checked as a whole first.
+        let mapping = spare_keymap();
+        assert_eq!(
+            layout_named_keysyms(Some(&mapping), vec![0xffe1, 0xff0d]).unwrap(),
+            [0xffe1, 0xff0d]
+        );
+        for keysyms in [vec![0xffca], vec![0xffe1, 0xffd1], vec![0xffe3, 0x61]] {
+            let error = layout_named_keysyms(Some(&mapping), keysyms.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("X11 keymap does not expose named key/chord component"),
+                "{keysyms:?}: {error}"
+            );
+        }
+        // No layout display: unchecked, as for text.
+        assert_eq!(layout_named_keysyms(None, vec![0xffca]).unwrap(), [0xffca]);
     }
 
     #[test]
@@ -3074,7 +3131,10 @@ mod tests {
             assert!(validate_linux_named_key_chord(name).is_ok(), "{name}");
         }
         assert_eq!(parse_named_key_chord("Super").unwrap(), vec![0xffeb]);
-        assert_eq!(linux_named_key_chord_keysyms("Meta").unwrap(), vec![0xffeb]);
+        assert_eq!(
+            linux_named_key_chord_keysyms(None, "Meta").unwrap(),
+            vec![0xffeb]
+        );
         // Two modifiers still need a key, and a repeat is still refused.
         assert!(parse_named_key_chord("Ctrl+Alt").is_err());
         assert!(parse_named_key_chord("Super+Super").is_err());
