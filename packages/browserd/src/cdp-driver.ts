@@ -4894,6 +4894,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await this.navigateHistory(state, action.direction);
         return;
       case "activate":
+        // Bringing the tab to the front is the action's effect: once sent, a
+        // later failure (a refused reattach, an unresponsive tab) leaves its
+        // outcome unknown rather than definitely not run.
+        state.actionEffectCount += 1;
         await (
           await this.ensureConnection()
         ).send("Target.activateTarget", {
