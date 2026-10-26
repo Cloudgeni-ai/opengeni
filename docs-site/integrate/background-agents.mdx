@@ -103,7 +103,7 @@ An app with its own webhook format needs no code: describe the format on a `cust
 - `ed25519`: the app's signature, checked with its public key as the secret. It also takes `signedContent`.
 - `url_token`: for apps that can't sign. The secret goes in the address as `?token=<secret>`, and it must be at least 24 letters, digits, `-`, `_`, `.` or `~`.
 
-The other fields are dot paths into each event, or headers. `summary`, `subject`, `url`, `actor`, `eventId` and `occurredAt` also take a list of paths, where the first with text wins. `type` can join `parts`, `freshness` refuses old deliveries, and `actorKind` says which actors are people. Linear, Sentry and Tailscale have presets that Automations and agents offer by name. Agents add webhook sources with the `event_sources_create_webhook` tool. Tailscale, spelled out:
+The other fields are dot paths into each event, or headers. `summary`, `subject`, `url`, `actor`, `eventId` and `occurredAt` also take a list of paths, where the first with text wins. `type` and `eventId` can join `parts`: an alert's `status`, `fingerprint` and `startsAt` name one firing episode, so an alert sent again runs automations once, and an event missing a part has no id. `freshness` refuses old deliveries, and `actorKind` says which actors are people. Linear, Sentry and Tailscale have presets that Automations and agents offer by name. Agents add webhook sources with the `event_sources_create_webhook` tool. Tailscale, spelled out:
 
 ```ts
 const { source } = await og.createEventSource(workspaceId, {

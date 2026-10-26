@@ -177,7 +177,11 @@ Automations, and agents with `event_sources_create_webhook`. The format says:
   `created` as `issue.created`), and optional `deliveryId`, `eventId`,
   `occurredAt`, `summary`, `subject`, `url` and `actor`. Each of the last six
   is a path or a list of up to 8 paths, the first holding text winning, since
-  apps put a title in different places per event. `actorKind` names the values
+  apps put a title in different places per event. `eventId` can also join 2
+  to 4 `parts` like `type`: an alert's status, fingerprint and start time name
+  one firing episode, so a group the app sends again runs each alert once. An
+  event missing a part gets no id rather than a partial one, so it is never
+  taken for another event. `actorKind` names the values
   at a path that mean a person; any other value means a bot. The whole event
   is the event's data, so trigger conditions can filter on any field.
 

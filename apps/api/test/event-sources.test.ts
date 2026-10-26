@@ -874,6 +874,91 @@ describe("event sources", () => {
       after.events.find((event: { type: string }) => event.type === "build.passed"),
     ).toMatchObject({ summary: "Build 12 passed" });
   });
+
+  test("an alert webhook keeps each firing episode once: a resend is skipped, a resolve and a re-fire arrive", async () => {
+    const f = await fixture({ enabled: true });
+    const secret = randomBytes(24).toString("hex");
+    // Alertmanager can't sign, but sends a bearer token, and resends a group
+    // on every repeat interval and whenever an alert joins or leaves it. The
+    // id joins status, fingerprint and start time: one firing episode.
+    const created = await f.app.request(f.sources, {
+      method: "POST",
+      headers: f.owner.headers,
+      body: JSON.stringify({
+        kind: "webhook",
+        adapter: "custom",
+        name: "Alerts",
+        signingSecret: secret,
+        format: {
+          signature: { scheme: "token", header: "Authorization", prefix: "Bearer " },
+          batch: { path: "alerts" },
+          type: { path: "status" },
+          eventId: {
+            parts: [{ path: "status" }, { path: "fingerprint" }, { path: "startsAt" }],
+            separator: "|",
+          },
+          subject: "labels.alertname",
+          summary: "annotations.summary",
+        },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const source = (await f.json(created)).source;
+    expect(source).toMatchObject({ status: "active" });
+    const path = new URL(source.webhookUrl).pathname;
+    const alert = (name: string, status: string, startsAt: string, fingerprint?: string) => ({
+      status,
+      labels: { alertname: name, severity: "critical" },
+      annotations: { summary: `${name} is ${status}` },
+      startsAt,
+      ...(fingerprint ? { fingerprint } : {}),
+    });
+    const send = async (receiver: string, alerts: unknown[], token = secret) =>
+      await f.app.request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ version: "4", receiver, alerts }),
+      });
+    const events = async () =>
+      (
+        await f.json(
+          await f.app.request(`${f.sources}/${source.id}/events`, { headers: f.owner.headers }),
+        )
+      ).events.map((event: { type: string; summary: string }) => `${event.type} ${event.summary}`);
+
+    const first = "2026-10-26T18:00:00.000Z";
+    expect(
+      (await send("oncall", [alert("DiskFull", "firing", first, "fp1")], "x".repeat(48))).status,
+    ).toBe(401);
+    expect((await send("oncall", [alert("DiskFull", "firing", first, "fp1")])).status).toBe(200);
+    // The group again, now with a second alert: only the new one arrives.
+    expect(
+      (
+        await send("oncall", [
+          alert("DiskFull", "firing", first, "fp1"),
+          alert("HighLatency", "firing", first, "fp2"),
+        ])
+      ).status,
+    ).toBe(200);
+    // The first resolves, then fires again later: both are new.
+    expect((await send("oncall", [alert("DiskFull", "resolved", first, "fp1")])).status).toBe(200);
+    const again = "2026-10-26T19:30:00.000Z";
+    expect((await send("oncall", [alert("DiskFull", "firing", again, "fp1")])).status).toBe(200);
+    // An alert without a fingerprint has no id, so each delivery of it arrives.
+    expect((await send("oncall", [alert("Unlabelled", "firing", first)])).status).toBe(200);
+    expect((await send("pager", [alert("Unlabelled", "firing", first)])).status).toBe(200);
+
+    expect((await events()).sort()).toEqual(
+      [
+        "firing DiskFull is firing",
+        "firing HighLatency is firing",
+        "resolved DiskFull is resolved",
+        "firing DiskFull is firing",
+        "firing Unlabelled is firing",
+        "firing Unlabelled is firing",
+      ].sort(),
+    );
+  });
 });
 
 describe("agent tools", () => {

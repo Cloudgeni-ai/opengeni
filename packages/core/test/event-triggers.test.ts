@@ -714,6 +714,57 @@ describe("webhook adapters", () => {
       });
     });
 
+    test("an event id joined from parts (Alertmanager's alerts), and none when a part is missing", () => {
+      const adapter = custom({
+        signature: { scheme: "token", header: "Authorization", prefix: "Bearer " },
+        batch: { path: "alerts" },
+        type: { path: "status" },
+        eventId: {
+          parts: [{ path: "status" }, { path: "fingerprint" }, { path: "startsAt" }],
+          separator: "|",
+        },
+        subject: "labels.alertname",
+      });
+      const body = encoder.encode(
+        JSON.stringify({
+          status: "firing",
+          groupKey: '{}:{alertname="DiskFull"}',
+          alerts: [
+            {
+              status: "firing",
+              fingerprint: "a1b2c3",
+              startsAt: "2026-10-26T18:00:00.000Z",
+              labels: { alertname: "DiskFull" },
+            },
+            {
+              status: "firing",
+              startsAt: "2026-10-26T18:00:00.000Z",
+              labels: { alertname: "NoFingerprint" },
+            },
+          ],
+        }),
+      );
+      const reading = adapter.read({ headers: new Headers(), body, receivedAt });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events.map((event) => [event.type, event.subject, event.externalId])).toEqual([
+        ["firing", "DiskFull", "firing|a1b2c3|2026-10-26T18:00:00.000Z"],
+        ["firing", "NoFingerprint", null],
+      ]);
+      // A header can be a part too, and the separator defaults to a dot.
+      const byDelivery = custom({
+        signature: { scheme: "token", header: "X-Token" },
+        type: { value: "ping" },
+        eventId: { parts: [{ header: "X-Delivery" }, { path: "seq" }] },
+      });
+      const ping = byDelivery.read({
+        headers: headersOf({ "x-delivery": "d-9" }),
+        body: encoder.encode(JSON.stringify({ seq: 3 })),
+        receivedAt,
+      });
+      if (ping.kind !== "events") throw new Error("expected events");
+      expect(ping.events[0]?.externalId).toBe("d-9.3");
+    });
+
     test("a type joined from parts, fallback paths, a body send time and the actor's kind", () => {
       const adapter = custom({
         signature: { scheme: "token", header: "X-Token" },

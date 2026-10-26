@@ -49,8 +49,11 @@ webhook docs and write `format`:
   `{ "parts": [{ "header": "X-Resource" }, { "path": "action" }] }`, joined
   with `.`.
 - Optional: `deliveryId` (a `header` or `path`) so retries are kept once;
-  `eventId`; `occurredAt`; `summary`, `subject`, `url` and `actor` (a path, or
-  a list of paths where the first with text wins); `actorKind`, such as
+  `eventId`, each event's own id so an event sent again runs once (a path, a
+  list of paths, or `parts` joined like `type`, such as an alert's `status`,
+  `fingerprint` and `startsAt`; an event missing a part has no id);
+  `occurredAt`; `summary`, `subject`, `url` and `actor` (a path, or a list of
+  paths where the first with text wins); `actorKind`, such as
   `{ "path": "actor.type", "person": ["user"] }`; `freshness`, such as
   `{ "header": "X-Timestamp", "toleranceSeconds": 300 }`, when the app sends a
   timestamp, so old deliveries can't be sent again; `batch` (`{}` or

@@ -330,6 +330,24 @@ function parseJsonOrNull(body: Uint8Array): unknown {
   }
 }
 
+/**
+ * An event's own id: a path, the first of several paths with text, or parts
+ * joined with the separator. An event missing a part has no id, so it is
+ * never taken for another event that shares the parts it has.
+ */
+function eventIdAt(rule: WebhookFormat["eventId"], item: unknown, headers: Headers): string | null {
+  if (rule === undefined) return null;
+  if (typeof rule === "string" || Array.isArray(rule)) return textAt(item, rule);
+  const parts: string[] = [];
+  for (const part of rule.parts) {
+    const text =
+      "header" in part ? headers.get(part.header)?.trim() || null : textAt(item, part.path);
+    if (!text) return null;
+    parts.push(text);
+  }
+  return parts.join(rule.separator);
+}
+
 /** One piece of an event's type, from a header, a path or a fixed value. */
 function typePart(
   source: WebhookFormat["type"] | WebhookValueSource,
@@ -369,7 +387,7 @@ function customEvent(
       : typePart(format.type, item, headers),
   );
   return {
-    externalId: textAt(item, format.eventId)?.slice(0, 200) ?? null,
+    externalId: eventIdAt(format.eventId, item, headers)?.slice(0, 200) ?? null,
     type,
     occurredAt: timeAt(item, format.occurredAt) ?? receivedAt,
     subject: textAt(item, format.subject),

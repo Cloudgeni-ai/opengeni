@@ -15,5 +15,6 @@ One mechanism reads every app's webhooks. Linear and Sentry are now presets of t
 - A `url_token` scheme for apps that can't sign: the secret is part of the address, at least 24 URL-safe characters.
 - `freshness`, which refuses deliveries whose send time is too old.
 - A `type` joined from `parts`, lists of fallback paths for the text fields, and `actorKind` to tell people from bots.
+- An `eventId` joined from `parts`, such as an alert's status, fingerprint and start time, so an app that resends a group of alerts runs each firing episode once. An event missing a part has no id.
 
 Agents with `scheduled_tasks:manage` can add webhook sources themselves. `event_sources_create_webhook` takes a preset or a format and a signing secret, which can be a secret reference, and returns the address to give the app. `event_sources_update` and `event_sources_delete` change and remove sources. For a webhook source, `event_sources_list` with its `sourceId` now shows its format and last five deliveries. The event-triggers Skill explains how to write a format from an app's webhook docs.

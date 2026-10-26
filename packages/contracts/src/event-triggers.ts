@@ -300,6 +300,20 @@ export const WebhookTextPaths = /* @__PURE__ */ defineSchema(() =>
 );
 export type WebhookTextPaths = z.infer<typeof WebhookTextPaths>;
 
+/** Several values joined into one, each a path in the event or a header. */
+function webhookJoinedParts() {
+  return z
+    .object({
+      parts: z.array(WebhookValueSource).min(2).max(4),
+      separator: z
+        .string()
+        .max(4)
+        .regex(/^[\x21-\x7e]*$/u)
+        .default("."),
+    })
+    .strict();
+}
+
 /**
  * How a custom webhook source reads another app's deliveries. Paths are read
  * in each event: the body, or each item of the list `batch` names.
@@ -348,21 +362,17 @@ export const WebhookFormat = /* @__PURE__ */ defineSchema(() =>
         z.object({ path: WebhookJsonPath }).strict(),
         z.object({ header: WebhookHeaderName }).strict(),
         z.object({ value: EventTypeName }).strict(),
-        z
-          .object({
-            parts: z.array(WebhookValueSource).min(2).max(4),
-            separator: z
-              .string()
-              .max(4)
-              .regex(/^[\x21-\x7e]*$/u)
-              .default("."),
-          })
-          .strict(),
+        webhookJoinedParts(),
       ]),
       /** The delivery's id, so a retried delivery is kept once; else the body's hash. */
       deliveryId: WebhookValueSource.optional(),
-      /** Each event's own id, so an event delivered twice runs automations once. */
-      eventId: WebhookTextPaths.optional(),
+      /**
+       * Each event's own id, so an event delivered twice runs automations
+       * once: a path, a list of paths where the first with text wins, or
+       * `parts` joined with `separator` (such as an alert's status,
+       * fingerprint and start time). An event missing a part has no id.
+       */
+      eventId: z.union([WebhookTextPaths, webhookJoinedParts()]).optional(),
       /** When it happened: an ISO time or Unix seconds or milliseconds. */
       occurredAt: WebhookTextPaths.optional(),
       /** A one-line description; the event type when absent. */
