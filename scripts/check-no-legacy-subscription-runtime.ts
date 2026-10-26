@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { parseSync } from "oxc-parser";
 import {
@@ -161,15 +161,15 @@ export function checkLegacySubscriptionSource(
   return findings;
 }
 
+const SKIPPED_DIRECTORIES = ["node_modules", "dist", "build", ".git", "test", "tests"];
+const isSourceFile = (path: string) =>
+  /\.[cm]?[jt]sx?$/.test(path) && !/\.(?:test|e2e|integration)\./.test(path);
+
 function files(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    if (["node_modules", "dist", "build", ".git", "test", "tests"].includes(entry.name)) return [];
+    if (SKIPPED_DIRECTORIES.includes(entry.name)) return [];
     const path = join(directory, entry.name);
-    return entry.isDirectory()
-      ? files(path)
-      : /\.[cm]?[jt]sx?$/.test(path) && !/\.(?:test|e2e|integration)\./.test(path)
-        ? [path]
-        : [];
+    return entry.isDirectory() ? files(path) : isSourceFile(path) ? [path] : [];
   });
 }
 
@@ -177,21 +177,59 @@ function files(directory: string): string[] {
 const GUARD_SOURCES =
   /^scripts\/(?:check-no-legacy-subscription-runtime\.ts|legacy-subscription-runtime\/)/;
 
+/** Whether a repository-relative path is a runtime source the full scan reads. */
+export function isScannedRuntimeSource(file: string): boolean {
+  const parts = file.split("/");
+  return (
+    ["apps", "packages", "scripts"].includes(parts[0]!) &&
+    !parts.slice(0, -1).some((part) => SKIPPED_DIRECTORIES.includes(part)) &&
+    isSourceFile(file) &&
+    !GUARD_SOURCES.test(file)
+  );
+}
+
+/**
+ * The sources a change can newly break, or null when only the full scan is
+ * sound. Findings are per file for a fixed retirement registry and parser, so
+ * unchanged files keep their verdict unless the registry, this engine or the
+ * toolchain changed, or the plan is not focused.
+ */
+export function changedRuntimeSources(plan: {
+  mode?: unknown;
+  changedFiles?: unknown;
+}): string[] | null {
+  if (plan.mode !== "focused" && plan.mode !== "docs") return null;
+  if (!Array.isArray(plan.changedFiles)) return null;
+  const changed = plan.changedFiles.filter((path): path is string => typeof path === "string");
+  const fullScan = (path: string) =>
+    GUARD_SOURCES.test(path) || path === "package.json" || path === "bun.lock";
+  if (changed.some(fullScan)) return null;
+  return changed.filter(isScannedRuntimeSource);
+}
+
 export function checkNoLegacySubscriptionRuntime(
   root: string,
   runtimes: readonly LegacySubscriptionRetirement[] = LEGACY_SUBSCRIPTION_RETIREMENTS,
+  only: readonly string[] | null = null,
 ): LegacySubscriptionFinding[] {
-  return ["apps", "packages", "scripts"]
-    .flatMap((dir) => files(join(root, dir)))
-    .flatMap((path) => {
-      const file = relative(root, path);
-      if (GUARD_SOURCES.test(file)) return [];
-      return checkLegacySubscriptionSource(file, readFileSync(path, "utf8"), runtimes);
-    });
+  const sources = only
+    ? only.filter((file) => existsSync(join(root, file)))
+    : ["apps", "packages", "scripts"]
+        .flatMap((dir) => files(join(root, dir)))
+        .map((path) => relative(root, path))
+        .filter((file) => !GUARD_SOURCES.test(file));
+  return sources.flatMap((file) =>
+    checkLegacySubscriptionSource(file, readFileSync(join(root, file), "utf8"), runtimes),
+  );
 }
 
 if (import.meta.main) {
-  const findings = checkNoLegacySubscriptionRuntime(process.cwd());
+  // PR fast checks scope the scan to the impact plan's changed files; Batch
+  // and every other caller scan the whole tree.
+  const planPath = process.env.OPENGENI_GUARD_SCOPE_PLAN;
+  const only = planPath ? changedRuntimeSources(JSON.parse(readFileSync(planPath, "utf8"))) : null;
+  if (only) console.log(`Scoped to ${only.length} changed runtime source(s).`);
+  const findings = checkNoLegacySubscriptionRuntime(process.cwd(), undefined, only);
   for (const finding of findings)
     console.error(`${finding.file}:${finding.line}: ${finding.message}`);
   if (findings.length) process.exitCode = 1;

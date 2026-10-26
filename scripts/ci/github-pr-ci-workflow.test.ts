@@ -129,18 +129,18 @@ test("PR fast checks run Batch's cheap source contracts before they can cost a b
   expect(batch).toContain('from "./changeset-plan"');
   expect(batch).toContain('"scripts/generate-site-browser-runtime.ts", "--check"');
 
-  // Guards: exactly Batch's deferrals, plus lint (its own step above) and the
-  // ~20s subscription-contract scan. Any other new guard runs on PRs too.
+  // Guards: exactly Batch's deferrals plus lint (its own step above), so every
+  // guard that can fail Batch source contracts fails the PR first.
   const guards = steps[index("run-guards-plan.ts")];
   expect(guards.if).toBeUndefined();
   expect(guards.run).toContain('--plan "$RUNNER_TEMP/pr-plan/pr-plan.json"');
+  expect(guards.run).toContain("--scope-scans-to-changes");
+  expect(batch).not.toContain("--scope-scans-to-changes");
   const excluded = (text: string) =>
     [...text.matchAll(/--exclude"?,?\s*"?([a-z-]+)/g)].map((m) => m[1]);
   const batchExcluded = excluded(batch.slice(batch.indexOf("run-guards-plan.ts")));
   expect(batchExcluded.sort()).toEqual(["example-builds", "publish-closure", "sdk-compat"]);
-  expect(excluded(guards.run).sort()).toEqual(
-    [...batchExcluded, "lint", "subscription-contract"].sort(),
-  );
+  expect(excluded(guards.run).sort()).toEqual([...batchExcluded, "lint"].sort());
 });
 
 test("write-capable supersession handler executes trusted base only on a new PR push", () => {

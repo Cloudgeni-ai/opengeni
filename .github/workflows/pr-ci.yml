@@ -97,13 +97,13 @@ jobs:
         with:
           name: pr-impact-plan
           path: ${{ runner.temp }}/pr-plan
-      # Batch's guard set, minus lint (run above), the output-producing guards
-      # Batch also defers, and subscription-contract (its legacy-runtime scan
-      # alone takes ~20s), which stays Batch-only.
-      - name: Check cheap impacted source guards
+      # Every guard Batch source contracts run, minus lint (run above), so a
+      # PR and its batch cannot disagree. The legacy subscription runtime scan
+      # reads only this PR's changed files; Batch scans the whole tree.
+      - name: Check impacted source guards
         run: >-
           bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
-          --exclude lint --exclude subscription-contract
+          --scope-scans-to-changes --exclude lint
           --exclude publish-closure --exclude sdk-compat --exclude example-builds
       - name: Check affected types
         run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
