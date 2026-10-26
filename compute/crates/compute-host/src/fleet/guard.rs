@@ -837,10 +837,16 @@ mod tests {
     fn a_guard_asked_to_stop_stops_only_at_a_step_that_may_feed_the_watchdog() {
         let dir = tempfile::tempdir().unwrap();
         let group = dir.path().join("vms");
-        std::fs::create_dir(&group).unwrap();
-        std::fs::write(group.join("cgroup.freeze"), "0").unwrap();
+        // One VM, running, in a group of its own inside the VMs' cgroup,
+        // which holds no process itself: the guard kills that VM.
+        let vm = group.join("vm");
+        for path in [&group, &vm] {
+            std::fs::create_dir_all(path).unwrap();
+            std::fs::write(path.join("cgroup.freeze"), "0").unwrap();
+            std::fs::write(path.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+            std::fs::write(path.join("cgroup.procs"), "").unwrap();
+        }
         let events = group.join("cgroup.events");
-        std::fs::write(&events, "populated 1\nfrozen 0\n").unwrap();
         let mut lapsed = config(dir.path(), None);
         lapsed.cgroup = group.clone();
         // No lease file: the lease has run out.
@@ -856,14 +862,22 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         stop.store(true, Ordering::Relaxed);
-        std::thread::sleep(STEP * 5);
+        // It goes on killing them: a kill written after it was asked to
+        // stop, however slowly the steps come on a busy machine.
+        let kill = vm.join("cgroup.kill");
+        let _ = std::fs::remove_file(&kill);
+        let started = std::time::Instant::now();
+        while std::fs::read_to_string(&kill).ok().as_deref() != Some("1") {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "it stopped killing them"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(STEP * 3);
         assert!(!guard.is_finished(), "it stopped with the VMs running");
-        assert_eq!(
-            std::fs::read_to_string(group.join("cgroup.kill")).unwrap(),
-            "1",
-            "it goes on killing them"
-        );
         // They are gone: it may feed the watchdog, and stops.
+        std::fs::write(vm.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
         std::fs::write(&events, "populated 0\nfrozen 0\n").unwrap();
         let started = std::time::Instant::now();
         while !guard.is_finished() {

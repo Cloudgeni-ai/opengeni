@@ -197,6 +197,7 @@ import {
   scheduledTaskScheduleToolInput,
   scheduledTaskCreateToolValidation,
   scheduledTaskEventsToolInput,
+  scheduledTaskOverlapPolicyToolInput,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
 import {
@@ -714,6 +715,7 @@ const buildScheduledTaskUpdateToolInput = (events: boolean) =>
         ...UpdateScheduledTaskRequest.out.shape,
         id: z4.string().uuid(),
         schedule: scheduledTaskScheduleToolInput().optional(),
+        overlapPolicy: scheduledTaskOverlapPolicyToolInput(),
         action: CreateScheduledTaskRequest.options[1].out.shape.action.optional(),
         agentConfig: z4
           .object(ScheduledTaskAgentConfigInput.shape)

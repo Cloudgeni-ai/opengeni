@@ -111,8 +111,10 @@ has finished and the parent explicitly gives the go-ahead.
 
 The accepted GitHub contract is **only the exact tested tree lands**, not
 “no PR head can change after the final HTTP read.” The adapter rechecks every
-head/readiness/evidence binding, source branch head, exact workflow result and
-main-CI headroom immediately before its atomic Git transaction. A last-moment
+head/readiness/evidence binding, source branch head and exact workflow result
+immediately before its atomic Git transaction. Only publication also rechecks
+runner headroom and the Batch slot there; a landing uses no runner and never
+waits for headroom. A last-moment
 PR update remains possible; no local lock or single replica eliminates it.
 
 One narrow head-refresh exception preserves a candidate when a queued PR only
@@ -275,6 +277,11 @@ service does not interpret an incomplete observation as an empty queue.
 
 ## Admission and FIFO
 
+When the oldest ready PR is control-plane or the Version PR, it runs alone.
+Otherwise ordinary PRs fill the batch up to its cap, skipping control-plane PRs
+in the middle but never crossing a Version PR. A skipped control-plane PR runs
+alone once it is oldest; in-flight Version and preceding-batch gates still apply.
+
 The GitHub-only admission contract is an open, non-draft PR with `queue-ready` or a current native auto-merge request,
 and successful configured required GitHub-hosted checks on its exact current head.
 The admission workflow is fast lint, types and selected units, not the full PR
@@ -330,6 +337,45 @@ label history is not permission to admit. Historical bindings remain immutable.
 `changeset-release/main` is a barrier: earlier PRs batch first, Version is a
 singleton, and later work does not speculate across it.
 
+### Main-fix priority lane
+
+Add the `queue-priority` label to a PR that fixes a red main. It is honoured
+only under the readiness trust rules above: the label must be on the PR now and
+its latest actual GraphQL label timeline event must be an add (GitHub requires
+triage or higher to label). Prose, comments or a label without a readable
+LabeledEvent grant nothing. The label is not readiness: the PR still needs
+`queue-ready` or native auto-merge, a non-draft exact head and every required
+green check. It is not part of the readiness binding, so adding or removing it
+never invalidates a candidate.
+
+Ready priority PRs sort ahead of the FIFO, including Version, and each runs as a
+singleton batch. When several are ready, the earliest ready event goes first.
+On a green or unknown base nothing else changes: a priority PR waits for
+speculation depth, barriers, landings and capacity like any other PR.
+
+When main CI at the exact base is conclusively red (the completed workflow
+failed, or a job of the running exact attempt already failed) and a priority PR
+is ready but not yet running, the planner may preempt:
+
+- A root candidate on that base with a failed or running Batch CI attempt is
+  abandoned. It and its speculative descendants are invalidated without blame,
+  retry, split or parking; their members return to the FIFO behind the fix with
+  unchanged bindings. A tested green root still lands, and a root without an
+  exact run keeps its reservation.
+- A candidate that contains a priority PR is never abandoned, so a failed fix
+  cannot be preempted by another fix in a loop. Remove its readiness to recover.
+- Pending bisection groups wait while the fix runs and resume afterwards.
+- Running Batch CI of abandoned candidates, and of other invalidated candidates
+  when the Batch slot is full, gets a durable `cancel` effect: a
+  `POST actions/runs/{id}/cancel` of that candidate's own queue-branch Batch CI.
+  It is fenced like every other REST effect, runs before the tick's other
+  effects, and is suppressed without a POST unless the candidate is still
+  invalidated and unlanded. The slot frees only when the provider reports the
+  run terminal; until then the fix is built locally but not published.
+
+The fix itself still needs green exact-tree Batch CI to land. A failed priority
+candidate keeps the ordinary red-base hold.
+
 Use native auto-merge (for example `gh pr merge --auto`) or `queue-ready`. While
 batcher admission is ON, protections must prevent native/direct auto-merge from
 bypassing this batcher. Only the
@@ -351,6 +397,86 @@ evidence of batcher admission or successful Batch CI. For an end-to-end batcher
 proof, enable the request only after stable ON is verified and keep ON throughout
 the proof; retain the exact candidate, run/attempt, tested tree and native MERGED
 readback separately from any Manual-fallback merge.
+
+### Main-push Batch CI attestation
+
+A landing fast-forwards main to the exact `queue/live/<batchId>` tip that Batch CI
+tested, so the push-to-main `ci.yml` run would otherwise re-run the whole suite on
+a tree that already passed. Its `Batch CI attestation` job
+(`scripts/ci/batch-attestation.ts`) looks for a trusted, completed, successful
+latest attempt of `.github/workflows/batch-ci.yml` on a `queue/live/<64-hex>` ref
+whose tested commit has exactly the main commit's Git tree. It reuses the
+unit-reuse proof machinery and binds the run and attempt, the canonical per-PR
+Git manifest (whose `batchId` must name the run's own live ref), the SHA-256
+digests of the plan and result archives, and a complete successful Batch result
+with every expected shard receipt. It also requires the tested tip to be the main
+commit or an ancestor of it, so a tree-preserving refresh landing qualifies. A
+batch containing a Version PR (`changeset-release/main`) or a control-plane PR
+never attests; both flags are bound into the manifest digest. Nor does a push
+whose landed range (`github.event.before` to `GITHUB_SHA`, which must be a proper
+ancestor range) changes `.github/`, `scripts/ci/` or `scripts/merge-batcher/`:
+those paths define main's own lanes, so a change to them runs the changed lanes.
+The impact planner's broader full-mode fences, such as changesets, the lockfile
+and toolchain files, do not block attestation; Batch CI tests them. A
+final read rejects an attempt that changed during discovery. The
+`Reuse identical-tree Batch CI` step then re-verifies the persisted proof offline
+and runs only for a verified proof. `plan` adopts the attested topology only when
+the attestation job succeeded with well-formed identities and the tree matches
+`GITHUB_SHA^{tree}`. Missing, expired, ambiguous, partial, inconsistent or
+unreadable evidence, a proof error, or any other event runs the ordinary full
+suite. Discovery never fails the workflow.
+
+On an attested run:
+
+- **Skipped (Batch verdict reused):** `Source and type contracts`, unit shards,
+  real-service shards, impacted E2E shards, real-service and recovery tests,
+  browser and visual acceptance, package and bundle contracts and the real
+  Chromium browser controller.
+- **Still run:** `plan` (impact plan and image inputs), `Deployment artifacts`,
+  the artifact runtime (including its macOS and Windows native smoke receipts),
+  release-image validation, every workload image, `Workload image builds` (and its
+  canary image receipt), `Typecheck and unit tests`, `Verify landed merge content`
+  and `Publish fully green main SHA`.
+
+`scripts/ci/required-results.jq` has an explicit attested mode. It accepts only
+a full-mode main push that builds images, where every skipped lane above is
+`skipped` (none partially ran) and deployment, artifact runtime and images
+succeeded. The aggregate job names, the `Full CI` commit status and the
+`full-green-main-<sha>` receipt (`schemaVersion: 1`, `mode: "full"`) are
+unchanged for publish/canary admission, Opengeni-ops `Deploy Staging Canary`
+and the merge-content audit. The receipt adds an `attestation` object (Batch run
+ID, attempt, tested head and tree), and the status description names the Batch
+run. Release admission (`scripts/check-release-pr-automation.mjs`) refuses a
+receipt with `attestation`: a release source, including a later tested
+descendant of a Version merge, needs the full main suite. The `batch-attestation-<sha>` artifact
+keeps the full proof for 30 days.
+
+**Coverage.** This is an explicit coverage reduction for batcher landings. Batch
+CI covers impact-selected source contracts and impact-selected unit shards on the
+exact tree. It does not cover the full unit inventory, real-service, E2E,
+browser, package-contract, publish-closure, SDK-compatibility or example-build
+lanes. Those lanes were never landing gates, because the batcher lands on Batch
+success whatever main CI reports. Staging canary deploys attested SHAs with
+those images. The lanes still run in full on every push without an
+identical-tree trusted `queue/live` Batch attempt (ordinary direct pushes), on
+Version PR, control-plane and CI-definition landings, on the weekly schedule and
+on the `workflow_dispatch` run of every exact Version PR head before a release.
+A direct push or revert whose tree exactly equals an earlier tested batch tip
+also attests. Release admission requires a non-attested full-green receipt, so
+queue-green and attested main remain non-release evidence. An attested base's
+green `units` class covers only the units Batch selected, so failed-cohort
+comparison can blame a cohort for a failure an unselected main test already had.
+
+The merge batcher treats a run as attested only from its complete job listing.
+It needs exactly one successful `Batch CI attestation` job whose
+`Reuse identical-tree Batch CI` step succeeded, and no skipped-lane job in any
+state but `skipped`. An attested run is never pre-fan-out, never counts as queued
+main and is never `latestMain`; it has no test fan-out to protect. Its
+runner-holding jobs remain `mainDemand` inside the main reserve and the provider
+pool, because they really occupy runners. `stage.json` headroom lists them as
+`attestedMainRuns`. An attested exact base reports green `source` and `units`
+classes for failed-cohort comparison, because the same tree passed both in Batch
+CI. Any lane that ran falls back to ordinary job-class evidence.
 
 ## Immutable candidates and CI result contract
 
@@ -445,7 +571,9 @@ full-green workflow receipt. The reader traverses complete attempt-scoped job pa
 checks totals and duplicate/run/attempt identities, and rereads the latest run/attempt
 before accepting those classes. Pending relevant jobs, unknown/error evidence,
 missing failure classes, duplicate jobs and incomplete shard sets do not release
-the hold. A verified full-green base also clears it. This is class relevance,
+the hold. A verified full-green base also clears it. A Batch-attested exact base
+reports green `source` and `units` classes from its identical-tree Batch verdict.
+This is class relevance,
 not a same-assertion fingerprint proof, requeue operation or green-test waiver.
 Otherwise a trusted second code failure splits the cohort or parks a failing singleton;
 a second infrastructure or unknown outcome holds. Invalidated, landed or obsolete-base
@@ -463,9 +591,29 @@ default remains one hosted run; a qualified configuration of two permits a
 successor to run while its predecessor is tested. `BATCHER_SPECULATION_DEPTH`
 bounds the chain, including local unpublished candidates. Missing publication
 outcomes retain their reservation; foreign, invalidated and waiting Batch runs
-still consume provider slots. No running CI is cancelled. Only a tested root
+still consume provider slots. No running CI is cancelled, except by the main-fix
+priority lane on a red exact base. Only a tested root
 whose base is current main may land, with exact tree/provenance/CAS checks;
 landing consumes no additional hosted slot and does not wait for successor CI.
+
+**A tested green root lands on the next controller step regardless of runner
+headroom.** Landing fast-forwards main to the exact already-tested tip and uses
+no runner, so holding it only delays every member PR and the next publication.
+The planner therefore never returns a headroom wait for a trusted, completed,
+successful exact root run, and the executor does not reread headroom before a
+landing. This deliberately retires the former "full-main CI has priority;
+tested candidate retained without cancellation" hold: a busy, unknown,
+incomplete, overrun or misconfigured runner inventory (`mainBusy`,
+`headroom.allowed: false`, `publicationBlocked`) no longer delays a landing.
+Every landing safety check is unchanged: the exact tested commit and tree,
+tested base equal to current main, a fresh complete re-observation and replan
+that must select the same tip, final readiness, binding and source-branch head
+rereads, head-refresh equivalence, exact-attempt run provenance, fast-forward
+only main, lease epoch/owner fencing and state-ref CAS, and shadow mode never
+landing. Runner headroom still gates everything that starts CI: publication
+(rechecked at the effect boundary with the Batch slot and complete inventory)
+and the single trusted retry. A headroom read that throws (rather than
+reporting a hold) still fails the whole observation, as every other read does.
 At publication/retry, the slot budget is the union of exact published-candidate
 reservations and current provider runs, not two independent limits. A matching
 visible push run is counted once; missing, mismatched or unresolved histories
@@ -495,12 +643,16 @@ This saturated model excludes failures, partial batches and downtime; two
 slots alone do not increase that runner-budget ceiling. Main complete-unit
 reuse, if independently qualified, would lower the modeled combined cost
 from 519 to 369 job-minutes, not make runner capacity unlimited.
+Main-push Batch CI attestation removes the attested landing's test lanes. Its
+remaining artifact, image and receipt jobs are not re-measured here, so the
+modeled main cost above is an upper bound for batcher landings.
 Failed or changed predecessors invalidate descendants without cancelling their
-runs. Version/control-plane barriers and sequential bisection remain unchanged.
+runs. Version barriers, control-plane singleton isolation and sequential bisection remain unchanged.
 Full-main capacity estimates remain observable rather than reserving runners.
-Before publication, the existing single trusted retry, and landing, the reader scans current
+Before publication and the existing single trusted retry, the reader scans current
 repository runs and their latest jobs (100 entries per page, paginated through
-the reported total; incomplete observations hold). Each of the five active run statuses
+the reported total; incomplete observations hold publication and retry, never a
+tested landing). Each of the five active run statuses
 is listed twice, so a run whose status changes once during the listing (in either
 direction, for example `in_progress` to `waiting` while other jobs still run) is
 still listed; the latest active listing is used, and a run listed as `completed`
@@ -516,8 +668,22 @@ request concurrency, not inventory size or provider latency. There are no 64-run
 or 32-run admission limits. A
 120-second scan deadline is checked before each request and after the last
 response; an overrun or provider error holds. Each listing requires a stable
-reported total, correctly sized pages and unique identities across pages;
-inconsistent pages and run identity drift hold rather than admitting partial
+reported total, correctly sized pages and unique identities across pages. A
+listing whose rows disagree with GitHub's reported `total_count` (count drift,
+short or long pages, repeated identities) is **re-read once** before anything
+holds; malformed pages and invalid identities do not retry. If a run's
+latest-job listing still disagrees after that re-read (GitHub's `filter=latest`
+count can include jobs it does not return), the live reader uses the distinct
+rows actually returned, lists the run in `partialJobRuns` and adds a warning
+to the headroom reason. Such a partial listing never proves a run
+approval-only and never seeds the approval cache. Job counts are informational
+for slot one, so publication of the first Batch proceeds; any additional slot
+(`occupiedBatchSlots > 0`) stays closed ("Additional Batch slots require a
+complete job inventory"), because an undercount there could overrun the runner
+budget. Run listings, which bound the Batch slots, stay strict: a run-listing
+mismatch that survives the re-read still holds publication and retry. The
+traffic-shadow reader keeps the strict job hold. None of these holds delay a
+tested landing. Run identity drift holds rather than admitting partial
 demand. A run is **approval-only** only when
 the following complete-job proof establishes it. The live reader may reuse that
 proof for at most 15 minutes only for main push CI whose sole waiting job is
@@ -605,7 +771,8 @@ may enter GitHub's queue; a tested candidate need not wait for main capacity to
 land. `capacityInformational`
 marks this policy; `capacity.hold` retains the historical capacity heuristic for
 diagnostics, not an admission rejection. Invalid capacity configuration and
-incomplete/unknown evidence still hold. Traffic-shadow capacity comparisons
+incomplete/unknown evidence still hold publication and retry; they never hold a
+tested landing, which ignores headroom entirely. Traffic-shadow capacity comparisons
 retain their existing conservative decisions.
 
 The exact tested tree, lease/CAS, provenance, configured in-flight limit and unknown-outcome
@@ -614,20 +781,23 @@ main-capacity wait no longer accrues when capacity is informational; latency
 comparisons across this policy change are therefore not like-for-like.
 
 - **Main before fan-out.** `ci.yml` first creates only automation-admission,
-  merge-content and plan; every other job needs plan and appears together, about
-  77–92 seconds later (measured), as a fan-out of up to 46 runner-holding jobs.
-  An active full-main push run whose complete job list has at most those 3 jobs
+  batch-attestation, merge-content and plan; every other job needs plan and
+  appears together (measured before batch-attestation existed: about 77–92
+  seconds later), as a fan-out of up to 46 runner-holding jobs.
+  An active full-main push run whose complete job list has at most those 4 jobs
   (any status, including a just-pushed run without jobs or a run held by its
   concurrency group) is pre-fan-out: its observed demand understates what it is
   about to request; this is reported without withholding a ready candidate.
   A drained run still lists its completed fan-out jobs, so it is not pre-fan-out.
   A run proven approval-only (an old rerun waiting for environment approval) is
   idle; once approved, a later observation sees its demand. A job-less waiting
-  or pending main run is reported as pre-fan-out. A test checks the 3-job constant
-  against `ci.yml`.
+  or pending main run is reported as pre-fan-out. A test checks the 4-job constant
+  against `ci.yml`. A Batch-attested run (see "Main-push Batch CI attestation") is
+  never pre-fan-out once its attestation step has succeeded: it has no test fan-out.
 - **Main jobs waiting for runners.** If any active full-main push CI run, newest
   or an older rerun, has a `queued` or `requested` job, its count and oldest wait
-  are retained. Main CI itself is never gated, cancelled or skipped.
+  are retained. Main CI itself is never gated or cancelled. Batch-attested runs
+  are excluded: their artifact and image jobs may wait without holding a candidate.
 - **Provider pool fit.** Observed repository demand (main + other) plus
   `BATCHER_OTHER_REPOSITORY_ALLOWANCE` plus the 18 candidate slots is compared with
   `BATCHER_PROVIDER_JOB_LIMIT`. With the defaults, 60 - 28 - 18 = 14 observed
@@ -673,6 +843,8 @@ actual run/job creation and start timestamps to measure provider queue delay.
 `stage.json` headroom now also records `capacity`: the configured limit and
 allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (queued or
 requested jobs across all active main runs), `preFanoutMainRuns` (their run IDs),
+`attestedMainRuns` (top-level headroom: active Batch-attested main runs, excluded
+from both),
 and `latestMain` (newest main run ID, jobs
 waiting for runners, oldest current queue age, and the largest `started_at -
 created_at` among started jobs, all measured from the job timestamps). These are
@@ -690,7 +862,8 @@ ready subset on the exact stacked candidate tree. Its trusted, completed, latest
 run-attempt success permits landing even when full-main CI is red, missing,
 running, cancelled or unknown. This is not full-CI equivalence or release evidence.
 Full main CI remains an independent post-merge backstop. Capacity admission still
-respects observed main runner demand; main advancing still invalidates obsolete
+respects observed main runner demand for publication and retry, never for a
+tested landing; main advancing still invalidates obsolete
 candidates and requires a new exact-tree test. Legacy `baseHold` records remain
 audit history, not green-candidate admission gates.
 
@@ -778,7 +951,7 @@ remote ref deletion is performed by this implementation.
 
 ### Recoverable REST effects
 
-Comment, whole-run retry and follow-up PR intents live in `state.json`, with deterministic
+Comment, whole-run retry, priority-lane cancel and follow-up PR intents live in `state.json`, with deterministic
 IDs, comment markers, exact run/attempt identity, attempts and next-check times.
 An intent is durably marked `submitting` before POST; a final lease read reduces
 stale-owner races but is **not** an atomic Git/REST fence. Restart reconciliation
