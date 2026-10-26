@@ -500,8 +500,9 @@ type Runtime = {
   recording: BrowserRecording | null;
   /** When a request last reached this browser (supervisor clock). */
   lastUsedAt: number;
-  /** The deadline of a deliberate wait by the agent session using this
-   * browser (supervisor clock), or null; see `waitHoldEnds`. */
+  /** Until when the agent session using this browser keeps it while it
+   * works or deliberately waits (supervisor clock), or null; see
+   * `waitHoldEnds`. */
   waitHoldUntil: number | null;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
@@ -3417,17 +3418,17 @@ export class BrowserSupervisor {
   }
 
   /**
-   * Keeps a browser through a deliberate wait by the agent session using it:
-   * the control plane sends the wait's deadline when the agent starts
-   * waiting, and the idle release leaves the browser running, page state and
-   * all, until that deadline (see `waitHoldEnds` for the cap); the normal
-   * idle time then counts from the hold's end, so the turn the wait resumes
-   * finds its browser. This is not a use of the browser. A deadline already
-   * past clears the hold.
+   * Keeps a browser while the agent session using it works or deliberately
+   * waits: the control plane sends until when (a wait's deadline, or a far
+   * time while the session works), and the idle release leaves the browser
+   * running, page state and all, until then (see `waitHoldEnds` for the cap);
+   * the normal idle time then counts from the hold's end, so the turn a wait
+   * resumes finds its browser. This is not a use of the browser. A time
+   * already past clears the hold.
    *
-   * With `endsWaitUntil`, the wait with that deadline ended at `until`
-   * (input arrived first): the hold ends there, and only if it is still that
-   * wait's, so a late end never shortens a newer wait.
+   * With `endsWaitUntil`, the hold until that time ended at `until` (the
+   * session stopped working and waiting first): the hold ends there, and only
+   * if it is still that one, so a late end never shortens a newer hold.
    *
    * A browser handed off by an earlier controller and not adopted yet is
    * held too, so a wait right after a restart or update keeps it. A browser
@@ -3983,10 +3984,11 @@ function idleReleasable(runtime: Runtime, idleBefore: number, now: number): bool
 }
 
 /**
- * Until when a deliberate wait keeps a browser past the idle release time:
- * the wait's deadline, but never more than `BROWSER_WAIT_HOLD_MAX_MS` after
- * the browser's last use, so repeated waits cannot keep a browser nobody
- * uses. Without a wait, never (negative infinity).
+ * Until when the session using a browser keeps it past the idle release
+ * time: the hold's time (a wait's deadline, or far off while the session
+ * works), but never more than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's
+ * last use, so a long turn or repeated waits cannot keep a browser nobody
+ * uses. Without a hold, never (negative infinity).
  */
 export function waitHoldEnds(lastUsedAt: number, waitHoldUntil: number | null): number {
   if (waitHoldUntil === null) return Number.NEGATIVE_INFINITY;
@@ -4000,8 +4002,8 @@ export function idleSince(lastUsedAt: number, waitHoldUntil: number | null): num
   return Math.max(lastUsedAt, waitHoldEnds(lastUsedAt, waitHoldUntil));
 }
 
-/** A wait hold sent by the control plane: a wait until `until`, or, with
- * `endsWaitUntil`, the end at `until` of the wait with that deadline. */
+/** A hold sent by the control plane: kept until `until`, or, with
+ * `endsWaitUntil`, the end at `until` of the hold until that time. */
 export type WaitHold = { until: number; endsWaitUntil?: number };
 
 function nextWaitHold(current: number | null, hold: WaitHold, now: number): number | null {

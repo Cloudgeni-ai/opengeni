@@ -345,6 +345,16 @@ async function agentWaits(
     where id = ${f.sessionId}`;
 }
 
+/** An agent on another session, still in its turn, is using the browser. */
+async function anotherAgentWorks(f: Fixture) {
+  const other = await finishedSession({ accountId: f.accountId, workspaceId: f.workspaceId });
+  await admin`insert into browser_session_associations (account_id, workspace_id,
+      browser_session_id, session_id, relationship, actor_subject_id)
+    values (${f.accountId}, ${f.workspaceId}, ${f.browserId}, ${other.sessionId}, 'using',
+      'fixture-agent')`;
+  return other;
+}
+
 /** Whether the reaper's listing offers the box for an idle release. */
 async function idleCandidate(f: Fixture) {
   const rows = await admin<{ sandbox_group_id: string }[]>`
@@ -581,6 +591,41 @@ describe("idle browser and desktop release", () => {
     const f = await fixture();
     await idleFor(f, 16);
     await agentWaits(f, 30, "observing");
+    expect(await idleCandidate(f)).toBe(true);
+    await sweep();
+    expect((await state(f)).browser.lifecycle).toBe("suspending");
+  }, 60_000);
+
+  test("another agent still working in its turn keeps the browser it uses", async () => {
+    const f = await fixture();
+    await idleFor(f, 16);
+    // An agent on another session used this browser, then spent a while on
+    // other work in the same turn, with no wait armed.
+    const other = await anotherAgentWorks(f);
+    expect(await idleCandidate(f)).toBe(false);
+    await sweep();
+    expect((await state(f)).browser.lifecycle).toBe("active");
+    expect(
+      await releaseIdleInteractionHolders(db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sandboxGroupId: f.sandboxGroupId,
+        idleMs: IDLE_MS,
+        browserCheckpoints: true,
+      }),
+    ).toBeNull();
+
+    // Its turn ended without a wait: the browser is idle again.
+    await finishTurn(other);
+    expect(await idleCandidate(f)).toBe(true);
+    await sweep();
+    expect((await state(f)).browser.lifecycle).toBe("suspending");
+  }, 60_000);
+
+  test("a long turn cannot keep a browser unused for longer than the hold cap", async () => {
+    const f = await fixture();
+    await idleFor(f, BROWSER_WAIT_HOLD_MAX_MS / 60_000 + 1);
+    await anotherAgentWorks(f);
     expect(await idleCandidate(f)).toBe(true);
     await sweep();
     expect((await state(f)).browser.lifecycle).toBe("suspending");

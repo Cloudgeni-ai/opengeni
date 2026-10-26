@@ -331,10 +331,11 @@ export type AppDependencies = {
 export type ObjectStorageDependency = ReturnType<typeof createObjectStorage>;
 
 /**
- * Tells the controllers of the browsers an agent session holds that the
- * session is deliberately waiting until `deadline`, so they are not stopped
- * as idle mid-wait, and ends that hold when the wait ends early. Best effort:
- * a browser it cannot reach keeps its plain idle release.
+ * Called when an agent session arms an input wait with `deadline`: the
+ * controllers of the browsers it holds keep them while the session waits and
+ * then while the turn the wait resumes works, and the hold ends when the
+ * session neither works nor waits. Best effort: a browser it cannot reach
+ * keeps its plain idle release.
  */
 export type HoldBrowsersForWait = (input: {
   grant: AccessGrant;

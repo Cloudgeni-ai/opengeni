@@ -1,11 +1,13 @@
 -- deployment-mode: rolling
--- An agent session's deliberate wait keeps the browser it created or is
--- using. When the agent arms an input wait (wait_for_input), the browser is
--- in use until that wait ends, but never longer than 60 minutes
--- (BROWSER_WAIT_HOLD_MAX_MS) after the browser's last use, so repeated waits
--- cannot keep a browser nobody uses. Before this, a Modal box holding only
--- such a browser was released after the sandbox idle grace and the browser
--- relaunched later with new tab ids and without its page state.
+-- An agent session that is working or deliberately waiting keeps the browser
+-- it created or is using. While the session works (a turn is queued, running,
+-- recovering, waiting for capacity or waiting on a person) or has an armed
+-- input wait (wait_for_input), the browser is in use, but never longer than
+-- 60 minutes (BROWSER_WAIT_HOLD_MAX_MS) after the browser's last use, so a
+-- long turn or repeated waits cannot keep a browser nobody uses. Before this,
+-- a Modal box holding only such a browser was released after the sandbox idle
+-- grace and the browser relaunched later with new tab ids and without its
+-- page state.
 --
 -- Only list_idle_interaction_leases changes, with the same signature and
 -- result: a box whose browser is held this way is no longer a candidate. The
@@ -64,15 +66,17 @@ BEGIN
                   AND ((operation.resource_kind = 'browser_session' AND operation.resource_id = browser.id)
                     OR (operation.resource_kind = 'computer_session'
                       AND operation.resource_id = computer.id)))
-              -- A waiting agent session keeps its browser (60 minutes is
-              -- BROWSER_WAIT_HOLD_MAX_MS).
+              -- A working or waiting agent session keeps its browser (60
+              -- minutes is BROWSER_WAIT_HOLD_MAX_MS).
               OR EXISTS (SELECT 1 FROM %1$I.browser_session_associations association
                 JOIN %1$I.sessions waiting ON waiting.id = association.session_id
                   AND waiting.workspace_id = association.workspace_id
                 WHERE association.workspace_id = browser.workspace_id
                   AND association.browser_session_id = browser.id
                   AND association.relationship IN ('created', 'using')
-                  AND waiting.input_wait_until > now()
+                  AND (waiting.status IN ('queued', 'running', 'requires_action', 'recovering',
+                      'waiting_capacity')
+                    OR waiting.input_wait_until > now())
                   AND browser.last_used_at > now() - interval '60 minutes'))
         )
       ORDER BY lease.holders_changed_at, lease.id LIMIT p_limit;

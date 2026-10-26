@@ -19,6 +19,8 @@ import {
   browserTabDiagnosisError,
   browserRouteError,
   browserCreateInput,
+  sessionBrowserHold,
+  SESSION_WORKING_HOLD_UNTIL,
   withInitialView,
 } from "../src/routes/browser-sessions";
 
@@ -26,6 +28,24 @@ const routeUrl = new URL("../src/routes/browser-sessions.ts", import.meta.url);
 const appUrl = new URL("../src/app.ts", import.meta.url);
 
 const FILE_ID = "33333333-3333-4333-8333-333333333333";
+
+test("a session keeps its browsers while it works or waits, and not once it stops", () => {
+  const now = Date.parse("2026-01-01T12:00:00.000Z");
+  const deadline = "2026-01-01T12:20:00.000Z";
+  const wait = { deadlineAt: deadline, reason: "Waiting for a reply." };
+  for (const status of ["queued", "running", "requires_action", "recovering", "waiting_capacity"]) {
+    expect(sessionBrowserHold({ status: status as never, inputWait: null }, now)).toBe(
+      SESSION_WORKING_HOLD_UNTIL,
+    );
+  }
+  expect(sessionBrowserHold({ status: "idle", inputWait: wait }, now)).toBe(Date.parse(deadline));
+  // A wait whose deadline passed, or none, keeps nothing.
+  expect(sessionBrowserHold({ status: "idle", inputWait: wait }, Date.parse(deadline))).toBeNull();
+  for (const status of ["idle", "failed", "cancelled"]) {
+    expect(sessionBrowserHold({ status: status as never, inputWait: null }, now)).toBeNull();
+  }
+  expect(sessionBrowserHold(null, now)).toBeNull();
+});
 
 test("a create returns the launch view only for the launch it activated in this request", () => {
   const browserSessionId = "44444444-4444-4444-8444-444444444444";
@@ -332,6 +352,7 @@ async function automaticBrowserRecoveryFixture() {
       headless: true,
       linkedComputerSessionId: null,
       networkRouteId: null,
+      associations: [],
     },
   };
   let state = {
@@ -680,7 +701,7 @@ async function automaticBrowserRecoveryFixture() {
   }
 }
 
-test("an agent's wait tells only the running browsers it holds, without using or starting anything", async () => {
+test("an agent's work and waits keep only the running browsers it holds, without starting anything", async () => {
   const directory = await mkdtemp("/tmp/og-api-wait-hold-");
   const script = join(directory, "synthetic-wait-hold.ts");
   await writeFile(script, `(${waitHoldFixture.toString()})()`, { mode: 0o600 });
@@ -697,6 +718,19 @@ test("an agent's wait tells only the running browsers it holds, without using or
     expect(stderr).toBe("");
     expect(code).toBe(0);
     const results = JSON.parse(stdout);
+    const hold = (until: string) => ({
+      browser: "held",
+      exactAuthority: true,
+      body: { controllerGeneration: "generation-held", until },
+    });
+    // The hold ends at the moment the session stopped, and only the hold sent
+    // last (a newer one is never shortened).
+    const ended = (endsWaitUntil: string) => ({
+      browser: "held",
+      exactAuthority: true,
+      body: { controllerGeneration: "generation-held", endedBeforeDeadline: true, endsWaitUntil },
+    });
+    const working = "9999-12-31T00:00:00.000Z";
     expect(results).toEqual([
       {
         scenario: "waiting",
@@ -706,15 +740,13 @@ test("an agent's wait tells only the running browsers it holds, without using or
         authorizations: ["session.read", "session.read"],
         routed: 1,
         leaseReads: ["cold-box", "cold-box"],
-        holds: [
-          {
-            browser: "held",
-            exactAuthority: true,
-            body: { controllerGeneration: "generation-held", until: results[0].deadline },
-          },
-        ],
+        holds: [hold(results[0].deadline)],
         touched: 0,
+        uses: 0,
+        personResolved: 0,
         deadline: results[0].deadline,
+        // Watched until the session stops or the cap passes.
+        watching: 1,
       },
       {
         scenario: "machine-moved",
@@ -724,39 +756,59 @@ test("an agent's wait tells only the running browsers it holds, without using or
         leaseReads: ["cold-box", "cold-box"],
         holds: [],
         touched: 0,
+        uses: 0,
+        personResolved: 0,
         deadline: results[1].deadline,
+        watching: 1,
       },
-      // Input arrives before the deadline: the hold ends then, and only for
-      // that wait (a newer wait's hold is never shortened).
-      ...["answered", "ended-before-watch"].map((scenario, index) => ({
-        scenario,
-        records: ["held", "held", "cold-box"],
-        authorizations: ["session.read", "session.read", "session.read"],
-        routed: 2,
-        leaseReads: ["cold-box", "cold-box"],
-        holds: [
-          {
-            browser: "held",
-            exactAuthority: true,
-            body: {
-              controllerGeneration: "generation-held",
-              until: results[index + 2].deadline,
-            },
-          },
-          {
-            browser: "held",
-            exactAuthority: true,
-            body: {
-              controllerGeneration: "generation-held",
-              endedBeforeDeadline: true,
-              endsWaitUntil: results[index + 2].deadline,
-            },
-          },
-        ],
+      // Input arrives before the deadline: the resumed turn keeps the browser
+      // while it works, and when it ends with no new wait the hold ends then.
+      {
+        scenario: "answered",
+        records: ["held", "held", "held", "cold-box", "cold-box", "cold-box"],
+        // Checked once, when the wait is armed and the attempt is live.
+        authorizations: ["session.read", "session.read"],
+        routed: 3,
+        leaseReads: Array(6).fill("cold-box"),
+        holds: [hold(results[2].deadline), hold(working), ended(working)],
         touched: 0,
-        deadline: results[index + 2].deadline,
+        uses: 0,
+        personResolved: 0,
+        deadline: results[2].deadline,
         watching: 0,
-      })),
+      },
+      // The wait was over before the session was read: nothing is held.
+      {
+        scenario: "ended-before-watch",
+        records: [],
+        authorizations: ["session.read", "session.read"],
+        routed: 0,
+        leaseReads: [],
+        holds: [],
+        touched: 0,
+        uses: 0,
+        personResolved: 0,
+        deadline: results[3].deadline,
+        watching: 0,
+      },
+      // An agent uses its browser mid-turn and works on with no wait armed:
+      // kept while it works, then through the wait it arms, and released as
+      // usual once it neither works nor waits.
+      {
+        scenario: "working",
+        records: Array(5).fill("held"),
+        // Only the uses themselves: the holds after them go as the person
+        // who started the agent's turn, resolved once while it is live.
+        authorizations: ["session.read", "session.read"],
+        routed: 5,
+        leaseReads: [],
+        holds: [hold(working), hold(results[4].deadline), ended(results[4].deadline)],
+        touched: 2,
+        uses: 2,
+        personResolved: 1,
+        deadline: results[4].deadline,
+        watching: 0,
+      },
     ]);
   } finally {
     if (child.exitCode === null) child.kill();
@@ -782,7 +834,6 @@ async function waitHoldFixture() {
   const authority = await import(new URL("../browser-controller-authority.ts", routeHref).href);
   const accountId = randomUUID(),
     workspaceId = randomUUID(),
-    waitingSessionId = randomUUID(),
     otherSessionId = randomUUID(),
     machineId = randomUUID(),
     instanceId = randomUUID(),
@@ -802,6 +853,9 @@ async function waitHoldFixture() {
     ids[name] = randomUUID();
     names.set(ids[name]!, name);
   }
+  // Every scenario is another agent session (the API keeps one watch per
+  // session).
+  let waitingSessionId = randomUUID();
   const now = Date.now();
   const browser = (
     name: string,
@@ -844,7 +898,7 @@ async function waitHoldFixture() {
       ],
     };
   };
-  const browsers = [
+  const buildBrowsers = () => [
     browser("held", "created", 12),
     browser("observed", "observing", 12),
     // Unused for longer than the hold cap.
@@ -852,7 +906,12 @@ async function waitHoldFixture() {
     browser("suspended", "created", 12, "suspended"),
     browser("cold-box", "using", 12),
   ];
+  let browsers = buildBrowsers();
+  let caller: Record<string, unknown> = grant;
+  let personResolved = 0;
   let scenario = "waiting";
+  let status = "idle";
+  let uses = 0;
   let records: string[] = [];
   let authorizations: string[] = [];
   let routed = 0;
@@ -890,11 +949,11 @@ async function waitHoldFixture() {
       leaseReads.push("cold-box");
       return null;
     },
-    getSession: async () => ({
-      id: otherSessionId,
+    getSession: async (_db: unknown, _workspaceId: string, sessionId: string) => ({
+      id: sessionId,
       workspaceId,
       activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
-      inputWait,
+      ...(sessionId === waitingSessionId ? { status, inputWait } : { status: "idle" }),
     }),
     touchBrowserSessionController: async () => {
       touched += 1;
@@ -903,6 +962,12 @@ async function waitHoldFixture() {
   }));
   mock.module(resolveFromApi("@opengeni/core"), () => ({
     ...core,
+    requireAccessGrant: async () => caller,
+    // An agent's later holds go as the person who started its turn.
+    requireLiveAgentAttemptAuthorization: async () => {
+      personResolved += 1;
+      return { initiatingHumanSubjectId: "synthetic-person" };
+    },
     requireSessionAuthorization: async (
       _deps: unknown,
       _grant: unknown,
@@ -924,6 +989,10 @@ async function waitHoldFixture() {
     hostname: "127.0.0.1",
     async fetch(request) {
       const [, , , browserSessionId, route] = new URL(request.url).pathname.split("/");
+      if (request.method === "GET" && route === "targets") {
+        uses += 1;
+        return Response.json({ protocolVersion: 1, ok: true, data: [] });
+      }
       if (request.method !== "POST" || route !== "wait-hold") {
         return Response.json({ protocolVersion: 1, ok: false }, { status: 500 });
       }
@@ -970,7 +1039,8 @@ async function waitHoldFixture() {
     withChannelA: routedChannel,
   }));
   const { registerBrowserSessionRoutes } = await import(routeHref);
-  const { holdBrowsersForWait } = registerBrowserSessionRoutes(new Hono(), {
+  const app = new Hono();
+  const { holdBrowsersForWait } = registerBrowserSessionRoutes(app, {
     settings: fixtureSettings({ delegationSecret: rootSecret }),
     db: {},
     bus: {
@@ -990,56 +1060,83 @@ async function waitHoldFixture() {
   console.warn = () => {};
   try {
     const results = [];
-    for (const next of ["waiting", "machine-moved", "answered", "ended-before-watch"]) {
+    /** Delivers a session event and waits until the controller heard
+     * `holdCount` holds in all (and, with `closed`, the watch ended). */
+    const emit = async (type: string, holdCount: number, closed = false) => {
+      for (const listener of listeners) listener([{ type, payload: {} }]);
+      const settled = () => holds.length >= holdCount && (!closed || listeners.length === 0);
+      for (let tries = 0; !settled() && tries < 400; tries++) {
+        await Bun.sleep(5);
+      }
+    };
+    const scenarios = ["waiting", "machine-moved", "answered", "ended-before-watch", "working"];
+    for (const next of scenarios) {
       scenario = next;
+      caller = grant;
+      personResolved = 0;
+      waitingSessionId = randomUUID();
+      browsers = buildBrowsers();
       records = [];
       authorizations = [];
       routed = 0;
       leaseReads = [];
       touched = 0;
+      uses = 0;
       holds = [];
       listeners = [];
       const deadline = new Date(Date.now() + 25 * 60_000);
-      inputWait =
-        next === "ended-before-watch"
-          ? null
-          : { deadlineAt: deadline.toISOString(), reason: "Waiting in a queue." };
-      await holdBrowsersForWait({
-        grant,
-        sessionId: waitingSessionId,
-        deadline,
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (next === "answered") {
-        for (let tries = 0; listeners.length === 0 && tries < 200; tries++) {
-          await Bun.sleep(5);
-        }
-        // Another wait's end changes nothing; this wait's end ends the hold.
-        for (const listener of listeners) {
-          listener([
-            {
-              type: "session.wait.finished",
-              payload: { outcome: "input", deadlineAt: new Date(0).toISOString() },
-            },
-          ]);
-        }
+      const armed = { deadlineAt: deadline.toISOString(), reason: "Waiting in a queue." };
+      status = next === "working" ? "running" : "idle";
+      inputWait = next === "ended-before-watch" || next === "working" ? null : armed;
+      if (next === "working") {
+        const use = async () => {
+          const response = await app.request(
+            `https://api.example.test/v1/workspaces/${workspaceId}/browser-sessions/${ids.held}/targets`,
+          );
+          if (response.status !== 200) throw new Error(`browser use failed: ${response.status}`);
+        };
+        // A person's use (the live view) changes nothing.
+        await use();
         await Bun.sleep(20);
-        if (holds.length !== 1) throw new Error("another wait's end changed the hold");
+        if (holds.length !== 0 || listeners.length !== 0) throw new Error("a person's use held");
+        // The agent uses its browser mid-turn: kept while the turn works on.
+        caller = {
+          ...grant,
+          principalKind: "agent_attempt",
+          metadata: { sessionId: waitingSessionId },
+        };
+        await use();
+        await emit("turn.started", 1);
+        // It then arms a wait as the turn ends: kept to the wait's deadline.
+        status = "idle";
+        inputWait = armed;
+        await emit("session.status.changed", 2);
+        // The wait times out and the next turn ends with no wait: the hold
+        // ends then.
         inputWait = null;
-        for (const listener of listeners) {
-          listener([
-            {
-              type: "session.wait.finished",
-              payload: { outcome: "input", deadlineAt: deadline.toISOString() },
-            },
-          ]);
-        }
+        await emit("session.wait.finished", 3, true);
+      } else {
+        await holdBrowsersForWait({
+          grant,
+          sessionId: waitingSessionId,
+          deadline,
+          signal: AbortSignal.timeout(10_000),
+        });
       }
-      if (next === "answered" || next === "ended-before-watch") {
-        for (let tries = 0; (holds.length < 2 || listeners.length > 0) && tries < 400; tries++) {
-          await Bun.sleep(5);
-        }
+      if (next === "answered") {
+        // Other activity changes nothing.
+        await emit("agent.message.delta", 1);
+        await Bun.sleep(20);
+        if (holds.length !== 1) throw new Error("an unrelated event changed the hold");
+        // Input arrives: the resumed turn keeps the browser.
+        status = "running";
+        inputWait = null;
+        await emit("session.wait.finished", 2);
+        // The turn ends with no new wait: the hold ends then.
+        status = "idle";
+        await emit("turn.completed", 3, true);
       }
+      if (next === "ended-before-watch") await emit("session.wait.finished", 0, true);
       results.push({
         scenario: next,
         records: records.sort().reverse(),
@@ -1048,10 +1145,10 @@ async function waitHoldFixture() {
         leaseReads,
         holds,
         touched,
+        uses,
+        personResolved,
         deadline: deadline.toISOString(),
-        ...(next === "answered" || next === "ended-before-watch"
-          ? { watching: listeners.length }
-          : {}),
+        watching: listeners.length,
       });
     }
     console.log(JSON.stringify(results));
@@ -2463,6 +2560,7 @@ async function workingCopyRoutesFixture() {
         headless: true,
         linkedComputerSessionId: null,
         networkRouteId: null,
+        associations: [],
       },
     }),
     getSession: async () => ({

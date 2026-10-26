@@ -913,15 +913,15 @@ export class BrowserControlClient {
 
   /**
    * Tells the controller that the agent session using this browser is
-   * deliberately waiting until `until`, so its idle release keeps the browser
-   * running until then (capped by the controller). Advisory: it never
+   * working or deliberately waiting until `until`, so its idle release keeps
+   * the browser running until then (capped by the controller). Advisory: it never
    * launches, recovers or counts as a use of the browser. Returns whether the
    * controller holds the browser; false when it no longer runs this exact
    * generation or predates holds (an older agent or controller image, which
    * keeps its plain idle release).
    *
-   * With `endsWaitUntil`, the wait with that deadline ended at `until`
-   * instead: the controller ends that wait's hold there, never a newer one.
+   * With `endsWaitUntil`, the hold until that time ended at `until`
+   * instead: the controller ends that hold there, never a newer one.
    */
   async holdForWait(
     reference: PlacementBrowserSessionReference,

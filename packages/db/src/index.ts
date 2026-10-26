@@ -54706,12 +54706,13 @@ const INTERACTION_HOLDER_RESOURCE =
  * operation counts too. Interventions waiting for a person do not: a wait is
  * not use (see `sandboxGroupIdleForCommandContainmentTx`).
  *
- * One kind of wait does keep a browser: an agent session that created or is
- * using it and is deliberately waiting (an armed input wait) keeps it, page
- * state and all, until the wait ends, but never longer than
- * `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The browser's own
- * controller keeps it by the same rule; `list_idle_interaction_leases`
- * (migration 0988) skips such boxes.
+ * One kind of pause does keep a browser: an agent session that
+ * created or is using it and is still working (a turn queued, running,
+ * recovering, waiting for capacity or waiting on a person) or deliberately
+ * waiting (an armed input wait) keeps it, page state and all, but never
+ * longer than `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The
+ * browser's own controller keeps it by the same rule;
+ * `list_idle_interaction_leases` (migration 0988) skips such boxes.
  *
  * When every browser and desktop on the box, and the whole sandbox group by
  * the general idle rule, have been unused for `idleMs` (the sandbox idle
@@ -54866,7 +54867,9 @@ export async function releaseIdleInteractionHolders(
             where association.workspace_id = browser_sessions.workspace_id
               and association.browser_session_id = browser_sessions.id
               and association.relationship in ('created', 'using')
-              and waiting.input_wait_until > now()
+              and (waiting.status in ('queued', 'running', 'requires_action', 'recovering',
+                  'waiting_capacity')
+                or waiting.input_wait_until > now())
               and browser_sessions.last_used_at
                 > now() - (${BROWSER_WAIT_HOLD_MAX_MS}::bigint * interval '1 millisecond')
           )) as idle,
