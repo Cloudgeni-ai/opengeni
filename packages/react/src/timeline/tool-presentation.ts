@@ -887,6 +887,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Notes, knowledge and instructions
   checkNotes: "brain",
   checkMeetings: "record",
+  saveMeetingNotes: "record",
   saveNote: "brain",
   archiveNote: "brain",
   proposeUpdate: "brain",
