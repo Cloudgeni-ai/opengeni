@@ -1007,7 +1007,13 @@ export function registerRecordingRoutes(
       : preferred
         ? { providerId: preferred.id, model: preferred.model.model }
         : null;
-    return c.json({ models, default: defaults, dictationDefault, pinned: !!deployment.pinned });
+    return c.json({
+      models,
+      default: defaults,
+      dictationDefault,
+      pinned: !!deployment.pinned,
+      language: resolveWorkspaceRecordingSettings(workspace?.settings).language ?? null,
+    });
   });
 
   /**

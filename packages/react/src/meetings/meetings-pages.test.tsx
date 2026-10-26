@@ -67,6 +67,14 @@ async function waitForText(container: HTMLElement, text: string, timeout = 3_000
   }
 }
 
+async function waitFor(check: () => boolean, timeout = 3_000) {
+  const deadline = Date.now() + timeout;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("Timed out waiting");
+    await settle(50);
+  }
+}
+
 describe("Meetings list", () => {
   test("lists meetings with their state and opens one", async () => {
     const fixture = createMeetingsFixture();
@@ -833,6 +841,28 @@ describe("Live transcript", () => {
       const labels = [...select!.options].map((option) => option.textContent);
       expect(labels[0]).toBe("Detect language");
       expect(labels).toContain("Norwegian");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("without a language from the host, the recorder starts in the one the server reports", async () => {
+    const fixture = createMeetingsFixture({ language: "no" });
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Start recording");
+      await waitFor(
+        () =>
+          view.container.querySelector<HTMLSelectElement>('select[aria-label="Meeting language"]')
+            ?.value === "no",
+      );
     } finally {
       await view.unmount();
     }
