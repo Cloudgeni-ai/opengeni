@@ -3806,7 +3806,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's stays deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's and 0984's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -3845,6 +3845,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "event_source_feeds",
     "sandboxes",
     "enrollments",
+    "session_background_commands",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -3889,9 +3890,11 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "list_due_event_source_feeds_v1(integer)",
       "list_due_recording_retention_v1(integer)",
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+      "rearm_unanswered_connected_commands(uuid, uuid, text)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+      "rearm_unanswered_connected_commands(uuid, uuid, text)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -3941,6 +3944,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "list_stalled_recording_work_v1(integer)",
       "list_due_recording_retention_v1(integer)",
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+      "rearm_unanswered_connected_commands(uuid, uuid, text)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
