@@ -38077,6 +38077,7 @@
       "CLOUD_SANDBOX_LABEL": "value",
       "LOCAL_SANDBOX_LABEL": "value",
       "machineDisplayName": "value",
+      "machineNameTwinLabel": "value",
       "machineScopeLabel": "value",
       "NO_SANDBOX_LABEL": "value",
       "sessionComputeLabel": "value",
