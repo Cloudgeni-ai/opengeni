@@ -4123,12 +4123,18 @@ calls and Codemode use this path; third-party lookalike tools do not. Outside
 that owning context, native reads and background reconciliation refresh the
 stored snapshot. An empty running snapshot can therefore precede capture of
 bytes already produced by the process.
-If a live refresh encounters a recognized temporary transport failure, the
-runtime reauthorizes and rereads the API instead of discarding retained output.
-A still-running result reports `freshness.status: "refresh_unavailable"` and
-`retryable: true`; this is a freshness warning, not proof of command failure or
-completion. No provider operation is retried by this fallback. Authorization,
-consent, fencing, integrity, and unclassified errors still fail closed.
+If a live refresh encounters a recognized temporary failure, the runtime
+reauthorizes and rereads the API instead of discarding retained output.
+Recognized temporary failures are transport outages and a provider observation
+that missed its bounded read window when the provider marks another read of the
+same invocation safe. A `command_wait` keeps its requested wait and refreshes
+the same command again on its ordinary one-second cadence; that is a read, never
+a Start or stdin replay. A still-running result whose latest refresh failed
+reports `freshness.status: "refresh_unavailable"` and `retryable: true`; this is
+a freshness warning, not proof of command failure or completion. Authorization,
+consent, fencing, integrity, unclassified errors, and observation failures that
+do not permit another read (for example, a provider that discarded the
+invocation's observation state) still fail closed.
 
 Typed runner failures are distinct from the process exit code: a runner may
 report an output/spool failure alongside exit code zero. Migration 0417 adds
