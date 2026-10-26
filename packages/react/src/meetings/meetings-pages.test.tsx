@@ -513,6 +513,40 @@ describe("Meeting page", () => {
     }
   });
 
+  test("a missing provider key names the model and the provider that isn't connected", async () => {
+    const fixture = createMeetingsFixture();
+    const missingKey = <T extends { transcript?: unknown }>(recording: T): T => ({
+      ...recording,
+      transcript: {
+        ...(recording.transcript as object),
+        errorCode: "missing_provider_key",
+      },
+    });
+    const client = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) =>
+        missingKey(await fixture.client.getRecording(workspaceId, id)),
+    } as typeof fixture.client;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "needs ElevenLabs");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Scribe v2 needs ElevenLabs, which isn't connected.");
+      expect(text).toContain("Try another model");
+      expect(text).not.toContain("No transcription provider is connected");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a transcript that failed before the audio was prepared can be made again", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(

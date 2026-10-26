@@ -429,6 +429,9 @@ function VisibilityMenu({
   );
 }
 
+/** A transcript version's model and the provider it runs on, by name. */
+type ModelAbout = { modelName: string; providerName: string };
+
 const SPINNER = (
   <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
 );
@@ -438,6 +441,7 @@ function PhaseNotice({
   recorder,
   here,
   recordingElsewhere,
+  modelOf,
   onRetry,
 }: {
   recording: Recording;
@@ -446,6 +450,8 @@ function PhaseNotice({
   here: MeetingHereStatus | null;
   /** It's captured on another device with the live preview on. */
   recordingElsewhere: boolean;
+  /** The version's model and its provider, when the workspace's list has it. */
+  modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -499,7 +505,11 @@ function PhaseNotice({
           </Button>
         }
       >
-        {transcriptErrorText(phase.version?.errorCode ?? null, msg)}
+        {transcriptErrorText(
+          phase.version?.errorCode ?? null,
+          msg,
+          phase.version ? modelOf(phase.version) : null,
+        )}
       </Notice>
     );
   }
@@ -532,11 +542,13 @@ function RerunNotice({
   versions,
   shownVersionNumber,
   modelName,
+  modelOf,
   onRetry,
 }: {
   versions: readonly RecordingTranscriptVersion[];
   shownVersionNumber: number;
   modelName: (version: RecordingTranscriptVersion) => string;
+  modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -566,7 +578,7 @@ function RerunNotice({
         }
       >
         {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
-          transcriptErrorText: transcriptErrorText(newest.errorCode, msg),
+          transcriptErrorText: transcriptErrorText(newest.errorCode, msg, modelOf(newest)),
         })}
       </Notice>
     );
@@ -659,6 +671,15 @@ function MeetingDetailPageContent({
       models.models.find(
         (candidate) => candidate.providerId === entry.providerId && candidate.model === entry.model,
       )?.name ?? entry.model,
+    [models.models],
+  );
+  const modelOf = useCallback(
+    (entry: RecordingTranscriptVersion): ModelAbout | null => {
+      const found = models.models.find(
+        (candidate) => candidate.providerId === entry.providerId && candidate.model === entry.model,
+      );
+      return found ? { modelName: found.name, providerName: found.providerName } : null;
+    },
     [models.models],
   );
 
@@ -1152,6 +1173,7 @@ function MeetingDetailPageContent({
           recorder={recorder}
           here={here}
           recordingElsewhere={previewing && !recordingHere}
+          modelOf={modelOf}
           onRetry={() => setRerunning(true)}
         />
         {phase.kind === "ready" ? (
@@ -1159,6 +1181,7 @@ function MeetingDetailPageContent({
             versions={meeting.versions}
             shownVersionNumber={phase.version.versionNumber}
             modelName={modelName}
+            modelOf={modelOf}
             onRetry={() => setRerunning(true)}
           />
         ) : null}

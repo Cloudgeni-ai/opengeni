@@ -2598,7 +2598,9 @@ export const englishMessages = {
   "meetings.recordings.transcriptFailed": "Transcript failed",
   "meetings.recordings.noTranscript": "No transcript",
   "meetings.recordings.errorMissingProviderKey":
-    "Transcription isn't set up. An admin can connect a provider in Organization settings, under Models.",
+    "This model's provider isn't connected. Try another model, or an admin can connect it in Organization settings, under Models.",
+  "meetings.recordings.errorMissingProviderKeyFor":
+    "{modelName} needs {providerName}, which isn't connected. Try another model, or an admin can connect {providerName} in Organization settings, under Models.",
   "meetings.recordings.errorProviderUnauthorized":
     "The transcription provider rejected its key. An admin can reconnect it in Organization settings, under Models.",
   "meetings.recordings.errorProviderQuotaExceeded":

@@ -328,6 +328,16 @@ describe("transcript turns", () => {
 
 test("error codes from the worker and providers read as plain advice", () => {
   expect(transcriptErrorText("missing_provider_key")).toContain("Organization settings");
+  // A missing key is one provider's, not proof that none is connected.
+  expect(transcriptErrorText("missing_provider_key")).not.toContain("No transcription provider");
+  expect(
+    transcriptErrorText("missing_provider_key", undefined, {
+      modelName: "Scribe v2",
+      providerName: "ElevenLabs",
+    }),
+  ).toBe(
+    "Scribe v2 needs ElevenLabs, which isn't connected. Try another model, or an admin can connect ElevenLabs in Organization settings, under Models.",
+  );
   expect(transcriptErrorText("provider_quota_exceeded")).toContain("out of credit");
   expect(transcriptErrorText("something_new")).toContain("Try again");
 });
