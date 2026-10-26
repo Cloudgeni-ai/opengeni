@@ -210,11 +210,19 @@ fn registry_console_users() -> Option<Vec<crate::MacConsoleUser>> {
     use core_foundation::array::CFArray;
     use core_foundation::number::CFNumber;
 
-    let users = registry_root_property("IOConsoleUsers")?.downcast::<CFArray<CFType>>()?;
+    let users = registry_root_property("IOConsoleUsers")?.downcast::<CFArray>()?;
     users
-        .iter()
+        .get_all_values()
+        .into_iter()
         .map(|entry| {
-            let entry = entry.downcast::<CFDictionary<CFString, CFType>>()?;
+            // The array holds its entries for this call; each is checked to be
+            // a dictionary before it is wrapped as one (retained again).
+            let item = unsafe { CFType::wrap_under_get_rule(entry) };
+            if !item.instance_of::<CFDictionary>() {
+                return None;
+            }
+            let entry: CFDictionary<CFString, CFType> =
+                unsafe { CFDictionary::wrap_under_get_rule(entry as CFDictionaryRef) };
             let flag = |key: &str| {
                 entry
                     .find(CFString::new(key))
