@@ -59,6 +59,7 @@ import {
   CODEX_LIVE_MODEL,
   realtimeAppLanguage,
   type RealtimeControllerClient,
+  type RealtimeLoadState,
   type RealtimeModelOption,
   type SessionRealtimeControllerFactory,
   sessionRealtimeLifecycleIsActive,
@@ -66,6 +67,7 @@ import {
   useRealtimeModelSelection,
   useSessionRealtime,
 } from "./session-realtime";
+import { type MicrophoneAccess, useMicrophoneAccess } from "./microphone-access";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export {
@@ -80,7 +82,12 @@ export {
   useRealtimeModelSelection,
   useSessionRealtime,
 } from "./session-realtime";
-export type { RealtimeModelOption, SessionRealtimeControllerFactory } from "./session-realtime";
+export type {
+  RealtimeLoadState,
+  RealtimeModelOption,
+  SessionRealtimeControllerFactory,
+} from "./session-realtime";
+export type { MicrophoneAccess } from "./microphone-access";
 
 /** Short status label for a credit/availability refusal (shared with the model menu). */
 function realtimeRefusalLabel(t: OpenGeniText, code: string | null | undefined): string | null {
@@ -261,6 +268,7 @@ export function SessionRealtimeControl(props: {
       canStart={realtime.canStart}
       admissionBlocker={realtime.admissionBlocker}
       modelAvailable={selectedModel.available}
+      loadState={selection.loadState}
       menuSide="top"
       modelMenu={props.modelMenu ?? "split"}
       showDiagnostics={props.showDiagnostics}
@@ -305,6 +313,12 @@ type NewSessionRealtimeControlProps = {
   selectedModel?: RealtimeModelOption | undefined;
   onSelectModel?: ((modelId: string) => void) | undefined;
   /**
+   * With parent-owned selection: whether what voice needs here has loaded, such
+   * as that selection's `loadState`. A host can report `loading` while its own
+   * start conditions are still loading, so a passing blocker is not shown.
+   */
+  loadState?: RealtimeLoadState | undefined;
+  /**
    * `split` attaches the model chevron at every breakpoint (public default).
    * `split-desktop` hides it below `sm` when the host owns mobile selection (e.g. “+”).
    * Inside a container-responsive Composer.Root, `sm` follows that composer.
@@ -317,6 +331,7 @@ type NewSessionRealtimeSelection = {
   models: readonly RealtimeModelOption[];
   selectedModel: RealtimeModelOption;
   selectModel: (modelId: string) => void;
+  loadState?: RealtimeLoadState | undefined;
 };
 
 export function NewSessionRealtimeControl(props: NewSessionRealtimeControlProps) {
@@ -328,6 +343,7 @@ export function NewSessionRealtimeControl(props: NewSessionRealtimeControlProps)
           models: props.models,
           selectedModel: props.selectedModel,
           selectModel: props.onSelectModel,
+          loadState: props.loadState,
         }}
       />
     );
@@ -384,6 +400,7 @@ function NewSessionRealtimeControlView(
       canStart={canStart}
       admissionBlocker={selection.selectedModel.unavailableReason ?? props.disabledReason ?? null}
       modelAvailable={selection.selectedModel.available}
+      loadState={selection.loadState}
       selectionDisabled={starting}
       menuSide="bottom"
       modelMenu={props.modelMenu ?? "split"}
@@ -407,6 +424,12 @@ export function RealtimeVoiceControl(props: {
   canStart: boolean;
   admissionBlocker?: string | null | undefined;
   modelAvailable: boolean;
+  /**
+   * Whether what voice needs here has loaded (`ready` by default). While
+   * `loading`, a blocker reads as "Checking voice" instead of a setup step;
+   * `failed` says voice couldn't load.
+   */
+  loadState?: RealtimeLoadState | undefined;
   selectionDisabled?: boolean | undefined;
   /** Prefer `bottom` on home/new-session; `top` for the docked session composer. */
   menuSide?: "top" | "bottom" | undefined;
@@ -439,6 +462,13 @@ export function RealtimeVoiceControl(props: {
     unavailableReason: props.modelAvailable ? null : CODEX_LIVE_MODEL(t).unavailableReason,
   };
   const models = props.models ?? [selectedModel];
+  // A page that can't use the microphone can't start voice; say so up front
+  // rather than after a start that would fail.
+  const microphone = useMicrophoneAccess();
+  const startable = props.canStart && microphone === "unknown";
+  // Until the catalog is known, the list holds only a placeholder Codex Live;
+  // list it only once it is real or usable.
+  const modelsKnown = (props.loadState ?? "ready") === "ready" || props.modelAvailable;
   const status = statusContent(
     t,
     props.snapshot,
@@ -446,6 +476,8 @@ export function RealtimeVoiceControl(props: {
     props.canStart,
     props.admissionBlocker ?? null,
     selectedModel.unavailableCode ?? null,
+    props.loadState ?? "ready",
+    microphone,
   );
   const modeOwned = props.snapshot.mode?.state === "active";
   const retryConnection =
@@ -464,7 +496,7 @@ export function RealtimeVoiceControl(props: {
   const mainDisabled =
     props.snapshot.status === "stopping" ||
     props.snapshot.status === "lost_owner" ||
-    (!modeOwned && !props.canStart) ||
+    (!modeOwned && !startable) ||
     (props.snapshot.status === "starting" && !modeOwned);
   const mainLabel = audioBlocked
     ? t("realtime.realtimeControl.resumeVoiceAudio")
@@ -472,7 +504,7 @@ export function RealtimeVoiceControl(props: {
       ? t("realtime.realtimeControl.retryVoiceConnection")
       : modeOwned
         ? t("realtime.realtimeControl.endVoiceConversation")
-        : !props.canStart && status.phase === "unavailable"
+        : !startable && (status.phase === "unavailable" || status.phase === "checking")
           ? `${status.label}: ${status.detail}`
           : startFailed
             ? t("realtime.realtimeControl.tryVoiceAgain")
@@ -676,25 +708,27 @@ export function RealtimeVoiceControl(props: {
               className="og-realtime-menu flex w-72 max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden"
               onCloseAutoFocus={(event) => event.preventDefault()}
             >
-              <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-                <RealtimeModelPickerMenu
-                  models={models}
-                  selectedModel={selectedModel}
-                  provider={pickerProvider}
-                  direction={pickerDirection}
-                  disabled={
-                    props.selectionDisabled === true || props.snapshot.mode?.state === "active"
-                  }
-                  onProviderChange={(provider, direction) => {
-                    setPickerDirection(direction);
-                    setPickerProvider(provider);
-                  }}
-                  onSelect={(modelId) => {
-                    props.onSelectModel?.(modelId);
-                    setPickerOpen(false);
-                  }}
-                />
-              </div>
+              {modelsKnown ? (
+                <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                  <RealtimeModelPickerMenu
+                    models={models}
+                    selectedModel={selectedModel}
+                    provider={pickerProvider}
+                    direction={pickerDirection}
+                    disabled={
+                      props.selectionDisabled === true || props.snapshot.mode?.state === "active"
+                    }
+                    onProviderChange={(provider, direction) => {
+                      setPickerDirection(direction);
+                      setPickerProvider(provider);
+                    }}
+                    onSelect={(modelId) => {
+                      props.onSelectModel?.(modelId);
+                      setPickerOpen(false);
+                    }}
+                  />
+                </div>
+              ) : null}
 
               {status.phase !== "idle" &&
               // Say it once: the selected model's row already carries its reason.
@@ -704,7 +738,7 @@ export function RealtimeVoiceControl(props: {
                 selectedModel.unavailableReason === status.detail
               ) ? (
                 <>
-                  <DropdownMenuSeparator />
+                  {modelsKnown ? <DropdownMenuSeparator /> : null}
                   <div className="px-2.5 py-2" role="status" aria-live="polite">
                     <div className="flex items-center gap-2 text-og-sm font-medium text-og-fg">
                       <RealtimeStatusDot
@@ -1151,6 +1185,7 @@ function RealtimeDiagnosticsMenu({ snapshot }: { snapshot: SessionRealtimeContro
 
 type RealtimeVisualPhase =
   | "idle"
+  | "checking"
   | "connecting"
   | "listening"
   | "speaking"
@@ -1168,6 +1203,8 @@ function statusContent(
   canStart: boolean,
   admissionBlocker: string | null,
   unavailableCode: string | null = null,
+  loadState: RealtimeLoadState = "ready",
+  microphone: MicrophoneAccess = "unknown",
 ): { phase: RealtimeVisualPhase; label: string; detail: string } {
   if (snapshot.audibleOutput === "blocked" && !snapshot.outputMuted) {
     return {
@@ -1230,6 +1267,32 @@ function statusContent(
         detail: snapshot.error ?? t("realtime.realtimeControl.theConnectionCouldNotBe"),
       };
     case "idle":
+      if (microphone !== "unknown") {
+        return {
+          phase: "unavailable",
+          label: t("realtime.realtimeControl.voiceUnavailable"),
+          detail:
+            microphone === "blocked"
+              ? t("realtime.realtimeControl.microphoneCantBeUsedHere")
+              : t("composerTranscriptionControl.microphoneAccessIsBlockedAllow"),
+        };
+      }
+      // Until what voice needs has loaded, a blocker may be a placeholder (the
+      // model list starts as Codex Live alone); don't present it as a task.
+      if (loadState === "loading" && (!modelAvailable || (!canStart && admissionBlocker))) {
+        return {
+          phase: "checking",
+          label: t("realtime.realtimeControl.checkingVoice"),
+          detail: t("realtime.realtimeControl.findingTheVoiceModelsYou"),
+        };
+      }
+      if (loadState === "failed" && !modelAvailable) {
+        return {
+          phase: "unavailable",
+          label: t("realtime.realtimeControl.voiceUnavailable"),
+          detail: t("realtime.realtimeControl.voiceCouldNotLoad"),
+        };
+      }
       if (!modelAvailable) {
         return {
           phase: "unavailable",
@@ -1366,7 +1429,9 @@ function RealtimeStatusDot(props: { phase: RealtimeVisualPhase; reduceMotion: bo
             ? "bg-og-status-running"
             : props.phase === "blocked" || props.phase === "error"
               ? "bg-og-status-waiting"
-              : props.phase === "elsewhere" || props.phase === "unavailable"
+              : props.phase === "elsewhere" ||
+                  props.phase === "unavailable" ||
+                  props.phase === "checking"
                 ? "bg-og-fg-subtle"
                 : "bg-og-accent",
         )}
