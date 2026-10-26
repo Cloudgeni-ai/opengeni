@@ -4,6 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   OPENGENI_API_CONTRACT_HEADER,
+  Permission,
   SitePublishWarningFix,
   organizationAccessPresetPermissions,
   type OrganizationAccessPolicy,
@@ -13,6 +14,7 @@ import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 import surface from "../../../scripts/public-api/surface.gen.json";
 import {
   ACTION_CATALOG_BROWSER_ONLY,
+  ACTION_GATE_PERMISSIONS,
   buildActionCatalog,
   isActionCatalogExempt,
   registeredApiRoutes,
@@ -796,6 +798,32 @@ describe("organization MCP action inputs", () => {
         return c.json(await list(grant, payload));
       }`),
     ).toBe("sessions:read");
+    // At the start of a try/finally, or returned by an awaited wrapper's
+    // arrow function, as a measured phase does.
+    expect(
+      gate(`async (c) => {
+        const startedAt = performance.now();
+        try {
+          const workspaceId = c.req.param("workspaceId");
+          const grant = await measure(observe, "auth", () =>
+            requireAccessGrant(c, deps, workspaceId, "workspace:admin"),
+          );
+          return c.json(await read(grant));
+        } finally {
+          observe(performance.now() - startedAt);
+        }
+      }`),
+    ).toBe("workspace:admin");
+    // Not when a catch could swallow the refusal.
+    expect(
+      gate(`async (c) => {
+        try {
+          await requireAccessGrant(c, deps, id, "workspace:admin");
+        } catch {
+          return c.json({});
+        }
+      }`),
+    ).toBeUndefined();
     // Not when a branch, return or throw could skip the check, the checked
     // value isn't a permission, or the route's handlers disagree.
     expect(
@@ -813,6 +841,22 @@ describe("organization MCP action inputs", () => {
     ).toBeUndefined();
     expect(byId("listSessionPage").permission).toBe("sessions:read");
     expect(byId("getMyUsage").permission).toBeUndefined();
+    expect(byId("getWorkspaceInsights").permission).toBe("workspace:admin");
+    expect(byId("createSession").permission).toBe("sessions:create");
+    // Helper-gated usage routes, from the hand-named table.
+    expect(byId("getUsage").permission).toBe("workspace:admin");
+    expect(byId("setWorkspaceAllowance").permission).toBe("account:admin");
+  });
+
+  test("every hand-named gate permission is still needed and names a permission", () => {
+    const routes = registeredApiRoutes();
+    for (const rule of ACTION_GATE_PERMISSIONS) {
+      expect(Permission.safeParse(rule.permission).success, rule.permission).toBe(true);
+      const matched = routes.filter((route) => rule.pattern.test(routeKey(route)));
+      expect(matched, String(rule.pattern)).not.toEqual([]);
+      for (const route of matched)
+        expect(routeInputs(route.sources ?? []).permission, routeKey(route)).toBeUndefined();
+    }
   });
 
   test("every hand-named request schema is still needed", () => {

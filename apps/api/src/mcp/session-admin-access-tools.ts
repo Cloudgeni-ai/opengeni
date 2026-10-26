@@ -120,6 +120,26 @@ function confirmedCall(saved: string, args: CallArgs): boolean {
   return parsed.success && isDeepStrictEqual(parsed.data, args);
 }
 
+/**
+ * The path parameters a call may leave out: an action in one workspace runs
+ * in this chat's workspace unless the call names another, so a question about
+ * "my workspace" needs no lookup first. Shown in search and describe results
+ * only; the tool descriptions stay as they are.
+ */
+function pathParameterDefaults(workspaceId: string): { workspaceId: string } {
+  return { workspaceId };
+}
+
+function withPathParameterDefaults(
+  entry: ActionCatalogEntry | undefined,
+  pathParameters: CallArgs["pathParameters"],
+  workspaceId: string,
+): CallArgs["pathParameters"] {
+  return entry?.path.includes(":workspaceId") && !pathParameters.workspaceId
+    ? { ...pathParameters, workspaceId }
+    : pathParameters;
+}
+
 /** As whom an app action in this turn runs (see `resolveSessionAppActionAuthority`). */
 export type SessionAppActionAuthority = Awaited<
   ReturnType<typeof resolveSessionAppActionAuthority>
@@ -273,8 +293,9 @@ export function registerSessionAdminAccessTools(input: {
       if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
       // Offer only what can succeed: someone who uses Opengeni through another
       // product reaches this chat's workspace, within this turn's access.
-      return text(
-        searchActions({
+      return text({
+        pathParameterDefaults: pathParameterDefaults(grant.workspaceId),
+        ...searchActions({
           query,
           limit,
           offset,
@@ -282,7 +303,7 @@ export function registerSessionAdminAccessTools(input: {
             ? { reachable: (entry: ActionCatalogEntry) => externalPersonCanRun(entry, authority) }
             : {}),
         }),
-      );
+      });
     },
   );
 
@@ -302,7 +323,13 @@ export function registerSessionAdminAccessTools(input: {
       if (authority.kind === "unavailable") return failure(UNAVAILABLE[authority.reason]);
       const entry = findAppAction(id);
       if (!entry || entry.browserOnly || entry.retired) return describeActionResult(id);
-      return text({ ...describeAction(entry), changes: appActionChangesState(entry) });
+      return text({
+        ...describeAction(entry),
+        ...(entry.path.includes(":workspaceId")
+          ? { pathParameterDefaults: pathParameterDefaults(grant.workspaceId) }
+          : {}),
+        changes: appActionChangesState(entry),
+      });
     },
   );
 
@@ -346,7 +373,8 @@ export function registerSessionAdminAccessTools(input: {
       }
       return await callOrganizationAction(reach.actAs(authority), {
         id: args.id,
-        pathParameters: args.pathParameters,
+        // After the confirmation check, which compares the call as the model made it.
+        pathParameters: withPathParameterDefaults(entry, args.pathParameters, grant.workspaceId),
         query: args.query,
         ...(args.body !== undefined ? { body: args.body } : {}),
       });
