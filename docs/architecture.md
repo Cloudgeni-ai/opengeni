@@ -621,31 +621,6 @@ Workspace operations require API-resolved authenticated access contexts and gran
 before data access. Transaction-local Postgres FORCE RLS adds defense-in-depth;
 resource UUIDs grant nothing.
 
-The unused private Modal worker-host proof transport
-(`packages/core/src/application/modal-native-worker-host-transport.ts`) has a
-separate prefix, version, purpose and HMAC subkey/message domain. It accepts only
-the explicitly configured deployment delegation root, never ordinary delegated
-tokens or the access-key/local fallback. A verified request MAC is transport
-correlation, not a resolved workspace grant, initiating-human authorization,
-native response, current custody claim, physical settlement or effect permit.
-No host entry, provider caller or durable recovery is activated by this helper.
-See [Modal recovery assurance](design/modal-recovery-assurance-2026-10-02.md).
-
-`modal-native-original-configuration.ts` is likewise unused private groundwork.
-It samples explicit deployment settings once, pins the direct read/TLS policy,
-and derives a separately domain-bound private equality commitment. Its draft
-and opaque sample are configuration data, not host/grant/capture authority.
-Tokens and keys never enter the draft; keyed equality must remain protected.
-
-`modal-native-live-declaration-join.ts` is an unused private request/data join,
-not the canonical claimed-worker issuer or a native context. It owns the exact
-bytes before MAC verification/parsing, joins the accepted LIVE origin, frozen
-human, Temporal tuple and unchanged recovery count, then rechecks current
-transport expiry and deployment configuration after blocking DB locks. Its
-immutable output must remain request-local and be consumed in that transaction.
-Protected cold/config/grant insertion and actual worker provenance are still
-required; this helper creates no permission to observe, dispatch or publish.
-
 Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
 `workspace:admin` may change private-session product settings; DB fences recheck
@@ -1037,15 +1012,6 @@ loss and deadlines remain insufficient proof. Published
 consumers use unpatched Modal: the runtime owns its error class and recognizes
 SDK boundaries by a local own-Symbol marker, never patch-only imports, names,
 codes or text.
-
-`modal-original-read-wire.ts` is a dormant private read-only transport, with no
-production caller or public sandbox export. Its pinned Modal 0.9.0 projection
-owns an explicit pair, TLS endpoint/channel and bundled Node trust roots;
-namespace and exact-task router-access reads have no ambient SDK profile or
-transport retry. Local observation slots and joined close wait for actual RPC
-callbacks, not waiter abort. It issues no host grant, authenticated original
-context, capture receipt or effect permit. See
-[the recovery design](design/modal-recovery-assurance-2026-10-02.md).
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the

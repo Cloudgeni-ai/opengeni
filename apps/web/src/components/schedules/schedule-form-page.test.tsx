@@ -100,9 +100,6 @@ mock.module("@opengeni/react/app/components/knowledge/agent-learning-settings", 
 mock.module("./schedule-agent-capabilities", () => ({
   ScheduleAgentCapabilities: () => null,
 }));
-mock.module("@/components/schedule-slack-posting", () => ({
-  ScheduleSlackPosting: () => null,
-}));
 mock.module("./schedule-composer", () => ({
   ComposerField: ({
     draft,

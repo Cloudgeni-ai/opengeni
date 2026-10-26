@@ -1,11 +1,9 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { PersonalWorkspaceBadge } from "../src/components/personal-workspace-badge";
 import { WorkspaceMenuItemContent } from "../src/components/rail/workspace-switcher";
 import { ResourceScopePicker } from "../src/components/resource-scope-picker";
 import { SessionTenancyControl } from "@opengeni/react/app/components/session/session-tenancy-control";
-import { SessionVisibilityPicker } from "../src/components/session-visibility-picker";
 import {
   managedSelfContextIdentity,
   type ManagedSelfContext,
@@ -56,7 +54,6 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
     createElement(
       "main",
       null,
-      createElement("div", { id: "personal-badge" }, createElement(PersonalWorkspaceBadge)),
       createElement(
         "div",
         { id: "personal-menuitem", role: "menuitem" },
@@ -121,54 +118,6 @@ export function renderPersonalWorkspaceAccessibilityFixture(): string {
           value: "workspace",
           organizationEnabled: true,
           personalEnabled: true,
-          onChange: () => undefined,
-        }),
-      ),
-      createElement(
-        "section",
-        { id: "session-visibility-picker" },
-        createElement(SessionVisibilityPicker, {
-          id: "session",
-          personalWorkspace: false,
-          value: "workspace",
-          capabilities: {
-            activated: true,
-            canCreatePrivate: true,
-            reason: "available",
-          },
-          disabled: false,
-          onChange: () => undefined,
-        }),
-      ),
-      createElement(
-        "section",
-        { id: "inactive-session-visibility-picker" },
-        createElement(SessionVisibilityPicker, {
-          id: "inactive-session",
-          personalWorkspace: false,
-          value: "workspace",
-          capabilities: {
-            activated: false,
-            canCreatePrivate: false,
-            reason: "not_activated",
-          },
-          disabled: false,
-          onChange: () => undefined,
-        }),
-      ),
-      createElement(
-        "section",
-        { id: "disabled-session-visibility-picker" },
-        createElement(SessionVisibilityPicker, {
-          id: "disabled-session",
-          personalWorkspace: false,
-          value: "workspace",
-          capabilities: {
-            activated: true,
-            canCreatePrivate: true,
-            reason: "available",
-          },
-          disabled: true,
           onChange: () => undefined,
         }),
       ),
