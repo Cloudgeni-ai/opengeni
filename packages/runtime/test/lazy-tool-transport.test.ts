@@ -509,6 +509,43 @@ describe("query-independent tool discovery", () => {
     );
   });
 
+  test("a short name several servers share loads one tool and suggests the others", async () => {
+    const own = firstPartyTool("opengeni__search", "Search the workspace");
+    const mail = firstPartyTool("mail__search", "Search mail");
+    const agent = new Agent({ name: "shared", tools: [mail, own], model: "scripted" });
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
+    const model = new ScriptedStreamingModel([
+      [
+        {
+          type: "function_call",
+          callId: "search",
+          name: "tool_search",
+          arguments: '{"query":"","names":["search"]}',
+        },
+      ],
+      [finalMessage("done")],
+    ]);
+    await runStreamed(agent, model, runtime);
+    const searched = (model.requests[1]!.input as { type?: string; output?: unknown }[]).find(
+      (item) => item.type === "function_call_result",
+    ) as { output: { text?: string } | string };
+    const text = typeof searched.output === "string" ? searched.output : searched.output.text!;
+    const output = JSON.parse(text) as {
+      tools: Array<{ name: string }>;
+      suggestions?: Array<{ name: string }>;
+      unavailable: string[];
+    };
+    expect(output.tools.map((entry) => entry.name)).toEqual(["opengeni__search"]);
+    expect(output.unavailable).toEqual([]);
+    expect(output.suggestions?.map((entry) => entry.name)).toEqual(["mail__search"]);
+    // A full name loads exactly that tool and suggests nothing.
+    const exact = JSON.parse(
+      runtime.genericSearchOutput({ query: "", names: ["mail__search"] }),
+    ) as { tools: Array<{ name: string }>; suggestions?: unknown };
+    expect(exact.tools.map((entry) => entry.name)).toEqual(["mail__search"]);
+    expect(exact).not.toHaveProperty("suggestions");
+  });
+
   test("listing pages are compact, lexical, scoped, and reject stale cursors", async () => {
     const catalog = ["c", "a", "b"].map((name) =>
       firstPartyTool(`records__${name}`, "文".repeat(1000)),

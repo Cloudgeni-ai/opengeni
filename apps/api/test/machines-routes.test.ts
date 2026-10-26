@@ -601,6 +601,87 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
       where consent.session_id = ${session.id}`;
     expect([...receipts]).toEqual([{ consenting_subject_id: "user-m10", attempt_id: attemptId }]);
   }, 120_000);
+  // An agent may repoint another chat it controls (a child it started, say).
+  // That move is made as the caller's own subject, exactly as before; only a
+  // move of the agent's own chat acts for the person who started its turn.
+  test("an agent's swap of another chat it may control reaches the move", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, sandbox, bus } = await seed({
+      sandboxBackend: "none",
+    });
+    const chat = async (initialMessage: string) => {
+      const created = await createSession(db, {
+        accountId,
+        workspaceId,
+        initialMessage,
+        resources: [],
+        metadata: {},
+        model: "gpt-test",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: "user-m10" },
+        subjectId: "user-m10",
+        visibility: "workspace_shared",
+      });
+      await initializeSessionStartAtomically(db, {
+        accountId,
+        workspaceId,
+        sessionId: created.id,
+        reasoningEffortFallback: "medium",
+        createdEventPayload: {},
+      });
+      return created;
+    };
+    const caller = await chat("start a helper");
+    const other = await chat("helper");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: caller.id,
+      workflowId: `session-${caller.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("test attempt was not claimed");
+    const agentToken = await signDelegatedAccessToken(DELEGATION_SECRET, {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      permissions: ["sessions:read", "sessions:control"],
+      principalKind: "agent_attempt",
+      sessionId: caller.id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    const swapOther = async () => {
+      const response = await appFor(bus).request(
+        `/v1/workspaces/${workspaceId}/sessions/${other.id}/active-sandbox`,
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${agentToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ target: sandbox.id }),
+        },
+      );
+      return { status: response.status, body: (await response.json()) as unknown };
+    };
+    // Every refusal the move can return is a typed answer, never a 500: this
+    // machine has not reported its workspace root yet.
+    expect(await swapOther()).toMatchObject({
+      status: 200,
+      body: { swapped: false, code: "workspace_root_unavailable" },
+    });
+    await admin`update enrollments set workspace_root = '/home/user/project'
+      where id = ${enrollment.id}`;
+    expect(await swapOther()).toMatchObject({
+      status: 200,
+      body: { swapped: true, activeSandboxId: sandbox.id },
+    });
+  }, 60_000);
+
   test("a backend:none session exposes its machine fleet without a synthetic home", async () => {
     if (!available) return;
     const { accountId, workspaceId, session, sandbox, bus } = await seed({

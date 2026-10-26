@@ -1,4 +1,4 @@
-import { SelfhostedControlError } from "@opengeni/runtime/sandbox";
+import { ActiveBackendUnresolvableError, SelfhostedControlError } from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 
 /**
@@ -12,6 +12,29 @@ export function wrongInteractionPlacementMessage(targetSandboxId: string): strin
     "The requested Connected Machine is not the machine this session is working on, and computer and browser sessions open on that machine. " +
     `To use it, call sandbox_swap with target "${targetSandboxId}" if it is available, then retry; staying on that machine afterwards is fine.`
   );
+}
+
+/**
+ * The chat's current machine could not be resolved before anything was sent
+ * to it: offline, no longer usable from this chat, or not able to serve this
+ * request. That is the chat's state, not a server failure, so it is a 409
+ * that says so rather than a 500.
+ */
+export function activeRouteUnavailableError(error: unknown): HTTPException | null {
+  const unresolvable =
+    error instanceof ActiveBackendUnresolvableError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof ActiveBackendUnresolvableError
+        ? error.cause
+        : null;
+  if (!unresolvable) return null;
+  const message =
+    unresolvable.code === "offline_enrollment"
+      ? "The Connected Machine this session is working on is not connected."
+      : unresolvable.code === "stale_pointer"
+        ? "The Connected Machine this session is working on is no longer available to it."
+        : unresolvable.message;
+  return new HTTPException(409, { message, cause: unresolvable });
 }
 
 /**
@@ -33,7 +56,11 @@ export async function wrongPlacementInsteadOfOffline(
       : error instanceof HTTPException && error.cause instanceof SelfhostedControlError
         ? error.cause
         : null;
-  if (!controlError?.agentOffline) return error;
+  // The current machine can also be unresolvable before any request reaches
+  // it (no live connection, or no longer usable from this chat).
+  const currentUnavailable =
+    controlError?.agentOffline === true || activeRouteUnavailableError(error) !== null;
+  if (!currentUnavailable) return error;
   const current = await currentSandboxId().catch(() => undefined);
   if (current === undefined || current === requestedSandboxId) return error;
   return new HTTPException(422, { message: wrongInteractionPlacementMessage(requestedSandboxId) });

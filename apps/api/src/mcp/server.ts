@@ -199,6 +199,10 @@ import {
   scheduledTaskEventsToolInput,
 } from "./scheduled-task-input";
 import { registerEventTools } from "./event-tools";
+import {
+  exactAgentAttemptClaims,
+  sessionFleetContextForCaller,
+} from "../sandbox/agent-fleet-context";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
@@ -320,7 +324,6 @@ import {
   type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
-  buildFleetContextForSession,
   fleetAgentNotice,
   listFleet,
   provisionSandbox,
@@ -3973,33 +3976,6 @@ function registerWorkspaceArtifactTools(
   );
 }
 
-function exactAgentAttemptClaims(grant: AccessGrant): {
-  sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
-} | null {
-  if (grant.principalKind !== "agent_attempt") return null;
-  const metadata = grant.metadata ?? {};
-  if (
-    typeof metadata["sessionId"] !== "string" ||
-    typeof metadata["turnId"] !== "string" ||
-    typeof metadata["attemptId"] !== "string" ||
-    typeof metadata["executionGeneration"] !== "number" ||
-    !Number.isSafeInteger(metadata["executionGeneration"]) ||
-    metadata["executionGeneration"] < 1 ||
-    metadata["executionGeneration"] > 2_147_483_647
-  ) {
-    return null;
-  }
-  return {
-    sessionId: metadata["sessionId"],
-    turnId: metadata["turnId"],
-    attemptId: metadata["attemptId"],
-    executionGeneration: metadata["executionGeneration"],
-  };
-}
-
 function registerTaskNoteTools(
   server: McpServer,
   deps: ApiRouteDeps,
@@ -4449,35 +4425,7 @@ function registerFleetTools(
   // REST route builds). Throws when the session has no box (backend:none) — the
   // fleet is only meaningful for a session that runs in a sandbox.
   const fleetContext = async (): Promise<FleetContext> => {
-    const claims = exactAgentAttemptClaims(grant);
-    const actor = claims
-      ? await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId)
-      : null;
-    return await buildFleetContextForSession(deps, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId,
-      ...(actor?.initiatingHumanSubjectId ? { subjectId: actor.initiatingHumanSubjectId } : {}),
-      ...(actor && claims
-        ? {
-            commandAttempt: {
-              turnId: claims.turnId,
-              attemptId: claims.attemptId,
-              executionGeneration: claims.executionGeneration,
-            },
-          }
-        : {}),
-      ...(actor?.initiatingHumanSubjectId && claims
-        ? {
-            attemptAuthority: {
-              turnId: claims.turnId,
-              attemptId: claims.attemptId,
-              executionGeneration: claims.executionGeneration,
-              initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-            },
-          }
-        : {}),
-    });
+    return await sessionFleetContextForCaller(deps, grant, sessionId);
   };
 
   const oneOffCodemodeEnvironment = async (

@@ -20,6 +20,8 @@ import {
   rankToolPool,
   parseSearchArgs,
   toolsNamedInQuery,
+  shortNameAlternatives,
+  unresolvedToolNames,
 } from "./codex-tool-search";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
 import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
@@ -553,19 +555,26 @@ export class LazyToolRuntime {
     const tools = (
       names === undefined ? this.matches(rawArguments) : this.search(rawArguments)
     ).filter(isFunctionTool);
-    const unavailable = names?.filter((name) => !tools.some((tool) => tool.name === name)) ?? [];
+    const unavailable = names ? unresolvedToolNames(tools, names) : [];
+    // A short name several servers share loads one of them; the others stay
+    // reachable as unloaded alternatives under their full names.
+    const pool = names ? this.searchableTools(this.currentTools).filter(isFunctionTool) : [];
+    const suggestions = [
+      ...new Set([
+        ...(names ?? [])
+          .flatMap((name) => shortNameAlternatives(pool, name))
+          .filter((tool) => !tools.includes(tool)),
+        ...(unavailable.length
+          ? this.matches({ query: unavailable.join(" "), limit }).filter(isFunctionTool)
+          : []),
+      ]),
+    ];
     return JSON.stringify({
       tools: tools.map(toolDescriptor),
       schemasLoaded: names !== undefined && tools.length > 0,
       ...(names === undefined ? {} : { unavailable }),
       ...this.unavailableSources(),
-      ...(unavailable.length
-        ? {
-            suggestions: this.matches({ query: unavailable.join(" "), limit })
-              .filter(isFunctionTool)
-              .map(toolDescriptor),
-          }
-        : {}),
+      ...(suggestions.length ? { suggestions: suggestions.map(toolDescriptor) } : {}),
     });
   }
 

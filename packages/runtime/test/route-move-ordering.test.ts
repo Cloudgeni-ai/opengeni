@@ -11,7 +11,11 @@ import {
   type StreamEvent,
 } from "@openai/agents";
 import { z } from "zod";
-import { installRouteMoveOrdering, PrefixedMcpServer } from "../src/index";
+import {
+  callNamesConnectedMachine,
+  installRouteMoveOrdering,
+  PrefixedMcpServer,
+} from "../src/index";
 import {
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
@@ -52,7 +56,14 @@ function firstPartyServer(log: string[]): PrefixedMcpServer {
     connect: async () => {},
     close: async () => {},
     listTools: async () =>
-      ["sandbox_swap", "sandbox_attach", "sandboxes_list"].map((name) => ({
+      [
+        "sandbox_swap",
+        "sandbox_attach",
+        "sandboxes_list",
+        "computer_open",
+        "browser_open",
+        "computer_observe",
+      ].map((name) => ({
         name,
         inputSchema: { type: "object", properties: {} },
       })),
@@ -94,8 +105,24 @@ describe("route-moving tools", () => {
       opengeni__sandbox_swap: true,
       opengeni__sandbox_attach: true,
       opengeni__sandboxes_list: undefined,
+      // The opens move the chat only when a call names a machine placement.
+      opengeni__computer_open: callNamesConnectedMachine,
+      opengeni__browser_open: callNamesConnectedMachine,
+      opengeni__computer_observe: undefined,
       linear__sandbox_swap: undefined,
     });
+    expect(
+      callNamesConnectedMachine({
+        arguments: JSON.stringify({ placement: { kind: "connected_machine", sandboxId: "m" } }),
+      }),
+    ).toBe(true);
+    expect(callNamesConnectedMachine({ arguments: "{}" })).toBe(false);
+    expect(
+      callNamesConnectedMachine({
+        arguments: JSON.stringify({ placement: { kind: "attached_device" } }),
+      }),
+    ).toBe(false);
+    expect(callNamesConnectedMachine({ arguments: "not json" })).toBe(false);
     // Clones (the sandbox runtime resolves tools on one) keep the ordering.
     const cloned = agent.clone({});
     const clonedTools = await cloned.getMcpTools(undefined as never);
@@ -104,6 +131,45 @@ describe("route-moving tools", () => {
         exclusiveExecution?: boolean;
       },
     ).toMatchObject({ exclusiveExecution: true });
+  });
+
+  test("an open runs in model order only when it names a Connected Machine", async () => {
+    const log: string[] = [];
+    const model = new ScriptedModel([
+      [
+        call("a", "opengeni__browser_open"),
+        call("b", "opengeni__browser_open"),
+        call("c", "opengeni__computer_open", {
+          placement: { kind: "connected_machine", sandboxId: "machine" },
+        }),
+        call("d", "opengeni__computer_observe"),
+      ],
+      [
+        {
+          type: "message",
+          id: "done",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "Done." }],
+        },
+      ],
+    ]);
+    const agent = new Agent({ name: "Test", model, mcpServers: [firstPartyServer(log)] });
+    installRouteMoveOrdering(agent as never);
+    const result = await new Runner({ tracingDisabled: true }).run(agent, "Open things");
+    expect(result.finalOutput).toBe("Done.");
+    expect(log).toEqual([
+      // The two plain opens start together.
+      "browser_open:start",
+      "browser_open:start",
+      "browser_open:end",
+      "browser_open:end",
+      // The open naming a machine waits for them, and the next call for it.
+      "computer_open:start",
+      "computer_open:end",
+      "computer_observe:start",
+      "computer_observe:end",
+    ]);
   });
 
   test("a call written after a swap in the same response starts once the swap is done", async () => {

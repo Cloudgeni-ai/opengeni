@@ -28506,7 +28506,7 @@
         "$": "object",
         "$.activeEpoch": "integer!",
         "$.activeSandboxId": "string! null",
-        "$.code": "enum?=[\"\\\"concurrent_swap\\\"\",\"\\\"offline_enrollment\\\"\",\"\\\"personal_machine_not_permitted\\\"\",\"\\\"personal_machine_permission_required\\\"\",\"\\\"recovery_degraded\\\"\",\"\\\"recovery_in_progress\\\"\",\"\\\"recovery_unrecoverable\\\"\",\"\\\"stale_pointer\\\"\",\"\\\"transient_establishment\\\"\",\"\\\"unsupported_backend_context\\\"\"]",
+        "$.code": "enum?=[\"\\\"concurrent_swap\\\"\",\"\\\"home_unavailable_this_turn\\\"\",\"\\\"invalid_working_directory\\\"\",\"\\\"offline_enrollment\\\"\",\"\\\"personal_machine_not_permitted\\\"\",\"\\\"personal_machine_permission_required\\\"\",\"\\\"recovery_degraded\\\"\",\"\\\"recovery_in_progress\\\"\",\"\\\"recovery_unrecoverable\\\"\",\"\\\"stale_pointer\\\"\",\"\\\"transient_establishment\\\"\",\"\\\"unsupported_backend_context\\\"\",\"\\\"workspace_root_unavailable\\\"\"]",
         "$.reason": "string?",
         "$.swapped": "boolean!"
       }

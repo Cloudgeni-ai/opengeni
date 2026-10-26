@@ -80,9 +80,38 @@ describe("setup card for a refusal the person can fix", () => {
           type: "tool.auth_needed",
           payload: userSetupCardPayload(chrome, { toolName: "browser_open" }),
         },
+        null,
       ],
     ]);
     expect(published).toEqual([["bus", ids.workspaceId, ids.sessionId, [{ id: "event-1" }]]]);
+  });
+
+  test("a machine card names the machine the refused call asked for", async () => {
+    const { post, appends } = poster();
+    const machine = "7F099792-650D-4356-96C5-E0DF3AAB4752";
+    await post(machinePermission, "computer_open", { requestedSandboxId: machine });
+    expect(appends).toEqual([
+      [
+        "db",
+        ids.workspaceId,
+        ids.sessionId,
+        ids.turnId,
+        7,
+        ids.attemptId,
+        "api:connected-machine",
+        {
+          type: "tool.auth_needed",
+          payload: userSetupCardPayload(machinePermission, {
+            toolName: "computer_open",
+            requestedSandboxId: machine.toLowerCase(),
+          }),
+        },
+        machine.toLowerCase(),
+      ],
+    ]);
+    expect(
+      (appends[0]![7] as { payload: { requestedSandboxId?: string } }).payload.requestedSandboxId,
+    ).toBe(machine.toLowerCase());
   });
 
   test("reports a card this turn already showed, and a replaced turn as not posted", async () => {
