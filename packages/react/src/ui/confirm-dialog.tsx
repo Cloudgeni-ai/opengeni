@@ -1,5 +1,6 @@
 import { useState, type ReactNode, type RefObject } from "react";
 
+import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "./button";
 import {
   Dialog,
@@ -44,8 +45,8 @@ export function ConfirmDialog({
   children,
   confirmLabel,
   confirmDisabled = false,
-  pendingLabel = "Working…",
-  cancelLabel = "Cancel",
+  pendingLabel,
+  cancelLabel,
   cancelAutoFocus = false,
   destructive = true,
   restoreFocusRef,
@@ -78,6 +79,7 @@ export function ConfirmDialog({
    */
   onConfirm: () => void | boolean | Promise<void | boolean>;
 }) {
+  const msg = useOpenGeniText();
   const [pending, setPending] = useState(false);
 
   const confirm = async () => {
@@ -124,7 +126,7 @@ export function ConfirmDialog({
             disabled={pending}
             onClick={() => onOpenChange(false)}
           >
-            {cancelLabel}
+            {cancelLabel ?? msg("formDialog.cancel")}
           </Button>
           <Button
             type="button"
@@ -133,7 +135,7 @@ export function ConfirmDialog({
             disabled={pending || confirmDisabled}
             onClick={() => void confirm()}
           >
-            {pending ? pendingLabel : confirmLabel}
+            {pending ? (pendingLabel ?? msg("formDialog.working")) : confirmLabel}
           </Button>
         </DialogFooter>
       </DialogContent>

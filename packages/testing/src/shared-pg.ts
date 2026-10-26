@@ -852,8 +852,8 @@ export async function acquireSharedTestDatabase(
 /**
  * Grant the runtime role what a migration withholds until the previous
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): EXECUTE
- * on the personal-machine owner lookup (0978). Tests that exercise it run as
- * they will once it is granted.
+ * on the personal-machine owner lookup (0978) and the connected-command re-arm
+ * (0984). Tests that exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -861,6 +861,8 @@ export async function grantDeferredRuntimeAccess(
 ): Promise<void> {
   await admin.unsafe(`
     GRANT EXECUTE ON FUNCTION opengeni_private.session_machine_owner_subject_v1(uuid, uuid, uuid)
+      TO "${role.replaceAll('"', '""')}";
+    GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text)
       TO "${role.replaceAll('"', '""')}";
   `);
 }

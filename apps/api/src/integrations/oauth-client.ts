@@ -75,7 +75,7 @@ import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
-import { connectSetupPermission, requireConnectOwnerAuthority } from "./connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   DEFAULT_OAUTH_PROFILE,
   OFFICIAL_GMAIL_MCP_URL,
@@ -726,10 +726,6 @@ async function startMcpOAuthWithinDeadline(
     authorizationUrl,
     expiresAt: expiresAt.toISOString(),
   });
-}
-
-export function isHostedSlackMcpTarget(providerDomain: string, mcpUrl: string): boolean {
-  return builtInOAuthProfileFor({ mcpUrl, providerDomain })?.key === "hosted-slack-mcp";
 }
 
 function assertGoogleMcpSetupEnabled(settings: Settings, profile: OAuthProviderProfile): void {

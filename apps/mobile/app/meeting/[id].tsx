@@ -29,7 +29,8 @@ function Meeting({ workspaceId }: { workspaceId: string }) {
     workspaceId,
     recordingId: id ?? null,
     onDeleted: () => router.back(),
-    bottomInset: insets.bottom,
+    // iOS keeps the transcript clear of the home indicator by itself.
+    bottomInset: Platform.OS === "ios" ? 0 : insets.bottom,
   });
   const actions = view.actions;
   // Android's header menu: rebuilt only when its items change; the handler is read live.

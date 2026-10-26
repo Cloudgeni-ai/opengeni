@@ -45,6 +45,43 @@ const maintenanceImageDigests = {
 };
 
 describe("deployment contract", () => {
+  test("signup verification survives managed runtime rendering without exposing its secret in Helm values", () => {
+    const contract = contractForProfile("azure-existing-services", "managed-saas-staging");
+    const keys = [
+      "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
+      "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
+      "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES",
+    ];
+    const disabled = generateRuntimeArtifacts(contract, {}, {});
+    expect(disabled.runtimeEnv).toContain("OPENGENI_SIGNUP_CHALLENGE_ENABLED=false");
+    expect(disabled.requiredEnvVars).not.toContain(keys[1]);
+    const enabled = { OPENGENI_SIGNUP_CHALLENGE_ENABLED: "true" };
+    const missing = generateRuntimeArtifacts(contract, {}, enabled);
+    for (const key of keys) {
+      expect(requiredRuntimeEnvVars(contract, enabled)).toContain(key);
+      expect(missing.missingEnvVars).toContain(key);
+    }
+    const configured = generateRuntimeArtifacts(
+      contract,
+      {},
+      {
+        ...enabled,
+        OPENGENI_SIGNUP_CHALLENGE_SITE_KEY: "synthetic-public-key",
+        OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY: "synthetic-private-key",
+        OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES: "staging.example.test",
+      },
+    );
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY=synthetic-private-key",
+    );
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES=staging.example.test",
+    );
+    expect(configured.helmValuesYaml).not.toContain("synthetic-private-key");
+    expect(configured.summary).not.toHaveProperty("signupChallengeSecretKey");
+    for (const key of keys) expect(configured.missingEnvVars).not.toContain(key);
+  });
+
   test("ships valid built-in profiles", () => {
     for (const profile of Object.values(deploymentProfiles)) {
       expect(parseDeploymentContract(profile).profile).toBe(profile.profile);

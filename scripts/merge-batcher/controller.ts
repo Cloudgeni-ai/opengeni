@@ -35,7 +35,8 @@ export type Effect =
   | { kind: "publish"; branch: string; manifest: Manifest }
   | { kind: "land"; manifest: Manifest; expectedBase: string; headRefresh?: HeadRefresh }
   | { kind: "retry"; run: Run }
-  | { kind: "announce"; number: number; body: string; key: string }
+  | { kind: "cancel"; runs: Run[] }
+  | { kind: "announce"; number: number; body: string; key: string; commentKey?: string }
   | { kind: "park"; number: number; body: string; key: string };
 /** Final read-only validation found contention; no transaction was attempted. */
 export class ReplanRequired extends Error {}
@@ -51,7 +52,12 @@ export interface Transaction {
 export interface Executor {
   capabilities: Capabilities;
   landingContract?: "exact-tested-snapshot";
-  prepareLedger?(ledger: Ledger, effect: Effect, now: string): Ledger;
+  prepareLedger?(
+    ledger: Ledger,
+    effect: Effect,
+    now: string,
+    conflicts?: Observation["conflicts"],
+  ): Ledger;
   maintain?(): Promise<string | null>;
   // Atomic Git lease/CAS. Strict adapters additionally fence admission/effects;
   // exact-tested-snapshot adapters explicitly reconcile non-atomic REST effects.
@@ -207,7 +213,10 @@ export class LiveReader implements Reader {
     return {
       now: new Date().toISOString(),
       baseSha,
-      ...(failedRoot ? { baseCI: await this.github.baseCI(baseSha) } : {}),
+      // A ready priority fix needs exact-base evidence to decide preemption.
+      ...(failedRoot || admission.priority?.length
+        ? { baseCI: await this.github.baseCI(baseSha) }
+        : {}),
       // Do not make full-main-CI observation availability a hidden admission
       // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
@@ -217,8 +226,9 @@ export class LiveReader implements Reader {
       ledger,
       observationWarnings,
       // The planner separately counts live runs and durable missing-run
-      // reservations. A full provider slot must not veto a safe root landing.
-      // Publication/retry rechecks provider capacity at the effect boundary.
+      // reservations. This headroom gates only publication and retry; the
+      // planner lands a trusted green root regardless of it. Publication/retry
+      // recheck provider capacity at the effect boundary.
       mainBusy:
         this.config.mode === "shadow"
           ? false
@@ -291,7 +301,13 @@ export class Controller {
     const checkpoint =
       this.config.mode === "active" &&
       (digest(stamp(records.stages)) !== digest(stamp(observation.ledger.stages)) ||
-        digest(records.missingRuns) !== digest(observation.ledger.missingRuns));
+        digest(records.missingRuns) !== digest(observation.ledger.missingRuns) ||
+        observation.conflicts?.some(
+          ({ number, headSha }) =>
+            !observation.ledger.effects[
+              digest({ kind: "comment", key: `conflict:${headSha}`, number })
+            ],
+        ));
     if (action.kind === "wait" && checkpoint)
       action = {
         kind: "record",
@@ -351,7 +367,10 @@ export class Controller {
         }
       }
     } else if (action.kind === "record") ledger = action.ledger;
-    else if (action.kind === "land") {
+    else if (action.kind === "abandon") {
+      ledger = action.ledger;
+      if (action.runs.length) effect = { kind: "cancel", runs: action.runs };
+    } else if (action.kind === "land") {
       const manifest = await this.git.inspect(action.candidate.manifest.tipSha);
       if (!(await this.git.ancestor(observation.baseSha, manifest.tipSha)))
         throw new Error("Landing would not fast-forward");
@@ -411,7 +430,13 @@ export class Controller {
         kind: "announce",
         number: action.ejection.pull.number,
         key,
-        body: `Merge batcher excluded exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
+        ...(action.ejection.reason === "merge-tree conflict against candidate predecessor"
+          ? { commentKey: `conflict:${action.ejection.pull.headSha}` }
+          : {}),
+        body:
+          action.ejection.reason === "merge-tree conflict against candidate predecessor"
+            ? `Not queued: this PR conflicts with main or an earlier PR in this batch. Rebase or merge main into it and push; it re-queues automatically once required checks pass. Exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}.\n\n<!-- batcher-ejection:${key} -->`
+            : `Merge batcher excluded exact head ${action.ejection.pull.headSha}: ${action.ejection.reason}. Batch: ${action.ejection.batchId}. A changed head or a new ready event can re-enter.\n\n<!-- batcher-ejection:${key} -->`,
       };
     }
     if (this.config.mode === "active") {
@@ -437,7 +462,9 @@ export class Controller {
             sample[effect.kind === "land" ? "landedAt" : "publishedAt"] =
               this.clock().toISOString();
         }
-        ledger = this.executor?.prepareLedger?.(ledger, effect, observation.now) ?? ledger;
+        ledger =
+          this.executor?.prepareLedger?.(ledger, effect, observation.now, observation.conflicts) ??
+          ledger;
         try {
           await this.executor!.transact({
             expectedState: observation.stateSha,

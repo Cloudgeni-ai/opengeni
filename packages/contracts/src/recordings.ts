@@ -854,6 +854,11 @@ export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
     dictationDefault: z.object({ providerId: z.string(), model: z.string() }).nullable(),
     /** The deployment uses one model for everything; workspaces cannot pick. */
     pinned: z.boolean(),
+    /**
+     * The language this workspace's meetings are transcribed in unless a
+     * recording names another; null detects it. Absent from older servers.
+     */
+    language: z.string().nullable().optional(),
   }),
 );
 export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;

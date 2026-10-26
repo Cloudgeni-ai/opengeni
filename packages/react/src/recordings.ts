@@ -49,8 +49,10 @@ export {
   groupLiveTurns,
   groupTranscriptTurns,
   languageName,
+  meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -62,6 +64,7 @@ export {
 export type {
   LiveTranscriptLine,
   LiveTranscriptTurn,
+  MeetingHereStatus,
   MeetingPhase,
   TranscriptTurn,
 } from "./recordings-model";

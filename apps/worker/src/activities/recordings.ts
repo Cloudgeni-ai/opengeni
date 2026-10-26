@@ -1306,5 +1306,3 @@ export function createRecordingActivities(
     applyRecordingRetention,
   };
 }
-
-export type StartRecordingWorkflowInput = StalledRecordingWork;

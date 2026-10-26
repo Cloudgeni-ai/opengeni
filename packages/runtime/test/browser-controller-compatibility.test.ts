@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { BrowserActionRequest } from "@opengeni/contracts";
+import { BrowserActionCommand, BrowserActionRequest } from "@opengeni/contracts";
+import { z } from "zod";
+import { encodeShape, flattenJsonSchema } from "../../../scripts/public-api/surface";
 import {
+  NEWER_BROWSER_ACTION_ENVELOPE_FIELDS,
   NEWER_BROWSER_ACTION_OPTIONS,
   olderBrowserControllerMessage,
 } from "../src/sandbox/browser-controller-compatibility";
@@ -16,7 +19,23 @@ const baseline = JSON.parse(
     new URL("./fixtures/browser-controller-action-contract.json", import.meta.url),
     "utf8",
   ),
-) as { agentVersion: string; roots: string[]; schemas: Shapes };
+) as { agentVersion: string; roots: string[]; envelope: Record<string, string>; schemas: Shapes };
+
+/** The flattened command envelope a controller parses around the action. The
+ * action itself (`$.action` and below) is covered through the public surface. */
+function currentEnvelope(): Record<string, string> {
+  const json = z.toJSONSchema(BrowserActionCommand as z.ZodType, {
+    io: "input",
+    unrepresentable: "any",
+    cycles: "ref",
+    reused: "inline",
+  }) as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.entries(encodeShape(flattenJsonSchema(json))).filter(
+      ([path]) => path === "$.action" || !path.startsWith("$.action"),
+    ),
+  );
+}
 
 /** The flattened shapes of every public schema an action command carries. */
 function currentShapes(): Shapes {
@@ -63,6 +82,33 @@ describe("browser actions an older controller rejects", () => {
       const [schema, path] = key.split(" ") as [string, string];
       expect(shapes[schema]?.[path]).toBeDefined();
     }
+    const envelope = currentEnvelope();
+    for (const key of NEWER_BROWSER_ACTION_ENVELOPE_FIELDS.flatMap((field) => field.surfaceKeys)) {
+      expect(envelope[key]).toBeDefined();
+    }
+  });
+
+  test("every command envelope field added since the baseline agent is kept from older controllers", () => {
+    const listed = new Set(
+      NEWER_BROWSER_ACTION_ENVELOPE_FIELDS.flatMap((field) => field.surfaceKeys),
+    );
+    const unlisted = Object.entries(currentEnvelope())
+      .filter(([path, value]) => baseline.envelope[path] !== value && !listed.has(path))
+      .map(([path]) => path);
+    // A BrowserActionCommand field or value that agents up to the baseline did
+    // not accept: an older controller rejects every command carrying it. Send
+    // it only to controllers that support it, then list it in
+    // NEWER_BROWSER_ACTION_ENVELOPE_FIELDS with how.
+    expect(unlisted).toEqual([]);
+  });
+
+  test("no command envelope field the baseline agent expects is gone", () => {
+    const envelope = currentEnvelope();
+    const missing = Object.keys(baseline.envelope).filter((path) => envelope[path] === undefined);
+    // An older controller still parses the baseline envelope: a field it
+    // requires that the server no longer sends makes it reject every command.
+    // Keep sending it to controllers that predate the removal.
+    expect(missing).toEqual([]);
   });
 
   test("names exact on a text locator inside a batch and its alternative", () => {

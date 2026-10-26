@@ -4,11 +4,21 @@
  * speakers and says which transcript version this is, with Transcribe again.
  *
  * Until the transcript exists the page says where the meeting is: still
- * uploading (from this browser or another device), transcribing, or failed
- * with the reason and what to try.
+ * recording here (with Pause and Stop, so taking notes never hides it), not
+ * finished yet on another device, transcribing, or failed with the reason and
+ * what to try. Audio uploads while it records, so after Stop it reads
+ * Transcribing, not Uploading.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentProps,
+} from "react";
 import {
   AudioLinesIcon,
   CheckIcon,
@@ -32,10 +42,12 @@ import {
   defaultSpeakerName,
   formatDuration,
   languageName,
+  meetingHereStatus,
   meetingPhase,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  meetingTitle,
   transcriptErrorText,
   useRecording,
   useRecordingModels,
@@ -43,6 +55,7 @@ import {
   useRecordingsClient,
   useLiveTranscript,
   useTranscript,
+  type MeetingHereStatus,
   type RecordingsClientOverride,
 } from "../recordings";
 
@@ -73,7 +86,6 @@ import { Notice } from "../ui/notice";
 import { formatAbsoluteTime } from "../ui/relative-time";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { Skeleton } from "../ui/skeleton";
-import { StatusBadge } from "../ui/status-badge";
 import { cn } from "../app/lib/utils";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
@@ -91,10 +103,17 @@ import {
   speakerIsSuggested,
   type TranscriptActions,
 } from "./meeting-transcript";
-import { liveSpeakerName, recorderLiveLines, uploadLine } from "./recorder-panel";
+import {
+  liveSpeakerName,
+  RecordingBar,
+  recorderLiveLines,
+  uploadLine,
+  useOnline,
+} from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
 import { MeetingNotes } from "./meeting-notes";
-import { useMeetingRecorder } from "./recorder-context";
+import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 const defaultText = createOpenGeniText();
 
@@ -416,47 +435,53 @@ const SPINNER = (
 
 function PhaseNotice({
   recording,
-  uploadingHere,
+  recorder,
+  here,
   recordingElsewhere,
   onRetry,
 }: {
   recording: Recording;
-  uploadingHere: string | null;
+  recorder: MeetingRecorder | null;
+  /** What this device's recorder knows about the meeting; null when it isn't recording it. */
+  here: MeetingHereStatus | null;
   /** It's captured on another device with the live preview on. */
   recordingElsewhere: boolean;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
   const phase = meetingPhase(recording);
-  if (phase.kind === "uploading") {
-    if (uploadingHere === null && recordingElsewhere) {
-      return (
-        <Notice
-          tone="waiting"
-          icon={SPINNER}
-          title={msg("meetings.detailPage.notFinishedYet")}
-          live="polite"
-        >
-          {msg("meetings.detailPage.itSStillBeingRecorded")}
-        </Notice>
-      );
-    }
-    return uploadingHere !== null ? (
-      <Notice
-        tone="waiting"
-        icon={SPINNER}
-        title={msg("meetings.detailPage.uploadingTheAudio")}
-        live="polite"
-      >
-        {msg("meetings.detailPage.uploadinghereKeepThisTabOpen", { uploadingHere: uploadingHere })}
-      </Notice>
-    ) : (
-      <Notice tone="waiting" icon={SPINNER} title={msg("meetings.detailPage.stillUploading")}>
-        {msg("meetings.detailPage.theAudioIsOnThe")}
+  if (phase.kind === "uploading" && recorder && (here === "recording" || here === "paused")) {
+    return <RecordingBar recorder={recorder} />;
+  }
+  if (phase.kind === "uploading" && here === "waiting_for_connection") {
+    return (
+      <Notice tone="waiting" live="polite">
+        {msg("meetings.recorderPanel.notUploadingNoConnectionThe")}
       </Notice>
     );
   }
-  if (phase.kind === "transcribing") {
+  if (phase.kind === "uploading" && recorder && here === "upload_failed") {
+    return (
+      <Notice tone="failed" live="polite">
+        {uploadLine(recorder, true, msg)}
+      </Notice>
+    );
+  }
+  if (phase.kind === "uploading" && here !== "transcribing") {
+    return (
+      <Notice
+        tone="waiting"
+        icon={SPINNER}
+        title={msg("meetings.detailPage.notFinishedYet")}
+        live="polite"
+      >
+        {recordingElsewhere
+          ? msg("meetings.detailPage.itSStillBeingRecorded")
+          : msg("meetings.detailPage.theAudioIsOnThe")}
+      </Notice>
+    );
+  }
+  if (phase.kind === "transcribing" || phase.kind === "uploading") {
     return (
       <Notice tone="waiting" icon={SPINNER} live="polite">
         {msg("meetings.detailPage.transcribingThisUsuallyTakesA")}
@@ -552,7 +577,7 @@ function RerunNotice({
 /** One of the host's own lines about a meeting, such as its project. */
 export type MeetingDetail = { id: string; label: string; content: ReactNode };
 
-export function MeetingDetailPage({
+function MeetingDetailPageContent({
   workspaceId,
   recordingId,
   viewerSubjectId,
@@ -604,6 +629,7 @@ export function MeetingDetailPage({
   const models = useRecordingModels(override);
   const { client } = useRecordingsClient(override);
   const { recorder } = useMeetingRecorder();
+  const online = useOnline();
   // The live preview, while a meeting is recorded and until its transcript is
   // ready: this browser's own recorder has it first; anyone else reads what
   // the recorder saved.
@@ -828,10 +854,9 @@ export function MeetingDetailPage({
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
   const phase = meetingPhase(recording);
-  const uploadingHere =
-    recorder && recorder.recordingId === recording.id
-      ? uploadLine(recorder, navigator.onLine, msg)
-      : null;
+  // Only while the server still waits for audio: this device may know more.
+  const here =
+    recording.state === "capturing" ? meetingHereStatus(recorder, recording.id, online) : null;
   const segments = transcript.segments;
   const speakerLabels = [...speakerColorSlots(segments).keys()];
   const slots = speakerColorSlots(segments);
@@ -851,6 +876,8 @@ export function MeetingDetailPage({
     (recording.state !== "capturing" &&
       !recording.tracks.some((track) => track.playable || track.chunkCount > 0));
   const canRerun = recording.state !== "capturing" && !audioGone && !rerunPending;
+  // Pending before any transcript is done, it is the first one, not "again".
+  const firstPending = rerunPending && shownVersionNumber === 0;
   const unnamedCount = speakerLabels.filter(
     (label) => !speakerIsNamed(label, transcript.speakers),
   ).length;
@@ -992,22 +1019,10 @@ export function MeetingDetailPage({
     }
   };
 
+  const shownTitle = meetingTitle(recording, msg);
   const header = (
     <DetailPageHeader
-      title={recording.title}
-      chips={
-        phase.kind === "transcribing" ? (
-          <StatusBadge variant="dot" tone="progress" pulse>
-            {msg("meetings.detailPage.transcribing")}
-          </StatusBadge>
-        ) : phase.kind === "uploading" ? (
-          <StatusBadge variant="dot" tone="progress" pulse>
-            {previewing && !recordingHere
-              ? msg("meetings.detailPage.inProgress")
-              : msg("meetings.detailPage.uploading")}
-          </StatusBadge>
-        ) : undefined
-      }
+      title={shownTitle}
       meta={
         <DetailMeta>
           {formatAbsoluteTime(recording.startedAt, { text: msg })}
@@ -1040,9 +1055,7 @@ export function MeetingDetailPage({
               }
             />
           ) : null}
-          <MoreMenu
-            label={msg("meetings.detailPage.moreActionsForTitle", { title: recording.title })}
-          >
+          <MoreMenu label={msg("meetings.detailPage.moreActionsForTitle", { title: shownTitle })}>
             <DropdownMenuItem onSelect={() => setRenaming(true)}>
               <PencilIcon aria-hidden="true" />
               {msg("meetings.detailPage.rename")}
@@ -1050,7 +1063,7 @@ export function MeetingDetailPage({
             {recording.state !== "capturing" ? (
               <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
                 <RefreshCwIcon aria-hidden="true" />
-                {rerunPending
+                {rerunPending && !firstPending
                   ? msg("meetings.detailPage.transcribingAgain")
                   : msg("meetings.detailPage.transcribeAgain")}
               </DropdownMenuItem>
@@ -1109,19 +1122,21 @@ export function MeetingDetailPage({
                   {versionLine(meeting.versions[0]!, modelName, msg)}
                 </span>
               )}
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => setRerunning(true)}
-                disabled={!canRerun}
-                className="w-fit rounded-[10px] pointer-coarse:h-11"
-              >
-                {rerunPending ? SPINNER : <RefreshCwIcon aria-hidden="true" />}
-                {rerunPending
-                  ? msg("meetings.detailPage.transcribingAgain")
-                  : msg("meetings.detailPage.transcribeAgain")}
-              </Button>
+              {phase.kind === "failed" || firstPending ? null : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setRerunning(true)}
+                  disabled={!canRerun}
+                  className="w-fit rounded-[10px] pointer-coarse:h-11"
+                >
+                  {rerunPending ? SPINNER : <RefreshCwIcon aria-hidden="true" />}
+                  {rerunPending
+                    ? msg("meetings.detailPage.transcribingAgain")
+                    : msg("meetings.detailPage.transcribeAgain")}
+                </Button>
+              )}
             </div>
           </DetailAsideItem>
         ) : null}
@@ -1134,7 +1149,8 @@ export function MeetingDetailPage({
       <div className="mt-6 grid gap-4 empty:hidden">
         <PhaseNotice
           recording={recording}
-          uploadingHere={uploadingHere}
+          recorder={recorder}
+          here={here}
           recordingElsewhere={previewing && !recordingHere}
           onRetry={() => setRerunning(true)}
         />
@@ -1219,7 +1235,7 @@ export function MeetingDetailPage({
                 <span className="mr-2 inline-flex rounded-full border border-border px-1.5 text-xs leading-4 font-medium text-fg-label">
                   {msg("meetings.detailPage.preview")}
                 </span>
-                {recording.state === "capturing"
+                {recording.state === "capturing" && here !== "transcribing"
                   ? msg("meetings.detailPage.whatSSaidSoFar")
                   : msg("meetings.detailPage.whatWasSaidAsIt")}
               </p>
@@ -1307,7 +1323,7 @@ export function MeetingDetailPage({
       </DetailPageBody>
       <RenameDialog
         open={renaming}
-        title={recording.title}
+        title={shownTitle}
         onClose={() => setRenaming(false)}
         onRename={async (title) =>
           await update({ title }, msg("meetings.detailPage.couldnTRenameThisMeeting2"))
@@ -1369,11 +1385,19 @@ export function MeetingDetailPage({
         }}
       />
       <DeleteMeetingDialog
-        recording={deleting ? recording : null}
+        recording={deleting ? { id: recording.id, title: shownTitle } : null}
         onClose={() => setDeleting(false)}
         onDelete={async () => await meeting.remove()}
         onDeleted={onBack}
       />
     </DetailPage>
+  );
+}
+
+export function MeetingDetailPage(props: ComponentProps<typeof MeetingDetailPageContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingDetailPageContent {...props} />
+    </MeetingsOverlayScope>
   );
 }

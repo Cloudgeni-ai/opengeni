@@ -2689,7 +2689,10 @@ async function assertTouchTargets(page: Page, mobile: boolean): Promise<void> {
  * extend its tap area beyond its painted box, for example with a pseudo-element
  * over its row's padding. Judge what a tap actually reaches: every probe at the
  * edges and corners of the 44 px square around the control's centre must hit
- * the control itself, so clipping or an overlapping neighbour still fails. */
+ * the control itself, so clipping or an overlapping neighbour still fails.
+ * Inert content takes no taps or focus, so it holds no touch targets: on a
+ * narrow screen the open workspace covers the chat and makes it inert, and only
+ * the workspace's own controls can be tapped. Those are still checked. */
 export function findUndersizedTouchTargets(): Array<{
   label: string | undefined;
   width: number;
@@ -2721,6 +2724,7 @@ export function findUndersizedTouchTargets(): Array<{
     ),
   )
     .filter((element) => {
+      if (element.closest("[inert]")) return false;
       const style = getComputedStyle(element);
       const rect = element.getBoundingClientRect();
       return (

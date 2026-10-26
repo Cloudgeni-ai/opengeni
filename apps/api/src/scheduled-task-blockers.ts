@@ -46,8 +46,16 @@ type Blocker = { reason: string; text: string };
 
 const RESUME = "then resume the schedule.";
 
+/**
+ * The person a schedule runs as no longer holds the exact access it was saved
+ * with (their organization membership changed, was suspended, or they left the
+ * workspace). Every run is refused until they save it again, which approves it
+ * with the access they hold now.
+ */
+const OWNER_ACCESS_CHANGED_TEXT = `The access it was saved with has changed, so every run is refused. Its owner can open it and save it to approve it with their current access, ${RESUME}`;
+
 const NON_RETRYABLE_REFUSAL_TEXT: Record<string, string> = {
-  scheduled_authority_unavailable: `The access it was set up with is no longer valid. Refresh the schedule's access, ${RESUME}`,
+  scheduled_authority_unavailable: OWNER_ACCESS_CHANGED_TEXT,
   machine_target_unavailable: `The machine it runs on is no longer available. Choose another machine or reconnect this one, ${RESUME}`,
   machine_enrollment_inactive: `The machine it runs on is disconnected. Reconnect the machine, ${RESUME}`,
   variable_set_unavailable: `A variable set it uses no longer exists or can't be used. Edit the schedule, ${RESUME}`,
@@ -143,6 +151,12 @@ export function scheduledRunHardBlocker(
       };
     case "scheduled_model_unavailable":
       return { reason: run.error, text: NON_RETRYABLE_REFUSAL_TEXT.scheduled_model_unavailable! };
+    // The database admission and claim fences refuse every run of a task
+    // revision whose saved owner authority no longer holds. That stays true
+    // for every later run until a person saves the schedule again.
+    case "scheduled_run_authority_proof_rejected":
+    case "scheduled_causal_membership_changed":
+      return { reason: run.error, text: OWNER_ACCESS_CHANGED_TEXT };
     default:
       return null;
   }

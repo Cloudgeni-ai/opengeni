@@ -10,7 +10,6 @@ import type {
   ConnectionMetadata,
   SocialConnection,
 } from "@opengeni/react/app/types";
-import { EnabledCapabilitiesSection } from "./capability-catalog-sections";
 import { Sheet } from "@opengeni/react/ui/sheet";
 import {
   ConnectionStatus,
@@ -607,37 +606,6 @@ describe("Skill installation authority UI", () => {
   // The enabled Connectors strip can no longer contain a Skill at all: Skills
   // are Bundles and their authority, their remove affordance, and their
   // administrator guidance all live in the Bundles section instead.
-  test("the enabled Connectors strip offers no Skill removal shortcut", async () => {
-    const skill = installedCuratedSkill();
-    const onOpen = mock((_item: CapabilityCatalogItem) => {});
-    const onDisable = mock((_item: CapabilityCatalogItem) => {});
-    const rendered = await render(
-      <EnabledCapabilitiesSection
-        items={[skill]}
-        busyId={null}
-        connectionHealth={() => ({ state: "none" })}
-        logoUrl={() => null}
-        onOpen={onOpen}
-        onDisable={onDisable}
-      />,
-    );
-    try {
-      const inspect = rendered.container.querySelector<HTMLButtonElement>(
-        '[data-capability-id="skill:terraform-style-guide"]',
-      );
-      expect(inspect?.disabled).toBe(false);
-      expect(
-        [...rendered.container.querySelectorAll("button")].map((button) =>
-          button.textContent?.trim(),
-        ),
-      ).not.toContain("Remove");
-      await act(async () => inspect!.click());
-      expect(onOpen).toHaveBeenCalledWith(skill);
-      expect(onDisable).not.toHaveBeenCalled();
-    } finally {
-      await rendered.unmount();
-    }
-  });
 });
 
 describe("social provider integration UI", () => {

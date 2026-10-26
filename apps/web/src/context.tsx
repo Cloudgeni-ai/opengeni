@@ -170,7 +170,9 @@ export function RootRouteComponent() {
   const isPublicDevHarness =
     import.meta.env.DEV &&
     (pathname === "/dev/composer-chrome" ||
+      pathname === "/dev/composer-stack" ||
       pathname === "/dev/onboarding" ||
+      pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =
     pathname === "/reset-password" ||
@@ -283,6 +285,11 @@ export function RootRouteComponent() {
                     onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
                     emailVerificationRequired={managedEmailVerificationRequired}
                     newSignupsEnabled={managedNewSignupsEnabled}
+                    signupChallengeSiteKey={
+                      clientConfig?.auth.mode === "managedSession"
+                        ? clientConfig.auth.signupChallengeSiteKey
+                        : undefined
+                    }
                   />
                 ) : undefined
               }
@@ -296,6 +303,11 @@ export function RootRouteComponent() {
               onSubmit={handleManagedAuth}
               emailVerificationRequired={managedEmailVerificationRequired}
               newSignupsEnabled={managedNewSignupsEnabled}
+              signupChallengeSiteKey={
+                clientConfig?.auth.mode === "managedSession"
+                  ? clientConfig.auth.signupChallengeSiteKey
+                  : undefined
+              }
               socialProviders={managedSocialProviders}
               onSocialSubmit={handleManagedSocialAuth}
             />

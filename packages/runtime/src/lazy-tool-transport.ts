@@ -216,6 +216,32 @@ export function connectableIntegrationNotice(
 }
 
 /**
+ * The connected account a tool reaches: its source (one per account route),
+ * how the account is named ("Gmail" or "Gmail (alice@example.com)"), its
+ * connector, and the kind of need it serves (the connector's catalog
+ * category, such as "communication") when one is known.
+ */
+export type ConnectedToolAccount = {
+  source: string;
+  label: string;
+  connector: string;
+  kind?: string;
+};
+
+/** At most this many other accounts are named; the rest are counted. */
+const CONNECTED_ACCOUNTS_NAMED = 10;
+
+/** The plain sentence a search result carries about the person's other connected accounts. */
+export function connectedAccountsNotice(
+  reached: readonly string[],
+  others: readonly string[],
+): string {
+  const named = others.slice(0, CONNECTED_ACCOUNTS_NAMED).join(", ");
+  const more = others.length - CONNECTED_ACCOUNTS_NAMED;
+  return `These tools reach ${reached.join(", ")}. Also connected: ${named}${more > 0 ? `, and ${more} more` : ""}. If the request could mean those accounts too (the person's email, calendar or files), check each that fits, or say which account you checked and offer the others.`;
+}
+
+/**
  * The exact (not spelling-approximate) capability_catalog_search matches whose
  * next step is a Connect card the person completes themselves (connect or add
  * credentials), not one a workspace admin must enable. Accepts the MCP content
@@ -383,6 +409,8 @@ export class LazyToolRuntime {
   readonly controlTools: Tool[];
   private routerWasExposed: boolean;
   private searchIndex: ToolSearchIndex | undefined;
+  /** Whether a search this turn already named the person's connected accounts. */
+  private connectedAccountsNamed = false;
 
   constructor(
     readonly transport: LazyToolTransport,
@@ -405,6 +433,8 @@ export class LazyToolRuntime {
     private readonly unavailableMcpServers: () => ReadonlyMap<string, string> = () => new Map(),
     /** Catalog integrations a search names that the person could connect. */
     private readonly connectableLookup?: ConnectableIntegrationLookup,
+    /** The connected account each tool reaches, by model tool name. */
+    private readonly connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
   ) {
     this.routerWasExposed = routerInHistory;
     this.controlTools =
@@ -780,7 +810,57 @@ export class LazyToolRuntime {
       signal,
     );
     const connectable = await lookup;
-    return connectable.length ? this.withConnectableNotice(result, connectable) : result;
+    const withConnectable = connectable.length
+      ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
+      : result;
+    const accounts = this.connectedAccountsNotice(withConnectable);
+    return accounts
+      ? this.withNotice(withConnectable, "connectedAccounts", accounts)
+      : withConnectable;
+  }
+
+  /**
+   * The first search this turn whose result shows the model a tool reaching a
+   * connected account (loaded, or as a compact candidate where the output
+   * carries those) names the person's other accounts that serve the same
+   * need: other accounts of that connector, and accounts whose connector has
+   * the same kind. A request for "my email" can mean Gmail and Outlook Mail,
+   * which ranking cannot tell are alike. An account whose tools failed to
+   * load is reported as an unavailable source instead.
+   */
+  private connectedAccountsNotice(result: GenericSearchMarker): string | undefined {
+    if (this.connectedAccountsNamed || !this.connectedAccounts) return undefined;
+    const accounts = this.connectedAccounts();
+    if (!accounts.size) return undefined;
+    // Native search outputs carry only loaded definitions, never candidates.
+    const listed =
+      (this.transport === "generic_dispatch"
+        ? (JSON.parse(result.output) as { tools?: { name?: unknown }[] }).tools
+        : result.tools) ?? [];
+    const shown = new Map<string, ConnectedToolAccount>();
+    for (const tool of listed) {
+      const account = typeof tool.name === "string" ? accounts.get(tool.name) : undefined;
+      if (account) shown.set(account.source, account);
+    }
+    if (!shown.size) return undefined;
+    const connectors = new Set([...shown.values()].map((account) => account.connector));
+    const kinds = new Set([...shown.values()].flatMap((account) => account.kind ?? []));
+    const reached: string[] = [];
+    const others: string[] = [];
+    const seen = new Set<string>();
+    for (const account of accounts.values()) {
+      if (seen.has(account.source)) continue;
+      seen.add(account.source);
+      if (shown.has(account.source)) reached.push(account.label);
+      else if (
+        connectors.has(account.connector) ||
+        (account.kind !== undefined && kinds.has(account.kind))
+      )
+        others.push(account.label);
+    }
+    if (!others.length) return undefined;
+    this.connectedAccountsNamed = true;
+    return connectedAccountsNotice(reached, others);
   }
 
   private async connectableIntegrations(
@@ -798,15 +878,21 @@ export class LazyToolRuntime {
     }
   }
 
-  private withConnectableNotice(
+  /**
+   * Plain text about a search result: a field of the JSON output, and on
+   * native routes (whose search output cannot carry text) the marker notice.
+   */
+  private withNotice(
     result: GenericSearchMarker,
-    connectable: readonly ConnectableIntegration[],
+    field: string,
+    notice: string,
   ): GenericSearchMarker {
-    const notice = connectableIntegrationNotice(connectable);
     return {
       ...result,
-      output: JSON.stringify({ ...JSON.parse(result.output), notConnected: notice }),
-      ...(this.transport === "generic_dispatch" ? {} : { notice }),
+      output: JSON.stringify({ ...JSON.parse(result.output), [field]: notice }),
+      ...(this.transport === "generic_dispatch"
+        ? {}
+        : { notice: result.notice === undefined ? notice : `${result.notice}\n${notice}` }),
     };
   }
 
@@ -1217,6 +1303,7 @@ export function installLazyToolRuntime(
   decisionModel?: ToolSelector,
   unavailableMcpServers?: () => ReadonlyMap<string, string>,
   connectableLookup?: ConnectableIntegrationLookup,
+  connectedAccounts?: () => ReadonlyMap<string, ConnectedToolAccount>,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -1233,6 +1320,7 @@ export function installLazyToolRuntime(
     decisionModel,
     unavailableMcpServers,
     connectableLookup,
+    connectedAccounts,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;

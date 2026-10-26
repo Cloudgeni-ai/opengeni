@@ -225,15 +225,6 @@ export function recordChatVisit(subjectId: string, row: SessionListRow): void {
   emit(subjectId);
 }
 
-/** A chat was deleted or is no longer reachable: forget it. */
-export function forgetChat(subjectId: string, chatId: string): void {
-  const state = directory(subjectId);
-  if (!state.rows.delete(chatId) && !state.recent.includes(chatId)) return;
-  state.recent = state.recent.filter((id) => id !== chatId);
-  persistRecent(subjectId, state);
-  emit(subjectId);
-}
-
 /** The sidebar reports the chats it shows, in order, so next and previous follow it. */
 export function setSidebarOrder(
   subjectId: string,

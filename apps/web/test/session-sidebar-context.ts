@@ -726,11 +726,18 @@ if (sitesScenario) {
   const siteClient = siteViewPreviewClient({
     workspaceId,
     rows,
-    // `?published=1`: the usage Site is on the web, so the header links to it.
+    // `?published=1`: the usage Site is on the web, so the header says Published.
+    // `?publishable=1`: publishing is set up, so an unpublished Site offers Publish.
+    // `?publishDelay=<ms|hold>`: Publish takes that long (hold: never finishes).
     // `?htmlDelay=<ms>`: loading a version takes that long, to show Updating.
     publishedHost: previewParameters.has("published")
       ? (siteId) => (siteId === usageSiteId ? "usage.sites.opengeni.ai" : "")
       : undefined,
+    publishable: previewParameters.has("publishable") || previewParameters.has("published"),
+    publishDelayMs:
+      previewParameters.get("publishDelay") === "hold"
+        ? Number.POSITIVE_INFINITY
+        : Number(previewParameters.get("publishDelay") ?? 0) || undefined,
     htmlDelayMs: Number(previewParameters.get("htmlDelay") ?? 0) || undefined,
     // "Make the header blue": the agent publishes the Site with a blue header.
     edit: (text) =>
@@ -905,6 +912,9 @@ const context = {
   },
   sessionChannelProjectionAuthority: new SessionChannelProjectionAuthority(),
   clientConfig: {},
+  // The Site view's publish form names the workspace and checks it isn't Personal.
+  workspaces: [{ id: workspaceId, name: "Product engineering", kind: "shared" }],
+  managedSelfContext: null,
   captureWorkspaceInvocation: () => invocation,
   ownsWorkspaceInvocation: (_workspace: string, accepted: unknown) => accepted === invocation,
   setSession: () => {},

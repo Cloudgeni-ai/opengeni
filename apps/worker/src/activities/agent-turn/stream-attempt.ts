@@ -835,6 +835,10 @@ export async function runTurnStreamAttempt(
       steerHandover = true;
       throw new ModelStepHandover("steer");
     }
+    // The watch noticed a Steer that no longer waits (withdrawn, or the
+    // automation run that steered was paused) before this boundary. Listen
+    // again, or every later request would be cut short at once.
+    if (checkSteer && steerWatch?.signal().aborted) steerWatch.rearm();
   };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;

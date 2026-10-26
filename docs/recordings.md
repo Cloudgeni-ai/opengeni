@@ -18,6 +18,16 @@ recording may rename it, edit speakers and text, re-run its transcript and
 switch the shown version. Only the person who recorded it may upload, finish,
 share, unshare or delete it.
 
+## Language
+
+A meeting is transcribed in `transcription.language` when the create request
+names one, else in the workspace's `settings.recordings.language`; `null`
+asks the model to detect it even when the workspace names one. Leave the
+language out to use the workspace's. `GET …/recording-models` returns the
+workspace's as `language` (null detects), and the React recorder starts on it
+unless the host passes `defaultLanguage`. Naming the language matters for
+close languages: without it, Norwegian can come back as Danish or Swedish.
+
 ## Capture contract
 
 Clients record locally first, so a dropped connection, a reload or a crash
@@ -97,7 +107,13 @@ the console uses:
   `header={false}` when the list sits inside a page of your own.
 - `MeetingDetailPage`: one meeting, with its player, transcript, speaker
   naming, versions and sharing. `details` adds your own lines beside the
-  transcript, such as the project it belongs to.
+  transcript, such as the project it belongs to. While this device records
+  the meeting (Take notes opens it), the page shows the recording's clock with
+  Pause and Stop; after Stop it reads Transcribing. Audio uploads while it
+  records, so neither page says Uploading: a meeting still being recorded
+  elsewhere reads In progress, and only a lost connection or a refused upload
+  is called out. `meetingHereStatus` in `@opengeni/react/recordings` is that
+  rule for a host's own pages.
 - `MeetingDefaultsView`: the workspace's meeting settings over plain values
   and an `onSave`.
 - The smaller pieces they are built from: `RecorderPanel`,
@@ -106,6 +122,71 @@ the console uses:
 The pages navigate through callbacks (`onOpen`, `meetingHref`, `onBack`), so
 any router works. `@opengeni/react/testing/meetings` has an in-memory
 recordings client with meetings in every state, for previews and tests.
+
+### In your own desktop app
+
+A browser records other people in a call only from a shared tab. A desktop
+app can record everything the computer plays, which includes the call, as its
+own track and without a prompt. The Opengeni desktop app does this, and so can
+any Electron app that shows Opengeni's meetings, with `@opengeni/desktop`:
+
+- Bundle the helper that records it. Each Opengeni desktop release
+  (`desktop-v*` on GitHub) attaches it per platform, for example
+  `opengeni-audio-capture-mac-arm64` and
+  `opengeni-audio-capture-win-x64.exe`. `SHA256SUMS` lists their checksums,
+  so pin them in your build. Ship it as an extra resource (electron-builder's
+  `extraResources`); on macOS your app signs it with the rest of the bundle.
+- In the main process, start the captures and answer the preload's calls:
+
+  ```ts
+  import {
+    handleSystemAudioIpc,
+    SystemAudioCaptures,
+    systemAudioHelperName,
+    systemAudioUsable,
+  } from "@opengeni/desktop/system-audio";
+
+  const helperPath = join(process.resourcesPath, "audio-capture", systemAudioHelperName());
+  const captures = new SystemAudioCaptures({
+    helperPath,
+    excludePid: process.pid, // leaves your app's own sounds out
+    excludeBundlePrefix: "com.example.app", // and, on macOS, its helpers'
+  });
+  handleSystemAudioIpc({ ipcMain, captures, allow: (event) => assertYourWebApp(event) });
+  // Pass systemAudioUsable(helperPath) to the preload, for example as an argument.
+  ```
+
+- In the preload of your web app's window, when the main process says it is
+  usable, call `exposeSystemAudio()` from `@opengeni/desktop/preload/system-audio`.
+  It defines `window.opengeniSystemAudio`, and the meeting recorder then
+  records computer audio there instead of offering a tab's.
+- On macOS (14.2 and later) add `NSAudioCaptureUsageDescription` to the app's
+  `Info.plist`; the person allows it once, under Screen & System Audio
+  Recording. Windows needs version 10 2004 or later, and Linux a PulseAudio or
+  PipeWire sound server.
+
+Inside an Electron app that doesn't, the recorder offers no tab audio, because
+Electron shows no share picker of its own.
+
+On a phone, `@opengeni/react-native/meetings` has the same pieces for React
+Native screens:
+
+- `MeetingRecorderProvider`: mount it once above the screens. It keeps one
+  recorder going while the person moves around the app and, with the native
+  module, while the phone is locked or another app is in front. Audio is
+  written to the phone as it is captured and uploaded in the background. Pass
+  a `storeScope` per signed-in account, so unsent audio is only ever uploaded
+  with that account's credential. A host without an `OpenGeniProvider` above
+  its screens passes its SDK `client`, and `workspaceId={null}` until it
+  knows the workspace.
+- `MeetingsList`: the recorder plus the list. `useMeetingView`: one
+  meeting's transcript, player and actions, for a screen of your own.
+
+The SDK client uses the web platform's `crypto` (request ids and upload
+checksums), which Hermes doesn't have. Mount the recorder inside
+`OpenGeniReactNativeProvider`, or call `installOpenGeniReactNativeEnvironment`
+yourself for as long as it is mounted. Otherwise listing and uploading fail
+with "Property 'crypto' doesn't exist".
 
 ## Live transcript preview
 
@@ -186,6 +267,13 @@ collar and overlapping speech included), the diarization error rate is
 about 18 percent, which is in the same range as pyannote 3.1. It uses about
 3 CPU minutes per hour of audio, so an hour of meeting takes about 30
 seconds on 8 cores.
+
+It runs on 4 threads unless the worker sets `threads` (fewer on a smaller
+machine). More threads finish little sooner but cost much more: a
+half-hour meeting takes 47 s and 128 CPU-seconds on 4 threads, and 21 s and
+304 CPU-seconds on all 32 threads of a 16-core desktop CPU. Transcription
+runs at the same time and takes about as long, so the extra speed rarely
+shows.
 
 Memory stays small and nearly flat with length: about 300 MB for a
 half-hour meeting on one thread, plus about 70 MB for each further thread,
@@ -295,16 +383,23 @@ The recording providers:
   longer than about a quarter of an hour during its preview.
 
 The dictation providers in `docs/transcription.md` (OpenAI, Azure OpenAI and
-the two subscriptions) share the same registry, credentials and billing, and
-serve dictation only.
+the two subscriptions) share the same registry, credentials and billing. They
+return only text, so they serve meetings only where the deployment aligns
+words (`OPENGENI_RECORDING_WORD_ALIGNMENT=true`, set in the stock images).
 
-Meetings use Azure Speech when its account is configured, else ElevenLabs.
-`OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT` (`provider/model`, such as
-`elevenlabs/scribe_v2`) picks another default for the deployment, and a
-workspace can set its own in `settings.recordings.transcription`.
+The deployment's meeting default is Azure Speech when its account is
+configured, else ElevenLabs; `OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT`
+(`provider/model`, such as `elevenlabs/scribe_v2`) picks another. A meeting
+runs the deployment's pin, else the model the request or the workspace names
+(`settings.recordings.transcription`), else the default when this workspace
+can use it, else the first model in the provider order that serves meetings
+and that this workspace can use. So a workspace signed in to a ChatGPT or
+SuperGrok subscription, or holding its own key, transcribes with it without
+picking it. With nothing usable it stays the default, and the transcript
+fails saying which provider to connect.
 `GET …/recording-models` lists the models, their capabilities, funding and
-whether each is available to this workspace, plus `dictationDefault` and
-`pinned`.
+whether each is available to this workspace, plus the `default` a meeting
+would run now, `dictationDefault` and `pinned`.
 
 A deployment-funded meeting transcript is charged in credits once it
 completes, at the model's price per hour of audio; workspace keys and

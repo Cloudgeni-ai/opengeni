@@ -994,6 +994,11 @@ export function useRecordingModels(
   defaultModel: ListRecordingModelsResponse["default"] | null;
   /** The deployment uses one model for every transcription; workspaces cannot pick. */
   pinned: boolean;
+  /**
+   * The workspace's meeting language (null detects it), or undefined until
+   * the server says, or when it is too old to.
+   */
+  language: string | null | undefined;
   loading: boolean;
   error: Error | null;
 } {
@@ -1015,6 +1020,7 @@ export function useRecordingModels(
     liveModels,
     defaultModel: state.data?.default ?? null,
     pinned: state.data?.pinned === true,
+    language: state.data ? state.data.language : undefined,
     loading: state.loading,
     error: state.error,
   };

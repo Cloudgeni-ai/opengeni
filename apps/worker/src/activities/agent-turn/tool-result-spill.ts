@@ -21,7 +21,6 @@ import {
 import type { Observability } from "@opengeni/observability";
 import {
   materializeSandboxFileDownloads,
-  sandboxRunAs,
   spilledModelToolResult,
   type CodemodeTokenWriterSession,
   type SandboxFileDownload,
@@ -283,7 +282,6 @@ export class ToolResultSpill {
   }
 
   private async writeDownload(session: unknown, download: SandboxFileDownload): Promise<boolean> {
-    const runAs = sandboxRunAs(this.deps.getModelRunSettings());
     const publish = this.deps.getPublish();
     const fence = this.deps.toolCancellationFenceRef.current;
     const materialized = await materializeSandboxFileDownloads(
@@ -294,7 +292,6 @@ export class ToolResultSpill {
         onRuntimeEvent: async (event) => {
           await publish?.([{ type: event.type, payload: event.payload }], true);
         },
-        ...(runAs ? { runAs } : {}),
         ...(fence ? { commandRunner: fence.runSandboxCommand.bind(fence) } : {}),
       },
     );

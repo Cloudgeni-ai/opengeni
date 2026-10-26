@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { dequal } from "dequal";
 import { ChevronLeftIcon, ChevronRightIcon, ShieldCheckIcon } from "lucide-react";
-import {
-  OpenGeniApiError,
-  toolReviewFields,
-  toolReviewDetails,
-  type ToolActionReview,
-} from "@opengeni/sdk";
+import { OpenGeniApiError, toolReviewDetails, type ToolActionReview } from "@opengeni/sdk";
 import type { PendingApproval } from "../approvals";
 import { cn } from "../lib/cn";
 import { useErrorMessage } from "../lib/error-message";
@@ -65,17 +60,6 @@ export type ApprovalSurfaceProps = {
   className?: string | undefined;
 };
 export type ApprovalField = { key: string; label: string; value: string };
-/** @deprecated Prefer the versioned server review; retained for small custom renderers. */
-export function approvalArgumentFields(value: unknown): ApprovalField[] | null {
-  const projected = toolReviewFields(value);
-  return projected.fields.length
-    ? projected.fields.map((field) => ({
-        key: field.path.slice(1),
-        label: field.label,
-        value: field.preview,
-      }))
-    : null;
-}
 
 /** Hosts provide decisions; this surface never mutates the approved payload. */
 export function ApprovalSurface({

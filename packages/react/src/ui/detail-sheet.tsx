@@ -11,6 +11,7 @@ import {
 import { ArrowLeftIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
+import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "./button";
 import { LogoTileSizeProvider } from "./logo-tile";
 import { SECTION_TITLE_CLASS } from "./section";
@@ -271,6 +272,7 @@ export function DetailHeader({
   showClose = true,
   className,
 }: DetailHeaderProps) {
+  const msg = useOpenGeniText();
   const presentation = usePresentation();
   const previewClose = useContext(PreviewCloseContext);
   const inDialog = presentation === "sheet";
@@ -334,7 +336,7 @@ export function DetailHeader({
         type="button"
         variant="ghost"
         size="icon-sm"
-        aria-label="Close"
+        aria-label={msg("formDialog.close")}
         className={closeButtonClass}
       >
         <XIcon />
@@ -345,7 +347,7 @@ export function DetailHeader({
       type="button"
       variant="ghost"
       size="icon-sm"
-      aria-label="Close"
+      aria-label={msg("formDialog.close")}
       onClick={previewClose}
       className={closeButtonClass}
     >
@@ -562,12 +564,13 @@ export function DetailFooterConfirm({
   title,
   description,
   confirmLabel,
-  cancelLabel = "Cancel",
+  cancelLabel,
   onConfirm,
   onCancel,
   pending = false,
   className,
 }: DetailFooterConfirmProps) {
+  const msg = useOpenGeniText();
   const presentation = usePresentation();
   const titleId = useId();
   const descriptionId = useId();
@@ -602,7 +605,7 @@ export function DetailFooterConfirm({
           autoFocus={presentation === "sheet"}
           className="pointer-coarse:h-11"
         >
-          {cancelLabel}
+          {cancelLabel ?? msg("formDialog.cancel")}
         </Button>
         <Button
           type="button"
@@ -620,10 +623,15 @@ export function DetailFooterConfirm({
 
 /** Loading placeholder with the header and fact rows in place. */
 export function DetailSkeleton({ sections = 2 }: { sections?: number }) {
+  const msg = useOpenGeniText();
   const presentation = usePresentation();
   const padded = presentation === "sheet" || presentation === "preview";
   return (
-    <div role="status" aria-label="Loading details" className="flex min-h-0 flex-1 flex-col">
+    <div
+      role="status"
+      aria-label={msg("formDialog.loading")}
+      className="flex min-h-0 flex-1 flex-col"
+    >
       <div
         className={cn(
           "flex shrink-0 items-start gap-3",
