@@ -88,33 +88,43 @@ export async function isWorkspaceEuOnly(
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await rawRows<{
-        account_id: string;
-        scoped_account_id: string | null;
-        eu_only: boolean | null;
-      }>(
-        scopedDb,
-        sql`select workspace.account_id::text as account_id,
-            nullif(current_setting('opengeni.account_id', true), '') as scoped_account_id,
-            residency.eu_only
-          from workspaces workspace
-          left join organization_inference_residency residency
-            on residency.account_id = workspace.account_id
-          where workspace.id = ${input.workspaceId}::uuid`,
-      );
-      const [row] = rows;
-      if (
-        rows.length !== 1 ||
-        !row ||
-        row.account_id.toLowerCase() !== input.accountId.toLowerCase() ||
-        row.scoped_account_id?.toLowerCase() !== row.account_id.toLowerCase()
-      ) {
-        throw new WorkspaceInferenceResidencyUnknownError();
-      }
-      return row.eu_only === true;
-    },
+    async (scopedDb) => await isWorkspaceEuOnlyInScope(scopedDb, input),
   );
+}
+
+/**
+ * `isWorkspaceEuOnly` inside a transaction already scoped to the workspace
+ * (for example the worker's batched execution-input read). Same checks: a
+ * workspace outside the scoped organization is an error, never "not EU-only".
+ */
+export async function isWorkspaceEuOnlyInScope(
+  scopedDb: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<boolean> {
+  const rows = await rawRows<{
+    account_id: string;
+    scoped_account_id: string | null;
+    eu_only: boolean | null;
+  }>(
+    scopedDb,
+    sql`select workspace.account_id::text as account_id,
+        nullif(current_setting('opengeni.account_id', true), '') as scoped_account_id,
+        residency.eu_only
+      from workspaces workspace
+      left join organization_inference_residency residency
+        on residency.account_id = workspace.account_id
+      where workspace.id = ${input.workspaceId}::uuid`,
+  );
+  const [row] = rows;
+  if (
+    rows.length !== 1 ||
+    !row ||
+    row.account_id.toLowerCase() !== input.accountId.toLowerCase() ||
+    row.scoped_account_id?.toLowerCase() !== row.account_id.toLowerCase()
+  ) {
+    throw new WorkspaceInferenceResidencyUnknownError();
+  }
+  return row.eu_only === true;
 }
 
 /**

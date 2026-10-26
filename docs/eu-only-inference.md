@@ -113,11 +113,12 @@ The setting is read per workspace with `isWorkspaceEuOnly` (today it follows
 the organization). When a workspace is EU-only, every model call must run on an
 EU route, and nothing falls back to a route that is not EU.
 
-- **Settings.** `settingsWithInferenceResidency` (applied first by
-  `settingsWithModelProviderCredentials`, the overlay every run, title, model
-  call and compaction uses) sets `requiredModelGeography: "eu"` on the run's
-  settings. It is per-run only and never read from the environment. A failed
-  read throws.
+- **Settings.** `settingsWithModelProviderCredentials`, the overlay every run,
+  title, model call and compaction uses, reads the setting in the same
+  transaction as its provider inputs and sets `requiredModelGeography: "eu"`
+  on the run's settings before any overlay that resolves a route
+  (`settingsWithInferenceResidency` does the same on its own). It is per-run
+  only and never read from the environment. A failed read throws.
 - **Resolution.** `resolveTurnModel` refuses a route whose live residency
   record is not EU, and refuses an unlisted model instead of using the legacy
   built-in client. The built-in fallback binding in `MultiProviderModelProvider`

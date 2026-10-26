@@ -115,20 +115,28 @@ test("EU-only turned on after the claim stops the turn once with region_restrict
     goal: null,
   });
 
-  // The first read (the claim's) sees EU-only off; an admin turns it on
-  // immediately after, so every later read sees it on.
-  const original = opengeniDb.isWorkspaceEuOnly;
-  let reads = 0;
-  const euOnlyReads = spyOn(opengeniDb, "isWorkspaceEuOnly").mockImplementation(
+  // The claim's read (in its batched execution-input read) sees EU-only off;
+  // an admin turns it on immediately after, so the attempt's own read sees it on.
+  const loadInputs = opengeniDb.loadModelProviderExecutionInputs;
+  const claimReads: boolean[] = [];
+  const claimRead = spyOn(opengeniDb, "loadModelProviderExecutionInputs").mockImplementation(
     async (db, input) => {
-      reads += 1;
-      const euOnly = await original(db, input);
-      if (reads === 1) {
-        expect(euOnly).toBe(false);
+      const inputs = await loadInputs(db, input);
+      claimReads.push(inputs.euOnly);
+      if (claimReads.length === 1) {
         await shared.admin`insert into organization_inference_residency (account_id, eu_only, version)
           values (${ctx.accountId}, true, 1)
           on conflict (account_id) do update set eu_only = true, version = organization_inference_residency.version + 1`;
       }
+      return inputs;
+    },
+  );
+  const isEuOnly = opengeniDb.isWorkspaceEuOnly;
+  const attemptReads: boolean[] = [];
+  const attemptRead = spyOn(opengeniDb, "isWorkspaceEuOnly").mockImplementation(
+    async (db, input) => {
+      const euOnly = await isEuOnly(db, input);
+      attemptReads.push(euOnly);
       return euOnly;
     },
   );
@@ -160,12 +168,14 @@ test("EU-only turned on after the claim stops the turn once with region_restrict
       })
       .catch((error: unknown) => ({ status: "threw", error }));
   } finally {
-    euOnlyReads.mockRestore();
+    claimRead.mockRestore();
+    attemptRead.mockRestore();
   }
 
   expect(result).toMatchObject({ status: "failed" });
   // The claim read it off, the attempt read it again and saw it on.
-  expect(reads).toBeGreaterThanOrEqual(2);
+  expect(claimReads[0]).toBe(false);
+  expect(attemptReads).toEqual([true]);
   // Resolution ran with the narrowed settings and refused.
   expect(resolvedWith.length).toBeGreaterThan(0);
   expect(resolvedWith.every((settings) => settings.requiredModelGeography === "eu")).toBe(true);

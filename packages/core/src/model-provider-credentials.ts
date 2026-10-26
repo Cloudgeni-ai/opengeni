@@ -458,7 +458,13 @@ export async function settingsWithInferenceResidency(
     accountId: input.accountId,
     workspaceId: input.workspaceId,
   });
-  return euOnly ? { ...input.settings, requiredModelGeography: "eu" } : input.settings;
+  return withInferenceResidencyRequirement(input.settings, euOnly);
+}
+
+function withInferenceResidencyRequirement(settings: Settings, euOnly: boolean): Settings {
+  return euOnly && settings.requiredModelGeography !== "eu"
+    ? { ...settings, requiredModelGeography: "eu" }
+    : settings;
 }
 
 /**
@@ -478,15 +484,10 @@ export async function settingsWithModelProviderCredentials(
   },
 ): Promise<Settings> {
   const { accountId, workspaceId, productModelId } = input;
-  const residencySettings = await settingsWithInferenceResidency(db, {
-    accountId,
-    workspaceId,
-    settings: input.settings,
-  });
   const codexSettings = await settingsWithCodexCredential(
     db,
     workspaceId,
-    residencySettings,
+    input.settings,
     input.codexSubscriptionActive,
   );
   const xaiSettings = codexSettings.supergrokSubscriptionEnabled
@@ -498,11 +499,14 @@ export async function settingsWithModelProviderCredentials(
     claudeSubscriptionEnabled: xaiSettings.claudeSubscriptionEnabled,
     loadOrganizationCredentials: environmentsEncryptionKeyBytes(xaiSettings) !== null,
   });
+  // EU-only inference (`settingsWithInferenceResidency`, read in the same
+  // transaction as the rest): set before any overlay that resolves a route.
+  const residencySettings = withInferenceResidencyRequirement(xaiSettings, prepared.euOnly);
   const gatewaySettings = await settingsWithWorkspaceGatewayCredential(
     db,
     accountId,
     workspaceId,
-    xaiSettings,
+    residencySettings,
     productModelId,
     prepared,
   );
