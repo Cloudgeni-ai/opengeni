@@ -815,25 +815,37 @@ async fn a_viewer_token_without_a_stream_binding_is_rejected() {
     let _producer = RelayChannel::register(producer_config(&base, PTY_PORT))
         .await
         .expect("producer register");
-    let unbound = mint(
-        "ogs_",
-        &format!(
-            r#"{{"workspaceId":"{WORKSPACE}","sessionId":"22222222-2222-4222-8222-222222222222","viewerId":"33333333-3333-4333-8333-333333333333","leaseEpoch":0,"mode":"control","port":{PTY_PORT},"exp":4102444800}}"#
-        ),
-    );
-    let (_v, ack) = Viewer::connect_with_token(&base, PTY_PORT, unbound, 0, None)
-        .await
-        .expect("dial");
-    assert!(
-        !ack.accepted,
-        "an unbound viewer token cannot open a relay stream"
-    );
-    assert!(metrics.opens_rejected() >= 1);
+    // No binding at all, only the agent, or only the channel: each is rejected.
+    let partial_bindings = [
+        ("unbound", String::new()),
+        ("agent-only", format!(r#","agentId":"{AGENT}""#)),
+        ("channel-only", format!(r#","channelId":"ch-{PTY_PORT}""#)),
+    ];
+    for (case, binding) in partial_bindings {
+        let before = metrics.opens_rejected();
+        let token = mint(
+            "ogs_",
+            &format!(
+                r#"{{"workspaceId":"{WORKSPACE}","sessionId":"22222222-2222-4222-8222-222222222222","viewerId":"33333333-3333-4333-8333-333333333333","leaseEpoch":0,"mode":"control","port":{PTY_PORT},"exp":4102444800{binding}}}"#
+            ),
+        );
+        let (_v, ack) = Viewer::connect_with_token(&base, PTY_PORT, token, 0, None)
+            .await
+            .expect("dial");
+        assert!(
+            !ack.accepted,
+            "a {case} viewer token cannot open a relay stream"
+        );
+        assert!(
+            metrics.opens_rejected() > before,
+            "{case} counted as rejected"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_view_token_watches_a_terminal_but_cannot_type_into_or_close_it() {
-    let (base, _shutdown, _m) = start_relay(|_| {}).await;
+    let (base, _shutdown, metrics) = start_relay(|_| {}).await;
     let mut producer = RelayChannel::register(producer_config(&base, PTY_PORT))
         .await
         .expect("producer register");
@@ -871,6 +883,11 @@ async fn a_view_token_watches_a_terminal_but_cannot_type_into_or_close_it() {
             .await
             .is_none(),
         "view-mode keystrokes and Close must be dropped"
+    );
+    assert_eq!(
+        metrics.unauthorized_drops(),
+        2,
+        "both dropped messages are visible to operators"
     );
 
     // The channel is still alive: output keeps flowing to the viewer.
@@ -943,8 +960,13 @@ async fn desktop_input_needs_a_control_token_and_the_established_channel() {
     }
 }
 
+/// Regression guard for a reconnect: a replaced viewer socket must not reach the
+/// producer. This also holds on the pre-fence relay (the old socket's splice ends
+/// once its sink is replaced); the generation fence itself is proven at the
+/// registry level by
+/// `registry::tests::a_replaced_connection_cannot_forward_or_close_on_its_successor`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_replaced_viewer_socket_cannot_type_into_or_close_its_successor() {
+async fn a_reconnect_leaves_only_the_live_viewer_driving_the_terminal() {
     let (base, _shutdown, _m) = start_relay(|_| {}).await;
     let mut producer = RelayChannel::register(producer_config(&base, PTY_PORT))
         .await

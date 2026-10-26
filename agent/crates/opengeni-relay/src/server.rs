@@ -455,6 +455,9 @@ pub(crate) mod conn {
         mut est: Established,
         state: &RelayState,
     ) {
+        // Warn once per connection on the first unauthorized message; the rest are
+        // counted in `opengeni_relay_unauthorized_drops_total` only.
+        let mut warned_unauthorized = false;
         loop {
             tokio::select! {
                 outbound = est.peer_rx.recv() => {
@@ -471,7 +474,7 @@ pub(crate) mod conn {
                     }
                 }
                 inbound = ws_rx.next() => {
-                    if !handle_inbound(inbound, &est, state) {
+                    if !handle_inbound(inbound, &est, state, &mut warned_unauthorized) {
                         break;
                     }
                 }
@@ -485,11 +488,24 @@ pub(crate) mod conn {
         inbound: Option<Result<WsMessage, axum::Error>>,
         est: &Established,
         state: &RelayState,
+        warned_unauthorized: &mut bool,
     ) -> bool {
         match inbound {
             Some(Ok(WsMessage::Binary(bytes))) => match RelayMessage::decode(&bytes) {
                 Ok(msg) if !may_forward(est, &msg) => {
-                    tracing::debug!(port = est.key.port, role = ?est.role, kind = ?msg.tag(), "relay: dropping unauthorized message");
+                    state.registry.metrics().record_unauthorized_drop();
+                    if *warned_unauthorized {
+                        tracing::debug!(port = est.key.port, role = ?est.role, kind = ?msg.tag(), "relay: dropping unauthorized message");
+                    } else {
+                        *warned_unauthorized = true;
+                        tracing::warn!(
+                            port = est.key.port,
+                            role = ?est.role,
+                            input_granted = est.input_granted,
+                            kind = ?msg.tag(),
+                            "relay: dropping a message the connection's token does not authorize (further drops on this connection are counted only)"
+                        );
+                    }
                     true
                 }
                 Ok(RelayMessage::Frame(frame)) => {

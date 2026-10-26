@@ -636,6 +636,9 @@ export class TokenBucket {
 
   private makeRoom(now: number): void {
     if (this.buckets.size < this.maxKeys) return;
+    // Under a flood of more than maxKeys distinct sources, evicting the least
+    // recently used bucket resets that source's limit. That is acceptable: an
+    // attacker who controls that many sources already has that aggregate rate.
     // At most one full sweep per second keeps a flood of new keys linear.
     if (now - this.lastSweepAt >= 1_000) {
       this.lastSweepAt = now;
