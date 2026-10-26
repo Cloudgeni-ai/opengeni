@@ -22,8 +22,8 @@ use futures::StreamExt as _;
 use image::{codecs::png::PngEncoder, ExtendedColorType, ImageEncoder as _};
 use opengeni_agent_pipewire_ffi::{FrameWait, PipeWireError, ScreenCastStream};
 use opengeni_agent_platform::{
-    linux_layout_text_keysyms, linux_named_key_chord_keysyms, CapturedFrame, CompositorLayout,
-    KeymapNames, LinuxRgbaFrame, PlatformError, PlatformResult,
+    linux_layout_text_keysyms, linux_named_key_chord_keys, CapturedFrame, CompositorKey,
+    CompositorLayout, KeymapNames, LinuxRgbaFrame, PlatformError, PlatformResult,
 };
 use opengeni_agent_proto::v1;
 use tokio::sync::{watch, Mutex};
@@ -223,8 +223,16 @@ impl Session {
         self.call("NotifyPointerButton", &(button, pressed)).await
     }
 
-    async fn keysym(&self, keysym: u32, pressed: bool) -> PlatformResult<()> {
-        self.call("NotifyKeyboardKeysym", &(keysym, pressed)).await
+    async fn key(&self, key: CompositorKey, pressed: bool) -> PlatformResult<()> {
+        match key {
+            CompositorKey::Keysym(keysym) => {
+                self.call("NotifyKeyboardKeysym", &(keysym, pressed)).await
+            }
+            CompositorKey::Keycode(keycode) => {
+                self.call("NotifyKeyboardKeycode", &(keycode, pressed))
+                    .await
+            }
+        }
     }
 
     async fn move_to(&self, x: i32, y: i32) -> PlatformResult<()> {
@@ -305,8 +313,8 @@ impl LayoutReport {
 }
 
 /// Follows Mutter's keyboard layout for one remote-desktop session. Mutter
-/// types a keysym only from its active layout group, so text is checked
-/// against that group of the keymap it names.
+/// types a keysym only from its active layout group, so text and key chords
+/// are resolved against that group of the keymap it names.
 struct LayoutWatch {
     report: watch::Receiver<LayoutReport>,
     /// The EIS socket, shut down to end the follower with the session.
@@ -677,22 +685,20 @@ impl GnomeScreen {
     pub(crate) async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
         let session = self.session().await?;
         // Resolve keys before anything is sent, so unsupported text or keys
-        // fail cleanly: the compositor silently drops a keysym its layout
-        // lacks while reporting success.
-        let keysyms = match input.event.as_ref() {
+        // fail cleanly: the compositor silently drops a keysym its active
+        // layout group lacks while reporting success. A chord key only another
+        // group has is sent as its physical key instead.
+        let keys = match input.event.as_ref() {
             Some(v1::desktop_input::Event::Key(key)) => {
                 let display = self.layout_display.clone();
-                let layout = if key.is_text {
-                    session.layout.current().await
-                } else {
-                    CompositorLayout::default()
-                };
+                let layout = session.layout.current().await;
                 let (value, is_text) = (key.key.clone(), key.is_text);
                 tokio::task::spawn_blocking(move || {
                     if is_text {
                         linux_layout_text_keysyms(display.as_deref(), &layout, &value)
+                            .map(|keysyms| keysyms.into_iter().map(CompositorKey::Keysym).collect())
                     } else {
-                        linux_named_key_chord_keysyms(display.as_deref(), &value)
+                        linux_named_key_chord_keys(display.as_deref(), &layout, &value)
                     }
                 })
                 .await
@@ -701,7 +707,7 @@ impl GnomeScreen {
             Some(_) => Vec::new(),
             None => return Err(PlatformError::os("DesktopInput carried no event")),
         };
-        let delivered = deliver(&session, input, &keysyms).await;
+        let delivered = deliver(&session, input, &keys).await;
         session
             .input_floor
             .store(session.video.latest_sequence() + 1, Ordering::Release);
@@ -712,7 +718,7 @@ impl GnomeScreen {
 async fn deliver(
     session: &Session,
     input: &v1::DesktopInput,
-    keysyms: &[u32],
+    keys: &[CompositorKey],
 ) -> PlatformResult<()> {
     match input.event.as_ref() {
         Some(v1::desktop_input::Event::Pointer(pointer)) => {
@@ -752,24 +758,24 @@ async fn deliver(
         Some(v1::desktop_input::Event::Key(key)) => {
             let action = key.action();
             if key.is_text {
-                for &keysym in keysyms {
+                for &key in keys {
                     if action != v1::KeyAction::Up {
-                        session.keysym(keysym, true).await?;
+                        session.key(key, true).await?;
                     }
                     if action != v1::KeyAction::Down {
-                        session.keysym(keysym, false).await?;
+                        session.key(key, false).await?;
                     }
                 }
                 return Ok(());
             }
             if action != v1::KeyAction::Up {
-                for &keysym in keysyms {
-                    session.keysym(keysym, true).await?;
+                for &key in keys {
+                    session.key(key, true).await?;
                 }
             }
             if action != v1::KeyAction::Down {
-                for &keysym in keysyms.iter().rev() {
-                    session.keysym(keysym, false).await?;
+                for &key in keys.iter().rev() {
+                    session.key(key, false).await?;
                 }
             }
             Ok(())

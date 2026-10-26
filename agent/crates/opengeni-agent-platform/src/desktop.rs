@@ -32,9 +32,9 @@ use crate::error::{PlatformError, PlatformResult};
 
 #[cfg(target_os = "linux")]
 pub use crate::linux::{
-    linux_layout_text_keysyms, linux_named_key_chord_keysyms, validate_linux_named_key_chord,
-    CompositorLayout, KeymapNames, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
-    X11Display, XServerCheck,
+    linux_layout_text_keysyms, linux_named_key_chord_keys, validate_linux_named_key_chord,
+    CompositorKey, CompositorLayout, KeymapNames, LinuxDesktop, LinuxRgbaFrame, LinuxWindow,
+    LinuxWindowRect, X11Display, XServerCheck,
 };
 
 /// A captured desktop frame: PNG-encoded image bytes plus the geometry they were

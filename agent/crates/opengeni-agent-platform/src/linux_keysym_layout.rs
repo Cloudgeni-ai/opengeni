@@ -14,8 +14,19 @@ use x11rb::protocol::xkb::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::ConnectionExt as _;
 use x11rb::rust_connection::RustConnection;
 
-const SHIFT_L: u32 = 0xffe1;
+pub(super) const SHIFT_L: u32 = 0xffe1;
 const ISO_LEVEL3_SHIFT: u32 = 0xfe03;
+
+/// One key of a named key or chord, as a compositor that takes keysyms or
+/// keycodes receives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorKey {
+    /// A keysym, which the compositor resolves in its active layout group.
+    Keysym(u32),
+    /// A Linux evdev keycode: a physical key, whatever the active group
+    /// makes of it.
+    Keycode(u32),
+}
 
 /// What the compositor reports about its keyboard layout, when it does.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -247,6 +258,28 @@ impl LayoutKeymap {
             Some(layout) if layout < layouts => self.types_in(keysym, layout),
             _ => layouts > 0 && (0..layouts).all(|layout| self.types_in(keysym, layout)),
         }
+    }
+
+    /// The lowest keycode that carries `keysym` at its base level in some
+    /// group, or else at its Shift level, with that level. Pressing this key
+    /// is how a person gives a shortcut whose key is in another group: the
+    /// application matches the shortcut by keycode across groups.
+    pub(super) fn physical_key(&self, keysym: u32) -> Option<(u8, usize)> {
+        if keysym == 0 {
+            return None;
+        }
+        (0..2).find_map(|level| {
+            self.keys
+                .iter()
+                .filter(|key| {
+                    key.groups
+                        .iter()
+                        .any(|levels| levels.get(level) == Some(&keysym))
+                })
+                .map(|key| key.keycode)
+                .min()
+                .map(|keycode| (keycode, level))
+        })
     }
 }
 

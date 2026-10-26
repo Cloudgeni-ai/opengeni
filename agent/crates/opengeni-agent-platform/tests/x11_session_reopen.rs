@@ -11,7 +11,7 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use opengeni_agent_platform::{
-        linux_layout_text_keysyms, linux_named_key_chord_keysyms, CompositorLayout,
+        linux_layout_text_keysyms, linux_named_key_chord_keys, CompositorKey, CompositorLayout,
         DesktopBackend as _, KeymapNames, LinuxDesktop, ReopeningDesktop, X11Display, XServerCheck,
     };
     use x11rb::protocol::xproto::ConnectionExt as _;
@@ -179,17 +179,27 @@ mod linux {
         // Named keys are checked against the same layout: F2 is on it, F13
         // is not, and the compositor would drop it while reporting success.
         assert_eq!(
-            linux_named_key_chord_keysyms(Some(&display), "Alt+F2").unwrap(),
-            vec![0xffe9, 0xffbf]
+            linux_named_key_chord_keys(Some(&display), &CompositorLayout::default(), "Alt+F2")
+                .unwrap(),
+            vec![CompositorKey::Keysym(0xffe9), CompositorKey::Keysym(0xffbf)]
         );
-        let missing = linux_named_key_chord_keysyms(Some(&display), "F13").unwrap_err();
+        let missing =
+            linux_named_key_chord_keys(Some(&display), &CompositorLayout::default(), "F13")
+                .unwrap_err();
         assert!(
             missing
                 .to_string()
                 .contains("X11 keymap does not expose named key/chord component 0xffca"),
             "{missing}"
         );
-        assert!(linux_named_key_chord_keysyms(None, "F13").is_ok());
+        assert!(linux_named_key_chord_keys(None, &CompositorLayout::default(), "F13").is_ok());
+        layout_groups_and_levels(&display, &checked);
+    }
+
+    /// Text and chords on a running layout display, checked the way a
+    /// compositor resolving keysyms per group and level delivers them.
+    fn layout_groups_and_levels(display: &str, checked: &X11Display) {
+        let display = display.to_string();
         // Text is checked per layout group and shift level, the way the
         // compositor resolves keysyms. `¦` is only on the fourth level of the
         // extra key, which the compositor would send unshifted as `<`.
@@ -226,6 +236,32 @@ mod linux {
             );
         }
         assert_eq!(text(None, "a"), Ok(vec![0x61]));
+        // A chord key only another group has is sent as the physical key
+        // that gives it there (evdev keycode 192 is X11 keycode 200).
+        let chord = |active: Option<u32>, name: &str| {
+            let layout = CompositorLayout {
+                active_group: active,
+                keymap: None,
+            };
+            linux_named_key_chord_keys(Some(&display), &layout, name).map_err(|e| e.to_string())
+        };
+        assert_eq!(
+            chord(Some(1), "Ctrl+é"),
+            Ok(vec![
+                CompositorKey::Keysym(0xffe3),
+                CompositorKey::Keysym(0xe9)
+            ])
+        );
+        for active in [Some(0), None] {
+            assert_eq!(
+                chord(active, "Ctrl+é"),
+                Ok(vec![
+                    CompositorKey::Keysym(0xffe3),
+                    CompositorKey::Keycode(192)
+                ]),
+                "{active:?}"
+            );
+        }
         // The display's keymap stands in for the compositor's only once it
         // carries the compositor's keymap names; until then typing waits, and
         // then fails as retryable rather than checking a stale layout.
