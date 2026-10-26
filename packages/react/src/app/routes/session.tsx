@@ -121,6 +121,9 @@ import {
 } from "../../session";
 import { sessionAgentsSignal } from "../../session-agents-model";
 import { useNavigate, usePage, useRouterState } from "../lib/navigation";
+import { RunningChatAgentChip } from "../components/composer-agent-chip";
+import { AgentMentionMenu, agentMentionContext } from "../components/agent-mention";
+import { useAppAgentProfiles } from "../lib/agent-profiles";
 import {
   BotIcon,
   BugIcon,
@@ -295,6 +298,11 @@ const DescendantRequests = lazy(() => import("../components/session/descendant-r
 const SessionSkillReviews = lazy(() =>
   import("../components/session/session-skill-reviews").then((module) => ({
     default: module.SessionSkillReviews,
+  })),
+);
+const AgentProfileSuggestionCard = lazy(() =>
+  import("../components/session/agent-profile-suggestion-card").then((module) => ({
+    default: module.AgentProfileSuggestionCard,
   })),
 );
 const SessionCommands = lazy(() =>
@@ -1461,10 +1469,9 @@ export function SessionRoute({
 }
 
 /** The embedding page's per-message context, as a send extra. */
-function withHostMessageContext(messageContext: (() => string | undefined) | undefined): {
-  modelContext?: string;
-} {
-  const value = messageContext?.();
+/** Joins the host's message context with the app's own (agent mentions). */
+function withMessageContexts(...parts: Array<string | undefined>): { modelContext?: string } {
+  const value = parts.filter((part): part is string => Boolean(part)).join("\n\n");
   return value ? { modelContext: value } : {};
 }
 
@@ -1989,6 +1996,11 @@ function SessionChatPane(props: {
   const page = usePage();
   const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId);
   const hostMessageContext = useHostMessageContext();
+  // @mentioned saved agents ride along as message context (agent profiles).
+  const agentProfiles = useAppAgentProfiles();
+  const mentionProfilesRef = useRef(agentProfiles.enabled ? agentProfiles.profiles : []);
+  mentionProfilesRef.current = agentProfiles.enabled ? agentProfiles.profiles : [];
+  const mentionTextRef = useRef("");
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
   const realtimeClient = useMemo(
@@ -2674,7 +2686,10 @@ function SessionChatPane(props: {
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
-      ...withHostMessageContext(hostMessageContext),
+      ...withMessageContexts(
+        hostMessageContext?.(),
+        agentMentionContext(mentionTextRef.current, mentionProfilesRef.current),
+      ),
       resources: [...attachments.readyResources, ...repositories.pendingResources],
       connectionAccounts: [
         ...connectionAccounts.selections,
@@ -2745,6 +2760,7 @@ function SessionChatPane(props: {
       }
     },
   });
+  mentionTextRef.current = composer.value;
   // A dropped event stream (an update or brief outage) reads as "updating" in
   // the composer while it reconnects.
   const composerView = useComposerWithStreamState(
@@ -3600,6 +3616,14 @@ function SessionChatPane(props: {
                                 events={props.events}
                               />
                             </Suspense>
+                            {context.clientConfig.agentProfiles?.enabled ? (
+                              <Suspense fallback={null}>
+                                <AgentProfileSuggestionCard
+                                  session={props.session}
+                                  events={props.events}
+                                />
+                              </Suspense>
+                            ) : null}
                             {props.humanInput.requests.length > 0 &&
                             props.session.status === "requires_action" ? (
                               <div className="pb-1" data-human-input-timeline-surface="">
@@ -3881,34 +3905,39 @@ function SessionChatPane(props: {
                 }}
                 disabled={terminal}
                 header={
-                  unavailableModelNotice ||
-                  usageLimitNotice ||
-                  creditRefusalNotice ||
-                  (machineAccess && !machineAccess.isOwner) ? (
-                    <>
-                      {!sessionAdmissionNeedsDifferentMachine(
-                        sessionAdmissionReason(props.session),
-                        machineAccess,
-                      ) ? (
-                        <SessionMachineAccessNotice
-                          access={machineAccess}
-                          action={
-                            <SessionMachinePickerAction
-                              runsOn={runsOn}
-                              workspaceId={props.session.workspaceId}
-                              rigId={props.session.rigId}
-                              move={moveRunsOn}
-                            />
-                          }
-                        />
-                      ) : null}
-                      {unavailableModelNotice}
-                      {usageLimitNotice}
-                      {creditRefusalNotice ? (
-                        <div className="px-2 pt-2">{creditRefusalNotice}</div>
-                      ) : null}
-                    </>
-                  ) : null
+                  <>
+                    {agentProfiles.enabled ? (
+                      <AgentMentionMenu composer={composer} profiles={agentProfiles.profiles} />
+                    ) : null}
+                    {unavailableModelNotice ||
+                    usageLimitNotice ||
+                    creditRefusalNotice ||
+                    (machineAccess && !machineAccess.isOwner) ? (
+                      <>
+                        {!sessionAdmissionNeedsDifferentMachine(
+                          sessionAdmissionReason(props.session),
+                          machineAccess,
+                        ) ? (
+                          <SessionMachineAccessNotice
+                            access={machineAccess}
+                            action={
+                              <SessionMachinePickerAction
+                                runsOn={runsOn}
+                                workspaceId={props.session.workspaceId}
+                                rigId={props.session.rigId}
+                                move={moveRunsOn}
+                              />
+                            }
+                          />
+                        ) : null}
+                        {unavailableModelNotice}
+                        {usageLimitNotice}
+                        {creditRefusalNotice ? (
+                          <div className="px-2 pt-2">{creditRefusalNotice}</div>
+                        ) : null}
+                      </>
+                    ) : null}
+                  </>
                 }
                 commandContext={commandContext}
                 onClearView={props.onClearView}
@@ -4073,6 +4102,7 @@ function SessionChatPane(props: {
                 }
                 controls={
                   <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
+                    <RunningChatAgentChip session={props.session} />
                     <ModelPicker
                       hasImageAttachments={attachments.attachments.some(
                         (file) => file.status !== "failed" && file.contentType.startsWith("image/"),

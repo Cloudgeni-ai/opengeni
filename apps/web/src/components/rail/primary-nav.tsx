@@ -8,7 +8,12 @@ import { useMeetingRecorderState } from "@opengeni/react/meetings";
 import { InboxLink } from "@/components/rail/inbox-link";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
-import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
+import {
+  isConfigItemActive,
+  PRIMARY_WORKSPACE_ITEMS,
+  primaryWorkspaceItems,
+} from "@/components/rail/workspace-nav-data";
+import { useAgentProfilesEnabled } from "@opengeni/react/app/lib/agent-profiles";
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
 
@@ -44,10 +49,11 @@ export function WorkspaceShortcutLinks({
   const recorderState = useMeetingRecorderState();
   const recording = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const items = primaryWorkspaceItems({ agentProfiles: useAgentProfilesEnabled() });
 
   return (
     <div className={cn("grid gap-0.5", className)}>
-      {PRIMARY_WORKSPACE_ITEMS.map((item) => (
+      {items.map((item) => (
         <WorkspaceConfigLink
           key={item.to}
           item={item}

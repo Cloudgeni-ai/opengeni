@@ -101,6 +101,19 @@ composition has a Connected Machine module; legacy bytes are unchanged.
 + Code search from the home folder may skip them; to search inside one, name it as the path.
 ```
 
+Agent profiles. While the agent profiles feature is on, the agent suggests a
+reusable agent once with `agent_profile_suggest` when a chat repeats the same
+kind of work. A permissive "may suggest" wording was never followed in local
+trials: the agent saved a Skill and moved on, so the sentence is a direct
+instruction that also applies when a Skill is saved. The suggestion is a card the person accepts or dismisses;
+nothing is saved by the agent. The sentence renders only while the tool can be
+available, so deployments with the feature off see no change. Only the modular
+composition gains it; legacy bytes are unchanged.
+
+```diff
++ When the user asks for the same kind of work two or more times in a chat, or says they will want it again, call `agent_profile_suggest` once in that chat, even if you also save a Skill for it: it offers them a reusable agent, preferring a saved agent that already does the work.
+```
+
 An answer the agent gives in a turn that ends on `wait_for_input` now goes in
 the call's new `reply` argument, which the person sees exactly as written. The
 Progress updates guidance no longer allows posting a status right before

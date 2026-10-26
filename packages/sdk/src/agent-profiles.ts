@@ -13,6 +13,7 @@ export type {
   ApplySessionAgentProfileRequest,
   CreateAgentProfileRequest,
   SessionAgentProfile,
+  SessionAgentProfileSuggestion,
   UpdateAgentProfileRequest,
   UpdateSessionAgentIdentityRequest,
 } from "./types";

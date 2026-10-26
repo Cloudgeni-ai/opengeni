@@ -30777,6 +30777,7 @@ async function createSessionInTransaction(
       );
   let insertedRows: (typeof schema.sessions.$inferSelect)[];
   let privateCreateCapabilityId: string | null = null;
+  let pendingChildAgentProfile: { id: string; agentProfile: SessionAgentProfile } | null = null;
   let privateCreateOwnerMembershipId: string | null = null;
   let privateCreateOwnerSubjectId: string | null = null;
   if (createRequestedVisibility === "user_private") {
@@ -31003,8 +31004,11 @@ async function createSessionInTransaction(
       // continuations) are included. SQL rechecks it against the locked turn
       // and the request's verified claims; another person never matches.
       const columns = getTableColumns(schema.sessions);
+      // The creation seam's column allow-list predates agent profiles; the
+      // display-only identity is written right after, in this transaction.
+      const { agentProfile: childAgentProfile, ...childInsertValues } = insertValues;
       const valuesByColumn = Object.fromEntries(
-        Object.entries(insertValues)
+        Object.entries(childInsertValues)
           .filter(([, value]) => value !== undefined)
           .map(([key, value]) => {
             const column = columns[key as keyof typeof columns];
@@ -31019,6 +31023,9 @@ async function createSessionInTransaction(
         ${actor.turnId}::uuid, ${actor.attemptId}::uuid, ${actor.executionGeneration}::integer,
         ${JSON.stringify(valuesByColumn)}::jsonb
       )`);
+      if (created.length && childAgentProfile) {
+        pendingChildAgentProfile = { id: created[0]!.id, agentProfile: childAgentProfile };
+      }
       insertedRows = created.length
         ? await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id))
         : [];
@@ -31035,6 +31042,20 @@ async function createSessionInTransaction(
     if (privateCreateCapabilityId) {
       await closePrivateSessionCreateCapability(tx, privateCreateCapabilityId);
       privateCreateCapabilityId = null;
+    }
+    // After any private-create capability closes: it never authorizes updates.
+    if (pendingChildAgentProfile) {
+      await tx
+        .update(schema.sessions)
+        .set({
+          agentProfile: pendingChildAgentProfile.agentProfile,
+          updatedAt: sql`${schema.sessions.updatedAt}`,
+        })
+        .where(eq(schema.sessions.id, pendingChildAgentProfile.id));
+      insertedRows = await tx
+        .select()
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, pendingChildAgentProfile.id));
     }
   } catch (error) {
     // The caller validated the channel workspace-scoped, but a concurrent
@@ -90621,6 +90642,7 @@ function mapSession(
     // Agent identity (migration 0997). Omitted when unset so default-agent
     // payloads stay byte-identical to older servers.
     ...(row.agentProfile ? { agentProfile: row.agentProfile } : {}),
+    ...(row.agentProfileSuggestion ? { agentProfileSuggestion: row.agentProfileSuggestion } : {}),
     ...pin,
     ...attention,
     ...archive,

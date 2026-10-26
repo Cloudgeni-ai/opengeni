@@ -102,13 +102,62 @@ Apply migration 0997, deploy the API and web images that carry it, then set
 routes and the UI and rejects `agentProfileId` on create; stored profiles and
 session identities are kept.
 
+## Web UI
+
+All of it is hidden while `ClientConfig.agentProfiles.enabled` is false.
+
+- **Agent tile** (`@opengeni/react/ui/agent-mark`): a rounded square holding one
+  emoji, a curated icon or one or two letters on a low-chroma hue. People keep
+  round monograms, so an agent is never mistaken for a person. The picker is
+  `@opengeni/react/ui/agent-avatar-picker`.
+- **Rail rows and chat header**: a chat that wears an identity shows its tile
+  before the title, and the row's spoken name includes "Agent <name>". The header
+  tile opens "Name this agent" (`agent-identity-control.tsx`): name, avatar, Save
+  as reusable agent, Remove.
+- **Composer agent chip** (`composer-agent-chip.tsx`): on a new chat it chooses
+  the saved agent the chat starts from (and adopts its model policy in the
+  picker, so the request does not override it); on a running chat it switches
+  the agent from the next message. The new-chat screen also shows up to four
+  agent cards ("Start with an agent"), and `?agent=<id>` preselects one.
+- **Agents pages** (`apps/web/src/components/agents/`): `/workspaces/:id/agents`
+  (list, archived view), `/agents/new` (new; `?fromSession=` prefills "Save as
+  agent" from a chat and makes that chat the agent's first; `?draft=` carries a
+  suggestion), and `/agents/:profileId` (edit, Start chat, Archive/Restore).
+  The rail lists Agents only while the feature is on; the pages send people to
+  the chats otherwise, as the retired Agents page did.
+
+## Agent suggestions
+
+`agent_profile_suggest` (first-party tool, `knowledge` family, `sessions:read`)
+lets an agent propose, at most once per chat, either a new agent (choosing the
+name, role, emoji and drafted instructions itself) or switching to a saved agent
+that already does the work. It creates nothing: it validates the proposal (an
+active name already taken returns the saved agents so the agent can suggest
+reuse) and records it on the chat (`sessions.agent_profile_suggestion`,
+migration `0982`, display state only), returning an `agent_profile_suggestion`
+receipt. The chat shows the newest one (streamed receipt first, then the kept
+copy, so it survives a reload when tool steps are not loaded) as a card: "Review and save" opens the
+prefilled Save as agent page; "Switch to <name>" applies the saved agent; "Not
+now" hides it for this chat. The tool is unavailable while the flag is off
+(`deploymentUnavailableFirstPartyMcpTools`), and the one sentence of prompt
+guidance renders only while it can be available.
+
+## Mentioning an agent
+
+Typing `@` at the end of a message in a running chat lists the saved agents;
+picking one writes `@Name`. On Send, each mentioned agent's name, id and role
+travel as the message's `modelContext`, with a line telling the agent to hand
+requested work to it through `session_create` with `agentProfileId`. The child
+starts from that agent's current version, narrowed to the parent's own
+authority like any child, and shows the agent's identity. The agent-child
+creation seam (`create_agent_child_session`) keeps its fixed column allow-list;
+the display-only identity is written in the same transaction right after the
+insert, once any private-create capability has closed.
+
 ## Planned
 
-- Web UI: agent tile in the rail and chat header, the composer agent chip, the
-  Agents list and profile page, "Name this agent" and "Save as agent".
-- `agent_profile_suggest`: during repeated work an agent proposes a new profile
-  (choosing its own name, role and avatar) or switching to an existing one; a
-  person accepts the card. Nothing is created without that acceptance.
 - Slack posting identity ("Annie · Opengeni") behind the opt-in
   `chat:write.customize` scope, frozen per Slack thread. See `docs/slack-bot.md`,
   which currently forbids that scope; changing it is part of that phase.
+- The agent's tile on its turns in the timeline and on child-agent cards.
+- Keyboard selection in the @mention list (today it is pointer and touch).

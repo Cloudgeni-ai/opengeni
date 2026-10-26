@@ -67,6 +67,8 @@ import {
   WorkspaceAgentDefaults,
 } from "./agent-config";
 export * from "./agent-instruction-changes";
+export { AGENT_AVATAR_ICONS, isSingleAgentAvatarEmoji } from "./agent-avatar";
+import { AGENT_AVATAR_ICONS, isSingleAgentAvatarEmoji } from "./agent-avatar";
 export * from "./bundled-skills";
 export * from "./skill-use";
 import { BundledSkillSelection } from "./bundled-skills";
@@ -1044,6 +1046,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "remember_confirm",
   "company_profile_propose",
   "company_profile_confirm",
+  "agent_profile_suggest",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -11984,53 +11987,8 @@ export const AGENT_PROFILE_ROLE_MAX_CHARS = 160;
 /** Soft cap per workspace, counting active and archived profiles. */
 export const AGENT_PROFILES_PER_WORKSPACE_MAX = 500;
 
-/** Curated icon names (the web maps each to a Lucide glyph). */
-export const AGENT_AVATAR_ICONS = [
-  "bot",
-  "bug",
-  "mail",
-  "git-pull-request",
-  "telescope",
-  "chart-line",
-  "file-text",
-  "shield-check",
-  "wrench",
-  "search",
-  "calendar-clock",
-  "megaphone",
-  "receipt",
-  "rocket",
-  "database",
-  "code",
-  "briefcase",
-  "book-open",
-  "flask-conical",
-  "globe",
-  "headset",
-  "pen-tool",
-  "users",
-  "sparkles",
-] as const;
 export const AgentAvatarIcon = /* @__PURE__ */ defineSchema(() => z.enum(AGENT_AVATAR_ICONS));
 export type AgentAvatarIcon = z.infer<typeof AgentAvatarIcon>;
-
-const AGENT_AVATAR_EMOJI_PATTERN = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
-
-/** True when `value` is exactly one user-perceived character that is an emoji. */
-export function isSingleAgentAvatarEmoji(value: string): boolean {
-  if (!AGENT_AVATAR_EMOJI_PATTERN.test(value)) return false;
-  const segmenter =
-    typeof Intl !== "undefined" && "Segmenter" in Intl
-      ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-      : null;
-  if (!segmenter) return [...value].length <= 8;
-  let count = 0;
-  for (const _segment of segmenter.segment(value)) {
-    count += 1;
-    if (count > 1) return false;
-  }
-  return count === 1;
-}
 
 /** Hue (0-359) of the avatar's low-chroma tile gradient. */
 export const AgentAvatarHue = /* @__PURE__ */ defineSchema(() => z.number().int().min(0).max(359));
@@ -12052,11 +12010,9 @@ export const AgentAvatar = /* @__PURE__ */ defineSchema(() =>
     z
       .object({
         kind: z.literal("letters"),
-        letters: z
-          .string()
-          .regex(/^[\p{L}\p{N}]{1,2}$/u, {
-            message: "letters must be one or two letters or digits",
-          }),
+        letters: z.string().regex(/^[\p{L}\p{N}]{1,2}$/u, {
+          message: "letters must be one or two letters or digits",
+        }),
         hue: AgentAvatarHue,
       })
       .strict(),
@@ -12185,6 +12141,28 @@ export const SessionAgentProfile = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type SessionAgentProfile = z.infer<typeof SessionAgentProfile>;
+
+/**
+ * The newest suggestion an agent made in this chat with `agent_profile_suggest`:
+ * save a new reusable agent, or switch to a saved one. Display state only; it
+ * never creates or applies a profile by itself.
+ */
+export const SessionAgentProfileSuggestion = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: z.string().uuid(),
+      kind: z.enum(["create", "reuse"]),
+      profileId: z.string().uuid().nullable(),
+      name: z.string().min(1).max(AGENT_PROFILE_NAME_MAX_CHARS),
+      role: z.string().max(AGENT_PROFILE_ROLE_MAX_CHARS).nullable(),
+      avatar: AgentAvatar,
+      instructions: z.string().max(AGENT_INSTRUCTIONS_MAX_CHARACTERS).nullable(),
+      reason: z.string().max(400).nullable(),
+      createdAt: z.string(),
+    })
+    .strict(),
+);
+export type SessionAgentProfileSuggestion = z.infer<typeof SessionAgentProfileSuggestion>;
 
 /** Names only this chat's agent (null clears it). Changes nothing else. */
 export const UpdateSessionAgentIdentityRequest = /* @__PURE__ */ defineSchema(() =>
@@ -16759,6 +16737,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // The identity this chat's agent wears (agent profiles). Display only;
     // null or omitted when the chat uses the default agent identity.
     agentProfile: SessionAgentProfile.nullable().optional(),
+    // The newest agent-profile suggestion in this chat (detail reads only).
+    agentProfileSuggestion: SessionAgentProfileSuggestion.nullable().optional(),
     // Capability-level projection of what a configured session can use.
     // Omitted by internal readers; null for legacy sessions.
     effectiveTools: AgentEffectiveTools.nullable().optional(),

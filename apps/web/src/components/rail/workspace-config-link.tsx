@@ -12,6 +12,7 @@ import {
   PlugIcon,
   ServerCogIcon,
   SettingsIcon,
+  UsersIcon,
   ZapIcon,
   type LucideIcon,
 } from "lucide-react";
@@ -34,6 +35,7 @@ const WORKSPACE_CONFIG_ICONS = {
   "audio-lines": AudioLinesIcon,
   "panels-top-left": PanelsTopLeftIcon,
   settings: SettingsIcon,
+  users: UsersIcon,
 } as const satisfies Record<WorkspaceConfigIcon, LucideIcon>;
 
 export function WorkspaceConfigGlyph(props: { icon: WorkspaceConfigIcon; className?: string }) {

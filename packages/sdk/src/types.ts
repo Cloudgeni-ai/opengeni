@@ -1892,6 +1892,8 @@ export type Session = {
   agent?: ResolvedAgentConfig | null | undefined;
   /** The identity this chat's agent wears (agent profiles). Display only. */
   agentProfile?: SessionAgentProfile | null | undefined;
+  /** The newest agent-profile suggestion an agent made in this chat. */
+  agentProfileSuggestion?: SessionAgentProfileSuggestion | null | undefined;
   /** Capability-level view of what a configured session can use; null for legacy. */
   effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
@@ -4077,6 +4079,7 @@ export type FirstPartyMcpToolName =
   | "remember_confirm"
   | "company_profile_propose"
   | "company_profile_confirm"
+  | "agent_profile_suggest"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -8127,6 +8130,19 @@ export type SessionAgentProfile = {
   name: string;
   role: string | null;
   avatar: AgentAvatar;
+};
+
+/** An agent's suggestion to save a reusable agent or switch to a saved one. */
+export type SessionAgentProfileSuggestion = {
+  id: string;
+  kind: "create" | "reuse";
+  profileId: string | null;
+  name: string;
+  role: string | null;
+  avatar: AgentAvatar;
+  instructions: string | null;
+  reason: string | null;
+  createdAt: string;
 };
 
 export type UpdateSessionAgentIdentityRequest = {

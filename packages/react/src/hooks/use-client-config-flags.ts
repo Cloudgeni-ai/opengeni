@@ -16,6 +16,7 @@ export type ClientConfigFlagsSource = {
     voiceInput?: ClientVoiceInputConfig | undefined;
     realtimeVoice?: boolean | undefined;
     browserExtension?: { name: string; installUrl: string } | undefined;
+    agentProfiles?: { enabled: boolean } | undefined;
   }>;
 };
 
@@ -63,6 +64,8 @@ export type ClientConfigFlags = {
    * null until the config loads or when the server doesn't say (Opengeni Browser).
    */
   browserExtension: { name: string; installUrl: string } | null;
+  /** Saved agents and per-chat agent identity. `false` until the server says it is on. */
+  agentProfiles: boolean;
 };
 
 const INITIAL_FLAGS: ClientConfigFlags = {
@@ -79,6 +82,7 @@ const INITIAL_FLAGS: ClientConfigFlags = {
   realtimeVoice: false,
   realtimeVoiceOffered: false,
   browserExtension: null,
+  agentProfiles: false,
 };
 
 /** Deployment and session-proxy capabilities from the client config. */
@@ -110,6 +114,7 @@ export function useClientConfigFlags(
             realtimeVoice: config.realtimeVoice !== false,
             realtimeVoiceOffered: config.realtimeVoice === true,
             browserExtension: config.browserExtension ?? null,
+            agentProfiles: config.agentProfiles?.enabled === true,
           });
         }
       },

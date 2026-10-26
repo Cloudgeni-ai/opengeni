@@ -1,4 +1,5 @@
 import { useOptionalAppContext } from "../../app-context";
+import { AgentIdentityControl } from "../session/agent-identity-control";
 import { archiveActionLabel } from "../../lib/archive-session";
 // The session header bar — the slim canvas top strip's contents on a session
 // route. Split out of the session shell as a PURE, presentational component: it takes
@@ -292,6 +293,7 @@ export function SessionHeader({
           loading={lineageLoading}
           error={lineageError}
         />
+        <AgentIdentityControl session={session} />
         <SessionTitleEditor session={session} rename={rename} />
         {/* Below lg the lifecycle is a dot beside the title; the full badge
             and connection pill take over from lg. */}

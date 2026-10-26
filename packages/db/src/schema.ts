@@ -10,6 +10,7 @@ import type {
   AgentAvatar,
   AgentProfileConfig,
   SessionAgentProfile,
+  SessionAgentProfileSuggestion,
   OrganizationAccessPolicy,
   SandboxProviderCommand,
   CommandSupervisionReceipt,
@@ -5424,6 +5425,10 @@ export const sessions = pgTable(
     // The identity this chat's agent wears (migration 0997, agent profiles).
     // Display snapshot only; NULL is the default agent identity.
     agentProfile: jsonb("agent_profile").$type<SessionAgentProfile>(),
+    // The newest agent-profile suggestion in this chat (migration 0982).
+    agentProfileSuggestion: jsonb(
+      "agent_profile_suggestion",
+    ).$type<SessionAgentProfileSuggestion>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     // Top-level xid, assigned by a BEFORE trigger in the original row write.

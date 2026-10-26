@@ -112,6 +112,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover
 import { ChannelCreateDialog } from "./channel-create-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
 import { useAppContext } from "../../app-context";
+import { useAgentProfilesEnabled, visibleAgentProfile } from "../../lib/agent-profiles";
 import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
@@ -5004,6 +5005,7 @@ function SessionRow(props: {
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
+  const agent = visibleAgentProfile(props.session, useAgentProfilesEnabled());
   const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
   // A key press puts the person's attention elsewhere (⌘K right after opening a
   // chat, with the pointer still on its row), so the hover card gives way, as
@@ -5184,6 +5186,7 @@ function SessionRow(props: {
                     ? childCountAria.replace("descendant", "spawned")
                     : null,
                   creator,
+                  agentName: agent?.name ?? null,
                 })}
                 aria-describedby={hoverDescription ? hoverDescriptionId : undefined}
                 onFocus={props.onFocus}
@@ -5263,6 +5266,7 @@ function SessionRow(props: {
                   relativeTime={rail.isMobile ? undefined : relativeTime}
                   jumpKey={jumpKey}
                   creator={creator}
+                  agent={agent}
                 />
               </Link>
             </HoverCardTrigger>

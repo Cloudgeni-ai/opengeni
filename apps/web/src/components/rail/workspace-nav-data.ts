@@ -2,6 +2,7 @@
 // `workspace-config-link.tsx`.
 
 export type WorkspaceConfigTarget =
+  | "/workspaces/$workspaceId/agents"
   | "/workspaces/$workspaceId/insights"
   | "/workspaces/$workspaceId/secrets"
   | "/workspaces/$workspaceId/rigs"
@@ -24,7 +25,8 @@ export type WorkspaceConfigIcon =
   | "zap"
   | "audio-lines"
   | "panels-top-left"
-  | "settings";
+  | "settings"
+  | "users";
 
 export type WorkspaceConfigItem = {
   to: WorkspaceConfigTarget;
@@ -33,6 +35,8 @@ export type WorkspaceConfigItem = {
   description: string;
   /** When true, only include for subjects with workspace:admin. */
   requiresAdmin?: boolean;
+  /** Only shown while this deployment feature is on. */
+  requiresFeature?: "agentProfiles";
 };
 
 export type WorkspaceConfigGroup = {
@@ -43,6 +47,13 @@ export type WorkspaceConfigGroup = {
 
 /** Product destinations promoted to the primary rail beside New session. */
 export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
+  {
+    to: "/workspaces/$workspaceId/agents",
+    icon: "users",
+    label: "Agents",
+    description: "Reusable agents with their own name, instructions and settings",
+    requiresFeature: "agentProfiles",
+  },
   {
     to: "/workspaces/$workspaceId/plugins",
     icon: "plug",
@@ -165,4 +176,11 @@ export function isConfigItemActive(
 ): boolean {
   const destination = `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
   return pathname === destination || pathname.startsWith(`${destination}/`);
+}
+
+/** Primary items this deployment offers. */
+export function primaryWorkspaceItems(features: { agentProfiles: boolean }): WorkspaceConfigItem[] {
+  return PRIMARY_WORKSPACE_ITEMS.filter(
+    (item) => item.requiresFeature !== "agentProfiles" || features.agentProfiles,
+  );
 }

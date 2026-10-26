@@ -404,6 +404,7 @@ import {
 } from "@opengeni/contracts/allowance-refusal";
 import { registerEditableArtifactAgentTools } from "./editable-artifacts";
 import { registerCompanyProfileAgentAdminTools } from "./company-profile-agent-admin";
+import { registerAgentProfileSuggestTool } from "./agent-profile-suggest";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { scheduleTimeZoneFacts, withAgentScheduleTimeZone } from "../scheduled-task-time-zone";
@@ -888,6 +889,13 @@ function buildSessionCreateToolInput(allowedTools: readonly FirstPartyMcpToolNam
       // deterministic failure instead of the omission path's safe own-box fallback.
       sandbox: z4.union([z4.literal("new"), z4.object({ groupId: z4.string().uuid() })]).optional(),
       agent: sessionCreateAgentInput,
+      agentProfileId: z4
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Start the worker as one of the workspace's saved agents (an id the user mentioned, for example from '@Bugfixer'). Its instructions and settings fill whatever this call omits, still narrowed to this session's own; the worker then shows that agent's name. Omit for an ordinary worker.",
+        ),
     })
     .strict();
   return contractToolInput(sessionCreateInput, sessionCreateInput, {
@@ -1305,7 +1313,19 @@ export function buildOpenGeniMcpServer(
       },
 
       json,
-    });
+    }); // Agent profiles: the agent may suggest a reusable agent; a person accepts.
+    if (deps.settings.agentProfilesEnabled) {
+      registerAgentProfileSuggestTool({
+        server,
+        deps,
+        grant,
+        sessionId,
+        authorize: async () => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+        },
+        json,
+      });
+    }
   }
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerWorkspaceArtifactTools(server, deps, grant, sessionId, json);

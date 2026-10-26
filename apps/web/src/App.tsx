@@ -3,7 +3,10 @@
 //   /                                        → remembered/default workspace redirect
 //   /workspaces/:id                          → sessions redirect
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
-//   /workspaces/:id/priority, /agents        → sessions redirect (retired "For you" and Agents pages)
+//   /workspaces/:id/priority                 → sessions redirect (retired "For you" page)
+//   /workspaces/:id/agents                   → saved agents (agent profiles flag; else sessions)
+//   /workspaces/:id/agents/new               → new agent (?fromSession: save a chat; ?draft: a suggestion)
+//   /workspaces/:id/agents/:profileId        → one agent: edit, Start chat, archive
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
 //   /sessions/:sessionId                     → authorized compatibility redirect
@@ -211,6 +214,9 @@ const LazySubscriptionPlansPreview = lazyRouteComponent(
   "SubscriptionPlansPreview",
 );
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
+const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
+const LazyAgentFormRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentFormRoute");
+const UUID_SEARCH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
   () => import("@/routes/read-only-chats"),
   "ReadOnlyChatsRoute",
@@ -516,17 +522,37 @@ const workspaceAgentRoute = createRoute({
   path: "agent",
   component: WorkspaceIndexRedirect,
 });
-// The "For you" feed and the Agents page were retired. Attention now lives in
-// the sessions rail ("Needs you" view), so their old links land on sessions.
+// The "For you" feed was retired. Attention now lives in the sessions rail
+// ("Needs you" view), so its old links land on sessions.
 const workspaceRetiredPriorityRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "priority",
   component: WorkspaceIndexRedirect,
 });
-const workspaceRetiredAgentsRoute = createRoute({
+// Saved agents (agent profiles). With the flag off these pages send people to
+// the chats, which is where the retired Agents page used to redirect.
+const workspaceAgentsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "agents",
-  component: WorkspaceIndexRedirect,
+  component: Agents,
+});
+const workspaceAgentNewRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/new",
+  validateSearch: (search: Record<string, unknown>): { fromSession?: string; draft?: string } => ({
+    ...(typeof search.fromSession === "string" && UUID_SEARCH.test(search.fromSession)
+      ? { fromSession: search.fromSession }
+      : {}),
+    ...(typeof search.draft === "string" && UUID_SEARCH.test(search.draft)
+      ? { draft: search.draft }
+      : {}),
+  }),
+  component: AgentNew,
+});
+const workspaceAgentDetailRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$profileId",
+  component: AgentDetail,
 });
 const workspaceSessionsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1043,7 +1069,9 @@ const routeTree = rootRoute.addChildren([
     workspaceIndexRoute,
     workspaceAgentRoute,
     workspaceRetiredPriorityRoute,
-    workspaceRetiredAgentsRoute,
+    workspaceAgentsRoute,
+    workspaceAgentNewRoute,
+    workspaceAgentDetailRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
     workspaceSecretsRoute.addChildren([
@@ -1229,6 +1257,27 @@ function SecretsRedirect() {
   ) : (
     <Navigate to="/workspaces/$workspaceId/secrets" params={{ workspaceId }} replace />
   );
+}
+
+function Agents() {
+  const { workspaceId } = workspaceAgentsRoute.useParams();
+  return <LazyAgentsRoute workspaceId={workspaceId} />;
+}
+
+function AgentNew() {
+  const { workspaceId } = workspaceAgentNewRoute.useParams();
+  const { fromSession, draft } = workspaceAgentNewRoute.useSearch();
+  return (
+    <LazyAgentFormRoute
+      workspaceId={workspaceId}
+      mode={{ kind: "create", fromSession, draftKey: draft }}
+    />
+  );
+}
+
+function AgentDetail() {
+  const { workspaceId, profileId } = workspaceAgentDetailRoute.useParams();
+  return <LazyAgentFormRoute workspaceId={workspaceId} mode={{ kind: "edit", profileId }} />;
 }
 
 function Rigs() {

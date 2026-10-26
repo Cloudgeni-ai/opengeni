@@ -5,6 +5,7 @@ import type {
   AgentProfileStatus,
   AgentProfileVersion,
   SessionAgentProfile,
+  SessionAgentProfileSuggestion,
 } from "@opengeni/contracts";
 import { AGENT_PROFILES_PER_WORKSPACE_MAX } from "@opengeni/contracts";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
@@ -369,6 +370,33 @@ export async function setSessionAgentProfile(
       // Naming updatedAt in the SET list enrolls this row in the commit gate;
       // the self-assignment deliberately preserves the activity sort time.
       .set({ agentProfile: input.agentProfile, updatedAt: sql`${schema.sessions.updatedAt}` })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .returning({ id: schema.sessions.id });
+    return rows.length > 0;
+  });
+}
+
+/** Records the newest agent-profile suggestion in a chat (display state only). */
+export async function setSessionAgentProfileSuggestion(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    suggestion: SessionAgentProfileSuggestion | null;
+  },
+): Promise<boolean> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .update(schema.sessions)
+      .set({
+        agentProfileSuggestion: input.suggestion,
+        updatedAt: sql`${schema.sessions.updatedAt}`,
+      })
       .where(
         and(
           eq(schema.sessions.workspaceId, input.workspaceId),

@@ -8,6 +8,8 @@ import {
 } from "lucide-react";
 import { Children, isValidElement, useId } from "react";
 
+import type { SessionAgentProfile } from "@opengeni/sdk";
+import { AgentMark } from "../../../ui/agent-mark";
 import { CreatorMonogram } from "../creator-monogram";
 import { type CreatorRef, creatorAnnouncement, creatorInitials } from "../../lib/creator-initials";
 import { formatWaitingSince } from "../../lib/format";
@@ -98,6 +100,7 @@ export function sessionRowAccessibleName({
   statusLabel,
   spawnedLabel,
   creator,
+  agentName,
 }: {
   title: string;
   stateLabel: string;
@@ -105,11 +108,15 @@ export function sessionRowAccessibleName({
   statusLabel: string;
   spawnedLabel?: string | null | undefined;
   creator?: CreatorRef | null | undefined;
+  /** The agent identity this chat wears, if any. */
+  agentName?: string | null | undefined;
 }): string {
   const spokenCreator = creatorAnnouncement(creator ?? null);
-  return `Open ${title}. ${stateLabel}${pinned ? ". Pinned" : ""}. ${statusLabel}${
-    spawnedLabel ? `. ${spawnedLabel}` : ""
-  }${spokenCreator ? `. Created by ${spokenCreator}` : ""}`;
+  return `Open ${title}${agentName ? `. Agent ${agentName}` : ""}. ${stateLabel}${
+    pinned ? ". Pinned" : ""
+  }. ${statusLabel}${spawnedLabel ? `. ${spawnedLabel}` : ""}${
+    spokenCreator ? `. Created by ${spokenCreator}` : ""
+  }`;
 }
 
 /**
@@ -268,6 +275,7 @@ export function SessionRowContent({
   relativeTime,
   jumpKey,
   creator,
+  agent = null,
   quickActionSlots = 0,
 }: {
   title: string;
@@ -286,9 +294,12 @@ export function SessionRowContent({
   quickActionSlots?: number | undefined;
   /** Session creator for a top-level row, else null. See RailTrailingMetadata. */
   creator?: CreatorRef | null | undefined;
+  /** The agent identity this chat wears; its tile leads the title. */
+  agent?: SessionAgentProfile | null | undefined;
 }) {
   return (
     <>
+      {agent ? <AgentMark avatar={agent.avatar} size={16} /> : null}
       {/* Inert for the row's accessible name, which its `aria-label` owns -
           including the creator. Kept as-is so this change regresses nothing. */}
       <span className="sr-only">{stateLabel}. </span>

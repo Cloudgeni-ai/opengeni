@@ -172,6 +172,11 @@ export type AppContextValue = {
     sessionId: string,
     title: string,
   ) => Promise<Session | null>;
+  /**
+   * Merge a session returned by a write (agent profile switch or naming) into
+   * the open session so the header, composer and settings reflect it at once.
+   */
+  adoptUpdatedSession?: ((updated: Session) => void) | undefined;
   /** Optimistically set the current member's personal session pin. */
   updateSessionPin: (
     workspaceId: string,
@@ -225,6 +230,8 @@ export type AppContextValue = {
       workingDir?: string | null | undefined;
       /** Workspace folder to file the new session under. */
       channelId?: string | null | undefined;
+      /** Saved agent the chat starts from (agent profiles). */
+      agentProfileId?: string | null | undefined;
       omitWorkspaceResources?: boolean | undefined;
       expectedNewSessionDraftRevision?: number | undefined;
       agentLearning?: import("@opengeni/sdk").AgentLearningOverrides | undefined;

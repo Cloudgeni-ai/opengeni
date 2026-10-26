@@ -1260,6 +1260,12 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
   }
 
+  function adoptUpdatedSession(updated: Session): void {
+    setSession((current) =>
+      current && current.id === updated.id ? { ...current, ...updated } : current,
+    );
+  }
+
   // Personal session pinning never changes shared session activity. Keep the
   // header immediate on this device, use its known revision when available, and
   // restore the authoritative prior state if the request (including a stale-tab
@@ -1794,6 +1800,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
           channelId: options?.channelId,
+          agentProfileId: options?.agentProfileId,
           expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
           agentLearning: options?.agentLearning,
           startMode: options?.startMode,
@@ -2396,6 +2403,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const contextUpdateWorkspaceSettings = useLatestCallback(updateWorkspaceSettings);
   const contextSetWorkspaceDefaultRig = useLatestCallback(setWorkspaceDefaultRig);
   const contextUpdateSessionTitle = useLatestCallback(updateSessionTitle);
+  const contextAdoptUpdatedSession = useLatestCallback(adoptUpdatedSession);
   const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
   const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
   const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
@@ -2521,6 +2529,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           updateWorkspaceSettings: contextUpdateWorkspaceSettings,
           setWorkspaceDefaultRig: contextSetWorkspaceDefaultRig,
           updateSessionTitle: contextUpdateSessionTitle,
+          adoptUpdatedSession: contextAdoptUpdatedSession,
           updateSessionPin: contextUpdateSessionPin,
           deleteWorkspace: contextDeleteWorkspace,
           refreshGitHub,
@@ -2571,6 +2580,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     contextTogglePersonalGitHubRepository,
     contextUpdateSessionPin,
     contextUpdateSessionTitle,
+    contextAdoptUpdatedSession,
     contextUpdateWorkspaceSettings,
     currentResources,
     repositoryValidationError,

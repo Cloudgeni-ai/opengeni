@@ -340,6 +340,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   remember_confirm: "knowledge",
   company_profile_propose: "knowledge",
   company_profile_confirm: "knowledge",
+  agent_profile_suggest: "knowledge",
 
   sandboxes_list: "workspaceAdmin",
   sandbox_attach: "workspaceAdmin",

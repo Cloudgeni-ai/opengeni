@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type postgres from "postgres";
 import {
+  bootstrapWorkspace,
+  claimSessionWorkForAttempt,
+  initializeSessionStartAtomically,
   AgentProfileArchivedError,
   AgentProfileNameConflictError,
   AgentProfileVersionConflictError,
@@ -267,5 +270,77 @@ describe("agent profiles (real PostgreSQL + FORCE RLS)", () => {
       },
     });
     expect(session.agentProfile?.name).toBe("Deploy watcher");
+  });
+
+  test("an agent-created child chat is born wearing a saved agent's identity", async () => {
+    if (!available) return;
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(db, {
+      accountExternalSource: "agent-profiles-child",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Agent profile children",
+      workspaceExternalSource: "agent-profiles-child",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Agent profile children",
+      subjectId: `user:owner-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const workspaceId = grant.workspaceId!;
+    const common = {
+      accountId: grant.accountId,
+      workspaceId,
+      resources: [],
+      tools: [],
+      metadata: {},
+      createdBy: { kind: "subject" as const, subjectId: grant.subjectId },
+      subjectId: grant.subjectId,
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+    };
+    const parent = await createSession(db, { ...common, initialMessage: "Fix the flaky test" });
+    await initializeSessionStartAtomically(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: parent.id,
+      clientEventId: `initial:${parent.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      goal: null,
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("parent turn was not claimed");
+    const profile = await createAgentProfile(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      name: "Bugfixer",
+      avatar: { kind: "emoji", emoji: "🐞", hue: 20 },
+      config: {},
+    });
+    const child = await createSession(db, {
+      ...common,
+      initialMessage: "Reproduce it",
+      parentSessionId: parent.id,
+      createdByActor: {
+        type: "agent_attempt",
+        attemptId,
+        sessionId: parent.id,
+        turnId: claimed.turn.id,
+        executionGeneration: claimed.turn.executionGeneration,
+      },
+      agentProfile: sessionAgentProfileFromProfile(profile),
+    });
+    expect(child.parentSessionId).toBe(parent.id);
+    expect(child.agentProfile).toMatchObject({ profileId: profile.id, name: "Bugfixer" });
+    expect((await getSession(db, workspaceId, child.id))?.agentProfile?.name).toBe("Bugfixer");
   });
 });

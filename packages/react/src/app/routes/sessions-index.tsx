@@ -217,6 +217,10 @@ import {
 } from "./sessions-index-hydration";
 import type { Channel, SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
+import type { AgentProfile } from "@opengeni/sdk";
+import { ComposerAgentChip } from "../components/composer-agent-chip";
+import { NewChatAgentRoster } from "../components/new-chat-agent-roster";
+import { useAppAgentProfiles } from "../lib/agent-profiles";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -302,6 +306,13 @@ function SessionsIndexRouteContent({
     [firstPartyMcpToolPolicy],
   );
   const navigate = useNavigate();
+  const agentProfiles = useAppAgentProfiles();
+  const [selectedAgentProfileId, setSelectedAgentProfileId] = useState<string | null>(
+    launch.agent ?? null,
+  );
+  const selectedAgentProfile = agentProfiles.enabled
+    ? (agentProfiles.profiles.find((profile) => profile.id === selectedAgentProfileId) ?? null)
+    : null;
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
   const launchChannelId = launch.channelId === "default" ? null : launch.channelId;
@@ -578,6 +589,27 @@ function SessionsIndexRouteContent({
   // server-resolved new-chat default; undefined means an older server that
   // does not report the marker, so none is sent back.
   const [modelProvided, setModelProvided] = useState<boolean | undefined>(undefined);
+  // Choosing a saved agent adopts its model policy in the picker, so the
+  // request the composer sends matches the agent instead of overriding it.
+  const selectAgentProfile = useCallback(
+    (profile: AgentProfile | null) => {
+      setSelectedAgentProfileId(profile?.id ?? null);
+      if (profile?.config.model) {
+        context.setModel(profile.config.model);
+        setModelProvided(true);
+      }
+      if (profile?.config.reasoningEffort) {
+        context.setReasoningEffort(profile.config.reasoningEffort);
+      }
+    },
+    [context],
+  );
+  const launchAgentAppliedRef = useRef(false);
+  useEffect(() => {
+    if (launchAgentAppliedRef.current || !selectedAgentProfile) return;
+    launchAgentAppliedRef.current = true;
+    selectAgentProfile(selectedAgentProfile);
+  }, [selectAgentProfile, selectedAgentProfile]);
   const [connectorCustomizing, setConnectorCustomizing] = useState(false);
   const [connectorExclusions, setConnectorExclusions] = useState<string[]>([]);
   const followWorkspaceConnectors = () => {
@@ -1224,6 +1256,7 @@ function SessionsIndexRouteContent({
                     targetSandboxId: submission.options.targetSandboxId,
                     workingDir: submission.options.workingDir,
                     channelId: selectedChannelId,
+                    agentProfileId: selectedAgentProfile?.id ?? null,
                     omitWorkspaceResources: submission.omitWorkspaceResources,
                     installedSkillIds: launch.skillCapabilityId
                       ? [launch.skillCapabilityId]
@@ -1303,6 +1336,7 @@ function SessionsIndexRouteContent({
                   targetSandboxId: submission.options.targetSandboxId,
                   workingDir: submission.options.workingDir,
                   channelId: selectedChannelId,
+                  agentProfileId: selectedAgentProfile?.id ?? null,
                   omitWorkspaceResources: submission.omitWorkspaceResources,
                   installedSkillIds: launch.skillCapabilityId
                     ? [launch.skillCapabilityId]
@@ -1714,6 +1748,20 @@ function SessionsIndexRouteContent({
           </div>
         ) : null}
 
+        {agentProfiles.enabled && agentProfiles.profiles.length > 0 ? (
+          <NewChatAgentRoster
+            profiles={agentProfiles.profiles}
+            selectedProfileId={selectedAgentProfile?.id ?? null}
+            onSelect={selectAgentProfile}
+            onNewAgent={() =>
+              void navigate({
+                to: "/workspaces/$workspaceId/agents/new",
+                params: { workspaceId },
+              })
+            }
+          />
+        ) : null}
+
         <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
           <ConsoleComposer
             workspaceId={workspaceId}
@@ -1722,7 +1770,11 @@ function SessionsIndexRouteContent({
             autoFocus
             disabled={newSessionDraft.loading || submitting}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-            placeholder="Describe a task for the agent…"
+            placeholder={
+              selectedAgentProfile
+                ? `Ask ${selectedAgentProfile.name}…`
+                : "Describe a task for the agent…"
+            }
             controlsLeading={
               <>
                 <ComposerMobilePlus
@@ -1902,6 +1954,27 @@ function SessionsIndexRouteContent({
             }
             controls={
               <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
+                {agentProfiles.enabled ? (
+                  <ComposerAgentChip
+                    profiles={agentProfiles.profiles}
+                    selectedProfileId={selectedAgentProfile?.id ?? null}
+                    allowDefault
+                    disabled={busy || newSessionDraft.loading}
+                    onSelect={selectAgentProfile}
+                    onManage={() =>
+                      void navigate({
+                        to: "/workspaces/$workspaceId/agents",
+                        params: { workspaceId },
+                      })
+                    }
+                    onNewAgent={() =>
+                      void navigate({
+                        to: "/workspaces/$workspaceId/agents/new",
+                        params: { workspaceId },
+                      })
+                    }
+                  />
+                ) : null}
                 <SessionModelControl
                   hasImageAttachments={attachments.attachments.some(
                     (file) => file.status !== "failed" && file.contentType.startsWith("image/"),

@@ -6110,6 +6110,7 @@ export type FirstPartyMcpToolPolicySettings = Pick<
   | "allowedFirstPartyMcpTools"
   | "artifactMaterializerDeployed"
   | "eventTriggersEnabled"
+  | "agentProfilesEnabled"
 >;
 
 const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
@@ -6129,11 +6130,16 @@ const EVENT_TRIGGER_TOOLS: readonly FirstPartyMcpToolNameType[] = [
  * is dropped rather than rejected: it is a deployment fact, not a caller error.
  */
 export function deploymentUnavailableFirstPartyMcpTools(
-  settings: Pick<Settings, "artifactMaterializerDeployed" | "eventTriggersEnabled">,
+  settings: Pick<
+    Settings,
+    "artifactMaterializerDeployed" | "eventTriggersEnabled" | "agentProfilesEnabled"
+  >,
 ): ReadonlySet<FirstPartyMcpToolNameType> {
   return new Set([
     ...(settings.artifactMaterializerDeployed ? [] : EDITABLE_ARTIFACT_EXPORT_TOOLS),
     ...(settings.eventTriggersEnabled ? [] : EVENT_TRIGGER_TOOLS),
+    // Suggesting a saved agent needs the agent profiles feature.
+    ...(settings.agentProfilesEnabled ? [] : (["agent_profile_suggest"] as const)),
   ]);
 }
 

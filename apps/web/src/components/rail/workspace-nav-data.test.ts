@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   PRIMARY_WORKSPACE_ITEMS,
+  primaryWorkspaceItems,
   WORKSPACE_CONFIG_GROUPS,
   isConfigItemActive,
   isWorkspaceConfigPath,
@@ -28,6 +29,7 @@ describe("workspace rail destinations", () => {
     );
 
     expect(primaryTargets).toEqual([
+      "/workspaces/$workspaceId/agents",
       "/workspaces/$workspaceId/plugins",
       "/workspaces/$workspaceId/state",
       "/workspaces/$workspaceId/automations",
@@ -35,6 +37,13 @@ describe("workspace rail destinations", () => {
       "/workspaces/$workspaceId/artifacts",
     ]);
     expect(PRIMARY_WORKSPACE_ITEMS.map((item) => item.label)).not.toContain("Documents");
+    // Agents is listed only while the agent profiles feature is on.
+    expect(primaryWorkspaceItems({ agentProfiles: false }).map((item) => item.to)).toEqual(
+      primaryTargets.filter((target) => target !== "/workspaces/$workspaceId/agents"),
+    );
+    expect(primaryWorkspaceItems({ agentProfiles: true }).map((item) => item.to)).toEqual(
+      primaryTargets,
+    );
     expect(settingsTargets.filter((target) => primaryTargets.includes(target))).toEqual([]);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/automations", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/artifacts", "ws-1")).toBe(false);

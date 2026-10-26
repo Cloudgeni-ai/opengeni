@@ -284,6 +284,8 @@ export type BuildCreateSessionRequestInput = {
   targetSandboxId?: string | null | undefined;
   workingDir?: string | null | undefined;
   channelId?: string | null | undefined;
+  /** Saved agent the chat starts from (agent profiles). */
+  agentProfileId?: string | null | undefined;
   expectedNewSessionDraftRevision?: number | undefined;
   agentLearning?: import("@opengeni/sdk").AgentLearningOverrides | undefined;
   /**
@@ -411,6 +413,7 @@ export function buildCreateSessionRequest(
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.channelId ? { channelId: input.channelId } : {}),
+    ...(input.agentProfileId ? { agentProfileId: input.agentProfileId } : {}),
     ...(input.agentLearning && Object.keys(input.agentLearning).length
       ? { agentLearning: input.agentLearning }
       : {}),

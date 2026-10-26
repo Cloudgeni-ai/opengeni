@@ -638,6 +638,7 @@ The retired Memory and reviewed-claim tools are not registered for new work.
 
 First-party Opengeni MCP company-profile tools (separate organization policy):
 
+- `agent_profile_suggest` - with agent profiles on, suggest (never create) a reusable agent or a switch to a saved one; the person accepts the card in their chat. See [`agent-profiles.md`](agent-profiles.md#agent-suggestions).
 - `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy (set on Settings > Agent learning) defaults to Review first (`suggest`): Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Automatic activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
 First-party Opengeni MCP session monitoring tools (`sessions:read`):
