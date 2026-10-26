@@ -6965,7 +6965,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
           cover
-            ? `browser element is covered by ${cover} at its center`
+            ? cover.shown
+              ? `browser element is covered by ${cover.description} where it shows`
+              : `browser element is covered by ${cover.description} at its center`
             : ((await this.unreachableReason(state, backendDOMNodeId)) ??
                 "browser element is covered or not pointer-actionable"),
           true,
@@ -7020,8 +7022,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * A target whose center lies outside the window or outside a container's
    * clip (a header the page slides up as its content scrolls, a row cut off
    * at a panel's edge) can still show part of itself, which is where a person
-   * clicks. Only used when nothing else is at the center: a target covered by
-   * another element keeps that refusal. Returns a point on the visible part
+   * clicks. Only used when nothing else is at the center, or when the center
+   * lies past the clipped edge of a container that holds the target (what is
+   * on top there, such as the panel beside a tree's side panel, is not over
+   * the target): a target covered by another element keeps that refusal.
+   * Returns a point on the visible part
    * that reaches the target itself, not a separate control nested inside it;
    * `nested` names that control when it is all that shows; null otherwise.
    */
@@ -7093,20 +7098,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control";
       case "clipped":
         return "browser element is out of view: only its own container is at its center, where it is clipped or hidden; scroll the page or panel back to it, or use another control";
+      case "cut-off":
+        return "browser element is out of view: it lies past the clipped edge of a panel or container that holds it; scroll that panel to it, or use another control";
       default:
         return null;
     }
   }
 
-  /** A short role-and-label description of what receives pointer input at the
-   * target's center instead of the target, or null when nothing else does. */
+  /** A short role-and-label description of what receives pointer input
+   * instead of the target, or null when nothing else does. That is checked at
+   * the target's center, or (`shown`) at the middle of the part of it that
+   * shows when its center lies past the clipped edge of a container that holds
+   * it: an element beside that container is not over the target there. */
   private async coveringElement(
     state: TargetState,
     backendDOMNodeId: number,
-  ): Promise<string | null> {
+  ): Promise<{ description: string; shown: boolean } | null> {
     try {
       const value = await this.callOnNode(state, backendDOMNodeId, COVER_DESCRIPTION_FUNCTION, []);
-      return typeof value === "string" && value ? value.slice(0, 160) : null;
+      if (typeof value === "string" && value) {
+        return { description: value.slice(0, 160), shown: false };
+      }
+      if (isRecord(value) && typeof value.shown === "string" && value.shown) {
+        return { description: value.shown.slice(0, 160), shown: true };
+      }
+      return null;
     } catch {
       return null;
     }
@@ -9722,16 +9738,94 @@ const DESCRIBE_HELPER = `
     return start.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
   };`;
 
+// Page-side helper: shownBox is the part of the target's box that the
+// containers holding it leave showing, before the window clips it. A
+// container clips the target when it hides its overflow on that axis (or
+// contains paint) and lies on the target's containing-block chain: a fixed
+// target escapes every container up to one that holds fixed boxes (a
+// transform, filter or containment), an absolute one escapes static ones.
+// The root and body are left to the window. A centre past that box is cut
+// off: whatever is on top there (a panel beside the target's own panel) is
+// not over the target.
+const SHOWN_BOX_HELPER = `
+  const shownBox = (target) => {
+    const rect = target.getBoundingClientRect();
+    const box = { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+    const view = target.ownerDocument.defaultView || window;
+    const words = (value) => String(value || "").split(/[\\s,]+/);
+    const holdsFixed = (style) =>
+      style.transform !== "none" ||
+      style.perspective !== "none" ||
+      style.filter !== "none" ||
+      words(style.contain).some((word) => ["paint", "layout", "strict", "content"].includes(word)) ||
+      words(style.willChange).some((word) => ["transform", "perspective", "filter"].includes(word));
+    const parentOf = (node) => {
+      const next = node.assignedSlot ?? node.parentNode ?? null;
+      return next instanceof ShadowRoot ? next.host : next;
+    };
+    const page = target.ownerDocument;
+    let position = view.getComputedStyle(target).position;
+    for (
+      let node = parentOf(target);
+      node instanceof Element && node !== page.documentElement && node !== page.body;
+      node = parentOf(node)
+    ) {
+      const style = view.getComputedStyle(node);
+      const holder = holdsFixed(style);
+      if (position === "fixed" && !holder) continue;
+      if (position === "absolute" && style.position === "static" && !holder) continue;
+      position = style.position;
+      if (style.display === "contents") continue;
+      const paint = words(style.contain).some((word) => ["paint", "strict", "content"].includes(word));
+      const clipsX = paint || style.overflowX !== "visible";
+      const clipsY = paint || style.overflowY !== "visible";
+      if (!clipsX && !clipsY) continue;
+      const outer = node.getBoundingClientRect();
+      const scaleX = node.offsetWidth ? outer.width / node.offsetWidth : 1;
+      const scaleY = node.offsetHeight ? outer.height / node.offsetHeight : 1;
+      if (clipsX) {
+        const left = outer.left + node.clientLeft * scaleX;
+        box.left = Math.max(box.left, left);
+        box.right = Math.min(box.right, left + node.clientWidth * scaleX);
+      }
+      if (clipsY) {
+        const top = outer.top + node.clientTop * scaleY;
+        box.top = Math.max(box.top, top);
+        box.bottom = Math.min(box.bottom, top + node.clientHeight * scaleY);
+      }
+    }
+    return box;
+  };
+  const cutOff = (box, x, y) =>
+    x < box.left - 0.5 || x > box.right + 0.5 || y < box.top - 0.5 || y > box.bottom + 0.5;`;
+
 // Describes the element on top at the target's centre, or null when nothing
-// else is there.
+// else is there. When the centre is cut off by a container that holds the
+// target, describes what is on top at the middle of the part that shows
+// instead, as { shown }.
 const COVER_DESCRIPTION_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
   ${HIT_HELPERS}
   ${DESCRIBE_HELPER}
-  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  ${SHOWN_BOX_HELPER}
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const hit = topHit(element, cx, cy);
   if (!hit || owns(element, hit) || owns(hit, element)) return null;
+  const shown = shownBox(element);
+  if (cutOff(shown, cx, cy)) {
+    const viewport = element.ownerDocument.documentElement;
+    const left = Math.max(shown.left, 0);
+    const top = Math.max(shown.top, 0);
+    const right = Math.min(shown.right, viewport.clientWidth || innerWidth);
+    const bottom = Math.min(shown.bottom, viewport.clientHeight || innerHeight);
+    if (right <= left || bottom <= top) return null;
+    const over = topHit(element, (left + right) / 2, (top + bottom) / 2);
+    if (!over || owns(element, over) || owns(over, element)) return null;
+    return { shown: describe(over) };
+  }
   return describe(hit);
 }`;
 
@@ -9764,7 +9858,9 @@ function nestedControlName(reported: Record<string, unknown>): string {
 // whose hit lies in a separate control nested in the target (a card's own
 // Delete button) does not count: when only such controls show, returns
 // { nested } naming the first. Null when no point qualifies or something other
-// than the target's own container is at its centre. The window is narrowed to
+// than the target's own container is at its centre, unless the containers
+// holding the target cut that centre off: the part sampled is then only what
+// they leave showing, nearest its middle. The window is narrowed to
 // what every same-origin parent frame shows, and to bounds (the page's window
 // in this frame's coordinates) when the driver passes them.
 const VISIBLE_PART_FUNCTION = `function(bounds) {
@@ -9773,15 +9869,21 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return null;
   ${HIT_HELPERS}
+  ${SHOWN_BOX_HELPER}
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   const centre = topHit(element, cx, cy);
-  if (centre && !owns(centre, element)) return null;
+  // Something else at the centre covers the target, unless the centre is
+  // cut off by a container that holds the target (a row running past its
+  // side panel's edge, with the next panel on top there).
+  const shown = shownBox(element);
+  const cut = cutOff(shown, cx, cy);
+  if (centre && !owns(centre, element) && !cut) return null;
   const viewport = element.ownerDocument.documentElement;
-  let left = 0;
-  let top = 0;
-  let right = viewport.clientWidth || innerWidth;
-  let bottom = viewport.clientHeight || innerHeight;
+  let left = Math.max(0, shown.left);
+  let top = Math.max(0, shown.top);
+  let right = Math.min(viewport.clientWidth || innerWidth, shown.right);
+  let bottom = Math.min(viewport.clientHeight || innerHeight, shown.bottom);
   if (bounds) {
     left = Math.max(left, bounds.left);
     top = Math.max(top, bounds.top);
@@ -9854,13 +9956,18 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
     );
     return { kind, label: label.slice(0, 200).join(""), cut: label.length > 200 };
   };
+  // Nearest the centre first; when a container cuts the centre off, nearest
+  // the middle of the part that shows, away from the cut edge, whose exact
+  // position hit testing and the box model can round apart.
+  const ax = cut ? (left + right) / 2 : cx;
+  const ay = cut ? (top + bottom) / 2 : cy;
   const steps = [0.5, 0.25, 0.75, 0, 1];
   const points = [];
   for (const sy of steps) {
     for (const sx of steps) {
       const x = left + (right - left) * sx;
       const y = top + (bottom - top) * sy;
-      points.push({ x, y, distance: (x - cx) ** 2 + (y - cy) ** 2 });
+      points.push({ x, y, distance: (x - ax) ** 2 + (y - ay) ** 2 });
     }
   }
   points.sort((a, b) => a.distance - b.distance);
@@ -9882,16 +9989,22 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
 // "pointer-events" (pointer-events: none on it or inherited from a container),
 // "outside" (nothing is at its centre, which is outside the window),
 // "clipped" (its own container is on top at its centre: clipped by an
-// overflow edge or hidden there), or null.
+// overflow edge or hidden there), "cut-off" (its centre lies past the clipped
+// edge of a container that holds it, where something beside that container
+// is on top), or null.
 const UNREACHABLE_REASON_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   ${HIT_HELPERS}
+  ${SHOWN_BOX_HELPER}
   if (getComputedStyle(element).pointerEvents === "none") return "pointer-events";
   const rect = element.getBoundingClientRect();
-  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const hit = topHit(element, cx, cy);
   if (!hit) return "outside";
   if (!owns(element, hit) && owns(hit, element)) return "clipped";
+  if (!owns(element, hit) && cutOff(shownBox(element), cx, cy)) return "cut-off";
   return null;
 }`;
 
