@@ -5057,7 +5057,7 @@ export const channels = pgTable(
   }),
 );
 
-// Agent profiles (migration 0981): named, workspace-shared agent presets.
+// Agent profiles (migration 0997): named, workspace-shared agent presets.
 // Configuration preset and display metadata only; applying one resolves
 // through ordinary session authorization. Archived, never deleted.
 export const agentProfiles = pgTable(
@@ -5421,7 +5421,7 @@ export const sessions = pgTable(
     // Frozen agent configuration (migration 0559); NULL means a legacy
     // session. Mid-session updates share the tool_policy_version CAS.
     agentConfig: jsonb("agent_config").$type<ResolvedAgentConfig>(),
-    // The identity this chat's agent wears (migration 0981, agent profiles).
+    // The identity this chat's agent wears (migration 0997, agent profiles).
     // Display snapshot only; NULL is the default agent identity.
     agentProfile: jsonb("agent_profile").$type<SessionAgentProfile>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

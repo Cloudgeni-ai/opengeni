@@ -289,7 +289,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "approveDeviceEnrollment",
@@ -348,7 +349,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AgentProfile"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "archiveKnowledgeEntry",
@@ -912,7 +914,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentProfile"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "createApiKey",
@@ -3078,7 +3081,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AgentProfile"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "getAttachedBrowser",
@@ -4842,7 +4846,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentProfileListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listAgentProfileVersions",
@@ -4851,7 +4856,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AgentProfileVersionListResponse"
-    ]
+    ],
+    "permission": "sessions:read"
   },
   {
     "id": "listAgentTopology",
@@ -4894,6 +4900,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "query": [
       "cursor",
+      "includeSubSessions",
       "kind",
       "limit",
       "q",
@@ -8097,7 +8104,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "AgentProfile"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "restoreKnowledgeEntry",
@@ -9245,7 +9253,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentProfile"
-    ]
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "updateAppRegistration",
@@ -9765,7 +9774,8 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "Session"
-    ]
+    ],
+    "permission": "sessions:control"
   },
   {
     "id": "updateSessionArchive",

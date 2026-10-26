@@ -29,7 +29,7 @@ while chats that already wear it keep their frozen identity.
 
 ## Data model
 
-Migration `0981_agent_profiles.sql` (rolling) adds:
+Migration `0997_agent_profiles.sql` (rolling) adds:
 
 - `agent_profiles`: name (unique among active profiles per workspace,
   case-insensitive), optional role, avatar, `config` and the current `version`.
@@ -97,7 +97,7 @@ client and browser bundle: `listAgentProfiles`, `createAgentProfile`,
 
 ## Rollout
 
-Apply migration 0981, deploy the API and web images that carry it, then set
+Apply migration 0997, deploy the API and web images that carry it, then set
 `OPENGENI_AGENT_PROFILES_ENABLED=true` on the API. Turning the flag off hides the
 routes and the UI and rejects `agentProfileId` on create; stored profiles and
 session identities are kept.

@@ -19,7 +19,7 @@ every API, worker, web, SDK/React and embedded consumer, then enable
 `OPENGENI_SESSION_USAGE_LIMITS_ENABLED`. Disabling it refuses new limits but
 keeps enforcing persisted ones. See [task usage limit rollout](session-usage-limits.md#rollout-and-activation).
 
-Agent profiles (migration 0981) are off by default. Apply the migration, deploy the
+Agent profiles (migration 0997) are off by default. Apply the migration, deploy the
 API and web images that carry it, then set `OPENGENI_AGENT_PROFILES_ENABLED=true` on
 the API. Turning it off hides the routes and UI; stored profiles are kept. See
 [agent profiles](agent-profiles.md).

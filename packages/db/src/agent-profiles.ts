@@ -17,7 +17,7 @@ import {
 import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import * as schema from "./schema";
 
-// Agent profiles (migration 0981): named, workspace-shared agent presets.
+// Agent profiles (migration 0997): named, workspace-shared agent presets.
 // Rows hold a configuration preset and display metadata only. Every content
 // change appends an immutable version row in the same transaction, so
 // `agent_profiles.version` always names the newest `agent_profile_versions` row.

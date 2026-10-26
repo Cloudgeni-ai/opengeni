@@ -29973,7 +29973,7 @@ export type SessionCreateInput = {
    * legacy session. When provided it also participates in keyed-create replay.
    */
   agentConfig?: ResolvedAgentConfig | null;
-  /** Identity the chat's agent wears (migration 0981). Display only. */
+  /** Identity the chat's agent wears (migration 0997). Display only. */
   agentProfile?: SessionAgentProfile | null;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
@@ -90618,7 +90618,7 @@ function mapSession(
         : "portable",
     codeSearchEnabled: row.codeSearchEnabled === true,
     agent: parseStoredSessionAgentConfig(row.agentConfig),
-    // Agent identity (migration 0981). Omitted when unset so default-agent
+    // Agent identity (migration 0997). Omitted when unset so default-agent
     // payloads stay byte-identical to older servers.
     ...(row.agentProfile ? { agentProfile: row.agentProfile } : {}),
     ...pin,
