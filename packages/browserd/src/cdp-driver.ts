@@ -6948,10 +6948,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       state.actionEffectCount = effectsBeforeScroll;
     let point = await this.centerPoint(state, backendDOMNodeId);
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
-      const revealed =
+      const visible =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
-        (await this.visiblePartPoint(state, backendDOMNodeId)) ??
-        (await this.revealByHover(state, backendDOMNodeId, frameId, point));
+        (await this.visiblePartPoint(state, backendDOMNodeId));
+      if (visible && "nested" in visible) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `browser element is out of view apart from ${visible.nested}, a separate control inside it, so a click would reach only that control; scroll the page or panel back to the element, or use another control`,
+          true,
+        );
+      }
+      const revealed =
+        visible ?? (await this.revealByHover(state, backendDOMNodeId, frameId, point));
       if (!revealed) {
         const cover = await this.coveringElement(state, backendDOMNodeId);
         throw new InteractionDefiniteDriverError(
@@ -7014,49 +7022,53 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * at a panel's edge) can still show part of itself, which is where a person
    * clicks. Only used when nothing else is at the center: a target covered by
    * another element keeps that refusal. Returns a point on the visible part
-   * that reaches the target, or null.
+   * that reaches the target itself, not a separate control nested inside it;
+   * `nested` names that control when it is all that shows; null otherwise.
    */
   private async visiblePartPoint(
     state: TargetState,
     backendDOMNodeId: number,
-  ): Promise<{ x: number; y: number } | null> {
-    const fractions = await this.callOnNode(
-      state,
-      backendDOMNodeId,
-      VISIBLE_PART_FUNCTION,
-      [],
-    ).catch(() => null);
-    if (!Array.isArray(fractions) || fractions.length !== 2) return null;
-    const [fx, fy] = fractions;
-    if (typeof fx !== "number" || typeof fy !== "number") return null;
-    if (!(fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1)) return null;
-    return await this.borderBoxPoint(state, backendDOMNodeId, fx, fy);
-  }
-
-  /** The point at the given fractions of a node's border box, in the same
-   * coordinates as centerPoint (the box follows the node's transforms). */
-  private async borderBoxPoint(
-    state: TargetState,
-    backendDOMNodeId: number,
-    fx: number,
-    fy: number,
-  ): Promise<{ x: number; y: number } | null> {
-    const result = await this.sendTarget<{ model?: unknown }>(state, "DOM.getBoxModel", {
+  ): Promise<{ x: number; y: number } | { nested: string } | null> {
+    const box = await this.sendTarget<{ model?: unknown }>(state, "DOM.getBoxModel", {
       backendNodeId: backendDOMNodeId,
     }).catch(() => null);
-    if (!result || !isRecord(result.model) || !Array.isArray(result.model.border)) return null;
-    const quad = result.model.border.filter(
+    if (!box || !isRecord(box.model) || !Array.isArray(box.model.border)) return null;
+    const quad = box.model.border.filter(
       (value): value is number => typeof value === "number" && Number.isFinite(value),
     );
     if (quad.length < 8) return null;
-    // Corners: top-left, top-right, bottom-right, bottom-left.
+    // Corners: top-left, top-right, bottom-right, bottom-left. The page
+    // samples its axis-aligned bounding box, which is the border box only
+    // when the element is not rotated or skewed; otherwise skip this path.
     const [x1, y1, x2, y2, x4, y4] = [quad[0]!, quad[1]!, quad[2]!, quad[3]!, quad[6]!, quad[7]!];
-    const offset = state.nodeRoute
-      ? await this.frameOffset(state, state.nodeRoute)
-      : { x: 0, y: 0 };
+    if (Math.abs(y2 - y1) > 0.5 || Math.abs(x4 - x1) > 0.5) return null;
+    // A cross-origin frame cannot see how much of its window the page shows;
+    // pass the page's window in the frame's own coordinates.
+    let bounds: { left: number; top: number; right: number; bottom: number } | null = null;
+    let offset = { x: 0, y: 0 };
+    if (state.nodeRoute) {
+      offset = await this.frameOffset(state, state.nodeRoute);
+      const { viewport } = await this.layoutMetrics(state);
+      bounds = {
+        left: -offset.x,
+        top: -offset.y,
+        right: viewport.width - offset.x,
+        bottom: viewport.height - offset.y,
+      };
+    }
+    const found = await this.callOnNode(state, backendDOMNodeId, VISIBLE_PART_FUNCTION, [
+      { value: bounds },
+    ]).catch(() => null);
+    if (isRecord(found) && typeof found.nested === "string" && found.nested) {
+      return { nested: found.nested.slice(0, 160) };
+    }
+    if (!Array.isArray(found) || found.length !== 2) return null;
+    const [fx, fy] = found;
+    if (typeof fx !== "number" || typeof fy !== "number") return null;
+    if (!(fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1)) return null;
     return {
-      x: offset.x + x1 + fx * (x2 - x1) + fy * (x4 - x1),
-      y: offset.y + y1 + fx * (y2 - y1) + fy * (y4 - y1),
+      x: offset.x + x1 + fx * (x2 - x1),
+      y: offset.y + y1 + fy * (y4 - y1),
     };
   }
 
@@ -7074,7 +7086,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ).catch(() => null);
     switch (reason) {
       case "pointer-events":
-        return "browser element does not take pointer input (pointer-events: none); press Enter on it or use another control";
+        return "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control";
       case "outside":
         return "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control";
       case "clipped":
@@ -9722,11 +9734,14 @@ const COVER_DESCRIPTION_FUNCTION = `function() {
 }`;
 
 // The part of the target inside its window, as fractions of its border box
-// at a point there that reaches the target, nearest its centre; null when no
-// such point exists or something other than its own container is at its
-// centre. Its centre can be outside the window or a container's clip while
-// the rest of it shows.
-const VISIBLE_PART_FUNCTION = `function() {
+// at a point there that reaches the target itself, nearest its centre. A point
+// whose hit lies in a separate control nested in the target (a card's own
+// Delete button) does not count: when only such controls show, returns
+// { nested } naming the first. Null when no point qualifies or something other
+// than the target's own container is at its centre. The window is narrowed to
+// what every same-origin parent frame shows, and to bounds (the page's window
+// in this frame's coordinates) when the driver passes them.
+const VISIBLE_PART_FUNCTION = `function(bounds) {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
@@ -9737,14 +9752,77 @@ const VISIBLE_PART_FUNCTION = `function() {
   const centre = topHit(element, cx, cy);
   if (centre && !owns(centre, element)) return null;
   const viewport = element.ownerDocument.documentElement;
-  const width = viewport.clientWidth || innerWidth;
-  const height = viewport.clientHeight || innerHeight;
+  let left = 0;
+  let top = 0;
+  let right = viewport.clientWidth || innerWidth;
+  let bottom = viewport.clientHeight || innerHeight;
+  if (bounds) {
+    left = Math.max(left, bounds.left);
+    top = Math.max(top, bounds.top);
+    right = Math.min(right, bounds.right);
+    bottom = Math.min(bottom, bounds.bottom);
+  }
+  try {
+    let dx = 0;
+    let dy = 0;
+    for (let view = element.ownerDocument.defaultView; view && view.frameElement; ) {
+      const frame = view.frameElement;
+      const box = frame.getBoundingClientRect();
+      dx += box.left + frame.clientLeft;
+      dy += box.top + frame.clientTop;
+      const parent = frame.ownerDocument;
+      const shownRight = parent.documentElement.clientWidth || parent.defaultView.innerWidth;
+      const shownBottom = parent.documentElement.clientHeight || parent.defaultView.innerHeight;
+      left = Math.max(left, -dx);
+      top = Math.max(top, -dy);
+      right = Math.min(right, shownRight - dx);
+      bottom = Math.min(bottom, shownBottom - dy);
+      view = parent.defaultView;
+    }
+  } catch {}
   // One pixel in from every edge, so rounding cannot put the press beside it.
-  const left = Math.max(rect.left, 0) + 1;
-  const right = Math.min(rect.right, width) - 1;
-  const top = Math.max(rect.top, 0) + 1;
-  const bottom = Math.min(rect.bottom, height) - 1;
+  left = Math.max(rect.left, left) + 1;
+  right = Math.min(rect.right, right) - 1;
+  top = Math.max(rect.top, top) + 1;
+  bottom = Math.min(rect.bottom, bottom) - 1;
   if (right <= left || bottom <= top) return null;
+  const controlRoles = new Set([
+    "button", "checkbox", "combobox", "link", "listbox", "menuitem", "menuitemcheckbox",
+    "menuitemradio", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "tab",
+    "textbox", "treeitem",
+  ]);
+  const isControl = (node) => {
+    if (!(node instanceof Element)) return false;
+    const role = String(node.getAttribute("role") || "").trim().split(/\\s+/)[0];
+    if (role && controlRoles.has(role)) return true;
+    const tag = node.localName;
+    if (["button", "select", "textarea", "summary", "label"].includes(tag)) return true;
+    if (tag === "input") return node.type !== "hidden";
+    if ((tag === "a" || tag === "area") && node.hasAttribute("href")) return true;
+    if (node.hasAttribute("tabindex") && node.tabIndex >= 0) return true;
+    const editable = node.getAttribute("contenteditable");
+    return editable !== null && editable !== "false";
+  };
+  // The nearest control between the hit and the target, or null.
+  const nestedControl = (hit) => {
+    for (let node = hit; node && node !== element; ) {
+      if (isControl(node)) return node;
+      node = node.assignedSlot ?? node.parentNode ?? null;
+      if (node instanceof ShadowRoot) node = node.host;
+    }
+    return null;
+  };
+  const name = (control) => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const kind = String(control.getAttribute("role") || "").trim().split(" ")[0] || control.localName;
+    const editable = control.matches("input, textarea, select, [contenteditable]");
+    const label = clean(
+      control.getAttribute("aria-label") ||
+        control.getAttribute("title") ||
+        (editable ? "" : control.textContent),
+    ).slice(0, 80);
+    return label ? kind + " " + JSON.stringify(label) : kind;
+  };
   const steps = [0.5, 0.25, 0.75, 0, 1];
   const points = [];
   for (const sy of steps) {
@@ -9755,13 +9833,18 @@ const VISIBLE_PART_FUNCTION = `function() {
     }
   }
   points.sort((a, b) => a.distance - b.distance);
+  let nested = null;
   for (const point of points) {
     const hit = topHit(element, point.x, point.y);
-    if (hit && owns(element, hit)) {
-      return [(point.x - rect.left) / rect.width, (point.y - rect.top) / rect.height];
+    if (!hit || !owns(element, hit)) continue;
+    const control = nestedControl(hit);
+    if (control) {
+      nested = nested ?? control;
+      continue;
     }
+    return [(point.x - rect.left) / rect.width, (point.y - rect.top) / rect.height];
   }
-  return null;
+  return nested ? { nested: name(nested) } : null;
 }`;
 
 // Why a target that nothing else covers takes no pointer input:

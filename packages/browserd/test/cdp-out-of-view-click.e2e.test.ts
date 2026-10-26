@@ -28,9 +28,21 @@ const FIXTURE = `data:text/html,${encodeURIComponent(
     '<div id="column"><div id="panel">',
     '<button style="pointer-events:none">Ghost</button>',
     '<div style="height:3000px"></div>',
-    '</div><div id="header"><nav aria-label="Breadcrumb" id="crumbs"><a href="#list" id="list">List</a></nav><div id="card">Record</div></div></div>',
+    '</div><div id="header"><nav aria-label="Breadcrumb" id="crumbs"><a href="#list" id="list">List</a></nav><div id="card">Record</div></div>',
+    // A card that is itself a button, with its own Delete button in its
+    // footer, and a rotated link; both start out mostly above the window.
+    '<div role="button" aria-label="Open record" id="record" tabindex="0" style="position:absolute;left:300px;top:0;width:200px;height:120px;background:#ddd;transform:translateY(-92px)" onclick="log.push(\'OPEN\')">',
+    '<div style="position:absolute;left:0;right:0;bottom:0;height:28px;display:flex;justify-content:center">',
+    '<button id="delete" style="width:100%;height:28px" onclick="event.stopPropagation();log.push(\'DELETE\')">Delete</button>',
+    "</div></div>",
+    '<a href="#rotated" id="rotated" style="position:absolute;left:700px;top:0;display:block;width:200px;height:60px;background:#cde;transform:translateY(-50px) rotate(35deg)">Rotated</a>',
+    // A same-origin frame pushed 40px above the window, with a link sliding
+    // above the frame's own top: the part the frame shows is still above the
+    // page's window.
+    '<iframe title="Framed" style="position:absolute;left:1000px;top:-40px;width:250px;height:200px;border:0" srcdoc="<a href=&quot;#framed&quot; onclick=&quot;parent.log.push(\'FRAMED\')&quot; style=&quot;position:absolute;left:0;top:-30px;display:block;width:100px;height:40px&quot;>Framed link</a>"></iframe>',
+    "</div>",
     "<script>",
-    "globalThis.clicks=0;",
+    "globalThis.clicks=0;globalThis.log=[];",
     'document.getElementById("list").addEventListener("click",(event)=>{event.preventDefault();clicks++});',
     'const panel=document.getElementById("panel");const header=document.getElementById("header");',
     'panel.addEventListener("scroll",()=>{header.style.transform="translateY("+(-Math.min(panel.scrollTop,40))+"px)"});',
@@ -108,6 +120,41 @@ e2e(
       expect(partial.state).toBe("completed");
       expect(await evaluate("clicks")).toBe(1);
 
+      // Only the card's footer shows, and all of it is the card's own Delete
+      // button: clicking the card must not press Delete.
+      const record = { kind: "role", role: "button", name: "Open record", exact: true } as const;
+      const nested = await click({ type: "click", locator: record });
+      expect(nested.state).toBe("failed");
+      expect(nested.error?.message).toBe(
+        'browser element is out of view apart from button "Delete", a separate control inside it, so a click would reach only that control; scroll the page or panel back to the element, or use another control',
+      );
+      expect(await evaluate("log")).toEqual([]);
+      // With room beside that button, the card itself takes the click.
+      await evaluate('document.getElementById("delete").style.width = "60px"');
+      const card = await click({ type: "click", locator: record });
+      expect(card.state).toBe("completed");
+      expect(await evaluate("log")).toEqual(["OPEN"]);
+
+      // A rotated link whose center is above the window is not sampled on
+      // its unrotated box: it gets the out-of-view refusal.
+      const rotated = await click({
+        type: "click",
+        locator: { kind: "role", role: "link", name: "Rotated", exact: true },
+      });
+      expect(rotated.state).toBe("failed");
+      expect(rotated.error?.message).toBe(
+        "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control",
+      );
+      expect(await evaluate("[clicks, log.length]")).toEqual([1, 1]);
+
+      // Points are kept inside the page's window, not only the frame's.
+      const framed = await click({
+        type: "click",
+        locator: { kind: "role", role: "link", name: "Framed link", exact: true },
+      });
+      expect(framed.error?.message).toContain("browser element is out of view");
+      expect(await evaluate("log")).toEqual(["OPEN"]);
+
       // Wholly above the window: nothing is at its center, and nothing
       // scrolled or moved, so the refusal is definite and says what to do.
       expect(await scrollPanel(100)).toBe(-40);
@@ -146,7 +193,7 @@ e2e(
       });
       expect(ghost.state).toBe("outcome_unknown");
       expect(ghost.error?.message).toContain(
-        "browser element does not take pointer input (pointer-events: none); press Enter on it or use another control",
+        "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control",
       );
     } finally {
       await cdp?.close();
