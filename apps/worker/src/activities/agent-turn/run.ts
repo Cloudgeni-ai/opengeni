@@ -50,11 +50,8 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import {
-  resolveInferenceResidency,
-  withClaudeUsageObserver,
-  withInferenceResidency,
-} from "@opengeni/runtime";
+import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
+import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
 import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
@@ -574,7 +571,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         capabilityServerCategories,
         credentialSubjectId,
         fileAuthoritySubjectId,
-        capabilitySettings,
+        capabilitySettings: claimedCapabilitySettings,
         codexAppsCoreConnectionId,
         turnExecutionPolicy,
         trigger,
@@ -588,7 +585,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
-      resolveInferenceResidency(capabilitySettings);
+      // EU-ONLY INFERENCE — read the workspace's setting again on every
+      // attempt, before any model call: a setting turned on after the claim
+      // still applies. Every later phase uses these settings, so resolution,
+      // run settings and every client carry the requirement, and this
+      // attempt's transport context is bound to it (never widened).
+      const capabilitySettings = await settingsWithTurnInferenceResidency({
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        settings: claimedCapabilitySettings,
+      });
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }

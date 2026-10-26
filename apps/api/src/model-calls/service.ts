@@ -53,7 +53,7 @@ import {
   type SubscriptionCoreCodexOperationScope,
 } from "@opengeni/db";
 import {
-  InferenceRegionRestrictedError,
+  findInferenceRegionRestrictedError,
   MultiProviderModelProvider,
   inferenceResidencyRequirement,
   withInferenceResidency,
@@ -659,13 +659,14 @@ export function publicModelCallError(error: unknown): unknown {
       message: error.message,
     });
   }
-  if (error instanceof InferenceRegionRestrictedError) {
+  const regionRestricted = findInferenceRegionRestrictedError(error);
+  if (regionRestricted) {
     return new ModelCallError({
       status: 422,
       type: "invalid_request_error",
       code: "region_restricted",
       param: "model",
-      message: error.message,
+      message: regionRestricted.message,
     });
   }
   if (error instanceof CodexReloginRequired) return subscriptionReconnectRequired("Codex");

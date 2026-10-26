@@ -38,9 +38,14 @@ Rules:
 - An `eu` claim must also fit its route (`modelResidencyRouteProblems`): a
   Bedrock upstream id with a non-EU inference profile prefix (`us.`,
   `us-gov.`, `apac.`, `jp.`, `au.`, `ca.`, `global.`, any case), a
-  `bedrock_geo_profile` whose id does not start with `eu.`, or an endpoint on a
+  `bedrock_geo_profile` whose id does not start with `eu.`, an endpoint on a
   known global host (`NON_EU_MODEL_HOSTS`, exact host match ignoring a
-  trailing dot) is wrong. Every resolver, including built-in models, treats
+  trailing dot), or a deployment-path endpoint (`.../deployments/{name}`,
+  Azure's form) whose deployment is not the model's upstream id is wrong. Such
+  an endpoint runs its deployment whatever model the request names, so only
+  that one model can be EU on it; this includes the built-in Azure provider
+  configured with `OPENGENI_AZURE_OPENAI_ENDPOINT` and
+  `OPENGENI_AZURE_OPENAI_DEPLOYMENT` and no base URL. Every resolver, including built-in models, treats
   such a claim as unknown. `OPENGENI_MODEL_PROVIDERS_JSON`,
   `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` and the catalog upsert refuse it; a
   stored database document is never refused for it, so a later release that
@@ -122,18 +127,32 @@ EU route, and nothing falls back to a route that is not EU.
   `instrumentedModelFetch`, which checks each request before it is sent:
   - A client built from EU settings carries the requirement, so it refuses any
     request whose provider and request-body model are not an EU route
-    (`euModelRoutes`), wherever it is used. Clients for EU and other settings
-    are never shared through the client cache.
+    (`euModelRoutes`), wherever it is used. When the URL calls a deployment by
+    path (`/openai/deployments/{name}/`), that deployment must be an EU route
+    too, because the provider runs it rather than the body's model. Clients
+    for EU and other settings are never shared through the client cache.
+  - The body's model is read from the object an SDK request body encodes, so
+    a request is never buffered for the check; only other stream bodies are
+    read from a copy.
   - The run's context (`withInferenceResidency`) adds the same check for
     clients built before the setting was known. A worker turn starts with an
     unresolved context that refuses every request until the claim binds it,
-    and an EU context never widens again.
-  - Other provider requests with a body (images, audio, files) are refused
-    under EU; reads such as model lists pass. Side features check their own
-    routes before calling.
-- **Worker.** Each attempt reads the setting again before any model call, so a
-  setting turned on after the claim still applies, and refuses a turn whose
-  resolved route is not EU.
+    and an EU context never widens again. A nested context applies on top of
+    the contexts around it: their requirements combine, and it refuses while
+    any of them is unresolved.
+  - Other provider requests (images, audio, files) are refused under EU unless
+    they are `GET` or `HEAD` reads such as model lists, with or without a
+    body. Side features check their own routes before calling.
+  - A refusal is final. The OpenAI SDK does not retry it and surfaces the
+    typed error itself, not a connection error.
+- **Worker.** Each attempt reads the setting again right after its claim and
+  before any model call (`settingsWithTurnInferenceResidency`), so a setting
+  turned on after the claim still applies. The narrowed settings replace the
+  claim's for the rest of the attempt: resolution, run settings and every
+  client built from them carry the requirement. A turn whose route is not EU
+  fails once with `region_restricted`, not retryable, however an SDK wrapped
+  the refusal. A turn already running keeps its route until its next attempt;
+  the transport check still applies to every request it sends.
 - **API.** The model-call API returns `422` with code `region_restricted`.
 
 A refusal is `InferenceRegionRestrictedError` (code `region_restricted`), whose

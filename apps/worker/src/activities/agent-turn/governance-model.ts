@@ -49,7 +49,7 @@ import { createTurnMediaArtifacts } from "./media-artifacts";
 import { retryWhileMissing } from "@opengeni/storage";
 import { measureTurnStartupPhase } from "../../observability-metrics";
 import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
-import { assertTurnInferenceResidency } from "./inference-residency-gate";
+import { assertTurnModelInferenceResidency } from "./inference-residency-gate";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
@@ -453,14 +453,10 @@ export async function prepareGovernanceAndModel(
         organizationModelDefaults,
       )
     : runSettings;
-  // EU-ONLY INFERENCE — read the workspace's setting again on every attempt,
-  // so a setting turned on after the claim still applies, and refuse any turn
-  // whose live route is not EU before any model call. The transport guard is
-  // narrowed to EU for the rest of the attempt (never widened).
-  await assertTurnInferenceResidency({
-    db,
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
+  // EU-ONLY INFERENCE — the attempt's settings were narrowed right after the
+  // claim (settingsWithTurnInferenceResidency), so resolution above already
+  // refused a non-EU route; refuse an unresolved one too, before any model call.
+  assertTurnModelInferenceResidency({
     settings: capabilitySettings,
     resolvedModel,
     productModelId: turnExecutionPolicy.productModelId,

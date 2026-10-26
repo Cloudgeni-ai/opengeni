@@ -704,6 +704,7 @@ export {
 export {
   InferenceRegionRestrictedError,
   currentInferenceResidency,
+  findInferenceRegionRestrictedError,
   inferenceResidencyRequirement,
   resolveInferenceResidency,
   withInferenceResidency,

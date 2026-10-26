@@ -66,6 +66,7 @@ import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import {
   recordModelTransportDispatched,
   recordModelTransportStarted,
+  refuseModelTransport,
 } from "./model-preparation-diagnostics";
 import { captureProviderRequestBody } from "./model-request-capture";
 import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
@@ -773,11 +774,20 @@ export function instrumentedModelFetch(
     if (!isModelCallFetch(input)) {
       // Under EU-only inference, other provider endpoints that carry content
       // (images, audio, files) are refused here; reads such as model lists pass.
-      assertInferenceResidencyForOtherRequest(provider, input, init, residency);
+      try {
+        assertInferenceResidencyForOtherRequest(provider, input, init, residency);
+      } catch (error) {
+        refuseModelTransport(error);
+      }
       return await inner(input, init);
     }
-    // EU-only inference: refuse a non-EU route before anything is sent.
-    init = await assertInferenceResidencyForRequest(provider, input, init, residency);
+    // EU-only inference: refuse a non-EU route before anything is sent. The
+    // refusal is final: the SDK must neither retry it nor wrap it.
+    try {
+      init = await assertInferenceResidencyForRequest(provider, input, init, residency);
+    } catch (error) {
+      refuseModelTransport(error);
+    }
     const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
     init = prepared.init;
     // The attempt-local observer durably checkpoints provider dispatch before

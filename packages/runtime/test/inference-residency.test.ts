@@ -1,15 +1,18 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { euModelRoutes, type Settings } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   InferenceRegionRestrictedError,
   MultiProviderModelProvider,
+  currentInferenceResidency,
+  findInferenceRegionRestrictedError,
   inferenceResidencyRequirement,
   resolveInferenceResidency,
   resolveTurnModel,
   withInferenceResidency,
 } from "../src";
 import { instrumentedModelFetch } from "../src/model-provider-client";
+import { ReplayableJsonOpenAI } from "../src/replayable-json-body";
 
 const euDataZone = {
   geography: "eu",
@@ -122,6 +125,10 @@ describe("EU-only inference enforcement", () => {
     await expect(
       guarded("https://res.openai.azure.com/openai/v1/images/generations", post("gpt-eu")),
     ).rejects.toThrow(InferenceRegionRestrictedError);
+    // Any method other than a read is refused, with or without a body.
+    await expect(
+      guarded("https://res.openai.azure.com/openai/v1/files/file-1", { method: "DELETE" }),
+    ).rejects.toThrow(InferenceRegionRestrictedError);
     expect(sent).toHaveLength(1);
   });
 
@@ -189,5 +196,174 @@ describe("EU-only inference enforcement", () => {
     const euModel = resolveTurnModel(eu(), "azure-eu/gpt-eu")!;
     const openModel = resolveTurnModel(settings(), "azure-eu/gpt-eu")!;
     expect(euModel.client).not.toBe(openModel.client);
+  });
+
+  test("an SDK client surfaces a refusal once, as the typed error, without retrying", async () => {
+    const { sent, inner } = recordingFetch();
+    const guarded = instrumentedModelFetch(
+      "azure-eu",
+      inner,
+      false,
+      inferenceResidencyRequirement(eu()),
+    );
+    let attempts = 0;
+    const client = new ReplayableJsonOpenAI({
+      apiKey: "key",
+      baseURL: "https://res.openai.azure.com/openai/v1",
+      maxRetries: 2,
+      fetch: (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        attempts += 1;
+        return await guarded(input, init);
+      }) as typeof fetch,
+    });
+    const error = await client.responses
+      .create({ model: "gpt-global-eu", input: "hi" })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(InferenceRegionRestrictedError);
+    expect(attempts).toBe(1);
+    expect(sent).toHaveLength(0);
+  });
+
+  test("a client resolved for an EU-only run refuses a non-EU body once, with retries on", async () => {
+    const network = spyOn(globalThis, "fetch").mockImplementation(
+      (async () => new Response("{}", { status: 500 })) as unknown as typeof fetch,
+    );
+    try {
+      const resolved = resolveTurnModel(
+        settings({ requiredModelGeography: "eu", openaiMaxRetries: 2 }),
+        "azure-eu/gpt-eu",
+      )!;
+      const error = await resolved.client.responses
+        .create({ model: "gpt-global-eu", input: "hi" })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(InferenceRegionRestrictedError);
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      network.mockRestore();
+    }
+  });
+
+  test("a wrapped refusal is still found on the cause chain", () => {
+    const refusal = new InferenceRegionRestrictedError("gpt-global-eu");
+    const wrapped = new Error("Connection error.", { cause: new Error("x", { cause: refusal }) });
+    expect(findInferenceRegionRestrictedError(wrapped)).toBe(refusal);
+    expect(findInferenceRegionRestrictedError(refusal)).toBe(refusal);
+    expect(findInferenceRegionRestrictedError(new Error("other"))).toBeNull();
+    const cyclic = new Error("cyclic") as Error & { cause?: unknown };
+    cyclic.cause = cyclic;
+    expect(findInferenceRegionRestrictedError(cyclic)).toBeNull();
+  });
+
+  test("an SDK request body is checked from its source object, without buffering it", async () => {
+    const outerBodies: unknown[] = [];
+    const innerBodies: unknown[] = [];
+    const inner = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      innerBodies.push(init?.body);
+      await new Response(init?.body as ReadableStream).text();
+      return new Response(JSON.stringify({ id: "resp", output: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    const guarded = instrumentedModelFetch(
+      "azure-eu",
+      inner,
+      false,
+      inferenceResidencyRequirement(eu()),
+    );
+    const client = new ReplayableJsonOpenAI({
+      apiKey: "key",
+      baseURL: "https://res.openai.azure.com/openai/v1",
+      maxRetries: 0,
+      fetch: (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        outerBodies.push(init?.body);
+        return await guarded(input, init);
+      }) as typeof fetch,
+    });
+    await client.responses.create({ model: "gpt-eu", input: "hi" });
+    expect(outerBodies[0]).toBeInstanceOf(ReadableStream);
+    // The same stream reaches the network: it was neither tee'd nor read.
+    expect(innerBodies).toHaveLength(1);
+    expect(innerBodies[0]).toBe(outerBodies[0]);
+  });
+
+  test("a nested context never widens an EU or unresolved parent", async () => {
+    const { sent, inner } = recordingFetch();
+    const unbound = instrumentedModelFetch("azure-eu", inner);
+    await withInferenceResidency(eu(), async () => {
+      await withInferenceResidency(settings(), async () => {
+        expect(currentInferenceResidency()?.requirement?.geography).toBe("eu");
+        await unbound(URL_RESPONSES, post("gpt-eu"));
+        await expect(unbound(URL_RESPONSES, post("gpt-global-eu"))).rejects.toThrow(
+          InferenceRegionRestrictedError,
+        );
+      });
+    });
+    await withInferenceResidency(null, async () => {
+      await withInferenceResidency(settings(), async () => {
+        expect(currentInferenceResidency()?.resolved).toBe(false);
+        await expect(unbound(URL_RESPONSES, post("gpt-global-eu"))).rejects.toThrow(
+          InferenceRegionRestrictedError,
+        );
+      });
+      // The parent's own later binding still applies to contexts nested afterwards.
+      resolveInferenceResidency(eu());
+      await withInferenceResidency(settings(), async () => {
+        await unbound(URL_RESPONSES, post("gpt-eu"));
+        await expect(unbound(URL_RESPONSES, post("gpt-global-eu"))).rejects.toThrow(
+          InferenceRegionRestrictedError,
+        );
+      });
+    });
+    // A nested EU context narrows an open parent.
+    await withInferenceResidency(settings(), async () => {
+      await withInferenceResidency(eu(), async () => {
+        await expect(unbound(URL_RESPONSES, post("gpt-global-eu"))).rejects.toThrow(
+          InferenceRegionRestrictedError,
+        );
+      });
+      await unbound(URL_RESPONSES, post("gpt-global-eu"));
+    });
+    expect(sent).toHaveLength(3);
+  });
+
+  test("a deployment-path URL is checked against the deployment it calls", async () => {
+    const { sent, inner } = recordingFetch();
+    const guarded = instrumentedModelFetch(
+      "azure-eu",
+      inner,
+      false,
+      inferenceResidencyRequirement(eu()),
+    );
+    const deployment = (name: string) =>
+      `https://res.openai.azure.com/openai/deployments/${name}/responses?api-version=2025-04-01-preview`;
+    // The body names the EU route, but Azure runs the deployment in the URL.
+    await expect(guarded(deployment("gpt-global-standard"), post("gpt-eu"))).rejects.toThrow(
+      InferenceRegionRestrictedError,
+    );
+    await guarded(deployment("gpt-eu"), post("gpt-eu"));
+    expect(sent).toHaveLength(1);
+  });
+
+  test("built-in Azure deployment-path mode refuses a model that is not its deployment", () => {
+    const builtin = (deployment: string) =>
+      testSettings({
+        openaiProvider: "azure",
+        azureOpenaiEndpoint: "https://res.openai.azure.com",
+        azureOpenaiDeployment: deployment,
+        azureOpenaiApiVersion: "2025-04-01-preview",
+        azureOpenaiApiKey: "az-key",
+        openaiModel: "gpt-eu",
+        builtinModelResidencyJson: JSON.stringify({ "gpt-eu": euDataZone }),
+        requiredModelGeography: "eu",
+      });
+    // Requests would reach gpt-global-standard, so the gpt-eu claim does not hold.
+    expect(() => resolveTurnModel(builtin("gpt-global-standard"), "gpt-eu")).toThrow(
+      InferenceRegionRestrictedError,
+    );
+    expect(() =>
+      new MultiProviderModelProvider(builtin("gpt-global-standard")).resolveBinding("gpt-eu"),
+    ).toThrow(InferenceRegionRestrictedError);
+    expect(resolveTurnModel(builtin("gpt-eu"), "gpt-eu")?.configured.id).toBe("gpt-eu");
   });
 });

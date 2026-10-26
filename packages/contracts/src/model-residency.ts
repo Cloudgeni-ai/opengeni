@@ -206,10 +206,35 @@ function hostOf(baseUrl: string): string | null {
 }
 
 /**
+ * The deployment an endpoint URL calls, from its `/deployments/{name}` path
+ * segment (Azure OpenAI's deployment-path form), or null. Such an endpoint
+ * runs that deployment whatever model the request body names.
+ */
+export function modelEndpointDeployment(url: string | URL): string | null {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return null;
+  }
+  const segments = pathname.split("/");
+  const index = segments.lastIndexOf("deployments");
+  const name = index >= 0 ? segments[index + 1] : undefined;
+  if (!name) return null;
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
+/**
  * Problems that make an EU claim wrong for the route it is declared on: a
  * Bedrock upstream id with a non-EU inference profile prefix, a Bedrock
- * geographic profile that is not `eu.`, or an endpoint on a known global host.
- * Every resolver applies it. Names only ever reject a claim, never grant one.
+ * geographic profile that is not `eu.`, an endpoint on a known global host,
+ * or a deployment-path endpoint that calls a different deployment than the
+ * model. Every resolver applies it. Names only ever reject a claim, never
+ * grant one.
  */
 export function modelResidencyRouteProblems(
   residency: { geography: ModelProcessingGeography; deploymentType: ModelDeploymentType },
@@ -243,6 +268,13 @@ export function modelResidencyRouteProblems(
     problems.push({
       path: ["baseUrl"],
       message: `${host} routes outside the EU, so a route on it cannot be declared eu`,
+    });
+  }
+  const deployment = route.baseUrl ? modelEndpointDeployment(route.baseUrl) : null;
+  if (deployment !== null && deployment !== (route.upstreamModelId ?? "")) {
+    problems.push({
+      path: ["baseUrl"],
+      message: `the endpoint calls deployment ${deployment}, not ${route.upstreamModelId ?? "this model"}, so only ${deployment} can be declared eu on it`,
     });
   }
   return problems;

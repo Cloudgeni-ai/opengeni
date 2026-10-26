@@ -10,6 +10,7 @@
 export { MultiProviderModelProvider } from "./model-provider-routing";
 export {
   InferenceRegionRestrictedError,
+  findInferenceRegionRestrictedError,
   inferenceResidencyRequirement,
   withInferenceResidency,
 } from "./inference-residency";
