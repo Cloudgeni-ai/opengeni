@@ -3,6 +3,7 @@ import {
   createRecordingTranscriptionProviderRegistry,
   RecordingTranscriptionError,
   TranscriptionBillingRefusedError,
+  TranscriptionServiceError,
   type RecordingDiarizer,
   type RecordingWordAligner,
   type RecordingTranscriptionProvider,
@@ -463,6 +464,50 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
     expect(version).toMatchObject({ state: "failed", errorCode: "missing_provider_key" });
   });
 
+  test("a retry asks the provider afresh, under a request identity no attempt used", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage);
+    // Like a subscription provider: one request identity is sent at most once.
+    const sent = new Set<string>();
+    let lost = true;
+    const provider = fakeProvider(async (request) => {
+      const identity = request.scope!.requestId;
+      if (sent.has(identity)) {
+        throw new RecordingTranscriptionError("already sent", "network", true);
+      }
+      sent.add(identity);
+      // The first attempt's worker goes away mid-meeting.
+      if (lost) throw new RecordingTranscriptionError("lost", "network", true);
+      return {
+        languages: ["eng"],
+        audioMilliseconds: 2_000,
+        diarized: false,
+        words: [
+          {
+            text: "Again.",
+            startMilliseconds: 100,
+            endMilliseconds: 400,
+            speaker: null,
+            spaceBefore: false,
+          },
+        ],
+      };
+    });
+    await expect(
+      activities(storage, provider).activities.transcribeRecordingVersion(recording.input),
+    ).rejects.toMatchObject({ type: "provider_network" });
+    lost = false;
+    expect(
+      await activities(storage, provider).activities.transcribeRecordingVersion(recording.input),
+    ).toEqual({ outcome: "complete" });
+    expect([...sent]).toEqual([
+      `${recording.input.versionId}:a1:0`,
+      `${recording.input.versionId}:a2:0`,
+      `${recording.input.versionId}:a2:1`,
+    ]);
+  });
+
   test("a meeting can't use a model that returns only text, and sends it no audio", async () => {
     if (!client) return;
     const storage = memoryStorage();
@@ -760,6 +805,42 @@ describe.skipIf(!hasFfmpeg)("dictation transcription activity", () => {
     ).rejects.toThrow();
     // Already gone is done.
     expect(await run.expireDictation(dictation.input)).toEqual({ deleted: 0, purged: false });
+  });
+
+  test("a retried dictation asks afresh and is still billed once per piece", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const dictation = await capturedDictation(storage);
+    const calls: TranscriptionRequest[] = [];
+    let lost = true;
+    const run = dictationActivities(storage, async (request) => {
+      calls.push(request);
+      if (lost) {
+        throw new TranscriptionServiceError({ code: "network", message: "lost", retryable: true });
+      }
+      return {
+        text: "Again.",
+        languages: ["en"],
+        providerId: "voice-one",
+        audioSeconds: 3,
+        latencyMs: 5,
+        creditCostMicros: 1_200,
+      };
+    });
+    await expect(run.transcribeRecordingVersion(dictation.input)).rejects.toMatchObject({
+      type: "voice_network",
+    });
+    lost = false;
+    expect(await run.transcribeRecordingVersion(dictation.input)).toMatchObject({
+      outcome: "complete",
+    });
+    expect(calls.map((call) => call.requestId)).toEqual([
+      `${dictation.input.versionId}:a1:0`,
+      `${dictation.input.versionId}:a2:0`,
+    ]);
+    expect(new Set(calls.map((call) => call.billing!.sourceId))).toEqual(
+      new Set([`${dictation.input.recordingId}:${dictation.input.versionId}:0`]),
+    );
   });
 
   test("a credit refusal fails the dictation without retrying", async () => {

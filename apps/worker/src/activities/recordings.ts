@@ -673,7 +673,10 @@ export function createRecordingActivities(
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               subjectId: input.ownerSubjectId,
-              requestId: `${input.versionId}:${plan.trackNumber}`,
+              // Each attempt asks afresh: a provider never sends a request
+              // identity twice, so reusing the last attempt's would refuse
+              // every retry after a lost worker or a provider failure.
+              requestId: `${input.versionId}:a${job.attempt}:${plan.trackNumber}`,
             },
           };
           const onPiece = (piece: number) =>
@@ -910,7 +913,8 @@ export function createRecordingActivities(
                   audio: piece.bytes,
                   mimeType: piece.mimeType,
                   durationSeconds: piece.durationMilliseconds / 1_000,
-                  requestId: `${input.versionId}:${piece.segmentNumber}`,
+                  // A fresh request per attempt; billing stays per piece below.
+                  requestId: `${input.versionId}:a${claimed.attempt}:${piece.segmentNumber}`,
                   ...(signal ? { signal } : {}),
                   preferredProvider: pinned ?? voiceInput?.preferredProvider,
                   fallbackEnabled: voiceInput?.fallbackEnabled,

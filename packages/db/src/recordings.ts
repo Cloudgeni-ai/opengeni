@@ -1694,6 +1694,12 @@ export type RecordingTranscriptionJob = {
   processingOwner: string;
   /** How long the version waited before its first attempt; null on later attempts. */
   queuedMilliseconds: number | null;
+  /**
+   * Which attempt at this version this claim is, from 1. It counts every
+   * claim, also those of a workflow started again, so each attempt can ask
+   * the provider afresh under its own request identity.
+   */
+  attempt: number;
 };
 
 /**
@@ -1767,6 +1773,7 @@ export async function claimRecordingTranscriptVersion(
         claimed.attemptCount === 1 && claimed.processingStartedAt
           ? Math.max(0, claimed.processingStartedAt.getTime() - claimed.createdAt.getTime())
           : null,
+      attempt: claimed.attemptCount,
     };
   });
 }
