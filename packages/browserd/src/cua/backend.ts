@@ -144,6 +144,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * checked against a fresh observation, which mints new refs, so the ref is
    * resolved in the observation it came from and CUA validates its token. */
   private readonly recentObservations = new Map<string, ComputerBackendObservation[]>();
+  /** Readings the app did not answer (see unansweredObservation). They show
+   * no focused element, so keys are not sent on them. */
+  private readonly unansweredReadings = new WeakSet<ComputerBackendObservation>();
   /** CUA's element token behind each ref of a window's latest reading. CUA
    * accepts only the tokens of a window's latest snapshot; a ref outlives
    * readings for as long as its element stays (see stabilizeRefs). */
@@ -1443,7 +1446,8 @@ export class CuaComputerBackend implements ComputerBackend {
    * That says nothing about the window, and CUA keeps its last snapshot, so
    * the refs of the last reading stay the ones actions resolve. The reading
    * itself lists no elements and says it stopped because the app answered
-   * too slowly, beside the screenshot, instead of failing. */
+   * too slowly, beside the screenshot, instead of failing. It shows no
+   * focused element, so keys are refused on it (see unansweredReadings). */
   private unansweredObservation(
     targetId: string,
     target: Target,
@@ -1472,6 +1476,7 @@ export class CuaComputerBackend implements ComputerBackend {
     const last = this.observations.get(targetId);
     // An action naming this reading acts on the last one's elements.
     const actedOn = last ? { ...last, observationId: observation.observationId } : observation;
+    this.unansweredReadings.add(actedOn);
     if (last) {
       const signs = this.progress.get(last);
       if (signs) this.progress.set(actedOn, signs);
@@ -2125,6 +2130,15 @@ export class CuaComputerBackend implements ComputerBackend {
         },
       ];
     }
+    // A reading the app did not answer showed no focused element: keys sent
+    // on it would go to one the caller never saw.
+    if (!laterInBatch && this.unansweredReadings.has(observed))
+      throw new ComputerBackendError(
+        "invalid_action",
+        "The app did not answer the latest reading of this window, so it shows no focused element and no keys were sent: observe the window again, then send them",
+        false,
+        false,
+      );
     // Window-scoped delivery never falls back to the foreground desktop. An
     // observed focused element is carried when CUA supplies that information.
     // After earlier actions of a batch the focus may have moved (clicking a

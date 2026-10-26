@@ -1114,6 +1114,27 @@ describe("CUA desktop boundary", () => {
       expect(unanswered.roots).toEqual([]);
       expect(unanswered.incomplete).toEqual({ reason: "time_budget", unreadCount: 1 });
       expect(unanswered.observationId).not.toBe(first.observationId);
+      // It shows no focused element, so keys sent on it are refused rather
+      // than sent to the last reading's focused element.
+      for (const keys of [
+        { type: "keyboard", action: "press", value: "Enter" },
+        { type: "keyboard", action: "type", value: "Hello" },
+      ] as const)
+        await expect(
+          backend.dispatch({
+            ...command(first),
+            expectedObservationId: unanswered.observationId,
+            action: keys,
+          }),
+        ).rejects.toMatchObject({
+          code: "invalid_action",
+          dispatched: false,
+          message:
+            "The app did not answer the latest reading of this window, so it shows no focused element and no keys were sent: observe the window again, then send them",
+        });
+      expect(
+        fixture.calls.filter((call) => call.name === "press_key" || call.name === "type_text"),
+      ).toEqual([]);
       // A ref of the last reading still acts, naming the unanswered reading.
       await backend.dispatch({
         ...command(first),
