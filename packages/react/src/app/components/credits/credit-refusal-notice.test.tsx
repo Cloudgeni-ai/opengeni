@@ -120,6 +120,25 @@ test("people who cannot buy credits are not offered a purchase", async () => {
   expect(container.textContent).toContain(SERVER_MESSAGE);
 });
 
+test("with no credit for any model it says so plainly, not the promotional-credit advice", async () => {
+  const gap = { modelLabel: "Assistant", covered: [], selectionUsable: false };
+  const container = await render({ gap });
+  const alert = container.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toContain("Add credits to start chatting");
+  expect(alert.textContent).toContain(
+    "Chats here are paid with Opengeni credits, and you don't have any right now.",
+  );
+  expect(alert.textContent).not.toContain("don't cover");
+  expect(alert.textContent).not.toContain("promotional");
+  await act(async () => root!.unmount());
+  const inChat = await render({ gap, continuing: true });
+  expect(inChat.textContent).toContain("Add credits to keep chatting");
+  await act(async () => root!.unmount());
+  const member = await render({ gap, canBuyCredits: false });
+  expect(member.textContent).toContain("No credits left");
+  expect(member.textContent).toContain("Ask an organization owner to add some.");
+});
+
 test("the refusal shows the server's sentence, not the SDK's status prefix or reference", async () => {
   // OpenGeniApiError.message for a 402 from the API, as the routes pass it.
   const container = await render({

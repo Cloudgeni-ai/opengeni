@@ -120,7 +120,9 @@ const { DirectModelProviderForm } = await import("@/components/direct-model-prov
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
 const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-token");
-const { clearPendingDeveloperSetup } = await import("@/lib/pending-developer-setup");
+const { clearPendingDeveloperSetup, pendingDeveloperSetupFor } =
+  await import("@/lib/pending-developer-setup");
+const { signupStarterSet } = await import("@opengeni/react/app/lib/signup-starter-set");
 const VALID_FRAGMENT_SETUP_TOKEN = "A".repeat(43);
 const VALID_QUERY_SETUP_TOKEN = "B".repeat(43);
 
@@ -1740,6 +1742,31 @@ describe("organization onboarding UI", () => {
       expect(container.querySelector("#organization-onboarding-name")).toBeNull();
       expect(container.textContent).toContain("Choose how to power your chats");
       expect(completeSelfServiceSetup).toHaveBeenCalledTimes(1);
+      // The changed answer is the one remembered: the new chat leads with the
+      // product suggestions, and a reload resumes the developer path.
+      const created = (await completeSelfServiceSetup.mock.results[0]!.value) as {
+        organizationId: string;
+      };
+      expect(signupStarterSet("anna@example.test", created.organizationId)).toBe("product");
+      expect(pendingDeveloperSetupFor("anna@example.test")?.organizationId).toBe(
+        created.organizationId,
+      );
+      await clickButton(container, "Back");
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Run agents in the cloud"))!
+          .click(),
+      );
+      await flush();
+      expect(signupStarterSet("anna@example.test", created.organizationId)).toBe("general");
+      expect(pendingDeveloperSetupFor("anna@example.test")).toBeNull();
+      await clickButton(container, "Back");
+      await act(async () =>
+        Array.from(container.querySelectorAll<HTMLButtonElement>("li button"))
+          .find((button) => button.textContent?.includes("Add AI agents to my product"))!
+          .click(),
+      );
+      await flush();
       await clickButton(container, "Skip for now");
       await flush();
       expect(onComplete).not.toHaveBeenCalled();
@@ -1750,6 +1777,7 @@ describe("organization onboarding UI", () => {
       // later tests start fresh.
       clearPendingDeveloperSetup();
       window.sessionStorage.clear();
+      window.localStorage.removeItem("opengeni.signupUseCase.v1");
       await act(async () => root.unmount());
       container.remove();
     }

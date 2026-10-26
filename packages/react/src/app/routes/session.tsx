@@ -3490,6 +3490,7 @@ function SessionChatPane(props: {
           workspaceId={props.session.workspaceId}
           canBuyCredits={canBuyCredits}
           canConnectModel={canConnectModel}
+          continuing
           onChooseModel={modelPickerDisabled ? undefined : chooseCoveredModel}
           onAddCredits={openCreditTopup}
           onDismiss={() => setCreditRefusal(null)}

@@ -13,6 +13,8 @@ import type { FreeCreditGap } from "../../lib/free-credit-gap";
  * Stays above the composer until the next accepted message, so the refusal is
  * not only a short line under a failed bubble: it names the model, the
  * server's reason, the models the remaining credit covers, and the next step.
+ * When no credit covers any model, it says that plainly instead, in the same
+ * words as the notice shown before the first Send.
  */
 export function CreditRefusalNotice({
   gap,
@@ -20,6 +22,7 @@ export function CreditRefusalNotice({
   workspaceId,
   canBuyCredits,
   canConnectModel,
+  continuing = false,
   onChooseModel,
   onAddCredits,
   onDismiss,
@@ -30,6 +33,8 @@ export function CreditRefusalNotice({
   workspaceId: string;
   canBuyCredits: boolean;
   canConnectModel: boolean;
+  /** The chat already has messages, so "keep chatting" reads true. */
+  continuing?: boolean | undefined;
   /** Select a covered model in the composer. */
   onChooseModel?: ((id: string) => void) | undefined;
   /** Opens the add-credits prompt on this page; without it, Add credits opens billing. */
@@ -43,13 +48,29 @@ export function CreditRefusalNotice({
       ? `Your credits cover ${modelListSummary(gap.covered.map((model) => model.label))}.`
       : null;
   const connect = canConnectModel && gap.covered.length === 0 && !gap.selectionUsable;
+  // Nothing left to switch to: the person has no credit for any model, so the
+  // server's advice to pick a model covered by promotional credit doesn't apply.
+  const noCredit = gap.covered.length === 0 && !gap.selectionUsable;
   // The server's sentence, without the SDK's "API 402:" prefix or the reference.
-  const reason = message ? apiErrorFacts(message).serverMessage : undefined;
+  const reason = noCredit
+    ? canBuyCredits
+      ? "Chats here are paid with Opengeni credits, and you don't have any right now."
+      : "Chats here are paid with Opengeni credits, and there are none left. Ask an organization owner to add some."
+    : message
+      ? apiErrorFacts(message).serverMessage
+      : undefined;
+  const title = noCredit
+    ? canBuyCredits
+      ? continuing
+        ? "Add credits to keep chatting"
+        : "Add credits to start chatting"
+      : "No credits left"
+    : `Your credits don't cover ${gap.modelLabel}`;
   return (
     <Notice
-      tone="failed"
+      tone={noCredit ? "waiting" : "failed"}
       live="assertive"
-      title={`Your credits don't cover ${gap.modelLabel}`}
+      title={title}
       {...(onDismiss ? { onDismiss } : {})}
     >
       <span data-testid="credit-refusal-notice">

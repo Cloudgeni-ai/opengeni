@@ -53,7 +53,10 @@ import {
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
 import type { OrganizationInvitation } from "@opengeni/react/app/types";
-import { rememberPendingDeveloperSetup } from "@/lib/pending-developer-setup";
+import {
+  clearPendingDeveloperSetup,
+  rememberPendingDeveloperSetup,
+} from "@/lib/pending-developer-setup";
 import { rememberSignupUseCase } from "@opengeni/react/app/lib/signup-starter-set";
 import { personalOrganizationName } from "@/lib/personal-organization-name";
 
@@ -624,15 +627,25 @@ export function OrganizationOnboardingPanel({
       <OnboardingUseCaseStep
         onChoose={(choice) => {
           if (!previewState) onboardingJourney().completed("use_case", choice);
-          // Back from the model step: the organization exists, so the
-          // developer path skips its name and resumes after a reload like
-          // one that started there.
-          if (createdSetup && choice === "embed" && activeEmail && !previewState) {
-            rememberPendingDeveloperSetup({
+          // Back from the model step: the organization exists, so the new
+          // answer replaces the remembered one (the new-chat suggestions follow
+          // it), and the developer path skips its name and resumes after a
+          // reload like one that started there.
+          if (createdSetup && activeEmail && !previewState) {
+            rememberSignupUseCase({
               account: activeEmail,
               organizationId: createdSetup.organizationId,
-              organizationName: organizationName.trim(),
+              useCase: choice,
             });
+            if (choice === "embed") {
+              rememberPendingDeveloperSetup({
+                account: activeEmail,
+                organizationId: createdSetup.organizationId,
+                organizationName: organizationName.trim(),
+              });
+            } else {
+              clearPendingDeveloperSetup();
+            }
           }
           setUseCase(choice);
         }}

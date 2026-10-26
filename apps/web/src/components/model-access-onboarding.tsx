@@ -703,7 +703,9 @@ export function ModelAccessOnboardingPanel({
     <ListRow
       leading={<OpenGeniCreditsTile size="lg" />}
       title={startingCredits || won ? "Buy more Opengeni credits" : "Opengeni credits"}
-      meta={["Pay as you go", "No provider account needed"]}
+      // Short enough for one line at phone width; the row under it names
+      // provider accounts, so "nothing to set up" says the difference.
+      meta={["Pay as you go", "Nothing to set up"]}
       indicator="expand"
       expanded={open === "credits"}
       panel={open === "credits" ? creditsPanel : null}

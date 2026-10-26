@@ -24,7 +24,8 @@ export function followCheckoutPageReturn(
   wait: { signal?: AbortSignal | undefined; intervalMs?: number | undefined } = {},
 ): void {
   if (checkout.outcome === "cancelled") {
-    toast("Checkout cancelled", { description: "No charge was made." });
+    // One id, so a second read of the same return (a remount) shows it once.
+    toast("Checkout cancelled", { id: "checkout-cancelled", description: "No charge was made." });
     return;
   }
   const { accountId, checkoutSessionId } = checkout;
