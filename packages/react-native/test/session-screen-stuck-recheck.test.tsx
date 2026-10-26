@@ -138,7 +138,7 @@ const { OpenGeniContext } = await import("../../react/src/session-context");
 const { useSessionControl } = await import("../../react/src/hooks/use-session-control");
 const { flush } = await import("../../react/test/render-hook");
 
-const session = {
+const grantBlockedSession = {
   id: "session-a",
   workspaceId: "workspace-a",
   status: "requires_action",
@@ -162,8 +162,14 @@ function deferred() {
 }
 
 const resumes: { args: unknown[]; done: ReturnType<typeof deferred> }[] = [];
+let session: Omit<typeof grantBlockedSession, "activeSandboxId" | "admissionBlock"> & {
+  activeSandboxId: string | null;
+  admissionBlock: Record<string, string>;
+} = grantBlockedSession;
+let machinesResponse: unknown = null;
 const client = new Proxy(
   {
+    listMachines: async () => machinesResponse,
     resumeSession: (...args: unknown[]) => {
       const done = deferred();
       resumes.push({ args, done });
@@ -181,6 +187,8 @@ const client = new Proxy(
 beforeEach(() => {
   resumes.length = 0;
   timelineFailure = null;
+  session = grantBlockedSession;
+  machinesResponse = null;
 });
 
 const noop = async () => {};
@@ -337,4 +345,46 @@ test("a chat that fails to draw offers Retry instead of taking the app down", as
   } finally {
     console.error = errors;
   }
+});
+
+const ownerOnlySession = {
+  ...grantBlockedSession,
+  activeSandboxId: "owner-laptop",
+  admissionBlock: {
+    reason: "database_claim_rejected",
+    sqlState: "42501",
+    retryPolicy: "explicit_recheck",
+    blockedAt: "2026-10-26T18:46:43Z",
+  },
+};
+
+// Machine reads are cached per client, so this runs before machine access is known.
+test("without machine access the same refusal reads as a permission check, with the web's words", async () => {
+  session = ownerOnlySession;
+  const view = await renderComponent(createElement(Screen));
+  await flush();
+  expect(view.container.textContent).toContain("Permission needed");
+  expect(view.container.textContent).toContain("The next step was blocked by a permission check.");
+  await view.unmount();
+});
+
+test("a message refused on someone else's personal machine says only its owner can start work there", async () => {
+  session = ownerOnlySession;
+  machinesResponse = {
+    activeSandboxId: "owner-laptop",
+    activeEpoch: 1,
+    machines: [],
+    sessionMachineAccess: {
+      sandboxId: "owner-laptop",
+      machineName: "Kari's laptop",
+      ownerName: "Kari",
+      isOwner: false,
+      queuedTurnBlocked: true,
+    },
+  };
+  const view = await renderComponent(createElement(Screen));
+  await flush();
+  expect(view.container.textContent).toContain("This message needs a different machine");
+  expect(view.container.textContent).toContain("Only Kari can start new work there.");
+  await view.unmount();
 });

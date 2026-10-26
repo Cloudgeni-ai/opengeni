@@ -2,6 +2,7 @@ import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./m
 import {
   conversationTimeline,
   personalMachineCopy,
+  sessionAdmissionCopy,
   useSessionStart,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -644,9 +645,9 @@ function StuckCard({
     start.needsDifferentMachine && start.machineAccess
       ? personalMachineCopy(t, start.machineAccess, { queued: true })
       : null;
-  const needsAccess =
-    reason?.reason === "initiator_membership_required" ||
-    reason?.reason === "personal_resource_grant_required";
+  // The web notice's words for the known refusal; the native stuck copy when
+  // the block is only known from its status event.
+  const copy = reason ? sessionAdmissionCopy(t, reason) : null;
   const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
@@ -663,7 +664,9 @@ function StuckCard({
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Icon name="circle-alert" size={16} color={c["status-failed"]} />
         <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg, flexShrink: 1 }}>
-          {machine ? t("sessionAdmission.needsDifferentMachineTitle") : m.stuckTitle}
+          {machine
+            ? t("sessionAdmission.needsDifferentMachineTitle")
+            : (copy?.title ?? m.stuckTitle)}
         </Text>
       </View>
       {machine ? (
@@ -716,8 +719,13 @@ function StuckCard({
             </Text>
           ) : null}
         </>
+      ) : copy ? (
+        <>
+          <Text style={textStyle}>{copy.body}</Text>
+          <Text style={textStyle}>{copy.next}</Text>
+        </>
       ) : (
-        <Text style={textStyle}>{needsAccess ? m.stuckAccessBody : m.stuckBody}</Text>
+        <Text style={textStyle}>{m.stuckBody}</Text>
       )}
       {failed ? (
         <Text
