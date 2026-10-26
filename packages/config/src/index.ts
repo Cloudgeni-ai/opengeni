@@ -11093,12 +11093,6 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
         `OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${result.error.message}`,
       );
     }
-    const residencyProblems = registryProviderResidencyRouteProblems(result.data);
-    if (residencyProblems.length > 0) {
-      throw new Error(
-        `OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${residencyProblems.join("; ")}`,
-      );
-    }
     try {
       return normalizeRegistryProvider(result.data);
     } catch (error) {
@@ -11964,6 +11958,17 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   }
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
+  // Only the operator's own environment is strict here. Settings resolved
+  // from a stored catalog document re-parse providers without this check;
+  // a contradicted claim there is unknown (registryModelResidency).
+  const providerResidencyProblems = parseModelProvidersJson(settings.modelProvidersJson).flatMap(
+    (provider) => registryProviderResidencyRouteProblems(provider),
+  );
+  if (providerResidencyProblems.length > 0) {
+    throw new Error(
+      `OPENGENI_MODEL_PROVIDERS_JSON is invalid: ${providerResidencyProblems.join("; ")}`,
+    );
+  }
   if (settings.builtinModelResidencyJson !== undefined) {
     const declared = parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson);
     const routeProblems = Object.entries(declared).flatMap(([modelId, declaration]) =>

@@ -216,34 +216,92 @@ describe("model residency", () => {
     expect(onHost("https://api.openai.com/v1")).toBe(false);
     expect(onHost("https://eu.api.openai.com/v1")).toBe(true);
     // Configuration with such a claim is refused when it is loaded.
+    const load = (provider: Record<string, unknown>) =>
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([provider]),
+        },
+        () => getSettings(),
+      );
     expect(() =>
-      parseModelProvidersJson(
-        JSON.stringify([
-          {
-            id: "router",
-            api: "chat",
-            baseUrl: "https://openrouter.ai/api/v1",
-            apiKey: "key",
-            residency: providerDefault,
-            models: [{ id: "router/model", upstreamModelId: "model" }],
-          },
-        ]),
-      ),
+      load({
+        id: "router",
+        api: "chat",
+        baseUrl: "https://openrouter.ai/api/v1",
+        apiKey: "key",
+        residency: providerDefault,
+        models: [{ id: "router/model", upstreamModelId: "model" }],
+      }),
     ).toThrow(/routes outside the EU/u);
     expect(() =>
-      parseModelProvidersJson(
-        JSON.stringify([
+      load({
+        id: "bedrock",
+        api: "anthropic-messages",
+        baseUrl: "https://bedrock-proxy.example.eu/v1",
+        apiKey: "key",
+        residency: bedrock("bedrock_regional"),
+        models: [{ id: "bedrock/sonnet", upstreamModelId: "global.anthropic.claude-sonnet" }],
+      }),
+    ).toThrow(/inference profile/u);
+  });
+
+  test("a stored document adding a contradicted model keeps the catalog working", () => {
+    const geoProfile = {
+      geography: "eu",
+      deploymentType: "bedrock_geo_profile",
+      regions: ["eu-central-1"],
+      evidence: {
+        source: "provider_documentation",
+        reference: "AWS Bedrock eu. profiles",
+        verifiedAt: null,
+      },
+    } as const;
+    const provider = {
+      id: "p",
+      api: "anthropic-messages",
+      baseUrl: "https://bedrock-proxy.example.eu/v1",
+      residency: geoProfile,
+    };
+    const host = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PROVIDERS_JSON: JSON.stringify([
           {
-            id: "bedrock",
-            api: "anthropic-messages",
-            baseUrl: "https://bedrock-proxy.example.eu/v1",
+            ...provider,
             apiKey: "key",
-            residency: bedrock("bedrock_regional"),
-            models: [{ id: "bedrock/sonnet", upstreamModelId: "global.anthropic.claude-sonnet" }],
+            models: [{ id: "p/a", upstreamModelId: "eu.anthropic.a" }],
           },
         ]),
-      ),
-    ).toThrow(/inference profile/u);
+      },
+      () => getSettings(),
+    );
+    const document = {
+      schemaVersion: 1,
+      defaultModel: "p/a",
+      builtInModels: [],
+      registryProviders: [
+        {
+          ...provider,
+          models: [
+            { id: "p/a", upstreamModelId: "eu.anthropic.a" },
+            { id: "p/b", upstreamModelId: "anthropic.b" },
+          ],
+        },
+      ],
+    };
+    const warn = console.warn;
+    console.warn = () => {};
+    try {
+      const applied = applyModelCatalogDocument(host, document);
+      const resolved = configuredModels(applied);
+      expect(isEuResidency(resolved.find((model) => model.id === "p/a")!.residency)).toBe(true);
+      expect(resolved.find((model) => model.id === "p/b")?.residency).toEqual(
+        UNKNOWN_MODEL_RESIDENCY,
+      );
+    } finally {
+      console.warn = warn;
+    }
   });
 
   test("the host transport supplies residency; a different database claim makes it unknown", () => {
