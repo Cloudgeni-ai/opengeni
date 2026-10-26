@@ -56,7 +56,9 @@ mod linux {
         fn spawn(mut command: Command, number: u32) -> Self {
             let child = command
                 .arg(format!(":{number}"))
-                .args(["-nolisten", "tcp", "-screen", "0", "640x480x24"])
+                // No server reset when the last client leaves, as on a real
+                // desktop: a reset drops clients that connect meanwhile.
+                .args(["-noreset", "-nolisten", "tcp", "-screen", "0", "640x480x24"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -145,6 +147,22 @@ mod linux {
         let number = 1_000 + std::process::id() % 600;
         let _server = Server::start_open(&binary, number);
         let display = format!(":{number}");
+        // The server can take a moment to accept clients after its socket
+        // appears; the keymap lookup silently falls back while it does, so
+        // first wait until a checked connect to it succeeds.
+        let checked = X11Display {
+            server: XServerCheck::AgentUser,
+            ..X11Display::named(display.clone())
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let connected = loop {
+            match checked.connect() {
+                Ok(_) => break Ok(()),
+                Err(error) if Instant::now() >= deadline => break Err(error),
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        };
+        assert!(connected.is_ok(), "checked connect: {connected:?}");
         // The layout has Latin letters and no Cyrillic, which can only be
         // known once its keymap was read.
         assert_eq!(

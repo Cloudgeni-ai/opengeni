@@ -126,12 +126,8 @@ impl X11Display {
             .as_raw();
         let allow_root = self.server == XServerCheck::AgentUserOrRoot;
         if !server_allowed(server_uid, nix::unistd::getuid().as_raw(), allow_root) {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "the X server of display {} runs as another user (uid {server_uid})",
-                    self.name
-                ),
+            return Err(ConnectError::IoError(other_users_server(
+                &self.name, server_uid,
             )));
         }
         Ok(DefaultStream::from_unix_stream(stream)?)
@@ -154,6 +150,18 @@ fn remote_stream(parsed: &ParsedDisplay) -> Result<(DefaultStream, PeerAddr), Co
         ConnectError::DisplayParsingError(x11rb::errors::DisplayParsingError::Unknown),
         ConnectError::IoError,
     ))
+}
+
+/// The refusal of a display whose X server runs as a user it may not, with
+/// what makes it work.
+fn other_users_server(display: &str, server_uid: u32) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "the X server of display {display} runs as another user (uid {server_uid}); run the \
+             agent as that user, or start it with --virtual-desktop"
+        ),
+    )
 }
 
 /// Whether an X server run by `server_uid` may receive this agent's cookie.
@@ -1236,6 +1244,20 @@ mod tests {
         assert_eq!(
             authority_cookie(&dir.path().join("missing"), Family::LOCAL, b"host", 0),
             None
+        );
+    }
+
+    #[test]
+    fn a_server_run_by_another_user_says_what_makes_it_work() {
+        let fixture = Fixture::new();
+        std::fs::remove_dir_all(fixture.root.path().join("run/sessions")).unwrap();
+        let found = display_candidates(&agent(), &fixture.roots());
+        let error = other_users_server(":0", 1234).to_string();
+        assert_eq!(
+            unavailable_reason(&found, ":0", &error),
+            "No graphical desktop is reachable: display :0 could not be opened (the X server of \
+             display :0 runs as another user (uid 1234); run the agent as that user, or start it \
+             with --virtual-desktop)."
         );
     }
 
