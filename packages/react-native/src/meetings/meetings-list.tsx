@@ -5,6 +5,7 @@ import {
   formatClock,
   formatDuration,
   groupLiveTurns,
+  meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
   tidyLiveText,
@@ -206,16 +207,22 @@ export function MeetingsList({
             overflow: "hidden",
           }}
         >
-          {list.recordings.map((recording, index) => (
-            <MeetingRow
-              key={recording.id}
-              recording={recording}
-              live={recording.id === capturingId}
-              paused={recorder?.state === "paused"}
-              first={index === 0}
-              onPress={() => onOpen(recording.id)}
-            />
-          ))}
+          {list.recordings.map((recording, index) => {
+            // Recording here until Stop; after it, Transcribing.
+            const here =
+              recording.state === "capturing" ? meetingHereStatus(recorder, recording.id) : null;
+            return (
+              <MeetingRow
+                key={recording.id}
+                recording={recording}
+                live={here === "recording" || here === "paused"}
+                paused={here === "paused"}
+                transcribingHere={here === "transcribing"}
+                first={index === 0}
+                onPress={() => onOpen(recording.id)}
+              />
+            );
+          })}
         </View>
       )}
       {list.hasMore ? (
@@ -239,6 +246,8 @@ function MeetingRow(props: {
   recording: Recording;
   live: boolean;
   paused: boolean;
+  /** Stopped on this phone with its last audio on its way: Transcribing, not In progress. */
+  transcribingHere: boolean;
   first: boolean;
   onPress: () => void;
 }) {
@@ -246,7 +255,12 @@ function MeetingRow(props: {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const { recording } = props;
-  const status = props.live ? null : meetingStatusLabel(meetingPhase(recording), msg);
+  const status = props.live
+    ? null
+    : meetingStatusLabel(
+        props.transcribingHere ? { kind: "transcribing", version: null } : meetingPhase(recording),
+        msg,
+      );
   const facts = [
     meetingDateLabel(msg, recording.startedAt),
     recording.durationMilliseconds ? formatDuration(recording.durationMilliseconds, msg) : null,

@@ -134,8 +134,9 @@ export function uploadLine(
     });
   }
   if (!upload || recorder.state === "starting") return null;
-  if (upload.pendingChunks === 0) return msg("meetings.recorderPanel.finishingTheUpload");
-  return msg("meetings.recorderPanel.uploadingCountPiecesOfAudio", { count: upload.pendingChunks });
+  // After Stop: the audio uploaded while it recorded, so usually only its end
+  // is left; after a dropped connection it can be more.
+  return msg("meetings.recorderPanel.savingTheRestOfTheAudio");
 }
 
 /** What this recording captures, as a sentence. */
@@ -163,7 +164,8 @@ export function uploadStalled(recorder: MeetingRecorder, online: boolean): boole
   return !online || Boolean(upload?.retryingAfterError);
 }
 
-function useOnline(): boolean {
+/** Whether the browser says it's online, kept current. */
+export function useOnline(): boolean {
   const [online, setOnline] = useState(() =>
     typeof navigator === "undefined" ? true : navigator.onLine,
   );
@@ -399,6 +401,128 @@ function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
   );
 }
 
+/** The pulsing dot, the state in a word and the clock of a recording under way. */
+function RecordingClock({ recorder, stalled }: { recorder: MeetingRecorder; stalled: boolean }) {
+  const msg = useOpenGeniText();
+  const paused = recorder.state === "paused";
+  return (
+    <div className="flex min-w-0 items-center gap-3">
+      <span className="relative flex size-3 shrink-0" aria-hidden="true">
+        {!paused ? (
+          <span
+            className={cn(
+              "absolute inset-0 animate-ping rounded-full motion-reduce:animate-none",
+              stalled ? "bg-status-waiting/60" : "bg-status-failed/60",
+            )}
+          />
+        ) : null}
+        <span
+          className={cn(
+            "relative size-3 rounded-full",
+            paused ? "bg-fg-subtle" : stalled ? "bg-status-waiting" : "bg-status-failed",
+          )}
+        />
+      </span>
+      <div className="min-w-0">
+        <p className="text-sm leading-5 font-medium text-fg">
+          {recorder.state === "stopping"
+            ? msg("meetings.recorderPanel.finishing")
+            : paused
+              ? msg("meetings.recorderPanel.paused")
+              : stalled
+                ? msg("meetings.recorderPanel.recordingNotUploading")
+                : msg("meetings.recorderPanel.recording2")}
+        </p>
+        <p
+          className="text-2xl leading-8 font-semibold tracking-[-0.5px] text-fg tabular-nums"
+          role="timer"
+          aria-live="off"
+        >
+          {formatClock(recorder.elapsedMilliseconds)}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** Pause or Resume, and Stop. */
+function RecordingControls({
+  recorder,
+  onStopped,
+}: {
+  recorder: MeetingRecorder;
+  onStopped?: ((recordingId: string) => void) | undefined;
+}) {
+  const msg = useOpenGeniText();
+  const paused = recorder.state === "paused";
+  const stopping = recorder.state === "stopping";
+  const recordingId = recorder.recordingId;
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        disabled={stopping}
+        onClick={() => (paused ? recorder.resume() : recorder.pause())}
+        className="rounded-[10px] pointer-coarse:h-11 max-sm:flex-1"
+      >
+        {paused ? <PlayIcon aria-hidden="true" /> : <PauseIcon aria-hidden="true" />}
+        {paused ? msg("meetings.recorderPanel.resume") : msg("meetings.recorderPanel.pause")}
+      </Button>
+      <Button
+        type="button"
+        disabled={stopping}
+        onClick={() => {
+          void recorder.stop().then(() => {
+            if (recordingId) onStopped?.(recordingId);
+          });
+        }}
+        className="rounded-[10px] pointer-coarse:h-11 max-sm:flex-1"
+      >
+        <SquareIcon aria-hidden="true" className="fill-current" />
+        {msg("meetings.recorderPanel.stop")}
+      </Button>
+    </>
+  );
+}
+
+/**
+ * The recording on the meeting's own page while this device records it, so
+ * taking notes there never hides that it is still recording or how to end it:
+ * the state and clock with Pause and Stop. Says so only when the connection
+ * keeps the audio on this device.
+ */
+export function RecordingBar({
+  recorder,
+  onStopped,
+}: {
+  recorder: MeetingRecorder;
+  /** After Stop, with the recording that stopped. */
+  onStopped?: ((recordingId: string) => void) | undefined;
+}) {
+  const msg = useOpenGeniText();
+  const online = useOnline();
+  const stalled = uploadStalled(recorder, online);
+  return (
+    <section
+      aria-label={msg("meetings.recorderPanel.recording2")}
+      className="rounded-[14px] border border-border bg-surface px-5 py-4 shadow-[0_1px_2px_rgb(0_0_0/0.04)] max-sm:p-4"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
+        <RecordingClock recorder={recorder} stalled={stalled} />
+        <div className="flex shrink-0 items-center gap-2 max-sm:w-full">
+          <RecordingControls recorder={recorder} onStopped={onStopped} />
+        </div>
+      </div>
+      {stalled ? (
+        <p className="mt-3 text-xs leading-4.5 font-medium text-fg-label" aria-live="polite">
+          {uploadLine(recorder, online, msg)}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 export function RecorderPanel({
   recorder,
   onStopped,
@@ -481,7 +605,6 @@ export function RecorderPanel({
   }
 
   if (recorder && live) {
-    const paused = state === "paused";
     const stalled = uploadStalled(recorder, online);
     const recordingId = recorder.recordingId;
     const line = uploadLine(recorder, online, msg);
@@ -492,42 +615,7 @@ export function RecorderPanel({
       >
         <RecordingTitle recorder={recorder} />
         <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className="relative flex size-3 shrink-0" aria-hidden="true">
-              {!paused ? (
-                <span
-                  className={cn(
-                    "absolute inset-0 animate-ping rounded-full motion-reduce:animate-none",
-                    stalled ? "bg-status-waiting/60" : "bg-status-failed/60",
-                  )}
-                />
-              ) : null}
-              <span
-                className={cn(
-                  "relative size-3 rounded-full",
-                  paused ? "bg-fg-subtle" : stalled ? "bg-status-waiting" : "bg-status-failed",
-                )}
-              />
-            </span>
-            <div className="min-w-0">
-              <p className="text-sm leading-5 font-medium text-fg">
-                {state === "stopping"
-                  ? msg("meetings.recorderPanel.finishing")
-                  : paused
-                    ? msg("meetings.recorderPanel.paused")
-                    : stalled
-                      ? msg("meetings.recorderPanel.recordingNotUploading")
-                      : msg("meetings.recorderPanel.recording2")}
-              </p>
-              <p
-                className="text-2xl leading-8 font-semibold tracking-[-0.5px] text-fg tabular-nums"
-                role="timer"
-                aria-live="off"
-              >
-                {formatClock(recorder.elapsedMilliseconds)}
-              </p>
-            </div>
-          </div>
+          <RecordingClock recorder={recorder} stalled={stalled} />
           <div className="grid min-w-48 flex-1 gap-2">
             {recorder.tracks.map((track) => (
               <LevelMeter
@@ -535,7 +623,7 @@ export function RecorderPanel({
                 recorder={recorder}
                 trackNumber={track.trackNumber}
                 label={trackLabel(track.source, recorder.systemAudioKind, msg)}
-                paused={paused}
+                paused={state === "paused"}
               />
             ))}
           </div>
@@ -551,29 +639,7 @@ export function RecorderPanel({
                 {msg("meetings.recorderPanel.takeNotes")}
               </Button>
             ) : null}
-            <Button
-              type="button"
-              variant="outline"
-              disabled={state === "stopping"}
-              onClick={() => (paused ? recorder.resume() : recorder.pause())}
-              className="rounded-[10px] pointer-coarse:h-11 max-sm:flex-1"
-            >
-              {paused ? <PlayIcon aria-hidden="true" /> : <PauseIcon aria-hidden="true" />}
-              {paused ? msg("meetings.recorderPanel.resume") : msg("meetings.recorderPanel.pause")}
-            </Button>
-            <Button
-              type="button"
-              disabled={state === "stopping"}
-              onClick={() => {
-                void recorder.stop().then(() => {
-                  if (recordingId) onStopped?.(recordingId);
-                });
-              }}
-              className="rounded-[10px] pointer-coarse:h-11 max-sm:flex-1"
-            >
-              <SquareIcon aria-hidden="true" className="fill-current" />
-              {msg("meetings.recorderPanel.stop")}
-            </Button>
+            <RecordingControls recorder={recorder} onStopped={onStopped} />
           </div>
         </div>
         {line ? (

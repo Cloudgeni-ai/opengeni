@@ -11,6 +11,7 @@ import {
   type RecordingTranscriptSegment,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
+import type { RecorderSnapshot } from "@opengeni/sdk/recordings";
 import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 const defaultText = createOpenGeniText();
@@ -47,8 +48,10 @@ export type MeetingPhase =
 
 /**
  * Where a recording is in its life, from the reader's side. A recording still
- * capturing is "uploading": the audio is on the recorder's device until its
- * chunks reach storage. A failed re-run leaves an older complete version
+ * capturing is "uploading" (kept for compatibility; it reads "In progress"):
+ * it is still being recorded, or its last audio is still on its way from the
+ * device that recorded it. That device knows which, so it asks
+ * {@link meetingHereStatus}. A failed re-run leaves an older complete version
  * current, so the transcript stays readable.
  */
 export function meetingPhase(recording: Recording): MeetingPhase {
@@ -65,6 +68,43 @@ export function meetingPhase(recording: Recording): MeetingPhase {
   return { kind: "no_transcript" };
 }
 
+/**
+ * What this device's recorder knows about one meeting that the server can't
+ * yet: it is recording (or paused) here, or it was stopped here and its last
+ * few seconds of audio are on their way, which a person reads as Transcribing.
+ * The audio uploads while it records, so nothing is left to "upload" after
+ * Stop unless the connection is down or the server refused it. Null when this
+ * device isn't recording that meeting, or when capture failed before Stop
+ * finished it; the server's {@link meetingPhase} says the rest.
+ */
+export type MeetingHereStatus =
+  | "recording"
+  | "paused"
+  | "transcribing"
+  | "waiting_for_connection"
+  | "upload_failed";
+
+export function meetingHereStatus(
+  recorder: Pick<RecorderSnapshot, "state" | "recordingId" | "upload"> | null,
+  recordingId: string,
+  online = true,
+): MeetingHereStatus | null {
+  if (!recorder || recorder.recordingId !== recordingId) return null;
+  if (recorder.state === "recording") return "recording";
+  if (recorder.state === "paused") return "paused";
+  if (recorder.state === "idle" || recorder.state === "starting") return null;
+  const upload = recorder.upload;
+  if (upload?.discarded) return null;
+  if (upload?.failed) return "upload_failed";
+  // Capture failed mid-recording: nothing finishes it until this browser
+  // recovers it, so it isn't transcribing yet.
+  if (recorder.state === "failed" && !upload?.finalized) return null;
+  if (!upload?.finalized && (!online || upload?.retryingAfterError)) {
+    return "waiting_for_connection";
+  }
+  return "transcribing";
+}
+
 /** The one-word state a list row shows, or null when there is nothing to say. */
 export function meetingStatusLabel(
   phase: MeetingPhase,
@@ -72,7 +112,7 @@ export function meetingStatusLabel(
 ): { label: string; tone: "progress" | "danger" | "neutral" } | null {
   switch (phase.kind) {
     case "uploading":
-      return { label: msg("meetings.recordings.uploading"), tone: "progress" };
+      return { label: msg("meetings.recordings.inProgress"), tone: "progress" };
     case "transcribing":
       return { label: msg("meetings.recordings.transcribing"), tone: "progress" };
     case "failed":

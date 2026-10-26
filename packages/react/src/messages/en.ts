@@ -2327,7 +2327,6 @@ export const englishMessages = {
   "meetings.detailPage.speakers": "Speakers",
   "meetings.detailPage.speakersToReview": "Speakers to review",
   "meetings.detailPage.starting": "Starting…",
-  "meetings.detailPage.stillUploading": "Still uploading",
   "meetings.detailPage.suggestedFromTheirVoice": "Suggested from their voice",
   "meetings.detailPage.suggestionDismissed": "Suggestion dismissed",
   "meetings.detailPage.theAudioForThisMeeting":
@@ -2363,10 +2362,6 @@ export const englishMessages = {
     "{transcriptErrorText} This version is unchanged.",
   "meetings.detailPage.tryAgain": "Try again",
   "meetings.detailPage.undo": "Undo",
-  "meetings.detailPage.uploading": "Uploading",
-  "meetings.detailPage.uploadinghereKeepThisTabOpen":
-    "{uploadingHere} Keep this tab open, or come back later: the audio is saved in this browser until it's uploaded.",
-  "meetings.detailPage.uploadingTheAudio": "Uploading the audio",
   "meetings.detailPage.valuePerHour": "${value} per hour",
   "meetings.detailPage.versionVersionnumber": "Version {versionNumber}",
   "meetings.detailPage.voiceRecognitionIsOffIn":
@@ -2486,7 +2481,6 @@ export const englishMessages = {
   "meetings.recorderPanel.couldnTRenameThisMeeting": "Couldn't rename this meeting",
   "meetings.recorderPanel.detectLanguage": "Detect language",
   "meetings.recorderPanel.finishing": "Finishing",
-  "meetings.recorderPanel.finishingTheUpload": "Finishing the upload.",
   "meetings.recorderPanel.includeATabSAudio": "Include a tab's audio",
   "meetings.recorderPanel.includeComputerAudio": "Include computer audio",
   "meetings.recorderPanel.listeningWhatSSaidShows":
@@ -2542,6 +2536,7 @@ export const englishMessages = {
   "meetings.recorderPanel.resume": "Resume",
   "meetings.recorderPanel.save": "Save",
   "meetings.recorderPanel.saving": "Saving…",
+  "meetings.recorderPanel.savingTheRestOfTheAudio": "Saving the rest of the audio.",
   "meetings.recorderPanel.showsWhatSSaidAs":
     "Shows what's said as it's said. The final transcript still comes after you stop.",
   "meetings.recorderPanel.starting": "Starting",
@@ -2577,8 +2572,6 @@ export const englishMessages = {
   "meetings.recorderPanel.uploadFailedMessage": "Upload failed: {message}",
   "meetings.recorderPanel.uploadfailurereasonTheRecordingIsSaved":
     "{uploadFailureReason} The recording is saved on this device. It uploads again when you reopen Meetings.",
-  "meetings.recorderPanel.uploadingCountPiecesOfAudio_one": "Uploading {count} piece of audio.",
-  "meetings.recorderPanel.uploadingCountPiecesOfAudio_other": "Uploading {count} pieces of audio.",
   "meetings.recorderPanel.uploadStopped": "Upload stopped",
   "meetings.recorderPanel.useACurrentVersionOf":
     "Use a current version of Chrome, Edge, Safari or Firefox.",
@@ -2602,7 +2595,7 @@ export const englishMessages = {
   "meetings.recordings.durationHours": "{hours}\u00a0h",
   "meetings.recordings.durationHoursMinutes": "{hours}\u00a0h {minutes}\u00a0min",
   /** A meeting's state in the list. */
-  "meetings.recordings.uploading": "Uploading",
+  "meetings.recordings.inProgress": "In progress",
   "meetings.recordings.transcribing": "Transcribing",
   "meetings.recordings.transcriptFailed": "Transcript failed",
   "meetings.recordings.noTranscript": "No transcript",

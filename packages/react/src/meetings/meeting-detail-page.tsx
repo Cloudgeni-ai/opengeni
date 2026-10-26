@@ -4,8 +4,10 @@
  * speakers and says which transcript version this is, with Transcribe again.
  *
  * Until the transcript exists the page says where the meeting is: still
- * uploading (from this browser or another device), transcribing, or failed
- * with the reason and what to try.
+ * recording here (with Pause and Stop, so taking notes never hides it), not
+ * finished yet on another device, transcribing, or failed with the reason and
+ * what to try. Audio uploads while it records, so after Stop it reads
+ * Transcribing, not Uploading.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -32,6 +34,7 @@ import {
   defaultSpeakerName,
   formatDuration,
   languageName,
+  meetingHereStatus,
   meetingPhase,
   speakerColorSlots,
   speakerDisplayName,
@@ -43,6 +46,7 @@ import {
   useRecordingsClient,
   useLiveTranscript,
   useTranscript,
+  type MeetingHereStatus,
   type RecordingsClientOverride,
 } from "../recordings";
 
@@ -91,10 +95,16 @@ import {
   speakerIsSuggested,
   type TranscriptActions,
 } from "./meeting-transcript";
-import { liveSpeakerName, recorderLiveLines, uploadLine } from "./recorder-panel";
+import {
+  liveSpeakerName,
+  RecordingBar,
+  recorderLiveLines,
+  uploadLine,
+  useOnline,
+} from "./recorder-panel";
 import { LiveTranscript, liveStatus } from "./live-transcript";
 import { MeetingNotes } from "./meeting-notes";
-import { useMeetingRecorder } from "./recorder-context";
+import { useMeetingRecorder, type MeetingRecorder } from "./recorder-context";
 
 const defaultText = createOpenGeniText();
 
@@ -416,47 +426,53 @@ const SPINNER = (
 
 function PhaseNotice({
   recording,
-  uploadingHere,
+  recorder,
+  here,
   recordingElsewhere,
   onRetry,
 }: {
   recording: Recording;
-  uploadingHere: string | null;
+  recorder: MeetingRecorder | null;
+  /** What this device's recorder knows about the meeting; null when it isn't recording it. */
+  here: MeetingHereStatus | null;
   /** It's captured on another device with the live preview on. */
   recordingElsewhere: boolean;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
   const phase = meetingPhase(recording);
-  if (phase.kind === "uploading") {
-    if (uploadingHere === null && recordingElsewhere) {
-      return (
-        <Notice
-          tone="waiting"
-          icon={SPINNER}
-          title={msg("meetings.detailPage.notFinishedYet")}
-          live="polite"
-        >
-          {msg("meetings.detailPage.itSStillBeingRecorded")}
-        </Notice>
-      );
-    }
-    return uploadingHere !== null ? (
-      <Notice
-        tone="waiting"
-        icon={SPINNER}
-        title={msg("meetings.detailPage.uploadingTheAudio")}
-        live="polite"
-      >
-        {msg("meetings.detailPage.uploadinghereKeepThisTabOpen", { uploadingHere: uploadingHere })}
-      </Notice>
-    ) : (
-      <Notice tone="waiting" icon={SPINNER} title={msg("meetings.detailPage.stillUploading")}>
-        {msg("meetings.detailPage.theAudioIsOnThe")}
+  if (phase.kind === "uploading" && recorder && (here === "recording" || here === "paused")) {
+    return <RecordingBar recorder={recorder} />;
+  }
+  if (phase.kind === "uploading" && here === "waiting_for_connection") {
+    return (
+      <Notice tone="waiting" live="polite">
+        {msg("meetings.recorderPanel.notUploadingNoConnectionThe")}
       </Notice>
     );
   }
-  if (phase.kind === "transcribing") {
+  if (phase.kind === "uploading" && recorder && here === "upload_failed") {
+    return (
+      <Notice tone="failed" live="polite">
+        {uploadLine(recorder, true, msg)}
+      </Notice>
+    );
+  }
+  if (phase.kind === "uploading" && here !== "transcribing") {
+    return (
+      <Notice
+        tone="waiting"
+        icon={SPINNER}
+        title={msg("meetings.detailPage.notFinishedYet")}
+        live="polite"
+      >
+        {recordingElsewhere
+          ? msg("meetings.detailPage.itSStillBeingRecorded")
+          : msg("meetings.detailPage.theAudioIsOnThe")}
+      </Notice>
+    );
+  }
+  if (phase.kind === "transcribing" || phase.kind === "uploading") {
     return (
       <Notice tone="waiting" icon={SPINNER} live="polite">
         {msg("meetings.detailPage.transcribingThisUsuallyTakesA")}
@@ -604,6 +620,7 @@ export function MeetingDetailPage({
   const models = useRecordingModels(override);
   const { client } = useRecordingsClient(override);
   const { recorder } = useMeetingRecorder();
+  const online = useOnline();
   // The live preview, while a meeting is recorded and until its transcript is
   // ready: this browser's own recorder has it first; anyone else reads what
   // the recorder saved.
@@ -828,10 +845,10 @@ export function MeetingDetailPage({
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
   const phase = meetingPhase(recording);
-  const uploadingHere =
-    recorder && recorder.recordingId === recording.id
-      ? uploadLine(recorder, navigator.onLine, msg)
-      : null;
+  // Only while the server still waits for audio: this device may know more.
+  const here =
+    recording.state === "capturing" ? meetingHereStatus(recorder, recording.id, online) : null;
+  const capturingHere = here === "recording" || here === "paused";
   const segments = transcript.segments;
   const speakerLabels = [...speakerColorSlots(segments).keys()];
   const slots = speakerColorSlots(segments);
@@ -996,15 +1013,16 @@ export function MeetingDetailPage({
     <DetailPageHeader
       title={recording.title}
       chips={
-        phase.kind === "transcribing" ? (
+        // Recording here, the bar under the title says so with its clock; a
+        // refused upload is said by its notice, and isn't in progress.
+        capturingHere || here === "upload_failed" ? undefined : phase.kind === "transcribing" ||
+          here === "transcribing" ? (
           <StatusBadge variant="dot" tone="progress" pulse>
             {msg("meetings.detailPage.transcribing")}
           </StatusBadge>
         ) : phase.kind === "uploading" ? (
           <StatusBadge variant="dot" tone="progress" pulse>
-            {previewing && !recordingHere
-              ? msg("meetings.detailPage.inProgress")
-              : msg("meetings.detailPage.uploading")}
+            {msg("meetings.detailPage.inProgress")}
           </StatusBadge>
         ) : undefined
       }
@@ -1134,7 +1152,8 @@ export function MeetingDetailPage({
       <div className="mt-6 grid gap-4 empty:hidden">
         <PhaseNotice
           recording={recording}
-          uploadingHere={uploadingHere}
+          recorder={recorder}
+          here={here}
           recordingElsewhere={previewing && !recordingHere}
           onRetry={() => setRerunning(true)}
         />

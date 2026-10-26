@@ -555,6 +555,159 @@ describe("Recorder errors", () => {
 });
 
 describe("Live transcript", () => {
+  /** A recorder on this device, recording the fixture's meeting in progress. */
+  async function fakeRecorder(
+    state: "recording" | "paused" | "stopping" | "stopped",
+    upload: { pendingChunks?: number; finalized?: boolean; retryingAfterError?: string } = {},
+  ) {
+    const { LIVE_RECORDING_ID } = await import("../testing/meetings-fixture");
+    const calls: string[] = [];
+    const recorder = {
+      state,
+      recordingId: LIVE_RECORDING_ID,
+      title: "Platform standup",
+      elapsedMilliseconds: 754_000,
+      tracks: [{ trackNumber: 0, source: "microphone", label: "Microphone" }],
+      upload: {
+        recordingId: LIVE_RECORDING_ID,
+        created: true,
+        pendingChunks: upload.pendingChunks ?? 1,
+        pendingBytes: 4_000,
+        uploading: true,
+        retryingAfterError: upload.retryingAfterError ?? null,
+        failed: null,
+        finalized: upload.finalized ?? false,
+        discarded: false,
+      },
+      error: null,
+      live: null,
+      supported: true,
+      systemAudioSupported: false,
+      systemAudioKind: null,
+      recovered: [],
+      start: async () => {},
+      pause: () => calls.push("pause"),
+      resume: () => calls.push("resume"),
+      stop: async () => {
+        calls.push("stop");
+      },
+      discard: async () => {},
+      rename: async () => {},
+      levels: () => ({}),
+    } as unknown as NonNullable<ReturnType<typeof useMeetingRecorder>["recorder"]>;
+    return { recorder, calls, recordingId: LIVE_RECORDING_ID };
+  }
+
+  test("taking notes while recording shows it's recording, with Stop, not Uploading", async () => {
+    const fixture = createMeetingsFixture();
+    const { recorder, calls, recordingId } = await fakeRecorder("recording");
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={recordingId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await act(async () => view.store.set(recorder));
+      await waitForText(view.container, "Platform standup");
+      const text = view.container.textContent ?? "";
+      expect(text).not.toContain("Uploading");
+      expect(text).not.toContain("Not finished yet");
+      const bar = view.container.querySelector('section[aria-label="Recording"]');
+      expect(bar?.textContent).toContain("12:34");
+      const stop = [...bar!.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Stop",
+      );
+      expect(stop).toBeDefined();
+      await act(async () => stop!.click());
+      expect(calls).toEqual(["stop"]);
+      // Said once, by the bar, not again beside the title.
+      expect(text.split("Recording").length - 1).toBe(1);
+
+      await act(async () => view.store.set({ ...recorder, state: "paused" }));
+      expect(view.container.textContent).toContain("Paused");
+      expect(view.container.textContent).toContain("Resume");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("after Stop the meeting reads Transcribing, never Uploading", async () => {
+    const fixture = createMeetingsFixture();
+    // Stop waits for the last few seconds of audio, then the recorder is stopped.
+    const { recorder, recordingId } = await fakeRecorder("stopping", { pendingChunks: 1 });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={recordingId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await act(async () => view.store.set(recorder));
+      await waitForText(view.container, "Platform standup");
+      let text = view.container.textContent ?? "";
+      expect(text).toContain("Transcribing");
+      expect(text).not.toContain("Uploading");
+      expect(view.container.querySelector('section[aria-label="Recording"]')).toBeNull();
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          state: "stopped",
+          upload: { ...recorder.upload!, pendingChunks: 0, finalized: true },
+        }),
+      );
+      expect(view.container.textContent).toContain("Transcribing");
+
+      // Only a lost connection keeps it from transcribing, and it says so.
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          upload: { ...recorder.upload!, retryingAfterError: "Failed to fetch" },
+        }),
+      );
+      text = view.container.textContent ?? "";
+      expect(text).toContain("no connection");
+      expect(text).not.toContain("Transcribing.");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the list says Transcribing for a meeting just stopped here", async () => {
+    const fixture = createMeetingsFixture();
+    const { recorder } = await fakeRecorder("stopping", { pendingChunks: 1 });
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await act(async () => view.store.set(recorder));
+      await waitForText(view.container, "Platform standup");
+      await settle();
+      // The widest box around the meeting's title that holds no other meeting.
+      let row: Element | null = [...view.container.querySelectorAll("a")].find((link) =>
+        link.textContent?.includes("Platform standup"),
+      )!;
+      while (row.parentElement && row.parentElement.querySelectorAll("a").length === 1) {
+        row = row.parentElement;
+      }
+      expect(row.textContent).toContain("Transcribing");
+      expect(view.container.textContent).not.toContain("Uploading");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a meeting can be named while it records", async () => {
     const { RecorderPanel } = await import("./recorder-panel");
     const renamed: string[] = [];
