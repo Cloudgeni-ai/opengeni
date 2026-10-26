@@ -683,9 +683,13 @@ export function RealtimeVoiceControl(props: {
               <button
                 type="button"
                 aria-label={t("realtime.realtimeControl.chooseVoiceModelAndOptions")}
-                title={t("realtime.realtimeControl.voiceModelLabel", {
-                  label: selectedModel.label,
-                })}
+                title={
+                  modelsKnown
+                    ? t("realtime.realtimeControl.voiceModelLabel", {
+                        label: selectedModel.label,
+                      })
+                    : t("realtime.realtimeControl.chooseVoiceModelAndOptions")
+                }
                 disabled={props.selectionDisabled}
                 className={cn(
                   // Keep the split trigger compact on desktop while preserving a
