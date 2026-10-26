@@ -1,6 +1,5 @@
 import type { Settings } from "@opengeni/config";
 import type {
-  AccessGrant,
   Document,
   DocumentAuthorityKind,
   EntitlementsPort,
@@ -330,20 +329,6 @@ export type AppDependencies = {
 
 export type ObjectStorageDependency = ReturnType<typeof createObjectStorage>;
 
-/**
- * Called when an agent session arms an input wait with `deadline`: the
- * controllers of the browsers it holds keep them while the session waits and
- * then while the turn the wait resumes works, and the hold ends when the
- * session neither works nor waits. Best effort: a browser it cannot reach
- * keeps its plain idle release.
- */
-export type HoldBrowsersForWait = (input: {
-  grant: AccessGrant;
-  sessionId: string;
-  deadline: Date;
-  signal: AbortSignal;
-}) => Promise<void>;
-
 export type ApiRouteDeps = AppDependencies & {
   resolveCatalogSettings: () => Promise<ResolvedCatalogSettings>;
   managedEmailTransport: ManagedEmailTransport;
@@ -354,13 +339,6 @@ export type ApiRouteDeps = AppDependencies & {
   // Resolved by createApp from settings: routes always get a concrete
   // resumeBoxById (it throws SandboxResumeError when sandboxBackend=none).
   resumeBoxById: (input: ResumeBoxByIdInput) => Promise<ResumedSandboxSession>;
-  /**
-   * Set once the browser session routes are registered, before any request,
-   * so every route and every MCP server built for an agent (direct or through
-   * the tool gateway) keeps a waiting session's browsers. Absent, a wait
-   * leaves browsers to their plain idle release.
-   */
-  holdBrowsersForWait?: HoldBrowsersForWait;
 };
 
 /**

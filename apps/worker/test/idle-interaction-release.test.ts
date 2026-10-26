@@ -14,6 +14,7 @@ import {
   createDb,
   createSession,
   initializeSessionStartAtomically,
+  listAgentHeldBrowserSessions,
   MANAGED_BROWSER_SESSION_CAPABILITIES,
   prepareBrowserSessionResume,
   releaseIdleInteractionHolders,
@@ -355,6 +356,17 @@ async function anotherAgentWorks(f: Fixture) {
   return other;
 }
 
+/** Fixture shortcut: the session's turns become ones the given person (or no
+ * person) started; a trigger otherwise keeps a turn's initiator fixed once
+ * accepted. */
+async function turnsStartedBy(subjectId: string | null, sessionId: string) {
+  await admin.begin(async (tx) => {
+    await tx`set local session_replication_role = replica`;
+    await tx`update session_turns set initiating_human_subject_id = ${subjectId}
+      where session_id = ${sessionId}`;
+  });
+}
+
 /** Whether the reaper's listing offers the box for an idle release. */
 async function idleCandidate(f: Fixture) {
   const rows = await admin<{ sandbox_group_id: string }[]>`
@@ -629,6 +641,70 @@ describe("idle browser and desktop release", () => {
     expect(await idleCandidate(f)).toBe(true);
     await sweep();
     expect((await state(f)).browser.lifecycle).toBe("suspending");
+  }, 60_000);
+
+  test("browsers are listed for a hold while a holding session works or waits, each time it does", async () => {
+    const f = await fixture();
+    await idleFor(f, 16);
+    await admin`insert into browser_session_associations (account_id, workspace_id,
+        browser_session_id, session_id, relationship, actor_subject_id)
+      values (${f.accountId}, ${f.workspaceId}, ${f.browserId}, ${f.sessionId}, 'created',
+        'fixture-agent')`;
+    await turnsStartedBy("user:fixture-person", f.sessionId);
+    const held = async () =>
+      (await listAgentHeldBrowserSessions(db, { limit: 1000 })).filter(
+        (browser) => browser.browserSessionId === f.browserId,
+      );
+    const status = async (value: string) => {
+      await admin`update sessions set status = ${value} where id = ${f.sessionId}`;
+    };
+    // The session's turn ended and nothing is waiting: not held.
+    expect(await held()).toEqual([]);
+    // A turn runs without touching the browser: held, reached as the person
+    // who started the session's latest turn.
+    await status("running");
+    expect(await held()).toEqual([
+      {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        browserSessionId: f.browserId,
+        routeSubjectId: "user:fixture-person",
+      },
+    ]);
+    // That turn ends, then a new one runs, again without the browser: held
+    // again.
+    await status("idle");
+    expect(await held()).toEqual([]);
+    await status("running");
+    expect(await held()).toHaveLength(1);
+    // An armed wait holds too; the cap after the browser's last use does not.
+    await status("idle");
+    await admin`update sessions set input_wait_turn_id = ${f.turnId},
+        input_wait_until = now() + interval '20 minutes',
+        input_wait_reason = 'Waiting for a reply in the page.', input_wait_set_at = now()
+      where id = ${f.sessionId}`;
+    expect(await held()).toHaveLength(1);
+    await idleFor(f, BROWSER_WAIT_HOLD_MAX_MS / 60_000 + 1);
+    expect(await held()).toEqual([]);
+  }, 60_000);
+
+  test("a held browser no person started a turn for has no one to be reached as", async () => {
+    const f = await fixture();
+    await idleFor(f, 16);
+    const other = await anotherAgentWorks(f);
+    await turnsStartedBy(null, other.sessionId);
+    expect(
+      (await listAgentHeldBrowserSessions(db, { limit: 1000 })).filter(
+        (browser) => browser.browserSessionId === f.browserId,
+      ),
+    ).toEqual([
+      {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        browserSessionId: f.browserId,
+        routeSubjectId: null,
+      },
+    ]);
   }, 60_000);
 
   test("a failed idle save releases the browser without a second attempt", async () => {

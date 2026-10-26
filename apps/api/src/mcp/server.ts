@@ -3383,26 +3383,6 @@ function registerGoalTools(
         },
       );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
-      if (deps.holdBrowsersForWait) {
-        // Off the tool result's path: the wait is armed whatever the browsers'
-        // controllers say, and a lost hold only leaves the plain idle release.
-        // Every MCP server built for an agent shares these deps, so a wait
-        // armed through the tool gateway holds its browsers too.
-        void deps
-          .holdBrowsersForWait({
-            grant,
-            sessionId,
-            deadline: new Date(deadlineAt),
-            signal: AbortSignal.timeout(30_000),
-          })
-          .catch((error: unknown) => {
-            console.warn("browser.wait_hold_failed", {
-              workspaceId: grant.workspaceId,
-              sessionId,
-              error: error instanceof Error ? error.name : "unknown",
-            });
-          });
-      }
       return json({
         status: "waiting_for_input",
         deadlineAt,

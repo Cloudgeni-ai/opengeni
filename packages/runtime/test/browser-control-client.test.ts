@@ -775,14 +775,7 @@ describe("BrowserControlClient", () => {
         { controllerGeneration: "controller-1", until: "2030-01-01T00:30:00.000Z" },
       ]);
       reply = success({ held: false });
-      // The wait ended early: the end names the wait it ends.
-      const endedAt = new Date("2030-01-01T00:10:00.000Z");
-      expect(await client.holdForWait(reference, endedAt, { endsWaitUntil: until })).toBe(false);
-      expect(bodies.at(-1)).toEqual({
-        controllerGeneration: "controller-1",
-        until: "2030-01-01T00:10:00.000Z",
-        endsWaitUntil: "2030-01-01T00:30:00.000Z",
-      });
+      expect(await client.holdForWait(reference, until)).toBe(false);
       // An older controller has no such route; it keeps its plain idle release.
       reply = failure(404, "resource_not_found", "route not found");
       expect(await client.holdForWait(reference, until)).toBe(false);

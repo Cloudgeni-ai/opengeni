@@ -1477,19 +1477,19 @@ describe("BrowserControlServer", () => {
       expect((await json(held)).data).toEqual({ held: true });
       const stale = await hold(adminToken, { controllerGeneration: "controller-stale", until });
       expect((await json(stale)).data).toEqual({ held: false });
-      // The end of that wait, as it arrives early.
-      const ended = await hold(adminToken, {
+      // A hold only extends: an earlier time leaves it held.
+      const earlier = await hold(adminToken, {
         controllerGeneration: reference.controllerGeneration,
         until: new Date().toISOString(),
-        endsWaitUntil: until,
       });
-      expect((await json(ended)).data).toEqual({ held: false });
+      expect((await json(earlier)).data).toEqual({ held: true });
+      // Only the generation and the time are accepted.
       expect(
         (
           await hold(adminToken, {
             controllerGeneration: reference.controllerGeneration,
             until,
-            endsWaitUntil: "yesterday",
+            endsWaitUntil: until,
           })
         ).status,
       ).toBe(400);

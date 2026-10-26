@@ -54,6 +54,7 @@ import {
 } from "@temporalio/client";
 import type { ScheduleOptions, ScheduleSpec, ScheduleUpdateOptions } from "@temporalio/client";
 import { createAppComposition, type DocumentIndexClient, type SessionWorkflowClient } from "./app";
+import { startBrowserHoldRenewalPump } from "./browser-hold-renewal";
 import { observabilityEventBusOptions } from "./observability";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
 import { startHelloIngestion, startMetricsIngestion } from "./sandbox/metrics-ingestion";
@@ -551,7 +552,7 @@ export async function startApi(
       throw error;
     }
   }
-  const { app, routeDeps } = createAppComposition({
+  const { app, routeDeps, renewBrowserHolds } = createAppComposition({
     settings,
     db: dbClient.db,
     bus,
@@ -684,6 +685,7 @@ export async function startApi(
     observability,
   });
   const stopEventIntakePrunePump = startEventIntakePrunePump({ db: dbClient.db, observability });
+  const stopBrowserHoldRenewalPump = startBrowserHoldRenewalPump(renewBrowserHolds, observability);
   const stopEventSubscriptionPump = startEventSubscriptionPump({
     db: dbClient.db,
     settings,
@@ -771,6 +773,7 @@ export async function startApi(
       await stopScheduledTaskLifecyclePump();
       await stopEventTriggerDispatchPump();
       await stopEventIntakePrunePump();
+      await stopBrowserHoldRenewalPump();
       await stopEventSubscriptionPump();
       await stopWorkspaceWebhookDispatchPump();
       await stopNativePushDispatchPump();

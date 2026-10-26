@@ -54696,6 +54696,46 @@ export const COMPUTE_GROUP_ENDED = "sandbox_deleted";
 const INTERACTION_HOLDER_RESOURCE =
   /^(browser-session|computer-session):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
 
+/** A browser an agent session holds while it works or waits. */
+export type AgentHeldBrowserSession = {
+  accountId: string;
+  workspaceId: string;
+  browserSessionId: string;
+  /** The person to reach its controller as: the most recent person who
+   * started a turn of a holding session, or null when no person did. */
+  routeSubjectId: string | null;
+};
+
+/**
+ * The browsers that agent sessions hold right now, across workspaces: active,
+ * used within `BROWSER_WAIT_HOLD_MAX_MS`, and created or used by a session
+ * that is still working (a turn queued, running, recovering, waiting for
+ * capacity or waiting on a person) or has an armed input wait. The same rule
+ * as the box release below; the API renews each one's hold on its controller.
+ * Most recently used first, at most `limit`.
+ */
+export async function listAgentHeldBrowserSessions(
+  db: Database,
+  input: { limit: number },
+): Promise<AgentHeldBrowserSession[]> {
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    browser_session_id: string;
+    route_subject_id: string | null;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_agent_held_browser_sessions(
+      ${input.limit}::integer, ${BROWSER_WAIT_HOLD_MAX_MS}::bigint)`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    browserSessionId: row.browser_session_id,
+    routeSubjectId: row.route_subject_id,
+  }));
+}
+
 /**
  * An idle browser or desktop does not keep its Modal box warm. Activity is
  * deliberate and durable: the newest of the interaction holder heartbeat and

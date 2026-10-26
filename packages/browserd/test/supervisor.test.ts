@@ -3330,7 +3330,7 @@ describe("same-working-directory controller restart", () => {
     });
   });
 
-  test("a wait that ends early ends its hold there, and a late end never shortens a newer wait", async () => {
+  test("renewed holds keep a browser while they last, never shorten each other, and then the idle time counts", async () => {
     await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
       let clock = 1_000_000;
       let processState: "live" | "exited" = "live";
@@ -3357,29 +3357,21 @@ describe("same-working-directory controller restart", () => {
         };
         await supervisor.listTargets(session);
         const lastUse = clock;
-        const firstDeadline = lastUse + 50 * 60_000;
-        expect(await supervisor.holdForWait(session, { until: firstDeadline })).toBe(true);
-        // Input arrives after 15 minutes: the hold ends then, not at the
-        // deadline, and the resumed turn gets the normal idle time from then.
-        clock = lastUse + 15 * 60_000;
-        expect(
-          await supervisor.holdForWait(session, { until: clock, endsWaitUntil: firstDeadline }),
-        ).toBe(false);
-        clock = lastUse + 25 * 60_000 - 1;
+        // The session works on without the browser: the control plane renews
+        // a short hold every few minutes.
+        for (let minute = 0; minute <= 20; minute += 2) {
+          clock = lastUse + minute * 60_000;
+          expect(await supervisor.holdForWait(session, { until: clock + 5 * 60_000 })).toBe(true);
+          expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        }
+        // A late renewal from another API process, with an earlier time,
+        // does not shorten the hold.
+        expect(await supervisor.holdForWait(session, { until: lastUse + 10 * 60_000 })).toBe(true);
+        // The session stopped after minute 20: no more renewals. The last hold
+        // runs out at minute 25 and the normal idle time counts from then.
+        clock = lastUse + 35 * 60_000 - 1;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
-        // The resumed turn waits again before that; the first wait's end
-        // arriving late does not shorten the new one.
-        const secondDeadline = lastUse + 45 * 60_000;
-        expect(await supervisor.holdForWait(session, { until: secondDeadline })).toBe(true);
-        expect(
-          await supervisor.holdForWait(session, {
-            until: lastUse + 15 * 60_000,
-            endsWaitUntil: firstDeadline,
-          }),
-        ).toBe(true);
-        clock = lastUse + 55 * 60_000 - 1;
-        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
-        clock = lastUse + 55 * 60_000;
+        clock = lastUse + 35 * 60_000;
         expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
       } finally {
         await supervisor.close();
@@ -3862,19 +3854,17 @@ describe("same-working-directory controller restart", () => {
         await second.close();
       }
 
-      // Another restart keeps the hold from the record; input then arrives
-      // early and ends it, and the idle time counts from then.
+      // Another restart keeps the hold from the record; renewals extend it
+      // there too, and once they stop the idle time counts from its end.
       const third = await open();
       try {
         clock = lastUse + 20 * 60_000;
         expect(await third.releaseDetachedBrowsers()).toEqual([]);
-        expect(await third.holdForWait(session, { until: clock, endsWaitUntil: deadline })).toBe(
-          false,
-        );
-        const ended = clock;
-        clock = ended + 10 * 60_000 - 1;
+        const renewed = lastUse + 45 * 60_000;
+        expect(await third.holdForWait(session, { until: renewed })).toBe(true);
+        clock = renewed + 10 * 60_000 - 1;
         expect(await third.releaseDetachedBrowsers()).toEqual([]);
-        clock = ended + 10 * 60_000;
+        clock = renewed + 10 * 60_000;
         expect(await third.releaseDetachedBrowsers()).toEqual([options.browserSessionId]);
         expect(stopped).toEqual([join(sessionDirectory, "profile")]);
         // Once stopped, nothing is held or launched for a later wait.

@@ -912,22 +912,15 @@ export class BrowserControlClient {
   }
 
   /**
-   * Tells the controller that the agent session using this browser is
-   * working or deliberately waiting until `until`, so its idle release keeps
-   * the browser running until then (capped by the controller). Advisory: it never
-   * launches, recovers or counts as a use of the browser. Returns whether the
-   * controller holds the browser; false when it no longer runs this exact
-   * generation or predates holds (an older agent or controller image, which
-   * keeps its plain idle release).
-   *
-   * With `endsWaitUntil`, the hold until that time ended at `until`
-   * instead: the controller ends that hold there, never a newer one.
+   * Tells the controller that the agent session using this browser is still
+   * working or deliberately waiting, so its idle release keeps the browser
+   * running at least until `until` (capped by the controller; a hold only
+   * extends). Advisory: it never launches, recovers or counts as a use of the
+   * browser. Returns whether the controller holds the browser; false when it
+   * no longer runs this exact generation or predates holds (an older agent or
+   * controller image, which keeps its plain idle release).
    */
-  async holdForWait(
-    reference: PlacementBrowserSessionReference,
-    until: Date,
-    options: { endsWaitUntil?: Date } = {},
-  ): Promise<boolean> {
+  async holdForWait(reference: PlacementBrowserSessionReference, until: Date): Promise<boolean> {
     const binding = parseReference(reference);
     let data: unknown;
     try {
@@ -938,7 +931,6 @@ export class BrowserControlClient {
         body: {
           controllerGeneration: binding.controllerGeneration,
           until: until.toISOString(),
-          ...(options.endsWaitUntil ? { endsWaitUntil: options.endsWaitUntil.toISOString() } : {}),
         },
       });
     } catch (error) {

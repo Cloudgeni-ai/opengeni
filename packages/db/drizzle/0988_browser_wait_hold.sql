@@ -9,17 +9,25 @@
 -- grace and the browser relaunched later with new tab ids and without its
 -- page state.
 --
--- Only list_idle_interaction_leases changes, with the same signature and
--- result: a box whose browser is held this way is no longer a candidate. The
--- release decision itself re-checks the same rule in the worker. A previous
--- worker still lists the box but its own decision releases it, exactly as
--- before this migration.
+-- list_idle_interaction_leases changes with the same signature and result: a
+-- box whose browser is held this way is no longer a candidate. The release
+-- decision itself re-checks the same rule in the worker. A previous worker
+-- still lists the box but its own decision releases it, exactly as before
+-- this migration.
+--
+-- list_agent_held_browser_sessions is new: the browsers held by the same rule
+-- across workspaces, for the API to renew a short hold on each browser's own
+-- controller (browserd stops idle browsers by itself on every placement), with
+-- the person to reach it as: the most recent person who started a turn of a
+-- holding session. A browser held only by sessions no person started gets
+-- none (null), and the API then leaves it to its plain idle release.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
 DO $install$
 DECLARE
   data_schema text := current_schema();
+  role_name text;
 BEGIN
   EXECUTE format($create$
     CREATE OR REPLACE FUNCTION opengeni_private.list_idle_interaction_leases(
@@ -86,5 +94,65 @@ BEGIN
       RAISE;
     END $body$;
   $create$, data_schema);
+
+  EXECUTE format($create$
+    CREATE FUNCTION opengeni_private.list_agent_held_browser_sessions(
+      p_limit integer, p_hold_max_ms bigint)
+    RETURNS TABLE(account_id uuid, workspace_id uuid, browser_session_id uuid,
+      route_subject_id text)
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, %1$I, pg_temp
+    AS $body$
+    DECLARE inventory_id uuid;
+    BEGIN
+      IF p_limit < 1 OR p_limit > 1000 THEN RAISE EXCEPTION 'invalid held browser batch'; END IF;
+      IF p_hold_max_ms IS NULL OR p_hold_max_ms < 60000 THEN RAISE EXCEPTION 'invalid hold cap'; END IF;
+      inventory_id := opengeni_private.open_session_tenancy_fence_inventory(%1$I.session_tenancy_fence_target_schema());
+      RETURN QUERY SELECT browser.account_id, browser.workspace_id, browser.id,
+        (SELECT turn.initiating_human_subject_id
+          FROM %1$I.browser_session_associations association
+          JOIN %1$I.sessions holder ON holder.id = association.session_id
+            AND holder.workspace_id = association.workspace_id
+          JOIN %1$I.session_turns turn ON turn.workspace_id = holder.workspace_id
+            AND turn.session_id = holder.id
+          WHERE association.workspace_id = browser.workspace_id
+            AND association.browser_session_id = browser.id
+            AND association.relationship IN ('created', 'using')
+            AND (holder.status IN ('queued', 'running', 'requires_action', 'recovering',
+                'waiting_capacity')
+              OR holder.input_wait_until > now())
+            AND turn.initiating_human_subject_id IS NOT NULL
+          ORDER BY turn.created_at DESC LIMIT 1)
+      FROM %1$I.browser_sessions browser
+      WHERE browser.lifecycle = 'active' AND browser.controller_generation IS NOT NULL
+        AND browser.last_used_at > now() - p_hold_max_ms * interval '1 millisecond'
+        AND EXISTS (SELECT 1 FROM %1$I.browser_session_associations association
+          JOIN %1$I.sessions holder ON holder.id = association.session_id
+            AND holder.workspace_id = association.workspace_id
+          WHERE association.workspace_id = browser.workspace_id
+            AND association.browser_session_id = browser.id
+            AND association.relationship IN ('created', 'using')
+            AND (holder.status IN ('queued', 'running', 'requires_action', 'recovering',
+                'waiting_capacity')
+              OR holder.input_wait_until > now()))
+      ORDER BY browser.last_used_at DESC, browser.id LIMIT p_limit;
+      PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);
+    EXCEPTION WHEN OTHERS THEN
+      PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory_id);
+      RAISE;
+    END $body$;
+  $create$, data_schema);
+
+  REVOKE ALL ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint)
+    FROM PUBLIC;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint)
+      TO opengeni_app;
+  END IF;
+  FOR role_name IN SELECT rolname FROM pg_roles
+    WHERE rolname <> current_user AND has_function_privilege(oid,
+      'opengeni_private.list_idle_interaction_leases(integer,bigint)', 'EXECUTE')
+  LOOP
+    EXECUTE format('GRANT EXECUTE ON FUNCTION opengeni_private.list_agent_held_browser_sessions(integer, bigint) TO %I', role_name);
+  END LOOP;
 END
 $install$;

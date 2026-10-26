@@ -30,7 +30,6 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
-import { prepareWorkspaceToolGatewayForGrant } from "../src/workspace-tool-gateway";
 
 const AGENT_PERMISSIONS: Permission[] = ["sessions:read", "sessions:control", "sessions:create"];
 
@@ -327,8 +326,8 @@ async function deliverIdleResult(ws: Workspace, child: Attempt): Promise<void> {
   }
 }
 
-function agentGrant(ws: Workspace, attempt: Attempt): AccessGrant {
-  return {
+function agentMcp(ws: Workspace, attempt: Attempt) {
+  const grant: AccessGrant = {
     accountId: ws.accountId,
     workspaceId: ws.workspaceId,
     subjectId: "worker:first-party-mcp",
@@ -342,10 +341,7 @@ function agentGrant(ws: Workspace, attempt: Attempt): AccessGrant {
       firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
     },
   };
-}
-
-function agentMcp(ws: Workspace, attempt: Attempt, deps: Partial<ApiRouteDeps> = {}) {
-  return buildOpenGeniMcpServer({ ...routeDeps(), ...deps }, agentGrant(ws, attempt));
+  return buildOpenGeniMcpServer(routeDeps(), grant);
 }
 
 /** How the worker's gateway marks a direct model call to the first-party server. */
@@ -983,66 +979,4 @@ describe("a held wait and a goal-owned child's continuation", () => {
       });
     });
   }
-});
-
-describe("an armed wait keeps the session's browsers", () => {
-  test("arming a wait tells the session's browsers its deadline, without delaying the wait", async () => {
-    const ws = await workspace();
-    const agent = await start(ws, "Keep my place in the support queue.");
-    const holds: Array<{ sessionId: string; deadline: string; workspaceId: string }> = [];
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const server = agentMcp(ws, agent, {
-      holdBrowsersForWait: async ({ grant, sessionId, deadline }) => {
-        holds.push({ sessionId, deadline: deadline.toISOString(), workspaceId: grant.workspaceId });
-        // A controller that never answers does not hold up the wait.
-        await held;
-      },
-    });
-    const waited = await callTool(server, "wait_for_input", {
-      reason: "Waiting for my turn in the queue.",
-      timeoutSeconds: 600,
-    });
-    expect(waited.status).toBe("waiting_for_input");
-    expect(holds).toEqual([
-      { sessionId: agent.sessionId, deadline: waited.deadlineAt, workspaceId: ws.workspaceId },
-    ]);
-    release();
-  });
-
-  test("a wait armed through the tool gateway holds the session's browsers too", async () => {
-    const ws = await workspace();
-    const agent = await start(ws, "Keep my place in the support queue.");
-    const holds: string[] = [];
-    const identity = { serverId: "opengeni", toolName: "wait_for_input" };
-    const prepared = await prepareWorkspaceToolGatewayForGrant(
-      {
-        ...routeDeps(),
-        settings: testSettings({
-          databaseUrl: shared.appUrl,
-          mcpServers: [{ id: "opengeni", url: "http://127.0.0.1:9/mcp", cacheToolsList: false }],
-        }),
-        holdBrowsersForWait: async ({ sessionId }) => {
-          holds.push(sessionId);
-        },
-      },
-      agentGrant(ws, agent),
-      [identity],
-    );
-    try {
-      const result = await prepared.toolGateway.call({
-        operationId: crypto.randomUUID(),
-        catalogDigest: prepared.toolGatewayCatalog.digest,
-        identity,
-        arguments: { reason: "Waiting for my turn in the queue.", timeoutSeconds: 600 },
-        caller: { kind: "codemode", subjectId: "worker:first-party-mcp" },
-      });
-      expect(result.isError).not.toBe(true);
-    } finally {
-      await prepared.close();
-    }
-    expect(holds).toEqual([agent.sessionId]);
-  });
 });

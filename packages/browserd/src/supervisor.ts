@@ -3419,16 +3419,14 @@ export class BrowserSupervisor {
 
   /**
    * Keeps a browser while the agent session using it works or deliberately
-   * waits: the control plane sends until when (a wait's deadline, or a far
-   * time while the session works), and the idle release leaves the browser
-   * running, page state and all, until then (see `waitHoldEnds` for the cap);
-   * the normal idle time then counts from the hold's end, so the turn a wait
-   * resumes finds its browser. This is not a use of the browser. A time
-   * already past clears the hold.
-   *
-   * With `endsWaitUntil`, the hold until that time ended at `until` (the
-   * session stopped working and waiting first): the hold ends there, and only
-   * if it is still that one, so a late end never shortens a newer hold.
+   * waits: the control plane renews a short hold every few minutes for as long
+   * as that lasts, and the idle release leaves the browser running, page
+   * state and all, until the latest hold (see `waitHoldEnds` for the cap). The
+   * normal idle time then counts from the hold's end, so a session that just
+   * stopped still finds its browser for a while. A hold only ever extends: no
+   * renewal, from whichever API process, shortens another, and nothing ever
+   * needs to end one. This is not a use of the browser. A time already past
+   * changes nothing.
    *
    * A browser handed off by an earlier controller and not adopted yet is
    * held too, so a wait right after a restart or update keeps it. A browser
@@ -4002,15 +4000,12 @@ export function idleSince(lastUsedAt: number, waitHoldUntil: number | null): num
   return Math.max(lastUsedAt, waitHoldEnds(lastUsedAt, waitHoldUntil));
 }
 
-/** A hold sent by the control plane: kept until `until`, or, with
- * `endsWaitUntil`, the end at `until` of the hold until that time. */
-export type WaitHold = { until: number; endsWaitUntil?: number };
+/** A hold sent by the control plane: keep the browser until `until`. */
+export type WaitHold = { until: number };
 
 function nextWaitHold(current: number | null, hold: WaitHold, now: number): number | null {
-  if (hold.endsWaitUntil !== undefined) {
-    return current === hold.endsWaitUntil ? Math.min(current, hold.until) : current;
-  }
-  return hold.until > now ? hold.until : null;
+  if (hold.until <= now) return current;
+  return current === null ? hold.until : Math.max(current, hold.until);
 }
 
 /** Whether the browser is still receiving a download. A store that cannot be
