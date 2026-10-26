@@ -28,8 +28,8 @@
   option. `group` (a non-archived root page) keeps Site conversations out of
   the rows and returns `siteGroups` with its first page: one complete row per
   Site and project with the viewer's conversation count over the requested
-  archive scope, latest activity and status counts, bounded to the 200 most
-  recently active (`siteGroupsTruncated` marks more). Its continuation pages
+  archive scope, row time (its newest publish) and status counts, bounded to
+  the 200 most recently published (`siteGroupsTruncated` marks more). Its continuation pages
   are ordinary default pages. `include` lists them as ordinary rows and is
   bound into its cursor; the sidebar uses it for search, Archived, pins and
   work a Site conversation spawned. Both use the same viewer authorization,
@@ -140,14 +140,17 @@
   console (`POST
   /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
   `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
-  latest open, which only lists the Site. A row's activity is the latest of
-  its conversations, its newest published version (creation is the first)
-  and the chats that published its versions (the one that created it and any
-  used to edit it), as far as the viewer can see them. So Sites in use rise
-  and untouched ones sort down like old sessions, without being hidden.
-  Opening a Site is not activity, just as opening a chat is not. Archiving,
-  restoring, rolling back or any other write to the Site's record is not
-  activity either. Opens are personal and never visible to anyone
+  latest open, which only lists the Site. A row's time is the Site's newest
+  published version (creation is the first) and nothing else, so Sites that
+  get new versions rise and the rest sort down like old sessions, without
+  being hidden. Messages and turns in its conversations (including a side
+  chat used to edit it) and in the chat that created or published it never
+  move it; a publish from any of them does. Opening a Site is not activity,
+  just as opening a chat is not. Archiving, restoring, rolling back (the
+  version chip's Undo, which makes an existing version current again and adds
+  none) or any other write to the Site's record does not move it either. A
+  viewer who cannot read the Site sees no publishes, so its row keeps the time
+  its first conversation there started. Opens are personal and never visible to anyone
   else; a Site page cannot record one. The console records one open per page
   (router history entry) that shows the Site view: not again when its client
   is replaced, only once a page that loaded hidden is shown, and not again

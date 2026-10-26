@@ -874,7 +874,10 @@ function siteRowSession(
   summary: SiteRowSummary | undefined,
   options: { workspaceId?: string | undefined; creator?: Session["createdBy"] | undefined },
 ): Session {
-  const updatedAt = laterIso(summary?.updatedAt ?? latest?.updatedAt ?? "", latest?.updatedAt);
+  // The server's row time is the Site's newest publish; a loaded conversation's
+  // messages never move it. Only a row the server did not send (an older chat
+  // that carries just a Site label) takes its conversation's time.
+  const updatedAt = summary ? summary.updatedAt : (latest?.updatedAt ?? "");
   const createdAt = laterIso(summary?.createdAt ?? latest?.createdAt ?? "", latest?.createdAt);
   // Only the fields the rail reads for ordering, grouping and links. It is
   // never sent to the server or used for a session action.

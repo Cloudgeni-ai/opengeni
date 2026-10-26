@@ -1738,14 +1738,18 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     // Rows stay ordinary; Site conversations arrive only as their Site rows.
     expect(page.sessions.map((row) => row.id)).toEqual([ordinary.id]);
     expect(page.siteConversations).toBe("group");
+    // These Sites have no record this viewer can read, so each row keeps the
+    // time its first conversation started: B's started last. Later messages
+    // (A's at five minutes ago) do not move a row.
     expect(page.siteGroups?.map((group) => [group.siteId, group.conversations])).toEqual([
-      [siteA, 2],
       [siteB, 1],
+      [siteA, 2],
     ]);
-    expect(page.siteGroups?.[0]).toMatchObject({
+    expect(page.siteGroups?.find((group) => group.siteId === siteA)).toMatchObject({
       title: "Analytics",
       channelId: null,
       total: 2,
+      updatedAt: new Date(a1.createdAt).toISOString(),
     });
     // Project totals count the trees the Site rows stand for.
     expect(page.totals?.groups[0]?.total).toBe(4);
@@ -2127,8 +2131,10 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     await admin`update workspace_artifacts set status = 'archived' where id = ${direct}`;
     expect((await rows()).map(([siteId]) => siteId)).toEqual([fromChat]);
 
-    // Activity in the chat that made a Site is the Site's activity, but only
-    // for people who can see that chat.
+    // Activity in the chat that made a Site never moves it, for anyone: its
+    // time stays its newest published version.
+    const [privatePublish] = await admin<{ created_at: Date }[]>`
+      select created_at from workspace_artifact_versions where artifact_id = ${fromPrivate}`;
     const later = "2030-01-01T00:00:00.000Z";
     await admin.begin(async (tx) => {
       await tx`set local session_replication_role = replica`;
@@ -2143,15 +2149,13 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         limit: 10,
       })
     ).siteGroups?.find((group) => group.siteId === fromPrivate);
-    expect(theirRow?.updatedAt).toBe(later);
+    expect(theirRow?.updatedAt).toBe(privatePublish!.created_at.toISOString());
     await recordSiteOpened(db, {
       workspaceId: workspace.workspaceId,
       subjectId,
       viewer: { subjectId },
       siteId: fromPrivate,
     });
-    const [privatePublish] = await admin<{ created_at: Date }[]>`
-      select created_at from workspace_artifact_versions where artifact_id = ${fromPrivate}`;
     expect(
       (await grouped()).siteGroups?.find((group) => group.siteId === fromPrivate)?.updatedAt,
     ).toBe(privatePublish!.created_at.toISOString());
@@ -2313,7 +2317,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     );
   }, 60_000);
 
-  test("orders Site rows by publishes and their chats' activity, not by opens or changes to the Site's record", async () => {
+  test("orders Site rows by publishes only, not by chat activity, opens or changes to the Site's record", async () => {
     if (!available) return;
     const { workspace, subjectId } = await siteViewerWorkspace();
     const other = `user:site-order-other-${crypto.randomUUID()}`;
@@ -2380,6 +2384,12 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       [older.siteId, "2026-01-01T00:00:00.000Z"],
     ];
     expect(await sites()).toEqual(untouched);
+
+    // One busy chat made both Sites (the Newsletter case): its later
+    // messages and turns move neither of them.
+    await setUpdatedAt(chat.id, "2030-01-01T00:00:00.000Z");
+    expect(await sites()).toEqual(untouched);
+    expect(await sites(other)).toEqual(untouched);
     const change = {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
@@ -2448,8 +2458,19 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     });
     expect(await sites()).toEqual(afterPublish);
 
-    // Messages and turns in a chat used to edit a Site are its activity.
-    const editor = await session({ ...workspace, message: "Edit the newer report" });
+    // Messages and turns in the Site's own side chat do not move it either;
+    // a version that chat publishes does, for everyone in the Site's audience.
+    const sideChat = await session({
+      ...workspace,
+      message: "Make the header blue",
+      metadata: { _opengeniSiteOrigin: { siteId: newer.siteId, title: "Newer report" } },
+      privateOwnerSubjectId: subjectId,
+      createdBy: { kind: "subject", subjectId },
+    });
+    await setUpdatedAt(sideChat.id, "2031-01-01T00:00:00.000Z");
+    expect(await sites()).toEqual(afterPublish);
+    expect(await sites(other)).toEqual(afterPublish);
+    const sidePublish = "2032-01-01T00:00:00.000Z";
     const turnId = crypto.randomUUID();
     await admin.begin(async (tx) => {
       await tx`set local session_replication_role = replica`;
@@ -2460,15 +2481,11 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
           created_at)
         values (${crypto.randomUUID()}, ${workspace.accountId}, ${workspace.workspaceId},
           ${newer.siteId}, 2, ${`blob-${crypto.randomUUID()}`}, ${"c".repeat(64)}, 10,
-          ${`op-${crypto.randomUUID()}`}, ${editor.id}, ${turnId}, ${crypto.randomUUID()}, 1,
-          ${subjectId}, '2026-02-01T00:00:00.000Z')`;
+          ${`op-${crypto.randomUUID()}`}, ${sideChat.id}, ${turnId}, ${crypto.randomUUID()}, 1,
+          ${subjectId}, ${sidePublish})`;
     });
-    await setUpdatedAt(editor.id, "2026-02-01T00:00:00.000Z");
-    expect(await sites()).toEqual(afterPublish);
-    const edited = "2030-01-01T00:00:00.000Z";
-    await setUpdatedAt(editor.id, edited);
-    expect((await sites())[0]).toEqual([newer.siteId, edited]);
-    expect((await sites(other))[0]).toEqual([newer.siteId, edited]);
+    expect((await sites())[0]).toEqual([newer.siteId, sidePublish]);
+    expect((await sites(other))[0]).toEqual([newer.siteId, sidePublish]);
   }, 60_000);
 
   test("a Site stays in its chat's project when people start or move conversations on it", async () => {

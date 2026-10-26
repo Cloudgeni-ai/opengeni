@@ -33911,7 +33911,7 @@ async function sessionListTotalsInScope(
       }
     ), site_conv_totals as (
       select site_id, row_channel_id as channel_id, count(*)::int as conversations,
-        max(updated_at) as updated_at, max(created_at) as created_at,
+        min(created_at) as first_created_at, max(created_at) as created_at,
         (array_agg(origin_title order by updated_at desc, id desc)
           filter (where origin_title is not null))[1] as origin_title
       from site_conv group by site_id, row_channel_id
@@ -33966,18 +33966,19 @@ async function sessionListTotalsInScope(
       -- One row per Site and project. The title is the Site's current one when
       -- its audience includes this viewer (the catalog's rule; RLS only
       -- isolates the workspace), else the creation-time label. A row without
-      -- conversations needs a live Site the viewer can see. Activity is the
-      -- latest of its conversations, its newest published version (creation
-      -- is version 1) and the chats that published its versions (the chat
-      -- that created it and any used to edit it), as far as this viewer can
-      -- see them. Opening a Site is not activity, as opening a chat is not;
-      -- an open only lists it. Archive, restore, rollback and other updates
-      -- to the Site's record are not activity either, so they never lift a
-      -- Site for everyone. One extra row reports truncation.
+      -- conversations needs a live Site the viewer can see. A row's time is
+      -- the Site's newest published version (creation is version 1) and
+      -- nothing else: messages and turns in its conversations, or in the chat
+      -- that created or published it, never move it, nor does opening it (an
+      -- open only lists it). Archive, restore, rollback (Undo) and other
+      -- updates to the Site's record add no version, so they never lift it
+      -- either. A viewer who cannot read the Site sees no publishes, so its
+      -- row keeps the time its first conversation here started, which
+      -- messages do not change. One extra row reports truncation.
       select key.site_id as "siteId", key.channel_id as "channelId",
         coalesce(site.title, key.origin_title, '') as title,
         key.conversations,
-        greatest(key.updated_at, site.published_at, site.edited_at) as "updatedAt",
+        coalesce(site.published_at, key.first_created_at) as "updatedAt",
         coalesce(key.created_at, site.created_at) as "createdAt",
         sidebar.pinned_at is not null as pinned, sidebar.pinned_at as "pinnedAt"
       from site_keys key
@@ -33985,14 +33986,7 @@ async function sessionListTotalsInScope(
         select artifact.title, artifact.status, artifact.created_at,
           (select version.created_at from ${schema.workspaceArtifactVersions} version
             where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id
-            order by version.revision desc limit 1) as published_at,
-          (select max(editor.updated_at) from ${schema.workspaceArtifactVersions} version
-            join ${schema.sessions} source
-              on source.workspace_id = ${workspaceId} and source.id = version.source_session_id
-            join ${schema.sessions} editor
-              on editor.workspace_id = ${workspaceId} and editor.id = source.root_session_id
-            where version.workspace_id = ${workspaceId} and version.artifact_id = artifact.id)
-            as edited_at
+            order by version.revision desc limit 1) as published_at
         from ${schema.workspaceArtifacts} artifact
         where artifact.workspace_id = ${workspaceId} and artifact.id = key.site_id
           and (artifact.visibility = 'workspace_shared'
