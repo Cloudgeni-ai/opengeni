@@ -704,6 +704,12 @@ function MeetingDetailPageContent({
   const nameSpeaker = transcript.nameSpeaker;
   const transcriptSpeakers = transcript.speakers;
   const peopleList = people.people;
+  // Naming reads the people list right after a person was created, before
+  // the list has rerendered with them.
+  const latestPeople = useRef(peopleList);
+  latestPeople.current = peopleList;
+  const createdPeople = useRef(new Map<string, RecordingPerson>());
+  const offeredVoices = useRef(new Set<string>());
   // Without voice recognition a name is only for this meeting; say so once,
   // the first time someone is named here.
   const toldNotRemembered = useRef(false);
@@ -717,11 +723,65 @@ function MeetingDetailPageContent({
         : {}),
     });
   }, [msg, voiceRecognition, onOpenSettings]);
+  const offerMyVoice = useCallback(
+    (me: RecordingPerson) => {
+      // Naming yourself is when remembering your voice makes sense.
+      toast.success(msg("meetings.detailPage.namedYou"), {
+        // Long enough to read and decide; the speaker menu offers it later too.
+        duration: 10_000,
+        description: msg("meetings.detailPage.rememberYourVoiceAndLater"),
+        action: {
+          label: msg("meetings.detailPage.rememberMyVoice"),
+          onClick: () =>
+            void rememberVoice(me.id, "self").then(
+              () => toast.success(msg("meetings.detailPage.yourVoiceWillBeRemembered")),
+              (error: unknown) =>
+                toast.error(msg("meetings.detailPage.couldnTRememberYourVoice"), {
+                  description: errorText(error),
+                }),
+            ),
+        },
+      });
+    },
+    [msg, rememberVoice],
+  );
+  // A name teaches nothing until the person's voice may be remembered, so
+  // say so once per person, the first time they're named here. Another
+  // member decides for themselves, so naming them offers nothing.
+  const offerToRemember = useCallback(
+    (personId: string) => {
+      const person =
+        latestPeople.current.find((candidate) => candidate.id === personId) ??
+        createdPeople.current.get(personId);
+      if (!person || person.voice || offeredVoices.current.has(person.id)) return;
+      const self = Boolean(viewerSubjectId) && person.memberSubjectId === viewerSubjectId;
+      if (person.memberSubjectId && !self) return;
+      offeredVoices.current.add(person.id);
+      if (self) {
+        offerMyVoice(person);
+        return;
+      }
+      toast.success(
+        msg("meetings.detailPage.namedDisplayname", { displayName: person.displayName }),
+        {
+          duration: 10_000,
+          description: msg("meetings.detailPage.rememberTheirVoiceAndLater"),
+          action: {
+            label: msg("meetings.detailPage.rememberVoice"),
+            onClick: () => setRememberingVoice(person),
+          },
+        },
+      );
+    },
+    [msg, viewerSubjectId, offerMyVoice],
+  );
   const actions: TranscriptActions = useMemo(
     () => ({
       nameSpeaker: async (label, name) => {
         await nameSpeaker(label, name);
-        if (name) tellNotRemembered();
+        if (!name) return;
+        if (!voiceRecognition) tellNotRemembered();
+        else if ("personId" in name) offerToRemember(name.personId);
       },
       viewerSubjectId,
       nameSelf: async (label: string) => {
@@ -735,21 +795,8 @@ function MeetingDetailPageContent({
         if (!voiceRecognition) {
           tellNotRemembered();
         } else if (!me.voice) {
-          // Naming yourself is when remembering your voice makes sense.
-          toast.success(msg("meetings.detailPage.namedYou"), {
-            description: msg("meetings.detailPage.rememberYourVoiceAndLater"),
-            action: {
-              label: msg("meetings.detailPage.rememberMyVoice"),
-              onClick: () =>
-                void rememberVoice(me.id, "self").then(
-                  () => toast.success(msg("meetings.detailPage.yourVoiceWillBeRemembered")),
-                  (error: unknown) =>
-                    toast.error(msg("meetings.detailPage.couldnTRememberYourVoice"), {
-                      description: errorText(error),
-                    }),
-                ),
-            },
-          });
+          offeredVoices.current.add(me.id);
+          offerMyVoice(me);
         }
       },
       rejectSuggestion: async (label: string) => {
@@ -779,7 +826,11 @@ function MeetingDetailPageContent({
       },
       moveSegment: transcript.moveSegment,
       editSegment: transcript.editSegment,
-      createPerson: async (displayName: string) => await createPerson({ displayName }),
+      createPerson: async (displayName: string) => {
+        const person = await createPerson({ displayName });
+        createdPeople.current.set(person.id, person);
+        return person;
+      },
       voices: voiceRecognition
         ? {
             viewerSubjectId,
@@ -824,6 +875,8 @@ function MeetingDetailPageContent({
       viewerName,
       peopleList,
       tellNotRemembered,
+      offerMyVoice,
+      offerToRemember,
       rememberVoice,
       forgetVoice,
       refreshTranscript,
