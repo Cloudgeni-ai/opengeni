@@ -620,6 +620,7 @@ function webRules(
           key={node.key}
           tex={typeof node.content === "string" ? node.content : ""}
           fontSize={inherited.fontSize ?? body.fontSize ?? theme.size.md}
+          lineHeight={inherited.lineHeight ?? body.lineHeight}
           color={String(inherited.color ?? body.color ?? theme.colors.fg)}
           fallbackStyle={styles.code_inline as TextStyle}
         />

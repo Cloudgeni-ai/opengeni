@@ -41,27 +41,38 @@ function loadEngine(): MathEngine | false {
 
 /** One ex of the message font, in points (TeX fonts: about 0.43 em). */
 const EX_PER_EM = 0.431;
+/** Ascent and descent of the message fonts (Inter and the system font), in em. */
+const FONT_ASCENT = 0.97;
+const FONT_DESCENT = 0.24;
 
-/** A formula inside a line of text. */
+/**
+ * A formula inside a line of text. React Native lays an inline view out with its bottom
+ * on the bottom of the line box, so the view moves up by the distance from there to the
+ * text baseline, then down by the formula's own depth below its baseline.
+ */
 export function InlineMath({
   tex,
   fontSize,
+  lineHeight,
   color,
   fallbackStyle,
 }: {
   tex: string;
   fontSize: number;
+  lineHeight?: number | undefined;
   color: string;
   fallbackStyle: TextStyle;
 }) {
   const math = useMemo(() => typeset(tex, false), [tex]);
   if (!math) return <Text style={fallbackStyle}>{tex}</Text>;
   const ex = fontSize * EX_PER_EM;
+  const content = fontSize * (FONT_ASCENT + FONT_DESCENT);
+  const baseline = Math.max(0, ((lineHeight ?? content) - content) / 2) + fontSize * FONT_DESCENT;
   return (
     <View
       accessible
       accessibilityLabel={tex}
-      style={{ transform: [{ translateY: math.depth * ex }] }}
+      style={{ transform: [{ translateY: math.depth * ex - baseline }] }}
     >
       <SvgXml xml={math.svg} width={math.width * ex} height={math.height * ex} color={color} />
     </View>
