@@ -373,7 +373,7 @@ function eventsForCreate(draft: Pick<ScheduleDraft, "events">) {
 export function overlapPolicyForCreate(
   draft: Pick<ScheduleDraft, "runMode" | "overlapPolicy">,
 ): ScheduleDraft["overlapPolicy"] {
-  return draft.runMode === "new_session_per_run" ? "allow_concurrent" : draft.overlapPolicy;
+  return draft.runMode === "new_session_per_run" ? "steer" : draft.overlapPolicy;
 }
 
 /** Existing chats, including one already created for a schedule, own their settings. */

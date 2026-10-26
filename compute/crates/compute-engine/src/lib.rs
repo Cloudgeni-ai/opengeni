@@ -327,7 +327,10 @@ pub trait Engine: Send + Sync + 'static {
     /// balloon rather than run out of memory. Every pause lets the balloon
     /// go first, and a request that comes once the VM is paused or ended
     /// does nothing and fails, so a VM never sleeps with its balloon set
-    /// and a request not made is never taken for done. For 0, resolves
+    /// and a request not made is never taken for done. Requests take
+    /// effect in the order this is called: one that reaches the VM after a
+    /// later request, or a later pause or resume, does nothing and fails,
+    /// so the setting asked last is the one that holds. For 0, resolves
     /// once the guest has taken back every page it gave. The future does
     /// not borrow the VM. Engines without balloons do nothing.
     fn set_balloon(

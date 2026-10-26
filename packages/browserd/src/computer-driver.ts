@@ -49,6 +49,7 @@ import {
 const MAX_FRAME_PROFILES_PER_TARGET = 8;
 const MAX_FRAME_SUBSCRIBERS_PER_TARGET = 32;
 const FRAME_INTERVAL_MS = 100;
+const MAX_REMEMBERED_STILLS = 64;
 
 type TargetFrameProfile = {
   key: string;
@@ -97,6 +98,15 @@ export class ComputerDriver implements ComputerInteractionDriver {
   /** The target last observed or acted on, listed as current (see
    * ComputerTarget.current). */
   private current: string | null = null;
+  /** The tail of each target's frame-making captures (see inFrameOrder). */
+  private readonly frameOrder = new Map<string, Promise<void>>();
+  /** Each target's last still capture, numbered so that an observation can
+   * tell one that finished after it began from an older one. */
+  private readonly stills = new Map<
+    string,
+    { sequence: number; frameId: string; targetGeneration: string }
+  >();
+  private stillSequence = 0;
 
   /** Secret values typed in this session; redacted from everything it returns,
    * since desktop accessibility trees and window titles show field values. */
@@ -136,6 +146,7 @@ export class ComputerDriver implements ComputerInteractionDriver {
   async observe(targetId: string): Promise<ComputerObservationValue> {
     this.assertOpen();
     try {
+      const since = this.stillSequence;
       const observation = await this.readWithRecovery(async (client) => {
         const observed = await client.observe(targetId);
         if (observed.frameId !== null || observed.target.kind === "app") return observed;
@@ -150,18 +161,35 @@ export class ComputerDriver implements ComputerInteractionDriver {
         // making its first pointer action impossible. Prime one frame only for
         // that cold path; an active viewer already keeps frameId populated and
         // pays no additional capture cost.
-        const frame = await client.capture(targetId);
-        if (
-          frame.targetId !== observed.target.id ||
-          frame.targetGeneration !== observed.target.targetGeneration
-        ) {
-          throw new InteractionControllerError(
-            "target_stale",
-            "computer target changed while establishing its frame fence",
-            true,
-          );
-        }
-        return { ...observed, frameId: frame.frameId };
+        //
+        // A native helper lets only the newest frame of a target keep its
+        // authority. Callers capture a still beside an observation (the
+        // screenshot they show) and hand on the still's frame; a primer landing
+        // after it would make that frame expire. So a still that finished
+        // after this observation began is the fence, and a primer otherwise
+        // runs in frame order, before any still requested after it.
+        const frameId = await this.inFrameOrder(targetId, async () => {
+          const still = this.stills.get(targetId);
+          if (
+            still &&
+            still.sequence > since &&
+            still.targetGeneration === observed.target.targetGeneration
+          )
+            return still.frameId;
+          const frame = await client.capture(targetId);
+          if (
+            frame.targetId !== observed.target.id ||
+            frame.targetGeneration !== observed.target.targetGeneration
+          ) {
+            throw new InteractionControllerError(
+              "target_stale",
+              "computer target changed while establishing its frame fence",
+              true,
+            );
+          }
+          return frame.frameId;
+        });
+        return { ...observed, frameId };
       });
       this.current = observation.target.id;
       return this.typedSecrets.redact(this.projectObservation(observation));
@@ -289,8 +317,8 @@ export class ComputerDriver implements ComputerInteractionDriver {
     this.assertOpen();
     const normalized = normalizeComputerFrameStreamOptions(options);
     try {
-      return this.projectFrame(
-        await this.readWithRecovery(
+      const frame = await this.inFrameOrder(targetId, async () => {
+        const still = await this.readWithRecovery(
           async (client) =>
             await client.captureStill(targetId, {
               format: normalized.format,
@@ -298,11 +326,40 @@ export class ComputerDriver implements ComputerInteractionDriver {
               maxWidth: normalized.maxWidth,
               maxHeight: normalized.maxHeight,
             }),
-        ),
-        0,
-      );
+        );
+        this.rememberStill(targetId, still.frameId, still.targetGeneration);
+        return still;
+      });
+      return this.projectFrame(frame, 0);
     } catch (error) {
       throw predispatchError(error, this.typedSecrets.merged());
+    }
+  }
+
+  /** Runs one frame-making capture of a target after the ones requested before
+   * it, so the helper's newest frame is the one requested last. */
+  private async inFrameOrder<T>(targetId: string, capture: () => Promise<T>): Promise<T> {
+    const previous = this.frameOrder.get(targetId) ?? Promise.resolve();
+    const run = previous.then(capture);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.frameOrder.set(targetId, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.frameOrder.get(targetId) === tail) this.frameOrder.delete(targetId);
+    }
+  }
+
+  private rememberStill(targetId: string, frameId: string, targetGeneration: string): void {
+    this.stills.delete(targetId);
+    this.stills.set(targetId, { sequence: ++this.stillSequence, frameId, targetGeneration });
+    // Oldest first: a Map iterates in insertion order.
+    for (const key of this.stills.keys()) {
+      if (this.stills.size <= MAX_REMEMBERED_STILLS) break;
+      this.stills.delete(key);
     }
   }
 

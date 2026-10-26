@@ -463,7 +463,11 @@ export async function createValidatedScheduledTask(input: {
     reusableSessionCanPost: null,
     verifySlackChannel: input.verifySlackChannel,
   });
-  if (knowledgeAction && input.payload.overlapPolicy === "allow_concurrent")
+  if (
+    knowledgeAction &&
+    input.payload.overlapPolicy !== "skip" &&
+    input.payload.overlapPolicy !== "buffer_one"
+  )
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
@@ -1694,10 +1698,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       action: knowledgeSource,
     });
   }
-  if (
-    knowledgeSource &&
-    (input.payload.overlapPolicy ?? input.existing.overlapPolicy) === "allow_concurrent"
-  )
+  const nextOverlapPolicy = input.payload.overlapPolicy ?? input.existing.overlapPolicy;
+  if (knowledgeSource && nextOverlapPolicy !== "skip" && nextOverlapPolicy !== "buffer_one")
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   if (
     knowledgeSource?.destination.kind === "personal" &&

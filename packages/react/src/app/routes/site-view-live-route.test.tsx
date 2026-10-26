@@ -19,8 +19,8 @@ const html: Record<number, string> = {
   5: "<header style='background:blue'>Opengeni usage</header>",
 };
 const server = { revision: 4, reads: 0, checks: 0, failHtml: false };
-// The header's published-link read; an API without the route (404) keeps the
-// plain Live label.
+// The header's published-link read; an API without the route (404) shows no
+// publication control.
 let publishedLink: SitePublicationLink | null = null;
 const version = (revision: number) =>
   ({
@@ -160,7 +160,10 @@ test("a publish from the side chat reloads the preview with the new version", as
   );
   expect(preview(container)).toContain("background:white");
   expect(chip(container)).toBe("v4");
-  expect(label(container)).toBe("Live");
+  // The Site view never says "Live": it stays current, and says so only
+  // while Updating or Reconnecting, so "Published" is its one indicator.
+  expect(label(container)).toBeUndefined();
+  expect(container.textContent).not.toContain("Live");
 
   // The agent streams its reply; nothing about the Site changed yet.
   const before = { ...server };
@@ -175,7 +178,7 @@ test("a publish from the side chat reloads the preview with the new version", as
   await settle();
   expect(preview(container)).toContain("background:blue");
   expect(chip(container)).toBe("v5");
-  expect(label(container)).toBe("Live");
+  expect(label(container)).toBeUndefined();
   // One cheap check saw the change, then the history was read once.
   expect(server.checks).toBe(before.checks + 1);
   expect(server.reads).toBeGreaterThan(before.reads);
@@ -189,7 +192,7 @@ test("a publish from the side chat reloads the preview with the new version", as
   expect(preview(container)).toContain("background:blue");
 });
 
-test("a published Site keeps its link in the header and says so when an update fails", async () => {
+test("a published Site says Published in the header, keeps it, and says so when an update fails", async () => {
   server.revision = 4;
   publishedLink = {
     siteId,
@@ -206,10 +209,25 @@ test("a published Site keeps its link in the header and says so when an update f
     );
     await settle();
     await settle();
-    const link = () => container.querySelector("[data-site-public-link] a");
-    expect(link()?.getAttribute("href")).toBe("https://usage.sites.example.test/");
-    // While the Site on screen is the live one, the link is the Live label;
-    // the status region beside it stays mounted, empty, to announce changes.
+    const published = () =>
+      container.querySelector<HTMLButtonElement>('[data-site-publication="published"]');
+    expect(published()?.textContent).toBe("Published");
+    expect(published()?.getAttribute("aria-label")).toBe("Published at usage.sites.example.test");
+    expect(container.textContent).not.toContain("Live");
+    // Its menu names the address and opens it.
+    await act(async () => {
+      published()!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    const menu = document.querySelector('[role="menu"]')!;
+    expect(menu.textContent).toContain("usage.sites.example.test");
+    expect(menu.querySelector("a")?.getAttribute("href")).toBe("https://usage.sites.example.test/");
+    expect(menu.textContent).toContain("Copy link");
+    expect(menu.textContent).toContain("Publishing settings");
+    await act(async () => {
+      menu.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    // While the Site on screen is the live one, nothing says so; the status
+    // region beside the control stays mounted, empty, to announce changes.
     expect(label(container)).toBeUndefined();
     const region = () => container.querySelector("[data-live-state-region]");
     expect(region()?.getAttribute("role")).toBe("status");
@@ -225,7 +243,7 @@ test("a published Site keeps its link in the header and says so when an update f
     expect(preview(container)).toContain("background:white");
     expect(label(container)).toBe("Reconnecting");
     expect(region()?.textContent).toBe("Reconnecting");
-    expect(link()?.getAttribute("href")).toBe("https://usage.sites.example.test/");
+    expect(published()?.textContent).toBe("Published");
   } finally {
     server.failHtml = false;
     publishedLink = null;
