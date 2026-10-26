@@ -34,7 +34,12 @@ import {
 import { publicationAnswer } from "../src/mcp/site-publication-tools";
 import { scanSitePageUsage, siteReadinessWarnings } from "../src/site-publishing/readiness";
 import { siteClientAddressKey, siteOutsiderUnfundedRefusal } from "../src/site-publishing/runtime";
-import { siteUnfundedReason } from "../src/site-publishing/agent-model";
+import {
+  clearSiteOutsideFundingMemo,
+  rememberSiteOutsideFunding,
+  SITE_OUTSIDE_FUNDING_MEMO_MS,
+  siteUnfundedReason,
+} from "../src/site-publishing/agent-model";
 import { insufficientCreditsHttpError } from "../src/http/api-error";
 import { HTTPException } from "hono/http-exception";
 import { siteAccessNarrowed } from "../src/site-publishing/service";
@@ -620,6 +625,39 @@ describe("a turn the workspace can't pay for, seen from outside the workspace", 
         message: "monthly model cost limit reached",
       }),
     ).toBeNull();
+  });
+
+  test("site.config reuses a funding answer briefly, shares one in flight, forgets failures", async () => {
+    clearSiteOutsideFundingMemo();
+    let calls = 0;
+    const check = (answer: "no_credits" | null) => async () => {
+      calls += 1;
+      return answer;
+    };
+    const t0 = 1_000_000;
+    // Concurrent callers share one check.
+    const [a, b] = await Promise.all([
+      rememberSiteOutsideFunding("k", t0, check("no_credits")),
+      rememberSiteOutsideFunding("k", t0, check(null)),
+    ]);
+    expect([a, b, calls]).toEqual(["no_credits", "no_credits", 1]);
+    // Within the window the answer is reused; other keys are separate.
+    expect(await rememberSiteOutsideFunding("k", t0 + 29_999, check(null))).toBe("no_credits");
+    expect(await rememberSiteOutsideFunding("other", t0, check(null))).toBeNull();
+    expect(calls).toBe(2);
+    // Once it lapses, the next caller checks again.
+    expect(
+      await rememberSiteOutsideFunding("k", t0 + SITE_OUTSIDE_FUNDING_MEMO_MS, check(null)),
+    ).toBeNull();
+    expect(calls).toBe(3);
+    // A failed check is not remembered.
+    await expect(
+      rememberSiteOutsideFunding("bad", t0, async () => {
+        throw new Error("db down");
+      }),
+    ).rejects.toThrow("db down");
+    expect(await rememberSiteOutsideFunding("bad", t0, check("no_credits"))).toBe("no_credits");
+    clearSiteOutsideFundingMemo();
   });
 
   test("core's no-credits refusal carries a stable details.code", () => {

@@ -3881,11 +3881,9 @@ test("an assistant the workspace can't pay for is unavailable to outsiders, not 
   });
 
   // With credits, the warning is gone at once and a turn starts. site.config
-  // reuses its answer briefly, so it shows the assistant once that lapses.
+  // reuses its answer briefly (unit-tested), so forget it here.
   await credits(5_000_000);
   expect(await codes()).not.toContain("agent_model_outside_no_credits");
-  const remembered = await f.gateway(site.host, "GET", "/site/config", { visitor });
-  expect(remembered.json.capabilities.agent).toBe(false);
   clearSiteOutsideFundingMemo();
   const funded = await f.gateway(site.host, "GET", "/site/config", { visitor });
   expect(funded.json.capabilities.agent).toBe(true);

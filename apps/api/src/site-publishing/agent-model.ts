@@ -196,8 +196,39 @@ export const SITE_OUTSIDE_FUNDING_MEMO_MS = 30_000;
 const SITE_OUTSIDE_FUNDING_MEMO_MAX = 2_000;
 const outsideFundingMemo = new Map<
   string,
-  { reason: SiteAgentUnfundedReason | null; expiresAt: number }
+  { answer: Promise<SiteAgentUnfundedReason | null>; expiresAt: number }
 >();
+
+/**
+ * Reuse one funding answer per key for SITE_OUTSIDE_FUNDING_MEMO_MS from
+ * `now`. Concurrent callers share the check in flight; a failed check is
+ * forgotten as soon as it fails, so the next caller runs it again. Bounded:
+ * expired answers are swept first, then the oldest live one is dropped.
+ */
+export function rememberSiteOutsideFunding(
+  key: string,
+  now: number,
+  check: () => Promise<SiteAgentUnfundedReason | null>,
+): Promise<SiteAgentUnfundedReason | null> {
+  const memo = outsideFundingMemo.get(key);
+  if (memo && memo.expiresAt > now) return memo.answer;
+  outsideFundingMemo.delete(key);
+  if (outsideFundingMemo.size >= SITE_OUTSIDE_FUNDING_MEMO_MAX) {
+    for (const [stale, entry] of outsideFundingMemo)
+      if (entry.expiresAt <= now) outsideFundingMemo.delete(stale);
+    // Still full of live answers: drop the oldest (Map keeps insertion order).
+    const oldest = outsideFundingMemo.keys().next();
+    if (outsideFundingMemo.size >= SITE_OUTSIDE_FUNDING_MEMO_MAX && !oldest.done)
+      outsideFundingMemo.delete(oldest.value);
+  }
+  const answer = check();
+  const entry = { answer, expiresAt: now + SITE_OUTSIDE_FUNDING_MEMO_MS };
+  outsideFundingMemo.set(key, entry);
+  answer.catch(() => {
+    if (outsideFundingMemo.get(key) === entry) outsideFundingMemo.delete(key);
+  });
+  return answer;
+}
 
 /**
  * Why the workspace can't pay for an outsider's turn on this model, or null
@@ -209,27 +240,17 @@ const outsideFundingMemo = new Map<
  * still run core's own admission, so a stale answer only changes whether
  * the assistant is offered, never whether a turn is paid for.
  */
-export async function siteOutsideModelUnfundedReason(
+export function siteOutsideModelUnfundedReason(
   deps: { db: Database; settings: Settings },
   scope: { accountId: string; workspaceId: string },
   model: string,
   now: number = Date.now(),
 ): Promise<SiteAgentUnfundedReason | null> {
-  const key = `${scope.accountId}\u0000${scope.workspaceId}\u0000${model}`;
-  const memo = outsideFundingMemo.get(key);
-  if (memo && memo.expiresAt > now) return memo.reason;
-  const reason = siteUnfundedReason(await siteOutsideModelFunding(deps, scope, model));
-  outsideFundingMemo.delete(key);
-  if (outsideFundingMemo.size >= SITE_OUTSIDE_FUNDING_MEMO_MAX) {
-    for (const [stale, entry] of outsideFundingMemo)
-      if (entry.expiresAt <= now) outsideFundingMemo.delete(stale);
-    // Still full of live answers: drop the oldest (Map keeps insertion order).
-    const oldest = outsideFundingMemo.keys().next();
-    if (outsideFundingMemo.size >= SITE_OUTSIDE_FUNDING_MEMO_MAX && !oldest.done)
-      outsideFundingMemo.delete(oldest.value);
-  }
-  outsideFundingMemo.set(key, { reason, expiresAt: now + SITE_OUTSIDE_FUNDING_MEMO_MS });
-  return reason;
+  return rememberSiteOutsideFunding(
+    `${scope.accountId}\u0000${scope.workspaceId}\u0000${model}`,
+    now,
+    async () => siteUnfundedReason(await siteOutsideModelFunding(deps, scope, model)),
+  );
 }
 
 /** Forget remembered funding answers, for tests. */
