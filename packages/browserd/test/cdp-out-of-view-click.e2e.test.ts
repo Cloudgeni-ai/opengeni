@@ -35,6 +35,17 @@ const FIXTURE = `data:text/html,${encodeURIComponent(
     '<div style="position:absolute;left:0;right:0;bottom:0;height:28px;display:flex;justify-content:center">',
     '<button id="delete" style="width:100%;height:28px" onclick="event.stopPropagation();log.push(\'DELETE\')">Delete</button>',
     "</div></div>",
+    // The same card mirrored, and one turned 180°: sampled on their
+    // unturned box, the press would land on the opposite side.
+    '<div role="button" aria-label="Mirrored record" style="position:absolute;left:510px;top:0;width:180px;height:120px;background:#ddd;transform:translateY(-92px) scaleX(-1)" onclick="log.push(\'MIRRORED\')">',
+    '<div style="position:absolute;left:0;right:0;bottom:0;height:28px;display:flex">',
+    '<span style="flex:1">Note</span>',
+    '<button style="width:40px" onclick="event.stopPropagation();log.push(\'EDIT\')">Edit</button>',
+    '<button style="width:40px" onclick="event.stopPropagation();log.push(\'MIRRORED DELETE\')">Delete</button>',
+    "</div></div>",
+    '<div role="button" aria-label="Turned record" style="position:absolute;left:910px;top:0;width:80px;height:120px;background:#ddd;transform:translateY(-92px) rotate(180deg)" onclick="log.push(\'TURNED\')">',
+    '<div style="position:absolute;left:0;right:0;bottom:0;height:28px"><button style="width:100%;height:28px" onclick="event.stopPropagation();log.push(\'TURNED DELETE\')">Delete</button></div>',
+    "</div>",
     '<a href="#rotated" id="rotated" style="position:absolute;left:700px;top:0;display:block;width:200px;height:60px;background:#cde;transform:translateY(-50px) rotate(35deg)">Rotated</a>',
     // A same-origin frame pushed 40px above the window, with a link sliding
     // above the frame's own top: the part the frame shows is still above the
@@ -133,6 +144,38 @@ e2e(
       await evaluate('document.getElementById("delete").style.width = "60px"');
       const card = await click({ type: "click", locator: record });
       expect(card.state).toBe("completed");
+      expect(await evaluate("log")).toEqual(["OPEN"]);
+
+      // Mirrored and turned cards are not sampled at all: their centers are
+      // above the window, which is the refusal, and nothing is pressed.
+      for (const name of ["Mirrored record", "Turned record"]) {
+        const turned = await click({
+          type: "click",
+          locator: { kind: "role", role: "button", name, exact: true },
+        });
+        expect(turned.state).toBe("failed");
+        expect(turned.error?.message).toBe(
+          "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control",
+        );
+      }
+      expect(await evaluate("log")).toEqual(["OPEN"]);
+
+      // The nested control is named by its tag or a known control role and
+      // its label, bounded in UTF-8 bytes and always quoted to the end.
+      await evaluate(
+        'const del = document.getElementById("delete"); del.style.width = "100%"; del.setAttribute("role", "x".repeat(400)); del.setAttribute("aria-label", "\u524a\u9664".repeat(40))',
+      );
+      const long = await click({ type: "click", locator: record });
+      expect(long.state).toBe("failed");
+      const named =
+        /^browser element is out of view apart from (.*), a separate control inside it, so a click would reach only that control; scroll the page or panel back to the element, or use another control$/.exec(
+          long.error?.message ?? "",
+        );
+      expect(named).not.toBeNull();
+      expect(named![1]).toStartWith('button "\u524a\u9664');
+      expect(named![1]).toEndWith('…"');
+      expect(Buffer.byteLength(named![1]!, "utf8")).toBeLessThanOrEqual(160);
+      expect(JSON.parse(named![1]!.slice("button ".length))).toEndWith("…");
       expect(await evaluate("log")).toEqual(["OPEN"]);
 
       // A rotated link whose center is above the window is not sampled on

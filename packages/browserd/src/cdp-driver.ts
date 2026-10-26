@@ -7041,7 +7041,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // samples its axis-aligned bounding box, which is the border box only
     // when the element is not rotated or skewed; otherwise skip this path.
     const [x1, y1, x2, y2, x4, y4] = [quad[0]!, quad[1]!, quad[2]!, quad[3]!, quad[6]!, quad[7]!];
-    if (Math.abs(y2 - y1) > 0.5 || Math.abs(x4 - x1) > 0.5) return null;
+    // It must also keep its orientation: mirrored (scaleX(-1)) or turned
+    // (180°) boxes map the page's fractions onto the wrong side.
+    if (Math.abs(y2 - y1) > 0.5 || Math.abs(x4 - x1) > 0.5 || x2 <= x1 || y4 <= y1) return null;
     // A cross-origin frame cannot see how much of its window the page shows;
     // pass the page's window in the frame's own coordinates.
     let bounds: { left: number; top: number; right: number; bottom: number } | null = null;
@@ -7059,8 +7061,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const found = await this.callOnNode(state, backendDOMNodeId, VISIBLE_PART_FUNCTION, [
       { value: bounds },
     ]).catch(() => null);
-    if (isRecord(found) && typeof found.nested === "string" && found.nested) {
-      return { nested: found.nested.slice(0, 160) };
+    if (isRecord(found) && isRecord(found.nested)) {
+      return { nested: nestedControlName(found.nested) };
     }
     if (!Array.isArray(found) || found.length !== 2) return null;
     const [fx, fy] = found;
@@ -9733,6 +9735,30 @@ const COVER_DESCRIPTION_FUNCTION = `function() {
   return describe(hit);
 }`;
 
+const NESTED_CONTROL_NAME_BYTES = 160;
+
+/** `kind "label"` for a nested control the page reported, at most
+ * NESTED_CONTROL_NAME_BYTES of UTF-8: the label is cut on a code-point
+ * boundary and ends in an ellipsis when cut; the quote always closes. */
+function nestedControlName(reported: Record<string, unknown>): string {
+  const bytes = (value: string) => Buffer.byteLength(value, "utf8");
+  const kind =
+    typeof reported.kind === "string" && /^[a-z][a-z0-9-]{0,39}$/.test(reported.kind)
+      ? reported.kind
+      : "control";
+  const label = typeof reported.label === "string" ? reported.label : "";
+  if (!label) return kind;
+  const quoted = (text: string) => `${kind} ${JSON.stringify(text)}`;
+  const whole = quoted(label);
+  if (reported.cut !== true && bytes(whole) <= NESTED_CONTROL_NAME_BYTES) return whole;
+  let kept = "";
+  for (const character of label) {
+    if (bytes(quoted(`${kept}${character}…`)) > NESTED_CONTROL_NAME_BYTES) break;
+    kept += character;
+  }
+  return quoted(`${kept}…`);
+}
+
 // The part of the target inside its window, as fractions of its border box
 // at a point there that reaches the target itself, nearest its centre. A point
 // whose hit lies in a separate control nested in the target (a card's own
@@ -9793,8 +9819,8 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
   ]);
   const isControl = (node) => {
     if (!(node instanceof Element)) return false;
-    const role = String(node.getAttribute("role") || "").trim().split(/\\s+/)[0];
-    if (role && controlRoles.has(role)) return true;
+    const roles = String(node.getAttribute("role") || "").trim().split(/\\s+/);
+    if (roles.some((role) => controlRoles.has(role))) return true;
     const tag = node.localName;
     if (["button", "select", "textarea", "summary", "label"].includes(tag)) return true;
     if (tag === "input") return node.type !== "hidden";
@@ -9812,16 +9838,21 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
     }
     return null;
   };
+  // The control's matched role (or tag) and its label; the driver bounds
+  // and quotes them.
   const name = (control) => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-    const kind = String(control.getAttribute("role") || "").trim().split(" ")[0] || control.localName;
+    const roles = String(control.getAttribute("role") || "").trim().split(/\\s+/);
+    const kind = roles.find((role) => controlRoles.has(role)) || control.localName;
     const editable = control.matches("input, textarea, select, [contenteditable]");
-    const label = clean(
-      control.getAttribute("aria-label") ||
-        control.getAttribute("title") ||
-        (editable ? "" : control.textContent),
-    ).slice(0, 80);
-    return label ? kind + " " + JSON.stringify(label) : kind;
+    const label = Array.from(
+      clean(
+        control.getAttribute("aria-label") ||
+          control.getAttribute("title") ||
+          (editable ? "" : control.textContent),
+      ),
+    );
+    return { kind, label: label.slice(0, 200).join(""), cut: label.length > 200 };
   };
   const steps = [0.5, 0.25, 0.75, 0, 1];
   const points = [];
