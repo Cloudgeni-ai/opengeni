@@ -1873,9 +1873,13 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
-          // 0998 managed-auth passkeys: one auth table without RLS whose
-          // runtime DML is withheld for a release (RUNTIME_DEFERRED_FULL_DML_TABLES).
-          (tables === NON_RLS_RUNTIME_TABLES ? 1 : 0) +
+          // 0998 managed-auth passkeys: one full-DML auth table without RLS,
+          // like the other managed-auth tables.
+          (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1060 EU-only inference: a runtime-read-only setting and its
           // history with no runtime privileges, both FORCE RLS.
           (tables === RUNTIME_READ_ONLY_TABLES || tables === RUNTIME_DML_TABLES ? 1 : 0) +
@@ -1955,6 +1959,7 @@ describe("runtime database posture evaluator", () => {
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
+        1 + // 0998 managed-auth passkeys: full-DML auth table without RLS.
         1 + // 1008 bot templates: full-DML, FORCE-RLS.
         1 + // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
         1 + // 1061 credential profiles: full-DML, FORCE-RLS.
@@ -2062,7 +2067,6 @@ describe("runtime database posture evaluator", () => {
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
           1 + // 1092 chat share links.
-          1 + // 0998 managed-auth passkeys: runtime DML withheld for a release.
           3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
@@ -3414,70 +3418,6 @@ describe("runtime database posture evaluator", () => {
 
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "table schema_migrations grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
-    );
-  });
-
-  test("a deferred full-DML table accepts no runtime DML or all four, never a partial grant", () => {
-    expect(runtimePosture.RUNTIME_DEFERRED_FULL_DML_TABLES).toEqual(["auth_passkeys"]);
-    expect(NON_RLS_RUNTIME_TABLES).toContain("auth_passkeys");
-    expect(RUNTIME_FULL_DML_TABLES).not.toContain("auth_passkeys");
-    expect(RUNTIME_TABLE_PRIVILEGES.auth_passkeys).toBeUndefined();
-    const { tablePrivileges: _explicit, ...defaultContract } = options;
-    const deferredTable = (grants: Partial<RuntimeTablePosture>) => {
-      const posture = safePosture();
-      posture.tables.push({
-        ...posture.tables[0]!,
-        name: "auth_passkeys",
-        rlsEnabled: false,
-        rlsForced: false,
-        rlsActive: false,
-        policyCount: 0,
-        select: false,
-        insert: false,
-        update: false,
-        delete: false,
-        ...grants,
-      });
-      return evaluateRuntimeDatabasePosture(posture, defaultContract).filter((violation) =>
-        violation.includes("auth_passkeys"),
-      );
-    };
-    expect(deferredTable({})).toEqual([]);
-    expect(deferredTable({ select: true, insert: true, update: true, delete: true })).toEqual([]);
-    expect(deferredTable({ select: true })).toEqual([
-      "table auth_passkeys grants partial runtime DML: SELECT",
-    ]);
-    expect(deferredTable({ columnPrivileges: ["UPDATE"] })).toEqual([
-      "table auth_passkeys grants partial runtime DML: UPDATE",
-    ]);
-    expect(
-      deferredTable({ select: true, insert: true, update: true, delete: true, truncate: true }),
-    ).toEqual(["table auth_passkeys grants excess runtime privileges: TRUNCATE"]);
-  });
-
-  test("a deferred target-schema capability is accepted with or without runtime EXECUTE, never PUBLIC", () => {
-    expect(runtimePosture.DEFERRED_RUNTIME_TARGET_ROUTINES).toEqual([
-      "mutate_managed_passkey(text, text, jsonb)",
-    ]);
-    const name = "mutate_managed_passkey(text, text, jsonb)";
-    const violationsFor = (change: { execute?: boolean; publicExecute?: boolean }) => {
-      const posture = safePosture();
-      Object.assign(posture.targetRoutines.find((routine) => routine.name === name)!, change);
-      return evaluateRuntimeDatabasePosture(posture, options).filter((violation) =>
-        violation.includes(name),
-      );
-    };
-    expect(violationsFor({ execute: true })).toEqual([]);
-    expect(violationsFor({ execute: false })).toEqual([]);
-    expect(violationsFor({ execute: false, publicExecute: true })).toContain(
-      `PUBLIC has forbidden target-schema capability ${name}`,
-    );
-    // A capability that is not deferred still requires runtime EXECUTE.
-    const sibling = "mutate_managed_sign_in_method(text, text, jsonb)";
-    const posture = safePosture();
-    posture.targetRoutines.find((routine) => routine.name === sibling)!.execute = false;
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      `runtime role lacks target-schema capability ${sibling}`,
     );
   });
 

@@ -1433,12 +1433,10 @@ passkey as a usable sign-in method.
 
 Passkeys ship in two releases. The previous release's readiness check refuses
 runtime access to a table and routine it doesn't know, so 0998 withholds both
-from the runtime role and provisioning keeps them withheld; until then the
-server offers no passkeys (client config reports `passkeySignIn: false`) and
-the sign-in-method routes refuse passkey changes. A later migration grants
-them once a release containing 0998 is the previous release, and passkeys turn
-on by themselves within a minute of that grant. Granting them by hand does not
-stick: provisioning revokes them again.
+from the runtime role; a release with 0998 but not 0999 offers no passkeys
+(client config reports `passkeySignIn: false`). Rolling migration 0999 grants
+them, and readiness requires them from then on. A release that still has the
+0998 gate turns passkeys on within a minute of seeing the grant.
 
 - Anyone signed in can add passkeys under their sign-in methods and sign in
   with one instead of a password. Removing the last usable method is refused as
