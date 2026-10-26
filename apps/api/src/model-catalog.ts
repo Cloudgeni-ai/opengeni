@@ -8,6 +8,7 @@ import {
 import {
   ClientModel,
   projectClientModelResidency,
+  UNKNOWN_MODEL_RESIDENCY,
   WorkspaceModelCatalogResponse,
   type DefaultModelSelection,
   type WorkspaceModelCatalogResponse as WorkspaceModelCatalogResponseType,
@@ -98,7 +99,8 @@ export function projectClientModel(model: ConfiguredModel): ClientModel {
     capabilities: model.capabilities,
     ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
     definitionVersion: model.definitionVersion,
-    residency: projectClientModelResidency(model.residency),
+    // Test doubles may pass partial models; a missing record is unknown, never EU.
+    residency: projectClientModelResidency(model.residency ?? UNKNOWN_MODEL_RESIDENCY),
   });
 }
 

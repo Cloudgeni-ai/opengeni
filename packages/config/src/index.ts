@@ -1144,8 +1144,9 @@ const SettingsSchema = z.object({
   // registry provider's models. validateSettings parses this at boot so a
   // malformed registry / unresolvable key / id collision fails fast.
   modelProvidersJson: z.string().default("[]"),
-  // Where the built-in OpenAI/Azure provider processes data (a residency
-  // declaration). Unset means a built-in rule: Azure is unknown, never EU.
+  // Where each built-in OpenAI/Azure model processes data: a JSON object from
+  // model id to residency declaration. An undeclared model uses a built-in
+  // rule: Azure is unknown, never EU.
   builtinModelResidencyJson: z.string().optional(),
   // Codex (ChatGPT) subscription: when enabled, a per-workspace connected
   // subscription is injected as a synthetic "codex-subscription" registry
@@ -4034,6 +4035,22 @@ function deploymentRegistryProvidersWithHostCredentials(
     if (canonicalJson(transportIdentity(provider)) !== canonicalJson(transportIdentity(host))) {
       throw new Error(
         `database model catalog provider ${provider.id} does not match its host-authorized transport`,
+      );
+    }
+    // Where the transport processes data is part of the transport: the host
+    // configuration that owns the endpoint must declare the same residency as
+    // the database document, for the provider and for every listed model.
+    const hostModels = new Map(host.models.map((model) => [model.id, model]));
+    const residencyMismatch =
+      canonicalJson(provider.residency ?? null) !== canonicalJson(host.residency ?? null) ||
+      provider.models.some(
+        (model) =>
+          canonicalJson(model.residency ?? null) !==
+          canonicalJson(hostModels.get(model.id)?.residency ?? null),
+      );
+    if (residencyMismatch) {
+      throw new Error(
+        `database model catalog provider ${provider.id} does not declare the same residency as its host-authorized transport`,
       );
     }
     return {
@@ -8025,7 +8042,9 @@ export function operatorDeclaresResidency(
   return kind === "api-key" || kind === "anonymous";
 }
 
-function residencyIsDeclared(residency: ModelResidencyV1 | undefined): boolean {
+function residencyIsDeclared(
+  residency: ModelResidencyV1 | undefined,
+): residency is ModelResidencyV1 {
   return (
     residency !== undefined &&
     residency.evidence.source !== "built_in_rule" &&
@@ -8058,7 +8077,8 @@ function normalizedResidencyDeclaration(
   return ModelResidencyV1.parse({
     geography: declaration.geography,
     deploymentType: declaration.deploymentType,
-    regions: [...declaration.regions],
+    // Sorted and deduplicated, so the same claim always has the same digest.
+    regions: [...new Set(declaration.regions)].sort(),
     evidence: {
       source: declaration.evidence.source,
       reference: declaration.evidence.reference,
@@ -8076,13 +8096,29 @@ export function registryModelResidency(
   provider: Pick<InternalRegistryProvider, "kind"> & {
     residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
   },
-  model: { residency?: z.output<typeof ModelResidencyDeclaration> | undefined } = {},
+  model: {
+    residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
+    upstreamModelId?: string | undefined;
+  } = {},
 ): ModelResidencyV1 {
   switch (provider.kind) {
     case "api-key":
     case "anonymous": {
       const declared = model.residency ?? provider.residency;
-      return declared ? normalizedResidencyDeclaration(declared) : UNKNOWN_MODEL_RESIDENCY;
+      if (!declared) return UNKNOWN_MODEL_RESIDENCY;
+      const residency = normalizedResidencyDeclaration(declared);
+      // A Bedrock geographic inference profile id names its geography; an EU
+      // claim on a us., apac. or global. profile is wrong, so it counts as
+      // unknown. Names only ever reject a claim, never grant one.
+      const upstreamModelId = model.upstreamModelId ?? "";
+      if (
+        residency.geography === "eu" &&
+        residency.deploymentType === "bedrock_geo_profile" &&
+        !upstreamModelId.startsWith("eu.")
+      ) {
+        return UNKNOWN_MODEL_RESIDENCY;
+      }
+      return residency;
     }
     case "codex-subscription":
       return builtInResidencyRule(
@@ -8155,55 +8191,69 @@ export function registryModelResidency(
   }
 }
 
-const builtinResidencyCache = new WeakMap<Settings, ModelResidencyV1>();
+const builtinResidencyCache = new WeakMap<Settings, ReadonlyMap<string, ModelResidencyV1>>();
 
-/**
- * Where the built-in OpenAI or Azure provider processes data:
- * `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` when the operator declared it, else
- * a rule. Azure without a declaration is unknown because GlobalStandard
- * deployments may process in any Azure region.
- */
-export function builtinModelResidency(settings: Settings): ModelResidencyV1 {
+function builtinResidencyDeclarations(settings: Settings): ReadonlyMap<string, ModelResidencyV1> {
   const cached = builtinResidencyCache.get(settings);
   if (cached) return cached;
-  let residency: ModelResidencyV1;
-  if (settings.builtinModelResidencyJson !== undefined) {
-    residency = normalizedResidencyDeclaration(
-      parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson),
-    );
-  } else if (settings.openaiProvider === "azure") {
-    residency = builtInResidencyRule(
-      "unknown",
-      "unknown",
-      "No OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declaration; Azure GlobalStandard deployments may process in any Azure region.",
-    );
-  } else if (settings.openaiBaseUrl) {
-    residency = builtInResidencyRule(
-      "unknown",
-      "unknown",
-      "Custom OpenAI-compatible base URL without an OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declaration.",
-    );
-  } else {
-    residency = builtInResidencyRule(
-      "us",
-      "provider_default",
-      "api.openai.com processes in the US by default.",
-    );
-  }
-  builtinResidencyCache.set(settings, residency);
-  return residency;
+  const declarations = new Map<string, ModelResidencyV1>(
+    settings.builtinModelResidencyJson === undefined
+      ? []
+      : Object.entries(parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson)).map(
+          ([modelId, declaration]) => [modelId, normalizedResidencyDeclaration(declaration)],
+        ),
+  );
+  builtinResidencyCache.set(settings, declarations);
+  return declarations;
 }
 
+/**
+ * Where one built-in OpenAI or Azure model processes data. Each built-in model
+ * is its own deployment (on Azure, with its own SKU), so the operator declares
+ * each one in `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON`, keyed by model id. An
+ * undeclared model uses a rule: Azure and custom base URLs are unknown,
+ * because GlobalStandard deployments may process in any Azure region.
+ */
+export function builtinModelResidency(settings: Settings, modelId: string): ModelResidencyV1 {
+  const declared = builtinResidencyDeclarations(settings).get(modelId);
+  if (declared) return declared;
+  if (settings.openaiProvider === "azure") {
+    return builtInResidencyRule(
+      "unknown",
+      "unknown",
+      "No OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declaration for this model; Azure GlobalStandard deployments may process in any Azure region.",
+    );
+  }
+  if (settings.openaiBaseUrl) {
+    return builtInResidencyRule(
+      "unknown",
+      "unknown",
+      "Custom OpenAI-compatible base URL without an OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declaration for this model.",
+    );
+  }
+  return builtInResidencyRule(
+    "us",
+    "provider_default",
+    "api.openai.com processes in the US by default.",
+  );
+}
+
+const BuiltinModelResidencyDeclarations = z.record(
+  z.string().trim().min(1),
+  ModelResidencyDeclaration,
+);
+
+/** `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON`: model id to residency declaration. */
 export function parseBuiltinModelResidencyJson(
   value: string,
-): z.output<typeof ModelResidencyDeclaration> {
+): Record<string, z.output<typeof ModelResidencyDeclaration>> {
   let raw: unknown;
   try {
     raw = JSON.parse(value);
   } catch {
     throw new Error("OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON must be a JSON object");
   }
-  const parsed = ModelResidencyDeclaration.safeParse(raw);
+  const parsed = BuiltinModelResidencyDeclarations.safeParse(raw);
   if (!parsed.success) {
     throw new Error(
       `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON is invalid: ${parsed.error.issues
@@ -8313,11 +8363,21 @@ function definitionVersionFor(
     // freeze inside TurnExecutionPolicyV1.
     ...(model.requestPolicy ? { requestPolicy: model.requestPolicy } : {}),
     pricing: model.pricing ?? null,
-    // An operator's residency declaration is executable identity: changing
-    // where a route processes data fails accepted turns instead of silently
-    // moving them. Built-in rules and unknown records are code-reviewed or
-    // carry no claim, so they stay out and existing digests are unchanged.
-    ...(residencyIsDeclared(model.residency) ? { residency: model.residency } : {}),
+    // Where an operator declares a route processes data is executable
+    // identity: moving it fails accepted turns instead of silently moving them.
+    // Only what moves processing is hashed, so re-verifying evidence keeps the
+    // digest. Built-in rules and unknown records carry no operator claim and
+    // stay out, so existing digests are unchanged. Enforcement still checks the
+    // live record on every call rather than relying on this digest.
+    ...(residencyIsDeclared(model.residency)
+      ? {
+          residency: {
+            geography: model.residency.geography,
+            deploymentType: model.residency.deploymentType,
+            regions: model.residency.regions,
+          },
+        }
+      : {}),
   });
   return `sha256:${createHash("sha256")
     .update("opengeni:model-definition:v1\n", "utf8")
@@ -9030,7 +9090,7 @@ export function configuredModels(
         deployment: { upstreamModelId: id, wireApi: "responses" },
         credentialSource: builtinProvider.credentialSource,
         billing: builtinProvider.billing,
-        residency: builtinModelResidency(settings),
+        residency: builtinModelResidency(settings, id),
         capabilities,
         ...(pricingSchedules[id] === undefined ? {} : { pricing: pricingSchedules[id] }),
         ...builtinContextLimitsForModel(settings, id),
@@ -9071,7 +9131,7 @@ export function configuredModels(
           deployment: { upstreamModelId, wireApi: provider.api },
           credentialSource: resolvedProvider.credentialSource,
           billing: resolvedProvider.billing,
-          residency: registryModelResidency(provider, model),
+          residency: registryModelResidency(provider, { ...model, upstreamModelId }),
           capabilities,
           ...(pricingSchedules[model.id] === undefined
             ? {}

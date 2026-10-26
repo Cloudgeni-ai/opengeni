@@ -35,12 +35,65 @@ export const ModelDeploymentType = /* @__PURE__ */ defineSchema(() =>
 );
 export type ModelDeploymentType = z.infer<typeof ModelDeploymentType>;
 
-/** Deployment types whose routing may leave any single geography. */
-export const GLOBAL_ROUTING_DEPLOYMENT_TYPES: readonly ModelDeploymentType[] = [
-  "azure_global",
-  "bedrock_global_profile",
-  "unknown",
-];
+/**
+ * The only deployment types that can be EU. Anything else, including gateways,
+ * subscriptions, global routing, unknown and any type added later, can never
+ * be EU, whatever a declaration says.
+ */
+export const EU_CAPABLE_DEPLOYMENT_TYPES: readonly ModelDeploymentType[] = Object.freeze([
+  "azure_regional",
+  "azure_data_zone",
+  "bedrock_regional",
+  "bedrock_geo_profile",
+  "provider_default",
+  "self_hosted",
+]);
+
+/**
+ * Cloud regions an EU claim may name, by deployment family: EEA regions plus
+ * Switzerland, which provider EU data zones can include. A region outside
+ * these lists rejects the claim (names only ever reject, never grant). The
+ * United Kingdom is not in the EEA and is not listed.
+ */
+export const EU_AZURE_REGIONS: readonly string[] = Object.freeze([
+  "austriaeast",
+  "belgiumcentral",
+  "denmarkeast",
+  "francecentral",
+  "francesouth",
+  "germanynorth",
+  "germanywestcentral",
+  "italynorth",
+  "northeurope",
+  "norwayeast",
+  "norwaywest",
+  "polandcentral",
+  "spaincentral",
+  "swedencentral",
+  "swedensouth",
+  "switzerlandnorth",
+  "switzerlandwest",
+  "westeurope",
+]);
+export const EU_AWS_REGIONS: readonly string[] = Object.freeze([
+  "eu-central-1",
+  "eu-central-2",
+  "eu-north-1",
+  "eu-south-1",
+  "eu-south-2",
+  "eu-west-1",
+  "eu-west-3",
+]);
+
+function euRegionsFor(deploymentType: ModelDeploymentType): readonly string[] | null {
+  if (deploymentType === "azure_regional" || deploymentType === "azure_data_zone") {
+    return EU_AZURE_REGIONS;
+  }
+  if (deploymentType === "bedrock_regional" || deploymentType === "bedrock_geo_profile") {
+    return EU_AWS_REGIONS;
+  }
+  return null;
+}
 
 export const MODEL_RESIDENCY_EVIDENCE_SOURCES = [
   /** The deployment operator declared it in the reviewed catalog or environment. */
@@ -70,10 +123,7 @@ export const ModelResidencyEvidenceV1 = /* @__PURE__ */ defineSchema(() =>
       /** Where to check it: a document URL, resource and SKU, or rule description. */
       reference: z.string().trim().min(1).max(1000).nullable(),
       /** Date (or date-time) the evidence was last checked. */
-      verifiedAt: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}(?:T[0-9:.]+Z)?$/u)
-        .nullable(),
+      verifiedAt: z.union([z.iso.date(), z.iso.datetime()]).nullable(),
     })
     .strict(),
 );
@@ -83,7 +133,8 @@ export type ModelResidencyEvidenceV1 = z.infer<typeof ModelResidencyEvidenceV1>;
 export function modelResidencyProblems(residency: {
   geography: ModelProcessingGeography;
   deploymentType: ModelDeploymentType;
-  evidence: ModelResidencyEvidenceV1;
+  regions: readonly string[];
+  evidence: { source: ModelResidencyEvidenceSource; reference: string | null };
 }): { path: string[]; message: string }[] {
   const problems: { path: string[]; message: string }[] = [];
   if (residency.geography === "unknown") {
@@ -95,14 +146,27 @@ export function modelResidencyProblems(residency: {
       message: "a known processing geography needs an evidence source and reference",
     });
   }
-  if (
-    residency.geography === "eu" &&
-    GLOBAL_ROUTING_DEPLOYMENT_TYPES.includes(residency.deploymentType)
-  ) {
+  if (residency.geography !== "eu") return problems;
+  if (!EU_CAPABLE_DEPLOYMENT_TYPES.includes(residency.deploymentType)) {
     problems.push({
       path: ["deploymentType"],
       message: `${residency.deploymentType} routing can leave the EU, so it cannot be declared eu`,
     });
+    return problems;
+  }
+  const allowedRegions = euRegionsFor(residency.deploymentType);
+  if (allowedRegions) {
+    if (residency.regions.length === 0) {
+      problems.push({ path: ["regions"], message: "an eu claim needs the route's regions" });
+    }
+    for (const region of residency.regions) {
+      if (!allowedRegions.includes(region)) {
+        problems.push({
+          path: ["regions"],
+          message: `${region} is not an EU region for ${residency.deploymentType}`,
+        });
+      }
+    }
   }
   return problems;
 }
@@ -134,13 +198,11 @@ export const ModelResidencyDeclaration = /* @__PURE__ */ defineSchema(() =>
       regions: z.array(z.string().regex(REGION_PATTERN)).max(32).default([]),
       evidence: z
         .object({
-          source: ModelResidencyEvidenceSource.exclude(["built_in_rule", "none"]),
+          // Operator configuration states its own declaration or the provider
+          // documentation it relies on; other sources come from code or admins.
+          source: z.enum(["operator_declaration", "provider_documentation"]),
           reference: z.string().trim().min(1).max(1000),
-          verifiedAt: z
-            .string()
-            .regex(/^\d{4}-\d{2}-\d{2}(?:T[0-9:.]+Z)?$/u)
-            .nullable()
-            .default(null),
+          verifiedAt: z.union([z.iso.date(), z.iso.datetime()]).nullable().default(null),
         })
         .strict(),
     })

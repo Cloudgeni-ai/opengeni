@@ -6,6 +6,7 @@ import {
   UNKNOWN_MODEL_RESIDENCY,
 } from "@opengeni/contracts";
 import {
+  applyModelCatalogDocument,
   builtinModelResidency,
   configuredModels,
   getSettings,
@@ -85,7 +86,7 @@ describe("model residency", () => {
         model: {
           geography: "global",
           deploymentType: "azure_global",
-          evidence: { source: "provider_api", reference: "sku GlobalStandard" },
+          evidence: { source: "provider_documentation", reference: "sku GlobalStandard" },
         },
       }),
     }).find((model) => model.id === "azure-eu/gpt-eu")!;
@@ -122,6 +123,111 @@ describe("model residency", () => {
     ).toBe(false);
     expect(isEuResidency(undefined)).toBe(false);
     expect(isEuResidency({ geography: "eu" })).toBe(false);
+  });
+
+  test("gateways, subscriptions and unknown routing can never be declared EU", () => {
+    for (const deploymentType of ["gateway", "subscription", "unknown", "azure_global"]) {
+      expect(() =>
+        parseModelProvidersJson(registry({ provider: { ...euDataZone, deploymentType } })),
+      ).toThrow(/cannot be declared eu/u);
+      expect(isEuResidency({ ...euDataZone, deploymentType })).toBe(false);
+    }
+  });
+
+  test("an EU claim must name EU regions for its cloud", () => {
+    for (const regions of [[], ["eastus"], ["uksouth"], ["eu-west-1"]]) {
+      expect(() =>
+        parseModelProvidersJson(registry({ provider: { ...euDataZone, regions } })),
+      ).toThrow();
+    }
+    expect(
+      isEuResidency({
+        ...euDataZone,
+        deploymentType: "bedrock_geo_profile",
+        regions: ["eu-west-2"],
+      }),
+    ).toBe(false);
+    expect(
+      isEuResidency({
+        ...euDataZone,
+        deploymentType: "bedrock_geo_profile",
+        regions: ["eu-central-1", "eu-west-1"],
+      }),
+    ).toBe(true);
+  });
+
+  test("operator evidence is a declaration or provider documentation with a real date", () => {
+    for (const evidence of [
+      { ...euDataZone.evidence, source: "admin_declaration" },
+      { ...euDataZone.evidence, source: "provider_api" },
+      { ...euDataZone.evidence, verifiedAt: "2026-99-99T::Z" },
+    ]) {
+      expect(() =>
+        parseModelProvidersJson(registry({ provider: { ...euDataZone, evidence } })),
+      ).toThrow();
+    }
+  });
+
+  test("an EU claim on a non-EU Bedrock profile id counts as unknown", () => {
+    const bedrock = {
+      geography: "eu",
+      deploymentType: "bedrock_geo_profile",
+      regions: ["eu-central-1"],
+      evidence: {
+        source: "provider_documentation",
+        reference: "AWS Bedrock eu. profiles",
+        verifiedAt: null,
+      },
+    } as const;
+    expect(
+      isEuResidency(
+        registryModelResidency(
+          { kind: "api-key", residency: bedrock },
+          { upstreamModelId: "us.anthropic.claude-sonnet" },
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isEuResidency(
+        registryModelResidency(
+          { kind: "api-key", residency: bedrock },
+          { upstreamModelId: "eu.anthropic.claude-sonnet" },
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  test("the database catalog must declare the same residency as the host transport", () => {
+    const hostSettings = (residency: { provider?: unknown; model?: unknown }) =>
+      withEnv(
+        { OPENGENI_OPENAI_API_KEY: "sk-test", OPENGENI_MODEL_PROVIDERS_JSON: registry(residency) },
+        () => getSettings(),
+      );
+    const document = (residency: { provider?: unknown; model?: unknown }) => ({
+      schemaVersion: 1,
+      defaultModel: "azure-eu/gpt-eu",
+      builtInModels: [],
+      registryProviders: JSON.parse(registry(residency)).map(
+        ({ apiKey: _apiKey, ...provider }: Record<string, unknown>) => provider,
+      ),
+    });
+    // Host declares EU, the database is silent: refused, not silently unknown.
+    expect(() =>
+      applyModelCatalogDocument(hostSettings({ provider: euDataZone }), document({})),
+    ).toThrow(/same residency/u);
+    // The database declares EU on a transport the host never vouched for: refused.
+    expect(() =>
+      applyModelCatalogDocument(hostSettings({}), document({ model: euDataZone })),
+    ).toThrow(/same residency/u);
+    const agreed = applyModelCatalogDocument(
+      hostSettings({ model: euDataZone }),
+      document({ model: euDataZone }),
+    );
+    expect(
+      isEuResidency(
+        configuredModels(agreed).find((model) => model.id === "azure-eu/gpt-eu")?.residency,
+      ),
+    ).toBe(true);
   });
 
   test("non-operator provider kinds cannot declare their own residency", () => {
@@ -178,20 +284,28 @@ describe("model residency", () => {
       OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
     };
     const undeclared = withEnv(azureEnv, () => getSettings());
-    expect(isEuResidency(builtinModelResidency(undeclared))).toBe(false);
+    expect(isEuResidency(builtinModelResidency(undeclared, undeclared.openaiModel))).toBe(false);
+    // Each built-in model is its own deployment: declaring one leaves the rest unknown.
     const declared = withEnv(
-      { ...azureEnv, OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON: JSON.stringify(euDataZone) },
+      {
+        ...azureEnv,
+        OPENGENI_OPENAI_MODEL: "gpt-eu",
+        OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-eu,gpt-global",
+        OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON: JSON.stringify({ "gpt-eu": euDataZone }),
+      },
       () => getSettings(),
     );
-    expect(isEuResidency(builtinModelResidency(declared))).toBe(true);
-    expect(configuredModels(declared).every((model) => isEuResidency(model.residency))).toBe(true);
+    expect(isEuResidency(builtinModelResidency(declared, "gpt-eu"))).toBe(true);
+    expect(isEuResidency(builtinModelResidency(declared, "gpt-global"))).toBe(false);
+    const byId = new Map(configuredModels(declared).map((model) => [model.id, model]));
+    expect(isEuResidency(byId.get("gpt-eu")?.residency)).toBe(true);
+    expect(isEuResidency(byId.get("gpt-global")?.residency)).toBe(false);
     expect(() =>
       withEnv(
         {
           ...azureEnv,
           OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON: JSON.stringify({
-            ...euDataZone,
-            deploymentType: "azure_global",
+            "gpt-eu": { ...euDataZone, deploymentType: "azure_global" },
           }),
         },
         () => getSettings(),
@@ -211,8 +325,25 @@ describe("model residency", () => {
         model: { ...euDataZone, regions: ["germanywestcentral"] },
       }),
     }).find((model) => model.id === "azure-eu/gpt-eu")!;
+    const reverified = models({
+      OPENGENI_MODEL_PROVIDERS_JSON: registry({
+        model: {
+          ...euDataZone,
+          regions: ["swedencentral", "germanywestcentral", "swedencentral"],
+          evidence: { ...euDataZone.evidence, verifiedAt: "2026-11-30" },
+        },
+      }),
+    }).find((model) => model.id === "azure-eu/gpt-eu")!;
+    const reordered = models({
+      OPENGENI_MODEL_PROVIDERS_JSON: registry({
+        model: { ...euDataZone, regions: ["germanywestcentral", "swedencentral"] },
+      }),
+    }).find((model) => model.id === "azure-eu/gpt-eu")!;
     expect(declared.definitionVersion).not.toBe(undeclared.definitionVersion);
     expect(otherRegion.definitionVersion).not.toBe(declared.definitionVersion);
+    // Re-verifying evidence, reordering or repeating regions keeps the digest.
+    expect(reverified.residency.regions).toEqual(["germanywestcentral", "swedencentral"]);
+    expect(reverified.definitionVersion).toBe(reordered.definitionVersion);
     // The sibling model without a declaration keeps its digest.
     const siblingBefore = models({ OPENGENI_MODEL_PROVIDERS_JSON: registry() }).find(
       (model) => model.id === "azure-eu/claude-sonnet-4-6-eu",
