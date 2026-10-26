@@ -2474,6 +2474,8 @@ export const englishMessages = {
     "Allow microphone access for this site in your browser's address bar or settings, then start again.",
   "meetings.recorderPanel.allowThisAppToUse":
     "Allow this app to use the microphone in your computer's privacy settings, then start again.",
+  "meetings.recorderPanel.allowThisAppToRecordComputerAudio":
+    "Allow this app under System Settings > Privacy & Security > Screen & System Audio Recording, then start again.",
   "meetings.recorderPanel.aPieceOfTheAudio": "Part of the audio was too large to upload.",
   "meetings.recorderPanel.audio": "Audio",
   "meetings.recorderPanel.cancel": "Cancel",
@@ -2481,6 +2483,9 @@ export const englishMessages = {
   "meetings.recorderPanel.canTRecordComputerAudio": "Can't record computer audio",
   "meetings.recorderPanel.capturingwhatValue": "{capturingWhat} {value}",
   "meetings.recorderPanel.computerAudio": "Computer audio",
+  "meetings.recorderPanel.computerAudioDidnTStart":
+    "Computer audio didn't start. Start again, or record without computer audio.",
+  "meetings.recorderPanel.computerAudioIsnTAllowed": "Computer audio isn't allowed",
   "meetings.recorderPanel.connectAMicrophoneOrCheck":
     "Connect a microphone or check that no other app is holding it, then start again.",
   "meetings.recorderPanel.couldnTRenameThisMeeting": "Couldn't rename this meeting",
@@ -2507,6 +2512,8 @@ export const englishMessages = {
     "Live transcription isn't set up. Ask an admin to connect it.",
   "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
   "meetings.recorderPanel.noNameYet": "No name yet",
+  "meetings.recorderPanel.noSoundServerIsRunning":
+    "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
   "meetings.recorderPanel.nothingIsRecordedWhilePaused": "Nothing is recorded while paused.",
   "meetings.recorderPanel.nothingWasRecordedSoNo": "Nothing was recorded, so no meeting was saved.",
   "meetings.recorderPanel.notUploadingNoConnectionRecording":
@@ -2569,6 +2576,8 @@ export const englishMessages = {
   "meetings.recorderPanel.thisBrowserCanTRecord": "This browser can't record",
   "meetings.recorderPanel.thisBrowserCanTShare":
     "This browser can't share a tab's audio. Record with the microphone only, or use Chrome or Edge on a computer.",
+  "meetings.recorderPanel.thisComputerCanTRecordItsOwnAudio":
+    "This computer can't record its own audio. Record without computer audio instead.",
   "meetings.recorderPanel.uploaded": "Uploaded",
   "meetings.recorderPanel.uploadFailedMessage": "Upload failed: {message}",
   "meetings.recorderPanel.uploadfailurereasonTheRecordingIsSaved":
