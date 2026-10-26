@@ -72,3 +72,17 @@ export function signupStarterSet(
     serverAnswer ?? (account ? readEntries()[entryKey(account, organizationId)] : undefined);
   return answer === "embed" ? "product" : answer === "everyday" ? "everyday" : "general";
 }
+
+/**
+ * The new-chat heading and composer placeholder for a starter set. People who
+ * came for everyday help get plain words about asking; the other answers keep
+ * the agent wording.
+ */
+export function newChatWording(set: ReturnType<typeof signupStarterSet>): {
+  heading: string;
+  placeholder: string;
+} {
+  return set === "everyday"
+    ? { heading: "What can I help with?", placeholder: "Ask anything, or describe what you need…" }
+    : { heading: "What should the agent do?", placeholder: "Describe a task for the agent…" };
+}

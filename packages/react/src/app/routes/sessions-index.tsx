@@ -157,7 +157,7 @@ import {
   relativeTimeLabel,
   sessionRepoLabel,
 } from "../../session-list-model";
-import { signupStarterSet } from "../lib/signup-starter-set";
+import { newChatWording, signupStarterSet } from "../lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
@@ -959,6 +959,15 @@ function SessionsIndexRouteContent({
       draft.visibility === "private" &&
       tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
+  // The signup answer picks the starters, and with them the heading and placeholder.
+  const starterSet = signupStarterSet(
+    context.authSession?.user.email,
+    workspace?.accountId,
+    context.managedSelfContext?.memberships.find(
+      (membership) => membership.organizationId === workspace?.accountId,
+    )?.signupUseCase,
+  );
+  const wording = newChatWording(starterSet);
   // A refused start names its model until the next start or a dismissal; before
   // any Send, an uncovered model with free credit left for others does the same.
   const refusedCreate =
@@ -1638,7 +1647,7 @@ function SessionsIndexRouteContent({
       <div className="mx-auto flex w-full max-w-3xl flex-col px-4 pt-10 pb-16 sm:px-6 sm:pt-16">
         <section className="flex flex-col items-center gap-2 text-center">
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
-            What should the agent do?
+            {wording.heading}
           </h1>
           {canTopUpCredits && workspace?.accountId ? (
             <>
@@ -1740,7 +1749,7 @@ function SessionsIndexRouteContent({
             autoFocus
             disabled={newSessionDraft.loading || submitting}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-            placeholder="Describe a task for the agent…"
+            placeholder={wording.placeholder}
             controlsLeading={
               <>
                 <ComposerMobilePlus
@@ -2050,13 +2059,7 @@ function SessionsIndexRouteContent({
         {starters ? (
           <NewSessionStarters
             workspaceId={workspaceId}
-            set={signupStarterSet(
-              context.authSession?.user.email,
-              workspace?.accountId,
-              context.managedSelfContext?.memberships.find(
-                (membership) => membership.organizationId === workspace?.accountId,
-              )?.signupUseCase,
-            )}
+            set={starterSet}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
               setMessage(prompt);
