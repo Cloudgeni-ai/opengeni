@@ -920,12 +920,14 @@ export class GitHubActiveExecutor implements Executor {
       if (!this.available(state)) return "ON notice staged by current owner";
     }
     // Bound work per tick. Completed effects are immutable history; blocked
-    // effects remain visible without starving candidate planning.
+    // effects remain visible without starving candidate planning. Candidate
+    // reruns unblock the batch slot, so they precede a backlog of comments.
     const effect = Object.values(state.ledger.effects)
       .sort(
         (a, b) =>
           Number(b.kind === "disable-auto-merge") - Number(a.kind === "disable-auto-merge") ||
           Number(b.kind === "followup") - Number(a.kind === "followup") ||
+          Number(b.kind === "rerun") - Number(a.kind === "rerun") ||
           Date.parse(a.nextAt) - Date.parse(b.nextAt),
       )
       .find(

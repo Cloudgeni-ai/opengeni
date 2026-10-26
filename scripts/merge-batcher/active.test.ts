@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitHubActiveExecutor } from "./active";
-import { main } from "./main";
+import { controllerOwner, main } from "./main";
 import { Controller, LiveReader } from "./controller";
 import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
 import { proveHeadRefresh } from "./head-refresh";
@@ -1043,6 +1043,66 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(
       f.writer.transaction([{ ref: f.cfg.stateRef, expected: old.sha, next }]),
     ).rejects.toThrow("Stale");
+  });
+  test("supervisor-supplied owner is validated and otherwise each process gets its own", () => {
+    const id = "0f8b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d";
+    expect(controllerOwner({ BATCHER_OWNER_ID: id })).toBe(id);
+    expect(controllerOwner({ BATCHER_OWNER_ID: ` ${id.toUpperCase()} ` })).toBe(id);
+    const a = controllerOwner({}),
+      b = controllerOwner({ BATCHER_OWNER_ID: "" });
+    expect(a).toMatch(/^[0-9a-f-]{36}$/);
+    expect(a).not.toBe(b);
+    for (const bad of ["controller-a", "0f8b1c2d3e4f4a5b8c6d7e8f9a0b1c2d", `${id}x`])
+      expect(() => controllerOwner({ BATCHER_OWNER_ID: bad })).toThrow("must be a UUID");
+  });
+  test("a generation owner shared by sequential children renews its live lease; others stay fenced", async () => {
+    const f = await fixture();
+    // Child 1 of the generation publishes and leaves a live lease.
+    const m = await f.publish();
+    f.verdict(m);
+    const before = await f.state();
+    expect(before.ledger.owner).toBe("controller-a");
+    expect(Date.parse(before.ledger.expiresAt)).toBeGreaterThan(Date.parse(NOW));
+    // A different owner (for example an old or new generation) must wait.
+    const blocked = await f.controller("other-generation").step();
+    expect(blocked.reason).toBe("another controller owns the durable lease");
+    expect(await f.executor("other-generation").maintain()).toBeNull();
+    expect((await f.state()).sha).toBe(before.sha);
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+    // Child 2 of the same generation renews immediately, still through the CAS.
+    await f.controller().step();
+    const after = await f.state();
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
+    expect(after.ledger.owner).toBe("controller-a");
+    expect(after.ledger.epoch).toBeGreaterThan(before.ledger.epoch);
+    // Sharing the owner never bypasses the state-ref compare-and-swap.
+    const stale = await f.git.stateCommit(before.ledger, before.sha, NOW);
+    await expect(
+      f.writer.transaction([{ ref: f.cfg.stateRef, expected: before.sha, next: stale }]),
+    ).rejects.toThrow("Stale");
+  });
+  test("maintenance submits a due candidate rerun before an older comment backlog", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    const run = f.verdict(m, "infrastructure");
+    const base = { attempts: 0, checks: 0, lastError: null, status: "pending" as const };
+    await f.seed((l) => {
+      l.effects["comment-backlog"] = {
+        ...base,
+        id: "comment-backlog",
+        kind: "comment",
+        number: 1,
+        body: "Backlog notice\n\n<!-- backlog -->",
+        marker: "<!-- backlog -->",
+        nextAt: "2026-10-21T11:00:00.000Z",
+      };
+      l.effects["rerun-due"] = { ...base, id: "rerun-due", kind: "rerun", run, nextAt: NOW };
+    });
+    await f.executor().maintain();
+    const effects = (await f.state()).ledger.effects;
+    expect(effects["rerun-due"]?.status).not.toBe("pending");
+    expect(effects["comment-backlog"]?.status).toBe("pending");
+    expect(f.api.comments).toEqual([]);
   });
   test("accepted push with lost response reconciles instead of republishing", async () => {
     const f = await fixture();
