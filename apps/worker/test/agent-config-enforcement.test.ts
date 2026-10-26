@@ -1141,24 +1141,26 @@ describe("effective-tools projection agrees with actual model preparation", () =
 });
 
 describe("Skill attachment is distinct from Skill catalog availability", () => {
+  // Only the Skill index reads the video policy at turn start; the video tools
+  // read it live when called.
   test.each([
-    { label: "explicit empty", selection: [], reads: 1 },
-    { label: "explicit unrelated", selection: ["builtin:opengeni-help"], reads: 1 },
+    { label: "explicit empty", selection: [], reads: 0 },
+    { label: "explicit unrelated", selection: ["builtin:opengeni-help"], reads: 0 },
     {
       label: "legacy unrelated",
       selection: bundledSkillSelectionFromMetadata({
         _opengeni_bundled_skill_ids_v1: ["builtin:opengeni-projects"],
       }),
-      reads: 1,
+      reads: 0,
     },
-    { label: "defaults", selection: "omit", reads: 2 },
-    { label: "explicit video", selection: ["builtin:video-generation"], reads: 2 },
+    { label: "defaults", selection: "omit", reads: 1 },
+    { label: "explicit video", selection: ["builtin:video-generation"], reads: 1 },
     {
       label: "legacy video",
       selection: bundledSkillSelectionFromMetadata({
         _opengeni_bundled_skill_ids_v1: ["builtin:opengeni-video-generation"],
       }),
-      reads: 2,
+      reads: 1,
     },
   ])(
     "$label reads video policy only when the bundled descriptor can use it",
@@ -1171,7 +1173,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
         });
         expect(captured.metadataReads).toEqual({ skillDescriptors: 1, videoPolicy: reads });
         expect(captured.skillCatalog.some((entry) => entry.id === "builtin:video-generation")).toBe(
-          reads === 2 && videoEnabled,
+          reads === 1 && videoEnabled,
         );
         expect(captured.names.includes("generate_video")).toBe(videoEnabled);
         expect(captured.skillCatalog.some((entry) => entry.name === SKILL_SENTINEL)).toBe(true);
@@ -1180,7 +1182,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
   );
 
   test.each([false, true])(
-    "selected video uses fresh final policy after initial enabled=%s",
+    "selected video reads the policy once, for the Skill index (enabled=%s)",
     async (initialEnabled) => {
       const phases: string[] = [];
       const captured = await captureWorkerRequest({
@@ -1189,37 +1191,36 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
         videoEnabled: true,
         loadVideoPolicy: async (phase) => {
           phases.push(phase);
-          const enabled = phase === "tool-preparation" ? initialEnabled : !initialEnabled;
           return {
             schemaVersion: 1,
-            revision: phase === "tool-preparation" ? 1 : 2,
+            revision: 1,
             fundingSource: "opengeni_credits",
-            enabledModelIds: enabled ? ["bytedance/seedance-2.5"] : [],
-            defaultModelId: enabled ? "bytedance/seedance-2.5" : null,
+            enabledModelIds: initialEnabled ? ["bytedance/seedance-2.5"] : [],
+            defaultModelId: initialEnabled ? "bytedance/seedance-2.5" : null,
           };
         },
       });
-      expect(phases).toEqual(["tool-preparation", "agent-build"]);
+      expect(phases).toEqual(["tool-preparation"]);
       expect(captured.skillCatalog.some((entry) => entry.id === "builtin:video-generation")).toBe(
         initialEnabled,
       );
-      expect(captured.names.includes("generate_video")).toBe(!initialEnabled);
+      expect(captured.names).toContain("generate_video");
     },
   );
-  test("omitted video descriptor retains later live validation", async () => {
+  test("omitted video descriptor reads no video policy at turn start", async () => {
     const failure = new Error("live video policy unavailable");
     const phases: string[] = [];
-    await expect(
-      captureWorkerRequest({
-        agent: agentConfig("all"),
-        bundledSkillIds: [],
-        loadVideoPolicy: async (phase) => {
-          phases.push(phase);
-          throw failure;
-        },
-      }),
-    ).rejects.toBe(failure);
-    expect(phases).toEqual(["agent-build"]);
+    const captured = await captureWorkerRequest({
+      agent: agentConfig("all"),
+      bundledSkillIds: [],
+      videoEnabled: true,
+      loadVideoPolicy: async (phase) => {
+        phases.push(phase);
+        throw failure;
+      },
+    });
+    expect(phases).toEqual([]);
+    expect(captured.names).toContain("generate_video");
   });
 
   test.each([false, true])(
