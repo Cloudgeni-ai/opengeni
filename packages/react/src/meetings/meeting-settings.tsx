@@ -3,7 +3,7 @@
 // live under the workspace's `recordings` settings, which a patch replaces as
 // a whole.
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import { toast } from "sonner";
 
 import {
@@ -28,6 +28,7 @@ import { SettingRow, SettingRowLink } from "../ui/setting-row";
 import { Switch } from "../ui/switch";
 
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 const defaultText = createOpenGeniText();
 
@@ -119,7 +120,7 @@ export function retentionChangeWarning(
 /** Who is looking at the settings, so they can agree to have their own voice remembered. */
 export type MeetingSettingsViewer = { subjectId: string; name: string };
 
-export function MeetingDefaultsView({
+function MeetingDefaultsViewContent({
   workspaceId,
   settings: current,
   personal,
@@ -688,5 +689,13 @@ function VoiceRows({
         </ul>
       ) : null}
     </>
+  );
+}
+
+export function MeetingDefaultsView(props: ComponentProps<typeof MeetingDefaultsViewContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingDefaultsViewContent {...props} />
+    </MeetingsOverlayScope>
   );
 }
