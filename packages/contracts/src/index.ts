@@ -17542,6 +17542,16 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     eventSequence: z.number().int().positive().nullable().optional(),
     /** One-tap answers for a single short choice question; empty otherwise. */
     choices: z.array(z.object({ id: primitives.string, label: primitives.string })).max(4),
+    /**
+     * An approval whose tool's MCP server asks the person a question in the
+     * middle of the call: which server asks, and whether the question has
+     * fields to fill in (answered in its form rather than with one tap). The
+     * item's title is then the server's question. Null otherwise.
+     */
+    serverQuestion: z
+      .object({ server: primitives.string, form: primitives.boolean })
+      .nullable()
+      .default(null),
     urgency: NotificationUrgency,
     status: InboxItemStatus,
     /** True while the person has not seen the item's current content. */

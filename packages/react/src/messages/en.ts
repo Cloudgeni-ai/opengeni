@@ -3260,6 +3260,10 @@ export const englishMessages = {
   "native.timeline.imageViewer.share": "Share",
   "native.timeline.inChatConnect.close": "Close",
   "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
+  /** Answers an MCP server's yes/no question from the inbox. */
+  "native.timeline.inbox.allow": "Allow",
+  "native.timeline.inbox.allowed": "Allowed",
+  "native.timeline.inbox.allowing": "Allowing…",
   "native.timeline.inbox.alreadyAnswered": "Already answered",
   "native.timeline.inbox.answer": "Answer",
   "native.timeline.inbox.answeredLabel": "Answered: {label}",
@@ -3298,6 +3302,8 @@ export const englishMessages = {
   "native.timeline.inbox.replies": "Replies",
   "native.timeline.inbox.reply": "Reply",
   "native.timeline.inbox.sending": "Sending…",
+  /** Who is asking, for an MCP server's question in the middle of a tool call, e.g. "Docs asks". */
+  "native.timeline.inbox.serverAsks": "{server} asks",
   "native.timeline.inbox.snooze": "Snooze",
   "native.timeline.inbox.snoozed": "Snoozed",
   "native.timeline.inbox.snoozeFor1Hour": "Snooze for 1 hour",

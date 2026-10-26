@@ -18429,6 +18429,9 @@
         "$.sender": "object? null",
         "$.sender.label": "string!",
         "$.sender.subjectId": "string!",
+        "$.serverQuestion": "object? null",
+        "$.serverQuestion.form": "boolean!",
+        "$.serverQuestion.server": "string!",
         "$.sessionAvailable": "boolean?",
         "$.sessionId": "string!",
         "$.sessionTitle": "string! null",
@@ -20963,6 +20966,87 @@
         "$": "object",
         "$.id": "string!",
         "$.kind": "const!=[\"\\\"repository\\\"\"]"
+      }
+    },
+    "McpElicitationApprovalRequest": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.requests": "array!",
+        "$.requests[]": "object",
+        "$.requests[].id": "string!",
+        "$.requests[].message": "string!",
+        "$.requests[].requestedSchema": "ref(McpElicitationRequestedSchema)!",
+        "$.server": "string!"
+      }
+    },
+    "McpElicitationField": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"3\",\"type=array\",\"type=boolean\",\"type=string\",\"type=string\",\"type=string\"]",
+        "$|type=string": "object",
+        "$|type=string.default": "string?",
+        "$|type=string.description": "string?",
+        "$|type=string.oneOf": "array!",
+        "$|type=string.oneOf[]": "object",
+        "$|type=string.oneOf[].const": "string!",
+        "$|type=string.oneOf[].title": "string!",
+        "$|type=string.title": "string?",
+        "$|type=string.type": "const!=[\"\\\"string\\\"\"]",
+        "$|type=string.enum": "array!",
+        "$|type=string.enum[]": "string",
+        "$|type=string.enumNames": "array?",
+        "$|type=string.enumNames[]": "string",
+        "$|type=string.format": "enum?=[\"\\\"date\\\"\",\"\\\"date-time\\\"\",\"\\\"email\\\"\",\"\\\"uri\\\"\"]",
+        "$|type=string.maxLength": "integer?",
+        "$|type=string.minLength": "integer?",
+        "$|3": "object",
+        "$|3.default": "number?",
+        "$|3.description": "string?",
+        "$|3.maximum": "number?",
+        "$|3.minimum": "number?",
+        "$|3.title": "string?",
+        "$|3.type": "enum!=[\"\\\"integer\\\"\",\"\\\"number\\\"\"]",
+        "$|type=boolean": "object",
+        "$|type=boolean.default": "boolean?",
+        "$|type=boolean.description": "string?",
+        "$|type=boolean.title": "string?",
+        "$|type=boolean.type": "const!=[\"\\\"boolean\\\"\"]",
+        "$|type=array": "object",
+        "$|type=array.default": "array?",
+        "$|type=array.default[]": "string",
+        "$|type=array.description": "string?",
+        "$|type=array.items": "union!=[\"0\",\"type=string\"]",
+        "$|type=array.items|0": "object",
+        "$|type=array.items|0.anyOf": "array!",
+        "$|type=array.items|0.anyOf[]": "object",
+        "$|type=array.items|0.anyOf[].const": "string!",
+        "$|type=array.items|0.anyOf[].title": "string!",
+        "$|type=array.items|type=string": "object",
+        "$|type=array.items|type=string.enum": "array!",
+        "$|type=array.items|type=string.enum[]": "string",
+        "$|type=array.items|type=string.type": "const!=[\"\\\"string\\\"\"]",
+        "$|type=array.maxItems": "integer?",
+        "$|type=array.minItems": "integer?",
+        "$|type=array.title": "string?",
+        "$|type=array.type": "const!=[\"\\\"array\\\"\"]"
+      }
+    },
+    "McpElicitationRequestedSchema": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.properties": "object!",
+        "$.properties{}": "ref(McpElicitationField)",
+        "$.required": "array?",
+        "$.required[]": "string",
+        "$.type": "const!=[\"\\\"object\\\"\"]"
       }
     },
     "McpPersonalConnectionSummary": {
@@ -28684,6 +28768,7 @@
         "$.fields[]": "ref(ToolReviewField)",
         "$.id": "string!",
         "$.moreFields": "integer!",
+        "$.question": "ref(McpElicitationApprovalRequest)?",
         "$.reason": "string!",
         "$.revision": "string!",
         "$.samples": "array?",
@@ -33602,6 +33687,7 @@
       "InboxItemKind": "type",
       "InboxItemLink": "type",
       "InboxItemSender": "type",
+      "InboxItemServerQuestion": "type",
       "InboxSettings": "type",
       "InboxTidyPolicy": "type",
       "InitiatingHuman": "type",
@@ -38300,6 +38386,7 @@
       "LearningRefusalActions": "type",
       "LearningRefusalActionsProvider": "value",
       "LearningRefusalPlace": "type",
+      "McpElicitationRequest": "value",
       "MessageTimeline": "value",
       "MessageTimelineProps": "type",
       "NewConversation": "value",

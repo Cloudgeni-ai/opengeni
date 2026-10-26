@@ -16,6 +16,7 @@ import { type Database, withRlsContext } from "./database";
 import { fromPostgresLosslessJson } from "./lossless-json";
 import * as schema from "./schema";
 import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
+import { pendingApprovalQuestion } from "./approval-questions";
 
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -204,6 +205,8 @@ export async function legacyToolActionReview(
       : active
         ? "pending"
         : "cancelled";
+    // The tool's MCP server stopped this call to ask the person something.
+    const question = active ? pendingApprovalQuestion(pending, input.approvalId) : undefined;
     const actionDigest = createHash("sha256")
       .update(
         stableJson({
@@ -239,6 +242,7 @@ export async function legacyToolActionReview(
         updatedAt: turn.updatedAt.toISOString(),
         availableActions: active ? (proven ? ["approve", "reject"] : ["reject"]) : [],
         detailsAvailable: proven,
+        ...(question ? { question } : {}),
       }),
     };
   });

@@ -71,6 +71,7 @@ function normalizeInboxItem(item: InboxItem): InboxItem {
     link: item.link ?? null,
     eventSequence: item.eventSequence ?? null,
     choices: Array.isArray(item.choices) ? item.choices : [],
+    serverQuestion: item.serverQuestion ?? null,
   };
 }
 
@@ -120,6 +121,8 @@ const KIND_ICON: Record<InboxItem["kind"], NativeIconName> = {
 };
 
 function kindIcon(item: InboxItem): NativeIconName {
+  // An MCP server's question is an approval of its call, but reads as a question.
+  if (item.kind === "approval" && item.serverQuestion) return "message-circle-question";
   return item.kind === "notification" && item.urgency === "time_sensitive"
     ? "bell-ring"
     : (KIND_ICON[item.kind] ?? "bell");
@@ -561,9 +564,11 @@ export function NativeInboxList({
       });
       leave(item);
       onNotice?.(
-        decision === "approve"
-          ? t("native.timeline.inbox.approved")
-          : t("native.timeline.inbox.denied"),
+        decision === "reject"
+          ? t("native.timeline.inbox.denied")
+          : item.serverQuestion
+            ? t("native.timeline.inbox.allowed")
+            : t("native.timeline.inbox.approved"),
       );
     });
 
@@ -680,13 +685,18 @@ export function NativeInboxList({
     const parts: string[] = [];
     // Another member's agent sent it: say who, first.
     if (item.sender) parts.push(t("native.timeline.inbox.fromLabel", { label: item.sender.label }));
+    if (item.kind === "approval" && item.serverQuestion) {
+      parts.push(t("native.timeline.inbox.serverAsks", { server: item.serverQuestion.server }));
+    }
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
       parts.push(t("native.timeline.inbox.timeSensitive"));
     }
     if (item.kind === "question") parts.push(t("native.timeline.inbox.question"));
     if (item.kind === "goal_paused") parts.push(t("native.timeline.inbox.goalPaused"));
     if (item.kind === "reply") parts.push(t("native.timeline.inbox.reply"));
-    if (item.kind === "approval" && !item.body) parts.push(t("native.timeline.inbox.approval"));
+    if (item.kind === "approval" && !item.body && !item.serverQuestion) {
+      parts.push(t("native.timeline.inbox.approval"));
+    }
     if (item.sessionAvailable !== false)
       parts.push(item.sessionTitle ?? t("native.timeline.inbox.untitledSession"));
     const workspace = spansWorkspaces ? workspaceNames?.get(item.workspaceId) : undefined;
@@ -697,6 +707,41 @@ export function NativeInboxList({
 
   const actions = (item: InboxItem) => {
     const pending = busy[item.id];
+    if (item.kind === "approval" && item.serverQuestion) {
+      // A plain confirmation is answered here; fields are filled in the session.
+      return (
+        <>
+          <Button
+            label={
+              pending === "reject"
+                ? t("native.timeline.inbox.denying")
+                : t("native.timeline.inbox.deny")
+            }
+            icon="x"
+            disabled={Boolean(pending)}
+            onPress={() => decide(item, "reject")}
+          />
+          {item.serverQuestion.form ? (
+            <Button
+              label={t("native.timeline.inbox.answer")}
+              disabled={Boolean(pending)}
+              onPress={() => onOpenSession(item)}
+            />
+          ) : (
+            <Button
+              label={
+                pending === "approve"
+                  ? t("native.timeline.inbox.allowing")
+                  : t("native.timeline.inbox.allow")
+              }
+              icon="check"
+              disabled={Boolean(pending)}
+              onPress={() => decide(item, "approve")}
+            />
+          )}
+        </>
+      );
+    }
     if (item.kind === "approval") {
       return (
         <>
@@ -859,7 +904,7 @@ export function NativeInboxList({
               >
                 {item.title}
               </Text>
-              {item.body && item.kind === "approval" ? (
+              {item.body && item.kind === "approval" && !item.serverQuestion ? (
                 <View
                   style={{
                     alignSelf: "flex-start",

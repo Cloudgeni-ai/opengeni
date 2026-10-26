@@ -6,7 +6,9 @@ import {
   createSession,
   getActiveSessionHistoryItemsPaged,
   getSession,
+  getToolActionReview,
   initializeSessionStartAtomically,
+  listInboxItems,
   listSessionEvents,
   SessionApprovalAnswerError,
 } from "@opengeni/db";
@@ -187,6 +189,24 @@ async function toolOutputs(ctx: Ctx, callId: string): Promise<unknown[]> {
     .map((event) => (event.payload as { output: unknown }).output);
 }
 
+/** What the inbox and the tool review (Slack, dialogs, embedders) show for a paused call. */
+async function surfaces(ctx: Ctx, callId: string) {
+  const review = await getToolActionReview(app.db, {
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    sessionId: ctx.sessionId,
+    approvalId: callId,
+  });
+  const inbox = await listInboxItems(app.db, {
+    accountId: ctx.accountId,
+    subjectId: ctx.subjectId,
+  });
+  const item = inbox.find(
+    (entry) => entry.sessionId === ctx.sessionId && entry.sourceKey === callId,
+  );
+  return { question: review?.question, item };
+}
+
 /** Model history keeps every call paired with exactly one result. */
 async function expectPairedHistory(ctx: Ctx) {
   const history = await getActiveSessionHistoryItemsPaged(app.db, ctx.workspaceId, ctx.sessionId);
@@ -238,10 +258,23 @@ test("a question pauses the call and a later answer sends it exactly once", asyn
   expect(await getSession(app.db, ctx.workspaceId, ctx.sessionId)).toMatchObject({
     status: "requires_action",
   });
+  // The inbox and the tool review show the server's question, not the tool name.
+  const waiting = await surfaces(ctx, callId);
+  expect(waiting.question).toMatchObject({
+    server: "Chat",
+    requests: [{ id: "confirm", message: `Send “${text}” to team?` }],
+  });
+  expect(waiting.item).toMatchObject({
+    kind: "approval",
+    title: `Send “${text}” to team?`,
+    serverQuestion: { server: "Chat", form: false },
+  });
 
   // A confirmation has no fields: a plain approval answers it.
   const decision = await decide(ctx, { approvalId: callId, decision: "approve" });
   expect(decision.payload).toMatchObject({ content: { confirm: {} } });
+  // Answered: no open question and no open item.
+  expect(await surfaces(ctx, callId)).toEqual({ question: undefined, item: undefined });
   expect((await runTurn(ctx, scripted, decision.id)).status).toBe("idle");
   expect(fake.sent.filter((message) => message.text === text)).toEqual([{ chat: "team", text }]);
   const retry = fake.calls.findLast((call) => call.arguments.text === text);
@@ -268,6 +301,12 @@ test("a form is checked, then a second question in the same call is asked and an
     id: "details",
     message: `Who should come to “${topic}”, and when?`,
   });
+  const form = await surfaces(ctx, callId);
+  expect(form.question?.requests[0]?.requestedSchema.required).toEqual(["room", "attendees"]);
+  expect(form.item).toMatchObject({
+    title: `Who should come to “${topic}”, and when?`,
+    serverQuestion: { server: "Chat", form: true },
+  });
 
   // A required field without a default must be answered; nothing is recorded.
   await expect(decide(ctx, { approvalId: callId, decision: "approve" })).rejects.toThrow(
@@ -293,6 +332,13 @@ test("a form is checked, then a second question in the same call is asked and an
   expect(again).toMatchObject({
     id: callId,
     elicitation: { requests: [{ id: "confirm", message: "Book small room for 3?" }] },
+  });
+  // The new question reopens the inbox item and replaces the review's question.
+  const asked = await surfaces(ctx, callId);
+  expect(asked.question?.requests.map((request) => request.id)).toEqual(["confirm"]);
+  expect(asked.item).toMatchObject({
+    title: "Book small room for 3?",
+    serverQuestion: { server: "Chat", form: false },
   });
   // The model was not asked anything in between.
   expect(scripted.calls).toBe(1);

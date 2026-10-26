@@ -98,15 +98,39 @@ answers keyed by request id:
 The API validates `content` against each schema (required fields, types,
 lengths, bounds and choices) and refuses an answer that does not match. A
 request without required fields can be approved without `content`, so a plain
-confirmation also works from Slack, push and other approval surfaces. Approval
+confirmation also works from surfaces that only approve or reject. Approval
 authority is unchanged: whoever may decide the session's approvals may answer.
 The recorded decision carries the complete answer, the form's defaults
 included. A rejection carries no answer.
 
-The inbox, Slack and push show such a call like any other approval, without
-the server's question. Approving from there answers a plain confirmation; a
-form with required fields has to be answered in the session (Slack says so,
-and the API refuses an incomplete answer with the reason).
+## Where the person sees the question
+
+Every approval surface shows the server's question itself, not just the tool
+name. A question with nothing to fill in is a confirmation answered with Allow
+or Deny wherever approvals are decided; a question with fields is answered on
+its form.
+
+| Surface              | Confirmation                                         | Form                                                    |
+| -------------------- | ---------------------------------------------------- | ------------------------------------------------------- |
+| Session (web, React) | Question, Allow, Decline                             | Question and form, Send answer, Decline                 |
+| Session (native)     | Question, Allow, Decline                             | Question and native form, Send answer, Decline          |
+| Web inbox            | Question as the title, "<server> asks", Allow, Deny  | Answer opens the same form in a dialog; Deny            |
+| Native inbox         | Question as the title, "<server> asks", Allow, Deny  | Answer opens the session on the form; Deny              |
+| Phone push           | "<server> asks: <question>", lock-screen Approve     | The same text; tapping opens the app on the form        |
+| Slack (private DM)   | Question in the card, Allow, Decline                 | Question in the card, Decline and "Answer in Opengeni"  |
+
+Inbox items for such approvals carry `serverQuestion: { server, form }`, and
+`GET /tool-reviews/{approvalId}` returns the waiting `question`, so an
+embedder's own inbox can do the same. A server that asks again on the same
+call reopens its inbox item with the new question.
+
+Slack answers forms in Opengeni because a Slack form is a modal that has to
+be opened within three seconds of the click, while Slack decisions go through
+Opengeni's durable action queue. A Slack card is also posted once per event
+and replayed byte for byte, so it shows the question from the event, not live
+state. A question too long for one Slack section is answered in Opengeni too.
+In a shared channel the card stays generic, as for any approval with private
+details.
 
 The React `ApprovalSurface` shows which server is asking, its message, the
 call it belongs to and the form, with the server's defaults filled in. The
@@ -129,4 +153,3 @@ each question its server asks: two decisions for the same call.
 - URL-mode elicitation, sampling and roots inside `input_required`.
 - Elicitation on `prompts/get` and `resources/read`.
 - Elicitation for Codemode and other programmatic callers.
-- Showing the server's question in the inbox, Slack and push.

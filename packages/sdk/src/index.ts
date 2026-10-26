@@ -1111,6 +1111,7 @@ export type {
   InboxItemLink,
   InboxItemKind,
   InboxItemSender,
+  InboxItemServerQuestion,
   InboxSettings,
   MemberNotificationsSetting,
   SessionInboxMute,

@@ -1,9 +1,14 @@
-import { slackToolReviewBlocks, slackToolReviewCanDecide } from "./slack-tool-review";
+import {
+  slackServerQuestion,
+  slackToolReviewBlocks,
+  slackToolReviewCanDecide,
+} from "./slack-tool-review";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   approvalIdentifier,
   ApproveSlackUserLinkAccessRequest,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  McpElicitationApprovalRequest,
   resolveWorkspaceSessionToolDefaults,
   hasOpenGeniSlackReactionScope,
   ListSlackUserLinkAccessRequestsResponse,
@@ -4866,7 +4871,12 @@ async function postSlackControlCard(
   });
 }
 
-type SlackApprovalSummary = { id: string; name: string };
+type SlackApprovalSummary = {
+  id: string;
+  name: string;
+  /** The MCP server's question that paused this call, from the event itself. */
+  question: McpElicitationApprovalRequest | null;
+};
 
 function slackApprovalSummaries(payload: unknown): SlackApprovalSummary[] {
   const approvals = record(payload)?.approvals;
@@ -4877,7 +4887,14 @@ function slackApprovalSummaries(payload: unknown): SlackApprovalSummary[] {
       const rawItem = record(value?.rawItem);
       const id = approvalIdentifier(approval);
       const name = boundedString(value?.name ?? value?.toolName ?? rawItem?.name, 256);
-      return id ? { id, name: name ?? "Opengeni action" } : null;
+      const question = McpElicitationApprovalRequest.safeParse(value?.elicitation);
+      return id
+        ? {
+            id,
+            name: name ?? "Opengeni action",
+            question: question.success ? question.data : null,
+          }
+        : null;
     })
     .filter((approval): approval is SlackApprovalSummary => approval !== null)
     .slice(0, MAX_SLACK_APPROVALS_PER_CARD);
@@ -5014,16 +5031,22 @@ async function slackApprovalCard(
     reviews.flatMap((review) => (review ? [[review.id, review] as const] : [])),
   );
   const actionable = approvals.filter((approval) => {
+    // A server's question is the decision itself, so it needs no saved review.
+    if (approval.question) return true;
     const review = reviewById.get(approval.id);
     return review && slackToolReviewCanDecide(review);
   });
   const specs = actionable
     .flatMap((approval) => [
-      {
-        actionKind: "approval_approve" as const,
-        actionKey: `approval:${approval.id}:approve`,
-        targetId: approval.id,
-      },
+      ...(approval.question && !slackServerQuestion(approval.question).answerableInSlack
+        ? []
+        : [
+            {
+              actionKind: "approval_approve" as const,
+              actionKey: `approval:${approval.id}:approve`,
+              targetId: approval.id,
+            },
+          ]),
       {
         actionKind: "approval_reject" as const,
         actionKey: `approval:${approval.id}:reject`,
@@ -5046,6 +5069,47 @@ async function slackApprovalCard(
     const approve = byKey.get(`approval:${approval.id}:approve`);
     const reject = byKey.get(`approval:${approval.id}:reject`);
     const review = reviewById.get(approval.id);
+    if (approval.question) {
+      // What the call does (when it can be shown), then the server's question
+      // right above its answer. Anything to fill in is answered in the session.
+      if (review && slackToolReviewCanDecide(review)) {
+        blocks.push(...slackToolReviewBlocks(review, privateAudience));
+      }
+      const question = slackServerQuestion(approval.question);
+      blocks.push(question.block);
+      if (!question.answerableInSlack && link) {
+        blocks.push({
+          type: "section",
+          text: { type: "mrkdwn", text: `<${link}|Answer in Opengeni>` },
+        });
+      }
+      const elements: Extract<SlackMessageBlock, { type: "actions" }>["elements"] = [];
+      if (question.answerableInSlack && approve) {
+        elements.push({
+          type: "button",
+          action_id: SLACK_ACTION_ID_BY_KIND.approval_approve,
+          value: approve.id,
+          text: { type: "plain_text", text: "Allow", emoji: true },
+          style: "primary",
+        });
+      }
+      if (reject) {
+        elements.push({
+          type: "button",
+          action_id: SLACK_ACTION_ID_BY_KIND.approval_reject,
+          value: reject.id,
+          text: { type: "plain_text", text: "Decline", emoji: true },
+        });
+      }
+      if (elements.length) {
+        blocks.push({
+          type: "actions",
+          block_id: `opengeni_approval_${event.sequence}_${blocks.length}`,
+          elements,
+        });
+      }
+      continue;
+    }
     if (!review) continue;
     blocks.push(...slackToolReviewBlocks(review, privateAudience));
     // Render the original event deterministically, even after a decision. The

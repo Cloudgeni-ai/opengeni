@@ -17,6 +17,7 @@ import { hydrateStoredAttemptToolCatalog } from "./session-content-blobs";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
 import { fromPostgresLosslessJson } from "./lossless-json";
 import { legacyToolActionReview } from "./legacy-tool-action-reviews";
+import { waitingApprovalQuestion } from "./approval-questions";
 
 type ReviewScope = {
   accountId: string;
@@ -231,6 +232,17 @@ export async function getToolActionReview(
   const args = request.reviewArguments;
   const context = request.reviewContext ?? undefined;
   const parsed = decodeReviewArguments(args);
+  // The tool's MCP server stopped this call to ask the person something.
+  const question = waiting
+    ? await withRlsContext(db, input, (scoped) =>
+        waitingApprovalQuestion(scoped, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          approvalId: request.approvalId,
+        }),
+      )
+    : undefined;
   return ToolActionReview.parse({
     version: 1,
     id: request.approvalId,
@@ -269,6 +281,7 @@ export async function getToolActionReview(
         : ["reject"]
       : [],
     detailsAvailable: args !== null,
+    ...(question ? { question } : {}),
   });
 }
 

@@ -31,6 +31,26 @@ let items: InboxItem[] = [
   },
   {
     ...base,
+    id: "server-confirmation",
+    sessionId: "s4",
+    kind: "approval",
+    sourceKey: "a2",
+    title: "Share “Q3 plan” with everyone in the Design team?",
+    body: "Share document",
+    serverQuestion: { server: "Docs", form: false },
+  },
+  {
+    ...base,
+    id: "server-form",
+    sessionId: "s5",
+    kind: "approval",
+    sourceKey: "a3",
+    title: "Which folder should the budget go in?",
+    body: "Save document",
+    serverQuestion: { server: "Docs", form: true },
+  },
+  {
+    ...base,
     id: "notification",
     sessionId: "s2",
     kind: "notification",
@@ -50,7 +70,10 @@ let items: InboxItem[] = [
     body: "I compared the three vendors and wrote up the tradeoffs.",
   },
 ];
-export const activity = { updates: [] as Array<{ id: string; body: unknown }> };
+export const activity = {
+  updates: [] as Array<{ id: string; body: unknown }>,
+  decisions: [] as Array<{ sessionId: string; body: unknown }>,
+};
 Object.assign(window, { inboxFixture: activity });
 const context = {
   accessContext: { subjectId: "user:fixture", mode: "hosted", workspaceGrants: [] },
@@ -72,6 +95,45 @@ const context = {
     getInboxSettings: async () => ({ tidyPolicy: "own_sessions" }),
     listWorkspaceMembers: async () => [],
     getMemberNotifications: async () => ({ allowOthers: true }),
+    getToolActionReview: async (_workspaceId: string, _sessionId: string, id: string) => ({
+      id,
+      title: "Save document",
+      accountLabel: "Budget 2027",
+      question: {
+        server: "Docs",
+        requests: [
+          {
+            id: "q1",
+            message: "Which folder should the budget go in?",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                folder: {
+                  type: "string",
+                  title: "Folder",
+                  oneOf: [
+                    { const: "finance", title: "Finance" },
+                    { const: "planning", title: "Planning" },
+                    { const: "shared", title: "Shared with leadership" },
+                  ],
+                },
+                note: { type: "string", title: "Note for the team" },
+              },
+              required: ["folder"],
+            },
+          },
+        ],
+      },
+    }),
+    sendApprovalDecision: async (
+      _workspaceId: string,
+      sessionId: string,
+      body: { approvalId: string },
+    ) => {
+      activity.decisions.push({ sessionId, body });
+      items = items.filter((item) => item.sourceKey !== body.approvalId);
+      return {};
+    },
   },
 } as unknown as AppContextValue;
 export const useAppContext = () => context;

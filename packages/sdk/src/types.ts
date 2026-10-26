@@ -6714,6 +6714,13 @@ export type InboxItem = {
   eventSequence: number | null;
   /** One-tap answers for a single short choice question; empty otherwise. */
   choices: InboxItemChoice[];
+  /**
+   * An approval whose tool's MCP server asks the person a question in the
+   * middle of the call: the title is then the server's question. With `form`,
+   * the question has fields to fill in, answered in its form (load it with
+   * `getToolActionReview`) rather than with one tap. Null or absent otherwise.
+   */
+  serverQuestion?: InboxItemServerQuestion | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   /** True while the person has not seen the item's current content. */
@@ -6742,6 +6749,9 @@ export type InboxItemLink = { url: string; label: string };
 
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };
+
+/** The MCP server asking about an approval in the inbox, and whether it needs a form. */
+export type InboxItemServerQuestion = { server: string; form: boolean };
 
 export type ListInboxResponse = {
   items: InboxItem[];

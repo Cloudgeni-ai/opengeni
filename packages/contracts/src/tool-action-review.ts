@@ -1,5 +1,6 @@
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
+import { McpElicitationApprovalRequest } from "./mcp-elicitation";
 import { z } from "zod";
 
 /** Gmail's batch modify limit: one review never selects more messages than this. */
@@ -231,6 +232,12 @@ export const ToolActionReview = /* @__PURE__ */ defineSchema(() =>
       approveLabel: primitives.string,
       availableActions: z.array(z.enum(["approve", "reject"])),
       detailsAvailable: primitives.boolean,
+      /**
+       * The question the tool's MCP server asked in the middle of this call,
+       * while it waits for the answer. Approving answers it (`content` on the
+       * decision when it has fields to fill in).
+       */
+      question: McpElicitationApprovalRequest.optional(),
     })
     .strict(),
 );

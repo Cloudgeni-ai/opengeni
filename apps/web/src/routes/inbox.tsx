@@ -7,10 +7,17 @@ import {
   type InboxItem,
   type InboxSettings,
   type InboxTidyPolicy,
+  type McpElicitationContent,
   type SessionHumanInputRequest,
   type SubmitHumanInputResponseRequest,
+  type ToolActionReview,
 } from "@opengeni/sdk";
-import { HumanInputForm, OpenGeniLinkProvider, SecretRefText } from "@opengeni/react/session-ui";
+import {
+  HumanInputForm,
+  McpElicitationRequest,
+  OpenGeniLinkProvider,
+  SecretRefText,
+} from "@opengeni/react/session-ui";
 import {
   notificationPlainText,
   parseNotificationText,
@@ -30,7 +37,7 @@ import {
   ShieldCheckIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@opengeni/react/ui/button";
@@ -78,7 +85,10 @@ const KIND_WORD: Record<InboxItem["kind"], string> = {
 };
 
 function KindIcon({ item }: { item: InboxItem }) {
-  if (item.kind === "question") return <MessageCircleQuestionIcon />;
+  // An MCP server's question is an approval of its call, but reads as a question.
+  if (item.kind === "question" || (item.kind === "approval" && item.serverQuestion)) {
+    return <MessageCircleQuestionIcon />;
+  }
   if (item.kind === "approval") return <ShieldCheckIcon />;
   if (item.kind === "goal_paused") return <CirclePauseIcon />;
   if (item.kind === "reply") return <MessageSquareTextIcon />;
@@ -349,6 +359,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const [scope, setScope] = useState<"all" | "workspace">("all");
   const [busy, setBusy] = useState<Record<string, string>>({});
   const [answering, setAnswering] = useState<InboxItem | null>(null);
+  const [answeringServer, setAnsweringServer] = useState<InboxItem | null>(null);
   // Unread items keep their dot for this visit; the server learns they were seen.
   const unreadThisVisit = useRef(new Set<string>());
   const now = Date.now();
@@ -409,6 +420,15 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
 
   const leave = (item: InboxItem) =>
     inbox.patchItems((current) => current.filter((candidate) => candidate.id !== item.id));
+  // Stable, so an open answer dialog does not reload (and lose its draft) on every poll.
+  const { refresh } = inbox;
+  const answered = useCallback(
+    (item: InboxItem) => {
+      patchItems((current) => current.filter((candidate) => candidate.id !== item.id));
+      void refresh();
+    },
+    [patchItems, refresh],
+  );
 
   const run = async (item: InboxItem, label: string, action: () => Promise<unknown>) => {
     setBusy((current) => ({ ...current, [item.id]: label }));
@@ -429,9 +449,12 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         decision,
       });
       leave(item);
-      toast.success(decision === "approve" ? "Approved" : "Denied", {
-        description: item.sessionTitle ?? undefined,
-      });
+      toast.success(
+        decision === "reject" ? "Denied" : item.serverQuestion ? "Allowed" : "Approved",
+        {
+          description: item.sessionTitle ?? undefined,
+        },
+      );
     });
 
   const snooze = (item: InboxItem, until: Date | null) =>
@@ -480,6 +503,8 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   // Under the title: what exactly is asked for, or the agent's note.
   const description = (item: InboxItem): ReactNode => {
     if (!item.body) return undefined;
+    // An MCP server's question is the title; the call it paused is in the session.
+    if (item.kind === "approval" && item.serverQuestion) return undefined;
     if (item.kind === "approval") {
       return (
         <code className="my-0.5 inline-block max-w-full truncate rounded-[6px] bg-surface-2 px-1.5 py-0.5 align-top font-mono text-xs text-fg">
@@ -496,13 +521,18 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     const parts: string[] = [];
     // Another member's agent sent it: say who, first.
     if (item.sender) parts.push(`From ${item.sender.label}`);
+    if (item.kind === "approval" && item.serverQuestion) {
+      parts.push(`${item.serverQuestion.server} asks`);
+    }
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
       parts.push("Time-sensitive");
     }
     if (item.kind === "goal_paused" || item.kind === "question" || item.kind === "reply") {
       parts.push(KIND_WORD[item.kind]);
     }
-    if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
+    if (item.kind === "approval" && !item.body && !item.serverQuestion) {
+      parts.push(KIND_WORD.approval);
+    }
     if (item.sessionAvailable !== false) parts.push(item.sessionTitle ?? "Untitled session");
     if (scope === "all" && workspacesWithItems.size > 1) {
       const name = workspaceNames.get(item.workspaceId);
@@ -515,6 +545,27 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
 
   const control = (item: InboxItem): ReactNode => {
     const pending = busy[item.id];
+    if (item.kind === "approval" && item.serverQuestion) {
+      // A plain confirmation is answered here; fields are filled in the dialog.
+      return (
+        <>
+          <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "reject")}>
+            <XIcon />
+            {pending === "reject" ? "Denying…" : "Deny"}
+          </RowButton>
+          {item.serverQuestion.form ? (
+            <RowButton disabled={Boolean(pending)} onClick={() => setAnsweringServer(item)}>
+              Answer
+            </RowButton>
+          ) : (
+            <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "approve")}>
+              <CheckIcon />
+              {pending === "approve" ? "Allowing…" : "Allow"}
+            </RowButton>
+          )}
+        </>
+      );
+    }
     if (item.kind === "approval") {
       return (
         <>
@@ -722,13 +773,11 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           </SectionStack>
         </div>
       </div>
-      <AnswerDialog
-        item={answering}
-        onClose={() => setAnswering(null)}
-        onAnswered={(item) => {
-          leave(item);
-          void inbox.refresh();
-        }}
+      <AnswerDialog item={answering} onClose={() => setAnswering(null)} onAnswered={answered} />
+      <ServerQuestionDialog
+        item={answeringServer}
+        onClose={() => setAnsweringServer(null)}
+        onAnswered={answered}
       />
     </ContentPage>
   );
@@ -1044,6 +1093,106 @@ function AnswerDialog({
               decisionButtons
             />
           </OpenGeniLinkProvider>
+        ) : (
+          <div className="grid gap-3 py-2" aria-busy="true">
+            <Skeleton className="h-5 w-3/4" />
+            <Skeleton className="h-9 w-full" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Answer an MCP server's question in the middle of a tool call without leaving
+ * the inbox: the same form as in the session, sent as the approval's answer.
+ */
+function ServerQuestionDialog({
+  item,
+  onClose,
+  onAnswered,
+}: {
+  item: InboxItem | null;
+  onClose: () => void;
+  onAnswered: (item: InboxItem) => void;
+}) {
+  const context = useAppContext();
+  const [review, setReview] = useState<ToolActionReview | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState<"approve" | "reject" | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setReview(null);
+    setLoadError(null);
+    setSubmitError(null);
+    if (!item) return;
+    let current = true;
+    void context.client
+      .getToolActionReview(item.workspaceId, item.sessionId, item.sourceKey)
+      .then((loaded) => {
+        if (!current) return;
+        if (!loaded.question) {
+          setLoadError("This question was already answered or is no longer open.");
+          onAnswered(item);
+          return;
+        }
+        setReview(loaded);
+      })
+      .catch((error: unknown) => {
+        if (current) setLoadError(userErrorText(error, "Couldn't load the question."));
+      });
+    return () => {
+      current = false;
+    };
+  }, [item, context.client, onAnswered]);
+
+  const decide = async (decision: "approve" | "reject", content?: McpElicitationContent) => {
+    if (!item || submitting) return;
+    setSubmitting(decision);
+    setSubmitError(null);
+    try {
+      await context.client.sendApprovalDecision(item.workspaceId, item.sessionId, {
+        approvalId: item.sourceKey,
+        decision,
+        ...(content ? { content } : {}),
+      });
+      onAnswered(item);
+      onClose();
+      toast.success(decision === "approve" ? "Answer sent" : "Declined", {
+        description: item.sessionTitle ?? undefined,
+      });
+    } catch (error) {
+      setSubmitError(userErrorText(error, "Couldn't send your answer. Try again."));
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  return (
+    <Dialog open={item !== null} onOpenChange={(open) => (!open ? onClose() : undefined)}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Answer</DialogTitle>
+          <DialogDescription>{item?.sessionTitle ?? "Untitled session"}</DialogDescription>
+        </DialogHeader>
+        {loadError ? (
+          <Notice tone="failed">{loadError}</Notice>
+        ) : review?.question ? (
+          <div className="grid gap-3">
+            <McpElicitationRequest
+              elicitation={review.question}
+              title={review.title}
+              subtitle={review.accountLabel ?? undefined}
+              submitting={submitting}
+              disabled={false}
+              onAnswer={(content) => void decide("approve", content)}
+              onDecline={() => void decide("reject")}
+            />
+            {submitError ? <Notice tone="failed">{submitError}</Notice> : null}
+          </div>
         ) : (
           <div className="grid gap-3 py-2" aria-busy="true">
             <Skeleton className="h-5 w-3/4" />

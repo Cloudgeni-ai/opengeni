@@ -143,6 +143,11 @@ export type ClaimedNativePushDelivery = {
     urgency?: "normal" | "time_sensitive";
     /** The session event the push is about, so a tap lands on it (0664). */
     sequence?: number;
+    /**
+     * An approval whose MCP server asks a question with fields to fill in
+     * (0982): it is answered in its form in the app, never on the lock screen.
+     */
+    serverQuestionForm?: boolean;
   };
   attempts: number;
 };

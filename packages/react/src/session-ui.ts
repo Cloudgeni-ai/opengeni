@@ -22,6 +22,7 @@ export type {
 } from "./components/secret-ref-chip";
 export { SecretsUiProvider } from "./secrets-ui";
 export { ApprovalSurface } from "./components/approval-surface";
+export { McpElicitationRequest } from "./components/mcp-elicitation-request";
 export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
 export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components/approval-surface";
