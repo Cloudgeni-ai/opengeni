@@ -121,6 +121,8 @@ function filled(value: unknown): boolean {
 // Values put into a confirmation's words are checked first, so an argument can
 // never write its own question. Anything else falls back to the generic text.
 const PLAIN_EMAIL = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}$/;
+// A tool's exact name, as integrations name them ("send_message", "gmail.send").
+const PLAIN_TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 
 /**
  * The question the person answers before a change runs, in plain words, from
@@ -165,6 +167,11 @@ export function appActionConfirmationTitle(
       return `Change ${workspace}'s settings?`;
     case "updateOrganizationModelDefaults":
       return "Change your organization's default models?";
+    case "updateConnectorToolPermissions":
+    case "updateSessionMcpToolPermissions": {
+      const where = workspace === "this workspace" ? "" : ` in ${workspace}`;
+      return `${toolApprovalQuestion(body, entry.id === "updateConnectorToolPermissions" ? "this integration's tools" : "this MCP server's tools")}${where}?`;
+    }
     default: {
       // Name where it applies; the card's next line shows the key values.
       const target =
@@ -177,6 +184,39 @@ export function appActionConfirmationTitle(
               : "";
       return `${sentence(entry)}${target}?`;
     }
+  }
+}
+
+/**
+ * "Let send_message run without asking", from a tool approval change: the
+ * tools it names (only plain tool names, at most three, else a count) or all
+ * of them by default, and the approval it sets.
+ */
+function toolApprovalQuestion(body: Record<string, unknown> | null, everyTool: string): string {
+  const names = Array.isArray(body?.toolNames) ? body.toolNames : [];
+  const tools =
+    body?.target === "default"
+      ? everyTool
+      : body?.target === "tools" &&
+          names.length > 0 &&
+          names.length <= 3 &&
+          names.every((name) => typeof name === "string" && PLAIN_TOOL_NAME.test(name))
+        ? names.join(names.length === 2 ? " and " : ", ").replace(/, ([^,]*)$/, ", and $1")
+        : body?.target === "tools" && names.length > 0
+          ? `${names.length} tool${names.length === 1 ? "" : "s"}`
+          : null;
+  if (tools === null) return "Change tool approvals";
+  switch (body?.permission) {
+    case "allow":
+      return `Let ${tools} run without asking`;
+    case "ask":
+      return `Ask before ${tools} ${tools === everyTool || names.length > 1 ? "run" : "runs"}`;
+    case "block":
+      return `Block ${tools}`;
+    case null:
+      return `Reset ${tools} to the default approval`;
+    default:
+      return "Change tool approvals";
   }
 }
 

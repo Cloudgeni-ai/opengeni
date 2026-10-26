@@ -54,6 +54,21 @@ describe("action descriptions", () => {
     expect(describeAction(entry).description).toContain("which models");
   });
 
+  // A tool set to Ask blocks a Site; the agent finds the change by the words
+  // the person uses and makes it in the chat instead of naming the settings page.
+  test("tool approvals are found by the words people use", () => {
+    for (const query of ["tool approval", "send email permission", "integration tool permission"]) {
+      const found = searchActions({ query, limit: 5, offset: 0 }).actions;
+      const change = found.find((action) => action.id === "updateConnectorToolPermissions");
+      expect(change?.description).toContain("(Allow)");
+    }
+    const entry = ACTION_CATALOG.find(
+      (candidate) => candidate.id === "updateConnectorToolPermissions",
+    )!;
+    expect(describeAction(entry).description).toContain("A Site can't ask");
+    expect(describeAction(entry).input.some((input) => input.schema !== undefined)).toBe(true);
+  });
+
   // Actions that change something but take no body: the path says it all.
   const BODYLESS =
     /\/(activate|usage\/refresh|refresh|verify|connect\/start|reset-credits\/(prepare|redeem))$|\/organizations\/:organizationId\/(codex|supergrok)\/connect\/start$/;

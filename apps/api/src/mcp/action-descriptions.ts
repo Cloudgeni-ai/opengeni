@@ -4,8 +4,8 @@ import type { ActionCatalogEntry } from "@opengeni/contracts/app-actions";
  * Plain-language descriptions for catalog actions, so an agent searching the
  * catalog can tell what an action does and explain it to the person in the
  * words the app uses. They cover the Models and subscription settings
- * (subscription accounts, sharing, models, usage and resets); a test keeps
- * every such action described. The Settings guide in the bundled
+ * (subscription accounts, sharing, models, usage and resets) and tool
+ * approvals; a test keeps every such action described. The Settings guide in the bundled
  * opengeni-help Skill explains what each setting means.
  */
 
@@ -310,11 +310,35 @@ const RULES: Rule[] = [
     pattern: /\/sessions\/:sessionId\/realtime\/supergrok$/,
     text: () => "Start a SuperGrok realtime voice connection for a session.",
   },
+  {
+    method: "GET",
+    pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
+    text: () =>
+      "Read an integration's tool approvals: whether each tool (for example send email or post a message) runs without asking (Allow), asks first (Ask) or is blocked (Block), with the revision to pass when changing them.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
+    text: () =>
+      'Change an integration\'s tool approvals: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools") or the integration\'s default (target "default"); permission null returns to the default. A Site can\'t ask, so a tool set to Ask fails there until it is set to Allow.',
+  },
+  {
+    method: "GET",
+    pattern: /\/session-mcp-tool-permissions$/,
+    text: () =>
+      "Read the tool approvals (Allow, Ask or Block) for MCP servers added to chats, with the revision to pass when changing them.",
+  },
+  {
+    method: "PATCH",
+    pattern: /\/session-mcp-tool-permissions$/,
+    text: () =>
+      'Change the tool approvals for an MCP server added to chats: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools") or the server\'s default (target "default"); permission null returns to the default.',
+  },
 ];
 
-/** Actions that must carry a description (subscriptions, models and vault connections). */
+/** Actions that must carry a description (subscriptions, models, vault connections and tool approvals). */
 export const DESCRIBED_ACTION_PATH =
-  /\/(codex|claude|supergrok)(\/|$)|\/model-providers\/|\/model-connections\/|\/model-account-settings(\/|$)|\/vault-providers\//;
+  /\/(codex|claude|supergrok)(\/|$)|\/model-providers\/|\/model-connections\/|\/model-account-settings(\/|$)|\/vault-providers\/|tool-permissions$/;
 
 function scopeOf(path: string): string {
   return path.startsWith("/v1/organizations/") ? "for the organization" : "in a workspace";

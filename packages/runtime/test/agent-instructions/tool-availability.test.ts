@@ -53,6 +53,7 @@ const PROMPT_NAMED_TOOLS = [
   "secret_search",
   "secret_save",
   "interaction_request_human",
+  "admin_action_call",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
 function compose(toolAvailability?: AgentPromptToolAvailability) {
@@ -120,7 +121,10 @@ describe("deriveAgentPromptToolAvailability", () => {
       selectedFirstPartyTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
       firstPartyPermissions: [],
     });
-    for (const tool of PROMPT_NAMED_TOOLS) expect(view.unavailable).toContain(tool);
+    // App actions run as the person, with no ceiling permission to miss.
+    for (const tool of PROMPT_NAMED_TOOLS.filter((name) => name !== "admin_action_call"))
+      expect(view.unavailable).toContain(tool);
+    expect(view.unavailable).not.toContain("admin_action_call");
   });
 
   test("a ceiling that might still be satisfied never proves absence", () => {
@@ -251,6 +255,29 @@ describe("modular prompt: tool-specific clauses", () => {
     );
     expect(composed).toContain("Save useful lasting findings with knowledge_save");
     expect(composed).toContain("Before saving, use knowledge_prepare_save");
+  });
+
+  // A setting that blocks a tool is changed in the chat through an app action,
+  // confirmed there, instead of described (staging session 12f7f50d).
+  test("a blocking setting is offered as an in-chat app action while admin_action_call may exist", () => {
+    const changed =
+      "show its setup card, make the change with `admin_action_call` when an app action makes it (the user confirms it in the chat), or give the exact next step when neither applies";
+    const legacy =
+      "show its setup card, or the exact next step when there is no card, and continue once it is fixed.";
+    expect(compose()).toContain(changed);
+    expect(compose()).toContain("integration, permission, setting or secret");
+    const absent = compose({ unavailable: ["admin_action_call"] });
+    expect(absent).not.toContain(changed);
+    expect(absent).toContain(legacy);
+    const noAdmin = composeModularAgentInstructions({
+      capabilities: { ...allAgentCapabilities(), workspaceAdmin: false },
+      renderer: "opengeni",
+      identity: DEFAULT_AGENT_IDENTITY,
+      resources: ALL_RESOURCES,
+      codemode: undefined,
+    }).composed;
+    expect(noAdmin).not.toContain(changed);
+    expect(noAdmin).toContain(legacy);
   });
 
   test("absent wait_for_input keeps only tool-neutral waiting guidance and compaction", () => {

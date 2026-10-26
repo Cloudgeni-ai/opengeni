@@ -1,5 +1,19 @@
 # Modular prompt changelog
 
+Settings that block a tool are changed in the chat. When `admin_action_call`
+may exist (capability `workspaceAdmin` on and the tool not proven absent), the
+Autonomy and persistence rule for user-fixable blockers adds "setting" to its
+examples and a middle step: make the change with `admin_action_call` when an
+app action makes it, which the user confirms in the chat. Before, the prompt
+never mentioned app actions, so an agent whose Site could not send email
+because the integration's tool was set to Ask told the person which settings
+page to open (staging session 12f7f50d, 2026-10-26 09:05 UTC). It reached the
+same app action only after the person asked for something in the chat. The
+`admin_actions_search` description now names integration tool approvals among
+the settings it reaches, and the `sites` Skill says a tool set to Ask can't run
+from a Site, so the agent offers to set it to Allow in the chat. The legacy
+prompt is unchanged.
+
 Connect cards in fewer calls. No prompt or tool description text changes.
 `tool_search` now also covers integrations the person could connect: when no
 installed tool clearly matches a query, it looks the query up in the
@@ -294,6 +308,15 @@ Headings that moved or were added (layout only, not diffed):
 
 ## Sentence edits (modular "all" vs legacy)
 
+Settings in the chat. The blocked-tool rule offers the app action that makes a
+blocking setting change, confirmed in the chat, before giving a next step (see
+the first entry above).
+
+```diff
+- When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.
++ When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission, setting or secret, offer the fix in the same reply: show its setup card, make the change with `admin_action_call` when an app action makes it (the user confirms it in the chat), or give the exact next step when neither applies, and continue once it is fixed.
+```
+
 Tool discovery and media. Deferred schemas must remain behind the existing
 search router, while modular agents need to distinguish missing disclosure
 from missing execution authority. Runtime mechanics explains ranked discovery
@@ -553,6 +576,9 @@ When a named tool is proven absent, only the clauses naming it change:
   an inline image source."
 - Sandbox environment: the `rig_propose_change` and `rig_get` sentences need
   their tools.
+- Autonomy and persistence: the blocked-tool rule names `admin_action_call`
+  only with `workspaceAdmin` on and that tool not proven absent; otherwise it
+  keeps the legacy sentence.
 - Secrets: the `secret_search` sentence and the Skill pointer need
   `secret_search`; the 2FA-enrollment and account-creation rungs of the login
   ladder need `secret_save`; the push-approval and hardware-key handoff line
