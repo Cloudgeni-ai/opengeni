@@ -2302,7 +2302,7 @@ export const englishMessages = {
   "meetings.detailPage.noTranscriptYet": "No transcript yet.",
   "meetings.detailPage.notThem": "Not them",
   "meetings.detailPage.onlyDoThisIfValue":
-    "Only do this if {value} agreed. Later meetings will suggest their name when they speak. Opengeni keeps a voice profile, not audio, until someone forgets it in Settings.",
+    "Only do this if {value} agreed. Later meetings will suggest their name when they speak. Only a voice profile is kept, not audio, until someone forgets it in Settings.",
   "meetings.detailPage.onlyMe": "Only me",
   "meetings.detailPage.onlyYouCanOpenIt": "Only you can open it.",
   "meetings.detailPage.onlyYouCanSeeThis": "Only you can see this now",
@@ -2472,8 +2472,7 @@ export const englishMessages = {
   "meetings.recorderPanel.finishing": "Finishing",
   "meetings.recorderPanel.includeATabSAudio": "Include a tab's audio",
   "meetings.recorderPanel.includeComputerAudio": "Include computer audio",
-  "meetings.recorderPanel.listeningWhatSSaidShows":
-    "Listening. What's said shows up here within a few seconds.",
+  "meetings.recorderPanel.listeningWhatSSaidShows": "Listening…",
   "meetings.recorderPanel.liveTextIsnTAvailable":
     "No live text this time.{value} You still get the transcript after you stop.",
   "meetings.recorderPanel.liveTranscript": "Live transcript",
