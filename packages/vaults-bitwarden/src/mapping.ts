@@ -41,7 +41,6 @@ import {
   type VaultFieldKind,
 } from "./contract";
 import {
-  BitwardenCryptoError,
   decryptOptional,
   encryptString,
   sha256B64,
@@ -960,9 +959,4 @@ function cipherRequestBody(cipher: Json, encryptedFor: string, changes: Json): J
     // Vaultwarden un-archives an item for this account when an update omits it.
     archivedDate: typeof cipher.archivedDate === "string" ? cipher.archivedDate : null,
   };
-}
-
-/** True when the error came from decrypting data rather than from the server. */
-export function isCryptoError(error: unknown): error is BitwardenCryptoError {
-  return error instanceof BitwardenCryptoError;
 }

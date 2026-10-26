@@ -42,7 +42,6 @@ import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
-  personalOnlyConnectionPrincipalMessage,
   personalOwnerStateAccepted,
   personalOwnerVerifiedInState,
 } from "../connection-ownership";
@@ -820,6 +819,3 @@ function numberValue(value: unknown): number | null {
 function positiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
 }
-
-export const PERSONAL_GITHUB_CONNECTION_PRINCIPAL_MESSAGE =
-  personalOnlyConnectionPrincipalMessage("My GitHub account");

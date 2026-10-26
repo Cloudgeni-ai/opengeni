@@ -728,10 +728,6 @@ async function startMcpOAuthWithinDeadline(
   });
 }
 
-export function isHostedSlackMcpTarget(providerDomain: string, mcpUrl: string): boolean {
-  return builtInOAuthProfileFor({ mcpUrl, providerDomain })?.key === "hosted-slack-mcp";
-}
-
 function assertGoogleMcpSetupEnabled(settings: Settings, profile: OAuthProviderProfile): void {
   if (
     profile.key === "official-gmail" ||

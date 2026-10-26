@@ -47,15 +47,6 @@ export const TIP_FOLLOW_CALM_MAX_PX_S = _s(42);
 export const TIP_FOLLOW_BURST_MAX_PX_S = _s(420);
 /** Ceiling for huge tip-debt / large single-frame walls (px/s). */
 export const TIP_FOLLOW_SURGE_MAX_PX_S = _s(1800);
-/**
- * @deprecated Position growth-track removed — camera is velocity-smoothed.
- * Kept so older tests/imports do not break.
- */
-export const TIP_FOLLOW_GROWTH_TRACK = 0;
-/** @deprecated */
-export const TIP_FOLLOW_LINE_TRACK = 0;
-/** @deprecated Sub-line special-case removed with growth-track. */
-export const TIP_FOLLOW_TOKEN_GROWTH_PX = 10;
 /** Hot line-sized tip-debt uses the short {@link TIP_FOLLOW_LINE_TAU_MS}. */
 export const TIP_FOLLOW_LINE_GROWTH_PX = 48;
 /** Hot τ ceiling while closing a line-sized tip-debt (ms). */
@@ -106,10 +97,6 @@ export function supportsScrollEndEvent(): boolean {
   }
   return typeof HTMLElement !== "undefined" && "onscrollend" in HTMLElement.prototype;
 }
-/** @deprecated Shrink lock removed; kept so old imports do not break. */
-export const TIP_FOLLOW_SHRINK_LOCK_MS = 0;
-/** @deprecated Absorb thresholds removed — growth track is continuous. */
-export const TIP_FOLLOW_GROWTH_ABSORB_PX = 96;
 
 /**
  * ScrollTop decrease not explained by a maxScroll clamp (fold / composer
@@ -363,68 +350,6 @@ export function readTranslateY(el: HTMLElement): number {
   } catch {
     return 0;
   }
-}
-
-/**
- * Cancel the tip-glue pop: start at translateY(+δ) and ease to 0.
- * Uses WAAPI — a same-frame CSS transition never paints the counter-offset,
- * so the scroll jump stays an instant one-line pop.
- */
-export function tipFollowPlaySoftRise(
-  el: HTMLElement,
-  gluedScrollDelta: number,
-  opts?: {
-    durationMs?: number;
-    maxPx?: number;
-    easing?: string;
-  },
-): void {
-  if (gluedScrollDelta <= 0.5) {
-    return;
-  }
-  const durationMs = opts?.durationMs ?? TIP_FOLLOW_SOFT_RISE_MS;
-  const maxPx = opts?.maxPx ?? TIP_FOLLOW_SOFT_RISE_MAX_PX;
-  const easing = opts?.easing ?? TIP_FOLLOW_SOFT_RISE_EASING;
-  const from = tipFollowSoftRiseFrom(readTranslateY(el), gluedScrollDelta, maxPx);
-  if (from <= 0.5) {
-    return;
-  }
-  // Drop any in-flight rise / leftover CSS transition before starting clean.
-  if (typeof el.getAnimations === "function") {
-    for (const animation of el.getAnimations()) {
-      animation.cancel();
-    }
-  }
-  el.style.transition = "";
-  // Hold the counter-offset in style until WAAPI’s first keyframe applies.
-  // Clearing to "" here painted one frame of hard tip-glue (the pop).
-  el.style.transform = `translateY(${from}px)`;
-  if (typeof el.animate !== "function") {
-    return;
-  }
-  const animation = el.animate(
-    [{ transform: `translateY(${from}px)` }, { transform: "translateY(0px)" }],
-    // `backwards`: first keyframe applies immediately (no gap after cancel).
-    { duration: durationMs, easing, fill: "backwards" },
-  );
-  const clearHold = () => {
-    if (el.style.transform === `translateY(${from}px)`) {
-      el.style.transform = "";
-    }
-  };
-  animation.addEventListener("finish", clearHold, { once: true });
-  animation.addEventListener("cancel", clearHold, { once: true });
-}
-
-/** Stop soft-rise and clear any CSS transform residue. */
-export function tipFollowClearSoftRise(el: HTMLElement): void {
-  if (typeof el.getAnimations === "function") {
-    for (const animation of el.getAnimations()) {
-      animation.cancel();
-    }
-  }
-  el.style.transition = "";
-  el.style.transform = "";
 }
 
 /**

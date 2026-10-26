@@ -349,12 +349,6 @@ export const designPreviewAccessRequests: AccessRequest[] = [
    Workspace general settings
    -------------------------------------------------------------------------- */
 
-export const agentActivity = {
-  state: "running" as "running" | "paused",
-  runningLabel: "Running",
-  pausedLabel: "Paused · resumes in 52 min",
-};
-
 export const sessionDefaults = {
   voiceInput: true,
   transcriptionProvider: "automatic" as "automatic" | "codex",
@@ -582,20 +576,6 @@ export function variableSetById(id: string): VariableSet {
 /** Deleting this set is blocked: a schedule uses it. */
 export const blockedDeleteVariableSet: VariableSet = variableSetById("vs-aws-production");
 
-/** A new set with no variables yet, for the empty state. */
-export const emptyVariableSet: VariableSet = {
-  id: "vs-sentry",
-  name: "Sentry",
-  description: "Auth token for reading issues from the acme-robotics Sentry org.",
-  scope: "workspace",
-  variables: [],
-  usedBy: [],
-  variablesLabel: "No variables",
-  usageLabel: "Not used",
-  updatedAt: "2026-09-26T11:30:00Z",
-  updatedLabel: "18 min ago",
-};
-
 export type EnvPasteRowStatus = "new" | "duplicate" | "reserved";
 
 export interface EnvPasteRow {
@@ -607,37 +587,6 @@ export interface EnvPasteRow {
   /** Inline message for duplicate and reserved rows. */
   message?: string;
 }
-
-/** Paste .env into GitHub automation: one reserved name and one duplicate. */
-export const envPastePreview: { targetSetId: string; rows: EnvPasteRow[] } = {
-  targetSetId: "vs-github-automation",
-  rows: [
-    {
-      name: "GITHUB_ORG",
-      kind: "plain",
-      value: "acme-robotics",
-      status: "duplicate",
-      message: "Already in this set. Pasting replaces its value.",
-    },
-    {
-      name: "GITHUB_TOKEN",
-      kind: "secret",
-      status: "reserved",
-      message:
-        "Opengeni sets GITHUB_TOKEN for repository access. Use another name, like GITHUB_BOT_TOKEN.",
-    },
-    { name: "RENOVATE_PLATFORM", kind: "plain", value: "github", status: "new" },
-    { name: "RENOVATE_AUTODISCOVER", kind: "plain", value: "false", status: "new" },
-  ],
-};
-
-/** Name validation copy for Add variable. */
-export const variableNameRules = {
-  hint: "Letters, numbers and underscores. Saved in uppercase.",
-  reserved: "GITHUB_TOKEN is reserved. Opengeni sets it for repository access.",
-  duplicate: "AWS_REGION is already in this set.",
-  replaceHint: "Takes effect from the next turn. Turns already running keep the current value.",
-};
 
 /* ----------------------------------------------------------------------------
    Sandbox environments and repositories (referenced by other fixtures)
@@ -944,9 +893,6 @@ export const gatewayProviders: GatewayProvider[] = [
     customModels: ["gemini-3.8-flash", "aws/claude-sonnet-4-6-eu"],
   },
 ];
-
-/** SuperGrok is turned off on this deployment, so it is never rendered. */
-export const hiddenProviders = ["SuperGrok"];
 
 export const allowedModelsSummary = "All models from connected accounts";
 

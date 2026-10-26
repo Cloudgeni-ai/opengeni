@@ -1676,9 +1676,6 @@ export type SubscriptionCoreShadowObservation =
       inputs: readonly SubscriptionCoreShadowInput[];
     };
 
-const SUBSCRIPTION_CORE_SHADOW_REQUIREMENT_SET = new Set<string>(
-  SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS,
-);
 /** First reasons a legacy account is outside the eligible set (policy ineligibility). */
 export const SUBSCRIPTION_CORE_SHADOW_PARITY_REASONS = [
   "provider_disabled",
@@ -1698,84 +1695,6 @@ export const SUBSCRIPTION_CORE_SHADOW_PARITY_REASONS = [
   "model_cooling_down",
   "exhausted",
 ] as const;
-const SUBSCRIPTION_CORE_SHADOW_PARITY_REASON_SET = new Set<string>(
-  SUBSCRIPTION_CORE_SHADOW_PARITY_REASONS,
-);
-
-const SUBSCRIPTION_CORE_SHADOW_DURATION_BUCKETS = [
-  0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1,
-];
-
-export function recordSubscriptionCoreShadow(
-  observability: Pick<Observability, "incrementCounter" | "observeHistogram">,
-  provider: SubscriptionCoreShadowProvider,
-  observation: SubscriptionCoreShadowObservation,
-  durationSeconds: number,
-): void {
-  observability.observeHistogram({
-    name: "opengeni_subscription_core_shadow_duration_seconds",
-    help: "Shared subscription core shadow comparison duration by provider, including skips.",
-    labels: { provider },
-    value: durationSeconds,
-    buckets: SUBSCRIPTION_CORE_SHADOW_DURATION_BUCKETS,
-  });
-  if (observation.outcome === "skipped") {
-    observability.incrementCounter({
-      name: "opengeni_subscription_core_shadow_skips_total",
-      help: "Shadow comparisons not made, by fixed reason; placement is unaffected.",
-      labels: { provider, reason: observation.reason },
-    });
-    return;
-  }
-  observability.incrementCounter({
-    name: "opengeni_subscription_core_shadow_comparisons_total",
-    help: "Shadow comparisons by security parity of the legacy account and core placement agreement.",
-    labels: { provider, parity: observation.parity, placement: observation.placement },
-  });
-  if (observation.parityReason !== null) {
-    observability.incrementCounter({
-      name: "opengeni_subscription_core_shadow_parity_failures_total",
-      help: "Legacy-selected accounts outside the core's eligible set, by first fixed reason.",
-      labels: {
-        provider,
-        reason: SUBSCRIPTION_CORE_SHADOW_PARITY_REASON_SET.has(observation.parityReason)
-          ? observation.parityReason
-          : "other",
-      },
-    });
-  }
-  for (const requirement of new Set(observation.violations)) {
-    observability.incrementCounter({
-      name: "opengeni_subscription_core_shadow_violations_total",
-      help: "Contract invariant violations of the core's own shadow decision, by requirement.",
-      labels: {
-        provider,
-        requirement: SUBSCRIPTION_CORE_SHADOW_REQUIREMENT_SET.has(requirement)
-          ? requirement
-          : "other",
-      },
-    });
-  }
-  for (const input of observation.inputs) {
-    observability.incrementCounter({
-      name: "opengeni_subscription_core_shadow_inputs_total",
-      help: "Legacy decision inputs present in compared shadow decisions, by fixed input.",
-      labels: { provider, input },
-    });
-  }
-}
-
-/** A shadow load that outlived its slot ceiling; its slot was given back. */
-export function recordSubscriptionCoreShadowStuckLoad(
-  observability: Pick<Observability, "incrementCounter">,
-  provider: SubscriptionCoreShadowProvider,
-): void {
-  observability.incrementCounter({
-    name: "opengeni_subscription_core_shadow_stuck_loads_total",
-    help: "Shadow world loads still unsettled at the slot ceiling; the slot was released.",
-    labels: { provider },
-  });
-}
 
 /** Idle browser/desktop release inspections by fixed outcome: `checkpointing`
  * (idle browser saves prepared), `released` (holders released without a save). */

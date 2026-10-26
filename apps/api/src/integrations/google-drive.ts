@@ -171,20 +171,6 @@ type GoogleDriveOAuthState = {
   iat: number;
 };
 
-export async function wakeGoogleDriveSourcesFromWorkspaceEvent(
-  _deps: ApiRouteDeps,
-  _input: {
-    accountId: string;
-    workspaceId: string;
-    connectionId: string;
-    connectionOwnerSubjectId: string;
-    eventId: string;
-    driveId: string | null;
-  },
-): Promise<{ enabled: boolean; triggered: number }> {
-  return { enabled: false, triggered: 0 };
-}
-
 type GoogleTokenResponse = {
   accessToken: string;
   refreshToken?: string;

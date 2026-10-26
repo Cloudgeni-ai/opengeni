@@ -25,7 +25,6 @@ import {
   keywordVariants,
   questionMentionsHistory,
   questionMentionsTests,
-  splitWords,
 } from "./text";
 import { CODE_SEARCH_MAX_PATTERN_CHARS } from "./workspace";
 
@@ -682,9 +681,4 @@ export function bestHitLines(c: FileCandidate, keywords: KeywordInfo[], n: numbe
     .sort((a, b) => lineWeight(b, keywords) - lineWeight(a, keywords) || a.line - b.line)
     .slice(0, n)
     .sort((a, b) => a.line - b.line);
-}
-
-/** Words of all keywords (for overlap scoring). */
-export function keywordWords(keywords: KeywordInfo[]): Set<string> {
-  return new Set(keywords.flatMap((k) => splitWords(k.raw)));
 }

@@ -5,10 +5,8 @@ import { CapabilityTile } from "@/components/capabilities/capability-tile";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import { Button } from "@opengeni/react/ui/button";
 import { EmptyState } from "@opengeni/react/ui/empty-state";
-import { Input } from "@opengeni/react/ui/input";
 import { Skeleton } from "@opengeni/react/ui/skeleton";
 import {
-  capabilityFilterLabel,
   capabilityItemKindLabel,
   type CapabilityFilter,
   type ConnectionHealth,
@@ -18,69 +16,6 @@ import { cn } from "@opengeni/react/app/lib/utils";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
 export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = ["all", "mcp", "api"];
-
-export function CapabilityDiscoveryControls({
-  filter,
-  counts,
-  onFilterChange,
-}: {
-  filter: CapabilityFilter;
-  counts: Record<CapabilityFilter, number>;
-  onFilterChange: (filter: CapabilityFilter) => void;
-}) {
-  return (
-    <>
-      <div className="mt-4 flex flex-wrap gap-2" role="group" aria-label="Plugin type filters">
-        {CAPABILITY_FILTERS.map((kind) => (
-          <button
-            key={kind}
-            type="button"
-            aria-pressed={filter === kind}
-            onClick={() => onFilterChange(kind)}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors pointer-coarse:min-h-11",
-              filter === kind
-                ? "border-brand/40 bg-brand/10 text-fg"
-                : "border-border bg-surface/50 text-fg-muted hover:border-border-strong hover:text-fg",
-            )}
-          >
-            {capabilityFilterLabel(kind)}
-            <span className={cn("text-2xs", filter === kind ? "text-fg" : "text-fg-muted")}>
-              {counts[kind]}
-            </span>
-          </button>
-        ))}
-      </div>
-    </>
-  );
-}
-
-/** One query for every section of the Plugins page. */
-export function PluginSearch({
-  query,
-  onQueryChange,
-  scope = "all",
-}: {
-  query: string;
-  scope?: string;
-  onQueryChange: (query: string) => void;
-}) {
-  const label = scope === "all" ? "Search connections, skills, and plugins" : `Search ${scope}`;
-  return (
-    <div className="relative mt-6">
-      <SearchIcon className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
-      <Input
-        type="search"
-        suppressAutofill
-        value={query}
-        onChange={(event) => onQueryChange(event.target.value)}
-        placeholder={label}
-        className="h-11 rounded-lg pl-11 text-sm shadow-none transition-none placeholder:text-fg-subtle"
-        aria-label={label}
-      />
-    </div>
-  );
-}
 
 export function EnabledCapabilitiesSection({
   items,

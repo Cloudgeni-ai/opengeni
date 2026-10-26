@@ -4,7 +4,6 @@ import {
   type ProviderItemMeta,
   type ProviderPasskeyMeta,
   type VaultFieldKind,
-  type VaultItemType,
 } from "./contract";
 import { protonPasskeyMeta } from "./passkeys";
 import {
@@ -204,10 +203,6 @@ export function itemKindForVariant(variant: string): ItemTypeMarker {
     default:
       return { type: "api_key", category: null };
   }
-}
-
-export function itemTypeForVariant(variant: string): VaultItemType {
-  return itemKindForVariant(variant).type;
 }
 
 /** `YYYY-MM-DDTHH:MM:SS` (UTC under TZ=UTC) to an ISO instant. */

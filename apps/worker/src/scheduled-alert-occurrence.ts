@@ -10,14 +10,6 @@ const MAX_LABEL_VALUE_BYTES = 4_096;
 const OFFSET_TIMESTAMP =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
-export type ScheduledAlertOccurrenceDeclaration = {
-  status: "firing" | "resolved";
-  startsAt: string;
-  fingerprint: string;
-  labels: Record<string, string>;
-  provider?: string;
-};
-
 export type ScheduledAlertOccurrenceIdentity = {
   status: "firing" | "resolved";
   sessionCreateIdempotencyKey: string;

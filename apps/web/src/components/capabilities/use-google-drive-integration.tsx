@@ -12,7 +12,6 @@ import type { IntegrationAdapter } from "./use-api-integration-accounts";
 import { request as apiRequest } from "@/api";
 
 export const GOOGLE_DRIVE_LOGO_URL = googleDriveLogo;
-export const GOOGLE_DRIVE_DEFINITION_ID = "google-drive";
 
 /** Historical account removal only. Google Drive MCP uses ordinary connector setup. */
 export function useGoogleDriveIntegration({

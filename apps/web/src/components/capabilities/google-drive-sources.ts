@@ -1,7 +1,5 @@
-import { request as apiRequest } from "@/api";
 import type {
   ConnectorDocumentDestinationAuthority,
-  ConnectionMetadata,
   GoogleDriveBrowseItem,
   GoogleDriveConnectionMetadata as GoogleDriveMetadata,
   GoogleDriveReadPolicy,
@@ -14,48 +12,6 @@ export type ConfiguredGoogleDriveSource = GoogleDriveBrowseItem & {
   syncEnabled: boolean;
   readPolicy: GoogleDriveReadPolicy;
 };
-
-/**
- * Save one Google Drive source selection for the exact connection. Shared by the
- * folder picker and by the sheet's sync toggle so both write the same shape.
- */
-export async function saveGoogleDriveSources(
-  workspaceId: string,
-  connectionId: string,
-  input: {
-    sources: Array<Pick<GoogleDriveBrowseItem, "id" | "name" | "mimeType" | "driveId">>;
-    authorityKind: ConnectorDocumentDestinationAuthority;
-    syncCadence: GoogleDriveSyncCadence;
-    syncEnabled: boolean;
-    readPolicy: GoogleDriveReadPolicy;
-  },
-): Promise<ConnectionMetadata> {
-  const { connection } = await apiRequest<{ connection: ConnectionMetadata }>(
-    `/v1/workspaces/${workspaceId}/connections/google-drive/${connectionId}/source`,
-    {
-      method: "POST",
-      body: JSON.stringify({
-        sources: input.sources.map((selected) => ({
-          id: selected.id,
-          name: selected.name,
-          mimeType: selected.mimeType,
-          driveId: selected.driveId,
-        })),
-        destination: { authorityKind: input.authorityKind, collectionId: null },
-        syncCadence: input.syncCadence,
-        syncEnabled: input.syncEnabled,
-        readPolicy: input.readPolicy,
-      }),
-    },
-  );
-  return connection;
-}
-
-export function googleDriveCadenceLabel(cadence: GoogleDriveSyncCadence): string {
-  if (cadence === "manual") return "On demand";
-  if (cadence === "daily") return "Daily";
-  return "Hourly";
-}
 
 export function googleDriveReadPolicyLabel(policy: GoogleDriveReadPolicy): string {
   if (policy === "ask") return "Ask for actions";
@@ -106,10 +62,4 @@ export function googleDriveDestinationOptionDisabled(
   if (authorityKind === "organization") return !canManageOrganizationDestination;
   if (authorityKind === "workspace") return !canManageWorkspaceDestination;
   return false;
-}
-
-export function googleDriveScopeLabel(scope: ConnectorDocumentDestinationAuthority): string {
-  if (scope === "personal") return "Only me";
-  if (scope === "organization") return "Company";
-  return "Workspace";
 }
