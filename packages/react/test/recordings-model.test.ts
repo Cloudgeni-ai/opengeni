@@ -188,19 +188,21 @@ describe("meeting status", () => {
       );
     expect(here("recording")).toBe("recording");
     expect(here("paused")).toBe("paused");
-    // After Stop the last second of audio is on its way, then transcription starts.
+    // After Stop the last few seconds of audio are on their way, then transcription starts.
     expect(here("stopping")).toBe("transcribing");
-    expect(here("stopped")).toBe("transcribing");
     expect(here("stopped", { finalized: true, pendingChunks: 0 })).toBe("transcribing");
     // Only a connection problem or a refusal keeps it from transcribing.
-    expect(here("stopped", {}, false)).toBe("waiting_for_connection");
-    expect(here("stopped", { retryingAfterError: "Failed to fetch" })).toBe(
+    expect(here("stopping", {}, false)).toBe("waiting_for_connection");
+    expect(here("stopping", { retryingAfterError: "Failed to fetch" })).toBe(
       "waiting_for_connection",
     );
     expect(here("stopped", { failed: { code: "not_found", message: "Not found" } })).toBe(
       "upload_failed",
     );
     expect(here("stopped", { discarded: true })).toBeNull();
+    // Capture failed before Stop: nothing is transcribing until it's recovered.
+    expect(here("failed")).toBeNull();
+    expect(here("failed", { finalized: true, pendingChunks: 0 })).toBe("transcribing");
   });
 
   test("another meeting, or no recorder, is left to the server's state", () => {

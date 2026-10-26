@@ -58,7 +58,7 @@ function fakeRecorder(
   preview: LivePreview = "off",
 ): MeetingRecorder {
   const live = mode === "recording" || mode === "paused" || mode === "offline";
-  // Stopped: the last second of audio is still on its way, so it reads Transcribing.
+  // Just stopped: the last few seconds of audio are on their way, so it reads Transcribing.
   const stopped = mode === "stopped";
   const held = live || stopped;
   return {
@@ -67,7 +67,7 @@ function fakeRecorder(
         ? "paused"
         : "recording"
       : stopped
-        ? "stopped"
+        ? "stopping"
         : mode === "denied"
           ? "failed"
           : "idle",

@@ -38,7 +38,7 @@ function upload(overrides: Record<string, unknown>): MeetingRecorder["upload"] {
 }
 
 describe("phone recorder wording", () => {
-  test("says where the audio is while recording, paused and uploading", () => {
+  test("says where the audio is while recording, paused and after Stop, never Uploading", () => {
     expect(phoneUploadLine(msg, recorder({ state: "recording", upload: upload({}) }))).toBe(
       "Keeps recording when the screen is locked or you switch apps. Audio is saved on this phone as you go.",
     );
@@ -56,10 +56,10 @@ describe("phone recorder wording", () => {
     ).toStartWith("No connection right now. Recording continues");
     expect(
       phoneUploadLine(msg, recorder({ state: "idle", upload: upload({ pendingChunks: 3 }) })),
-    ).toBe("Uploading 3 pieces of audio.");
+    ).toBe("Saving the last few seconds of audio.");
     expect(
-      phoneUploadLine(msg, recorder({ state: "idle", upload: upload({ pendingChunks: 1 }) })),
-    ).toBe("Uploading 1 piece of audio.");
+      phoneUploadLine(msg, recorder({ state: "idle", upload: upload({ pendingChunks: 0 }) })),
+    ).toBe("Saving the last few seconds of audio.");
     expect(
       phoneUploadLine(msg, recorder({ state: "idle", upload: upload({ discarded: true }) })),
     ).toBe("Nothing was recorded, so no meeting was saved.");

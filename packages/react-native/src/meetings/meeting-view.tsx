@@ -106,9 +106,8 @@ export function useMeetingView({
   const recorder = useMeetingRecorder();
   const capturingHere = isCapturing(recorder) && recorder?.recordingId === recording?.id;
   // Stopped on this phone, its last audio is on its way: that reads as Transcribing.
-  const transcribingHere =
-    recording?.state === "capturing" &&
-    meetingHereStatus(recorder, recording.id) === "transcribing";
+  const here = recording?.state === "capturing" ? meetingHereStatus(recorder, recording.id) : null;
+  const transcribingHere = here === "transcribing";
   const [sheet, setSheet] = useState<Sheet>(null);
   const [pulling, setPulling] = useState(false);
   const tracks = recording?.tracks ?? [];
@@ -238,7 +237,7 @@ export function useMeetingView({
             </Pressable>
             <MetaLine recording={recording} />
             {details ? <View style={{ marginTop: 10 }}>{details}</View> : null}
-            {capturingHere ? (
+            {here === "recording" || here === "paused" ? (
               <PhaseNote
                 text={msg("native.meetings.meetingView.recordingNowTheTranscriptStarts")}
               />

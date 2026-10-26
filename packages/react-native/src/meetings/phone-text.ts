@@ -55,10 +55,8 @@ export function phoneUploadLine(msg: OpenGeniText, recorder: MeetingRecorder): s
   if (recorder.state === "starting") return null;
   if (upload?.discarded) return msg("meetings.recorderPanel.nothingWasRecordedSoNo");
   if (!upload || upload.finalized) return null;
-  if (upload.pendingChunks === 0) return msg("meetings.recorderPanel.finishingTheUpload");
-  return msg("meetings.recorderPanel.uploadingCountPiecesOfAudio", {
-    count: upload.pendingChunks,
-  });
+  // After Stop: the audio uploaded while it recorded, so only its end is left.
+  return msg("meetings.recorderPanel.savingTheLastFewSeconds");
 }
 
 /** The live preview is billed on top of the transcript, so say so where it's switched on. */

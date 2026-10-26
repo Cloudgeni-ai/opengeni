@@ -265,7 +265,8 @@ export function MeetingsListPage({
                     : meetingPhase(recording),
                   msg,
                 );
-                const isLive = recording.id === liveId && recorder?.state !== "stopped";
+                // Recording here until Stop: after it, the row reads Transcribing.
+                const isLive = here === "recording" || here === "paused";
                 return (
                   <ListRow
                     key={recording.id}
@@ -282,9 +283,15 @@ export function MeetingsListPage({
                     }
                     status={
                       isLive ? (
-                        <StatusBadge variant="dot" tone="danger" pulse>
-                          {msg("meetings.listPage.recording")}
-                        </StatusBadge>
+                        here === "paused" ? (
+                          <StatusBadge variant="dot" tone="neutral">
+                            {msg("meetings.recorderPanel.paused")}
+                          </StatusBadge>
+                        ) : (
+                          <StatusBadge variant="dot" tone="danger" pulse>
+                            {msg("meetings.listPage.recording")}
+                          </StatusBadge>
+                        )
                       ) : status ? (
                         <StatusBadge
                           variant="dot"

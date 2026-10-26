@@ -71,11 +71,11 @@ export function meetingPhase(recording: Recording): MeetingPhase {
 /**
  * What this device's recorder knows about one meeting that the server can't
  * yet: it is recording (or paused) here, or it was stopped here and its last
- * second of audio is on its way, which a person reads as Transcribing. The
- * audio uploads while it records, so nothing is left to "upload" after Stop
- * unless the connection is down or the server refused it. Null when this
- * device isn't recording that meeting; the server's {@link meetingPhase} says
- * the rest.
+ * few seconds of audio are on their way, which a person reads as Transcribing.
+ * The audio uploads while it records, so nothing is left to "upload" after
+ * Stop unless the connection is down or the server refused it. Null when this
+ * device isn't recording that meeting, or when capture failed before Stop
+ * finished it; the server's {@link meetingPhase} says the rest.
  */
 export type MeetingHereStatus =
   | "recording"
@@ -96,6 +96,9 @@ export function meetingHereStatus(
   const upload = recorder.upload;
   if (upload?.discarded) return null;
   if (upload?.failed) return "upload_failed";
+  // Capture failed mid-recording: nothing finishes it until this browser
+  // recovers it, so it isn't transcribing yet.
+  if (recorder.state === "failed" && !upload?.finalized) return null;
   if (!upload?.finalized && (!online || upload?.retryingAfterError)) {
     return "waiting_for_connection";
   }

@@ -1013,8 +1013,10 @@ export function MeetingDetailPage({
     <DetailPageHeader
       title={recording.title}
       chips={
-        // Recording here, the bar under the title says so with its clock.
-        capturingHere ? undefined : phase.kind === "transcribing" || here === "transcribing" ? (
+        // Recording here, the bar under the title says so with its clock; a
+        // refused upload is said by its notice, and isn't in progress.
+        capturingHere || here === "upload_failed" ? undefined : phase.kind === "transcribing" ||
+          here === "transcribing" ? (
           <StatusBadge variant="dot" tone="progress" pulse>
             {msg("meetings.detailPage.transcribing")}
           </StatusBadge>

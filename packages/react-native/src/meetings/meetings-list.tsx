@@ -202,20 +202,22 @@ export function MeetingsList({
             overflow: "hidden",
           }}
         >
-          {list.recordings.map((recording, index) => (
-            <MeetingRow
-              key={recording.id}
-              recording={recording}
-              live={recording.id === capturingId}
-              paused={recorder?.state === "paused"}
-              transcribingHere={
-                recording.state === "capturing" &&
-                meetingHereStatus(recorder, recording.id) === "transcribing"
-              }
-              first={index === 0}
-              onPress={() => onOpen(recording.id)}
-            />
-          ))}
+          {list.recordings.map((recording, index) => {
+            // Recording here until Stop; after it, Transcribing.
+            const here =
+              recording.state === "capturing" ? meetingHereStatus(recorder, recording.id) : null;
+            return (
+              <MeetingRow
+                key={recording.id}
+                recording={recording}
+                live={here === "recording" || here === "paused"}
+                paused={here === "paused"}
+                transcribingHere={here === "transcribing"}
+                first={index === 0}
+                onPress={() => onOpen(recording.id)}
+              />
+            );
+          })}
         </View>
       )}
       {list.hasMore ? (

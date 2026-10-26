@@ -637,7 +637,8 @@ describe("Live transcript", () => {
 
   test("after Stop the meeting reads Transcribing, never Uploading", async () => {
     const fixture = createMeetingsFixture();
-    const { recorder, recordingId } = await fakeRecorder("stopped", { pendingChunks: 1 });
+    // Stop waits for the last few seconds of audio, then the recorder is stopped.
+    const { recorder, recordingId } = await fakeRecorder("stopping", { pendingChunks: 1 });
     const view = await render(
       <MeetingDetailPage
         workspaceId={fixture.workspaceId}
@@ -654,6 +655,14 @@ describe("Live transcript", () => {
       expect(text).toContain("Transcribing");
       expect(text).not.toContain("Uploading");
       expect(view.container.querySelector('section[aria-label="Recording"]')).toBeNull();
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          state: "stopped",
+          upload: { ...recorder.upload!, pendingChunks: 0, finalized: true },
+        }),
+      );
+      expect(view.container.textContent).toContain("Transcribing");
 
       // Only a lost connection keeps it from transcribing, and it says so.
       await act(async () =>
@@ -672,7 +681,7 @@ describe("Live transcript", () => {
 
   test("the list says Transcribing for a meeting just stopped here", async () => {
     const fixture = createMeetingsFixture();
-    const { recorder } = await fakeRecorder("stopped", { pendingChunks: 1 });
+    const { recorder } = await fakeRecorder("stopping", { pendingChunks: 1 });
     const view = await render(
       <MeetingsListPage
         workspaceId={fixture.workspaceId}

@@ -2474,7 +2474,6 @@ export const englishMessages = {
   "meetings.recorderPanel.couldnTRenameThisMeeting": "Couldn't rename this meeting",
   "meetings.recorderPanel.detectLanguage": "Detect language",
   "meetings.recorderPanel.finishing": "Finishing",
-  "meetings.recorderPanel.finishingTheUpload": "Finishing the upload.",
   "meetings.recorderPanel.includeATabSAudio": "Include a tab's audio",
   "meetings.recorderPanel.includeComputerAudio": "Include computer audio",
   "meetings.recorderPanel.listeningWhatSSaidShows":
@@ -2530,6 +2529,7 @@ export const englishMessages = {
   "meetings.recorderPanel.resume": "Resume",
   "meetings.recorderPanel.save": "Save",
   "meetings.recorderPanel.saving": "Saving…",
+  "meetings.recorderPanel.savingTheLastFewSeconds": "Saving the last few seconds of audio.",
   "meetings.recorderPanel.showsWhatSSaidAs":
     "Shows what's said as it's said. The final transcript still comes after you stop.",
   "meetings.recorderPanel.starting": "Starting",
@@ -2565,8 +2565,6 @@ export const englishMessages = {
   "meetings.recorderPanel.uploadFailedMessage": "Upload failed: {message}",
   "meetings.recorderPanel.uploadfailurereasonTheRecordingIsSaved":
     "{uploadFailureReason} The recording is saved on this device. It uploads again when you reopen Meetings.",
-  "meetings.recorderPanel.uploadingCountPiecesOfAudio_one": "Uploading {count} piece of audio.",
-  "meetings.recorderPanel.uploadingCountPiecesOfAudio_other": "Uploading {count} pieces of audio.",
   "meetings.recorderPanel.uploadStopped": "Upload stopped",
   "meetings.recorderPanel.useACurrentVersionOf":
     "Use a current version of Chrome, Edge, Safari or Firefox.",

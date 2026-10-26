@@ -134,8 +134,8 @@ export function uploadLine(
     });
   }
   if (!upload || recorder.state === "starting") return null;
-  if (upload.pendingChunks === 0) return msg("meetings.recorderPanel.finishingTheUpload");
-  return msg("meetings.recorderPanel.uploadingCountPiecesOfAudio", { count: upload.pendingChunks });
+  // After Stop: the audio uploaded while it recorded, so only its end is left.
+  return msg("meetings.recorderPanel.savingTheLastFewSeconds");
 }
 
 /** What this recording captures, as a sentence. */
