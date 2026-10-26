@@ -2,7 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import { ChatViewportFileDropTarget } from "@opengeni/react/app/components/session/chat-viewport-file-drop-target";
+import {
+  ChatFileDropCover,
+  ChatFileDropRelay,
+  ChatFileDropRelayProvider,
+  ChatViewportFileDropTarget,
+} from "@opengeni/react/app/components/session/chat-viewport-file-drop-target";
 import { registerDom } from "../../../../../packages/react/test/render-hook";
 
 registerDom();
@@ -125,5 +130,74 @@ describe("ChatViewportFileDropTarget", () => {
     });
 
     expect(calls).toBe(0);
+  });
+});
+
+describe("ChatFileDropRelay", () => {
+  async function mountBeside(onFiles: (files: FileList) => void, enabled: boolean) {
+    const relay = new ChatFileDropRelay();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const draw = (chatEnabled: boolean) =>
+      act(async () => {
+        root.render(
+          <>
+            <div data-testid="beside">
+              <ChatFileDropCover relay={relay} enabled />
+            </div>
+            <ChatFileDropRelayProvider relay={relay}>
+              <ChatViewportFileDropTarget
+                data-workspace-scroll-owner="self-managed"
+                enabled={chatEnabled}
+                onFiles={onFiles}
+              >
+                <div />
+              </ChatViewportFileDropTarget>
+            </ChatFileDropRelayProvider>
+          </>,
+        );
+      });
+    await draw(enabled);
+    mounted = { root, container };
+    return { container, relay, draw };
+  }
+  const coverOf = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>('[data-testid="chat-file-drop-cover"]');
+  const overlayOf = (container: HTMLElement) =>
+    container.querySelector('[data-testid="chat-viewport-drop-overlay"]');
+
+  test("a chat takes the files dropped beside it only while it takes files itself", async () => {
+    const added: string[][] = [];
+    const { container, relay, draw } = await mountBeside(
+      (files) => added.push([...files].map((file) => file.name)),
+      false,
+    );
+    const file = new File(["x"], "shot.png", { type: "image/png" });
+    expect(relay.current()).toBeNull();
+    await act(async () => void fireDrag(document.body, "dragenter", [file]));
+    expect(coverOf(container)).toBeNull();
+    await draw(true);
+    expect(relay.current()).not.toBeNull();
+    await act(async () => void fireDrag(document.body, "dragover", [file]));
+    const cover = coverOf(container)!;
+    await act(async () => void fireDrag(cover, "dragover", [file]));
+    expect(overlayOf(container)).not.toBeNull();
+    await act(async () => void fireDrag(cover, "drop", [file]));
+    expect(added).toEqual([["shot.png"]]);
+    expect(overlayOf(container)).toBeNull();
+    // Turned off again, it stops taking them.
+    await draw(false);
+    expect(relay.current()).toBeNull();
+  });
+
+  test("the cover goes once the drag has left the page", async () => {
+    const { container } = await mountBeside(() => {}, true);
+    const file = new File(["x"], "shot.png", { type: "image/png" });
+    await act(async () => void fireDrag(document.body, "dragenter", [file]));
+    expect(coverOf(container)).not.toBeNull();
+    // No more drag events from this page: the pointer is outside the window.
+    await act(async () => void (await new Promise((resolve) => setTimeout(resolve, 1100))));
+    expect(coverOf(container)).toBeNull();
   });
 });

@@ -823,7 +823,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       // capabilities. Ordinary session creation resolves the viewer's settings.
       const siteOrigin = origin ?? currentSiteSessionOrigin();
       if (siteOrigin && currentSiteViewerRlsContext()?.siteId !== siteOrigin.siteId) {
-        const refused = siteFrameBodyRefusal("sessions.create", "/sessions", payload);
+        // The console's own Site view (the Site's id and version without a
+        // frame marker; Site code is always marked) attaches the person's
+        // files to the first message, as it does to every later one. Site
+        // code still may not.
+        const consoleSiteView =
+          siteOrigin.siteId !== null && c.req.header(SITE_FRAME_HEADER) === undefined;
+        const refused = siteFrameBodyRefusal(
+          "sessions.create",
+          "/sessions",
+          consoleSiteView ? withoutFileResources(payload) : payload,
+        );
         if (refused)
           return c.json(
             {
@@ -6975,4 +6985,25 @@ function mapLineageNodes(nodes: LineageNode[], policy: EffectivePolicyContext): 
     session: sessionResponse(node.session as Session, policy),
     children: mapLineageNodes(node.children, policy),
   }));
+}
+
+/**
+ * A create body without its file attachments, when those are all it attaches,
+ * for the Site-frame field check. Any other resource (a repository, a
+ * workspace resource) stays in the body and is refused as before.
+ */
+function withoutFileResources(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const { resources, ...rest } = payload as Record<string, unknown>;
+  if (
+    !Array.isArray(resources) ||
+    !resources.every(
+      (resource) =>
+        resource !== null &&
+        typeof resource === "object" &&
+        (resource as { kind?: unknown }).kind === "file",
+    )
+  )
+    return payload;
+  return rest;
 }
