@@ -660,7 +660,9 @@ minutes, and consumes it once. Issuance opportunistically removes bounded
 expired/consumed rows. Existing database readiness therefore covers this path.
 Site calls do not use this approval store: their active immutable version's
 requested identities are intersected with the current viewer's live gateway and
-revalidated by the API on every direct call.
+revalidated by the API on every direct call. The gateway applies saved Allow
+and Ask choices before it hides connection tools that would need an approval,
+so a tool a person set to Allow is callable from a Site.
 
 Migrations `0404_mcp_oauth_authorization_server.sql` and
 `0405_tool_gateway_approval_capabilities.sql` are one drained maintenance

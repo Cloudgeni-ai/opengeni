@@ -1155,6 +1155,8 @@ export function workspaceToolGatewayDefinitionFilter(
     ) {
       return false;
     }
+    // `approval` is the effective one: the runtime maps saved Allow/Ask
+    // choices before filtering, so an allowed tool stays available here.
     if (
       definition.approval === "human" &&
       definition.requiresProviderPreflight === true &&
