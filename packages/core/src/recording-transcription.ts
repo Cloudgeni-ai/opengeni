@@ -477,6 +477,106 @@ export type RecordingTrackWords = {
   words: readonly RecordingTranscribedWord[];
 };
 
+/** How far apart the same word may land in two tracks and still be one sound. */
+const ECHO_WINDOW_MILLISECONDS = 1_500;
+/** Misheard words an echo may hold between words that match computer audio. */
+const ECHO_MAX_MISHEARD_IN_A_ROW = 2;
+/** Matching words an echo needs, so one shared "ja" or "okay" stays. */
+const ECHO_MIN_MATCHED_WORDS = 2;
+
+/** A word as compared across tracks: letters and digits only, any case. */
+function echoKey(text: string): string {
+  return text
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+/** Start times of each word in computer audio, sorted, by echoKey. */
+function heardInComputerAudio(tracks: readonly RecordingTrackWords[]): Map<string, number[]> {
+  const heard = new Map<string, number[]>();
+  for (const track of tracks) {
+    for (const word of track.words) {
+      const key = echoKey(word.text);
+      if (!key) continue;
+      const starts = heard.get(key);
+      if (starts) starts.push(word.startMilliseconds);
+      else heard.set(key, [word.startMilliseconds]);
+    }
+  }
+  for (const starts of heard.values()) starts.sort((left, right) => left - right);
+  return heard;
+}
+
+function heardNear(starts: readonly number[] | undefined, at: number): boolean {
+  if (!starts) return false;
+  let low = 0;
+  let high = starts.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (starts[middle]! < at - ECHO_WINDOW_MILLISECONDS) low = middle + 1;
+    else high = middle;
+  }
+  return low < starts.length && starts[low]! <= at + ECHO_WINDOW_MILLISECONDS;
+}
+
+/**
+ * Without headphones, the microphone also hears the other people in a call
+ * from the speakers, so their words would show up twice: from computer audio,
+ * and again from the microphone as if the person recording said them. Drop
+ * the microphone's runs of words that were said at the same moment in
+ * computer audio: at least two matching words, with at most two misheard
+ * words in a row between them. What the person says, even right after
+ * someone else, stays.
+ */
+export function withoutMicrophoneEchoes(
+  tracks: readonly RecordingTrackWords[],
+  sources: ReadonlyArray<{ trackNumber: number; source: RecordingTrackSource }>,
+): RecordingTrackWords[] {
+  const sourceOf = (trackNumber: number) =>
+    sources.find((track) => track.trackNumber === trackNumber)?.source;
+  const computer = tracks.filter((track) => sourceOf(track.trackNumber) === "system");
+  if (computer.length === 0) return [...tracks];
+  const heard = heardInComputerAudio(computer);
+  return tracks.map((track) => {
+    if (sourceOf(track.trackNumber) !== "microphone") return track;
+    const words = track.words;
+    const keys = words.map((word) => echoKey(word.text));
+    const matched = words.map(
+      (word, index) =>
+        keys[index] !== "" && heardNear(heard.get(keys[index]!), word.startMilliseconds),
+    );
+    const dropped = new Set<number>();
+    let index = 0;
+    while (index < words.length) {
+      if (!matched[index]) {
+        index += 1;
+        continue;
+      }
+      let end = index;
+      let count = 1;
+      let misheard = 0;
+      for (let next = index + 1; next < words.length; next += 1) {
+        if (matched[next]) {
+          end = next;
+          count += 1;
+          misheard = 0;
+        } else if (keys[next] !== "" && ++misheard > ECHO_MAX_MISHEARD_IN_A_ROW) {
+          break;
+        }
+      }
+      // Punctuation the provider wrote as its own word goes with the echo.
+      while (end + 1 < words.length && keys[end + 1] === "") end += 1;
+      if (count >= ECHO_MIN_MATCHED_WORDS) {
+        for (let position = index; position <= end; position += 1) dropped.add(position);
+      }
+      index = end + 1;
+    }
+    if (dropped.size === 0) return track;
+    return { ...track, words: words.filter((_, position) => !dropped.has(position)) };
+  });
+}
+
 export type RecordingTranscriptSegmentDraft = {
   startMilliseconds: number;
   endMilliseconds: number;

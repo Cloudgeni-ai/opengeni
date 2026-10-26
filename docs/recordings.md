@@ -273,6 +273,11 @@ microphone track is the person recording and the system track is everyone
 else, so only the system track needs diarization. A microphone alone (a
 phone, or the web without tab audio) may hear a whole room, so it is
 diarized like any other track.
+Without headphones the microphone also hears the others from the speakers,
+so the transcript leaves out microphone words that were said at the same
+moment in the system track: runs of at least two words that match within
+1.5 seconds, with at most two misheard words in a row between them. What the
+person recording says, even right after someone else, stays.
 When the chosen model can tell speakers apart, its diarization is used.
 Otherwise, or when the request or `settings.recordings.diarizer` says
 `ours`, Opengeni tells the speakers apart itself, on the worker's CPU.
