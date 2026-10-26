@@ -255,8 +255,8 @@ export function SecurityController({
       }
       const changed = changeDescription(command);
       if (!result.reauthenticationRequired) {
-        // Only how this account signs in changed for one passkey; this
-        // session stays signed in. Reload the list in place.
+        // Adding another passkey keeps this session signed in. Reload the
+        // list in place.
         setSuccess(changed);
         setError(null);
         void api

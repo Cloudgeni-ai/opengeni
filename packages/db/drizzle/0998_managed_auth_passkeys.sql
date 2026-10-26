@@ -58,6 +58,8 @@ DECLARE
   credential jsonb := p_request->'credential';
   passkey_value uuid;
   linked boolean := false;
+  revoked boolean := false;
+  identity_value uuid;
   previous_marker text := current_setting('opengeni.canonical_human_identity_lifecycle', true);
 BEGIN
   revision_value := managed_sign_in_method_authority(p_user, p_session, p_request);
@@ -111,6 +113,16 @@ BEGIN
     ) THEN
       RAISE EXCEPTION 'SIGN_IN_METHOD_LAST_USABLE_METHOD' USING ERRCODE = '42501';
     END IF;
+    -- Sessions don't record which passkey opened them, so a removed passkey
+    -- can only be shut out by ending every session, as a password change does.
+    UPDATE canonical_human_identities i
+      SET identity_revision = i.identity_revision + 1, auth_revision = i.auth_revision + 1,
+        updated_at = clock_timestamp()
+      FROM canonical_human_identity_subjects s
+      WHERE s.identity_id = i.id AND s.auth_user_id = p_user AND s.status = 'active'
+      RETURNING i.id INTO identity_value;
+    DELETE FROM auth_sessions WHERE identity_id = identity_value;
+    revoked := true;
   ELSE
     RAISE EXCEPTION 'SIGN_IN_METHOD_INVALID_REQUEST' USING ERRCODE = '22023';
   END IF;
@@ -123,7 +135,7 @@ BEGIN
     FROM auth_users
     WHERE id = p_user AND email_verified AND lower(email) NOT LIKE '%.invalid';
   PERFORM set_config('opengeni.canonical_human_identity_lifecycle', coalesce(previous_marker, ''), true);
-  RETURN jsonb_build_object('passkeyId', passkey_value, 'reauthenticationRequired', linked);
+  RETURN jsonb_build_object('passkeyId', passkey_value, 'reauthenticationRequired', linked OR revoked);
 END $body$;
 REVOKE ALL ON FUNCTION mutate_managed_passkey(text, text, jsonb) FROM PUBLIC;
 

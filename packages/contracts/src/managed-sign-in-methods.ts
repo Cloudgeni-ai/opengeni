@@ -7,6 +7,7 @@ export const ManagedSignInProvider = /* @__PURE__ */ defineSchema(() =>
 );
 
 export {
+  accountContactEmail,
   isPasskeyOnlyAccountEmail,
   PASSKEY_ONLY_ACCOUNT_EMAIL_DOMAIN,
   passkeyOnlyAccountEmail,
@@ -78,8 +79,8 @@ export const ManagedPasskeySignUpRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export const ManagedPasskeySignInResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    // False in browser-accounts modes: the account exists, and the browser
-    // signs in to it with the passkey through an account transaction.
+    // True when the response signed this browser in. Passkeys are offered
+    // only in the legacy session-set mode, where that is always the case.
     signedIn: primitives.boolean,
   }),
 );

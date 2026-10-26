@@ -123,7 +123,7 @@ async function signUp(rt: Runtime, name = "Passkey Person") {
 async function signIn(
   rt: Runtime,
   passkey: SoftwarePasskey,
-  input: { flags?: { userVerified?: boolean }; origin?: string } = {},
+  input: { flags?: { userVerified?: boolean }; origin?: string; crossOrigin?: boolean } = {},
 ) {
   const options = await post(rt, "/v1/auth/passkey/sign-in/options", {});
   expect(options.status).toBe(200);
@@ -136,6 +136,7 @@ async function signIn(
     response: softwarePasskeyAssertion(passkey, ceremony.options, {
       origin: input.origin ?? ORIGIN,
       ...(input.flags ? { flags: input.flags } : {}),
+      ...(input.crossOrigin ? { crossOrigin: true } : {}),
     }),
   });
   return { ceremony, response };
@@ -278,6 +279,12 @@ describe("passkey sign-in and passkey-only accounts", () => {
     expect(phished.response.status).toBe(422);
     expect(await phished.response.json()).toMatchObject({ code: "PASSKEY_NOT_VERIFIED" });
 
+    // A ceremony another site ran in a frame of this page is refused.
+    const framed = await signIn(rt, passkey, { crossOrigin: true });
+    expect(framed.response.status).toBe(422);
+    expect(await framed.response.json()).toMatchObject({ code: "PASSKEY_NOT_VERIFIED" });
+    expect(sessionCookie(framed.response)).toBe("");
+
     const unverified = await signIn(rt, passkey, { flags: { userVerified: false } });
     expect(unverified.response.status).toBe(422);
     expect(await unverified.response.json()).toMatchObject({ code: "PASSKEY_NOT_VERIFIED" });
@@ -337,7 +344,18 @@ describe("passkey sign-in and passkey-only accounts", () => {
       { cookie: fresh },
     );
     expect(removed.status).toBe(200);
-    expect((await methods(rt, fresh)).passkeys).toHaveLength(1);
+    // Sessions don't record which passkey opened them, so removing one ends
+    // every session, including the one the removed passkey opened.
+    expect(await removed.json()).toMatchObject({ reauthenticationRequired: true });
+    const stale = await rt.app.request("/v1/auth/sign-in-methods", { headers: { cookie: fresh } });
+    expect(stale.status).toBe(401);
+    const [{ sessions }] = await admin<{ sessions: number }[]>`
+      select count(*)::int as sessions from auth_sessions where user_id=${person.userId}`;
+    expect(sessions).toBe(0);
+
+    const remaining = await signIn(rt, second.passkey);
+    expect(remaining.response.status).toBe(200);
+    expect((await methods(rt, sessionCookie(remaining.response))).passkeys).toHaveLength(1);
     const gone = await signIn(rt, passkey);
     expect(gone.response.status).toBe(422);
   });
@@ -373,5 +391,18 @@ describe("passkey sign-in and passkey-only accounts", () => {
     );
     expect(password.status).toBe(409);
     expect(await password.json()).toMatchObject({ code: "SIGN_IN_METHOD_UNAVAILABLE" });
+  });
+
+  test("adding a passkey needs a recent sign-in before the browser makes one", async () => {
+    const rt = runtime();
+    const person = await passwordFixture();
+    await admin`update auth_sessions set created_at = now() - interval '10 minutes'
+      where token = ${person.token}`;
+    const cookie = await legacyCookie(rt, person.token);
+    const options = await post(rt, "/v1/auth/sign-in-methods/passkey/options", {}, { cookie });
+    expect(options.status).toBe(403);
+    expect(await options.json()).toMatchObject({
+      code: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED",
+    });
   });
 });

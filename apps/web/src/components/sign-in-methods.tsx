@@ -510,7 +510,7 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
           if (!open) setRemovePasskey(null);
         }}
         title={`Remove ${removePasskey?.name ?? "this passkey"}?`}
-        description="It can no longer sign in to your account. The passkey may still be listed in your password manager or device; you can delete it there."
+        description="It can no longer sign in to your account, and you'll be signed out everywhere, including here. The passkey may still be listed in your password manager or device; you can delete it there."
         confirmLabel="Remove passkey"
         cancelAutoFocus
         restoreFocusRef={removePasskeyTrigger}

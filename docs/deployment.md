@@ -1398,6 +1398,14 @@ passkey as a usable sign-in method.
   address, so it gets no sign-in notices or password resets; its passkeys are
   its only way in, and its last passkey can't be removed. Recommend that these
   people add a second passkey.
+- Before enabling passkey-only accounts, settle the public hostname and the
+  session-set mode. Passkeys belong to the hostname they were made on and are
+  offered only in the legacy session-set mode, so moving the deployment to
+  another hostname or switching session-set modes leaves passkey-only accounts
+  with no way to sign in and no email address to recover through.
+- Removing a passkey signs the person out everywhere, as a password change
+  does: sessions don't record which passkey opened them, so ending all of them
+  is the only way to shut out a removed passkey.
 - Ceremonies are single use, expire after five minutes and are bound to the
   origin that started them. Requests for new ceremonies are rate limited per
   client address. Credentials are stored as public keys only; the signature

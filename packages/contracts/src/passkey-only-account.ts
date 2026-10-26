@@ -19,3 +19,11 @@ export function isPasskeyOnlyAccountEmail(email: string | null | undefined): boo
     email.toLowerCase().endsWith(`@${PASSKEY_ONLY_ACCOUNT_EMAIL_DOMAIN}`)
   );
 }
+
+/**
+ * The account's real email address, or null when it has none. Use it wherever
+ * an address is shown, used as a label or handed to another service.
+ */
+export function accountContactEmail(email: string | null | undefined): string | null {
+  return email && !isPasskeyOnlyAccountEmail(email) ? email : null;
+}

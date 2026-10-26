@@ -8,6 +8,7 @@ import {
   passkeyOnlyAccountEmail,
 } from "@opengeni/contracts/managed-sign-in-methods";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { nestedPostgresSqlState } from "@opengeni/db";
 import { APIError } from "better-auth/api";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
@@ -144,7 +145,10 @@ async function signInVerifiedPerson(
         userAgent: context.req.header("user-agent") ?? "",
       }),
     );
-  } catch {
+  } catch (error) {
+    // Admission refuses through Better Auth; anything else (a database
+    // outage) is a failure, not a refusal of this account.
+    if (!(error instanceof APIError)) throw error;
     session = null;
   }
   if (!session?.token) {
@@ -330,6 +334,14 @@ export function registerManagedPasskeyRoutes(
       } catch (error) {
         // Without its passkey the new account has no way in: remove it.
         await deps.db.execute(sql`delete from auth_users where id = ${userId}`);
+        // Another sign-up registered the same passkey in the meantime.
+        if (nestedPostgresSqlState(error) === "23505") {
+          return refusal(
+            409,
+            "PASSKEY_ALREADY_REGISTERED",
+            "This passkey already belongs to an account; sign in with it",
+          );
+        }
         throw error;
       }
       return await signInVerifiedPerson(context, deps, userId);

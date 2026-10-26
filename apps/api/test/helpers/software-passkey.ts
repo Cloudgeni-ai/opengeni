@@ -36,8 +36,13 @@ function counterBytes(counter: number): Buffer {
   return bytes;
 }
 
-function clientData(type: "webauthn.create" | "webauthn.get", challenge: string, origin: string) {
-  return Buffer.from(JSON.stringify({ type, challenge, origin, crossOrigin: false }));
+function clientData(
+  type: "webauthn.create" | "webauthn.get",
+  challenge: string,
+  origin: string,
+  crossOrigin = false,
+) {
+  return Buffer.from(JSON.stringify({ type, challenge, origin, crossOrigin }));
 }
 
 export function createSoftwarePasskey(): SoftwarePasskey {
@@ -55,7 +60,7 @@ export function createSoftwarePasskey(): SoftwarePasskey {
 export function softwarePasskeyRegistration(
   passkey: SoftwarePasskey,
   options: Record<string, unknown>,
-  input: { origin: string; aaguid?: string; flags?: Flags; rpId?: string },
+  input: { origin: string; aaguid?: string; flags?: Flags; rpId?: string; crossOrigin?: boolean },
 ): Record<string, unknown> {
   const rp = options.rp as { id: string };
   const user = options.user as { id: string };
@@ -99,7 +104,7 @@ export function softwarePasskeyRegistration(
     type: "public-key",
     response: {
       clientDataJSON: isoBase64URL.fromBuffer(
-        clientData("webauthn.create", options.challenge as string, input.origin),
+        clientData("webauthn.create", options.challenge as string, input.origin, input.crossOrigin),
       ),
       attestationObject: isoBase64URL.fromBuffer(attestationObject),
       transports: ["internal", "hybrid"],
@@ -113,7 +118,7 @@ export function softwarePasskeyRegistration(
 export function softwarePasskeyAssertion(
   passkey: SoftwarePasskey,
   options: Record<string, unknown>,
-  input: { origin: string; flags?: Flags; rpId?: string; counter?: number },
+  input: { origin: string; flags?: Flags; rpId?: string; counter?: number; crossOrigin?: boolean },
 ): Record<string, unknown> {
   passkey.counter = input.counter ?? passkey.counter + 1;
   const authenticatorData = Buffer.concat([
@@ -121,7 +126,12 @@ export function softwarePasskeyAssertion(
     Buffer.from([flagsByte(input.flags ?? {}, false)]),
     counterBytes(passkey.counter),
   ]);
-  const clientDataJSON = clientData("webauthn.get", options.challenge as string, input.origin);
+  const clientDataJSON = clientData(
+    "webauthn.get",
+    options.challenge as string,
+    input.origin,
+    input.crossOrigin,
+  );
   const signature = sign(
     "sha256",
     Buffer.concat([authenticatorData, createHash("sha256").update(clientDataJSON).digest()]),

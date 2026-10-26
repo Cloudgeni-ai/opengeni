@@ -279,6 +279,24 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
         sql`select email, name from auth_users where id=${actor.authUserId}`,
       );
       if (!user) throw new HTTPException(401);
+      // Saving a passkey needs a sign-in from the last five minutes. Check it
+      // before the browser makes one, or the device keeps a passkey this
+      // account then refuses.
+      const [fresh] = await rows<{ fresh: boolean }>(
+        deps,
+        sql`select exists(select 1 from auth_sessions where id=${actor.authSessionId}
+          and user_id=${actor.authUserId}
+          and created_at > clock_timestamp() - interval '5 minutes'
+          and created_at <= clock_timestamp()) as fresh`,
+      );
+      if (!fresh?.fresh)
+        return context.json(
+          {
+            code: "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED",
+            message: "sign in method reauthentication required",
+          },
+          403,
+        );
       const label = isPasskeyOnlyAccountEmail(user.email) ? user.name : user.email;
       return context.json(
         ManagedPasskeyCeremony.parse(

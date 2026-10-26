@@ -245,11 +245,33 @@ export async function startManagedPasskeyRegistration(
   return { challengeId, options: options as unknown as Record<string, unknown> };
 }
 
+/**
+ * Whether the browser ran this ceremony inside a frame from another site.
+ * Any site may frame these pages, so a ceremony from a frame could be one the
+ * person was tricked into; passkeys here are used only on the page itself.
+ */
+function madeInCrossOriginFrame(response: unknown): boolean {
+  const clientData = (response as { response?: { clientDataJSON?: unknown } } | null)?.response
+    ?.clientDataJSON;
+  if (typeof clientData !== "string") return false;
+  try {
+    return (
+      (JSON.parse(isoBase64URL.toUTF8String(clientData)) as { crossOrigin?: unknown })
+        ?.crossOrigin === true
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function verifyManagedPasskeyRegistration(
   ceremony: ManagedPasskeyStoredCeremony,
   response: unknown,
   name?: string,
 ): Promise<ManagedPasskeyCredential> {
+  if (madeInCrossOriginFrame(response)) {
+    throw new ManagedPasskeyError("PASSKEY_NOT_VERIFIED", "The passkey could not be verified");
+  }
   let result: Awaited<ReturnType<typeof verifyRegistrationResponse>>;
   try {
     result = await verifyRegistrationResponse({
@@ -315,6 +337,9 @@ export async function verifyManagedPasskeySignIn(
       "This passkey isn't connected to an account here",
     );
   if (typeof assertion?.id !== "string" || assertion.id !== assertion.rawId) throw unknown();
+  if (madeInCrossOriginFrame(assertion)) {
+    throw new ManagedPasskeyError("PASSKEY_NOT_VERIFIED", "The passkey could not be verified");
+  }
   const [stored] = await rows<StoredPasskeyRow>(
     db,
     sql`select id, user_id as "userId", credential_id as "credentialId", public_key as "publicKey",
