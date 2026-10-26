@@ -783,11 +783,13 @@ The harness also reaps databases that killed or crashed test runs left behind:
 a detached background pass, at most every five minutes, drops per-test
 `og_<label>_<12 hex>` databases whose recorded owner process is gone (or, for
 unowned ones, that stayed idle with no connections for 15 minutes) and migrated
-templates idle for 6 hours beyond the 10 most recently used (or for 7 days),
-never with FORCE and never failing a test. Template names depend only on the
-schema contract's contents, so worktrees with the same schema share one. Notes go to
-`reaper.log` beside the harness lock state; set `OPENGENI_TEST_PG_REAP=0` to
-turn it off. See the header of `packages/testing/src/shared-pg.ts`.
+templates idle for 6 hours beyond the 10 most recently used, never with FORCE
+and never failing a test. Call `retainTestDatabase` for a database you keep on
+purpose. Template names depend only on the contents of the migrations and the
+sources `@opengeni/db` loads, so worktrees with the same inputs share one. Notes
+go to `reaper.log` beside the harness lock state; `OPENGENI_TEST_PG_REAP=0`
+turns it off (it is off under `CI`). See the header of
+`packages/testing/src/shared-pg.ts`.
 
 Bun services launched by the test harness ignore implicit checkout `.env` files.
 Supply fixture settings through the service environment, or use an explicit

@@ -6,7 +6,7 @@
 import postgres from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "../packages/db/src/schema";
-import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, retainTestDatabase } from "@opengeni/testing/shared-pg";
 import { InsightsUsageQuery } from "@opengeni/contracts/insights-usage";
 import {
   createDb,
@@ -27,6 +27,9 @@ if (
 const retained = process.env.OPENGENI_INSIGHTS_LAB_DATABASE;
 if (retained && !/^og_insights_hourly_lab_[a-f0-9]{12}$/.test(retained))
   throw new Error("Expected an exact retained hourly lab database name");
+// The retained lab database outlives the run that made it: keep the
+// harness's reaper (started by the acquisition below) away from it.
+if (retained) await retainTestDatabase(retained);
 const allocated = await acquireSharedTestDatabase("insights-hourly-lab");
 if (!allocated) throw new Error("Real local PostgreSQL required");
 const retainedUrl = (value: string) => {

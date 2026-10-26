@@ -58,20 +58,25 @@ const execFileAsync = promisify(execFile);
 // A test process that is killed or crashes never drops its database, and the
 // server outlives every run, so orphans used to pile up until the disk filled.
 // Every database the harness creates now carries its owner (host, boot id, pid
-// namespace, pid, process start time) as its database comment, and every
-// acquisition stamps the template it clones with a last-used time. At most
-// once per REAP_INTERVAL_MS per state directory, an acquisition (or the last
-// holder's release) starts one detached background reaper (`--reap` below,
-// logic in reapOrphanedTestDatabases) that drops, without FORCE:
+// namespace, pid, process start time) as its database comment, and every clone
+// stamps its template with a last-used time. At most once per REAP_INTERVAL_MS
+// per state directory, an acquisition (or the last holder's release) starts one
+// detached background reaper (`--reap` below, logic in
+// reapOrphanedTestDatabases) that drops, without FORCE:
 //   - per-test `og_<label>_<12 hex>` databases with no connections whose owner
 //     provably died on this machine;
-//   - unowned ones (older checkouts) idle with no connections and no
-//     transactions across a 15-minute window of reaper passes;
-//   - templates idle for 6 hours beyond the 10 most recently used, and any
-//     template idle for 7 days, except this checkout's own (a clone whose
-//     template vanished rebuilds it under the lock).
-// Reaping is best effort: it never blocks or fails a test, and its notes go to
-// `reaper.log` in the state directory. OPENGENI_TEST_PG_REAP=0 turns it off.
+//   - unowned ones (older checkouts) idle with no connections and no new
+//     client sessions across a 15-minute window of reaper passes, and ones whose
+//     owner it cannot check (another host or pid namespace) across 6 hours;
+//   - templates idle for 6 hours beyond the 10 most recently used, any
+//     template idle for 7 days, and templates only older checkouts use after
+//     2 days, a few per pass, never this checkout's own (a clone whose template
+//     vanished rebuilds it under the lock).
+// A database with any other comment is kept: retainTestDatabase() marks one a
+// caller deliberately leaves behind. Reaping is best effort: it never blocks
+// or fails a test, and its notes go to `reaper.log` in the state directory.
+// OPENGENI_TEST_PG_REAP=0 turns it off; it is off under CI (fresh machines)
+// unless OPENGENI_TEST_PG_REAP=1.
 // ---------------------------------------------------------------------------
 
 // Keep the fixed cross-process listener outside Linux's default ephemeral client
@@ -119,22 +124,16 @@ function databaseUrl(database: string, role?: string, password?: string): string
 // is shared by every worktree on the machine — so a bare name would freeze the
 // schema/ACLs at whichever checkout first built it. Baking every template input
 // into the name gives each exact contract its own immutable template.
-// Only contents and repo-relative names count, never the checkout's location:
-// worktrees with identical inputs share one template.
+// The inputs are the migrations plus the source of @opengeni/db and every
+// workspace package it depends on. Only contents and names relative to
+// `packages/` count, never the checkout's location, so worktrees with the
+// same inputs share one template.
 const TEMPLATE_DB_PREFIX = "og_test_template_";
 
 /** This checkout's `packages/` directory. */
 const PACKAGES_DIR = fileURLToPath(new URL("../../", import.meta.url));
 /** The migrations dir this checkout's `migrate()` applies (@opengeni/db). */
 const MIGRATIONS_DIR = join(PACKAGES_DIR, "db/drizzle");
-/** Template inputs besides the migrations, relative to `packages/`. */
-const TEMPLATE_CONTRACT_FILES = [
-  "db/src/migrate.ts",
-  "db/src/migration-postgres-compatibility.ts",
-  "db/src/knowledge-migration.ts",
-  "db/src/provision-roles.ts",
-  "db/src/runtime-posture.ts",
-] as const;
 
 let templateDbNameMemo: string | undefined;
 
@@ -182,13 +181,70 @@ export async function checkoutTemplateDbName(packagesDir: string): Promise<strin
     hasher.update(await readFile(join(migrationsDir, file)));
     hasher.update("\0");
   }
-  for (const file of TEMPLATE_CONTRACT_FILES) {
-    hasher.update(file);
-    hasher.update("\0");
-    hasher.update(await readFile(join(packagesDir, file)));
-    hasher.update("\0");
+  for (const directory of await templateSourceDirectories(packagesDir)) {
+    for (const file of await sourceFiles(join(packagesDir, directory))) {
+      hasher.update(`${directory}/${file}`);
+      hasher.update("\0");
+      hasher.update(await readFile(join(packagesDir, directory, file)));
+      hasher.update("\0");
+    }
   }
   return `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
+}
+
+/**
+ * The `src` directories (relative to `packages/`) of @opengeni/db and every
+ * workspace package it depends on, directly or not: everything the migration
+ * runner and role provisioning can load. Hashing whole directories also
+ * covers files they read or import dynamically.
+ */
+export async function templateSourceDirectories(packagesDir: string): Promise<string[]> {
+  const byName = new Map<string, { directory: string; dependencies: string[] }>();
+  for (const entry of (await readdir(packagesDir)).sort()) {
+    try {
+      const manifest = JSON.parse(
+        await readFile(join(packagesDir, entry, "package.json"), "utf8"),
+      ) as { name?: unknown; dependencies?: Record<string, unknown> };
+      if (typeof manifest.name !== "string") continue;
+      byName.set(manifest.name, {
+        directory: entry,
+        dependencies: Object.entries(manifest.dependencies ?? {})
+          .filter(([, version]) => typeof version === "string" && version.startsWith("workspace:"))
+          .map(([name]) => name),
+      });
+    } catch {
+      // not a package
+    }
+  }
+  const seen = new Set<string>();
+  const pending = ["@opengeni/db"];
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    // The harness itself is not a template input.
+    if (seen.has(name) || name === "@opengeni/testing" || !byName.has(name)) continue;
+    seen.add(name);
+    pending.push(...byName.get(name)!.dependencies);
+  }
+  return [...seen].map((name) => `${byName.get(name)!.directory}/src`).sort();
+}
+
+/** Non-test files under `root`, as sorted `/`-separated relative paths. */
+async function sourceFiles(root: string, prefix = ""): Promise<string[]> {
+  const files: string[] = [];
+  let entries: string[];
+  try {
+    entries = (await readdir(join(root, prefix))).sort();
+  } catch {
+    return files;
+  }
+  for (const entry of entries) {
+    const relative = prefix ? `${prefix}/${entry}` : entry;
+    if (/\.test\.|^__tests__$|^test$/u.test(entry)) continue;
+    const info = await statPath(join(root, relative)).catch(() => null);
+    if (info?.isDirectory()) files.push(...(await sourceFiles(root, relative)));
+    else if (info?.isFile()) files.push(relative);
+  }
+  return files;
 }
 
 const STATE_DIR = join(
@@ -351,9 +407,9 @@ function processIsAlive(pid: number): boolean {
  * reclaimed. The token also prevents an old holder from deleting a successor's
  * lock during cleanup.
  */
-async function withLock<T>(fn: () => Promise<T>): Promise<T> {
+async function withLock<T>(fn: () => Promise<T>, timeoutMs = 600_000): Promise<T> {
   await mkdir(STATE_DIR, { recursive: true });
-  const deadline = Date.now() + 600_000;
+  const deadline = Date.now() + timeoutMs;
   const token = crypto.randomUUID();
   for (;;) {
     let acquired = false;
@@ -859,6 +915,23 @@ async function recordDatabaseOwner(root: postgres.Sql, dbName: string): Promise<
     );
 }
 
+/**
+ * Keep a per-test database the caller deliberately leaves behind (for example
+ * a benchmark fixture reused across runs): the reaper never drops a database
+ * whose comment is anything other than a harness owner record. Throws when
+ * the marker cannot be written, because the database would then be reaped.
+ */
+export async function retainTestDatabase(databaseName: string): Promise<void> {
+  const root = postgres(ADMIN_URL, { max: 1, onnotice: () => undefined });
+  try {
+    await root.unsafe(
+      `COMMENT ON DATABASE ${quoteIdent(databaseName)} IS ${quoteLiteral(DB_RETAINED_COMMENT)}`,
+    );
+  } finally {
+    await root.end().catch(() => undefined);
+  }
+}
+
 function isMissingTemplateError(error: unknown): boolean {
   const details = error as { code?: unknown; message?: unknown };
   return (
@@ -868,27 +941,34 @@ function isMissingTemplateError(error: unknown): boolean {
   );
 }
 
-const stampedTemplates = new Set<string>();
+const templateStampedAt = new Map<string, number>();
 
 /**
- * Refresh the template's last-used stamp (once per process, and only when it
- * is over an hour old) so the reaper keeps templates checkouts still use.
+ * Refresh the template's last-used stamp (when it is over an hour old, checked
+ * at most hourly per process) so the reaper keeps templates checkouts use.
  * Writes only the shared catalog comment; it never connects to the template.
  * Best effort.
  */
 async function stampTemplateUse(root: postgres.Sql, template: string): Promise<void> {
-  if (stampedTemplates.has(template)) return;
-  stampedTemplates.add(template);
+  const last = templateStampedAt.get(template);
+  if (last !== undefined && Date.now() - last < TEMPLATE_STAMP_REFRESH_MS) return;
+  templateStampedAt.set(template, Date.now());
   try {
     const [row] = await root`
       SELECT shobj_description(oid, 'pg_database') AS comment
         FROM pg_database WHERE datname = ${template} AND datistemplate`;
     if (!row) return;
     const stamp = parseTemplateStamp(row.comment as string | null);
-    if (stamp && Date.now() - stamp.lastUsedAt < TEMPLATE_STAMP_REFRESH_MS) return;
-    await root.unsafe(
-      `COMMENT ON DATABASE ${quoteIdent(template)} IS ${quoteLiteral(templateStampComment(Date.now()))}`,
-    );
+    if (stamp?.by === "harness" && Date.now() - stamp.lastUsedAt < TEMPLATE_STAMP_REFRESH_MS) {
+      return;
+    }
+    // Never queue behind a clone holding the template: try again next time.
+    await root.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL lock_timeout = '1s'`);
+      await tx.unsafe(
+        `COMMENT ON DATABASE ${quoteIdent(template)} IS ${quoteLiteral(templateStampComment(Date.now()))}`,
+      );
+    });
   } catch (error) {
     void reaperNote(`could not stamp template ${template}: ${String(error)}`);
   }
@@ -915,7 +995,12 @@ function reaperNote(note: string): Promise<void> {
  * update atomic across this state directory's processes. Never throws.
  */
 async function maybeStartReaper(): Promise<void> {
-  if (process.env.OPENGENI_TEST_PG_REAP === "0") return;
+  const setting = process.env.OPENGENI_TEST_PG_REAP?.trim();
+  if (setting === "0") return;
+  // CI machines are discarded after each job, so there is nothing to keep
+  // tidy, and a detached process would outlive the job's process checks.
+  const ci = process.env.CI?.trim();
+  if (ci && ci !== "0" && ci !== "false" && setting !== "1") return;
   try {
     const marker = await readFile(REAPER_MARKER_FILE, "utf8")
       .then((source) => JSON.parse(source) as { pid?: unknown; startedAt?: unknown })
@@ -967,7 +1052,8 @@ export async function reapSharedTestDatabases(
     adminUrl: ADMIN_URL,
     observationsPath: REAPER_OBSERVATIONS_FILE,
     protectedTemplates: [await templateDbName().catch(() => "")],
-    withTemplateLock: withLock,
+    // Never queue behind a long template build: skip pruning this pass instead.
+    withTemplateLock: (fn) => withLock(fn, 30_000),
   });
   if (
     !options.dryRun &&
@@ -1365,23 +1451,28 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
 //   database comment. A database whose owner ran on this same host, boot and
 //   pid namespace and is no longer running (or whose pid now belongs to a
 //   different process) is an orphan.
-// - Everything else (no owner record, for example a database made by an
-//   older checkout, or one owned by a process we cannot see) is an orphan only
-//   after it stays without connections and without any transaction activity
-//   across several reaper passes spanning `idleWindowMs`.
+// - A database without any comment (made by an older checkout) is an orphan
+//   only after it stays without connections and without any new client
+//   session (autovacuum does not count) across reaper passes spanning
+//   `idleWindowMs`; one whose owner
+//   runs where we cannot check it gets `foreignIdleWindowMs`. A database with
+//   any other comment (for example retainTestDatabase()) is never dropped.
 // - Drops never use FORCE, so a database that gains a connection is skipped
-//   instead of broken. Only `og_<label>_<12 hex>` names are considered;
-//   templates, `postgres` and every other database are never per-test
-//   candidates.
-// - Templates carry a last-used stamp written on each acquisition. A
-//   template idle for `templateMinIdleMs` outside the `templateKeep` most
-//   recently used, or idle for `templateRetentionMs`, is pruned, except the
-//   templates this checkout uses. A clone whose template vanished rebuilds
-//   it (cloneFromTemplate), and the template build is lock-guarded.
+//   instead of broken. Only `og_<label>_<12 hex>` names and unmarked
+//   template-named leftovers are considered; `postgres` and every other
+//   database are never candidates.
+// - Templates carry a last-used stamp written by each clone. A template idle
+//   for `templateMinIdleMs` outside the `templateKeep` most recently used, or
+//   idle for `templateRetentionMs`, is pruned; one only the reaper has stamped
+//   (an older checkout's) after `templateReaperStampRetentionMs`. At most
+//   `maxTemplateDrops` go per pass, never the templates this checkout uses. A
+//   clone whose template vanished rebuilds it (cloneFromTemplate), and the
+//   template build is lock-guarded.
 // Every failure is reported in the result and never thrown.
 // ---------------------------------------------------------------------------
 
 export const DB_OWNER_COMMENT_PREFIX = "opengeni-test-db:v1 ";
+export const DB_RETAINED_COMMENT = "opengeni-test-db:retained";
 export const TEMPLATE_COMMENT_PREFIX = "opengeni-test-template:v1 ";
 
 export type ProcessIdentity = {
@@ -1414,7 +1505,14 @@ export function currentProcessIdentity(): ProcessIdentity {
   } catch {
     // not Linux
   }
-  return { host: hostname(), boot: readTrimmed("/proc/sys/kernel/random/boot_id"), pidns };
+  // Test-only: a scoped run looks like another machine to every other
+  // reaper, so only the scoped reaper can ever judge its owners dead.
+  const scope = process.env.OPENGENI_TEST_PG_REAP_SCOPE?.trim();
+  return {
+    host: scope ? `${hostname()}#${scope}` : hostname(),
+    boot: readTrimmed("/proc/sys/kernel/random/boot_id"),
+    pidns,
+  };
 }
 
 /** Start time of `pid` (field 22 of /proc/<pid>/stat), "" if unknown. */
@@ -1492,10 +1590,14 @@ export function ownerStatus(
   return "alive";
 }
 
-export type TemplateStamp = { lastUsedAt: number };
+/**
+ * `by: "harness"` when an acquisition cloned the template; `"reaper"` when the
+ * reaper first saw a template that an older checkout built and never stamps.
+ */
+export type TemplateStamp = { lastUsedAt: number; by: "harness" | "reaper" };
 
-export function templateStampComment(now: number): string {
-  return `${TEMPLATE_COMMENT_PREFIX}${JSON.stringify({ lastUsedAt: now })}`;
+export function templateStampComment(now: number, by: TemplateStamp["by"] = "harness"): string {
+  return `${TEMPLATE_COMMENT_PREFIX}${JSON.stringify({ lastUsedAt: now, by })}`;
 }
 
 export function parseTemplateStamp(comment: string | null): TemplateStamp | null {
@@ -1503,9 +1605,10 @@ export function parseTemplateStamp(comment: string | null): TemplateStamp | null
   try {
     const value = JSON.parse(comment.slice(TEMPLATE_COMMENT_PREFIX.length)) as {
       lastUsedAt?: unknown;
+      by?: unknown;
     };
     return typeof value.lastUsedAt === "number" && Number.isFinite(value.lastUsedAt)
-      ? { lastUsedAt: value.lastUsedAt }
+      ? { lastUsedAt: value.lastUsedAt, by: value.by === "harness" ? "harness" : "reaper" }
       : null;
   } catch {
     return null;
@@ -1544,7 +1647,7 @@ export function isTemplateDatabaseName(
   );
 }
 
-type Observation = { oid: string; xacts: string; since: number };
+type Observation = { oid: string; sessions: string; since: number };
 type ObservationState = { databases: Record<string, Observation> };
 
 async function readObservations(path: string): Promise<ObservationState> {
@@ -1556,7 +1659,7 @@ async function readObservations(path: string): Promise<ObservationState> {
         if (
           entry &&
           typeof entry.oid === "string" &&
-          typeof entry.xacts === "string" &&
+          typeof entry.sessions === "string" &&
           typeof entry.since === "number"
         ) {
           databases[name] = entry;
@@ -1598,6 +1701,15 @@ export type ReapOptions = {
   dryRun?: boolean;
   idleWindowMs?: number;
   templateRetentionMs?: number;
+  /**
+   * Idle time after which a template goes when only the reaper has stamped it
+   * (built by a checkout that predates stamping and so never stamps it).
+   */
+  templateReaperStampRetentionMs?: number;
+  /** Template drops per pass; each holds the container lock briefly. */
+  maxTemplateDrops?: number;
+  /** Idle window for owner records this reaper cannot verify. */
+  foreignIdleWindowMs?: number;
   /** How many most recently used templates may idle up to the retention. */
   templateKeep?: number;
   /** Idle time after which a template outside the most recent `templateKeep` goes. */
@@ -1620,6 +1732,9 @@ export type ReapResult = {
 export const DEFAULT_IDLE_WINDOW_MS = 15 * 60_000;
 export const DEFAULT_TEMPLATE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const DEFAULT_TEMPLATE_KEEP = 10;
+export const DEFAULT_TEMPLATE_REAPER_STAMP_RETENTION_MS = 2 * 24 * 60 * 60_000;
+export const DEFAULT_MAX_TEMPLATE_DROPS = 5;
+export const DEFAULT_FOREIGN_IDLE_WINDOW_MS = 6 * 60 * 60_000;
 export const DEFAULT_TEMPLATE_MIN_IDLE_MS = 6 * 60 * 60_000;
 
 type DatabaseRow = {
@@ -1629,7 +1744,8 @@ type DatabaseRow = {
   invalid: boolean;
   comment: string | null;
   connections: number;
-  xacts: string;
+  /** Client sessions ever opened (autovacuum workers do not count). */
+  sessions: string;
 };
 
 function short(error: unknown): string {
@@ -1648,6 +1764,10 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
   const scopePrefix = options.scopePrefix ?? "og_";
   const templatePrefix = options.templatePrefix ?? "og_test_template_";
   const idleWindowMs = options.idleWindowMs ?? DEFAULT_IDLE_WINDOW_MS;
+  const foreignIdleWindowMs = Math.max(
+    idleWindowMs,
+    options.foreignIdleWindowMs ?? DEFAULT_FOREIGN_IDLE_WINDOW_MS,
+  );
   const maxDrops = options.maxDrops ?? 200;
   const deadline = started + (options.deadlineMs ?? 5 * 60_000);
   const here = options.here ?? currentProcessIdentity();
@@ -1665,7 +1785,7 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
              d.datconnlimit = -2 AS invalid,
              shobj_description(d.oid, 'pg_database') AS comment,
              (SELECT count(*)::int FROM pg_stat_activity a WHERE a.datid = d.oid) AS connections,
-             coalesce(s.xact_commit + s.xact_rollback, 0)::text AS xacts
+             coalesce(s.sessions, 0)::text AS sessions
         FROM pg_database d
         LEFT JOIN pg_stat_database s ON s.datid = d.oid
        WHERE starts_with(d.datname, ${scopePrefix})
@@ -1675,7 +1795,12 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
     const nextObservations: ObservationState = { databases: {} };
     const candidates: DatabaseRow[] = [];
     for (const row of rows) {
-      if (row.datistemplate || !isPerTestDatabaseName(row.datname, scopePrefix, templatePrefix)) {
+      if (row.datistemplate) continue;
+      // A template-named database that is not (or no longer) marked as a
+      // template: a crashed build or a prune interrupted after unmarking.
+      // Builds hold a connection throughout, so the idle rule covers it.
+      const unmarkedTemplate = isTemplateDatabaseName(row.datname, templatePrefix);
+      if (!unmarkedTemplate && !isPerTestDatabaseName(row.datname, scopePrefix, templatePrefix)) {
         continue;
       }
       if (row.connections > 0) {
@@ -1688,6 +1813,11 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
         continue;
       }
       const owner = parseDatabaseOwnerComment(row.comment);
+      if (!owner && row.comment && !unmarkedTemplate) {
+        // Someone annotated it, for example retainTestDatabase(): keep it.
+        result.kept += 1;
+        continue;
+      }
       const status = owner ? ownerStatus(owner, here, options.probe) : "unknown";
       if (status === "dead") {
         candidates.push(row);
@@ -1697,14 +1827,17 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
         result.kept += 1;
         continue;
       }
-      // Unknown owner: orphan only after staying idle across the window.
+      // Unknown owner: orphan only after staying idle across the window. An
+      // owner we cannot check (another host or pid namespace) may simply not
+      // have connected yet, so it gets a much longer window.
+      const window = owner ? foreignIdleWindowMs : idleWindowMs;
       const previous = observations.databases[row.datname];
       const since =
-        previous && previous.oid === row.oid && previous.xacts === row.xacts
+        previous && previous.oid === row.oid && previous.sessions === row.sessions
           ? previous.since
           : now();
-      nextObservations.databases[row.datname] = { oid: row.oid, xacts: row.xacts, since };
-      if (now() - since >= idleWindowMs) {
+      nextObservations.databases[row.datname] = { oid: row.oid, sessions: row.sessions, since };
+      if (now() - since >= window) {
         candidates.push(row);
       } else {
         result.kept += 1;
@@ -1722,11 +1855,19 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       }
       try {
         // No FORCE: a database that gained a connection fails here and is kept.
-        await sql.unsafe(`DROP DATABASE IF EXISTS ${quoteIdent(row.datname)}`);
+        await sql.unsafe(`DROP DATABASE ${quoteIdent(row.datname)}`);
         result.dropped.push(row.datname);
         delete nextObservations.databases[row.datname];
       } catch (error) {
+        delete nextObservations.databases[row.datname];
+        // Already gone (its owner or another reaper dropped it): not ours.
+        if ((error as { code?: unknown })?.code === "3D000") continue;
         result.kept += 1;
+        nextObservations.databases[row.datname] = observations.databases[row.datname] ?? {
+          oid: row.oid,
+          sessions: row.sessions,
+          since: now(),
+        };
         result.errors.push(`${row.datname}: ${short(error)}`);
         continue;
       }
@@ -1751,6 +1892,11 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
         templatePrefix,
         protectedTemplates: new Set(options.protectedTemplates ?? []),
         retentionMs: options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
+        reaperStampRetentionMs: Math.min(
+          options.templateReaperStampRetentionMs ?? DEFAULT_TEMPLATE_REAPER_STAMP_RETENTION_MS,
+          options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
+        ),
+        maxDrops: options.maxTemplateDrops ?? DEFAULT_MAX_TEMPLATE_DROPS,
         keep: options.templateKeep ?? DEFAULT_TEMPLATE_KEEP,
         minIdleMs: Math.min(
           options.templateMinIdleMs ?? DEFAULT_TEMPLATE_MIN_IDLE_MS,
@@ -1777,6 +1923,8 @@ async function pruneStaleTemplates(
     templatePrefix: string;
     protectedTemplates: Set<string>;
     retentionMs: number;
+    reaperStampRetentionMs: number;
+    maxDrops: number;
     keep: number;
     minIdleMs: number;
     withLock: <T>(fn: () => Promise<T>) => Promise<T>;
@@ -1786,32 +1934,31 @@ async function pruneStaleTemplates(
   },
 ): Promise<void> {
   const { result } = context;
-  const templates = rows.filter(
-    (row) => row.datistemplate && isTemplateDatabaseName(row.datname, context.templatePrefix),
-  );
-  // The `keep` most recently used templates stay unless unused for the full
-  // retention; any other template goes once idle for `minIdleMs`.
+  const templates = rows
+    .filter(
+      (row) => row.datistemplate && isTemplateDatabaseName(row.datname, context.templatePrefix),
+    )
+    .map((row) => ({ row, stamp: parseTemplateStamp(row.comment) }));
+  // The `keep` most recently cloned templates stay unless unused for the full
+  // retention; any other template current code uses goes once idle for
+  // `minIdleMs`. Templates only the reaper stamped belong to checkouts that
+  // predate stamping, which keep using them without refreshing the stamp, so
+  // they get their own, longer clock.
   const recent = new Set(
     templates
-      .map((row) => ({
-        name: row.datname,
-        lastUsedAt: parseTemplateStamp(row.comment)?.lastUsedAt,
-      }))
-      .filter(
-        (entry): entry is { name: string; lastUsedAt: number } => entry.lastUsedAt !== undefined,
-      )
-      .sort((left, right) => right.lastUsedAt - left.lastUsedAt)
+      .filter(({ stamp }) => stamp?.by === "harness")
+      .sort((left, right) => right.stamp!.lastUsedAt - left.stamp!.lastUsedAt)
       .slice(0, context.keep)
-      .map((entry) => entry.name),
+      .map(({ row }) => row.datname),
   );
-  for (const row of templates) {
+  const prunable: { row: DatabaseRow; lastUsedAt: number }[] = [];
+  for (const { row, stamp } of templates) {
     if (context.protectedTemplates.has(row.datname)) continue;
-    const stamp = parseTemplateStamp(row.comment);
     if (!stamp) {
       // Built by a checkout that predates stamping: start its clock now.
       try {
         await sql.unsafe(
-          `COMMENT ON DATABASE ${quoteIdent(row.datname)} IS ${quoteLiteral(templateStampComment(context.now()))}`,
+          `COMMENT ON DATABASE ${quoteIdent(row.datname)} IS ${quoteLiteral(templateStampComment(context.now(), "reaper"))}`,
         );
       } catch (error) {
         result.errors.push(`${row.datname}: ${short(error)}`);
@@ -1819,13 +1966,19 @@ async function pruneStaleTemplates(
       continue;
     }
     const idle = context.now() - stamp.lastUsedAt;
-    const prunable =
-      idle >= context.retentionMs || (!recent.has(row.datname) && idle >= context.minIdleMs);
-    if (!prunable || context.now() > context.deadline) continue;
+    const stale =
+      stamp.by === "reaper"
+        ? idle >= context.reaperStampRetentionMs
+        : idle >= context.retentionMs || (!recent.has(row.datname) && idle >= context.minIdleMs);
+    if (stale) prunable.push({ row, lastUsedAt: stamp.lastUsedAt });
+  }
+  // Longest idle first, a few per pass: each drop briefly holds the lock that
+  // every test acquisition on this machine takes.
+  prunable.sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+  for (const { row, lastUsedAt } of prunable.slice(0, context.maxDrops)) {
+    if (context.now() > context.deadline) break;
     try {
-      const dropped = await context.withLock(() =>
-        dropTemplate(sql, row, stamp.lastUsedAt, context),
-      );
+      const dropped = await context.withLock(() => dropTemplate(sql, row, lastUsedAt, context));
       if (dropped) result.templatesDropped.push(row.datname);
     } catch (error) {
       result.errors.push(`${row.datname}: ${short(error)}`);

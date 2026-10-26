@@ -26,7 +26,7 @@ import {
   getWorkspaceInsights,
   type GetWorkspaceInsightsInput,
 } from "../packages/core/src/domain/insights";
-import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, retainTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   DEFAULT_CALLS,
@@ -406,6 +406,8 @@ async function main() {
       )
         throw new Error("Unexpected incomplete fixture target");
       database = state.database;
+      // A fixture seeded before retention markers existed: mark it now.
+      await retainTestDatabase(database).catch(() => undefined);
       maintenance.pathname = `/${database}`;
       admin = postgres(maintenance.toString(), { max: 2, prepare: false });
       const app = new URL(maintenance);
@@ -418,6 +420,8 @@ async function main() {
       admin = shared.admin;
       appUrl = shared.appUrl;
       database = new URL(shared.adminUrl).pathname.slice(1);
+      // Kept across runs on purpose: tell the harness's reaper to leave it.
+      await retainTestDatabase(database);
     }
     // Keep this exact isolated clone for repeatability; release() would DROP it.
     await write(args.out, "database.json", {

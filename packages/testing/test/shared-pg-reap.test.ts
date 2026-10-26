@@ -1,5 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { appendFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  cp,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +20,7 @@ import {
   type BlankTestDatabase,
   checkoutTemplateDbName,
   currentDatabaseOwner,
+  DB_RETAINED_COMMENT,
   currentProcessIdentity,
   type DatabaseOwner,
   databaseOwnerComment,
@@ -18,9 +29,12 @@ import {
   ownerStatus,
   parseDatabaseOwnerComment,
   parseTemplateStamp,
+  processStartTime,
+  type ProcessIdentity,
   quoteIdent,
   quoteLiteral,
   reapOrphanedTestDatabases,
+  templateSourceDirectories,
   templateStampComment,
 } from "../src/shared-pg";
 
@@ -102,39 +116,57 @@ describe("naming scheme", () => {
   });
 
   test("template stamps parse defensively", () => {
-    expect(parseTemplateStamp(templateStampComment(123))).toEqual({ lastUsedAt: 123 });
+    expect(parseTemplateStamp(templateStampComment(123))).toEqual({
+      lastUsedAt: 123,
+      by: "harness",
+    });
+    expect(parseTemplateStamp(templateStampComment(5, "reaper"))?.by).toBe("reaper");
+    // Stamps written before the author was recorded count as the reaper's.
+    expect(parseTemplateStamp('opengeni-test-template:v1 {"lastUsedAt":7}')).toEqual({
+      lastUsedAt: 7,
+      by: "reaper",
+    });
     expect(parseTemplateStamp(null)).toBeNull();
     expect(parseTemplateStamp('opengeni-test-template:v1 {"lastUsedAt":"x"}')).toBeNull();
   });
 });
 
-test("checkouts at different paths with the same schema contract share a template", async () => {
+test("checkouts at different paths with the same inputs share a template", async () => {
   const packages = join(root, "packages");
+  const sources = await templateSourceDirectories(packages);
+  expect(sources).toContain("db/src");
+  expect(sources).toContain("contracts/src");
+  expect(sources).not.toContain("testing/src");
   const directory = await mkdtemp(join(tmpdir(), "og-template-name-"));
   try {
-    const copy = async (name: string) => {
+    // A checkout elsewhere: same manifests, sources linked rather than copied.
+    const checkout = async (name: string) => {
       const target = join(directory, name, "nested", "packages");
-      await cp(join(packages, "db/drizzle"), join(target, "db/drizzle"), { recursive: true });
-      await mkdir(join(target, "db/src"), { recursive: true });
-      for (const file of [
-        "migrate.ts",
-        "migration-postgres-compatibility.ts",
-        "knowledge-migration.ts",
-        "provision-roles.ts",
-        "runtime-posture.ts",
-      ]) {
-        await cp(join(packages, "db/src", file), join(target, "db/src", file));
+      for (const entry of await readdir(packages)) {
+        const manifest = join(packages, entry, "package.json");
+        if (!(await Bun.file(manifest).exists())) continue;
+        await mkdir(join(target, entry), { recursive: true });
+        await cp(manifest, join(target, entry, "package.json"));
       }
+      await symlink(join(packages, "db/drizzle"), join(target, "db/drizzle"));
+      for (const source of sources) await symlink(join(packages, source), join(target, source));
       return target;
     };
-    const first = await copy("worktree-a");
-    const second = await copy("somewhere-else");
+    const first = await checkout("worktree-a");
+    const second = await checkout("somewhere-else");
     const name = await checkoutTemplateDbName(packages);
     expect(name).toMatch(/^og_test_template_[0-9a-f]{12}$/u);
     expect(await checkoutTemplateDbName(first)).toBe(name);
     expect(await checkoutTemplateDbName(second)).toBe(name);
-    // Any change to a template input still yields a different template.
-    await appendFile(join(second, "db/src/provision-roles.ts"), "\n");
+    // A change to anything the migration runner can load is a new template,
+    // including files beyond migrate.ts and provision-roles.ts themselves.
+    await rm(join(second, "config/src"));
+    await cp(join(packages, "config/src"), join(second, "config/src"), { recursive: true });
+    expect(await checkoutTemplateDbName(second)).toBe(name);
+    const [file] = (await readdir(join(second, "config/src"))).filter((entry) =>
+      entry.endsWith(".ts"),
+    );
+    await appendFile(join(second, "config/src", file!), "\n");
     expect(await checkoutTemplateDbName(second)).not.toBe(name);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -156,19 +188,30 @@ test("reaping errors are reported, never thrown", async () => {
   }
 });
 
-// Against the real test PostgreSQL, confined to a unique name scope so other
-// runs' databases on a shared server are never considered.
+// Against the real test PostgreSQL, confined to a unique name scope and a
+// made-up machine identity: every other reaper on a shared server sees these
+// owners as foreign (never provably dead), and this test's passes only look
+// at its own scope.
 describe("reaping a real cluster", () => {
   let blank: BlankTestDatabase | null = null;
   let adminUrl = "";
   let admin: postgres.Sql | null = null;
   let directory = "";
   const scope = `og_rp${hex12().slice(0, 8)}_`;
-  const here = currentProcessIdentity();
+  const here: ProcessIdentity = {
+    host: `og-reap-test-${hex12()}`,
+    boot: "reap-test-boot",
+    pidns: "pid:[reap-test]",
+  };
   const deadOwner: DatabaseOwner = {
     ...here,
     pid: 0x3fff_fff0, // above any pid_max: never a live process
     start: "1",
+  };
+  const liveOwner: DatabaseOwner = {
+    ...here,
+    pid: process.pid,
+    start: processStartTime(process.pid),
   };
 
   beforeAll(async () => {
@@ -193,8 +236,9 @@ describe("reaping a real cluster", () => {
       }
       const roles = await admin<{ rolname: string }[]>`
         SELECT rolname FROM pg_roles WHERE starts_with(rolname, ${scope})`;
-      for (const { rolname } of roles)
+      for (const { rolname } of roles) {
         await admin.unsafe(`DROP ROLE IF EXISTS ${quoteIdent(rolname)}`);
+      }
       await admin.end();
     }
     await blank?.release();
@@ -209,9 +253,21 @@ describe("reaping a real cluster", () => {
     return name;
   }
 
+  async function createTemplate(name: string, comment?: string): Promise<string> {
+    await createDatabase(name, comment);
+    await admin!`UPDATE pg_database SET datistemplate = true WHERE datname = ${name}`;
+    return name;
+  }
+
   async function exists(name: string): Promise<boolean> {
     const rows = await admin!`SELECT 1 FROM pg_database WHERE datname = ${name}`;
     return rows.length > 0;
+  }
+
+  function databaseUrl(name: string): string {
+    const url = new URL(adminUrl);
+    url.pathname = `/${name}`;
+    return url.toString();
   }
 
   // Each test works in its own sub-scope so leftovers never cross tests.
@@ -226,42 +282,46 @@ describe("reaping a real cluster", () => {
           observationsPath: join(directory, `${id}.json`),
           scopePrefix: sub,
           templatePrefix: `${sub}template_`,
+          here,
           ...overrides,
         }),
     };
   }
 
   test(
-    "drops a dead owner's database, keeps a live owner's and a connected one",
+    "drops a dead owner's database and keeps live, connected, foreign and retained ones",
     async () => {
       if (!admin) return;
       const { sub, reap } = subScope("o");
       const dead = await createDatabase(`${sub}dead_${hex12()}`, databaseOwnerComment(deadOwner));
-      const live = await createDatabase(`${sub}live_${hex12()}`, databaseOwnerComment());
+      const kept = [
+        await createDatabase(`${sub}live_${hex12()}`, databaseOwnerComment(liveOwner)),
+        await createDatabase(
+          `${sub}foreign_${hex12()}`,
+          databaseOwnerComment(currentDatabaseOwner()),
+        ),
+        await createDatabase(`${sub}retained_${hex12()}`, DB_RETAINED_COMMENT),
+        await createDatabase(`${sub}noted_${hex12()}`, "kept by hand for a bisect"),
+        await createDatabase(`${sub}notours`, databaseOwnerComment(deadOwner)),
+      ];
       const connected = await createDatabase(
         `${sub}conn_${hex12()}`,
         databaseOwnerComment(deadOwner),
       );
-      const foreign = await createDatabase(
-        `${sub}foreign_${hex12()}`,
-        databaseOwnerComment({ ...deadOwner, host: `${here.host}-elsewhere` }),
-      );
-      const offScheme = await createDatabase(`${sub}notours`, databaseOwnerComment(deadOwner));
+      kept.push(connected);
       // acquireOwnerMigratedTestDatabase's per-database role goes with it.
       await admin.unsafe(`CREATE ROLE ${quoteIdent(`${dead}_owner`.slice(0, 63))} NOLOGIN`);
 
-      const holder = postgres(adminUrl.replace(/\/postgres(\?|$)/u, `/${connected}$1`), { max: 1 });
+      const holder = postgres(databaseUrl(connected), { max: 1 });
       try {
         await holder`SELECT 1`;
         const result = await reap();
         expect(result.errors).toEqual([]);
         expect(result.dropped).toEqual([dead]);
         expect(await exists(dead)).toBe(false);
-        for (const kept of [live, connected, foreign, offScheme]) {
-          expect(await exists(kept)).toBe(true);
-        }
-        const roles =
-          await admin`SELECT 1 FROM pg_roles WHERE rolname = ${`${dead}_owner`.slice(0, 63)}`;
+        for (const name of kept) expect(await exists(name)).toBe(true);
+        const roles = await admin`
+          SELECT 1 FROM pg_roles WHERE rolname = ${`${dead}_owner`.slice(0, 63)}`;
         expect(roles).toHaveLength(0);
       } finally {
         await holder.end();
@@ -271,35 +331,53 @@ describe("reaping a real cluster", () => {
   );
 
   test(
-    "an unowned database is dropped only after staying idle across the window",
+    "unverifiable databases go only after staying idle across their window",
     async () => {
       if (!admin) return;
-      const { sub, reap } = subScope("i");
+      const { sub, templatePrefix, reap } = subScope("i");
       let now = Date.now();
-      const clock = { now: () => now, idleWindowMs: 15 * 60_000, pruneTemplates: false };
-      const observationsPath = join(directory, "idle.json");
+      const minute = 60_000;
+      const clock = { now: () => now, pruneTemplates: false };
       const idle = await createDatabase(`${sub}idle_${hex12()}`);
       const busy = await createDatabase(`${sub}busy_${hex12()}`);
+      // An owner on another machine may simply not have connected yet.
+      const foreign = await createDatabase(
+        `${sub}foreign_${hex12()}`,
+        databaseOwnerComment({ ...deadOwner, host: `${here.host}-elsewhere` }),
+      );
+      // A template build that crashed, or a prune cut off after unmarking.
+      const unmarked = await createDatabase(`${templatePrefix}${hex12()}`);
 
-      // First sighting starts the clock: nothing is dropped yet.
-      expect((await reap({ ...clock, observationsPath })).dropped).toEqual([]);
+      // First sighting starts every clock: nothing is dropped yet.
+      expect((await reap(clock)).dropped).toEqual([]);
 
-      // The busy one does work in between, so its clock restarts.
-      const worker = postgres(adminUrl.replace(/\/postgres(\?|$)/u, `/${busy}$1`), { max: 1 });
+      // A client connects to the busy one in between, so its clock restarts.
+      const sessions = async () => {
+        const [row] = await admin!`
+          SELECT coalesce(sessions, 0)::text AS n
+            FROM pg_stat_database WHERE datname = ${busy}`;
+        return (row?.n as string | undefined) ?? "0";
+      };
+      const before = await sessions();
+      const worker = postgres(databaseUrl(busy), { max: 1 });
       for (let i = 0; i < 3; i += 1) await worker`SELECT 1`;
       await worker.end();
-      await Bun.sleep(1_500); // let the server publish the transaction counters
+      for (let i = 0; i < 100 && (await sessions()) === before; i += 1) await Bun.sleep(100);
+      expect(await sessions()).not.toBe(before);
 
-      now += 10 * 60_000;
-      expect((await reap({ ...clock, observationsPath })).dropped).toEqual([]);
-      now += 10 * 60_000;
-      const result = await reap({ ...clock, observationsPath });
-      expect(result.dropped).toEqual([idle]);
+      now += 10 * minute;
+      expect((await reap(clock)).dropped).toEqual([]);
+      now += 10 * minute;
+      expect((await reap(clock)).dropped.sort()).toEqual([idle, unmarked].sort());
       expect(await exists(busy)).toBe(true);
-      const remembered = JSON.parse(await readFile(observationsPath, "utf8")) as {
+      expect(await exists(foreign)).toBe(true);
+
+      now += 7 * 60 * minute;
+      expect((await reap(clock)).dropped.sort()).toEqual([busy, foreign].sort());
+      const remembered = JSON.parse(await readFile(join(directory, "i.json"), "utf8")) as {
         databases: Record<string, unknown>;
       };
-      expect(Object.keys(remembered.databases)).toEqual([busy]);
+      expect(remembered.databases).toEqual({});
     },
     DB_TEST_TIMEOUT_MS,
   );
@@ -310,8 +388,7 @@ describe("reaping a real cluster", () => {
       if (!admin) return;
       const { sub, templatePrefix, reap } = subScope("e");
       const dead = await createDatabase(`${sub}dead_${hex12()}`, databaseOwnerComment(deadOwner));
-      const stale = await createDatabase(`${templatePrefix}${hex12()}`, templateStampComment(0));
-      await admin`UPDATE pg_database SET datistemplate = true WHERE datname = ${stale}`;
+      const stale = await createTemplate(`${templatePrefix}${hex12()}`, templateStampComment(0));
       const notADirectory = join(directory, "file");
       await writeFile(notADirectory, "");
       const result = await reap({
@@ -346,20 +423,24 @@ describe("reaping a real cluster", () => {
   );
 
   test(
-    "prunes only long-unused templates that this checkout does not need",
+    "prunes long-unused templates under the lock and never this checkout's",
     async () => {
       if (!admin) return;
       const { templatePrefix, reap } = subScope("t");
       const now = Date.now();
-      const make = async (comment?: string) => {
-        const name = await createDatabase(`${templatePrefix}${hex12()}`, comment);
-        await admin!`UPDATE pg_database SET datistemplate = true WHERE datname = ${name}`;
-        return name;
-      };
-      const stale = await make(templateStampComment(now - 8 * DAY));
-      const recent = await make(templateStampComment(now - DAY));
-      const unstamped = await make();
-      const mine = await make(templateStampComment(now - 30 * DAY));
+      const stale = await createTemplate(
+        `${templatePrefix}${hex12()}`,
+        templateStampComment(now - 8 * DAY),
+      );
+      const recent = await createTemplate(
+        `${templatePrefix}${hex12()}`,
+        templateStampComment(now - DAY),
+      );
+      const unstamped = await createTemplate(`${templatePrefix}${hex12()}`);
+      const mine = await createTemplate(
+        `${templatePrefix}${hex12()}`,
+        templateStampComment(now - 30 * DAY),
+      );
       const locks: string[] = [];
       const result = await reap({
         protectedTemplates: [mine],
@@ -373,47 +454,51 @@ describe("reaping a real cluster", () => {
       expect(locks).toEqual(["held"]);
       expect(await exists(stale)).toBe(false);
       for (const kept of [recent, unstamped, mine]) expect(await exists(kept)).toBe(true);
-      // An unstamped (older checkout's) template starts its retention clock now.
+      // An older checkout's unstamped template starts the reaper's clock now.
       const [row] = await admin`
-      SELECT shobj_description(oid, 'pg_database') AS comment FROM pg_database
-       WHERE datname = ${unstamped}`;
-      expect(parseTemplateStamp(row!.comment as string)?.lastUsedAt).toBeGreaterThanOrEqual(now);
+        SELECT shobj_description(oid, 'pg_database') AS comment FROM pg_database
+         WHERE datname = ${unstamped}`;
+      const stamp = parseTemplateStamp(row!.comment as string);
+      expect(stamp?.by).toBe("reaper");
+      expect(stamp?.lastUsedAt).toBeGreaterThanOrEqual(now);
     },
     DB_TEST_TIMEOUT_MS,
   );
 
   test(
-    "keeps the most recently used templates and prunes other idle ones",
+    "keeps the most recently used templates, gives older checkouts' templates longer, and drops a few per pass",
     async () => {
       if (!admin) return;
       const { templatePrefix, reap } = subScope("c");
       const now = Date.now();
       const hour = 60 * 60_000;
-      const make = async (idleMs: number) => {
-        const name = await createDatabase(
-          `${templatePrefix}${hex12()}`,
-          templateStampComment(now - idleMs),
-        );
-        await admin!`UPDATE pg_database SET datistemplate = true WHERE datname = ${name}`;
-        return name;
-      };
+      const make = (idleMs: number, by: "harness" | "reaper" = "harness") =>
+        createTemplate(`${templatePrefix}${hex12()}`, templateStampComment(now - idleMs, by));
       const newest = await make(hour);
       const settling = await make(5 * hour);
       const idle = await make(10 * hour);
       const older = await make(2 * DAY);
-      const result = await reap({ templateKeep: 1, templateMinIdleMs: 6 * hour });
-      expect(result.errors).toEqual([]);
-      expect(result.templatesDropped.sort()).toEqual([idle, older].sort());
-      // The most recent one, and one outside the cap but not yet idle long enough.
-      expect(await exists(newest)).toBe(true);
-      expect(await exists(settling)).toBe(true);
+      // Only the reaper ever stamped these (an older checkout uses them).
+      const legacyInUse = await make(DAY, "reaper");
+      const legacyGone = await make(3 * DAY, "reaper");
+      const options = { templateKeep: 1, templateMinIdleMs: 6 * hour, maxTemplateDrops: 2 };
+
+      const first = await reap(options);
+      expect(first.errors).toEqual([]);
+      // Longest idle first, two per pass.
+      expect(first.templatesDropped).toEqual([legacyGone, older]);
+      const second = await reap(options);
+      expect(second.templatesDropped).toEqual([idle]);
+      for (const kept of [newest, settling, legacyInUse]) expect(await exists(kept)).toBe(true);
     },
     DB_TEST_TIMEOUT_MS,
   );
 
-  test("the harness records its owner and a detached reaper cleans up after a killed run", async () => {
+  test("the harness records its owner and its own detached reaper cleans up after a killed run", async () => {
     if (!admin) return;
     const state = await mkdtemp(join(tmpdir(), "og-reap-harness-"));
+    const stateDir = async () =>
+      join(state, (await readdir(state)).find((entry) => entry.startsWith("opengeni-"))!);
     try {
       const env = {
         ...process.env,
@@ -421,7 +506,10 @@ describe("reaping a real cluster", () => {
         OPENGENI_TEST_PG_URL: adminUrl,
         OPENGENI_TEST_PG_NATIVE: undefined,
         OPENGENI_TEST_PG_REAP: "0",
+        // Scoped names and a scoped machine identity: only this test's own
+        // reaper can judge the orphan's owner dead.
         OPENGENI_TEST_PG_REAP_SCOPE: scope,
+        CI: undefined,
       };
       // A test process that acquires a database and dies without releasing it.
       const victim = Bun.spawn(
@@ -430,9 +518,9 @@ describe("reaping a real cluster", () => {
           "--no-env-file",
           "-e",
           `const { acquireBlankTestDatabase } = await import("@opengeni/testing/shared-pg");
-           const db = await acquireBlankTestDatabase(${JSON.stringify(scope.slice(3) + "victim")});
-           console.log(new URL(db.databaseUrl).pathname.slice(1));
-           process.exit(0);`,
+             const db = await acquireBlankTestDatabase(${JSON.stringify(`${scope.slice(3)}victim`)});
+             console.log(new URL(db.databaseUrl).pathname.slice(1));
+             process.exit(0);`,
         ],
         { cwd: root, env, stdout: "pipe", stderr: "pipe" },
       );
@@ -445,9 +533,11 @@ describe("reaping a real cluster", () => {
       const orphan = stdout.trim();
       expect(orphan.startsWith(scope)).toBe(true);
       const [row] = await admin`
-        SELECT shobj_description(oid, 'pg_database') AS comment FROM pg_database
-         WHERE datname = ${orphan}`;
-      expect(parseDatabaseOwnerComment(row!.comment as string)?.pid).toBe(victim.pid);
+          SELECT shobj_description(oid, 'pg_database') AS comment FROM pg_database
+           WHERE datname = ${orphan}`;
+      const owner = parseDatabaseOwnerComment(row!.comment as string);
+      expect(owner?.pid).toBe(victim.pid);
+      expect(owner?.host.endsWith(`#${scope}`)).toBe(true);
 
       // The next acquisition starts the background reaper, which drops it.
       const next = Bun.spawn(
@@ -456,8 +546,8 @@ describe("reaping a real cluster", () => {
           "--no-env-file",
           "-e",
           `const { acquireBlankTestDatabase } = await import("@opengeni/testing/shared-pg");
-           const db = await acquireBlankTestDatabase("reap-next");
-           await db.release();`,
+             const db = await acquireBlankTestDatabase("reap-next");
+             await db.release();`,
         ],
         {
           cwd: root,
@@ -467,9 +557,22 @@ describe("reaping a real cluster", () => {
         },
       );
       expect(await next.exited).toBe(0);
+      const marker = JSON.parse(await readFile(join(await stateDir(), "reaper.json"), "utf8")) as {
+        pid: number;
+      };
       const deadline = Date.now() + 60_000;
-      while ((await exists(orphan)) && Date.now() < deadline) await Bun.sleep(250);
+      while (Date.now() < deadline) {
+        try {
+          process.kill(marker.pid, 0);
+        } catch {
+          break; // the reaper finished
+        }
+        await Bun.sleep(250);
+      }
       expect(await exists(orphan)).toBe(false);
+      // Proof it was this harness's reaper, not another one on the server.
+      const log = await readFile(join(await stateDir(), "reaper.log"), "utf8");
+      expect(log).toContain(orphan);
     } finally {
       await rm(state, { recursive: true, force: true });
     }
