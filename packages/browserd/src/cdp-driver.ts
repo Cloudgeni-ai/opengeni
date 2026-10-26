@@ -2400,6 +2400,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             )
           : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
       }
+      // A tab the browser will not let us control (an attached tab Chrome
+      // refuses to debug) fails before any input when nothing was sent yet,
+      // so the action definitely did not run.
+      if (
+        error instanceof InteractionControllerError &&
+        error.code === "resource_unavailable" &&
+        (!effects || effects.state.actionEffectCount === effects.before)
+      ) {
+        throw new InteractionDefiniteDriverError(error.code, error.message);
+      }
       if (error instanceof CdpSessionDetachedError) {
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",

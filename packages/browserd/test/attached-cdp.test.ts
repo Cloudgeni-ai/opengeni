@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BrowserInteractionController,
   InteractionControllerError,
   InteractionDefiniteDriverError,
   InteractionOutcomeUnknownDriverError,
@@ -253,6 +254,104 @@ describe("AttachedChromeCdpConnection", () => {
       expect(failure).toBeInstanceOf(InteractionControllerError);
       expect(failure).toMatchObject({ code: "resource_unavailable", retryable: false });
       expect((failure as Error).message).toContain("password managers do this");
+    } finally {
+      await driver.close().catch(() => undefined);
+      connection.close();
+    }
+  });
+
+  test("every read and action on a tab Chrome will not debug fails with the refusal, never an unclassified error", async () => {
+    const { AgentBrowserDriver } = await import("../src/cdp-driver");
+    const bridge = new FakeBridge();
+    const request = bridge.request.bind(bridge);
+    bridge.request = async <T = unknown>(payload: Readonly<Record<string, unknown>>) => {
+      if (payload.type === "debugger.attach")
+        throw new AttachedBrowserBridgeError(
+          "driver_rejected",
+          "Cannot access a chrome-extension:// URL of different extension",
+          false,
+          { extensionCode: "driver_failed" },
+        );
+      return await request<T>(payload);
+    };
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    const browserSessionId = crypto.randomUUID();
+    const controllerGeneration = "attach-refusal-actions-test";
+    const driver = new AgentBrowserDriver({
+      browserSessionId,
+      controllerGeneration,
+      targetLifecycle: "cdp",
+      runner: {
+        async run<T>(args: readonly string[]): Promise<T> {
+          if (args[0] === "get") return { cdpUrl: "opengeni-attached://local" } as T;
+          return {} as T;
+        },
+      },
+      connect: async () => connection,
+    });
+    const refused = (failure: unknown) => {
+      // Before, each of these was a CDP protocol error: the controller
+      // answered screenshots and tab state (activate and the action fence)
+      // with an unclassified 500.
+      expect(failure).not.toBeInstanceOf(CdpProtocolError);
+      expect(failure).toBeInstanceOf(InteractionControllerError);
+      expect(failure).toMatchObject({ code: "resource_unavailable", retryable: false });
+      expect((failure as Error).message).toContain("password managers do this");
+    };
+    const controller = new BrowserInteractionController({
+      browserSessionId,
+      controllerGeneration,
+      driver,
+    });
+    try {
+      refused(await driver.targetState("7").catch((error: unknown) => error));
+      refused(await driver.captureScreenshot("7").catch((error: unknown) => error));
+      for (const action of [
+        { type: "pointer", action: "click", x: 10, y: 10 },
+        {
+          type: "fill",
+          locator: { kind: "css", selector: "input[type=password]" },
+          value: "hello",
+        },
+        { type: "type", locator: { kind: "css", selector: "input" }, text: "hello" },
+        { type: "press", key: "Enter" },
+      ] as const) {
+        const command = {
+          protocolVersion: 1,
+          actor: { kind: "agent", subjectId: "agent:test" },
+          operationId: crypto.randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: "7",
+          expectedTargetGeneration: "1",
+          expectedDocumentGeneration: "1",
+          expectedFrameId: "main",
+          observationMode: "none",
+          action,
+        } as const;
+        const receipt = await controller.run(command);
+        // No input reached the page, so the action definitely did not run;
+        // before, the controller answered with an unclassified failure.
+        expect(receipt.state).toBe("failed");
+        expect(receipt.error).toMatchObject({ code: "resource_unavailable", retryable: false });
+        expect(receipt.error?.message).toContain("password managers do this");
+        // Refused only at dispatch (the tab was detached since the
+        // controller's check), it is still a definite failure, not an
+        // unknown outcome.
+        const dispatched = await driver
+          .dispatch({ ...command, operationId: crypto.randomUUID() })
+          .catch((error: unknown) => error);
+        expect(dispatched).toBeInstanceOf(InteractionDefiniteDriverError);
+        expect(dispatched).toMatchObject({ code: "resource_unavailable", retryable: false });
+        expect((dispatched as Error).message).toContain("password managers do this");
+      }
+      // Nothing reached the page.
+      expect(bridge.commands.some((command) => String(command.method).startsWith("Input."))).toBe(
+        false,
+      );
     } finally {
       await driver.close().catch(() => undefined);
       connection.close();
