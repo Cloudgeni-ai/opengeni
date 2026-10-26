@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { NEW_SESSION_STARTERS, NewSessionStarters } from "./new-session-starters";
+import {
+  EVERYDAY_SESSION_STARTERS,
+  NEW_SESSION_STARTERS,
+  NewSessionStarters,
+} from "./new-session-starters";
 
 let priorActEnvironmentDescriptor: PropertyDescriptor | undefined;
 
@@ -87,4 +91,39 @@ test("without the chat list, the new-chat page shows no recent chats or project 
   expect(route).toContain('const chatList = useSessionUiFeature("chatList");');
   expect(route).toContain("{chatList ? <RecentSessions workspaceId={workspaceId} /> : null}");
   expect(route).toMatch(/chatList \? \(\s*<SessionSetupStrip/);
+});
+
+test("help with everyday things gets six plain everyday asks, with no services to connect", async () => {
+  const onSelect = mock((_prompt: string) => {});
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<NewSessionStarters set="everyday" workspaceId="ws-1" onSelect={onSelect} />),
+    );
+    expect(container.querySelector("h2")?.textContent).toBe("Suggestions");
+    const buttons = [...container.querySelectorAll("button")];
+    expect(buttons.map((button) => button.textContent)).toEqual(
+      EVERYDAY_SESSION_STARTERS.map((starter) => starter.title + starter.description),
+    );
+    // No product demo link, no service logos, none of the general starters.
+    expect(container.querySelector("a, img")).toBeNull();
+    const general = NEW_SESSION_STARTERS.map((starter) => starter.title);
+    expect(general.some((title) => container.textContent?.includes(title))).toBe(false);
+    expect(container.textContent).not.toMatch(/Slack|GitHub|Linear|agent|repository/i);
+    for (const [index, starter] of EVERYDAY_SESSION_STARTERS.entries()) {
+      expect(buttons[index]!.dataset.starter).toBe(starter.id);
+      await act(async () => buttons[index]!.click());
+      expect(onSelect.mock.calls[index]).toEqual([starter.prompt]);
+    }
+
+    await act(async () =>
+      root.render(<NewSessionStarters set="everyday" onSelect={onSelect} disabled />),
+    );
+    expect(container.querySelectorAll("button:disabled")).toHaveLength(6);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });

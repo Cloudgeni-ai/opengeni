@@ -25,6 +25,17 @@ test("running agents in the cloud, a later answer, and unreadable storage", () =
   expect(signupStarterSet("ada@example.test", "org-a")).toBe("general");
 });
 
+test("help with everyday things leads with the everyday set, for that account and organization only", () => {
+  rememberSignupUseCase({
+    account: "Ada@Example.test",
+    organizationId: "org-a",
+    useCase: "everyday",
+  });
+  expect(signupStarterSet("ada@example.test", "org-a")).toBe("everyday");
+  expect(signupStarterSet("ada@example.test", "org-b")).toBe("general");
+  expect(signupStarterSet("grace@example.test", "org-a")).toBe("general");
+});
+
 test("keeps the newest twenty organizations", () => {
   for (let index = 0; index < 25; index += 1)
     rememberSignupUseCase({
@@ -45,7 +56,7 @@ test("the server's current answer wins on any device", () => {
   expect(signupStarterSet(null, "org-a", "embed")).toBe("product");
   // Back, then another answer on another device: the server's answer wins.
   rememberSignupUseCase({ account: "ada@example.test", organizationId: "org-a", useCase: "embed" });
-  expect(signupStarterSet("ada@example.test", "org-a", "everyday")).toBe("general");
+  expect(signupStarterSet("ada@example.test", "org-a", "everyday")).toBe("everyday");
   // Without a server answer (an older server or organization) this browser decides.
   expect(signupStarterSet("ada@example.test", "org-a", undefined)).toBe("product");
 });

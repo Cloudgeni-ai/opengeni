@@ -1,5 +1,18 @@
 import { Link } from "../lib/navigation";
-import { Blocks, Clock3, PanelsTopLeft, PlayCircleIcon, Search } from "lucide-react";
+import type { ReactNode } from "react";
+import {
+  Blocks,
+  Clock3,
+  CookingPot,
+  GraduationCap,
+  Lightbulb,
+  Mail,
+  PanelsTopLeft,
+  Plane,
+  PlayCircleIcon,
+  Scale,
+  Search,
+} from "lucide-react";
 import { linearLogo, slackLogo } from "./new-session-starter-logos";
 import { Button } from "../../ui/button";
 
@@ -49,6 +62,61 @@ export const NEW_SESSION_STARTERS = [
   },
 ] as const;
 
+/**
+ * For people who said they want help with everyday things: what they'd ask a
+ * helpful friend, in their words. No services to connect, nothing technical.
+ */
+export const EVERYDAY_SESSION_STARTERS = [
+  {
+    id: "trip",
+    title: "Plan a trip",
+    description: "A simple day-by-day plan for where you're going.",
+    prompt:
+      "Help me plan a trip. Ask where and when I'm going, who's coming and what we enjoy, then suggest a simple day-by-day plan.",
+    Icon: Plane,
+  },
+  {
+    id: "message",
+    title: "Write a message",
+    description: "An email, a letter or a text that says what you mean.",
+    prompt:
+      "Help me write a message. Ask who it's for and what I want to say, then write a short, friendly draft I can change.",
+    Icon: Mail,
+  },
+  {
+    id: "explain",
+    title: "Explain something",
+    description: "A letter, a bill or a topic, in plain words.",
+    prompt:
+      "Explain something to me in plain words. First ask what it is: I can paste the text or attach a photo. Then tell me simply what it means and whether I need to do anything.",
+    Icon: Lightbulb,
+  },
+  {
+    id: "decide",
+    title: "Help me decide",
+    description: "Compare a few options and pick one.",
+    prompt:
+      "Help me decide between a few options. Ask what I'm choosing between and what matters most to me, then compare them simply and recommend one.",
+    Icon: Scale,
+  },
+  {
+    id: "meals",
+    title: "Plan the week's meals",
+    description: "Simple recipes and a shopping list.",
+    prompt:
+      "Help me plan meals for the week. Ask how many people, what we like and anything we avoid, then suggest simple meals and a shopping list.",
+    Icon: CookingPot,
+  },
+  {
+    id: "learn",
+    title: "Learn to do something",
+    description: "Step by step, at your own pace.",
+    prompt:
+      "Teach me how to do something, step by step. Ask what I want to learn and what I already know, then go one step at a time and check that I'm following.",
+    Icon: GraduationCap,
+  },
+] as const;
+
 /** For people who said they build a product: their agent first, then a demo. */
 export const ADD_AGENT_STARTER = {
   id: "add-agent",
@@ -70,15 +138,16 @@ export const ADD_AGENT_DEFAULT_PROMPT =
 /** The general starters a builder still needs, after their own two. */
 const PRODUCT_GENERAL_IDS = ["github", "create", "research", "schedule"] as const;
 
-export type StarterSet = "general" | "product";
+export type StarterSet = "everyday" | "general" | "product";
 
 const STARTER_CLASS =
   "h-full min-h-16 justify-start gap-3 whitespace-normal px-3 py-3 text-left hover:bg-surface hover:hover-layer";
 
 /**
  * Six starters under the new-chat composer. The set follows the signup
- * answer: people adding agents to a product get their own agent and the
- * playground demo first; everyone else gets the general six.
+ * answer: people who want help with everyday things get six everyday asks;
+ * people adding agents to a product get their own agent and the playground
+ * demo first; everyone else gets the general six.
  */
 export function NewSessionStarters({
   onSelect,
@@ -92,80 +161,106 @@ export function NewSessionStarters({
   /** Where the playground demo opens (product set). */
   workspaceId?: string | undefined;
 }) {
+  if (set === "everyday") {
+    return (
+      <StarterSection>
+        {EVERYDAY_SESSION_STARTERS.map(({ id, title, description, prompt, Icon }) => (
+          <Button
+            key={id}
+            type="button"
+            variant="outline"
+            disabled={disabled}
+            className={STARTER_CLASS}
+            data-starter={id}
+            onClick={() => onSelect(prompt)}
+          >
+            <Icon aria-hidden="true" className="size-5 shrink-0 text-fg-subtle" />
+            <StarterText title={title} description={description} />
+          </Button>
+        ))}
+      </StarterSection>
+    );
+  }
   const general =
     set === "product"
       ? PRODUCT_GENERAL_IDS.map((id) => NEW_SESSION_STARTERS.find((starter) => starter.id === id)!)
       : NEW_SESSION_STARTERS;
   return (
+    <StarterSection>
+      {set === "product" ? (
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={disabled}
+            className={STARTER_CLASS}
+            data-starter={ADD_AGENT_STARTER.id}
+            onClick={() => onSelect(ADD_AGENT_DEFAULT_PROMPT)}
+          >
+            <Blocks aria-hidden="true" className="size-5 text-fg-subtle" />
+            <StarterText
+              title={ADD_AGENT_STARTER.title}
+              description={ADD_AGENT_STARTER.description}
+            />
+          </Button>
+          {workspaceId ? (
+            <Button asChild variant="outline" className={STARTER_CLASS}>
+              <Link
+                to="/workspaces/$workspaceId/playground"
+                params={{ workspaceId }}
+                data-starter={PLAYGROUND_STARTER.id}
+              >
+                <PlayCircleIcon aria-hidden="true" className="size-5 text-fg-subtle" />
+                <StarterText
+                  title={PLAYGROUND_STARTER.title}
+                  description={PLAYGROUND_STARTER.description}
+                />
+              </Link>
+            </Button>
+          ) : null}
+        </>
+      ) : null}
+      {general.map((starter) => {
+        const Icon =
+          starter.id === "schedule" ? Clock3 : starter.id === "research" ? Search : PanelsTopLeft;
+        const logo =
+          starter.id === "slack" ? slackLogo : starter.id === "linear" ? linearLogo : null;
+        return (
+          <Button
+            key={starter.id}
+            type="button"
+            variant="outline"
+            disabled={disabled}
+            className={STARTER_CLASS}
+            onClick={() => onSelect(starter.prompt)}
+          >
+            {logo ? (
+              <img
+                src={logo}
+                alt=""
+                aria-hidden="true"
+                className="size-8 shrink-0 rounded-sm object-contain"
+              />
+            ) : starter.id === "github" ? (
+              <GitHubMark />
+            ) : (
+              <Icon aria-hidden="true" className="size-5 text-fg-subtle" />
+            )}
+            <StarterText title={starter.title} description={starter.description} />
+          </Button>
+        );
+      })}
+    </StarterSection>
+  );
+}
+
+function StarterSection({ children }: { children: ReactNode }) {
+  return (
     <section className="mt-8" aria-label="Starter suggestions">
       <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">
         Suggestions
       </h2>
-      <div className="grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-2">
-        {set === "product" ? (
-          <>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={disabled}
-              className={STARTER_CLASS}
-              data-starter={ADD_AGENT_STARTER.id}
-              onClick={() => onSelect(ADD_AGENT_DEFAULT_PROMPT)}
-            >
-              <Blocks aria-hidden="true" className="size-5 text-fg-subtle" />
-              <StarterText
-                title={ADD_AGENT_STARTER.title}
-                description={ADD_AGENT_STARTER.description}
-              />
-            </Button>
-            {workspaceId ? (
-              <Button asChild variant="outline" className={STARTER_CLASS}>
-                <Link
-                  to="/workspaces/$workspaceId/playground"
-                  params={{ workspaceId }}
-                  data-starter={PLAYGROUND_STARTER.id}
-                >
-                  <PlayCircleIcon aria-hidden="true" className="size-5 text-fg-subtle" />
-                  <StarterText
-                    title={PLAYGROUND_STARTER.title}
-                    description={PLAYGROUND_STARTER.description}
-                  />
-                </Link>
-              </Button>
-            ) : null}
-          </>
-        ) : null}
-        {general.map((starter) => {
-          const Icon =
-            starter.id === "schedule" ? Clock3 : starter.id === "research" ? Search : PanelsTopLeft;
-          const logo =
-            starter.id === "slack" ? slackLogo : starter.id === "linear" ? linearLogo : null;
-          return (
-            <Button
-              key={starter.id}
-              type="button"
-              variant="outline"
-              disabled={disabled}
-              className={STARTER_CLASS}
-              onClick={() => onSelect(starter.prompt)}
-            >
-              {logo ? (
-                <img
-                  src={logo}
-                  alt=""
-                  aria-hidden="true"
-                  className="size-8 shrink-0 rounded-sm object-contain"
-                />
-              ) : starter.id === "github" ? (
-                <GitHubMark />
-              ) : (
-                <Icon aria-hidden="true" className="size-5 text-fg-subtle" />
-              )}
-              <StarterText title={starter.title} description={starter.description} />
-            </Button>
-          );
-        })}
-      </div>
+      <div className="grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-2">{children}</div>
     </section>
   );
 }

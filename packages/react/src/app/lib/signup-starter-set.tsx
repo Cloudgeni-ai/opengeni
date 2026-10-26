@@ -1,11 +1,12 @@
 import { isOnboardingUseCase, type OnboardingUseCase } from "./onboarding-use-case";
 
 /**
- * The signup answer ("Add AI agents to my product" or "Run agents in the
- * cloud") decides which suggestions the new-chat page leads with. The server
- * keeps the person's current answer and returns it with their memberships, so
- * it follows them to every device. This browser copy, per account and
- * organization, is only a fallback for a server that doesn't return it.
+ * The signup answer ("Get help with everyday things", "Add AI agents to my
+ * product" or "Run agents in the cloud") decides which suggestions the
+ * new-chat page leads with. The server keeps the person's current answer and
+ * returns it with their memberships, so it follows them to every device. This
+ * browser copy, per account and organization, is only a fallback for a server
+ * that doesn't return it.
  */
 const STORAGE_KEY = "opengeni.signupUseCase.v1";
 /** Enough for every organization one browser realistically signs up. */
@@ -65,9 +66,9 @@ export function signupStarterSet(
   account: string | null | undefined,
   organizationId: string | null | undefined,
   serverAnswer?: OnboardingUseCase | undefined,
-): "general" | "product" {
+): "everyday" | "general" | "product" {
   if (!organizationId) return "general";
   const answer =
     serverAnswer ?? (account ? readEntries()[entryKey(account, organizationId)] : undefined);
-  return answer === "embed" ? "product" : "general";
+  return answer === "embed" ? "product" : answer === "everyday" ? "everyday" : "general";
 }
