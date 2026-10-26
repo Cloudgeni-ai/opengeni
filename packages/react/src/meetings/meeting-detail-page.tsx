@@ -44,6 +44,7 @@ import {
   languageName,
   meetingHereStatus,
   meetingPhase,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -429,6 +430,15 @@ function VisibilityMenu({
   );
 }
 
+/** A transcript version's model and the provider it runs on, by name. */
+type ModelAbout = {
+  modelName: string;
+  providerName: string;
+  funding: string;
+  /** The deployment offers no other model. */
+  pinned: boolean;
+};
+
 const SPINNER = (
   <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
 );
@@ -438,6 +448,7 @@ function PhaseNotice({
   recorder,
   here,
   recordingElsewhere,
+  modelOf,
   onRetry,
 }: {
   recording: Recording;
@@ -446,6 +457,8 @@ function PhaseNotice({
   here: MeetingHereStatus | null;
   /** It's captured on another device with the live preview on. */
   recordingElsewhere: boolean;
+  /** The version's model and its provider, when the workspace's list has it. */
+  modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -499,7 +512,11 @@ function PhaseNotice({
           </Button>
         }
       >
-        {transcriptErrorText(phase.version?.errorCode ?? null, msg)}
+        {transcriptErrorText(
+          phase.version?.errorCode ?? null,
+          msg,
+          phase.version ? modelOf(phase.version) : null,
+        )}
       </Notice>
     );
   }
@@ -532,11 +549,13 @@ function RerunNotice({
   versions,
   shownVersionNumber,
   modelName,
+  modelOf,
   onRetry,
 }: {
   versions: readonly RecordingTranscriptVersion[];
   shownVersionNumber: number;
   modelName: (version: RecordingTranscriptVersion) => string;
+  modelOf: (version: RecordingTranscriptVersion) => ModelAbout | null;
   onRetry: () => void;
 }) {
   const msg = useOpenGeniText();
@@ -566,7 +585,7 @@ function RerunNotice({
         }
       >
         {msg("meetings.detailPage.transcripterrortextThisVersionIsUnchanged", {
-          transcriptErrorText: transcriptErrorText(newest.errorCode, msg),
+          transcriptErrorText: transcriptErrorText(newest.errorCode, msg, modelOf(newest)),
         })}
       </Notice>
     );
@@ -661,6 +680,22 @@ function MeetingDetailPageContent({
       )?.name ?? entry.model,
     [models.models],
   );
+  const modelOf = useCallback(
+    (entry: RecordingTranscriptVersion): ModelAbout | null => {
+      const found = models.models.find(
+        (candidate) => candidate.providerId === entry.providerId && candidate.model === entry.model,
+      );
+      return found
+        ? {
+            modelName: found.name,
+            providerName: found.providerName,
+            funding: found.funding,
+            pinned: models.pinned,
+          }
+        : null;
+    },
+    [models.models, models.pinned],
+  );
 
   const createPerson = people.create;
   const { rememberVoice, forgetVoice } = people;
@@ -669,6 +704,12 @@ function MeetingDetailPageContent({
   const nameSpeaker = transcript.nameSpeaker;
   const transcriptSpeakers = transcript.speakers;
   const peopleList = people.people;
+  // Naming reads the people list right after a person was created, before
+  // the list has rerendered with them.
+  const latestPeople = useRef(peopleList);
+  latestPeople.current = peopleList;
+  const createdPeople = useRef(new Map<string, RecordingPerson>());
+  const offeredVoices = useRef(new Set<string>());
   // Without voice recognition a name is only for this meeting; say so once,
   // the first time someone is named here.
   const toldNotRemembered = useRef(false);
@@ -682,11 +723,65 @@ function MeetingDetailPageContent({
         : {}),
     });
   }, [msg, voiceRecognition, onOpenSettings]);
+  const offerMyVoice = useCallback(
+    (me: RecordingPerson) => {
+      // Naming yourself is when remembering your voice makes sense.
+      toast.success(msg("meetings.detailPage.namedYou"), {
+        // Long enough to read and decide; the speaker menu offers it later too.
+        duration: 10_000,
+        description: msg("meetings.detailPage.rememberYourVoiceAndLater"),
+        action: {
+          label: msg("meetings.detailPage.rememberMyVoice"),
+          onClick: () =>
+            void rememberVoice(me.id, "self").then(
+              () => toast.success(msg("meetings.detailPage.yourVoiceWillBeRemembered")),
+              (error: unknown) =>
+                toast.error(msg("meetings.detailPage.couldnTRememberYourVoice"), {
+                  description: errorText(error),
+                }),
+            ),
+        },
+      });
+    },
+    [msg, rememberVoice],
+  );
+  // A name teaches nothing until the person's voice may be remembered, so
+  // say so once per person, the first time they're named here. Another
+  // member decides for themselves, so naming them offers nothing.
+  const offerToRemember = useCallback(
+    (personId: string) => {
+      const person =
+        latestPeople.current.find((candidate) => candidate.id === personId) ??
+        createdPeople.current.get(personId);
+      if (!person || person.voice || offeredVoices.current.has(person.id)) return;
+      const self = Boolean(viewerSubjectId) && person.memberSubjectId === viewerSubjectId;
+      if (person.memberSubjectId && !self) return;
+      offeredVoices.current.add(person.id);
+      if (self) {
+        offerMyVoice(person);
+        return;
+      }
+      toast.success(
+        msg("meetings.detailPage.namedDisplayname", { displayName: person.displayName }),
+        {
+          duration: 10_000,
+          description: msg("meetings.detailPage.rememberTheirVoiceAndLater"),
+          action: {
+            label: msg("meetings.detailPage.rememberVoice"),
+            onClick: () => setRememberingVoice(person),
+          },
+        },
+      );
+    },
+    [msg, viewerSubjectId, offerMyVoice],
+  );
   const actions: TranscriptActions = useMemo(
     () => ({
       nameSpeaker: async (label, name) => {
         await nameSpeaker(label, name);
-        if (name) tellNotRemembered();
+        if (!name) return;
+        if (!voiceRecognition) tellNotRemembered();
+        else if ("personId" in name) offerToRemember(name.personId);
       },
       viewerSubjectId,
       nameSelf: async (label: string) => {
@@ -700,21 +795,8 @@ function MeetingDetailPageContent({
         if (!voiceRecognition) {
           tellNotRemembered();
         } else if (!me.voice) {
-          // Naming yourself is when remembering your voice makes sense.
-          toast.success(msg("meetings.detailPage.namedYou"), {
-            description: msg("meetings.detailPage.rememberYourVoiceAndLater"),
-            action: {
-              label: msg("meetings.detailPage.rememberMyVoice"),
-              onClick: () =>
-                void rememberVoice(me.id, "self").then(
-                  () => toast.success(msg("meetings.detailPage.yourVoiceWillBeRemembered")),
-                  (error: unknown) =>
-                    toast.error(msg("meetings.detailPage.couldnTRememberYourVoice"), {
-                      description: errorText(error),
-                    }),
-                ),
-            },
-          });
+          offeredVoices.current.add(me.id);
+          offerMyVoice(me);
         }
       },
       rejectSuggestion: async (label: string) => {
@@ -744,7 +826,11 @@ function MeetingDetailPageContent({
       },
       moveSegment: transcript.moveSegment,
       editSegment: transcript.editSegment,
-      createPerson: async (displayName: string) => await createPerson({ displayName }),
+      createPerson: async (displayName: string) => {
+        const person = await createPerson({ displayName });
+        createdPeople.current.set(person.id, person);
+        return person;
+      },
       voices: voiceRecognition
         ? {
             viewerSubjectId,
@@ -789,6 +875,8 @@ function MeetingDetailPageContent({
       viewerName,
       peopleList,
       tellNotRemembered,
+      offerMyVoice,
+      offerToRemember,
       rememberVoice,
       forgetVoice,
       refreshTranscript,
@@ -853,6 +941,10 @@ function MeetingDetailPageContent({
   }
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
+  // The person recording, as the transcript will name their microphone.
+  const ownerName =
+    peopleList.find((person) => person.memberSubjectId === recording.ownerSubjectId)?.displayName ??
+    (owner ? (viewerName ?? null) : null);
   const phase = meetingPhase(recording);
   // Only while the server still waits for audio: this device may know more.
   const here =
@@ -1152,6 +1244,7 @@ function MeetingDetailPageContent({
           recorder={recorder}
           here={here}
           recordingElsewhere={previewing && !recordingHere}
+          modelOf={modelOf}
           onRetry={() => setRerunning(true)}
         />
         {phase.kind === "ready" ? (
@@ -1159,6 +1252,7 @@ function MeetingDetailPageContent({
             versions={meeting.versions}
             shownVersionNumber={phase.version.versionNumber}
             modelName={modelName}
+            modelOf={modelOf}
             onRetry={() => setRerunning(true)}
           />
         ) : null}
@@ -1247,7 +1341,9 @@ function MeetingDetailPageContent({
                     trackNumber: track.trackNumber,
                     text: track.partial,
                   }))}
-                  speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg)}
+                  speakerName={(trackNumber) =>
+                    liveSpeakerName(recorder, trackNumber, msg, ownerName)
+                  }
                   status={liveStatus(recorder.live, msg)}
                   empty={msg("meetings.detailPage.listeningWhatSSaidShows")}
                 />
@@ -1255,9 +1351,17 @@ function MeetingDetailPageContent({
                 <LiveTranscript
                   heading={false}
                   lines={savedLive.segments}
-                  speakerName={(trackNumber) =>
-                    defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg)
-                  }
+                  speakerName={(trackNumber) => {
+                    const source = defaultSpeakerName(
+                      `track-${trackNumber}`,
+                      recording.tracks,
+                      msg,
+                    );
+                    return (
+                      ownerLiveLaneName(recording.tracks, trackNumber, ownerName ?? source, msg) ??
+                      source
+                    );
+                  }}
                   status={
                     savedLive.error
                       ? { text: msg("meetings.detailPage.canTLoadThePreview"), tone: "waiting" }

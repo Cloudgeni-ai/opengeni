@@ -15,6 +15,7 @@ import {
   RecordingTranscriptionError,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
+  withoutMicrophoneEchoes,
   type RecordingDiarizerResult,
   type RecordingDiarizer,
   type RecordingAlignedWords,
@@ -65,6 +66,8 @@ import {
   type Database,
   type RecordingSpeakerVoice,
   type StalledRecordingWork,
+  type TrackSpeaker,
+  workspaceMemberDisplayName,
 } from "@opengeni/db";
 import {
   resolveWorkspaceRecordingSettings,
@@ -134,6 +137,13 @@ export type RecordingTranscriptOutcome = (
 
 /** A version lease outlives the longest provider call; retries reclaim it by owner. */
 const TRANSCRIPT_LEASE_SECONDS = 3 * 60 * 60;
+
+/**
+ * Names this worker's prepared track files (`track-1.timeline.webm`). Bump it
+ * when the preparation changes what a model or the player hears, so files
+ * made the old way are built again instead of reused.
+ */
+const PREPARED_AUDIO_REVISION = "timeline";
 
 export type RecordingActivityOptions = {
   /** Providers to offer instead of the deployment's own, such as fakes in tests. */
@@ -265,10 +275,17 @@ export async function transcribeTrack(input: {
             mimeType: rendered.mimeType,
             fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}-${index}.${rendered.extension}`,
           }));
+    // Each piece is its own provider request: a subscription provider sends
+    // one request identity at most once, so pieces must not share it.
+    const scope =
+      input.request.scope && !whole
+        ? { ...input.request.scope, requestId: `${input.request.scope.requestId}:p${index}` }
+        : input.request.scope;
     const result = await measureRecordingStage("transcribe", () =>
       input.provider.transcribe(
         {
           ...input.request,
+          ...(scope ? { scope } : {}),
           audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
         },
         input.credentials,
@@ -673,7 +690,10 @@ export function createRecordingActivities(
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               subjectId: input.ownerSubjectId,
-              requestId: `${input.versionId}:${plan.trackNumber}`,
+              // Each attempt asks afresh: a provider never sends a request
+              // identity twice, so reusing the last attempt's would refuse
+              // every retry after a lost worker or a provider failure.
+              requestId: `${input.versionId}:a${job.attempt}:${plan.trackNumber}`,
             },
           };
           const onPiece = (piece: number) =>
@@ -728,7 +748,9 @@ export function createRecordingActivities(
             words: shiftWords(words, offsetMilliseconds),
           });
         }
-        const segments = buildRecordingSegments(trackWords);
+        const segments = buildRecordingSegments(
+          withoutMicrophoneEchoes(trackWords, job.recording.tracks),
+        );
         const voices: RecordingSpeakerVoice[] = [];
         if (recognizeVoices) {
           const labels = recordingSpeakerLabels(trackWords);
@@ -764,6 +786,26 @@ export function createRecordingActivities(
           segments.flatMap((segment) => (segment.speakerLabel ? [segment.speakerLabel] : [])),
         ).size;
         telemetry.providerCostUsd = costUsdMicros === null ? null : costUsdMicros / 1_000_000;
+        // A microphone beside computer or tab audio is the person recording.
+        const recorderLabels = plans.flatMap((plan) => (plan.fixedLabel ? [plan.fixedLabel] : []));
+        const trackSpeakers: TrackSpeaker[] = [];
+        if (recorderLabels.length > 0) {
+          const displayName = await workspaceMemberDisplayName(db, {
+            workspaceId: input.workspaceId,
+            subjectId: input.ownerSubjectId,
+          }).catch((error: unknown) => {
+            // Without a name a person can still say "It's me".
+            observability.warn("couldn't read the recording owner's name", {
+              workspaceId: input.workspaceId,
+              recordingId: input.recordingId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return null;
+          });
+          for (const label of recorderLabels) {
+            trackSpeakers.push({ label, memberSubjectId: input.ownerSubjectId, displayName });
+          }
+        }
         return await measureRecordingStage("finish", async () => {
           const creditCostMicros = charge
             ? await settleMeetingCredits({
@@ -793,6 +835,7 @@ export function createRecordingActivities(
               text: segment.text,
               words: segment.words,
             })),
+            trackSpeakers,
             voices,
           });
           telemetry.credits = creditCostMicros === null ? null : creditCostMicros / 1_000_000;
@@ -910,7 +953,8 @@ export function createRecordingActivities(
                   audio: piece.bytes,
                   mimeType: piece.mimeType,
                   durationSeconds: piece.durationMilliseconds / 1_000,
-                  requestId: `${input.versionId}:${piece.segmentNumber}`,
+                  // A fresh request per attempt; billing stays per piece below.
+                  requestId: `${input.versionId}:a${claimed.attempt}:${piece.segmentNumber}`,
                   ...(signal ? { signal } : {}),
                   preferredProvider: pinned ?? voiceInput?.preferredProvider,
                   fallbackEnabled: voiceInput?.fallbackEnabled,
@@ -1070,12 +1114,20 @@ export function createRecordingActivities(
     const container = recordingAudioContainer(input.mimeType);
     if (!container) throw new PermanentRecordingFailure("invalid_audio");
     const format = preparedAudioFormat(container);
+    // Files made before tracks kept their timeline (holes closed up when a
+    // model decoded them) have the old name and are built again.
+    const objectKey = recordingPreparedTrackObjectKey({
+      workspaceId: input.actor.workspaceId,
+      recordingId: input.recordingId,
+      trackNumber: input.trackNumber,
+      extension: `${PREPARED_AUDIO_REVISION}.${format.extension}`,
+    });
     const existing = await getRecordingTrackPreparedObject(input.db, {
       ...input.actor,
       recordingId: input.recordingId,
       trackNumber: input.trackNumber,
     });
-    if (existing) {
+    if (existing?.objectKey === objectKey) {
       const stored = await input.objectStorage.getObjectBytes(existing.objectKey);
       if (stored && stored.bytes.byteLength === existing.bytes) {
         return {
@@ -1097,12 +1149,6 @@ export function createRecordingActivities(
       readChunk: async (chunk) =>
         (await input.objectStorage.getObjectBytes(chunk.objectKey))?.bytes ?? null,
     });
-    const objectKey = recordingPreparedTrackObjectKey({
-      workspaceId: input.actor.workspaceId,
-      recordingId: input.recordingId,
-      trackNumber: input.trackNumber,
-      extension: prepared.extension,
-    });
     await input.objectStorage.putObject({
       key: objectKey,
       contentType: prepared.mimeType,
@@ -1123,6 +1169,10 @@ export function createRecordingActivities(
       if (error instanceof RecordingNotFoundError)
         await input.objectStorage.deleteObject(objectKey);
       throw error;
+    }
+    // The file this one replaces, made under an older name.
+    if (existing && existing.objectKey !== objectKey) {
+      await input.objectStorage.deleteObject(existing.objectKey).catch(() => undefined);
     }
     return { ...prepared, storedBytes: prepared.bytes.byteLength };
   }

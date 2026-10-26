@@ -263,6 +263,71 @@ describe("Recorder provider", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  test("Stop on a recording made in another workspace opens it in that workspace", async () => {
+    const fixture = createMeetingsFixture();
+    const openedElsewhere: string[] = [];
+    const openedHere: string[] = [];
+    const store = createMeetingRecorderStore(
+      () => {},
+      (recordingId, workspaceId) => {
+        openedElsewhere.push(`${workspaceId}/${recordingId}`);
+        return true;
+      },
+    );
+    let state: "recording" | "stopped" = "recording";
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-elsewhere",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 61_000,
+      systemAudioKind: null,
+      upload: { created: true },
+      recovered: [],
+      live: null,
+      error: null,
+      stop: async () => {
+        state = "stopped";
+      },
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, "workspace-elsewhere");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MeetingRecorderStoreProvider value={store}>
+          <MeetingsListPage
+            workspaceId={fixture.workspaceId}
+            recordings={fixture.client}
+            meetingHref={(id) => `/meetings/${id}`}
+            onOpen={(id) => openedHere.push(id)}
+          />
+        </MeetingRecorderStoreProvider>,
+      );
+    });
+    try {
+      const stop = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Stop",
+      );
+      expect(stop).toBeDefined();
+      await act(async () => {
+        stop!.click();
+      });
+      await settle(50);
+      expect(openedElsewhere).toEqual(["workspace-elsewhere/recording-elsewhere"]);
+      expect(openedHere).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });
 
 describe("Meeting page", () => {
@@ -448,6 +513,40 @@ describe("Meeting page", () => {
     }
   });
 
+  test("a missing provider key names the model and the provider that isn't connected", async () => {
+    const fixture = createMeetingsFixture();
+    const missingKey = <T extends { transcript?: unknown }>(recording: T): T => ({
+      ...recording,
+      transcript: {
+        ...(recording.transcript as object),
+        errorCode: "missing_provider_key",
+      },
+    });
+    const client = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) =>
+        missingKey(await fixture.client.getRecording(workspaceId, id)),
+    } as typeof fixture.client;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "needs ElevenLabs");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Scribe v2 needs ElevenLabs, which isn't connected.");
+      expect(text).toContain("Try another model");
+      expect(text).not.toContain("No transcription provider is connected");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a transcript that failed before the audio was prepared can be made again", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
@@ -542,13 +641,38 @@ describe("Recorder errors", () => {
     >[0];
     expect(recorderErrorText(denied, "desktop").body).toContain("your computer's privacy settings");
     expect(recorderErrorText(denied, "display").body).toContain("browser");
-    const helper = {
-      code: "system_audio_unavailable",
-      message: "Turn on System Audio Recording for Opengeni in System Settings.",
-    } as Parameters<typeof recorderErrorText>[0];
-    expect(recorderErrorText(helper, "desktop")).toEqual({
-      title: "Can't record computer audio",
-      body: "Turn on System Audio Recording for Opengeni in System Settings.",
+  });
+
+  test("the desktop app's reason for no computer audio is said in the viewer's words", async () => {
+    const { recorderErrorText } = await import("./recorder-panel");
+    const failure = (reason?: string) =>
+      ({
+        code: "system_audio_unavailable",
+        message: "The desktop app's own English sentence.",
+        ...(reason ? { reason } : {}),
+      }) as Parameters<typeof recorderErrorText>[0];
+    expect(recorderErrorText(failure("permission_denied"), "desktop")).toEqual({
+      title: "Computer audio isn't allowed",
+      body: "Allow this app under System Settings > Privacy & Security > Screen & System Audio Recording, then start again.",
+    });
+    expect(recorderErrorText(failure("sound_server_unavailable"), "desktop").body).toBe(
+      "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
+    );
+    expect(recorderErrorText(failure("unavailable"), "desktop").body).toBe(
+      "This computer can't record its own audio. Record without computer audio instead.",
+    );
+    for (const reason of ["capture_failed", undefined]) {
+      expect(recorderErrorText(failure(reason), "desktop")).toEqual({
+        title: "Can't record computer audio",
+        body: "Computer audio didn't start. Start again, or record without computer audio.",
+      });
+    }
+    const translated = (key: string) => `nb:${key}`;
+    expect(
+      recorderErrorText(failure("sound_server_unavailable"), "desktop", translated as never),
+    ).toEqual({
+      title: "nb:meetings.recorderPanel.canTRecordComputerAudio",
+      body: "nb:meetings.recorderPanel.noSoundServerIsRunning",
     });
   });
 
@@ -785,13 +909,35 @@ describe("Live transcript", () => {
       const text = view.container.textContent ?? "";
       expect(text).toContain("Not finished yet");
       expect(text).toContain("still being recorded on another device");
-      // Someone else's microphone isn't "You".
-      expect(text).toContain("Microphone");
+      // Beside tab audio the microphone is the person recording, by name, and
+      // the tab audio is everyone else.
+      expect(text).toContain("Ingrid Solberg");
+      expect(text).toContain("Others");
+      expect(text).not.toContain("Microphone");
       expect(text).not.toContain("You0:04");
       expect(view.container.querySelector('[role="log"]')).not.toBeNull();
     } finally {
       await view.unmount();
     }
+  });
+
+  test("the person recording reads their own name on the microphone's live text", async () => {
+    const { liveSpeakerName } = await import("./recorder-panel");
+    const withTab = {
+      tracks: [
+        { trackNumber: 0, source: "microphone" as const },
+        { trackNumber: 1, source: "system" as const },
+      ],
+      systemAudioKind: "tab" as const,
+    } as unknown as Parameters<typeof liveSpeakerName>[0];
+    expect(liveSpeakerName(withTab, 0, undefined, "Ingrid Solberg")).toBe("Ingrid Solberg");
+    expect(liveSpeakerName(withTab, 1, undefined, "Ingrid Solberg")).toBe("Others");
+    expect(liveSpeakerName(withTab, 0)).toBe("You");
+    const micOnly = {
+      tracks: [{ trackNumber: 0, source: "microphone" as const }],
+      systemAudioKind: null,
+    } as unknown as Parameters<typeof liveSpeakerName>[0];
+    expect(liveSpeakerName(micOnly, 0, undefined, "Ingrid Solberg")).toBe("Microphone");
   });
 
   test("the recorder bar keeps live text and its cost in its options menu", async () => {

@@ -8,6 +8,7 @@ import {
   type Config,
   type Ejection,
   type Ledger,
+  type MissingRun,
   type Observation,
   type ParkedPull,
   type Pull,
@@ -34,6 +35,44 @@ export function latestRun(candidate: Candidate, config: Config): Run | undefined
         r.workflow === config.workflow,
     )
     .sort((a, b) => b.id - a.id || b.attempt - a.attempt)[0];
+}
+
+/**
+ * Whether the durable ledger proves a settled (landed or invalidated) batch's
+ * Batch CI is finished: the batcher landed it, which it does only for a
+ * completed green run, or it recorded that CI completing after any retry it
+ * requested.
+ */
+export function settledCiFinished(ledger: Ledger, batchId: string): boolean {
+  if (!ledger.landed.includes(batchId) && !ledger.invalidated.includes(batchId)) return false;
+  const stage = ledger.stages[batchId];
+  if (!stage) return false;
+  if (stage.landedAt) return true;
+  if (!stage.ciCompletedAt) return false;
+  const retry = ledger.retries[batchId] ?? stage.retry;
+  return !retry || Date.parse(retry.requestedAt) < Date.parse(stage.ciCompletedAt);
+}
+
+/**
+ * Whether a candidate whose Batch CI run isn't visible still holds a Batch
+ * slot. Publication reserves the slot before the provider shows the run, so an
+ * unseen run counts as running until there is terminal evidence or an
+ * operator releases it. Run history lives in a disposable cache, and settled
+ * refs are reread only a few at a time, so the ledger's own record that a
+ * settled batch finished is that evidence. Without it, a cold cache turned
+ * every settled ref into a phantom running batch that blocked publication.
+ */
+export function unseenRunHoldsSlot(
+  candidate: Candidate,
+  ledger: Ledger,
+  config: Config,
+  missing: MissingRun | undefined = ledger.missingRuns[candidate.manifest.batchId],
+): boolean {
+  return (
+    !latestRun(candidate, config) &&
+    missing?.status !== "released" &&
+    !settledCiFinished(ledger, candidate.manifest.batchId)
+  );
 }
 export function infrastructureRetryReason(candidate: Candidate, run: Run, config: Config) {
   if (
@@ -188,12 +227,14 @@ function planCandidate(o: Observation, c: Config): Action {
   // Publication reserves capacity before the provider exposes its run, even
   // after composition invalidation. Only terminal evidence or explicit
   // infrastructure release frees that reservation; abandonment alone does not.
+  // A settled batch the ledger already recorded as finished is terminal
+  // evidence even when its run history isn't loaded.
   const localInflight = o.candidates.reduce((n, x) => {
     const running = x.runs.filter(
       (r) => r.workflow === c.workflow && r.status !== "completed",
     ).length;
     const missing = o.missingRuns?.[x.manifest.batchId] ?? ledger.missingRuns[x.manifest.batchId];
-    return n + running + (!latestRun(x, c) && missing?.status !== "released" ? 1 : 0);
+    return n + running + (unseenRunHoldsSlot(x, ledger, c, missing) ? 1 : 0);
   }, 0);
   const inflight = Math.max(localInflight, o.headroom?.occupiedBatchSlots ?? 0);
   // Runner headroom (mainBusy/headroom) gates only actions that start CI:

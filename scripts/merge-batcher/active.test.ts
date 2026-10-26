@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GitHubActiveExecutor } from "./active";
-import { main } from "./main";
+import { controllerOwner, main } from "./main";
 import { Controller, LiveReader } from "./controller";
 import { AtomicGitWriter, GitFailure, GitStore, type RefUpdate } from "./git";
 import { proveHeadRefresh } from "./head-refresh";
@@ -1082,6 +1082,95 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(
       f.writer.transaction([{ ref: f.cfg.stateRef, expected: old.sha, next }]),
     ).rejects.toThrow("Stale");
+  });
+  test("supervisor-supplied owner is validated and otherwise each process gets its own", () => {
+    const id = "0f8b1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d";
+    expect(controllerOwner({ BATCHER_OWNER_ID: id })).toBe(id);
+    expect(controllerOwner({ BATCHER_OWNER_ID: ` ${id.toUpperCase()} ` })).toBe(id);
+    const a = controllerOwner({}),
+      b = controllerOwner({ BATCHER_OWNER_ID: "" });
+    expect(a).toMatch(/^[0-9a-f-]{36}$/);
+    expect(a).not.toBe(b);
+    for (const bad of ["controller-a", "0f8b1c2d3e4f4a5b8c6d7e8f9a0b1c2d", `${id}x`])
+      expect(() => controllerOwner({ BATCHER_OWNER_ID: bad })).toThrow("must be a UUID");
+  });
+  test("a generation owner shared by sequential children renews its live lease; others stay fenced", async () => {
+    const f = await fixture();
+    // Child 1 of the generation publishes and leaves a live lease.
+    const m = await f.publish();
+    f.verdict(m);
+    const before = await f.state();
+    expect(before.ledger.owner).toBe("controller-a");
+    expect(Date.parse(before.ledger.expiresAt)).toBeGreaterThan(Date.parse(NOW));
+    // A different owner (for example an old or new generation) must wait.
+    const blocked = await f.controller("other-generation").step();
+    expect(blocked.reason).toBe("another controller owns the durable lease");
+    expect(await f.executor("other-generation").maintain()).toBeNull();
+    expect((await f.state()).sha).toBe(before.sha);
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+    // Child 2 of the same generation renews immediately, still through the CAS.
+    await f.controller().step();
+    const after = await f.state();
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
+    expect(after.ledger.owner).toBe("controller-a");
+    expect(after.ledger.epoch).toBeGreaterThan(before.ledger.epoch);
+    // Sharing the owner never bypasses the state-ref compare-and-swap.
+    const stale = await f.git.stateCommit(before.ledger, before.sha, NOW);
+    await expect(
+      f.writer.transaction([{ ref: f.cfg.stateRef, expected: before.sha, next: stale }]),
+    ).rejects.toThrow("Stale");
+  });
+  test("maintenance submits a due candidate rerun before an older comment backlog", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    const run = f.verdict(m, "infrastructure");
+    const base = { attempts: 0, checks: 0, lastError: null, status: "pending" as const };
+    await f.seed((l) => {
+      l.effects["comment-backlog"] = {
+        ...base,
+        id: "comment-backlog",
+        kind: "comment",
+        number: 1,
+        body: "Backlog notice\n\n<!-- backlog -->",
+        marker: "<!-- backlog -->",
+        nextAt: "2026-10-21T11:00:00.000Z",
+      };
+      l.effects["rerun-due"] = { ...base, id: "rerun-due", kind: "rerun", run, nextAt: NOW };
+    });
+    await f.executor().maintain();
+    const effects = (await f.state()).ledger.effects;
+    expect(effects["rerun-due"]?.status).not.toBe("pending");
+    // The rerun went first; the comment still gets this tick's second slot.
+    expect(effects["comment-backlog"]?.status).toBe("done");
+    expect(f.api.comments.filter((body) => body.includes("<!-- backlog -->"))).toHaveLength(1);
+  });
+  test("a rerun held by busy main does not starve the comment backlog", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    const run = f.verdict(m, "infrastructure");
+    const base = { attempts: 0, checks: 0, lastError: null, status: "pending" as const };
+    await f.seed((l) => {
+      l.effects["comment-backlog"] = {
+        ...base,
+        id: "comment-backlog",
+        kind: "comment",
+        number: 1,
+        body: "Backlog notice\n\n<!-- backlog -->",
+        marker: "<!-- backlog -->",
+        nextAt: "2026-10-21T11:00:00.000Z",
+      };
+      l.effects["rerun-held"] = { ...base, id: "rerun-held", kind: "rerun", run, nextAt: NOW };
+    });
+    f.api.busy = true;
+    for (let tick = 0; tick < 5; tick++) {
+      await f.executor().maintain();
+      f.advance(120);
+    }
+    const effects = (await f.state()).ledger.effects;
+    expect(effects["rerun-held"]?.status).toBe("pending");
+    expect(effects["rerun-held"]?.attempts).toBe(0);
+    expect(effects["comment-backlog"]?.status).toBe("done");
+    expect(f.api.comments.filter((body) => body.includes("<!-- backlog -->"))).toHaveLength(1);
   });
   test("accepted push with lost response reconciles instead of republishing", async () => {
     const f = await fixture();
@@ -2709,6 +2798,13 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       old = await f.publish();
     f.verdict(old);
     expect((await f.controller().step()).action.kind).toBe("land");
+    // A settled batch whose finish the ledger never recorded (for example one
+    // settled before stages were kept) has no terminal evidence of its own.
+    await f.seed((ledger) => {
+      ledger.stages[old.batchId]!.landedAt = null;
+      ledger.stages[old.batchId]!.ciCompletedAt = null;
+    });
+    await rm(f.controller().journal.path, { force: true });
     f.api.workflowRuns = [];
     f.api.cache.get = async () => null; // Disposable provider cache is unavailable after restart.
     f.change();
@@ -2763,6 +2859,43 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       recovered.ledger.missingRuns[old.batchId]?.recovery,
     );
     expect((await f.state()).ledger.ejected).toEqual([]);
+  });
+  test("a cold cache never turns a batch the ledger records as landed into a held Batch slot", async () => {
+    const f = await fixture(),
+      old = await f.publish();
+    f.verdict(old);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect((await f.state()).ledger.stages[old.batchId]?.landedAt).not.toBeNull();
+    // Restart on a fresh host: run history and the local journal are gone.
+    await rm(f.controller().journal.path, { force: true });
+    f.api.workflowRuns = [];
+    f.api.cache.get = async () => null;
+    f.change();
+    const next = await f.controller().step();
+    expect(next.action.kind).toBe("build");
+    if (next.action.kind === "build") expect(next.action.publish).toBe(true);
+    expect((await f.state()).ledger.missingRuns[old.batchId]).toBeUndefined();
+  });
+  test("an earlier missing-run hold on a batch the ledger records as landed is dropped", async () => {
+    const f = await fixture(),
+      old = await f.publish();
+    f.verdict(old);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    await f.seed((ledger) => {
+      ledger.missingRuns[old.batchId] = {
+        firstSeenAt: NOW,
+        status: "abandoned",
+        updatedAt: NOW,
+        kind: "historical-run-history",
+      };
+    });
+    f.api.workflowRuns = [];
+    f.api.cache.get = async () => null;
+    f.change();
+    const next = await f.controller().step();
+    expect(next.action.kind).toBe("build");
+    if (next.action.kind === "build") expect(next.action.publish).toBe(true);
+    expect((await f.state()).ledger.missingRuns[old.batchId]).toBeUndefined();
   });
   test("failed landing does not record fabricated measured landed time", async () => {
     const f = await fixture(),

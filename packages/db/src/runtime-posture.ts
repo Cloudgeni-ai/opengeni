@@ -49,8 +49,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * (0929), the recording recovery sweep's stalled-work inventory (0930), the
  * MCP Events subscription pump's due inventory (0932), the source feed pump's
  * due inventory (0935), the recording retention sweep's due inventory (0946),
- * the lookup of whose personal machine a chat runs on (0978) and the re-arm of
- * the running commands a returning runner did not answer for (0984). Each is
+ * the lookup of whose personal machine a chat runs on (0978), the re-arm of
+ * the running commands a returning runner did not answer for (0984) and the
+ * control worker's content-free queued-turn hold summary (0988). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -64,6 +65,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_recording_retention_v1(integer)",
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "summarize_queued_turns_by_hold()",
 ] as const;
 
 /**
@@ -76,11 +78,13 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
  * 0984 withholds the connected-command re-arm the same way; until it is
- * granted, a runner's inventory report skips it.
+ * granted, a runner's inventory report skips it. 0988 withholds the queued-turn
+ * hold summary; until it is granted, the control worker does not publish it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "summarize_queued_turns_by_hold()",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -107,6 +111,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_memberships",
   ],
   "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
+  "summarize_queued_turns_by_hold()": ["session_turns", "sessions", "workspace_inference_controls"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =

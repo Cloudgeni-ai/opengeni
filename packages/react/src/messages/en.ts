@@ -2237,6 +2237,7 @@ export const englishMessages = {
   "markdown.matchInMessageSourceExcerpt":
     "Match in message source · Excerpt stays in place when Find closes",
   "markdown.openArtifact": "Open artifact",
+  "markdown.openChat": "Open chat",
   "markdown.openFile": "Open file",
   "markdown.openPath": "Open {path}",
   "markdown.openPathAtLineLine": "Open {path} at line {line}",
@@ -2244,6 +2245,7 @@ export const englishMessages = {
   "markdown.previewIncomplete": "Preview incomplete",
   "markdown.previewUnavailable": "(preview unavailable)",
   "markdown.showFormattedMessage": "Show formatted message",
+  "markdown.thisChatNeedsAWorkspace": "This chat link needs a workspace-aware host to open",
   "markdown.thisArtifactNeedsAWorkspace": "This artifact needs a workspace-aware host to open",
   "markdown.thisFileNeedsAWorkspace": "This file needs a workspace-aware host to open",
   "markdown.thisLinkIsUnavailable": "This link is unavailable",
@@ -2310,6 +2312,7 @@ export const englishMessages = {
   "meetings.detailPage.model": "Model",
   "meetings.detailPage.moreActionsForTitle": "More actions for {title}",
   "meetings.detailPage.nameChangeWhoThisIs": "{name}, change who this is",
+  "meetings.detailPage.namedDisplayname": "Named {displayName}",
   "meetings.detailPage.namedYou": "Named you",
   "meetings.detailPage.nameNameThisSpeaker": "{name}, name this speaker",
   "meetings.detailPage.namesArenTSuggestedIn": "Names aren't suggested in later meetings",
@@ -2329,7 +2332,10 @@ export const englishMessages = {
   "meetings.detailPage.onlyYouCanSeeThis": "Only you can see this now",
   "meetings.detailPage.preview": "Preview",
   "meetings.detailPage.rememberMyVoice": "Remember my voice",
+  "meetings.detailPage.rememberTheirVoiceAndLater":
+    "If they agree, later meetings can suggest them.",
   "meetings.detailPage.rememberValueSVoice": "Remember {value}'s voice?",
+  "meetings.detailPage.rememberVoice": "Remember voice…",
   "meetings.detailPage.rememberYourVoiceAndLater":
     "Later meetings will suggest your name when you speak.",
   "meetings.detailPage.rename": "Rename",
@@ -2437,9 +2443,11 @@ export const englishMessages = {
   "meetings.liveTranscript.liveTranscript": "Live transcript",
   "meetings.liveTranscript.liveTranscriptText": "Live transcript text",
   "meetings.liveTranscript.now": "now",
+  "meetings.liveTranscript.others": "Others",
   "meetings.liveTranscript.preview": "· preview",
   "meetings.liveTranscript.reconnectingTheLiveTextThe":
     "Reconnecting live text. Recording continues.",
+  "meetings.liveTranscript.you": "You",
   "meetings.notes.cancel": "Cancel",
   "meetings.notes.changedMeanwhile":
     "Someone else changed these notes while you were editing. Saving replaces their changes.",
@@ -2479,6 +2487,8 @@ export const englishMessages = {
     "Allow microphone access for this site in your browser's address bar or settings, then start again.",
   "meetings.recorderPanel.allowThisAppToUse":
     "Allow this app to use the microphone in your computer's privacy settings, then start again.",
+  "meetings.recorderPanel.allowThisAppToRecordComputerAudio":
+    "Allow this app under System Settings > Privacy & Security > Screen & System Audio Recording, then start again.",
   "meetings.recorderPanel.aPieceOfTheAudio": "Part of the audio was too large to upload.",
   "meetings.recorderPanel.audio": "Audio",
   "meetings.recorderPanel.cancel": "Cancel",
@@ -2486,6 +2496,9 @@ export const englishMessages = {
   "meetings.recorderPanel.canTRecordComputerAudio": "Can't record computer audio",
   "meetings.recorderPanel.capturingwhatValue": "{capturingWhat} {value}",
   "meetings.recorderPanel.computerAudio": "Computer audio",
+  "meetings.recorderPanel.computerAudioDidnTStart":
+    "Computer audio didn't start. Start again, or record without computer audio.",
+  "meetings.recorderPanel.computerAudioIsnTAllowed": "Computer audio isn't allowed",
   "meetings.recorderPanel.connectAMicrophoneOrCheck":
     "Connect a microphone or check that no other app is holding it, then start again.",
   "meetings.recorderPanel.couldnTRenameThisMeeting": "Couldn't rename this meeting",
@@ -2512,6 +2525,8 @@ export const englishMessages = {
     "Live transcription isn't set up. Ask an admin to connect it.",
   "meetings.recorderPanel.noMicrophoneFound": "No microphone found",
   "meetings.recorderPanel.noNameYet": "No name yet",
+  "meetings.recorderPanel.noSoundServerIsRunning":
+    "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
   "meetings.recorderPanel.nothingIsRecordedWhilePaused": "Nothing is recorded while paused.",
   "meetings.recorderPanel.nothingWasRecordedSoNo": "Nothing was recorded, so no meeting was saved.",
   "meetings.recorderPanel.notUploadingNoConnectionRecording":
@@ -2565,7 +2580,6 @@ export const englishMessages = {
     "The live transcription provider is busy right now.",
   "meetings.recorderPanel.theLiveTranscriptionProviderRefused":
     "Live transcription rejected the workspace's key. Ask an admin to check it.",
-  "meetings.recorderPanel.theLiveTranscriptUsesExtra": "Uses extra transcription credit.",
   "meetings.recorderPanel.theMeetingWasDeletedOr":
     "The meeting was deleted, or you no longer have access to it.",
   "meetings.recorderPanel.theServerRefusedTheAudio": "The server refused the audio.",
@@ -2574,6 +2588,8 @@ export const englishMessages = {
   "meetings.recorderPanel.thisBrowserCanTRecord": "This browser can't record",
   "meetings.recorderPanel.thisBrowserCanTShare":
     "This browser can't share a tab's audio. Record with the microphone only, or use Chrome or Edge on a computer.",
+  "meetings.recorderPanel.thisComputerCanTRecordItsOwnAudio":
+    "This computer can't record its own audio. Record without computer audio instead.",
   "meetings.recorderPanel.uploaded": "Uploaded",
   "meetings.recorderPanel.uploadFailedMessage": "Upload failed: {message}",
   "meetings.recorderPanel.uploadfailurereasonTheRecordingIsSaved":
@@ -2603,7 +2619,15 @@ export const englishMessages = {
   "meetings.recordings.transcriptFailed": "Transcript failed",
   "meetings.recordings.noTranscript": "No transcript",
   "meetings.recordings.errorMissingProviderKey":
-    "Transcription isn't set up. An admin can connect a provider in Organization settings, under Models.",
+    "This model's provider isn't connected. Try another model, or an admin can connect it in Organization settings, under Models.",
+  "meetings.recordings.errorMissingProviderKeyFor":
+    "{modelName} needs {providerName}, which isn't connected. Try another model, or an admin can connect {providerName} in Organization settings, under Models.",
+  "meetings.recordings.errorMissingProviderKeyForPinned":
+    "{modelName} needs {providerName}, which isn't connected. An admin can connect {providerName} in Organization settings, under Models.",
+  "meetings.recordings.errorMissingProviderKeyForDeployment":
+    "{modelName} needs {providerName}, which this deployment hasn't set up. Try another model, or ask whoever runs this deployment to set up {providerName}.",
+  "meetings.recordings.errorMissingProviderKeyForDeploymentPinned":
+    "{modelName} needs {providerName}, which this deployment hasn't set up. Ask whoever runs this deployment to set up {providerName}.",
   "meetings.recordings.errorProviderUnauthorized":
     "The transcription provider rejected its key. An admin can reconnect it in Organization settings, under Models.",
   "meetings.recordings.errorProviderQuotaExceeded":
@@ -3165,7 +3189,6 @@ export const englishMessages = {
   "native.meetings.phoneText.connecting": "Connecting…",
   "native.meetings.phoneText.dateTime": "{date}, {time}",
   "native.meetings.phoneText.itAddsAboutPerHour": "It adds about ${value} per hour of audio.",
-  "native.meetings.phoneText.itUsesExtraTranscriptionCredit": "It uses extra transcription credit.",
   "native.meetings.phoneText.keepsRecordingWhenLocked":
     "Keeps recording when the screen is locked or you switch apps.",
   "native.meetings.phoneText.microphoneAccessIsOff": "Microphone access is off",
@@ -3204,6 +3227,22 @@ export const englishMessages = {
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
   "native.realtime.nativeCall.voiceDisconnected": "Voice disconnected.",
   "native.realtime.nativeCall.voiceIsNotReadyYet": "Voice is not ready yet.",
+  "native.realtime.wakePhrase.copied": "Copied",
+  "native.realtime.wakePhrase.copy": "Copy",
+  "native.realtime.wakePhrase.copyAndOpenSettings": "Copy and open Settings",
+  "native.realtime.wakePhrase.copyLabel": "Copy “{text}”",
+  "native.realtime.wakePhrase.defaultPhrase": "Hey {name}",
+  "native.realtime.wakePhrase.defaultRequest": "Talk to {name}",
+  "native.realtime.wakePhrase.footnote":
+    "Works from the lock screen too; a locked phone asks you to unlock first. If nothing happens, check that Siri starts the call when you ask it: “{request}”.",
+  "native.realtime.wakePhrase.intro":
+    "Say your own phrase and a call with {name} starts, no tapping. iPhone sets this up in Settings; it takes about a minute.",
+  "native.realtime.wakePhrase.stepOpen":
+    "Open Settings, search for “Vocal Shortcuts” and tap Set Up (or Add Action), then Continue.",
+  "native.realtime.wakePhrase.stepPhrase":
+    "Type the phrase you'll say, then say it three times so iPhone learns your voice.",
+  "native.realtime.wakePhrase.stepRequest": "Choose Siri Request and paste:",
+  "native.realtime.wakePhrase.title": "Say “{phrase}”",
   "native.timeline.activity.countvalueFiles": "{countValue} files",
   "native.timeline.activity.moreMore": "+{more} more",
   "native.timeline.activity.resultsFoldedIntoModelContext":
@@ -5463,6 +5502,7 @@ export const englishMessages = {
   "timeline.turnSummaryModel.compactions_other": "{count} conversation history compactions",
   "timeline.turnSummaryModel.compacts_one": "compacted",
   "timeline.turnSummaryModel.compacts_other": "{count} compacts",
+  "timeline.turnSummaryModel.daysHours": "{days}d {hours}h",
   "timeline.turnSummaryModel.hoursMinutes": "{hours}h {minutes}m",
   "timeline.turnSummaryModel.memoriesSaved_one": "{count} memory saved",
   "timeline.turnSummaryModel.memoriesSaved_other": "{count} memories saved",

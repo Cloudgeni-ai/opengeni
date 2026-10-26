@@ -90,7 +90,15 @@ All three occupancy metrics additionally carry nonempty `worker_pod_uid`, from
 forbids a worker extraEnv override. Missing UID is not replaced with a pod
 name. Idle workers must actually emit occupancy zero. Backlog is approximate,
 includes video and retries, and is not an exact count of customer turns.
-The SQL `opengeni_turns_queued` prompt count is not a scaler input.
+The SQL `opengeni_turns_queued` prompt count is not a scaler input: it counts
+every durable queued prompt, including prompts held behind a running turn, a
+Pause, a failed turn or a required human action. Use
+`opengeni_turns_queued_by_hold{hold="ready"}` (and its
+`opengeni_turns_queued_oldest_age_seconds`) for prompts that are only waiting
+for dispatch; an old `ready` prompt is a stranded queue, not missing capacity.
+The split appears only after the follow-up migration grants the runtime EXECUTE
+that 0988 defers; until then only the total is published. Prompts from a
+non-owner waiting for a personal machine's owner still count as `ready`.
 The producer contract assumes one turn SDK poller for each registry/queue/pod
 UID, as in the normal chart Deployment. Embedded hosts running multiple
 same-identity workers must aggregate their SDK occupancy first; scrape

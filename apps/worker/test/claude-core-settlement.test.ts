@@ -7,12 +7,16 @@ import * as parentWake from "../src/activities/parent-wake";
 import { classifyClaudeProviderError } from "../src/activities/agent-turn/errors";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import {
+  claudeResponseInspector,
   claudeCoreRefusal,
   finalizeCoreClaudeTurn,
   joinCoreClaudeObservations,
 } from "../src/activities/agent-turn/claude-core";
 import { SUBSCRIPTION_CORE_TURN_REFUSAL_LIMIT } from "../src/activities/agent-turn/subscription-core-failover";
-import { createCoreSubscriptionRequests } from "../src/activities/agent-turn/subscription-core-requests";
+import {
+  createCoreSubscriptionRequests,
+  settleCoreResponse,
+} from "../src/activities/agent-turn/subscription-core-requests";
 import type { SubscriptionCoreTurn } from "../src/activities/agent-turn/turn-context";
 
 // Claude refusal settlement, finalization and waits on the shared core
@@ -1145,4 +1149,116 @@ describe("an interrupted response recovers within the turn on every core provide
       expect(recovery).not.toHaveBeenCalled();
     });
   }
+});
+
+/**
+ * A lane whose one request settles as `outcome` once `finishRecording` runs:
+ * the transport has started recording the outcome but not finished, as when a
+ * stream reader cancels on an error event without waiting.
+ */
+async function recordingLane(outcome: "refused" | "unknown") {
+  const settles: string[] = [];
+  let finishRecording!: () => void;
+  const recorded = new Promise<void>((resolve) => {
+    finishRecording = resolve;
+  });
+  const lane = createCoreSubscriptionRequests({
+    reserve: async (request) => ({ operationId: request.requestId }),
+    settle: async ({ operationId, outcome: settled }) => {
+      await recorded;
+      settles.push(`${operationId}:${settled}`);
+    },
+    displayName: "Provider",
+    outcomeUnknown: () =>
+      Object.assign(new Error("unknown"), { code: "subscription_core_request_outcome_unknown" }),
+    isOutcomeUnknown: (error) =>
+      (error as { code?: unknown }).code === "subscription_core_request_outcome_unknown",
+  });
+  const first = { requestId: "first", transportAttempt: 1 };
+  await lane.reserve(first);
+  void lane.observe({ ...first, outcome });
+  expect(lane.canRecover()).toBe(false);
+  return { lane, settles, finishRecording };
+}
+
+describe("a stream error that arrives while its request's outcome is still recording", () => {
+  for (const outcome of ["refused", "unknown"] as const) {
+    test(`an overload (${outcome === "refused" ? "before any content" : "mid-answer"}) still recovers the same turn`, async () => {
+      coreRuntime({ refusals: 1 });
+      const recovery = recoveringRecovery();
+      spy(parentWake, "deliverFailedChildTurnToParent").mockResolvedValue(undefined as never);
+      const { lane, settles, finishRecording } = await recordingLane(outcome);
+      const { deps } = failureDeps(
+        anthropic(529, "overloaded_error"),
+        core({ requests: lane, titleRequests: undefined }),
+      );
+      const settlement = settleTurnFailure(deps as never);
+      setTimeout(finishRecording, 25);
+      expect(await settlement).toMatchObject({ status: "recovering" });
+      expect(recovery).toHaveBeenCalledTimes(1);
+      expect(recovery.mock.calls[0]![2]).toMatchObject({
+        detail: { providerCondition: "overloaded", retryable: true },
+      });
+      expect(settles).toEqual([`first:${outcome}`]);
+    });
+  }
+
+  test("a recording that never finishes stays unrecoverable after the bounded wait", async () => {
+    const { lane, settles } = await recordingLane("refused");
+    await lane.settlementsRecorded(5);
+    expect(lane.canRecover()).toBe(false);
+    expect(settles).toEqual([]);
+  });
+
+  test("a stream reader that cancels on an error event without waiting has already started the refusal's settlement", async () => {
+    const encoder = new TextEncoder();
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1"}}\n\n',
+      'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\n',
+    ].join("");
+    // The connection stays open after the error event, as a provider's may.
+    const upstream = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(sse));
+        },
+      }),
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    );
+    const settles: string[] = [];
+    const lane = createCoreSubscriptionRequests({
+      reserve: async (request) => ({ operationId: request.requestId }),
+      settle: async ({ operationId, outcome }) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        settles.push(`${operationId}:${outcome}`);
+      },
+      displayName: "Provider",
+      outcomeUnknown: () => new Error("unknown"),
+      isOutcomeUnknown: () => false,
+    });
+    const request = { requestId: "first", transportAttempt: 1 };
+    await lane.reserve(request);
+    const response = await settleCoreResponse(
+      lane,
+      request,
+      upstream,
+      claudeResponseInspector(upstream),
+    );
+    // The Claude stream reader's terminal path: read until the error event,
+    // then cancel without waiting for transport cleanup.
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    while (!text.includes("overloaded_error")) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+    expect(lane.canRecover()).toBe(false);
+    await lane.settlementsRecorded();
+    expect(settles).toEqual(["first:refused"]);
+    expect(lane.canRecover()).toBe(true);
+  });
 });

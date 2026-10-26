@@ -15,6 +15,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
+  bundledSkillSelectionFromMetadata,
   AGENT_CAPABILITY_IDS,
   FIRST_PARTY_MCP_TOOL_CAPABILITIES,
   FIRST_PARTY_MCP_TOOL_NAMES,
@@ -1140,6 +1141,87 @@ describe("effective-tools projection agrees with actual model preparation", () =
 });
 
 describe("Skill attachment is distinct from Skill catalog availability", () => {
+  test.each([
+    { label: "explicit empty", selection: [], reads: 1 },
+    { label: "explicit unrelated", selection: ["builtin:opengeni-help"], reads: 1 },
+    {
+      label: "legacy unrelated",
+      selection: bundledSkillSelectionFromMetadata({
+        _opengeni_bundled_skill_ids_v1: ["builtin:opengeni-projects"],
+      }),
+      reads: 1,
+    },
+    { label: "defaults", selection: "omit", reads: 2 },
+    { label: "explicit video", selection: ["builtin:video-generation"], reads: 2 },
+    {
+      label: "legacy video",
+      selection: bundledSkillSelectionFromMetadata({
+        _opengeni_bundled_skill_ids_v1: ["builtin:opengeni-video-generation"],
+      }),
+      reads: 2,
+    },
+  ])(
+    "$label reads video policy only when the bundled descriptor can use it",
+    async ({ selection, reads }) => {
+      for (const videoEnabled of [false, true]) {
+        const captured = await captureWorkerRequest({
+          agent: agentConfig("all"),
+          bundledSkillIds: selection as FixtureOptions["bundledSkillIds"],
+          videoEnabled,
+        });
+        expect(captured.metadataReads).toEqual({ skillDescriptors: 1, videoPolicy: reads });
+        expect(captured.skillCatalog.some((entry) => entry.id === "builtin:video-generation")).toBe(
+          reads === 2 && videoEnabled,
+        );
+        expect(captured.names.includes("generate_video")).toBe(videoEnabled);
+        expect(captured.skillCatalog.some((entry) => entry.name === SKILL_SENTINEL)).toBe(true);
+      }
+    },
+  );
+
+  test.each([false, true])(
+    "selected video uses fresh final policy after initial enabled=%s",
+    async (initialEnabled) => {
+      const phases: string[] = [];
+      const captured = await captureWorkerRequest({
+        agent: agentConfig("all"),
+        bundledSkillIds: ["builtin:video-generation"],
+        videoEnabled: true,
+        loadVideoPolicy: async (phase) => {
+          phases.push(phase);
+          const enabled = phase === "tool-preparation" ? initialEnabled : !initialEnabled;
+          return {
+            schemaVersion: 1,
+            revision: phase === "tool-preparation" ? 1 : 2,
+            fundingSource: "opengeni_credits",
+            enabledModelIds: enabled ? ["bytedance/seedance-2.5"] : [],
+            defaultModelId: enabled ? "bytedance/seedance-2.5" : null,
+          };
+        },
+      });
+      expect(phases).toEqual(["tool-preparation", "agent-build"]);
+      expect(captured.skillCatalog.some((entry) => entry.id === "builtin:video-generation")).toBe(
+        initialEnabled,
+      );
+      expect(captured.names.includes("generate_video")).toBe(!initialEnabled);
+    },
+  );
+  test("omitted video descriptor retains later live validation", async () => {
+    const failure = new Error("live video policy unavailable");
+    const phases: string[] = [];
+    await expect(
+      captureWorkerRequest({
+        agent: agentConfig("all"),
+        bundledSkillIds: [],
+        loadVideoPolicy: async (phase) => {
+          phases.push(phase);
+          throw failure;
+        },
+      }),
+    ).rejects.toBe(failure);
+    expect(phases).toEqual(["agent-build"]);
+  });
+
   test.each([false, true])(
     "disabled Skills skip unused metadata/files with inline selections (unavailable=%s)",
     async (unavailable) => {
@@ -1218,6 +1300,7 @@ describe("Skill attachment is distinct from Skill catalog availability", () => {
         await expect(
           captureWorkerRequest({
             agent: agentConfig("all", "skills", skills),
+            bundledSkillIds: "omit",
             loadSkillDescriptors: async () => {
               if (failingRead === "descriptors") throw failure;
               return [];

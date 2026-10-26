@@ -222,12 +222,19 @@ export function SubagentsLabel({ count }: { count: number }) {
 
 /* --- "spawned by" breadcrumb (child sessions link back to their parent) ----- */
 
-/** The parent link narrows to an arrow on phones and in narrow headers. */
-const CRUMB_NAV =
-  "flex min-w-0 shrink-[2] items-center text-xs max-sm:shrink-0 @max-[34rem]/titlebar:shrink-0!";
-const WIDE_CRUMB = "hidden min-w-0 items-center gap-0.5 sm:flex @max-[34rem]/titlebar:hidden!";
+/**
+ * The header gives the breadcrumb and the title equal shares of a crowded
+ * row, so neither squeezes the other to nothing; the parent's name truncates
+ * within its share. Phones, narrow headers and a narrow title area
+ * (`titlegroup`) show only an arrow back to the parent.
+ */
+const CRUMB_NAV = "flex min-w-0 items-center text-xs";
+const WIDE_CRUMB =
+  "hidden min-w-0 items-center gap-0.5 sm:flex @max-[34rem]/titlebar:hidden! @max-[20rem]/titlegroup:hidden!";
 const NARROW_CRUMB =
-  "inline-flex size-6 shrink-0 items-center justify-center rounded text-fg-muted outline-hidden transition-colors hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/55 pointer-coarse:size-11 sm:hidden @max-[34rem]/titlebar:inline-flex!";
+  "inline-flex size-6 shrink-0 items-center justify-center rounded text-fg-muted outline-hidden transition-colors hover:bg-surface-2 hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/55 pointer-coarse:size-11 sm:hidden @max-[34rem]/titlebar:inline-flex! @max-[20rem]/titlegroup:inline-flex!";
+const CRUMB_LINK =
+  "block min-w-0 max-w-40 truncate outline-hidden transition-colors hover:text-fg focus-visible:text-fg";
 
 function CrumbSeparator() {
   return <ChevronRightIcon aria-hidden className="size-3 shrink-0 text-fg-subtle" />;
@@ -272,10 +279,7 @@ export function SessionAncestryBreadcrumb({
             to="/workspaces/$workspaceId/sessions/$sessionId"
             params={href}
             aria-label={`Back to parent session; ancestry ${state}`}
-            className={cn(
-              "block min-w-0 max-w-40 truncate outline-hidden transition-colors hover:text-fg focus-visible:text-fg",
-              error ? "text-status-failed" : "text-fg-muted",
-            )}
+            className={cn(CRUMB_LINK, error ? "text-status-failed" : "text-fg-muted")}
           >
             Parent {state}
           </Link>
@@ -313,7 +317,7 @@ export function SessionAncestryBreadcrumb({
               <DropdownMenuTrigger asChild>
                 <button
                   type="button"
-                  className="inline-flex size-5 items-center justify-center rounded text-fg-subtle hover:bg-surface-2 hover:text-fg"
+                  className="inline-flex size-5 shrink-0 items-center justify-center rounded text-fg-subtle hover:bg-surface-2 hover:text-fg"
                   aria-label={
                     earlier.length === 1
                       ? "1 earlier session"
@@ -362,7 +366,7 @@ function BreadcrumbLink({
       params={{ workspaceId, sessionId: session.id }}
       title={label}
       dir="auto"
-      className="block min-w-0 max-w-40 truncate outline-hidden transition-colors hover:text-fg focus-visible:text-fg"
+      className={CRUMB_LINK}
     >
       {label}
     </Link>
