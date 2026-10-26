@@ -26,6 +26,21 @@ export function adtsAac(seconds: number, frequency = 440): Uint8Array {
   );
 }
 
+/**
+ * A WebM/Opus tone whose timestamps skip each `[from, to)` second range, like
+ * a capture that drops packets: it lasts `seconds` on its timeline but holds
+ * less audio.
+ */
+export function gappedOpusWebm(seconds: number, holes: Array<[number, number]>): Uint8Array {
+  const keep = holes.map(([from, to]) => `not(between(t,${from},${to}))`).join("*");
+  return tone(
+    seconds,
+    440,
+    ["-af", `aselect='${keep}'`, "-c:a", "libopus", "-b:a", "32k", "-ac", "1", "-f", "webm"],
+    "webm",
+  );
+}
+
 /** Split an ADTS stream at frame boundaries into pieces of about `frames` frames. */
 export function adtsFrames(bytes: Uint8Array): Uint8Array[] {
   const frames: Uint8Array[] = [];

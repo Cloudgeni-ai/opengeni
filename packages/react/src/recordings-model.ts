@@ -128,12 +128,35 @@ export function meetingStatusLabel(
 /**
  * Plain words for a transcription error code, with what to do about it. The
  * codes are the worker's: its own (`missing_provider_key`, `invalid_audio`,
- * ...) and the provider's, prefixed `provider_`.
+ * ...) and the provider's, prefixed `provider_`. `model` names the model the
+ * version ran and its provider, when the caller knows them, so a missing key
+ * says which provider isn't connected rather than that none is. Its funding
+ * says who can connect it (the deployment's own key is its operator's), and
+ * `pinned` that the deployment offers no other model to try instead.
  */
-export function transcriptErrorText(code: string | null, msg: OpenGeniText = defaultText): string {
+export function transcriptErrorText(
+  code: string | null,
+  msg: OpenGeniText = defaultText,
+  model?: {
+    modelName: string;
+    providerName: string;
+    funding?: string | undefined;
+    pinned?: boolean | undefined;
+  } | null,
+): string {
   switch (code) {
-    case "missing_provider_key":
-      return msg("meetings.recordings.errorMissingProviderKey");
+    case "missing_provider_key": {
+      if (!model) return msg("meetings.recordings.errorMissingProviderKey");
+      const names = { modelName: model.modelName, providerName: model.providerName };
+      if (model.funding === "deployment") {
+        return model.pinned
+          ? msg("meetings.recordings.errorMissingProviderKeyForDeploymentPinned", names)
+          : msg("meetings.recordings.errorMissingProviderKeyForDeployment", names);
+      }
+      return model.pinned
+        ? msg("meetings.recordings.errorMissingProviderKeyForPinned", names)
+        : msg("meetings.recordings.errorMissingProviderKeyFor", names);
+    }
     case "provider_unauthorized":
       return msg("meetings.recordings.errorProviderUnauthorized");
     case "provider_quota_exceeded":

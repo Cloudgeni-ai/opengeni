@@ -263,6 +263,71 @@ describe("Recorder provider", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  test("Stop on a recording made in another workspace opens it in that workspace", async () => {
+    const fixture = createMeetingsFixture();
+    const openedElsewhere: string[] = [];
+    const openedHere: string[] = [];
+    const store = createMeetingRecorderStore(
+      () => {},
+      (recordingId, workspaceId) => {
+        openedElsewhere.push(`${workspaceId}/${recordingId}`);
+        return true;
+      },
+    );
+    let state: "recording" | "stopped" = "recording";
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-elsewhere",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 61_000,
+      systemAudioKind: null,
+      upload: { created: true },
+      recovered: [],
+      live: null,
+      error: null,
+      stop: async () => {
+        state = "stopped";
+      },
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, "workspace-elsewhere");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MeetingRecorderStoreProvider value={store}>
+          <MeetingsListPage
+            workspaceId={fixture.workspaceId}
+            recordings={fixture.client}
+            meetingHref={(id) => `/meetings/${id}`}
+            onOpen={(id) => openedHere.push(id)}
+          />
+        </MeetingRecorderStoreProvider>,
+      );
+    });
+    try {
+      const stop = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Stop",
+      );
+      expect(stop).toBeDefined();
+      await act(async () => {
+        stop!.click();
+      });
+      await settle(50);
+      expect(openedElsewhere).toEqual(["workspace-elsewhere/recording-elsewhere"]);
+      expect(openedHere).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });
 
 describe("Meeting page", () => {
@@ -443,6 +508,40 @@ describe("Meeting page", () => {
         (button) => button.textContent?.trim() === "Transcribe again",
       );
       expect(again?.disabled).toBe(true);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a missing provider key names the model and the provider that isn't connected", async () => {
+    const fixture = createMeetingsFixture();
+    const missingKey = <T extends { transcript?: unknown }>(recording: T): T => ({
+      ...recording,
+      transcript: {
+        ...(recording.transcript as object),
+        errorCode: "missing_provider_key",
+      },
+    });
+    const client = {
+      ...fixture.client,
+      getRecording: async (workspaceId: string, id: string) =>
+        missingKey(await fixture.client.getRecording(workspaceId, id)),
+    } as typeof fixture.client;
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={FAILED_RECORDING_ID}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "needs ElevenLabs");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Scribe v2 needs ElevenLabs, which isn't connected.");
+      expect(text).toContain("Try another model");
+      expect(text).not.toContain("No transcription provider is connected");
     } finally {
       await view.unmount();
     }
