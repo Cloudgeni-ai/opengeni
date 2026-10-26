@@ -47,6 +47,7 @@ function usage(exitCode = 1): void {
     "  --save-image saves the result's single image at that path and never overwrites",
     "  if the call completes but its image cannot be saved, the result is still printed",
     "  with imageSaveError and the exit code is 4; do not repeat that call",
+    "  an error result (isError) prints as the answer, saves no file and exits 0",
     "",
     "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
