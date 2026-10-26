@@ -265,10 +265,17 @@ export async function transcribeTrack(input: {
             mimeType: rendered.mimeType,
             fileName: `${input.audio.fileName.replace(/\.[^.]+$/u, "")}-${index}.${rendered.extension}`,
           }));
+    // Each piece is its own provider request: a subscription provider sends
+    // one request identity at most once, so pieces must not share it.
+    const scope =
+      input.request.scope && !whole
+        ? { ...input.request.scope, requestId: `${input.request.scope.requestId}:p${index}` }
+        : input.request.scope;
     const result = await measureRecordingStage("transcribe", () =>
       input.provider.transcribe(
         {
           ...input.request,
+          ...(scope ? { scope } : {}),
           audio: { bytes: audio.bytes, mimeType: audio.mimeType, fileName: audio.fileName },
         },
         input.credentials,
