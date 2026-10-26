@@ -7,7 +7,7 @@
 //! machine. So the guard hands each line to a thread of its own, which
 //! writes it; when that thread falls behind by [`ROOM`] lines, the lines
 //! after those are dropped, as are lines the log refuses, and the thread
-//! says how many once it has caught up.
+//! says how many once it has caught up, as soon as the log takes that.
 
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -33,7 +33,8 @@ struct Counts {
     queued: AtomicU64,
     /// Lines it has written, or tried to.
     written: AtomicU64,
-    /// Lines dropped and not yet said to be.
+    /// Lines dropped and not yet said to be: a notice the log refuses
+    /// leaves them unsaid.
     dropped: AtomicU64,
 }
 
@@ -78,7 +79,8 @@ impl Lossy {
 }
 
 /// The writing thread: writes each line given, and, whenever it has
-/// written all it was given, says how many it was not.
+/// written all it was given, says how many it was not, trying again after
+/// the next line if the log refuses that.
 fn write_out(queue: &Receiver<Vec<u8>>, mut sink: impl Write, counts: &Counts) {
     loop {
         let line = match queue.try_recv() {
@@ -86,12 +88,15 @@ fn write_out(queue: &Receiver<Vec<u8>>, mut sink: impl Write, counts: &Counts) {
             Err(TryRecvError::Empty) => {
                 let dropped = counts.dropped.load(Ordering::Acquire);
                 if dropped > 0 {
-                    let _ = writeln!(
-                        sink,
-                        "{dropped} log lines dropped: the log did not take them in time"
-                    );
-                    let _ = sink.flush();
-                    counts.dropped.fetch_sub(dropped, Ordering::AcqRel);
+                    let notice =
+                        format!("{dropped} log lines dropped: the log did not take them in time\n");
+                    if sink
+                        .write_all(notice.as_bytes())
+                        .and_then(|()| sink.flush())
+                        .is_ok()
+                    {
+                        counts.dropped.fetch_sub(dropped, Ordering::AcqRel);
+                    }
                 }
                 match queue.recv() {
                     Ok(line) => line,
@@ -215,15 +220,17 @@ mod tests {
         );
     }
 
-    /// A sink that refuses its first write, as a log whose stream broke.
+    /// A sink that refuses its first `refuse` writes, as a log whose
+    /// stream broke.
     struct Refusing {
-        refuse: bool,
+        refuse: u32,
         text: Arc<Mutex<Vec<u8>>>,
     }
 
     impl Write for Refusing {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            if std::mem::take(&mut self.refuse) {
+            if self.refuse > 0 {
+                self.refuse -= 1;
                 return Err(io::Error::from(io::ErrorKind::BrokenPipe));
             }
             self.text.lock().unwrap().extend_from_slice(buf);
@@ -239,7 +246,7 @@ mod tests {
     fn a_line_the_log_refuses_is_said_to_be_dropped() {
         let text = Arc::new(Mutex::new(Vec::new()));
         let sink = Refusing {
-            refuse: true,
+            refuse: 1,
             text: Arc::clone(&text),
         };
         let log = Lossy::with_room(sink, 2).unwrap();
@@ -252,6 +259,33 @@ mod tests {
         assert_eq!(
             String::from_utf8(text.lock().unwrap().clone()).unwrap(),
             "1 log lines dropped: the log did not take them in time\nline 1\nline 2\n"
+        );
+    }
+
+    /// A notice of dropped lines that the log refuses too is said again
+    /// once it takes lines, and until then the log is not flushed.
+    #[test]
+    fn a_refused_notice_is_said_once_the_log_takes_lines_again() {
+        let text = Arc::new(Mutex::new(Vec::new()));
+        let sink = Refusing {
+            refuse: 2,
+            text: Arc::clone(&text),
+        };
+        let log = Lossy::with_room(sink, 2).unwrap();
+        (&log).write_all(b"line 0\n").unwrap();
+        assert!(
+            !log.flush_within(Duration::from_millis(200)),
+            "flushed with its notice refused"
+        );
+        for line in 1..3 {
+            (&log)
+                .write_all(format!("line {line}\n").as_bytes())
+                .unwrap();
+            assert!(log.flush_within(Duration::from_secs(5)));
+        }
+        assert_eq!(
+            String::from_utf8(text.lock().unwrap().clone()).unwrap(),
+            "line 1\n1 log lines dropped: the log did not take them in time\nline 2\n"
         );
     }
 }
