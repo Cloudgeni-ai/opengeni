@@ -789,10 +789,15 @@ export class SecretValueMemory {
     }
   }
 
-  /** Whether `value` is, or lies within, a value `secret_get` revealed. */
+  /**
+   * Whether `value` is, or lies within, a value `secret_get` revealed. Only a
+   * value of at least the minimum length counts as lying within one, so a
+   * short value is not released by a chance match.
+   */
   private isRevealed(value: string): boolean {
     if (this.revealed.size === 0) return false;
     if (this.revealed.has(value)) return true;
+    if (value.length < this.minChars) return false;
     for (const revealed of this.revealed) if (revealed.includes(value)) return true;
     return false;
   }

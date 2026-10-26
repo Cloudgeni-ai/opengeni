@@ -352,7 +352,8 @@ secret part is replaced:
   spaces around `=` (plain, quoted or in braces), as a URL query parameter or
   on a line that also has a host, server, database, user, port or SSL key
   written the same way. In the `Key=value;` style (after `;`, `?`, `&` or at
-  a line start) a plain value runs to the next `;`. In the keyword style
+  a line start) a plain value runs to the next `;`, unless it is lower-case
+  code such as `config.password`. In the keyword style
   (`host=db password=…`, `connect(…, password=…)`) it also ends at a comma,
   bracket or parenthesis, and code such as `password=args.password` or
   `password=os.environ["DB_PW"]` is not a value. Source code such as

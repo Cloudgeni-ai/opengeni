@@ -551,6 +551,12 @@ describe("review regressions, round 3", () => {
     await memory.captureShapes(elsewhere);
     expect(captured).toHaveLength(1);
     expect(memory.maskToolOutput(elsewhere)).toBe(elsewhere);
+    // A short value is not released by a chance match inside a revealed value.
+    const short = new SecretValueMemory();
+    short.reveal(`FAKEkeyAb12${repeat("Z", 40)}`);
+    expect(short.maskToolOutput("redis://u:Ab12@cache:6379")).toBe(
+      "redis://u:[masked url password]@cache:6379",
+    );
   });
 
   test("Key=value; connection strings keep their full password", () => {
@@ -562,6 +568,9 @@ describe("review regressions, round 3", () => {
     ] as const) {
       expect(kinds(line)).toEqual([["connection-string-password", value]]);
     }
+    // Code written without spaces is still not a password.
+    expect(kinds("host=args.host;password=args.password")).toEqual([]);
+    expect(kinds("Server=db;Password=config.password;")).toEqual([]);
     // Keyword style still ends at a comma and ignores code.
     expect(kinds("connect(host=db, user=app, password=args.password)")).toEqual([]);
   });

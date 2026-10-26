@@ -127,6 +127,8 @@ const TEMPLATE_PARAMETER = /^(?:%\([A-Za-z_][A-Za-z0-9_]*\)[sdr]?|@[A-Za-z_][A-Z
 
 /** `args.password`, `config.db.password`, `this.pw`: an expression in source code. */
 const MEMBER_ACCESS = /^[A-Za-z_$][\w$]*(?:\.[\w$]+)+$/;
+/** The same written only in lower case without digits; passwords rarely are. */
+const LOWER_MEMBER_ACCESS = /^[a-z_$][a-z_$]*(?:\.[a-z_$]+)+$/;
 
 // Documentation-style stand-ins such as `your_account_key_here` or `my-password`.
 const PLACEHOLDER_PHRASE =
@@ -198,7 +200,8 @@ const DETECTORS: readonly Detector[] = [
     pattern:
       /(?:^|[;?&])(?:password|pwd)=(?:\{([^}\r\n]{1,256})(?=\})|'([^'\r\n]{1,256})(?=')|"([^"\r\n]{1,256})(?=")|([^;&\s"'<>{}=][^;&\s"'<>]{0,255}))/gim,
     secret: lastGroup,
-    accept: inConnectionString,
+    accept: (text, match, value) =>
+      !LOWER_MEMBER_ACCESS.test(value) && inConnectionString(text, match, value),
   },
   {
     kind: "connection-string-password",
