@@ -31408,6 +31408,27 @@ export async function getSession(
   workspaceId: string,
   sessionId: string,
 ): Promise<Session | null> {
+  return readSession(db, workspaceId, sessionId, "full");
+}
+
+/** Fresh admission read; retain canonical control/policy/row validation without UI decorations. */
+export async function getSessionModelGate(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<Pick<Session, "model" | "codexCompactionMode"> | null> {
+  const session = await readSession(db, workspaceId, sessionId, "model_gate");
+  return session
+    ? { model: session.model, codexCompactionMode: session.codexCompactionMode }
+    : null;
+}
+
+async function readSession(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  presentation: "full" | "model_gate",
+): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
@@ -31424,8 +31445,21 @@ export async function getSession(
       false,
     );
     if (!session) throw new Error(`Session event cursor missing for session ${row.id}`);
-    const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
-    return await mapSessionWithControl(scopedDb, session, grouped.get(row.id) ?? []);
+    const grouped =
+      presentation === "full"
+        ? await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id])
+        : null;
+    return await mapSessionWithControl(
+      scopedDb,
+      session,
+      grouped?.get(row.id) ?? [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      presentation,
+    );
   });
 }
 
@@ -90289,6 +90323,7 @@ async function mapSessionWithControl(
   archive: Pick<Session, "archived" | "archivedAt" | "archiveVersion"> = mapSessionArchive(null),
   workspaceControl?: WorkspaceControlRow,
   tenancyViewer?: { subjectId: string },
+  presentation: "full" | "model_gate" = "full",
 ): Promise<Session> {
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
@@ -90309,6 +90344,7 @@ async function mapSessionWithControl(
   );
   mapped.codexCurrentSelection = null;
   mapped.dispatchWait = null;
+  if (presentation === "model_gate") return mapped;
   if (row.status === "queued" && row.activeTurnId === null && control.state === "active") {
     // Read only the existing delivery ledger. Neither a claimed wake nor a
     // Temporal acknowledgement proves that a worker has admitted a turn.

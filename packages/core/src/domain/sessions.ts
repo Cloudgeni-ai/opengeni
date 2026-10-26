@@ -173,6 +173,7 @@ import {
   resolveMcpApprovalRecommendation,
   getSandbox,
   getSession,
+  getSessionModelGate,
   getInitializedSessionCreateReplay,
   getSessionGoal,
   getSessionAuthorityProjection,
@@ -2114,7 +2115,8 @@ export async function postUserMessageTurn(
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
-  const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
+  const sessionForModelGate = await getSessionModelGate(db, workspaceId, sessionId);
+  if (!sessionForModelGate) throw new Error(`Session not found: ${sessionId}`);
   // Acceptance already froze this policy before resource/credential validation.
   // A different turn starting meanwhile must not change the model we gate here.
   const effectiveModelForGate =
