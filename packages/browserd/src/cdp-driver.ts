@@ -213,6 +213,13 @@ const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
 const CONNECTED_CHROME_CAPTURE_STALL_MS = 3_000;
 const CONNECTED_CHROME_CAPTURE_STALLED =
   "browser screenshot stalled: Chrome did not draw this tab within 3 s, which happens while another tab is in front of it in its window; select it with browser_tabs to capture it, or read it with browser_observe";
+/** Chromium refuses a capture of a tab that has no drawn surface yet (a tab a
+ * relaunched browser just restored, or one whose renderer is still starting)
+ * instead of waiting for it. It draws within moments, so a capture retries
+ * until the capture deadline and then gives up with a plain reason. */
+const UNDRAWN_SURFACE_REFUSAL = "Unable to capture screenshot";
+const UNDRAWN_SURFACE_TIMED_OUT =
+  "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe";
 /** Longest a viewport capture waits for the compositor to present a just
  * changed emulated viewport before publishing what it has. */
 const STALE_SURFACE_SETTLE_MS = 1_500;
@@ -2267,29 +2274,37 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 };
               }
               const captureOnce = async () => {
-                const response = await this.screenshotRead(
-                  "Page.captureScreenshot",
+                const response = await this.untilSurfaceDrawn(
                   deadline,
-                  async (timeoutMs) => {
-                    const stallBound =
-                      this.engine === "chrome" && !normalized.fullPage
-                        ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
-                        : timeoutMs;
-                    try {
-                      // Never overlaps a frame capture of the tab: a full-page
-                      // capture is clipped (see sendCapture).
-                      return await this.sendCapture<{ data?: unknown }>(state, capture, stallBound);
-                    } catch (error) {
-                      if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
-                        throw new InteractionControllerError(
-                          "timeout",
-                          CONNECTED_CHROME_CAPTURE_STALLED,
-                          true,
-                        );
-                      }
-                      throw error;
-                    }
-                  },
+                  async () =>
+                    await this.screenshotRead(
+                      "Page.captureScreenshot",
+                      deadline,
+                      async (timeoutMs) => {
+                        const stallBound =
+                          this.engine === "chrome" && !normalized.fullPage
+                            ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
+                            : timeoutMs;
+                        try {
+                          // Never overlaps a frame capture of the tab: a full-page
+                          // capture is clipped (see sendCapture).
+                          return await this.sendCapture<{ data?: unknown }>(
+                            state,
+                            capture,
+                            stallBound,
+                          );
+                        } catch (error) {
+                          if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
+                            throw new InteractionControllerError(
+                              "timeout",
+                              CONNECTED_CHROME_CAPTURE_STALLED,
+                              true,
+                            );
+                          }
+                          throw error;
+                        }
+                      },
+                    ),
                 );
                 // An image above the media bound fails like a reply too large
                 // for the connection: the agent can ask for a smaller capture.
@@ -6061,6 +6076,36 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       );
       failure.cause = error;
       throw failure;
+    }
+  }
+
+  /** Repeat a capture Chromium refused because the tab has not drawn a
+   * surface yet, until it draws or the capture deadline passes. */
+  private async untilSurfaceDrawn<T>(deadline: number, capture: () => Promise<T>): Promise<T> {
+    let pause = 16;
+    for (;;) {
+      try {
+        return await capture();
+      } catch (error) {
+        if (
+          !(error instanceof CdpProtocolError) ||
+          error.method !== "Page.captureScreenshot" ||
+          error.message !== UNDRAWN_SURFACE_REFUSAL
+        ) {
+          throw error;
+        }
+        if (Date.now() + pause >= deadline) {
+          const failure = new InteractionControllerError(
+            "timeout",
+            UNDRAWN_SURFACE_TIMED_OUT,
+            true,
+          );
+          failure.cause = error;
+          throw failure;
+        }
+        await delay(pause);
+        pause = Math.min(pause * 2, 200);
+      }
     }
   }
 
