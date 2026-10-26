@@ -8,6 +8,7 @@ import {
   meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   tidyLiveText,
   tidyPartialText,
   useRecordingModels,
@@ -272,7 +273,7 @@ function MeetingRow(props: {
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={[
-        recording.title || msg("native.meetings.meetingsList.untitledMeeting"),
+        meetingTitle(recording, msg),
         ...facts,
         props.live ? liveLabel : status?.label,
       ]
@@ -296,7 +297,7 @@ function MeetingRow(props: {
           numberOfLines={2}
           style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}
         >
-          {recording.title || msg("native.meetings.meetingsList.untitledMeeting")}
+          {meetingTitle(recording, msg)}
         </Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
           {recording.visibility === "private" ? (

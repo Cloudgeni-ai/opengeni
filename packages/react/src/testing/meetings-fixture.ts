@@ -299,7 +299,8 @@ export function createMeetingsFixture(
           unprepared(
             recording(
               "0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5",
-              "Customer call: Northwind",
+              // Started through the API without a title: the server's stand-in.
+              `Recording ${iso(minutes(8)).slice(0, 16).replace("T", " ")} UTC`,
               minutes(8),
               minutes(31),
               {

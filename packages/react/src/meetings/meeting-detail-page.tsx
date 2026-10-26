@@ -47,6 +47,7 @@ import {
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  meetingTitle,
   transcriptErrorText,
   useRecording,
   useRecordingModels,
@@ -85,7 +86,6 @@ import { Notice } from "../ui/notice";
 import { formatAbsoluteTime } from "../ui/relative-time";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { Skeleton } from "../ui/skeleton";
-import { StatusBadge } from "../ui/status-badge";
 import { cn } from "../app/lib/utils";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
@@ -857,7 +857,6 @@ function MeetingDetailPageContent({
   // Only while the server still waits for audio: this device may know more.
   const here =
     recording.state === "capturing" ? meetingHereStatus(recorder, recording.id, online) : null;
-  const capturingHere = here === "recording" || here === "paused";
   const segments = transcript.segments;
   const speakerLabels = [...speakerColorSlots(segments).keys()];
   const slots = speakerColorSlots(segments);
@@ -877,6 +876,8 @@ function MeetingDetailPageContent({
     (recording.state !== "capturing" &&
       !recording.tracks.some((track) => track.playable || track.chunkCount > 0));
   const canRerun = recording.state !== "capturing" && !audioGone && !rerunPending;
+  // Pending before any transcript is done, it is the first one, not "again".
+  const firstPending = rerunPending && shownVersionNumber === 0;
   const unnamedCount = speakerLabels.filter(
     (label) => !speakerIsNamed(label, transcript.speakers),
   ).length;
@@ -1018,23 +1019,10 @@ function MeetingDetailPageContent({
     }
   };
 
+  const shownTitle = meetingTitle(recording, msg);
   const header = (
     <DetailPageHeader
-      title={recording.title}
-      chips={
-        // Recording here, the bar under the title says so with its clock; a
-        // refused upload is said by its notice, and isn't in progress.
-        capturingHere || here === "upload_failed" ? undefined : phase.kind === "transcribing" ||
-          here === "transcribing" ? (
-          <StatusBadge variant="dot" tone="progress" pulse>
-            {msg("meetings.detailPage.transcribing")}
-          </StatusBadge>
-        ) : phase.kind === "uploading" ? (
-          <StatusBadge variant="dot" tone="progress" pulse>
-            {msg("meetings.detailPage.inProgress")}
-          </StatusBadge>
-        ) : undefined
-      }
+      title={shownTitle}
       meta={
         <DetailMeta>
           {formatAbsoluteTime(recording.startedAt, { text: msg })}
@@ -1067,9 +1055,7 @@ function MeetingDetailPageContent({
               }
             />
           ) : null}
-          <MoreMenu
-            label={msg("meetings.detailPage.moreActionsForTitle", { title: recording.title })}
-          >
+          <MoreMenu label={msg("meetings.detailPage.moreActionsForTitle", { title: shownTitle })}>
             <DropdownMenuItem onSelect={() => setRenaming(true)}>
               <PencilIcon aria-hidden="true" />
               {msg("meetings.detailPage.rename")}
@@ -1077,7 +1063,7 @@ function MeetingDetailPageContent({
             {recording.state !== "capturing" ? (
               <DropdownMenuItem disabled={!canRerun} onSelect={() => setRerunning(true)}>
                 <RefreshCwIcon aria-hidden="true" />
-                {rerunPending
+                {rerunPending && !firstPending
                   ? msg("meetings.detailPage.transcribingAgain")
                   : msg("meetings.detailPage.transcribeAgain")}
               </DropdownMenuItem>
@@ -1136,19 +1122,21 @@ function MeetingDetailPageContent({
                   {versionLine(meeting.versions[0]!, modelName, msg)}
                 </span>
               )}
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => setRerunning(true)}
-                disabled={!canRerun}
-                className="w-fit rounded-[10px] pointer-coarse:h-11"
-              >
-                {rerunPending ? SPINNER : <RefreshCwIcon aria-hidden="true" />}
-                {rerunPending
-                  ? msg("meetings.detailPage.transcribingAgain")
-                  : msg("meetings.detailPage.transcribeAgain")}
-              </Button>
+              {phase.kind === "failed" || firstPending ? null : (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setRerunning(true)}
+                  disabled={!canRerun}
+                  className="w-fit rounded-[10px] pointer-coarse:h-11"
+                >
+                  {rerunPending ? SPINNER : <RefreshCwIcon aria-hidden="true" />}
+                  {rerunPending
+                    ? msg("meetings.detailPage.transcribingAgain")
+                    : msg("meetings.detailPage.transcribeAgain")}
+                </Button>
+              )}
             </div>
           </DetailAsideItem>
         ) : null}
@@ -1247,7 +1235,7 @@ function MeetingDetailPageContent({
                 <span className="mr-2 inline-flex rounded-full border border-border px-1.5 text-xs leading-4 font-medium text-fg-label">
                   {msg("meetings.detailPage.preview")}
                 </span>
-                {recording.state === "capturing"
+                {recording.state === "capturing" && here !== "transcribing"
                   ? msg("meetings.detailPage.whatSSaidSoFar")
                   : msg("meetings.detailPage.whatWasSaidAsIt")}
               </p>
@@ -1335,7 +1323,7 @@ function MeetingDetailPageContent({
       </DetailPageBody>
       <RenameDialog
         open={renaming}
-        title={recording.title}
+        title={shownTitle}
         onClose={() => setRenaming(false)}
         onRename={async (title) =>
           await update({ title }, msg("meetings.detailPage.couldnTRenameThisMeeting2"))
@@ -1397,7 +1385,7 @@ function MeetingDetailPageContent({
         }}
       />
       <DeleteMeetingDialog
-        recording={deleting ? recording : null}
+        recording={deleting ? { id: recording.id, title: shownTitle } : null}
         onClose={() => setDeleting(false)}
         onDelete={async () => await meeting.remove()}
         onDeleted={onBack}

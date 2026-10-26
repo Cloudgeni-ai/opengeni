@@ -52,6 +52,7 @@ export {
   meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,

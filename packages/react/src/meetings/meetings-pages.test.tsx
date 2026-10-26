@@ -784,7 +784,6 @@ describe("Live transcript", () => {
       await waitForText(view.container, "Let's keep this one short.");
       const text = view.container.textContent ?? "";
       expect(text).toContain("Not finished yet");
-      expect(text).toContain("In progress");
       expect(text).toContain("still being recorded on another device");
       // Someone else's microphone isn't "You".
       expect(text).toContain("Microphone");
@@ -795,7 +794,7 @@ describe("Live transcript", () => {
     }
   });
 
-  test("the recorder offers live text when the workspace has a live model", async () => {
+  test("the recorder bar keeps live text and its cost in its options menu", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
       <MeetingsListPage
@@ -807,19 +806,16 @@ describe("Live transcript", () => {
       />,
     );
     try {
-      await waitForText(view.container, "Live transcript");
-      const box = [
-        ...view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
-      ].find((element) => element.closest("label")?.textContent?.includes("Live transcript"));
-      expect(box?.checked).toBe(true);
-      // Switched on, it says what it costs.
-      expect(view.container.textContent).toContain("The live transcript adds about $");
+      await waitForText(view.container, "Start recording");
+      // It waits in the options menu beside Start, not as another control in the bar.
+      expect(view.container.textContent).not.toContain("Live transcript");
+      expect(view.container.textContent).not.toContain("per hour");
     } finally {
       await view.unmount();
     }
   });
 
-  test("the recorder starts in the workspace's meeting language, and can detect instead", async () => {
+  test("the recorder starts in the workspace's meeting language", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
       <MeetingsListPage
@@ -832,13 +828,9 @@ describe("Live transcript", () => {
     );
     try {
       await waitForText(view.container, "Start recording");
-      const select = view.container.querySelector<HTMLSelectElement>(
-        'select[aria-label="Meeting language"]',
-      );
-      expect(select?.value).toBe("no");
-      const labels = [...select!.options].map((option) => option.textContent);
-      expect(labels[0]).toBe("Detect language");
-      expect(labels).toContain("Norwegian");
+      expect(
+        view.container.querySelector('button[aria-label="Recording options, Norwegian"]'),
+      ).not.toBeNull();
     } finally {
       await view.unmount();
     }
@@ -858,8 +850,8 @@ describe("Live transcript", () => {
       await waitForText(view.container, "Start recording");
       await waitFor(
         () =>
-          view.container.querySelector<HTMLSelectElement>('select[aria-label="Meeting language"]')
-            ?.value === "no",
+          view.container.querySelector('button[aria-label="Recording options, Norwegian"]') !==
+          null,
       );
     } finally {
       await view.unmount();
