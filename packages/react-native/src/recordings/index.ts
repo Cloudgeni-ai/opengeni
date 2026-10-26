@@ -10,6 +10,7 @@
 //
 // `useRecorder` and the reading hooks come from `@opengeni/react/recordings`.
 import { useMemo } from "react";
+import { PermissionsAndroid, Platform } from "react-native";
 import { requireOptionalNativeModule } from "expo-modules-core";
 import { Directory, File, Paths } from "expo-file-system";
 import * as Crypto from "expo-crypto";
@@ -128,6 +129,25 @@ function safeScope(scope: string): string {
   return scope.replace(/[^A-Za-z0-9._-]/gu, "_");
 }
 
+/**
+ * Android 13 and later hide a foreground service's notification until the app
+ * may post notifications. Recording works either way, but the notification is
+ * how people see that it is still on with the app closed, and how they get
+ * back to it, so the recorder asks right after the microphone is allowed.
+ * Android stops showing the question after it was turned down twice.
+ */
+async function requestRecordingNotificationPermission(): Promise<void> {
+  if (Platform.OS !== "android" || typeof Platform.Version !== "number" || Platform.Version < 33) {
+    return;
+  }
+  const permission = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS;
+  try {
+    if (!(await PermissionsAndroid.check(permission))) await PermissionsAndroid.request(permission);
+  } catch {
+    // Without it the recording still runs; only its notification is hidden.
+  }
+}
+
 export type NativeRecorderPlatformOptions = {
   /** The ongoing notification Android shows while recording. Defaults to a generic one. */
   notification?: { title: string; text: string };
@@ -161,7 +181,11 @@ export function nativeRecorderPlatform(
         store,
         fs: expoRecordingFileSystem,
         randomUUID: () => Crypto.randomUUID(),
-        requestPermission: async () => (await requestRecordingPermissionsAsync()).granted,
+        requestPermission: async () => {
+          const { granted } = await requestRecordingPermissionsAsync();
+          if (granted) await requestRecordingNotificationPermission();
+          return granted;
+        },
         notification: options.notification,
         fetch: fetchImpl,
         ...(options.bitRate ? { bitRate: options.bitRate } : {}),
