@@ -9,13 +9,13 @@ import {
 } from "@opengeni/contracts/managed-sign-in-methods";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { nestedPostgresSqlState } from "@opengeni/db";
-import { APIError } from "better-auth/api";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
 import {
   consumeManagedPasskeyCeremony,
+  managedAuthRefusal,
   ManagedPasskeyError,
   managedPasskeyRelyingParty,
   managedPasskeysAvailable,
@@ -168,7 +168,7 @@ async function signInVerifiedPerson(
   } catch (error) {
     // Admission refuses through Better Auth; anything else (a database
     // outage) is a failure, not a refusal of this account.
-    if (!(error instanceof APIError)) throw error;
+    if (!managedAuthRefusal(error)) throw error;
     session = null;
   }
   if (!session?.token) {
@@ -323,11 +323,11 @@ export function registerManagedPasskeyRoutes(
           ),
         );
       } catch (error) {
-        if (error instanceof APIError) {
-          const code = (error.body as { code?: unknown } | undefined)?.code;
+        const refused = managedAuthRefusal(error);
+        if (refused) {
           return refusal(
             403,
-            typeof code === "string" ? code : "PASSKEY_SIGN_UP_REFUSED",
+            refused.code ?? "PASSKEY_SIGN_UP_REFUSED",
             "New accounts can't be created right now",
           );
         }

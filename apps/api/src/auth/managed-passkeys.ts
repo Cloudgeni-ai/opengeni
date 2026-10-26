@@ -11,6 +11,7 @@ import {
   type RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import { isoBase64URL, isoUint8Array } from "@simplewebauthn/server/helpers";
+import { APIError } from "better-auth/api";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
@@ -103,6 +104,16 @@ export class ManagedPasskeyError extends Error {
   ) {
     super(message);
   }
+}
+
+/**
+ * A Better Auth refusal (session admission or a sign-up gate) with its error
+ * code, or null when the error is anything else, such as a database outage.
+ */
+export function managedAuthRefusal(error: unknown): { code: string | null } | null {
+  if (!(error instanceof APIError)) return null;
+  const code = (error.body as { code?: unknown } | undefined)?.code;
+  return { code: typeof code === "string" ? code : null };
 }
 
 /**
