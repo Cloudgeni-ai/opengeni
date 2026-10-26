@@ -178,8 +178,8 @@ access limitation. Missing publishing access itself still blocks publication.
    normal tool approval rules, but a Site can't ask the viewer to approve a
    call, so a tool set to Ask fails there: show which tool needs Allow. When
    that blocks the person you work for, offer to set it to Allow in the chat
-   with the integration's tool approval app action (they confirm it there)
-   instead of describing the setting.
+   with the integration's tool approval app action instead of describing the
+   setting.
 5. The host intersects that set with the viewer's
    live workspace, permission, and connection authority on every call. Handle
    missing tools, revoked connections, stale catalogs, and access loss as normal

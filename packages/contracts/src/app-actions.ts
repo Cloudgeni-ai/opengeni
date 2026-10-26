@@ -168,10 +168,9 @@ export function appActionConfirmationTitle(
     case "updateOrganizationModelDefaults":
       return "Change your organization's default models?";
     case "updateConnectorToolPermissions":
-    case "updateSessionMcpToolPermissions": {
-      const where = workspace === "this workspace" ? "" : ` in ${workspace}`;
-      return `${toolApprovalQuestion(body, entry.id === "updateConnectorToolPermissions" ? "this integration's tools" : "this MCP server's tools")}${where}?`;
-    }
+      return `${toolApprovalQuestion(body, "this integration's")} in ${workspace}?`;
+    case "updateSessionMcpToolPermissions":
+      return `${toolApprovalQuestion(body, "this MCP server's")} in ${workspace}?`;
     default: {
       // Name where it applies; the card's next line shows the key values.
       const target =
@@ -189,28 +188,30 @@ export function appActionConfirmationTitle(
 
 /**
  * "Let send_message run without asking", from a tool approval change: the
- * tools it names (only plain tool names, at most three, else a count) or all
- * of them by default, and the approval it sets.
+ * tools it names (only plain tool names, at most three, else a count) and the
+ * approval it sets, or the default for tools without their own approval.
  */
-function toolApprovalQuestion(body: Record<string, unknown> | null, everyTool: string): string {
+function toolApprovalQuestion(body: Record<string, unknown> | null, owner: string): string {
+  const label = { allow: "Allow", ask: "Ask", block: "Block" } as const;
+  const permission = body?.permission;
+  const known = permission === "allow" || permission === "ask" || permission === "block";
+  if (body?.target === "default") {
+    if (known) return `Set ${owner} default tool approval to ${label[permission]}`;
+    return permission === null ? `Clear ${owner} default tool approval` : "Change tool approvals";
+  }
   const names = Array.isArray(body?.toolNames) ? body.toolNames : [];
-  const tools =
-    body?.target === "default"
-      ? everyTool
-      : body?.target === "tools" &&
-          names.length > 0 &&
-          names.length <= 3 &&
-          names.every((name) => typeof name === "string" && PLAIN_TOOL_NAME.test(name))
-        ? names.join(names.length === 2 ? " and " : ", ").replace(/, ([^,]*)$/, ", and $1")
-        : body?.target === "tools" && names.length > 0
-          ? `${names.length} tool${names.length === 1 ? "" : "s"}`
-          : null;
-  if (tools === null) return "Change tool approvals";
-  switch (body?.permission) {
+  if (body?.target !== "tools" || names.length === 0) return "Change tool approvals";
+  const plain =
+    names.length <= 3 &&
+    names.every((name) => typeof name === "string" && PLAIN_TOOL_NAME.test(name));
+  const tools = plain
+    ? names.join(names.length === 2 ? " and " : ", ").replace(/, ([^,]*)$/, ", and $1")
+    : `${names.length} tool${names.length === 1 ? "" : "s"}`;
+  switch (permission) {
     case "allow":
       return `Let ${tools} run without asking`;
     case "ask":
-      return `Ask before ${tools} ${tools === everyTool || names.length > 1 ? "run" : "runs"}`;
+      return `Ask before ${tools} ${names.length === 1 ? "runs" : "run"}`;
     case "block":
       return `Block ${tools}`;
     case null:

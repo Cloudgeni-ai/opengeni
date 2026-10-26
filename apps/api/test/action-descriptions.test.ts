@@ -65,7 +65,7 @@ describe("action descriptions", () => {
     const entry = ACTION_CATALOG.find(
       (candidate) => candidate.id === "updateConnectorToolPermissions",
     )!;
-    expect(describeAction(entry).description).toContain("A Site can't ask");
+    expect(describeAction(entry).description).toContain("A Site's own tool calls can't ask");
     expect(describeAction(entry).input.some((input) => input.schema !== undefined)).toBe(true);
   });
 

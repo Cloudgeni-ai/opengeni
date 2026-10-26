@@ -1,4 +1,11 @@
-import { blocks, bullets, sentences, toolAvailable, type AgentPromptContext } from "./types";
+import {
+  blocks,
+  bullets,
+  sentences,
+  toolAvailable,
+  toolsAvailable,
+  type AgentPromptContext,
+} from "./types";
 
 /**
  * The one rule the legacy contract lacked: embedder text wins over Opengeni's
@@ -76,11 +83,12 @@ function autonomy(context: AgentPromptContext): string {
   const nativeCheck = context.capabilities.artifacts
     ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
     : "First check whether an available tool already provides the capability natively.";
-  // A setting the person could change in the app is applied here through an
-  // app action (confirmed in the chat) whenever the call tool may exist.
+  // A setting the person could change in the app is changed here through an
+  // app action (confirmed in the chat) whenever the app-action tools may exist.
   const blockedFix =
-    context.capabilities.workspaceAdmin && toolAvailable(context, "admin_action_call")
-      ? "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission, setting or secret, offer the fix in the same reply: show its setup card, make the change with `admin_action_call` when an app action makes it (the user confirms it in the chat), or give the exact next step when neither applies, and continue once it is fixed."
+    context.capabilities.workspaceAdmin &&
+    toolsAvailable(context, ["admin_actions_search", "admin_action_call"])
+      ? "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission, setting or secret, offer the fix in the same reply: show its setup card, make the change with `admin_actions_search` and `admin_action_call` when an app action makes it (the user confirms it in the chat unless the session has full access), or give the exact next step when neither applies, and continue once it is fixed."
       : "When something the user can fix blocks a tool, such as a missing connection, extension, machine, integration, permission or secret, offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.";
   return blocks(
     `## Autonomy and persistence

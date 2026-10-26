@@ -314,13 +314,13 @@ const RULES: Rule[] = [
     method: "GET",
     pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
     text: () =>
-      "Read an integration's tool approvals: whether each tool (for example send email or post a message) runs without asking (Allow), asks first (Ask) or is blocked (Block), with the revision to pass when changing them.",
+      "Read an integration's tool approvals: whether each tool (for example send email or post a message) runs without asking (Allow), asks first (Ask) or is blocked (Block), with the connectionId and revision to pass when changing them.",
   },
   {
     method: "PATCH",
     pattern: /\/capabilities\/:capabilityId\/tool-permissions$/,
     text: () =>
-      'Change an integration\'s tool approvals: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools") or the integration\'s default (target "default"); permission null returns to the default. A Site can\'t ask, so a tool set to Ask fails there until it is set to Allow.',
+      'Change an integration\'s tool approvals: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools"), one action of a tool (target "action" with toolName and actionName) or the default for tools without their own approval (target "default"); permission null clears that approval. A Site\'s own tool calls can\'t ask, so a tool set to Ask fails there until it is set to Allow.',
   },
   {
     method: "GET",
@@ -332,7 +332,7 @@ const RULES: Rule[] = [
     method: "PATCH",
     pattern: /\/session-mcp-tool-permissions$/,
     text: () =>
-      'Change the tool approvals for an MCP server added to chats: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools") or the server\'s default (target "default"); permission null returns to the default.',
+      'Change the tool approvals for an MCP server added to chats: let tools run without asking (Allow), ask first (Ask) or block them (Block), for named tools (target "tools") or the default for tools without their own approval (target "default"); permission null clears that approval.',
   },
 ];
 
