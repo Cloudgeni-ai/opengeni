@@ -431,6 +431,8 @@ describe("app actions for a person in an embedded chat", () => {
     expect(textOf(trustedElsewhere)).toBe(reach);
     const otherWorkspaceChat = await reachSessionInOtherWorkspace({
       reach: trusted.reach,
+      db,
+      here: { accountId: organizationId, workspaceId },
       workspaceId: sharedWorkspaceId,
       toolName: "session_get",
       arguments: { sessionId: crypto.randomUUID() },

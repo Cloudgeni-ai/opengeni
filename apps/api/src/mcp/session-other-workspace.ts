@@ -1,9 +1,14 @@
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { ToolGatewayInvokeResponse } from "@opengeni/contracts";
+import type { Database, WorkspaceContentFlowEnd } from "@opengeni/db";
 import * as z4 from "zod/v4";
 
 import { runOrganizationAction } from "../organization-mcp";
 import type { SessionAdminReach } from "./session-admin-access-tools";
+import {
+  otherWorkspaceContentRefusal,
+  type OtherWorkspaceContentFlow,
+} from "./workspace-content-flow";
 
 /* ----------------------------------------------------------------------------
    Session tools act on this workspace's chats. Given another workspace's id, a
@@ -29,6 +34,19 @@ export type OtherWorkspaceSessionTool = (typeof OTHER_WORKSPACE_SESSION_TOOLS)[n
 const OTHER_WORKSPACE_SESSION_TOOL_SET: ReadonlySet<string> = new Set(
   OTHER_WORKSPACE_SESSION_TOOLS,
 );
+/**
+ * Every one of these brings the other chat's content back here; sending and
+ * steering also carry this session's content there.
+ */
+const CONTENT_FLOW: Record<OtherWorkspaceSessionTool, OtherWorkspaceContentFlow> = {
+  session_get: "from_there",
+  session_events: "from_there",
+  session_wait: "from_there",
+  session_send_message: "both_ways",
+  session_steer: "both_ways",
+  session_pause: "from_there",
+  session_resume: "from_there",
+};
 
 /** The first-party server's identity in a workspace's tool gateway. */
 const FIRST_PARTY_SERVER_ID = "opengeni";
@@ -118,6 +136,9 @@ function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
  */
 export async function reachSessionInOtherWorkspace(input: {
   reach: SessionAdminReach | null;
+  db: Database;
+  /** This session's workspace. */
+  here: WorkspaceContentFlowEnd;
   workspaceId: string;
   toolName: OtherWorkspaceSessionTool;
   arguments: Record<string, unknown>;
@@ -128,6 +149,12 @@ export async function reachSessionInOtherWorkspace(input: {
     return refusal("Pass sessionId with workspaceId: it names a chat in that workspace.");
   const actingPerson = await input.reach.fullAccessPerson();
   if (!actingPerson) return refusal(ENDED);
+  const refused = await otherWorkspaceContentRefusal(input.db, {
+    here: input.here,
+    thereWorkspaceId: input.workspaceId,
+    flow: CONTENT_FLOW[input.toolName],
+  });
+  if (refused) return refused;
   const outcome = await runOrganizationAction(actingPerson, {
     id: INVOKE_ACTION,
     pathParameters: { workspaceId: input.workspaceId },

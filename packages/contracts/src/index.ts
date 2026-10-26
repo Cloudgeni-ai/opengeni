@@ -896,6 +896,8 @@ export const ErrorCode = /* @__PURE__ */ defineSchema(() =>
     "action_timeout",
     "tab_not_responding",
     "tab_crashed",
+    /** Content from an EU-only workspace may only reach other EU-only workspaces (HTTP 422). */
+    "region_restricted",
     /**
      * The resource or route no longer exists (HTTP 410). A retired route's
      * details carry `code: "route_retired"` and the `replacement` to call.

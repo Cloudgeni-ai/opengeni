@@ -31,6 +31,7 @@ import {
   searchActions,
   type OrganizationActionContext,
 } from "../organization-mcp";
+import { otherWorkspaceContentRefusal } from "./workspace-content-flow";
 
 /**
  * How a session reaches the app's actions: the same actions as the
@@ -344,6 +345,8 @@ export function registerSessionAdminAccessTools(input: {
         });
         if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
       }
+      const refused = await appActionOtherWorkspaceRefusal(db, grant, args);
+      if (refused) return refused;
       return await callOrganizationAction(reach.actAs(authority), {
         id: args.id,
         pathParameters: args.pathParameters,
@@ -352,4 +355,24 @@ export function registerSessionAdminAccessTools(input: {
       });
     },
   );
+}
+
+/**
+ * An app action in another workspace brings that workspace's content into this
+ * session, and a change also carries this session's content there: null when
+ * that may happen, otherwise the refusal to return instead.
+ */
+export async function appActionOtherWorkspaceRefusal(
+  db: Database,
+  grant: Pick<AccessGrant, "accountId" | "workspaceId">,
+  call: { id: string; pathParameters: Record<string, string> },
+): Promise<CallToolResult | null> {
+  const entry = findAppAction(call.id);
+  const otherWorkspaceId = call.pathParameters["workspaceId"];
+  if (!entry?.path.includes(":workspaceId") || !otherWorkspaceId) return null;
+  return await otherWorkspaceContentRefusal(db, {
+    here: { accountId: grant.accountId, workspaceId: grant.workspaceId },
+    thereWorkspaceId: otherWorkspaceId,
+    flow: appActionChangesState(entry) ? "both_ways" : "from_there",
+  });
 }

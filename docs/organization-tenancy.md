@@ -844,6 +844,24 @@ workspace's own account in the same scope and throws when the workspace is
 missing, in another account or hidden, so an unreadable setting never reads as
 off.
 
+EU-only content stays in EU-only workspaces. Content from an EU-only workspace
+may reach another workspace only when that workspace is EU-only too; other
+content may go anywhere. `assertWorkspaceContentFlowAllowed` and, for a step
+that carries content both ways, `assertWorkspaceContentExchangeAllowed`
+(`packages/db/src/workspace-content-flow.ts`) check each exact workspace pair
+with `isWorkspaceEuOnly`, read each workspace's organization from the workspace
+itself, and throw when the setting can't be read, so nothing moves. A refusal
+is `WorkspaceContentFlowRefusedError`: HTTP `422 region_restricted`, and a
+plain refusal from MCP tools. A session reaching another workspace is checked
+before anything runs there (`apps/api/src/mcp/workspace-content-flow.ts`):
+session tools given a `workspaceId` and `admin_action_call` naming one bring
+that workspace's content back, and sending, steering and changes also carry
+the session's content there. Every other scope that spans workspaces
+(organization and personal Knowledge, Skills and Documents, Personal
+workspaces, user- and organization-owned machines and browsers, Slack routes,
+personal-resource grants) is bound to one organization, so it always shares
+one setting today; a per-workspace switch must add the pair check there.
+
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling
 the shared managed-auth email transport. The delivery freezes the invited

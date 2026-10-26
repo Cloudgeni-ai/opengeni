@@ -152,6 +152,7 @@ import {
   databaseUnavailableHttpError,
   modelUnavailableHttpError,
   connectionAccountSelectionHttpError,
+  regionRestrictedHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
@@ -2491,6 +2492,7 @@ export function createAppComposition(deps: AppDependencies): {
             allowanceExhaustedHttpError(rawError) ??
             subscriptionSettingsLockedHttpError(rawError) ??
             workspaceControlBusyHttpError(rawError) ??
+            regionRestrictedHttpError(rawError) ??
             scheduledTaskTargetAccessHttpError(rawError) ??
             agentConfigHttpError(rawError) ??
             modelUnavailableHttpError(rawError) ??

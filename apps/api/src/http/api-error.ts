@@ -10,6 +10,7 @@ import {
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
   WorkspaceControlBusyError,
+  WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
 import {
   ConnectionAccountSelectionError,
@@ -238,6 +239,26 @@ export function agentConfigHttpError(error: unknown): ApiHttpError | null {
       code: cause.code,
       ...(cause.capability ? { capability: cause.capability } : {}),
     },
+  });
+}
+
+/**
+ * Content from an EU-only workspace would reach a workspace that isn't
+ * EU-only. Rendered as 422 `region_restricted`; retrying can't change it.
+ */
+export function regionRestrictedHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof WorkspaceContentFlowRefusedError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof WorkspaceContentFlowRefusedError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "region_restricted",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
   });
 }
 

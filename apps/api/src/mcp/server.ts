@@ -5231,6 +5231,8 @@ function registerWorkspaceOrchestrationTools(
       if (workspaceId !== undefined && workspaceId !== grant.workspaceId) {
         return await reachSessionInOtherWorkspace({
           reach: sessionAdminReach,
+          db: deps.db,
+          here: { accountId: grant.accountId, workspaceId: grant.workspaceId },
           workspaceId,
           toolName,
           arguments: rest as Record<string, unknown>,
