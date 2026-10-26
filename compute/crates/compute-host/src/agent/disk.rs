@@ -13,10 +13,16 @@
 //! the last reading may yet fit (see
 //! [`compute_core::Host::disk_awaits_reading`]): it waits for the next
 //! reading, about a second away, which decides it.
+//!
+//! A guest also frees space while its VM runs, since its disk takes
+//! discards: the space comes back to the host's disk, but stays the
+//! guest's to take again. So each disk is read both before and after the
+//! disk reading, and books the larger of the two (see
+//! [`HostAgent::disk_growth_readings`]).
 
 use std::path::Path;
 
-use compute_core::{DiskSpace, Input};
+use compute_core::{DiskSpace, Input, SandboxId};
 use compute_engine::Engine;
 
 use crate::disk_growth;
@@ -46,6 +52,15 @@ pub(super) enum AfterReading {
     Fetch(ImageId, u64),
 }
 
+/// What each disk of a sandbox with a VM may still grow by, read before
+/// the disk reading of a sample, with whether its memory image was still
+/// being filled; see [`HostAgent::disk_readings`].
+#[derive(Debug, Default)]
+pub(super) struct BeforeReading {
+    growth: Vec<(SandboxId, Option<u64>)>,
+    hydrating: Vec<Input>,
+}
+
 /// When a new sandbox fits; see [`HostAgent::room_for`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Room {
@@ -69,33 +84,70 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// What the disk of each sandbox with a VM may still grow by, and
     /// whether its memory image is still being filled from object storage.
     /// Read before the disk reading of the same sample, which then shows
-    /// what the disk grew by and what the fill wrote.
-    pub(super) fn disk_readings(&self) -> Vec<Input> {
-        // A save writes one copy of memory only where files share extents.
-        let shares = self.save_copies == 1;
-        let mut readings = Vec::new();
+    /// what the disk grew by and what the fill wrote; the disks are read
+    /// again after it by [`Self::disk_growth_readings`].
+    pub(super) fn disk_readings(&self) -> BeforeReading {
+        let mut before = BeforeReading::default();
         for (id, slot) in &self.slots {
             let Some(live) = slot.vm.as_ref() else {
                 continue;
             };
-            match disk_growth::headroom(&slot.paths.disk, self.allocation_unit, shares) {
-                Ok(bytes) => readings.push(Input::DiskGrowth {
-                    sandbox: *id,
-                    bytes,
-                }),
-                // It stays booked at what it last could grow by.
-                Err(error) => tracing::debug!(
-                    sandbox = %crate::protocol::Id(*id),
-                    %error,
-                    "could not read how much a disk may still grow"
-                ),
-            }
-            readings.push(Input::Hydrating {
+            before
+                .growth
+                .push((*id, self.headroom(*id, &slot.paths.disk)));
+            before.hydrating.push(Input::Hydrating {
                 sandbox: *id,
                 hydrating: live.memory.hydrating(),
             });
         }
+        before
+    }
+
+    /// The readings of `before`, with what each of its disks may still
+    /// grow by read again, after the disk reading of the same sample: the
+    /// larger of the two counts. A guest writing between them took space
+    /// the disk reading shows taken, which the first reading still counts
+    /// as to come; one freeing space between them, as a trim does, gave
+    /// back space the disk reading shows free, which only the second
+    /// counts as the guest's to take again. Either way the disk is booked
+    /// for at least what it may grow by as the disk reading saw it, short
+    /// only of what its guest wrote again in the moment between that
+    /// reading and the disk's second one. A disk neither reading could
+    /// read books all it may take, its whole size, until one can.
+    pub(super) fn disk_growth_readings(&self, before: BeforeReading) -> Vec<Input> {
+        let mut readings = before.hydrating;
+        for (id, first) in before.growth {
+            let Some(slot) = self.slots.get(&id) else {
+                continue;
+            };
+            let second = self.headroom(id, &slot.paths.disk);
+            let bytes = match first.max(second) {
+                Some(bytes) => bytes,
+                None => match self.records.get(crate::protocol::Id(id)) {
+                    Some(record) => self.record_size(&record).disk,
+                    // Gone meanwhile: nothing of it is left to book.
+                    None => continue,
+                },
+            };
+            readings.push(Input::DiskGrowth { sandbox: id, bytes });
+        }
         readings
+    }
+
+    /// What the disk file of sandbox `id` at `path` may still grow by, if
+    /// it can be read; see [`disk_growth::headroom`].
+    fn headroom(&self, id: SandboxId, path: &Path) -> Option<u64> {
+        // A save writes one copy of memory only where files share extents.
+        let shares = self.save_copies == 1;
+        disk_growth::headroom(path, self.allocation_unit, shares)
+            .inspect_err(|error| {
+                tracing::debug!(
+                    sandbox = %crate::protocol::Id(id),
+                    %error,
+                    "could not read how much a disk may still grow"
+                );
+            })
+            .ok()
     }
 
     /// What a new sandbox's first files may write: a copy of its

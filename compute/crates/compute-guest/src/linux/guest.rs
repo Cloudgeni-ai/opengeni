@@ -339,8 +339,10 @@ impl Guest {
     }
 
     /// Handles one connection to the notice port. Notices are handled one
-    /// at a time, on the listener's thread, and so are the host's
-    /// `activity` question and `sync` request.
+    /// at a time, on the listener's thread, and so is the host's
+    /// `activity` question. Its `sync` request gets a thread of its own:
+    /// a flush and trim can take a while, and must not hold up the notices
+    /// after them, such as a restore's clock.
     pub fn notice(&self, mut stream: Stream) {
         let _ = stream.set_read_timeout(Some(LINE_LIMIT));
         let Ok((line, _)) = read_line(&mut stream, notice::MAX_LINE) else {
@@ -355,9 +357,11 @@ impl Guest {
             // only in this memory reaches them first, then what the files
             // freed goes back to the host. The sync commits the deletions
             // first, so their space is free for the trim.
-            sys::sync();
-            trim_root();
-            let _ = stream.write_all(notice::SYNCED);
+            super::spawn("sync", move || {
+                sys::sync();
+                trim_root();
+                let _ = stream.write_all(notice::SYNCED);
+            });
             return;
         }
         let Some(notice) = Notice::parse(&line) else {
