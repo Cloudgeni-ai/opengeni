@@ -836,8 +836,16 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   check a guest takes no connection on, and after five in a row an error
   naming the sandbox (`guest took no connection on its notice port`).
   It then ends the VM as a crashed one: a `compute.alarm` for programs
-  lost, files kept, and the next wake boots from the disk. A host whose
-  guest image does not listen on the notice port must not set it.
+  lost, files kept, and the next wake boots from the disk. A guest that
+  halted or powered off says so first: Firecracker on x86 gives it no
+  way to power off, so its kernel's last line on its console
+  (`console.log`, after which come only the VMM's own lines) is
+  `reboot: System halted` or `reboot: Power off not available: System
+  halted instead`. Such a guest is ended at its first miss that counts,
+  within about 35 seconds, with the error `guest said it halted`. The
+  line alone ends nothing: a guest that still takes connections keeps
+  running whatever its console says. A host whose guest image does not
+  listen on the notice port must not set it.
   A check counts only if the guest could run all through it: no step
   paused it meanwhile, the guard did not freeze it, and the machine did
   not suspend. The guard says when it freezes the VMs, which it does on
