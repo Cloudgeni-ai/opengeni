@@ -2714,6 +2714,9 @@
 :where(.og-root).grid-cols-\[minmax\(0\,max-content\)\],:where(.og-root) .grid-cols-\[minmax\(0\,max-content\)\] {
     grid-template-columns: minmax(0,max-content);
   }
+:where(.og-root).grid-cols-\[minmax\(0\,max-content\)_minmax\(4rem\,1fr\)\],:where(.og-root) .grid-cols-\[minmax\(0\,max-content\)_minmax\(4rem\,1fr\)\] {
+    grid-template-columns: minmax(0,max-content) minmax(4rem,1fr);
+  }
 :where(.og-root).grid-cols-\[minmax\(1\.5rem\,max-content\)_minmax\(0\,max-content\)\],:where(.og-root) .grid-cols-\[minmax\(1\.5rem\,max-content\)_minmax\(0\,max-content\)\] {
     grid-template-columns: minmax(1.5rem,max-content) minmax(0,max-content);
   }

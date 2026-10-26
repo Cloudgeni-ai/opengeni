@@ -63,8 +63,7 @@ export function recorderErrorText(
   msg: OpenGeniText = defaultText,
 ): { title: string; body: string } {
   if (systemAudioKind === "desktop" && error.code === "system_audio_unavailable") {
-    // The desktop app's own sentence says what to do on this computer.
-    return { title: msg("meetings.recorderPanel.canTRecordComputerAudio"), body: error.message };
+    return desktopSystemAudioErrorText(error.reason, msg);
   }
   switch (error.code) {
     case "microphone_denied":
@@ -104,6 +103,27 @@ export function recorderErrorText(
       };
     default:
       return { title: msg("meetings.recorderPanel.recordingStopped"), body: error.message };
+  }
+}
+
+/** Why the desktop app couldn't record computer audio, and what to do on this computer. */
+function desktopSystemAudioErrorText(
+  reason: RecorderError["reason"],
+  msg: OpenGeniText,
+): { title: string; body: string } {
+  const title = msg("meetings.recorderPanel.canTRecordComputerAudio");
+  switch (reason) {
+    case "permission_denied":
+      return {
+        title: msg("meetings.recorderPanel.computerAudioIsnTAllowed"),
+        body: msg("meetings.recorderPanel.allowThisAppToRecordComputerAudio"),
+      };
+    case "sound_server_unavailable":
+      return { title, body: msg("meetings.recorderPanel.noSoundServerIsRunning") };
+    case "unavailable":
+      return { title, body: msg("meetings.recorderPanel.thisComputerCanTRecordItsOwnAudio") };
+    default:
+      return { title, body: msg("meetings.recorderPanel.computerAudioDidnTStart") };
   }
 }
 
@@ -230,12 +250,13 @@ function LevelMeter({
     return () => cancelAnimationFrame(frame);
   }, [levels, trackNumber, paused]);
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <span className="w-24 shrink-0 truncate text-xs leading-4 text-fg-muted">{label}</span>
-      <span
-        aria-hidden="true"
-        className="relative h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-surface-2"
-      >
+    // Label and bar are cells of the parent grid, so every label fits its
+    // column and the bars line up.
+    <div className="contents">
+      <span className="min-w-0 max-w-44 truncate text-xs leading-4 text-fg-muted" title={label}>
+        {label}
+      </span>
+      <span aria-hidden="true" className="relative h-1.5 overflow-hidden rounded-full bg-surface-2">
         <span
           ref={barRef}
           className="absolute inset-0 origin-left rounded-full bg-status-idle transition-transform duration-75 motion-reduce:transition-none"
@@ -665,7 +686,7 @@ function RecorderPanelContent({
         <RecordingTitle recorder={recorder} />
         <div className="flex flex-wrap items-center gap-x-6 gap-y-4">
           <RecordingClock recorder={recorder} stalled={stalled} />
-          <div className="grid min-w-48 flex-1 gap-2">
+          <div className="grid min-w-48 flex-1 grid-cols-[minmax(0,max-content)_minmax(4rem,1fr)] items-center gap-x-3 gap-y-2">
             {recorder.tracks.map((track) => (
               <LevelMeter
                 key={track.trackNumber}

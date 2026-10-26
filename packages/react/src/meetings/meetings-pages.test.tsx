@@ -641,13 +641,38 @@ describe("Recorder errors", () => {
     >[0];
     expect(recorderErrorText(denied, "desktop").body).toContain("your computer's privacy settings");
     expect(recorderErrorText(denied, "display").body).toContain("browser");
-    const helper = {
-      code: "system_audio_unavailable",
-      message: "Turn on System Audio Recording for Opengeni in System Settings.",
-    } as Parameters<typeof recorderErrorText>[0];
-    expect(recorderErrorText(helper, "desktop")).toEqual({
-      title: "Can't record computer audio",
-      body: "Turn on System Audio Recording for Opengeni in System Settings.",
+  });
+
+  test("the desktop app's reason for no computer audio is said in the viewer's words", async () => {
+    const { recorderErrorText } = await import("./recorder-panel");
+    const failure = (reason?: string) =>
+      ({
+        code: "system_audio_unavailable",
+        message: "The desktop app's own English sentence.",
+        ...(reason ? { reason } : {}),
+      }) as Parameters<typeof recorderErrorText>[0];
+    expect(recorderErrorText(failure("permission_denied"), "desktop")).toEqual({
+      title: "Computer audio isn't allowed",
+      body: "Allow this app under System Settings > Privacy & Security > Screen & System Audio Recording, then start again.",
+    });
+    expect(recorderErrorText(failure("sound_server_unavailable"), "desktop").body).toBe(
+      "No sound server (PipeWire or PulseAudio) is running. Start one, or record without computer audio.",
+    );
+    expect(recorderErrorText(failure("unavailable"), "desktop").body).toBe(
+      "This computer can't record its own audio. Record without computer audio instead.",
+    );
+    for (const reason of ["capture_failed", undefined]) {
+      expect(recorderErrorText(failure(reason), "desktop")).toEqual({
+        title: "Can't record computer audio",
+        body: "Computer audio didn't start. Start again, or record without computer audio.",
+      });
+    }
+    const translated = (key: string) => `nb:${key}`;
+    expect(
+      recorderErrorText(failure("sound_server_unavailable"), "desktop", translated as never),
+    ).toEqual({
+      title: "nb:meetings.recorderPanel.canTRecordComputerAudio",
+      body: "nb:meetings.recorderPanel.noSoundServerIsRunning",
     });
   });
 
