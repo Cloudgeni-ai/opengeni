@@ -720,6 +720,41 @@ describe("standalone context compaction execution", () => {
   test("applyContextCompaction keeps only this session's turn ids and rejects misaligned ids", async () => {
     const fixture = await finishedTurnsFixture(() => []);
     const other = await finishedTurnsFixture(() => []);
+    // A finished turn of a sibling session in the same workspace, so only the
+    // session filter (not workspace scoping) can keep its id out.
+    const sibling = await createSession(client.db, {
+      accountId: fixture.grant.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const [siblingTurn] = await withWorkspaceRls(client.db, fixture.workspaceId, (db) =>
+      db
+        .insert(schema.sessionTurns)
+        .values({
+          accountId: fixture.grant.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: sibling.id,
+          triggerEventId: crypto.randomUUID(),
+          temporalWorkflowId: `session-${sibling.id}`,
+          status: "completed",
+          source: "user",
+          prompt: "Sibling question",
+          position: 0,
+          resources: [],
+          tools: [],
+          model: "scripted-compactor",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+        })
+        .returning(),
+    );
     const input = {
       accountId: fixture.grant.accountId,
       workspaceId: fixture.workspaceId,
@@ -732,7 +767,8 @@ describe("standalone context compaction execution", () => {
     const replacementItems = [
       "own finished turn",
       "running turn",
-      "other session's turn",
+      "sibling session's turn",
+      "other workspace's turn",
       "malformed id",
       "upper-cased id",
       "no id",
@@ -750,6 +786,7 @@ describe("standalone context compaction execution", () => {
       replacementTurnIds: [
         fixture.turnA.id,
         fixture.scope.turnId,
+        siblingTurn!.id,
         other.turnA.id,
         "not-a-uuid'; select 1; --",
         fixture.turnB.id.toUpperCase(),
@@ -765,6 +802,7 @@ describe("standalone context compaction execution", () => {
     expect(active.slice(0, replacementItems.length).map((row) => row.turnId)).toEqual([
       fixture.turnA.id,
       fixture.scope.turnId,
+      null,
       null,
       null,
       null,
