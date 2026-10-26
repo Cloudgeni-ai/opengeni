@@ -1,0 +1,486 @@
+{
+  "childLifecycleKinds": [
+    "child_terminal_result",
+    "child_requires_action",
+    "child_requires_action_resolved",
+    "child_paused",
+    "child_waiting_capacity",
+    "child_progress"
+  ],
+  "flagGatedKinds": [
+    "child_requires_action",
+    "child_requires_action_resolved",
+    "child_paused",
+    "child_waiting_capacity",
+    "child_progress"
+  ],
+  "format": "opengeni.child-lifecycle-notice-protocol/v1",
+  "kinds": [
+    "scheduled_occurrence",
+    "goal_continuation",
+    "agent_message",
+    "agent_steer_instruction",
+    "session_wait_timeout",
+    "background_command_result",
+    "child_terminal_result",
+    "media_generation_result",
+    "child_requires_action",
+    "child_requires_action_resolved",
+    "child_paused",
+    "child_waiting_capacity",
+    "child_progress",
+    "secret_use_approval_decided",
+    "capability_setup_completed"
+  ],
+  "limits": {
+    "CHILD_PAUSED_REASON_MAX_BYTES": 2048,
+    "CHILD_PROGRESS_NOTE_MAX_BYTES": 4096,
+    "CHILD_REQUIRES_ACTION_MAX_REQUESTS": 20,
+    "CHILD_REQUIRES_ACTION_OPTION_LABEL_MAX_BYTES": 128,
+    "CHILD_REQUIRES_ACTION_PAYLOAD_MAX_BYTES": 8192,
+    "CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES": 512,
+    "CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES": 8192
+  },
+  "payloads": {
+    "child_paused": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": {},
+      "properties": {
+        "actorKind": {
+          "enum": [
+            "human",
+            "api",
+            "agent"
+          ],
+          "type": "string"
+        },
+        "childSessionId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "operationId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string",
+              "x-opengeni-refinements": [
+                {
+                  "message": "must be at most 2048 UTF-8 bytes",
+                  "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "const": "child_paused",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "childSessionId",
+        "operationId",
+        "actorKind",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "child_progress": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": {},
+      "properties": {
+        "childSessionId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "goalId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "objectiveRevision": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operationId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "progressNote": {
+          "type": "string",
+          "x-opengeni-refinements": [
+            {
+              "message": "must be at most 4096 UTF-8 bytes",
+              "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes"
+            }
+          ]
+        },
+        "type": {
+          "const": "child_progress",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "childSessionId",
+        "goalId",
+        "objectiveRevision",
+        "operationId",
+        "progressNote"
+      ],
+      "type": "object"
+    },
+    "child_requires_action": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": {},
+      "properties": {
+        "childSessionId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "childTurnGeneration": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "childTurnId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "requests": {
+          "items": {
+            "oneOf": [
+              {
+                "properties": {
+                  "allowSkip": {
+                    "type": "boolean"
+                  },
+                  "expiresAt": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "firstQuestion": {
+                    "type": "string",
+                    "x-opengeni-refinements": [
+                      {
+                        "message": "must be at most 512 UTF-8 bytes",
+                        "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes"
+                      }
+                    ]
+                  },
+                  "kind": {
+                    "const": "human_input",
+                    "type": "string"
+                  },
+                  "questionCount": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "questions": {
+                    "items": {
+                      "properties": {
+                        "humanOnly": {
+                          "const": true,
+                          "type": "boolean"
+                        },
+                        "id": {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "kind": {
+                          "maxLength": 32,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "options": {
+                          "items": {
+                            "properties": {
+                              "id": {
+                                "maxLength": 64,
+                                "minLength": 1,
+                                "type": "string"
+                              },
+                              "label": {
+                                "type": "string",
+                                "x-opengeni-refinements": [
+                                  {
+                                    "message": "must be at most 128 UTF-8 bytes",
+                                    "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes"
+                                  }
+                                ]
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "label"
+                            ],
+                            "type": "object"
+                          },
+                          "maxItems": 20,
+                          "type": "array"
+                        },
+                        "prompt": {
+                          "type": "string",
+                          "x-opengeni-refinements": [
+                            {
+                              "message": "must be at most 512 UTF-8 bytes",
+                              "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes"
+                            }
+                          ]
+                        },
+                        "required": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "kind",
+                        "prompt",
+                        "required",
+                        "options"
+                      ],
+                      "type": "object"
+                    },
+                    "maxItems": 20,
+                    "type": "array"
+                  },
+                  "requestId": {
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "requestId",
+                  "questionCount",
+                  "firstQuestion",
+                  "allowSkip",
+                  "expiresAt"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "approvalId": {
+                    "type": "string",
+                    "x-opengeni-refinements": [
+                      {
+                        "message": "must be at most 256 UTF-8 bytes",
+                        "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes"
+                      }
+                    ]
+                  },
+                  "kind": {
+                    "const": "approval",
+                    "type": "string"
+                  },
+                  "toolName": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "x-opengeni-refinements": [
+                          {
+                            "message": "must be at most 128 UTF-8 bytes",
+                            "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "approvalId",
+                  "toolName"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "type": {
+          "const": "child_requires_action",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "childSessionId",
+        "childTurnId",
+        "childTurnGeneration",
+        "requests",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "child_requires_action_resolved": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": {},
+      "properties": {
+        "approvalId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "x-opengeni-refinements": [
+                {
+                  "message": "must be at most 256 UTF-8 bytes",
+                  "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "childSessionId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "childTurnGeneration": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "childTurnId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "outcome": {
+          "enum": [
+            "answered",
+            "skipped",
+            "expired",
+            "cancelled",
+            "approved",
+            "rejected"
+          ],
+          "type": "string"
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "respondedByKind": {
+          "enum": [
+            "human",
+            "api",
+            "agent_attempt",
+            "system"
+          ],
+          "type": "string"
+        },
+        "type": {
+          "const": "child_requires_action_resolved",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "childSessionId",
+        "childTurnId",
+        "childTurnGeneration",
+        "requestId",
+        "approvalId",
+        "outcome",
+        "respondedByKind"
+      ],
+      "type": "object"
+    },
+    "child_waiting_capacity": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": {},
+      "properties": {
+        "childSessionId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "childTurnId": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "nextCheckAt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider": {
+          "enum": [
+            "codex",
+            "xai",
+            "claude"
+          ],
+          "type": "string"
+        },
+        "type": {
+          "const": "child_waiting_capacity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "childSessionId",
+        "childTurnId",
+        "provider",
+        "nextCheckAt"
+      ],
+      "type": "object"
+    }
+  },
+  "revision": 1,
+  "wakeClasses": {
+    "child_paused": "deferred",
+    "child_progress": "deferred",
+    "child_requires_action": "immediate",
+    "child_requires_action_resolved": "deferred",
+    "child_waiting_capacity": "deferred"
+  }
+}

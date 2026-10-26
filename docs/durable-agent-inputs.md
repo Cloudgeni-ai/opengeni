@@ -271,6 +271,21 @@ the rest, and the claim path marks a pending row whose kind or payload it
 cannot parse `failed` with a visible `system.update.cancelled{reason:
 "unrecognized_kind"}` instead of throwing.
 
+Those hardened images drop, rather than defer, a row they cannot parse, so a
+release that changes what a gated notice looks like still enables the flag
+only after its whole fleet runs the candidate. A release may instead boot the
+candidate with the flag already on when the notice protocol is unchanged:
+`packages/contracts/src/child-lifecycle-notice-protocol.gen.json` (rendered by
+`bun scripts/generate-child-lifecycle-notice-protocol.ts`, checked by the
+contracts test) describes every kind name, the gated kinds and their wake
+classes, every exported `CHILD_*` limit, and the input JSON Schema of each
+gated payload, including the message and source of every refinement and value
+rewrite. Release tooling compares that file at the live and the candidate
+revision and keeps the second rollout unless both are byte-identical. A change
+an older consumer would treat differently but the rendering cannot see, such
+as a field whose meaning changes, must bump
+`CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION`.
+
 An idle `child_terminal_result` is result-bearing. The idle settlement that
 commits its outbox row also freezes the child's newest result-bearing
 `turn.completed` output as optional `payload.finalAnswer` (`sequence`, `text`,
