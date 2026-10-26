@@ -1,5 +1,58 @@
 # @opengeni/db
 
+## 5.4.2
+
+### Minor Changes
+
+- 801743c: A connected MCP server's own icon now shows as its connector logo. When a workspace connects or enables its own (custom) MCP server, Opengeni reads the `icons` the server lists in its `initialize` reply (`serverInfo.icons`, MCP 2025-11-25), picks the best one for a single tile (theme-neutral before light or dark, vector before a large raster, favicons last), and stores it as the item's logo. Icons go through the same checks as vendored catalog logos (an image type the asset route serves, at most 512 KB, no scripts or external references in SVGs), are fetched through the deployment's outbound network policy with a timeout and at most three redirects, and are served from `/v1/catalog-assets/...`, so the browser never loads them from the server's host. A server without a usable icon keeps its monogram and connects as before. Tool steps from such a server also find the logo by the server's host. Editing a custom catalog item no longer clears its logo. New `@opengeni/capabilities` exports: `mcpServerIcons`, `rankMcpServerIcons`, `decodeDataUriIcon`, `validateLogoAsset`, `catalogAssetObjectKey` and the other logo-asset checks previously private to the catalog scripts; new `@opengeni/db` export `setWorkspaceCapabilityCatalogItemLogo`.
+- 01188c9: Automations can listen to any app's webhooks. A new `custom` webhook adapter reads deliveries as the source's `format` describes: how they are signed (`standard_webhooks`, `hmac_sha256` of the body in a header, `timestamped_hmac_sha256` as Stripe and Tailscale send, or a shared `token` header), whether one delivery holds a list of events, and where each event's type, id, time, summary, subject, link and actor are (JSON paths or headers). The whole event is the event's data, so trigger conditions can filter on any field. The secret is the one the app shows or the one a person set there; the source waits, blocked, until it is pasted. `WEBHOOK_FORMAT_PRESETS` ships Tailscale's format: "Add a source" offers Tailscale by name, and its event-type catalog lists Tailscale's documented types.
+- 3cd4985: Passkeys kept in a connected password manager now work for agents. A Bitwarden or Vaultwarden login with a passkey, a Keeper login record with a passkey, or a Proton Pass login with a passkey shows `hasPasskey`, matches a `passkey` search, and signs in through the agent's managed browser like a hosted passkey. Only which items hold a passkey is mirrored (credential id, site, account name); the private key is read live from the provider when a browser needs it and is never stored. After a sign-in the signature counter is written back to Bitwarden and Keeper unless the vault is linked read-only; for Proton Pass, whose CLI cannot edit items, Opengeni keeps the count itself. Providers implement the new optional `readPasskeys` and `updatePasskeySignCount`, and `capabilities().passkeys` becomes a boolean. 1Password's SDK does not expose passkeys, so 1Password passkeys stay unusable. Items that need approval for each use are no longer loaded into a browser, hosted passkeys included.
+- 936d9e0: Add optional Turnstile signup verification, reversible promotional-credit holds, and signature-backed repeated free-credit claim detection. Keep purchased credit and incurred usage settlement intact, with tenant-safe balance projections and owner-only audited review controls. All enforcement defaults off and requires explicit deployment configuration after every funding reader is upgraded.
+
+### Patch Changes
+
+- 8a13aa9: Keep historical identity maintenance frontier reads ordered by native UUID so they use the primary-key index rather than sorting cast text, and apply configured job timeouts to startup inspection.
+- 0b76a0a: A background command on a Connected Machine no longer stays "running" forever after the machine was offline. When the reconciler could not reach the machine, it left the command to the machine's own reports, but the machine reports only operations it knows, so a command whose start never reached it was never settled. Now the machine's next inventory report makes those commands due again; the reconciler asks the machine, and one it does not know settles lost (never as a success), while one it runs continues as before. Migration 0984 adds the private function behind this, with its runtime grant withheld for one release so the previous release stays ready, and makes commands already stuck this way due once. Until a later migration grants it, a report skips the re-arm. Compute sandboxes are unaffected: their running commands are still never polled.
+- 7ba1be6: A Browser, Computer, Terminal or Files request that arrives while a chat's sandbox is still starting now waits for that start, as a turn does, instead of failing with "sandbox lease is not attachable". A fresh chat's first Browser or Computer open no longer needs a retry. The API and the worker share one wait for a starting sandbox.
+- 995c16f: App actions in a chat driven by someone who uses Opengeni through another product (an external user, such as a person in an embedded chat) now work. Every call used to fail with 403 `invalid delegated human authorization`, because the person proof accepted only native accounts. These calls now run as that person in the chat's workspace only, with their live access there capped by the access frozen with their message, and no organization-level authority, so reads such as `getMyUsage` answer at once. Action search offers such a person only actions that can succeed for them: that workspace's actions, only reads unless their message allows changes, nothing that carries a secret, and only actions whose first access check their access passes (each catalog entry now records that permission as `permission` when its handler shows one). With full access, such a person can do everything they can in that one workspace, and every path (search, a call, a session tool reaching another workspace) gives the same answer. A call outside that workspace is refused before anything runs, with a plain message that names the one workspace they can use. Refusals and 403 hints for them no longer point to Opengeni app pages. The exact-workspace person proof used by published Sites is now also exported as `stampWorkspacePersonAuthorization`, and it also covers an external person's own workspace, as their active organization membership names it (`externalPersonPersonalWorkspaceId`).
+- f721495: Long screenshot-heavy sessions no longer die with `active_history_too_large`. Automatic compaction now also runs when the stored active history reaches 60% of its materialization guard, or when a request reaches 60% of the provider's per-request image limit. A session that is already over the guard compacts from a bounded view, built in PostgreSQL with the oldest inline images left out, and continues. The remaining error, for an item too large even for that view, now says to clear the context or start a new session. New exports: `readActiveSessionHistory`, footprint and pressure helpers, `providerRequestImageLimit` and `countModelInputImages`.
+- 96502c5: A message someone else sends to a chat that runs on another member's personal machine no longer blocks the chat. It waits for the machine's owner instead: it never starts or interrupts the owner's turns, the owner's next message brings it to the agent as context, and it runs on its own once the chat moves to a machine the sender may use. Steering a waiting message, and an agent steering such a chat on behalf of somebody else, are refused with a clear reason. Send results report `waitsForMachineOwner`, and the chat's machine explanation lists whose messages wait (`waitingMessages`). This takes effect once a later release grants the runtime the new machine-owner lookup; until then chats behave as before.
+- 51915c3: Organization Codex accounts show their usage again on the Models page and the account page. Since API request tracing wraps the global `fetch`, every organization Codex live usage check refused to run, and each account row said "Usage unavailable" even though the account had a saved reading. Usage reads now accept the native `fetch` behind request tracing (`tracedFetchTarget` in `@opengeni/observability` unwraps it), and they still refuse a custom transport that cannot be awaited after an abort. When a live check does fail, the list row now shows the last saved reading, as the account page does, and says "Usage unavailable" only for an account that has never been read.
+- 5f332c1: Fewer prompt-cache misses. Claude portable checkpoints and Codex remote compaction now send the exact ordinary request withheld at the compaction boundary, so they extend the cached request instead of re-projecting history that diverged at the first tool disclosure. Workspace governance moves from the system prompt to a durable history item written before the turn that first sees a new value, and Codex cache affinity is keyed by the session scope subject, so recovery attempts, steers and turns by other people no longer rewrite the start of every request. Each model call fact now records a request fingerprint, Claude's dropped-thinking counts and a warm-miss class in `prompt_cache_diagnostics`, with matching worker metrics.
+- ba4c9dc: Document and provide an explicit resumable operator job to populate historical tool-event identity projections online without rewriting payloads or stopping services.
+- f5b8289: An image provider that is out of credit, rate limited, refusing or down no longer fails the turn as if the chat model were out of credits. `generate_image` returns its own short error and the turn continues, so the agent can tell the person and offer something else. Nothing is charged and held credits are released at once. Operators get the `opengeni_image_generation_provider_failures_total` metric and an `image generation provider failed` warning with the provider's detail; the agent and the person never see provider account text or billing links. Any other tool error that carries a provider 402 or 429 now stops the turn as `tool_provider_refused` instead of `provider_quota_exhausted` or a chat-model rate limit.
+- Updated dependencies [931325b]
+- Updated dependencies [23e7e1e]
+- Updated dependencies [f884a9b]
+- Updated dependencies [a57cfa8]
+- Updated dependencies [9db3491]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [01188c9]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [57cfc37]
+- Updated dependencies [96502c5]
+- Updated dependencies [51915c3]
+- Updated dependencies [5f332c1]
+- Updated dependencies [24b71c6]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [7a02989]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/config@5.4.0
+  - @opengeni/network@5.4.0
+  - @opengeni/codemode@5.4.0
+  - @opengeni/observability@5.4.0
+  - @opengeni/codex@5.4.0
+  - @opengeni/xai-subscription@5.4.0
+  - @opengeni/subscriptions@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

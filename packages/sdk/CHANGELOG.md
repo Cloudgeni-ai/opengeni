@@ -1,5 +1,51 @@
 # @opengeni/sdk
 
+## 5.4.2
+
+### Minor Changes
+
+- de7087a: Agents can write a meeting's notes. The new `meeting_notes_save` tool replaces a meeting's written-up notes (Markdown) as the person the session works for, so it reaches exactly the meetings they can see. It needs `sessions:create` and the revision `meeting_read` gave, so edits made in the meantime are not overwritten. `meeting_read` now also returns the meeting's notepad and its notes with their revision. In the timeline the tool shows as "Saving meeting notes", and it is part of the Meetings capability group.
+- 96502c5: A message someone else sends to a chat that runs on another member's personal machine no longer blocks the chat. It waits for the machine's owner instead: it never starts or interrupts the owner's turns, the owner's next message brings it to the agent as context, and it runs on its own once the chat moves to a machine the sender may use. Steering a waiting message, and an agent steering such a chat on behalf of somebody else, are refused with a clear reason. Send results report `waitsForMachineOwner`, and the chat's machine explanation lists whose messages wait (`waitingMessages`). This takes effect once a later release grants the runtime the new machine-owner lookup; until then chats behave as before.
+- 936d9e0: Add optional Turnstile signup verification, reversible promotional-credit holds, and signature-backed repeated free-credit claim detection. Keep purchased credit and incurred usage settlement intact, with tenant-safe balance projections and owner-only audited review controls. All enforcement defaults off and requires explicit deployment configuration after every funding reader is upgraded.
+
+### Patch Changes
+
+- 4488c59: Browser actions no longer report an ordinary page error as a lost controller (`controller_lost`). A dispatch error the driver did not classify is `controller_lost` only when the browser or the connection to it is actually gone; when the browser still answers, or does not answer a short check in time, it is `driver_failed` with an unknown outcome and a message that says which. Inside a browser action, such an error is a definite `driver_failed` failure when no input was sent, and an unknown outcome that names the error once input was sent. When every action ran but the page could not be read afterwards (for example a page whose frames keep changing), the receipt is `completed` without an outline and carries a new `observation_unavailable` note saying so. Clicking an option of a native single-choice dropdown now chooses it, as a person would: the page sees input and change, and an open list then closes without a blur or focus event. A disabled or hidden option is refused. A selection change whose change handler opens a JavaScript dialog, from a click or the `select` action, is no longer reported as an action that did not run. Clicking any other element the page does not render is a definite `invalid_action` refusal, and one removed from the page is a stale-element `locator_not_found`. Receipt notes are now versioned: a caller asks with `receiptNotes=2` (`BROWSER_ACTION_RECEIPT_NOTES_VERSION`) to receive the new note kind, and older callers keep receiving only the kinds they parse.
+- 3ee89da: Browser navigation now completes only once the new page has committed, and a page that never stops making requests no longer counts as network idle. Before, `navigate` could return while the tab still showed the previous page, so the next action could find and press its element in the page being left, and `waitUntil: 'network_idle'` reported success after waiting out its full timeout on pages that poll continuously. Now navigate and history steps wait for their own commit (and stop a navigation that never commits), and the outline, URL and screenshot of a result always describe the same document. A network-idle wait on a page that loaded but never went quiet still ends at its timeout and lets the batch carry on, and the action receipt now says so in a new per-action `notes` entry (`kind: "network_busy"`) instead of implying an idle network; a page that never loaded still fails the wait. When the page moves to a new document after an action found its element and just before its first input event, the action looks for its element (named by role, text or another non-ref locator) once more on the new page within its own deadline, and is refused without input only if the element is not there or the page changes again; actions in a fenceEachAction batch, and actions still waiting for their element, keep acting only on their own document as before. A navigation the browser turns into a download ends at once.
+
+  A server that answers with an HTTP error status and no body is now treated like one that sends an error page: the tab shows the browser's page naming the status, and navigate, tab open and browser open complete on it. A browser whose first page fails to load still opens and shows the browser's error page instead of failing the whole open, with a plain line naming the load error, and a navigation that fails to load reports its failure with the error page the tab actually committed.
+
+- f6298be: Role, text and ref locators now reach a visible custom menu that a web component puts on screen through a shadow-root slot, and on pages of up to about 1,000 accessibility nodes browser outlines show it too. Chromium updates its accessibility tree incrementally and leaves out content assigned to a slot after the slot was laid out, so such a context menu was on screen but missing from the outline and `locator_not_found` for every semantic locator. browserd now rebuilds the tree before a locator reports `locator_not_found` or a wait times out, on larger pages also once when a locator or wait first misses, and on small pages also for outlines, the first read of each action and about once a second while polling. Text that CSS generates keeps its ref across these rebuilds. Text and label locators also take `exact` (whole accessible name, ignoring case and spacing), as role locators do: the browser action schema already showed the field, but the server rejected it on those kinds. Code Mode `getByText` and `getByLabel` take it as their second argument.
+- 415c32b: Any Electron app that shows Opengeni's meetings can now record the computer's audio, which includes the other people in a call, as its own track, the way the Opengeni desktop app does. `@opengeni/desktop/system-audio` exports `handleSystemAudioIpc` and `systemAudioHelperName` next to `SystemAudioCaptures`, and its `channels` option is now optional. `@opengeni/desktop/preload/system-audio` exports `exposeSystemAudio()`, which defines `window.opengeniSystemAudio`. The meeting recorder uses that global when the Opengeni desktop bridge is absent (`getDesktopSystemAudio` in `@opengeni/sdk/desktop-bridge`). Each desktop release attaches the helper binaries (`opengeni-audio-capture-<os>-<arch>`), and `SHA256SUMS` covers them. Inside an Electron app that can't record computer audio, the recorder no longer offers a browser tab's audio, because Electron has no share picker of its own and choosing it only failed.
+- 53e1fe5: Agents now find and open any of the person's computers in one call.
+
+  - interaction_discover lists the person's Connected Machines this chat can use (`machines`: name, OS, online state, whether it has a screen, the placement to open it with, and which one the chat is on). The model's view leaves out browser and computer sessions on machines listed as offline, and says how many it left out; Code Mode still receives every record.
+  - computer_open and browser_open with a Connected Machine placement the chat is not on move the chat there first, exactly as sandbox_swap would, instead of failing and asking for a separate swap, and the result says the chat moved. A personal machine whose owner has not allowed the chat yet shows the card to allow that machine in the same call. An open that names a Connected Machine placement runs in model order with the other calls of a response, like sandbox_swap; other opens still run in parallel.
+  - tool_search loads a tool by its exact name without the server prefix (`sandboxes_list` loads `opengeni__sandboxes_list`). When several servers share that name, Opengeni's own tool (else the first) loads and the others are listed as suggestions.
+  - An agent's swap and machine list through the API act for the person who started its turn when it moves or lists its own chat, as sandbox_swap and sandboxes_list do, so that person's Only me machines are in reach. Repointing another chat it may control works as before. An agent attempt may list its own chat's machines with the session read permission sandboxes_list needs.
+  - Moving a chat to a machine that has not reported its workspace root (or with an invalid working directory) is a typed refusal from the swap API, not a 500.
+  - A computer or browser request while the chat's current machine is offline or no longer usable is a 409 that says so, not a 500. Asking for another machine in that state gets the wrong-placement answer.
+
+- Updated dependencies [931325b]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [01188c9]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [57cfc37]
+- Updated dependencies [96502c5]
+- Updated dependencies [5f332c1]
+- Updated dependencies [24b71c6]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/connect@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

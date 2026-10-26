@@ -1,5 +1,110 @@
 # @opengeni/worker-bundle
 
+## 5.4.2
+
+### Patch Changes
+
+- 38f5eb2: A turn that fails while a command is still waiting for its sandbox, for example because the sandbox could not be created, now records that command as not started instead of outcome unknown, so Retry stays available. Such a call is closed when it is recorded: if the sandbox comes up later, the command is not sent.
+- bed99c5: Computer and browser calls of one model response that use the same ComputerSession, or the same BrowserSession tab, now run in model order, so a `computer_observe` written after a `computer_act` shows the window after it, and a parallel read can no longer replace the reading an unfenced action was fenced on. Calls on other sessions or tabs, and other tools, still run concurrently. CUA keyboard input fenced on an earlier reading of the same window is sent when that window's focused element is unchanged.
+- 7ba1be6: A Browser, Computer, Terminal or Files request that arrives while a chat's sandbox is still starting now waits for that start, as a turn does, instead of failing with "sandbox lease is not attachable". A fresh chat's first Browser or Computer open no longer needs a retry. The API and the worker share one wait for a starting sandbox.
+- 53e1fe5: Agents now find and open any of the person's computers in one call.
+
+  - interaction_discover lists the person's Connected Machines this chat can use (`machines`: name, OS, online state, whether it has a screen, the placement to open it with, and which one the chat is on). The model's view leaves out browser and computer sessions on machines listed as offline, and says how many it left out; Code Mode still receives every record.
+  - computer_open and browser_open with a Connected Machine placement the chat is not on move the chat there first, exactly as sandbox_swap would, instead of failing and asking for a separate swap, and the result says the chat moved. A personal machine whose owner has not allowed the chat yet shows the card to allow that machine in the same call. An open that names a Connected Machine placement runs in model order with the other calls of a response, like sandbox_swap; other opens still run in parallel.
+  - tool_search loads a tool by its exact name without the server prefix (`sandboxes_list` loads `opengeni__sandboxes_list`). When several servers share that name, Opengeni's own tool (else the first) loads and the others are listed as suggestions.
+  - An agent's swap and machine list through the API act for the person who started its turn when it moves or lists its own chat, as sandbox_swap and sandboxes_list do, so that person's Only me machines are in reach. Repointing another chat it may control works as before. An agent attempt may list its own chat's machines with the session read permission sandboxes_list needs.
+  - Moving a chat to a machine that has not reported its workspace root (or with an invalid working directory) is a typed refusal from the swap API, not a 500.
+  - A computer or browser request while the chat's current machine is offline or no longer usable is a 409 that says so, not a 500. Asking for another machine in that state gets the wrong-placement answer.
+
+- d3d8ccf: A computer_open or browser_open that moved the chat to another machine and then failed now says the chat moved, so the agent does not assume it is still on its old machine. Moving a chat in the UI to a machine that has not reported its workspace folder, or whose workspace does not contain the chat's working folder, shows what to do instead of "Try again."
+- 5f332c1: Fewer prompt-cache misses. Claude portable checkpoints and Codex remote compaction now send the exact ordinary request withheld at the compaction boundary, so they extend the cached request instead of re-projecting history that diverged at the first tool disclosure. Workspace governance moves from the system prompt to a durable history item written before the turn that first sees a new value, and Codex cache affinity is keyed by the session scope subject, so recovery attempts, steers and turns by other people no longer rewrite the start of every request. Each model call fact now records a request fingerprint, Claude's dropped-thinking counts and a warm-miss class in `prompt_cache_diagnostics`, with matching worker metrics.
+- e096a40: A turn whose model provider cannot be reached at all, as when the machine running it loses its internet connection, now waits for the connection to return instead of failing after five quick retries. It retries at a calm pace (up to every five minutes) for up to six hours from the first failure and continues by itself when the provider answers again; a new message still ends the wait at once. Name-resolution failures, refused connections, missing routes and the OpenAI SDK's bare "Connection error." qualify. Provider errors with an HTTP status, dropped or slow connections, unknown host names and TLS failures keep the existing five-retry budget. "No route to host" and "network is unreachable" failures are now retried instead of failing the turn at once.
+- 7d48157: Speaker detection for meeting recordings runs on 4 threads by default
+  instead of every core. A half-hour meeting takes 128 CPU-seconds instead of
+  304 on a 32-thread machine and still finishes alongside its transcription.
+  Word alignment keeps using every core.
+- f5b8289: An image provider that is out of credit, rate limited, refusing or down no longer fails the turn as if the chat model were out of credits. `generate_image` returns its own short error and the turn continues, so the agent can tell the person and offer something else. Nothing is charged and held credits are released at once. Operators get the `opengeni_image_generation_provider_failures_total` metric and an `image generation provider failed` warning with the provider's detail; the agent and the person never see provider account text or billing links. Any other tool error that carries a provider 402 or 429 now stops the turn as `tool_provider_refused` instead of `provider_quota_exhausted` or a chat-model rate limit.
+- 7a02989: Hand off retained commands with unavailable foreground observations before exposing their background command IDs, so finished turns can clean up without waiting for an unavailable observer. Preserve physical writer and capture fences, classify forgotten Modal exec state as uncertainty, and retain bounded probe diagnostics. Identify outstanding writer kinds during finalization and label deliberate worker containment even when Temporal masks its force-stop exception.
+- Updated dependencies [931325b]
+- Updated dependencies [23e7e1e]
+- Updated dependencies [f884a9b]
+- Updated dependencies [a57cfa8]
+- Updated dependencies [484a6ff]
+- Updated dependencies [8a13aa9]
+- Updated dependencies [9db3491]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [2a181e7]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [3708369]
+- Updated dependencies [38f5eb2]
+- Updated dependencies [57e4bee]
+- Updated dependencies [bed99c5]
+- Updated dependencies [bd8e4b4]
+- Updated dependencies [a345601]
+- Updated dependencies [0b76a0a]
+- Updated dependencies [801743c]
+- Updated dependencies [b85edfc]
+- Updated dependencies [01188c9]
+- Updated dependencies [415c32b]
+- Updated dependencies [7ba1be6]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [f0e8083]
+- Updated dependencies [f721495]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [5769285]
+- Updated dependencies [57cfc37]
+- Updated dependencies [96502c5]
+- Updated dependencies [e74e3db]
+- Updated dependencies [1ed80fb]
+- Updated dependencies [51915c3]
+- Updated dependencies [d3d8ccf]
+- Updated dependencies [1d2b021]
+- Updated dependencies [82a9da9]
+- Updated dependencies [5f332c1]
+- Updated dependencies [3cd4985]
+- Updated dependencies [47a0e5b]
+- Updated dependencies [ba4c9dc]
+- Updated dependencies [24b71c6]
+- Updated dependencies [47a0e5b]
+- Updated dependencies [7f9c06b]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [f5b8289]
+- Updated dependencies [7a02989]
+- Updated dependencies [b833bfc]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/config@5.4.0
+  - @opengeni/runtime@5.4.0
+  - @opengeni/network@5.4.0
+  - @opengeni/core@5.4.0
+  - @opengeni/db@5.4.0
+  - @opengeni/codemode@5.4.0
+  - @opengeni/interaction@5.4.0
+  - @opengeni/sdk@5.4.0
+  - @opengeni/capabilities@5.4.0
+  - @opengeni/observability@5.4.0
+  - @opengeni/vaults@5.4.0
+  - @opengeni/vaults-bitwarden@5.4.0
+  - @opengeni/vaults-keeper@5.4.0
+  - @opengeni/vaults-protonpass@5.4.0
+  - @opengeni/storage@5.4.0
+  - @opengeni/codex@5.4.0
+  - @opengeni/documents@5.4.0
+  - @opengeni/events@5.4.0
+  - @opengeni/github@5.4.0
+  - @opengeni/tool-gateway@5.4.0
+  - @opengeni/vaults-onepassword@5.4.0
+  - @opengeni/xai-subscription@5.4.0
+  - @opengeni/agent-proto@5.4.0
+  - @opengeni/decisions@5.4.0
+  - @opengeni/jev@5.4.0
+  - @opengeni/subscriptions@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

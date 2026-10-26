@@ -1,5 +1,22 @@
 # @opengeni/desktop
 
+## 5.4.2
+
+### Patch Changes
+
+- 3d298e6: On Windows, a desktop app run from source now uses its own app ID (the packaged ID plus `.dev`). Sharing the installed app's ID left two Start-menu shortcuts with one ID, so Windows could show the installed app's notifications under "Electron" and open the development build when one was clicked.
+- 415c32b: Any Electron app that shows Opengeni's meetings can now record the computer's audio, which includes the other people in a call, as its own track, the way the Opengeni desktop app does. `@opengeni/desktop/system-audio` exports `handleSystemAudioIpc` and `systemAudioHelperName` next to `SystemAudioCaptures`, and its `channels` option is now optional. `@opengeni/desktop/preload/system-audio` exports `exposeSystemAudio()`, which defines `window.opengeniSystemAudio`. The meeting recorder uses that global when the Opengeni desktop bridge is absent (`getDesktopSystemAudio` in `@opengeni/sdk/desktop-bridge`). Each desktop release attaches the helper binaries (`opengeni-audio-capture-<os>-<arch>`), and `SHA256SUMS` covers them. Inside an Electron app that can't record computer audio, the recorder no longer offers a browser tab's audio, because Electron has no share picker of its own and choosing it only failed.
+- Updated dependencies [4488c59]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [415c32b]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [de7087a]
+- Updated dependencies [96502c5]
+- Updated dependencies [936d9e0]
+  - @opengeni/sdk@5.4.0
+  - @opengeni/agent-host@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes
