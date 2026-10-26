@@ -9,6 +9,7 @@ import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
   addSessionSystemUpdate,
+  applyContextCompaction,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -59,6 +60,7 @@ import {
   isContextWindowExceeded,
   isExactContextLengthExceeded,
   maybeCompactContext,
+  type CompactionSummarizer,
 } from "../src/activities/context-compaction";
 
 async function claimCompactionForAttempt(
@@ -481,6 +483,294 @@ describe("standalone context compaction execution", () => {
       ]);
     });
   }
+
+  /**
+   * Two finished turns (A, B), each a request and its answer, plus `leading`
+   * rows before them, then a running compaction turn that received an
+   * agent message. Returns the scope for compacting inside the running turn.
+   */
+  async function finishedTurnsFixture(
+    leading: (turnA: string) => Array<{
+      turnId: string | null;
+      item: Record<string, unknown>;
+      providerArtifactInvalidatedAt?: Date;
+    }>,
+  ) {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Turn alignment compaction test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Turn alignment compaction test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const workspaceId = grant.workspaceId!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: "",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const [turnA, turnB] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .insert(schema.sessionTurns)
+        .values(
+          ["First question", "Second question"].map((prompt, position) => ({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: session.id,
+            triggerEventId: crypto.randomUUID(),
+            temporalWorkflowId: `session-${session.id}`,
+            status: "completed" as const,
+            source: "user" as const,
+            prompt,
+            position,
+            resources: [],
+            tools: [],
+            model: "scripted-compactor",
+            reasoningEffort: "medium" as const,
+            latencyMode: "standard" as const,
+            sandboxBackend: "none" as const,
+          })),
+        )
+        .returning(),
+    );
+    const message = (role: string, text: string) =>
+      role === "assistant"
+        ? { type: "message", role, content: [{ type: "output_text", text }] }
+        : { type: "message", role, content: text };
+    const rows = [
+      ...leading(turnA!.id),
+      { turnId: turnA!.id, item: message("user", "First question") },
+      // Bulky tool work that compaction drops, so the rebuild is smaller.
+      {
+        turnId: turnA!.id,
+        item: { type: "function_call", callId: "evidence", name: "inspect", arguments: "{}" },
+      },
+      {
+        turnId: turnA!.id,
+        item: {
+          type: "function_call_result",
+          callId: "evidence",
+          output: "completed evidence ".repeat(4_000),
+        },
+      },
+      { turnId: turnA!.id, item: message("assistant", "First answer") },
+      { turnId: turnB!.id, item: message("user", "Second question") },
+      { turnId: turnB!.id, item: message("assistant", "Second answer") },
+    ];
+    await withWorkspaceRls(client.db, workspaceId, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        rows.map((row, position) => ({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId: session.id,
+          turnId: row.turnId,
+          position,
+          item: row.item,
+          ...(row.providerArtifactInvalidatedAt
+            ? {
+                providerArtifactInvalidatedAt: row.providerArtifactInvalidatedAt,
+                providerArtifactInvalidationReason: "encrypted_content_rejected",
+                providerArtifactInvalidatedByAttemptId: crypto.randomUUID(),
+              }
+            : {}),
+        })),
+      );
+    });
+    const update = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `turn-alignment:${suffix}`,
+      summary: "Continue",
+      payload: { type: "agent_message", operationId: crypto.randomUUID(), text: "Continue." },
+    });
+    if (!update.added) throw new Error("Agent-message input was not inserted");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(client.db, workspaceId, session.id, attemptId);
+    const scope = {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionId: session.id,
+      turnId: turn.id,
+      executionGeneration: turn.executionGeneration,
+      attemptId,
+    };
+    const retained = async () =>
+      (await getActiveSessionHistoryItemsPaged(client.db, workspaceId, session.id))
+        .filter(
+          (row) =>
+            row.item.type === "message" &&
+            (row.item.role === "user" || row.item.role === "assistant") &&
+            !String(JSON.stringify(row.item.content)).includes("Checkpoint"),
+        )
+        .map((row) => ({
+          turnId: row.turnId,
+          replyTurn: row.item[RETAINED_REPLY_TURN_FIELD] ?? null,
+          text:
+            typeof row.item.content === "string"
+              ? row.item.content
+              : (row.item.content as Array<{ text: string }>).map((part) => part.text).join(""),
+        }));
+    const expected = [
+      { turnId: turnA!.id, replyTurn: null, text: "First question" },
+      { turnId: null, replyTurn: turnA!.id, text: "First answer" },
+      { turnId: turnB!.id, replyTurn: null, text: "Second question" },
+      { turnId: null, replyTurn: turnB!.id, text: "Second answer" },
+    ];
+    return { grant, workspaceId, session, turnA: turnA!, turnB: turnB!, scope, retained, expected };
+  }
+
+  for (const mode of ["portable", "remote_v2"] as const) {
+    test(`${mode} keeps turn ids aligned when a rejected provider artifact row is dropped`, async () => {
+      // Projection drops a rejected compaction row, so turn ids must follow
+      // rows, not list positions; otherwise every later request would take
+      // the turn of the row before it and borrow another turn's reply.
+      const fixture = await finishedTurnsFixture((turnA) => [
+        {
+          turnId: turnA,
+          item: { type: "compaction", encrypted_content: "rejected-checkpoint" },
+          providerArtifactInvalidatedAt: new Date(),
+        },
+      ]);
+      const outcome = await maybeCompactContext(
+        client.db,
+        testSettings({ contextWindowTokens: 250_000 }),
+        fixture.scope,
+        null,
+        async () => "Checkpoint of the rejected-artifact session",
+        {
+          force: true,
+          codexCompactionMode: mode,
+          isCodexSubscriptionTurn: mode === "remote_v2",
+          requestRemoteCompactionV2: async () => ({
+            type: "compaction",
+            encrypted_content: `checkpoint-${crypto.randomUUID()}`,
+          }),
+        },
+      );
+      expect(outcome.compacted).toBe(true);
+      expect(await fixture.retained()).toEqual(fixture.expected);
+    });
+  }
+
+  test("portable byte-budget cut keeps turn ids aligned with the summarized prefix", async () => {
+    const fixture = await finishedTurnsFixture(() => []);
+    // The running turn's open tool batch does not fit the byte budget, so it
+    // is deferred and only the earlier prefix is summarized and rebuilt.
+    await withWorkspaceRls(client.db, fixture.workspaceId, async (db) => {
+      const [{ max } = { max: 0 }] = await db
+        .select({ max: sql<number>`max(${schema.sessionHistoryItems.position})` })
+        .from(schema.sessionHistoryItems)
+        .where(eq(schema.sessionHistoryItems.sessionId, fixture.session.id));
+      await db.insert(schema.sessionHistoryItems).values(
+        [
+          { type: "function_call", callId: "deferred-call", name: "inspect", arguments: "{}" },
+          { type: "function_call_result", callId: "deferred-call", output: "OVERSIZED-OUTPUT" },
+        ].map((item, index) => ({
+          accountId: fixture.grant.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.session.id,
+          turnId: fixture.scope.turnId,
+          position: Math.floor(Number(max)) + 1 + index,
+          item,
+        })),
+      );
+    });
+    const summarize: CompactionSummarizer = async (_settings, input) => {
+      expect(JSON.stringify(input)).not.toContain("OVERSIZED-OUTPUT");
+      return "Checkpoint of the summarized prefix";
+    };
+    summarize.measureInputBytes = async (_settings, input) =>
+      JSON.stringify(input).includes("OVERSIZED-OUTPUT") ? Number.MAX_SAFE_INTEGER : 1;
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      fixture.scope,
+      null,
+      summarize,
+      { force: true, codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    expect(await fixture.retained()).toEqual(fixture.expected);
+    const active = await getActiveSessionHistoryItemsPaged(
+      client.db,
+      fixture.workspaceId,
+      fixture.session.id,
+    );
+    // The deferred batch follows the checkpoint and stays unattributed.
+    expect(active.slice(-2).map((row) => [row.item.type, row.turnId])).toEqual([
+      ["function_call", null],
+      ["function_call_result", null],
+    ]);
+  });
+
+  test("applyContextCompaction keeps only this session's turn ids and rejects misaligned ids", async () => {
+    const fixture = await finishedTurnsFixture(() => []);
+    const other = await finishedTurnsFixture(() => []);
+    const input = {
+      accountId: fixture.grant.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      turnId: fixture.scope.turnId,
+      expectedExecutionGeneration: fixture.scope.executionGeneration,
+      expectedAttemptId: fixture.scope.attemptId,
+      summaryItem: { type: "message", role: "user", content: "Checkpoint" },
+    };
+    const replacementItems = [
+      "own finished turn",
+      "running turn",
+      "other session's turn",
+      "malformed id",
+      "upper-cased id",
+      "no id",
+    ].map((text) => ({ type: "message", role: "user", content: text }));
+    await expect(
+      applyContextCompaction(client.db, {
+        ...input,
+        replacementItems,
+        replacementTurnIds: [fixture.turnA.id],
+      }),
+    ).rejects.toThrow("align");
+    const applied = await applyContextCompaction(client.db, {
+      ...input,
+      replacementItems,
+      replacementTurnIds: [
+        fixture.turnA.id,
+        fixture.scope.turnId,
+        other.turnA.id,
+        "not-a-uuid'; select 1; --",
+        fixture.turnB.id.toUpperCase(),
+        null,
+      ],
+    });
+    expect(applied.applied).toBe(true);
+    const active = await getActiveSessionHistoryItemsPaged(
+      client.db,
+      fixture.workspaceId,
+      fixture.session.id,
+    );
+    expect(active.slice(0, replacementItems.length).map((row) => row.turnId)).toEqual([
+      fixture.turnA.id,
+      fixture.scope.turnId,
+      null,
+      null,
+      null,
+      null,
+    ]);
+  });
 
   test("does not touch durable history when provider accounting is below threshold", async () => {
     const inaccessibleDb = new Proxy(
