@@ -33,7 +33,7 @@ import {
 } from "../src/site-publishing/limits";
 import { publicationAnswer } from "../src/mcp/site-publication-tools";
 import { scanSitePageUsage, siteReadinessWarnings } from "../src/site-publishing/readiness";
-import { siteClientAddressKey } from "../src/site-publishing/runtime";
+import { siteClientAddressKey, siteOutsiderUnfundedRefusal } from "../src/site-publishing/runtime";
 import { siteAccessNarrowed } from "../src/site-publishing/service";
 import {
   siteSessionEventProjection,
@@ -511,6 +511,102 @@ describe("readiness", () => {
       outsideModel: { kind: "unavailable" },
     });
     expect(none.map((warning) => warning.code)).toEqual(["agent_model_outside_unavailable"]);
+  });
+
+  test("an outside model the workspace can't pay for warns the owner", () => {
+    const unfunded = siteReadinessWarnings({
+      ...base,
+      page: null,
+      agent: { enabled: true, tools: null },
+      outsideModel: { kind: "same", model: "gpt-6-luna" },
+      outsideModelUnfunded: true,
+    });
+    expect(unfunded.map((warning) => warning.code)).toEqual(["agent_model_outside_no_credits"]);
+    expect(unfunded[0]!.message).toContain("no credits for gpt-6-luna");
+    // No assistant, or a funded one: nothing to say.
+    expect(
+      siteReadinessWarnings({
+        ...base,
+        page: null,
+        agent: { enabled: false, tools: null },
+        outsideModel: { kind: "same", model: "gpt-6-luna" },
+        outsideModelUnfunded: true,
+      }),
+    ).toEqual([]);
+    expect(
+      siteReadinessWarnings({
+        ...base,
+        page: null,
+        agent: { enabled: true, tools: null },
+        outsideModel: { kind: "fallback", model: "gpt-6" },
+        outsideModelUnfunded: false,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("a turn the workspace can't pay for, seen from outside the workspace", () => {
+  const refusal = (body: unknown, status = 402) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  const noCredits = {
+    error: {
+      status: 402,
+      code: "payment_required",
+      message:
+        "No credits available for this model. Choose a model covered by your promotional credits or add credits.",
+    },
+  };
+
+  test("becomes the assistant's plain refusal for guests and signed-in outsiders", async () => {
+    for (const kind of ["guest", "user", "invited"] as const) {
+      const translated = await siteOutsiderUnfundedRefusal({ kind }, refusal(noCredits));
+      expect(translated?.status).toBe(403);
+      expect(translated!.message).toBe("This Site's assistant isn't available right now");
+      expect(translated!.details).toMatchObject({
+        code: "not_available_for_viewer",
+        feature: "agent",
+        reason: "no_credits",
+      });
+    }
+    const allowance = await siteOutsiderUnfundedRefusal(
+      { kind: "guest" },
+      refusal({ error: { code: "allowance_exhausted", message: "Allowance used up" } }),
+    );
+    expect(allowance?.status).toBe(403);
+  });
+
+  test("members, other refusals and the Site's own budgets pass through unchanged", async () => {
+    expect(await siteOutsiderUnfundedRefusal({ kind: "member" }, refusal(noCredits))).toBeNull();
+    expect(
+      await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        refusal({
+          error: {
+            code: "payment_required",
+            message: "Site usage",
+            details: { code: "site_platform_quota_exhausted" },
+          },
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        refusal({ error: { code: "session_usage_limit_reached", message: "Budget" } }),
+      ),
+    ).toBeNull();
+    expect(
+      await siteOutsiderUnfundedRefusal({ kind: "guest" }, refusal(noCredits, 429)),
+    ).toBeNull();
+    expect(
+      await siteOutsiderUnfundedRefusal(
+        { kind: "guest" },
+        new Response("not json", { status: 402 }),
+      ),
+    ).toBeNull();
   });
 });
 

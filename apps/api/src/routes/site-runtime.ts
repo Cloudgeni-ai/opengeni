@@ -83,6 +83,7 @@ import {
   resolveSiteOutsideModel,
   siteCreditModelIds,
   siteCreditModelSelections,
+  siteOutsideModelFunding,
 } from "../site-publishing/agent-model";
 import { projectWorkspaceModelCatalog } from "../model-catalog";
 import {
@@ -138,6 +139,7 @@ import {
   siteReservationRefused,
   siteClientAddressPrincipal,
   siteNotAvailableForViewer,
+  siteOutsiderUnfundedRefusal,
   siteRuntimeBudgetKey,
   siteRuntimeBudgetLimits,
   siteViewerCapabilities,
@@ -984,8 +986,9 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
   /**
    * What this viewer can use, from the same checks the routes enforce: the
    * agent also needs the platform brake open for people outside the
-   * workspace who are not invited, and a credit-billed model for anyone
-   * outside the workspace. Page tools are independent of the assistant.
+   * workspace who are not invited, and a credit-billed model the workspace
+   * can pay for, for anyone outside the workspace. Page tools are
+   * independent of the assistant.
    */
   const viewerCapabilities = async (
     host: SiteRuntimeHost,
@@ -1008,6 +1011,14 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
         agentModel: host.publication.agent.model,
       }).catch(() => null);
       agent = choice !== null && choice.kind !== "unavailable";
+      // A model the workspace can't pay for answers only "no credits":
+      // report the assistant unavailable rather than offer it. A failed
+      // check leaves it offered; the turn's own admission still decides.
+      if (agent && choice && choice.kind !== "unavailable")
+        agent = await siteOutsideModelFunding(deps, host.scope, choice.model).then(
+          (decision) => decision.allowed,
+          () => true,
+        );
     }
     const version = host.site.currentVersionId
       ? await getPublishedSiteVersion(deps.db, host.scope, host.site.id, host.site.currentVersionId)
@@ -1355,7 +1366,11 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       body?: unknown,
     ) => {
       const response = await send(method, path, body);
-      if (!response.ok) return siteRuntimeForwardedResponse(response);
+      if (!response.ok) {
+        const unfunded = await siteOutsiderUnfundedRefusal(viewer, response);
+        if (unfunded) throw unfunded;
+        return siteRuntimeForwardedResponse(response);
+      }
       return context.json(view(await response.json()) as object, response.status as 200);
     };
     const notFound = () =>
@@ -1659,6 +1674,8 @@ export function registerSiteRuntimeRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       if (created.status !== 202) {
         await releaseUnstarted(host.scope, requestedSessionId);
+        const unfunded = await siteOutsiderUnfundedRefusal(viewer, created);
+        if (unfunded) throw unfunded;
         return siteRuntimeForwardedResponse(created);
       }
       const session = (await created.json().catch(() => null)) as { id?: unknown } | null;

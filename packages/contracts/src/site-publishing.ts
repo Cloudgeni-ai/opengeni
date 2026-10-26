@@ -426,6 +426,8 @@ export const SITE_PUBLISH_WARNING_CODES = [
   /** No longer reported (the fallback shows as outsideAgentModel); kept for compatibility. */
   "agent_model_outside_fallback",
   "agent_model_outside_unavailable",
+  /** The workspace can't pay for the outside model right now (no credits, or allowance used up). */
+  "agent_model_outside_no_credits",
   /** The page was too large to read, so what it uses was not checked. */
   "page_not_checked",
   /**

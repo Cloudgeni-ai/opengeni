@@ -492,6 +492,46 @@ export function requireSiteAgent(
     );
 }
 
+/** What someone outside the workspace is told when the workspace can't pay for their turn. */
+export const SITE_AGENT_UNFUNDED_MESSAGE = "This Site's assistant isn't available right now";
+
+/** The refusal for someone outside the workspace whose turn the workspace can't pay for. */
+export function siteAgentUnfunded() {
+  return siteNotAvailableForViewer("agent", SITE_AGENT_UNFUNDED_MESSAGE, {
+    reason: "no_credits",
+  });
+}
+
+/**
+ * Core refuses a turn with 402 when the workspace can't pay for it: no
+ * credits for the model, or its allowance used up. Someone outside the
+ * workspace can neither add credits nor pick another model, so a forwarded
+ * refusal of that kind becomes the assistant's plain "not available"
+ * refusal instead of the owner's purchase prompt. Any other response,
+ * including a Site's own 402 budgets, is returned unchanged (null).
+ */
+export async function siteOutsiderUnfundedRefusal(
+  viewer: Pick<SiteRuntimeViewer, "kind">,
+  response: Response,
+): Promise<ReturnType<typeof siteAgentUnfunded> | null> {
+  if (viewer.kind === "member" || response.status !== 402) return null;
+  const body = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { error?: { code?: unknown; details?: { code?: unknown } } } | null;
+  const code = body?.error?.code;
+  const detail = body?.error?.details?.code;
+  const unfunded =
+    code === "allowance_exhausted" ||
+    (code === "payment_required" &&
+      (detail === undefined ||
+        detail === "insufficient_credits" ||
+        detail === "allowance_exhausted"));
+  if (!unfunded) return null;
+  await response.body?.cancel().catch(() => undefined);
+  return siteAgentUnfunded();
+}
+
 function budgetExhausted(budget: string, message: string) {
   return sitePublishingError(429, "limit_exceeded", "site_budget_exhausted", message, { budget });
 }

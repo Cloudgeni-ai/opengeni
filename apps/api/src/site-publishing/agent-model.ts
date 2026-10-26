@@ -1,11 +1,13 @@
 import type { Settings } from "@opengeni/config";
 import {
   resolveWorkspaceSessionDefaults,
+  type LimitDecision,
   type OrganizationModelDefaults,
   type WorkspaceSessionDefaults,
 } from "@opengeni/contracts";
 import {
   admissibleWorkspaceModel,
+  checkLimit,
   loadWorkspaceModelSelectionInput,
   resolveWorkspaceCatalogSettings,
   resolveWorkspaceModelSelection,
@@ -146,5 +148,38 @@ export async function resolveSiteOutsideModel(
     agentModel: input.agentModel,
     workspaceDefaults: resolveWorkspaceSessionDefaults(workspace?.settings ?? {}),
     organizationDefaults: organization.sessionDefaults ?? null,
+  });
+}
+
+/** Core refusals that mean the workspace can't pay for the turn. */
+const UNFUNDED_LIMIT_CODES: ReadonlySet<string> = new Set([
+  "insufficient_credits",
+  "allowance_exhausted",
+]);
+
+/** Whether a core admission refusal (402) means the workspace can't pay. */
+export function siteUnfundedLimitCode(code: unknown): boolean {
+  return typeof code === "string" && UNFUNDED_LIMIT_CODES.has(code);
+}
+
+/**
+ * Whether the workspace can pay for a turn by someone outside it on this
+ * credit-billed model right now: core's own admission check for a new agent
+ * run, with no person's allowance behind it, as an outside visitor's turn
+ * has none. A Site whose assistant would only answer "no credits" reports
+ * the assistant as unavailable instead of offering it.
+ */
+export async function siteOutsideModelFunding(
+  deps: { db: Database; settings: Settings },
+  scope: { accountId: string; workspaceId: string },
+  model: string,
+): Promise<LimitDecision> {
+  return checkLimit(deps, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    initiatingHumanSubjectId: null,
+    action: "agent_run:create",
+    quantity: 1,
+    model,
   });
 }
