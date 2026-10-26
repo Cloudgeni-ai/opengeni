@@ -35,7 +35,12 @@ delivery can be late or missed.
   refuses a second, so a second replica waits and tries again: a standby,
   with no lock of our own. Each message is handled, then deleted: jobs
   offered are acquired, and the pool is scaled to the jobs GitHub has
-  assigned it plus the idle runners asked for, up to its maximum.
+  assigned it plus the idle runners asked for, up to its maximum. As in
+  GitHub's own listener, a message whose jobs could not be acquired is
+  neither handled nor deleted, and the next poll asks from the same place,
+  so it is offered again; a session token that expired is refreshed once
+  for the acquisition. After five failures in a row the session is given
+  up and opened again.
 - **A runner is a sandbox.** Each gets a just-in-time configuration from
   GitHub, then a sandbox from the pool's template with that configuration
   in its environment and its runner's name and id in its metadata. The
@@ -48,12 +53,18 @@ delivery can be late or missed.
   completed, and at the latest when a reconciliation finds its runner gone
   from GitHub (ephemeral runners are removed when their job ends). An
   unused runner beyond what the pool needs is removed from GitHub, then its
-  sandbox killed; GitHub refuses to remove a busy runner, which keeps its
-  job. A registration whose sandbox is gone is removed. Every sandbox has a
-  timeout, the pool's longest job, in case all else fails.
+  sandbox killed; GitHub refuses to remove a busy runner
+  (`JobStillRunningException`), which keeps its job. Any other refusal
+  (rate limits, a lapsed token) is an error, and the runner is asked about
+  again at the next check. A registration whose sandbox is gone is removed,
+  and so is one of the pool's names with no sandbox at all (the service
+  stopped between registering it and starting its sandbox). Every sandbox
+  has a timeout, the pool's longest job, in case all else fails.
 - **No state of its own.** What runs is read back from the sandboxes'
   metadata and GitHub every 30 s and at start, so a restart or a standby
-  taking over loses nothing and never leaks a sandbox.
+  taking over loses nothing and never leaks a sandbox or a registration. A
+  standby taking over also adopts the pool's newest template, which the
+  replica before it may have made.
 - **Warm templates refreshed from the default branch.** Given a repository
   and a prepare command, the service watches the branch. When it moves (and
   at most every `--warm-every`), it starts a sandbox from the base template,

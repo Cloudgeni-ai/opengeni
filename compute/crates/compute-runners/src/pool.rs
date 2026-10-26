@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -31,6 +31,14 @@ const RECONCILE_EVERY: Duration = Duration::from_secs(30);
 const SETTLE: Duration = Duration::from_secs(60);
 /// How long a standby waits before asking for the session again.
 pub const STANDBY_EVERY: Duration = Duration::from_secs(30);
+/// How long a listener waits after a failed poll or a message it could
+/// not take before it polls again.
+pub const RETRY_EVERY: Duration = Duration::from_secs(5);
+/// Hex digits after a runner name's `<pool>-`.
+const NAME_DIGITS: usize = 12;
+/// Failures in a row (polls, or messages whose jobs were not acquired)
+/// after which the session is given up and opened again.
+const FAILURES_ALLOWED: u32 = 5;
 
 /// How a pool runs.
 #[derive(Clone, Debug)]
@@ -48,6 +56,9 @@ pub struct Settings {
     /// How long a standby waits before asking for the session again
     /// ([`STANDBY_EVERY`]).
     pub standby: Duration,
+    /// How long a listener waits after a failure before polling again
+    /// ([`RETRY_EVERY`]).
+    pub retry: Duration,
 }
 
 /// One runner, as the pool knows it.
@@ -78,6 +89,19 @@ fn now_s() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
+}
+
+/// Whether `name` is one this pool gives its runners: `<pool>-` and
+/// [`NAME_DIGITS`] hex digits.
+fn named_by(pool: &str, name: &str) -> bool {
+    name.strip_prefix(pool)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|digits| {
+            digits.len() == NAME_DIGITS
+                && digits
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
 }
 
 impl Pool {
@@ -185,7 +209,7 @@ impl Pool {
 
     /// Registers a runner and starts its sandbox.
     async fn start(&self) -> Result<(String, Runner)> {
-        let mut suffix = [0u8; 6];
+        let mut suffix = [0u8; NAME_DIGITS / 2];
         getrandom::fill(&mut suffix)?;
         let name = suffix
             .iter()
@@ -245,6 +269,8 @@ impl Pool {
     }
 
     /// Reads back what runs, ends what is no longer needed, and scales.
+    /// A runner whose removal fails is kept, and asked about again next
+    /// time.
     pub async fn reconcile(&mut self) -> Result<()> {
         let listed = self
             .compute
@@ -285,6 +311,7 @@ impl Pool {
                 }
             }
         }
+        self.forget_orphans().await;
         let settled = now_s().saturating_sub(SETTLE.as_secs());
         let known: Vec<(String, Runner)> = self
             .runners
@@ -297,8 +324,14 @@ impl Pool {
             }
             if !seen.contains(&runner.sandbox) {
                 tracing::info!(runner = %name, sandbox = %runner.sandbox, "a runner's sandbox is gone; so goes its registration");
-                if !matches!(self.github.remove_runner(runner.id).await?, Removed::Busy) {
-                    self.runners.remove(&name);
+                match self.github.remove_runner(runner.id).await {
+                    Ok(Removed::Removed | Removed::Gone) => {
+                        self.runners.remove(&name);
+                    }
+                    Ok(Removed::Busy) => {}
+                    Err(error) => {
+                        tracing::warn!(runner = %name, error = format!("{error:#}"), "removing a runner failed; the next check tries again");
+                    }
                 }
                 continue;
             }
@@ -309,6 +342,34 @@ impl Pool {
         }
         self.scale().await;
         Ok(())
+    }
+
+    /// Removes the pool's registrations that have no sandbox: left when
+    /// the service stopped between registering a runner and starting its
+    /// sandbox, or when removing one whose sandbox failed to start failed.
+    /// Runs after the pool took on every sandbox it has, and before it
+    /// starts any, so every registration of a runner it knows is its own.
+    async fn forget_orphans(&self) {
+        let registered = match self.github.registered().await {
+            Ok(registered) => registered,
+            Err(error) => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "listing the scope's runners failed"
+                );
+                return;
+            }
+        };
+        for orphan in registered.into_iter().filter(|runner| {
+            !runner.busy
+                && named_by(&self.settings.name, &runner.name)
+                && !self.runners.contains_key(&runner.name)
+        }) {
+            tracing::info!(runner = %orphan.name, "a registration without a sandbox goes");
+            if let Err(error) = self.github.remove_runner(orphan.id).await {
+                tracing::warn!(runner = %orphan.name, error = format!("{error:#}"), "removing a registration failed; the next check tries again");
+            }
+        }
     }
 }
 
@@ -409,41 +470,53 @@ impl Pool {
                         failures,
                         "polling for messages failed"
                     );
-                    if failures >= 5 {
+                    if failures >= FAILURES_ALLOWED {
                         return false;
                     }
-                    if wait_or_stop(stop, Duration::from_secs(5)).await {
+                    if wait_or_stop(stop, self.settings.retry).await {
                         return true;
                     }
                     continue;
                 }
             };
-            failures = 0;
-            self.take(session, &message).await;
-            last = Some(message.id);
+            if self.take(session, &message).await {
+                failures = 0;
+                last = Some(message.id);
+                continue;
+            }
+            // The message stays: polled again from the same place, it is
+            // offered again, as are its jobs.
+            failures += 1;
+            if failures >= FAILURES_ALLOWED {
+                return false;
+            }
+            if wait_or_stop(stop, self.settings.retry).await {
+                return true;
+            }
         }
     }
 
-    /// Acquires the jobs `message` offers, handles it, and deletes it.
-    async fn take(&mut self, session: &mut Session, message: &Message) {
+    /// Acquires the jobs `message` offers, handles it, and deletes it: then
+    /// true. False, and nothing done, when its jobs could not be acquired;
+    /// the message is offered again.
+    async fn take(&mut self, session: &mut Session, message: &Message) -> bool {
         let github = Arc::clone(&self.github);
         let offered = message.available();
         if !offered.is_empty() {
-            match github.acquire(self.set, session, &offered).await {
-                Ok(Some(acquired)) => {
+            match self.acquire(session, &offered).await {
+                Ok(acquired) => {
                     tracing::info!(
                         offered = offered.len(),
                         acquired = acquired.len(),
                         "jobs acquired"
                     );
                 }
-                Ok(None) => {
-                    tracing::info!(
-                        "the session's token expired while acquiring; GitHub offers the jobs again"
-                    );
-                }
                 Err(error) => {
-                    tracing::warn!(error = format!("{error:#}"), "acquiring jobs failed");
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "acquiring jobs failed; the message is kept to be offered again"
+                    );
+                    return false;
                 }
             }
         }
@@ -460,6 +533,24 @@ impl Pool {
                 tracing::warn!(error = format!("{error:#}"), "deleting a message failed");
             }
         }
+        true
+    }
+
+    /// Acquires `offered`, refreshing the session once if its token
+    /// expired.
+    async fn acquire(&self, session: &mut Session, offered: &[i64]) -> Result<Vec<i64>> {
+        if let Some(acquired) = self.github.acquire(self.set, session, offered).await? {
+            return Ok(acquired);
+        }
+        *session = self
+            .github
+            .refresh_session(self.set, session)
+            .await
+            .context("refreshing the session to acquire jobs")?;
+        self.github
+            .acquire(self.set, session, offered)
+            .await?
+            .context("the session's fresh token was refused too")
     }
 }
 

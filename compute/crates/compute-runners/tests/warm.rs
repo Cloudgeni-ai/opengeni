@@ -117,6 +117,92 @@ async fn a_template_follows_the_branch_and_older_ones_go() {
     keeping.await.unwrap();
 }
 
+#[tokio::test]
+async fn a_replica_taking_over_starts_runners_from_the_newest_template() {
+    let fake = Fake::start().await;
+    {
+        let mut world = fake.world();
+        world.head = "b".repeat(40);
+        world.templates.push((
+            "tpl-a".into(),
+            "ci-100-aaaaaaaaaaaa".into(),
+            "sbx-gone".into(),
+        ));
+    }
+    let github = Arc::new(Github::new(
+        reqwest::Client::new(),
+        &fake.base,
+        &fake.base,
+        Scope::parse("acme/web").unwrap(),
+        Credentials::Token("the-token".into()),
+    ));
+    let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
+    let (current_tx, mut current) = watch::channel("runner-base".to_owned());
+    let (leading_tx, leading) = watch::channel(false);
+    let stop = CancellationToken::new();
+    let keeping = tokio::spawn(warm::keep(
+        settings(),
+        github,
+        compute,
+        current_tx,
+        leading,
+        stop.clone(),
+    ));
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        current.wait_for(|name| name == "ci-100-aaaaaaaaaaaa"),
+    )
+    .await
+    .expect("the newest template, at start")
+    .unwrap();
+
+    // While this replica stands by, the one leading makes B at the head
+    // and deletes A.
+    {
+        let mut world = fake.world();
+        world.templates.clear();
+        world.templates.push((
+            "tpl-b".into(),
+            "ci-200-bbbbbbbbbbbb".into(),
+            "sbx-gone".into(),
+        ));
+    }
+    leading_tx.send_replace(true);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        current.wait_for(|name| name == "ci-200-bbbbbbbbbbbb"),
+    )
+    .await
+    .expect("B, on taking over")
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        fake.world().processes.is_empty(),
+        "B is at the head: nothing is built"
+    );
+
+    // Standing by again, then taking over once every template is gone:
+    // runners start from the base.
+    leading_tx.send_replace(false);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    {
+        let mut world = fake.world();
+        world.templates.clear();
+        world.failing = Some("git".into());
+    }
+    leading_tx.send_replace(true);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        current.wait_for(|name| name == "runner-base"),
+    )
+    .await
+    .expect("the base, when no template is left")
+    .unwrap();
+
+    stop.cancel();
+    keeping.await.unwrap();
+}
+
 /// One refresh: cloned with the token in its environment alone, prepared,
 /// written out, saved, and its builder gone.
 fn the_refresh_ran_as_it_should(world: &fake::World) {

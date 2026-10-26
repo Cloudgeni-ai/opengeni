@@ -114,7 +114,9 @@ fn clone_script(web: &str, repo: &str, commit: &str, dir: &str) -> String {
 }
 
 /// Keeps the pool's template warm until `stop`, telling `current` each new
-/// one. Refreshes only while `leading`, so a standby builds nothing.
+/// one. Refreshes only while `leading`, so a standby builds nothing; on
+/// taking over it adopts the newest template, which the replica that led
+/// before may have made.
 pub async fn keep(
     settings: Settings,
     github: Arc<Github>,
@@ -123,26 +125,15 @@ pub async fn keep(
     leading: watch::Receiver<bool>,
     stop: CancellationToken,
 ) {
-    let mut have: Option<Ours> = match compute.snapshots().await {
-        Ok(all) => ours(&settings.pool, &all).pop(),
-        Err(error) => {
-            tracing::warn!(
-                error = format!("{error:#}"),
-                "listing templates failed; starting from the base"
-            );
-            None
-        }
-    };
-    if let Some(newest) = &have {
-        tracing::info!(template = %newest.name, "runners start from the newest warm template");
-        current.send_replace(newest.name.clone());
-    }
-    let mut tried: Option<u64> = have.as_ref().map(|newest| newest.at);
+    let mut have: Option<Ours> = None;
+    let mut tried: Option<u64> = None;
+    adopt(&settings, &compute, &current, &mut have, &mut tried).await;
     let mut branch = settings.branch.clone();
     let mut cleared = false;
     loop {
         if *leading.borrow() {
             if !cleared {
+                adopt(&settings, &compute, &current, &mut have, &mut tried).await;
                 clear_builders(&compute, &settings.pool).await;
                 cleared = true;
             }
@@ -182,6 +173,38 @@ pub async fn keep(
             () = stop.cancelled() => return,
         }
     }
+}
+
+/// Takes the pool's newest template as the one runners start from (the
+/// base when it has none), and as the one last made. Keeps what it had
+/// when the templates cannot be listed.
+async fn adopt(
+    settings: &Settings,
+    compute: &Compute,
+    current: &watch::Sender<String>,
+    have: &mut Option<Ours>,
+    tried: &mut Option<u64>,
+) {
+    let all = match compute.snapshots().await {
+        Ok(all) => all,
+        Err(error) => {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "listing templates failed; runners keep the template they had"
+            );
+            return;
+        }
+    };
+    let newest = ours(&settings.pool, &all).pop();
+    let name = newest
+        .as_ref()
+        .map_or_else(|| settings.base.clone(), |newest| newest.name.clone());
+    if *current.borrow() != name {
+        tracing::info!(template = %name, "runners start from the pool's newest template");
+        current.send_replace(name);
+    }
+    *tried = newest.as_ref().map(|newest| newest.at);
+    *have = newest;
 }
 
 /// The branch's head, when no template has it yet.

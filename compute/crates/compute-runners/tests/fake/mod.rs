@@ -43,13 +43,23 @@ pub struct World {
     pub sets: Vec<Value>,
     /// GitHub's runners: id to name and whether one has a job.
     pub runners: BTreeMap<u64, (String, bool)>,
+    /// Statuses the next removals of runners answer, before any is
+    /// removed.
+    pub removal_refusals: VecDeque<u16>,
+    /// Admin connections made to the actions service.
+    pub connections: u32,
     /// The open session's id and owner.
     pub session: Option<(String, String)>,
     pub sessions_closed: u32,
     pub queue_token: String,
     pub refreshes: u32,
+    /// The queue: a message stays until deleted.
     pub messages: VecDeque<Value>,
     pub deleted_messages: Vec<u64>,
+    /// Acquisitions failing before one succeeds.
+    pub acquire_failures: u32,
+    /// Acquisitions answered as if the queue's token had expired.
+    pub acquire_expired: u32,
     pub acquired: Vec<i64>,
     pub sandboxes: BTreeMap<String, Sandbox>,
     pub killed: Vec<String>,
@@ -90,6 +100,7 @@ impl Fake {
                 "/repos/acme/web/actions/runners/registration-token",
                 post(registration),
             )
+            .route("/repos/acme/web/actions/runners", get(registered))
             .route("/actions/runner-registration", post(connection))
             .route(
                 "/svc/_apis/runtime/runnerscalesets",
@@ -195,7 +206,27 @@ async fn registration() -> Response {
 
 async fn connection(State(fake): State<Fake>, headers: HeaderMap) -> Response {
     assert_eq!(headers["authorization"], "RemoteAuth registration");
+    fake.world().connections += 1;
     axum::Json(json!({"url": format!("{}/svc/", fake.base), "token": jwt()})).into_response()
+}
+
+/// The REST API's runners, a page at a time.
+async fn registered(
+    State(fake): State<Fake>,
+    Query(query): Query<BTreeMap<String, usize>>,
+) -> Response {
+    let (per_page, page) = (query["per_page"], query["page"]);
+    let world = fake.world();
+    let runners: Vec<Value> = world
+        .runners
+        .iter()
+        .skip((page - 1) * per_page)
+        .take(per_page)
+        .map(
+            |(id, (name, busy))| json!({"id": id, "name": name, "status": "offline", "busy": busy}),
+        )
+        .collect();
+    axum::Json(json!({"total_count": world.runners.len(), "runners": runners})).into_response()
 }
 
 async fn sets(State(fake): State<Fake>, Query(query): Query<BTreeMap<String, String>>) -> Response {
@@ -266,8 +297,23 @@ async fn close(State(fake): State<Fake>, Path((_, id)): Path<(u64, String)>) -> 
     StatusCode::NO_CONTENT
 }
 
-async fn acquire(State(fake): State<Fake>, axum::Json(ids): axum::Json<Vec<i64>>) -> Response {
+async fn acquire(
+    State(fake): State<Fake>,
+    headers: HeaderMap,
+    axum::Json(ids): axum::Json<Vec<i64>>,
+) -> Response {
     let mut world = fake.world();
+    if world.acquire_expired > 0 {
+        world.acquire_expired -= 1;
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if headers["authorization"] != format!("Bearer {}", world.queue_token).as_str() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if world.acquire_failures > 0 {
+        world.acquire_failures -= 1;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     world.acquired.extend(&ids);
     axum::Json(listing(
         &ids.into_iter().map(Value::from).collect::<Vec<_>>(),
@@ -289,36 +335,67 @@ async fn agents(
     axum::Json(listing(&found)).into_response()
 }
 
-async fn remove(State(fake): State<Fake>, Path(id): Path<u64>) -> StatusCode {
+async fn remove(State(fake): State<Fake>, Path(id): Path<u64>) -> Response {
     let mut world = fake.world();
+    if let Some(status) = world.removal_refusals.pop_front() {
+        return StatusCode::from_u16(status).unwrap().into_response();
+    }
     match world.runners.get(&id) {
-        None => StatusCode::NOT_FOUND,
-        Some((_, true)) => StatusCode::BAD_REQUEST,
+        None => StatusCode::NOT_FOUND.into_response(),
+        Some((_, true)) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "message": format!("Job still running on runner {id}."),
+                "typeName": "GitHub.DistributedTask.WebApi.JobStillRunningException, Sdk",
+                "typeKey": "JobStillRunningException",
+            })),
+        )
+            .into_response(),
         Some(_) => {
             world.runners.remove(&id);
-            StatusCode::NO_CONTENT
+            StatusCode::NO_CONTENT.into_response()
         }
     }
 }
 
-async fn poll(State(fake): State<Fake>, headers: HeaderMap) -> Response {
+/// The first message after `last` still on the queue.
+fn after(world: &World, last: u64) -> Option<Value> {
+    world
+        .messages
+        .iter()
+        .find(|message| message["messageId"].as_u64().unwrap() > last)
+        .cloned()
+}
+
+async fn poll(
+    State(fake): State<Fake>,
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Response {
     let token = format!("Bearer {}", fake.world().queue_token);
     if headers["authorization"] != token.as_str() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let last = query
+        .get("lastMessageId")
+        .map_or(0, |last| last.parse().unwrap());
     let arrived = fake.arrived.notified();
-    if let Some(message) = fake.world().messages.pop_front() {
+    if let Some(message) = after(&fake.world(), last) {
         return axum::Json(message).into_response();
     }
     let _ = tokio::time::timeout(Duration::from_millis(100), arrived).await;
-    match fake.world().messages.pop_front() {
+    match after(&fake.world(), last) {
         Some(message) => axum::Json(message).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
     }
 }
 
 async fn delete_message(State(fake): State<Fake>, Path(id): Path<u64>) -> StatusCode {
-    fake.world().deleted_messages.push(id);
+    let mut world = fake.world();
+    world
+        .messages
+        .retain(|message| message["messageId"].as_u64() != Some(id));
+    world.deleted_messages.push(id);
     StatusCode::NO_CONTENT
 }
 

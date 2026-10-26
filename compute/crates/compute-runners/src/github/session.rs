@@ -32,17 +32,15 @@ pub enum Polled {
 impl Github {
     /// Opens the scale set's session, as `owner`.
     pub async fn open_session(&self, set: u64, owner: &str) -> Result<Session, SessionError> {
-        let response = self
+        let request = self
             .actions(
                 Method::POST,
                 &format!("_apis/runtime/runnerscalesets/{set}/sessions"),
                 &[],
             )
             .await?
-            .json(&serde_json::json!({"ownerName": owner}))
-            .send()
-            .await
-            .map_err(anyhow::Error::from)?;
+            .json(&serde_json::json!({"ownerName": owner}));
+        let response = self.send_admin(request).await?;
         if response.status() == StatusCode::CONFLICT {
             return Err(SessionError::Taken);
         }
@@ -51,7 +49,7 @@ impl Github {
 
     /// A new token for `session`, whose token expired.
     pub async fn refresh_session(&self, set: u64, session: &Session) -> Result<Session> {
-        let response = self
+        let request = self
             .actions(
                 Method::PATCH,
                 &format!(
@@ -60,15 +58,14 @@ impl Github {
                 ),
                 &[],
             )
-            .await?
-            .send()
             .await?;
+        let response = self.send_admin(request).await?;
         expect(response, StatusCode::OK, "a refreshed message session").await
     }
 
     /// Ends `session`, so another listener may open one at once.
     pub async fn close_session(&self, set: u64, session: &Session) -> Result<()> {
-        let response = self
+        let request = self
             .actions(
                 Method::DELETE,
                 &format!(
@@ -77,9 +74,8 @@ impl Github {
                 ),
                 &[],
             )
-            .await?
-            .send()
             .await?;
+        let response = self.send_admin(request).await?;
         match response.status() {
             StatusCode::NO_CONTENT | StatusCode::OK | StatusCode::NOT_FOUND => Ok(()),
             status => Err(Refused {

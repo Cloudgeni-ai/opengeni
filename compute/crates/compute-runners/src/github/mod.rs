@@ -26,6 +26,11 @@ use wire::{JitConfig, JitSetting, Label, List, RunnerGroup, RunnerRef, RunnerSet
 const API_VERSION: &str = "6.0-preview";
 /// How long before a token ends it is replaced.
 const REFRESH_BEFORE: Duration = Duration::from_secs(60);
+/// The exception the actions service names when it keeps a runner because
+/// the runner has a job.
+const STILL_RUNNING: &str = "JobStillRunningException";
+/// Runners per page of the REST API's listing, its most.
+const PER_PAGE: usize = 100;
 
 /// An answer GitHub gave that was not the one expected.
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +76,13 @@ impl Scope {
             }
         }
     }
+
+    fn runners_path(&self) -> String {
+        match self {
+            Self::Organization(owner) => format!("/orgs/{owner}/actions/runners"),
+            Self::Repository(owner, repo) => format!("/repos/{owner}/{repo}/actions/runners"),
+        }
+    }
 }
 
 impl fmt::Display for Scope {
@@ -98,6 +110,14 @@ pub enum Removed {
     Gone,
     /// GitHub kept it: it has a job.
     Busy,
+}
+
+/// A runner registered in the scope, as the REST API lists it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct Registered {
+    pub id: u64,
+    pub name: String,
+    pub busy: bool,
 }
 
 /// GitHub, for one scope.
@@ -236,6 +256,19 @@ impl Github {
             .bearer_auth(admin.token))
     }
 
+    /// Sends `request`, made with the admin token: a token refused before
+    /// its time is forgotten, so the next call is made with a fresh one.
+    async fn send_admin(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let response = request.send().await?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            tracing::info!(
+                "the actions service refused its admin token; the next call gets another"
+            );
+            *self.admin.lock().await = None;
+        }
+        Ok(response)
+    }
+
     fn actions_with(
         &self,
         base: &str,
@@ -262,7 +295,7 @@ impl Github {
         if let Some(body) = body {
             request = request.json(body);
         }
-        expect(request.send().await?, StatusCode::OK, what).await
+        expect(self.send_admin(request).await?, StatusCode::OK, what).await
     }
 
     /// The id of the runner group `name` (`default` is 1).
@@ -371,32 +404,60 @@ impl Github {
         Ok(found.value.into_iter().find(|runner| runner.name == name))
     }
 
-    /// Removes the runner `id`, unless it has a job.
+    /// Removes the runner `id`, unless it has a job. Any other refusal is an
+    /// error, so the runner is asked about again later.
     pub async fn remove_runner(&self, id: u64) -> Result<Removed> {
-        let response = self
+        let request = self
             .actions(
                 Method::DELETE,
                 &format!("_apis/distributedtask/pools/0/agents/{id}"),
                 &[],
             )
-            .await?
-            .send()
             .await?;
-        match response.status() {
+        let response = self.send_admin(request).await?;
+        let status = response.status();
+        match status {
             StatusCode::NO_CONTENT | StatusCode::OK => Ok(Removed::Removed),
             StatusCode::NOT_FOUND => Ok(Removed::Gone),
-            status if status.is_client_error() => {
+            _ => {
                 let body = response.text().await.unwrap_or_default();
-                tracing::debug!(id, %status, body, "GitHub kept a runner");
-                Ok(Removed::Busy)
+                if status == StatusCode::BAD_REQUEST && body.contains(STILL_RUNNING) {
+                    tracing::debug!(id, "GitHub kept a runner with a job");
+                    return Ok(Removed::Busy);
+                }
+                Err(Refused {
+                    what: format!("removing runner {id}"),
+                    status,
+                    body,
+                }
+                .into())
             }
-            status => Err(Refused {
-                what: format!("removing runner {id}"),
-                status,
-                body: response.text().await.unwrap_or_default(),
-            }
-            .into()),
         }
+    }
+
+    /// Every runner registered in the scope.
+    pub async fn registered(&self) -> Result<Vec<Registered>> {
+        #[derive(serde::Deserialize)]
+        struct Page {
+            runners: Vec<Registered>,
+        }
+        let path = self.scope.runners_path();
+        let mut all = Vec::new();
+        for page in 1.. {
+            let response = self
+                .rest(Method::GET, &path)
+                .await?
+                .query(&[("per_page", PER_PAGE), ("page", page)])
+                .send()
+                .await?;
+            let found: Page = expect(response, StatusCode::OK, "the scope's runners").await?;
+            let last = found.runners.len() < PER_PAGE;
+            all.extend(found.runners);
+            if last {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     /// The commit branch `branch` of repository `repo` (`owner/repo`) is at.

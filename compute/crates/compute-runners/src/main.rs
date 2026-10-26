@@ -269,6 +269,7 @@ async fn run(serve: Serve) -> Result<()> {
         timeout_s: serve.timeout_s,
         env,
         standby: pool::STANDBY_EVERY,
+        retry: pool::RETRY_EVERY,
     };
     let pool = Pool::new(Arc::clone(&github), compute, set.id, settings, template);
     let result = pool::listen(pool, &owner, &leading_tx, &stop).await;

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compute_runners::compute::Compute;
-use compute_runners::github::{Credentials, Github, Scope};
+use compute_runners::github::{Credentials, Github, Removed, Scope};
 use compute_runners::pool::{self, BORN_KEY, ID_KEY, JIT_ENV, NAME_KEY, POOL_KEY, Pool};
 use fake::{Fake, Sandbox};
 use serde_json::json;
@@ -44,6 +44,7 @@ async fn pool(fake: &Fake, min_idle: u32) -> Pool {
         timeout_s: 600,
         env: BTreeMap::from([("TURBO_API".into(), "http://cache".into())]),
         standby: Duration::from_millis(100),
+        retry: Duration::from_millis(100),
     };
     let (_, template) = watch::channel("runner-base".to_owned());
     let compute = Compute::new(reqwest::Client::new(), &fake.base, "key");
@@ -283,4 +284,156 @@ async fn an_expired_queue_token_is_refreshed() {
     .await;
     stop.cancel();
     done.await.unwrap();
+}
+
+#[tokio::test]
+async fn a_message_whose_jobs_were_not_acquired_is_offered_again() {
+    let fake = Fake::start().await;
+    fake.world().acquire_failures = 2;
+    let Running {
+        fake,
+        mut leading,
+        stop,
+        done,
+    } = listening(fake, 0).await;
+    until_leading(&mut leading, true).await;
+    fake.send(
+        &json!([{"messageType": "JobAvailable", "runnerRequestId": 21}]),
+        1,
+    );
+    fake.until("the job acquired at the third offer", |world| {
+        world.acquired == [21] && world.sandboxes.len() == 1 && world.messages.is_empty()
+    })
+    .await;
+    assert_eq!(fake.world().acquire_failures, 0);
+    assert_eq!(
+        fake.world().deleted_messages.len(),
+        1,
+        "the message is deleted once, when taken"
+    );
+    assert_eq!(fake.world().sessions_closed, 0, "the session is kept");
+
+    // A token that expired between the poll and the acquisition is
+    // refreshed, and the jobs acquired with the fresh one.
+    fake.world().acquire_expired = 1;
+    fake.send(
+        &json!([{"messageType": "JobAvailable", "runnerRequestId": 22}]),
+        2,
+    );
+    fake.until("the job acquired after a refresh", |world| {
+        world.acquired == [21, 22] && world.refreshes == 1 && world.sandboxes.len() == 2
+    })
+    .await;
+    stop.cancel();
+    done.await.unwrap();
+}
+
+#[tokio::test]
+async fn registrations_without_a_sandbox_go() {
+    let fake = Fake::start().await;
+    let mut pool = pool(&fake, 1).await;
+    {
+        let mut world = fake.world();
+        // Registered, its sandbox never started: it goes.
+        world.runners.insert(50, ("ci-0123456789ab".into(), false));
+        // Without a sandbox but with a job (as GitHub has it): it stays.
+        world.runners.insert(51, ("ci-aaaaaaaaaaaa".into(), true));
+        // Not named as the pool names its runners: it stays.
+        world
+            .runners
+            .insert(52, ("ci-gpu-0123456789ab".into(), false));
+        world.runners.insert(53, ("someone-elses".into(), false));
+        // In its sandbox: it stays.
+        world.runners.insert(54, ("ci-bbbbbbbbbbbb".into(), false));
+        world.sandboxes.insert(
+            "sbx-kept".into(),
+            Sandbox {
+                template: "runner-base".into(),
+                metadata: BTreeMap::from([
+                    (POOL_KEY.into(), "ci".into()),
+                    (NAME_KEY.into(), "ci-bbbbbbbbbbbb".into()),
+                    (ID_KEY.into(), "54".into()),
+                    (BORN_KEY.into(), "1000".into()),
+                ]),
+                env: BTreeMap::new(),
+            },
+        );
+    }
+    pool.reconcile().await.unwrap();
+    let world = fake.world();
+    assert_eq!(
+        world.runners.keys().copied().collect::<Vec<_>>(),
+        [51, 52, 53, 54]
+    );
+    assert_eq!(world.sandboxes.len(), 1, "the kept runner is the idle one");
+}
+
+#[tokio::test]
+async fn a_runner_github_refuses_to_remove_is_asked_about_again() {
+    let fake = Fake::start().await;
+    let mut pool = pool(&fake, 1).await;
+    {
+        let mut world = fake.world();
+        world.runners.insert(7, ("ci-cccccccccccc".into(), false));
+        world.sandboxes.insert(
+            "sbx-7".into(),
+            Sandbox {
+                template: "runner-base".into(),
+                metadata: BTreeMap::from([
+                    (POOL_KEY.into(), "ci".into()),
+                    (NAME_KEY.into(), "ci-cccccccccccc".into()),
+                    (ID_KEY.into(), "7".into()),
+                    (BORN_KEY.into(), "1000".into()),
+                ]),
+                env: BTreeMap::new(),
+            },
+        );
+    }
+    pool.reconcile().await.unwrap();
+
+    // Its sandbox goes; GitHub is rate limiting, then answers.
+    {
+        let mut world = fake.world();
+        world.sandboxes.remove("sbx-7");
+        world.removal_refusals.push_back(429);
+    }
+    pool.reconcile().await.unwrap();
+    assert!(
+        fake.world().runners.contains_key(&7),
+        "a refused removal is not taken for one done"
+    );
+    pool.reconcile().await.unwrap();
+    let world = fake.world();
+    assert!(!world.runners.contains_key(&7), "asked again, it goes");
+    assert_eq!(world.runners.len(), 1, "one idle runner replaces it");
+}
+
+#[tokio::test]
+async fn a_runner_is_busy_only_when_github_says_its_job_runs() {
+    let fake = Fake::start().await;
+    let github = github(&fake);
+    {
+        let mut world = fake.world();
+        world.runners.insert(60, ("ci-busy".into(), true));
+        world.runners.insert(61, ("ci-idle".into(), false));
+    }
+    assert_eq!(github.remove_runner(60).await.unwrap(), Removed::Busy);
+    assert_eq!(github.remove_runner(61).await.unwrap(), Removed::Removed);
+    assert_eq!(github.remove_runner(61).await.unwrap(), Removed::Gone);
+    for refused in [400, 403, 422, 429] {
+        fake.world().removal_refusals.push_back(refused);
+        let error = github.remove_runner(60).await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&refused.to_string()),
+            "{error:#}"
+        );
+    }
+
+    // An admin token refused before its time is replaced at the next call.
+    let connections = fake.world().connections;
+    fake.world().removal_refusals.push_back(401);
+    assert!(github.remove_runner(60).await.is_err());
+    assert_eq!(fake.world().connections, connections);
+    assert_eq!(github.remove_runner(60).await.unwrap(), Removed::Busy);
+    assert_eq!(fake.world().connections, connections + 1);
 }
