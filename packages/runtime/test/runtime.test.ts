@@ -5690,11 +5690,15 @@ describe("runtime event normalization", () => {
     "## Skills",
     "Use skill_read to read a relevant Skill without a sandbox. Omit paths for SKILL.md, or supply paths to read exactly those files.",
     "Management tools are lazy and available through tool search.",
-    "The following entries are descriptors, not the Skill instructions. Use the id when names are ambiguous.",
-    '- {"id":"native-tool:document-parsing","name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
-    `- ${JSON.stringify(composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"))}`,
-    '- {"id":"native-tool:opengeni-help","name":"opengeni-help","description":"Answer questions about Opengeni setup, using it on a phone or computer, doing settings for the person in chat, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
-    '- {"id":"native-tool:visualize","name":"visualize","description":"Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore \'what happens when\' or \'what changes\', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."}',
+    "The following entries are descriptors, not the Skill instructions. Read a Skill by its name; an entry shows an id only when several Skills share that name, and then you read it by that id.",
+    '- {"name":"document-parsing","description":"Extract readable Markdown from local Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV, and text-based PDF files using the preinstalled AnyDoc runtime."}',
+    `- ${JSON.stringify(
+      ((entry) => ({ name: entry?.name, description: entry?.description }))(
+        composeRuntimeSkills([]).index.find((entry) => entry.name === "opengeni-client"),
+      ),
+    )}`,
+    '- {"name":"opengeni-help","description":"Answer questions about Opengeni setup, using it on a phone or computer, doing settings for the person in chat, product integration, SDK/API behavior, billing, GitHub access, and development setup. Read the official product docs before making product-specific claims or replacing an application\'s AI provider. No installation is needed for this bundled guide."}',
+    '- {"name":"visualize","description":"Create visualizations and interactive tools directly in conversation. Use when the user asks to see how something works, explore \'what happens when\' or \'what changes\', compare or inspect, or wants a simulation, map, chart, graph, or mockup, or when a visual clearly explains better than text. Use standard tools for static scientific figures."}',
   ].join("\n");
   const staticInstructions = (instructions: unknown): string => {
     if (typeof instructions !== "string") throw new Error("Expected static instructions");
