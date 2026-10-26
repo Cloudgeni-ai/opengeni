@@ -48,7 +48,8 @@ class OpenGeniAudioCaptureService : Service() {
       builder
         .setContentTitle(title)
         .setContentText(text)
-        .setSmallIcon(applicationInfo.icon)
+        // A white microphone: a launcher icon shows as a blank disc in the status bar.
+        .setSmallIcon(dev.opengeni.textselection.R.drawable.opengeni_recording_notification)
         .setOngoing(true)
         .setCategory(Notification.CATEGORY_SERVICE)
         .apply { if (open != null) setContentIntent(open) }
