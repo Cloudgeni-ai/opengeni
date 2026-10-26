@@ -79,7 +79,7 @@ export async function publishArtifactRuntime(options: {
   const firstRun = await api.get(runPath);
   validateRuntimeProducer(firstRun, options);
   const verifySource = async () => {
-    const comparison = await api.get(`compare/${sourceSha}...main`);
+    const comparison = await api.get(runtimeSourceComparePath(sourceSha));
     if (
       comparison.base_commit?.sha !== sourceSha ||
       comparison.merge_base_commit?.sha !== sourceSha ||
@@ -221,6 +221,18 @@ export async function publishArtifactRuntime(options: {
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
+}
+
+/**
+ * Ancestry check against canonical main. Only `status`, `base_commit` and
+ * `merge_base_commit` are read, but GitHub returns the complete changed-file
+ * list (with patches, up to 300 files) on the first page of a comparison, so a
+ * large commit landing on main pushed the plain response past the 1 MiB JSON
+ * bound. Any paginated page after the first omits `files`, and one commit per
+ * page bounds the commit list, while the comparison fields stay identical.
+ */
+export function runtimeSourceComparePath(sourceSha: string): string {
+  return `compare/${sourceSha}...main?per_page=1&page=2`;
 }
 
 export function runtimeDownloadAccept(path: string): string {
