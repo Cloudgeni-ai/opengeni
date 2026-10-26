@@ -118,6 +118,7 @@ async function fixture() {
     accountId,
     workspaceId,
     member: await person("member", "member", MEMBER),
+    otherMember: await person("other", "member", MEMBER),
     viewer: await person("viewer", "member", ["sessions:read", "secrets:list"]),
     workspaceAdmin: await person("admin", "admin", ADMIN),
   };
@@ -185,7 +186,7 @@ describe("credential profile routes", () => {
     expect(invalid.json.error).toBe("credential_profile_invalid");
     expect(JSON.stringify(invalid.json)).not.toContain("plain-value");
 
-    const session = (parentSessionId?: string) =>
+    const session = (parentSessionId?: string, visibility?: "user_private") =>
       createSession(client.db, {
         accountId: f.accountId,
         workspaceId: f.workspaceId,
@@ -199,6 +200,7 @@ describe("credential profile routes", () => {
         createdBy: { kind: "subject", subjectId: f.member.subjectId },
         subjectId: f.member.subjectId,
         ...(parentSessionId ? { parentSessionId } : {}),
+        ...(visibility ? { visibility } : {}),
       });
     const parent = await session();
     const child = await session(parent.id);
@@ -243,6 +245,14 @@ describe("credential profile routes", () => {
       asMember,
     );
     expect(missing.status).toBe(404);
+
+    // A member who cannot see a private chat cannot read or change its profile.
+    const privateChat = await session(undefined, "user_private");
+    const asOther = await bearer(f.otherMember, MEMBER);
+    const hidden = `${base}/sessions/${privateChat.id}/credential-profile`;
+    expect((await call("GET", hidden, asOther)).status).toBe(404);
+    expect((await call("PUT", hidden, asOther, chatProfile)).status).toBe(404);
+    expect((await call("GET", hidden, asMember)).status).toBe(200);
 
     // An empty profile clears the level.
     const cleared = await call(

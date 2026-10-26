@@ -1989,7 +1989,11 @@ describe("SelfhostedSession — credential profiles (native env path)", () => {
     const plain = streamedExecRequest(plainMock);
     expect(exec.command).toEqual(plain.command);
     expect(exec.shell).toBe(plain.shell);
-    expect(exec.env).toEqual({ GH_TOKEN: TOKEN, OPENGENI_CODEMODE_TOKEN: "codemode-bearer" });
+    expect(exec.env).toEqual({
+      GH_TOKEN: TOKEN,
+      OPENGENI_CODEMODE_TOKEN: "codemode-bearer",
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+    });
     expect(JSON.stringify(exec.command)).not.toContain(TOKEN);
   });
 
@@ -2000,6 +2004,7 @@ describe("SelfhostedSession — credential profiles (native env path)", () => {
     expect(exec.env).toEqual({
       GH_TOKEN: TOKEN,
       OPENGENI_CODEMODE_TOKEN: "codemode-bearer",
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
       OPENGENI_SECRET_0: "native-canary",
     });
   });

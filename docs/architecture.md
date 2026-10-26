@@ -2886,9 +2886,10 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   pause inheritance. MCP credentials bind URLs; identity is informational.
 - **Secrets and arbitrary content are different.** Configured credentials are
   authenticated-encrypted and read through explicit capability boundaries.
-  Conversation, source, tool, and error text is not centrally regex-redacted;
-  the approved exceptions are masking of known secret values and of narrow,
-  high-precision secret shapes ([`secrets.md`](secrets.md#masking-decision)).
+  Conversation, source, tool, and error text is not centrally regex-redacted.
+  Two narrow exceptions are approved but not yet implemented: masking of known
+  secret values and of narrow, high-precision secret shapes
+  ([`secrets.md`](secrets.md#masking-decision)).
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.

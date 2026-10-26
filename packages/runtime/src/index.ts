@@ -13117,6 +13117,14 @@ function gitCredentialHelperCommandLines(
     "  az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;",
     "  *) provider=; token_env= ;;",
     "esac",
+    // A credential profile that delivered this tool's token variable to the
+    // command wins over the platform binding (docs/secrets.md, "Credential
+    // profiles"): run the real tool with the inherited value.
+    'if [ -n "$token_env" ]; then',
+    '  case ",${OPENGENI_CREDENTIAL_PROFILE_VARS:-}," in',
+    '    *",$token_env,"*) provider= ;;',
+    "  esac",
+    "fi",
     "hash_binding_id() {",
     "  if command -v sha256sum >/dev/null 2>&1; then printf '%s' \"$1\" | sha256sum | cut -c1-32; return; fi",
     "  if command -v shasum >/dev/null 2>&1; then printf '%s' \"$1\" | shasum -a 256 | cut -c1-32; return; fi",

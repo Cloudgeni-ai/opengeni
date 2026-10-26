@@ -44,7 +44,10 @@ import {
   type ShellDialect,
   type ShellSpliceResult,
 } from "@opengeni/vaults";
-import type { CredentialEnvironment } from "./credential-profile-delivery";
+import {
+  CREDENTIAL_PROFILE_VARS_VARIABLE,
+  type CredentialEnvironment,
+} from "./credential-profile-delivery";
 
 /** Total bytes of secret env values delivered to one command (D15). */
 export const SECRET_ENV_TOTAL_MAX_BYTES = 262_144;
@@ -89,6 +92,12 @@ export interface SecretExecCarry {
    */
   readonly profileOnly?: boolean;
   readonly match?: string;
+  /**
+   * Notes the delivering session adds while dispatching (for example a
+   * managed sandbox that cannot receive the profile). It is the same array
+   * as `PreparedSecretText.notes`, so they reach the tool result.
+   */
+  readonly deliveryNotes?: string[];
 }
 
 /** Literal substitution for stdin (`write_stdin`, `command_input`). */
@@ -116,6 +125,8 @@ export function secretExecCarryFor(cmd: unknown): SecretExecCarry | null {
   const carry = storage.getStore();
   if (!carry || carry.kind !== "exec" || typeof cmd !== "string") return null;
   if (carry.profileOnly) {
+    // `match` is the unique cancellable wrapper around the command (it holds
+    // a per-call marker path); without one only the exact command matches.
     return cmd === carry.command || (carry.match !== undefined && cmd.includes(carry.match))
       ? carry
       : null;
@@ -258,7 +269,7 @@ export function bindSecretCarryToDispatch(
   carry: SecretExecCarry | null,
   dispatched: string,
 ): SecretExecCarry | null {
-  if (!carry?.profileOnly) return carry;
+  if (!carry?.profileOnly || dispatched === carry.command) return carry;
   return { ...carry, match: dispatched };
 }
 
@@ -289,14 +300,19 @@ export async function prepareSecretExec(
   const prepared = await prepareSecretReferences(command, options);
   if (!options.credentials) return prepared;
   const profile = await options.credentials.forCommand(options.use);
-  const notes = profile.notes.length > 0 ? { notes: profile.notes } : {};
   if (Object.keys(profile.env).length === 0) {
     return profile.notes.length === 0
       ? prepared
-      : { text: prepared?.text ?? command, carry: prepared?.carry ?? null, ...notes };
+      : { text: prepared?.text ?? command, carry: prepared?.carry ?? null, notes: profile.notes };
   }
+  // One array: notes the session adds while delivering join the result.
+  const notes = { notes: [...profile.notes] };
   if (prepared?.carry) {
-    return { ...prepared, carry: { ...prepared.carry, profileEnv: profile.env }, ...notes };
+    return {
+      ...prepared,
+      carry: { ...prepared.carry, profileEnv: profile.env, deliveryNotes: notes.notes },
+      ...notes,
+    };
   }
   const text = prepared?.text ?? command;
   return {
@@ -310,6 +326,7 @@ export async function prepareSecretExec(
       scope: options.resolver ? secretScopeFor(options.resolver) : "credential-profile",
       profileEnv: profile.env,
       profileOnly: true,
+      deliveryNotes: notes.notes,
     },
     ...notes,
   };
@@ -553,7 +570,7 @@ export function secretEnvFileContent(
     return `export ${name}=${posixSingleQuote(value)}\n`;
   });
   const variables = Object.entries(profile).map(([name, value]) => {
-    if (!isCredentialProfileEnvName(name)) {
+    if (!isCredentialProfileEnvName(name) && name !== CREDENTIAL_PROFILE_VARS_VARIABLE) {
       throw new Error("secret delivery: invalid credential profile variable name");
     }
     return `export ${name}=${posixSingleQuote(value)}\n`;

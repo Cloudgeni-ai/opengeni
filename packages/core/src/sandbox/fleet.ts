@@ -1213,8 +1213,6 @@ export async function executeRunOnSelfhostedMachine(
         use: secretUse,
         credentials: machine.credentials ?? null,
       });
-      const profileNote = credentialProfileNoteText(prepared?.notes);
-      const credentialProfileNote = profileNote ? { credentialProfileNote: profileNote } : {};
       let res: Awaited<ReturnType<typeof session.exec>> | undefined;
       try {
         res = await runWithSecretCarry(prepared?.carry ?? null, () =>
@@ -1231,6 +1229,9 @@ export async function executeRunOnSelfhostedMachine(
           await session.clearSecretFilesForAttempt().catch(() => undefined);
         }
       }
+      // Read after dispatch: the machine may add a delivery note to the same list.
+      const profileNote = credentialProfileNoteText(prepared?.notes);
+      const credentialProfileNote = profileNote ? { credentialProfileNote: profileNote } : {};
       if (res.backgroundCommandId) {
         return {
           target,

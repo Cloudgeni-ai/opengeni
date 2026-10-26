@@ -998,6 +998,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private readonly retainedProcesses = new Map<number, RetainedProcessRecord>();
   /** Attempt scopes that received secret files on this session (cleanup). */
   private readonly secretScopes = new Set<string>();
+  /** Attempt scopes already told that this sandbox could not receive a profile. */
+  private readonly profileDeliveryNoted = new Set<string>();
   private readonly processControlReads = new Map<number, SharedProcessRead>();
   private readonly commandOwnerBackends = new Set<RoutableBackendSession>();
   /** Every backend whose settled op-stream results may still need a final ack.
@@ -2742,10 +2744,29 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     // Credential profile variables ride the same file, ahead of the command,
     // so variables the command sets itself still win.
     const envFile = secretEnvFilePath(carry.scope);
-    await writer({
-      path: envFile,
-      content: new TextEncoder().encode(secretEnvFileContent(env, profileEnvironmentOf(carry))),
-    });
+    const content = new TextEncoder().encode(
+      secretEnvFileContent(env, profileEnvironmentOf(carry)),
+    );
+    if (!carryHasReferences(carry)) {
+      // Profile variables only: a sandbox that cannot receive the file (a
+      // backend without private writes, or a failed write) runs the command
+      // without them. A profile never fails a command. Attempt-end cleanup
+      // covers the scope even if a write fails part-way.
+      this.secretScopes.add(carry.scope);
+      try {
+        await writer({ path: envFile, content });
+      } catch {
+        if (!this.profileDeliveryNoted.has(carry.scope)) {
+          this.profileDeliveryNoted.add(carry.scope);
+          carry.deliveryNotes?.push(
+            "credential profile not applied: this sandbox could not receive it",
+          );
+        }
+        return args;
+      }
+      return { ...(args as Record<string, unknown>), cmd: withSecretEnvFilePrefix(cmd, envFile) };
+    }
+    await writer({ path: envFile, content });
     this.secretScopes.add(carry.scope);
     return { ...(args as Record<string, unknown>), cmd: withSecretEnvFilePrefix(command, envFile) };
   }

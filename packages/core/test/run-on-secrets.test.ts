@@ -548,7 +548,10 @@ describe("run_on credential profiles", () => {
     // The command runs exactly as given, in the machine's own shell.
     expect(exec.command).toEqual(["gh pr list"]);
     expect(exec.shell).toBe(true);
-    expect(exec.env).toEqual({ GH_TOKEN: "ghp_fakeRunOnProfileToken" });
+    expect(exec.env).toEqual({
+      GH_TOKEN: "ghp_fakeRunOnProfileToken",
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+    });
     expect(result.credentialProfileNote).toBe(
       "[Note: credential profile skipped AZURE_TENANT_ID (secret not found)]",
     );

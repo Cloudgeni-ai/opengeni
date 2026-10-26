@@ -136,8 +136,9 @@ export function credentialProfileView(row: CredentialProfileRow): CredentialProf
 
 /**
  * Merge a profile chain (workspace first, then sessions from the root down):
- * a nearer level replaces an entry of the same name, and the nearest
- * non-null git helper setting wins (off when none sets it).
+ * a nearer level replaces an entry of the same name (compared without case,
+ * as validation does, so Windows never sees two spellings of one variable),
+ * and the nearest non-null git helper setting wins (off when none sets it).
  */
 export function effectiveCredentialProfile(
   chain: readonly CredentialProfileChainLink[],
@@ -147,8 +148,9 @@ export function effectiveCredentialProfile(
   for (const link of chain) {
     for (const entry of link.entries) {
       if (typeof entry?.name !== "string" || typeof entry.reference !== "string") continue;
-      entries.delete(entry.name);
-      entries.set(entry.name, {
+      const key = entry.name.toUpperCase();
+      entries.delete(key);
+      entries.set(key, {
         name: entry.name,
         reference: entry.reference,
         source: {

@@ -236,7 +236,7 @@ each command or into the prompts of the chats it starts.
 chat can add its own profile, which the chats it starts inherit, the same way
 the vault policy propagates. A command receives the workspace entries, then
 each chat's entries from the root chat down to its own; a nearer level
-replaces an entry with the same name. `gitHelper` follows the nearest level
+replaces an entry with the same name (ignoring case). `gitHelper` follows the nearest level
 that sets it and is off by default. Nothing is configured until someone sets a
 profile.
 
@@ -249,17 +249,29 @@ reference. Values ride the same in-memory carry as references
 them in `ExecRequest.env`, and managed sandboxes export them from the 0600 env
 file that is sourced and deleted in the same command. They exist only in the
 command's process environment, never in the command text, stored tool
-arguments, events, git config or files left on the machine. Profile variables
-are applied first, so anything the command sets itself (`GH_TOKEN=… gh …`,
-`export`, a reference) wins. The profile is read again at most every few
-seconds, so a change applies to the next commands without restarting anything.
+arguments, git config or files left on the machine. Tool output is not masked
+yet: a command that prints a value (`env`, `printenv`, `gh auth status -t`)
+puts it in the tool result, which is stored and seen by the model, exactly as
+with a written reference. Profile variables are applied first, so anything the
+command sets itself (`GH_TOKEN=… gh …`, `export`, a reference) wins. Each
+command also gets `OPENGENI_CREDENTIAL_PROFILE_VARS`, the comma-separated names
+(never values) the profile delivered. The profile is read again at most every
+few seconds, so a change applies to the next commands without restarting
+anything; a read that takes longer than about two seconds or fails uses the
+last profile read in the attempt, or none, so a slow database never stalls
+commands.
 
 **Lenient.** A profile never fails a command. An entry that cannot be resolved
 (missing secret, policy, waiting for approval, provider unavailable, too large
 or binary) is skipped and the command runs without it; the tool result ends
 with a short note such as `[Note: credential profile skipped AZURE_TENANT_ID
-(secret not found)]`. An entry waiting for the person's approval is asked for
-once per attempt; approving it with "Allow once" covers one command, so use a
+(secret not found)]`. Each distinct note is shown once per attempt, not on
+every command. A password manager that does not answer within about 15 seconds
+skips its entries the same way. A managed sandbox that cannot receive the env
+file (for example an OpenSandbox backend, which has no private file writes)
+runs the command without the profile and says so once. An agent with secrets
+turned off runs without the profile and without a note. An entry waiting for
+the person's approval is asked for once per attempt; approving it with "Allow once" covers one command, so use a
 longer approval for an item every command needs. Notes never show values.
 Entries resolve only after the command's own references resolved. Entries from
 connected vaults (1Password and similar) are read per command and count toward
@@ -272,15 +284,30 @@ each command also gets per-command git configuration through
 `https://github.com` it first clears the machine's own credential helpers and
 then adds one that answers git's `get` request with `GH_TOKEN` from the
 environment (user `x-access-token`). Nothing is written to global or repository
-git config, and other hosts keep the machine's configuration. `gh` reads
-`GH_TOKEN` directly.
+git config, and other hosts keep the machine's configuration. This needs git
+2.31 or later; older git ignores the variables. On a Connected Machine whose
+own environment already sets `GIT_CONFIG_COUNT`, the helper's entries replace
+the first ones for that command, so put such settings in the profile instead.
+
+**Precedence on managed sandboxes.** A profile is an explicit choice, so it
+wins over the platform's repository bindings for the variables it delivers:
+the git helper replaces the binding's helper for `github.com`, and the `gh`,
+`glab` and `az` wrappers keep a profile-delivered `GH_TOKEN`, `GITLAB_TOKEN` or
+`AZURE_DEVOPS_EXT_PAT` (they read `OPENGENI_CREDENTIAL_PROFILE_VARS`) instead
+of replacing it with the binding token. Without a profile entry for that
+variable, the bindings work as before. Host run credentials
+([credentials.md](credentials.md)) are applied after the profile and win for
+the same variable names. On Connected Machines there are no wrappers, so `gh`
+reads `GH_TOKEN` directly.
 
 **Rules.** Names use letters, digits and underscores, do not start with a
 digit, are unique ignoring case, and never start with `OPENGENI_` (reserved).
 Each entry holds exactly one `{{secret:…}}` reference; `secretfile` references
 are not accepted. An escaped reference (`\{{secret:…}}`, as written for
-hand-off tools) is stored unescaped. At most 32 entries; the same 100 KiB per
-value and 256 KiB per command caps apply. Saving an empty profile clears that
+hand-off tools) is stored unescaped. At most 32 entries; each value is capped
+at 100 KiB and all profile values of one command at 256 KiB. That cap is
+counted separately from the command's own references (which have their own
+256 KiB cap), so one command can carry up to 512 KiB of such variables. Saving an empty profile clears that
 level. Changes are audited as `credential_profile.updated` or
 `credential_profile.cleared` with variable names only.
 
@@ -290,9 +317,12 @@ the chat's tool-policy access for a chat profile. Use the HTTP routes below or
 the `secret_profile_get` and `secret_profile_set` agent tools; there is no web
 UI yet. Profiles hold references, never values.
 
-**Masking hook.** Every value a profile delivers is passed to the attempt's
-`onValuesDelivered` hook (`createCredentialEnvironment`), so known-value
-masking of tool output can cover profile values too, including an `env` dump.
+**Masking hook.** `createCredentialEnvironment` accepts an `onValuesDelivered`
+hook that receives every value a profile delivers, before the command runs.
+Nothing passes it yet, because known-value masking has not landed. When it
+does, the worker (`agent-build.ts`) and the `run_on` path
+(`apps/api/src/mcp/server.ts`) should pass it, so masking also covers profile
+values, including an `env` dump.
 
 ## Masking decision
 
@@ -304,7 +334,8 @@ supersede that decision for these cases only: masking of known secret values
 (values Opengeni resolved or delivered, credential profile values included)
 before storage and before the model sees them, and masking of narrow,
 high-precision secret-shaped strings in tool output. Other content stays
-exact.
+exact. Until those two maskings are implemented, tool output is still stored
+exactly as produced.
 
 ## Asking a person
 

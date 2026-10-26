@@ -115,10 +115,14 @@ Rules that hold across the table:
   itself. Connected Machines receive them in `ExecRequest.env`; managed
   sandboxes source and delete a 0600 env file in the same command. The optional
   git helper uses per-command `GIT_CONFIG_*` variables for `https://github.com`
-  and writes no git config. This complements, and does not replace, the
-  binding files that give managed sandboxes git, `gh` and `az` credentials.
+  and writes no git config. On managed sandboxes the binding files still give
+  git, `gh`, `glab` and `az` their credentials, but for a variable a profile
+  delivers the profile wins: the git helper replaces the binding helper for
+  `github.com`, and the provider CLI wrappers keep the profile's token. Host
+  run credentials are applied after the profile and win for the same names.
   An entry that cannot be resolved is skipped with a note; it never fails the
-  command.
+  command. Tool output is not masked yet, so a command that prints a value
+  shows it.
 - **The perimeter is not identity.** The deployment access key admits ordinary
   callers and deployment-only surfaces. A cryptographically valid first-party
   delegated bearer may instead enter `/v1`; the normal access resolver still

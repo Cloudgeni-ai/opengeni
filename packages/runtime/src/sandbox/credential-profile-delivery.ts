@@ -35,6 +35,14 @@ const PROFILE_TOTAL_MAX_BYTES = 262_144;
 /** How long a loaded profile is reused before it is read again. */
 const DEFAULT_PROFILE_TTL_MS = 5_000;
 /**
+ * How long one command waits for the profile read. A slow database must not
+ * stall commands: past this, the last profile read successfully (or none)
+ * is used and the read finishes in the background.
+ */
+const DEFAULT_PROFILE_LOAD_TIMEOUT_MS = 2_000;
+/** How long one command waits for the password manager to resolve the profile. */
+const DEFAULT_PROFILE_RESOLVE_TIMEOUT_MS = 15_000;
+/**
  * Failures that stay true for the rest of the attempt: retrying them for
  * every command would only repeat the same refusal (and, for approvals, the
  * person's answer starts a new turn anyway).
@@ -43,6 +51,14 @@ const STICKY_FAILURES = new Set<SecretReferenceFailureCode>(["approval_required"
 
 /** The git helper reads this variable when git asks for github.com credentials. */
 export const CREDENTIAL_PROFILE_GIT_TOKEN_VARIABLE = "GH_TOKEN";
+/**
+ * Comma-separated names of the variables a profile delivered to this
+ * command. The managed-sandbox provider CLI wrappers (gh, glab, az) read it
+ * and keep a profile-supplied token instead of replacing it with the
+ * platform's repository binding. Profiles cannot set `OPENGENI_` names, so
+ * only Opengeni writes it.
+ */
+export const CREDENTIAL_PROFILE_VARS_VARIABLE = "OPENGENI_CREDENTIAL_PROFILE_VARS";
 const GIT_HELPER_KEY = "credential.https://github.com.helper";
 /**
  * A credential helper that answers `get` with GH_TOKEN from the process
@@ -80,8 +96,28 @@ export type CreateCredentialEnvironmentInput = {
    */
   onValuesDelivered?: (values: readonly string[]) => void;
   profileTtlMs?: number;
+  loadTimeoutMs?: number;
+  resolveTimeoutMs?: number;
   now?: () => number;
 };
+
+class ProfileTimeoutError extends Error {}
+
+/** Settle with `promise`, or reject with ProfileTimeoutError after `ms`. */
+async function withinTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new ProfileTimeoutError()), ms);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 const NOTHING: CredentialEnvironmentResult = { env: {}, notes: [] };
 
@@ -149,21 +185,51 @@ export function createCredentialEnvironment(
   input: CreateCredentialEnvironmentInput,
 ): CredentialEnvironment {
   const ttl = input.profileTtlMs ?? DEFAULT_PROFILE_TTL_MS;
+  const loadTimeout = input.loadTimeoutMs ?? DEFAULT_PROFILE_LOAD_TIMEOUT_MS;
+  const resolveTimeout = input.resolveTimeoutMs ?? DEFAULT_PROFILE_RESOLVE_TIMEOUT_MS;
   const now = input.now ?? Date.now;
   let cached: { at: number; profile: Promise<EffectiveCredentialProfile | null> } | null = null;
+  /** The last profile read successfully in this attempt (null: none set). */
+  let lastGood: EffectiveCredentialProfile | null = null;
   const sticky = new Map<string, string>();
+  /** Notes already shown in this attempt: each one is shown once. */
+  const shown = new Set<string>();
 
   function loadProfile(): Promise<EffectiveCredentialProfile | null> {
     const at = now();
     if (!cached || at - cached.at >= ttl) {
-      const profile = input.load();
+      const profile = Promise.resolve().then(() => input.load());
       cached = { at, profile };
-      // A failed read is not reused.
-      profile.catch(() => {
-        if (cached?.profile === profile) cached = null;
-      });
+      profile.then(
+        (value) => {
+          lastGood = value;
+        },
+        () => {
+          // A failed read is not reused.
+          if (cached?.profile === profile) cached = null;
+        },
+      );
     }
     return cached.profile;
+  }
+
+  /**
+   * The effective profile, never waiting longer than the load timeout. A
+   * slow or failed read falls back to the last good profile, silently: a
+   * workspace that never set a profile sees no difference at all.
+   */
+  async function currentProfile(): Promise<EffectiveCredentialProfile | null> {
+    try {
+      return await withinTimeout(loadProfile(), loadTimeout);
+    } catch {
+      return lastGood;
+    }
+  }
+
+  function unseen(items: readonly string[]): string[] {
+    const fresh = items.filter((item) => !shown.has(item));
+    for (const item of fresh) shown.add(item);
+    return fresh;
   }
 
   async function resolveLeniently(
@@ -181,17 +247,24 @@ export function createCredentialEnvironment(
       const refs = new Map<string, SecretReference>();
       for (const entry of pending) refs.set(referenceKey(entry.reference), entry.reference);
       try {
-        const values = await resolver.resolve([...refs.values()], {
-          surface: use.surface,
-          toolName: use.toolName,
-          ...(use.sourceCallId ? { sourceCallId: use.sourceCallId } : {}),
-          ...(use.destination ? { destination: use.destination } : {}),
-        });
+        const values = await withinTimeout(
+          resolver.resolve([...refs.values()], {
+            surface: use.surface,
+            toolName: use.toolName,
+            ...(use.sourceCallId ? { sourceCallId: use.sourceCallId } : {}),
+            ...(use.destination ? { destination: use.destination } : {}),
+          }),
+          resolveTimeout,
+        );
         for (const [key, value] of values) resolved.set(key, value);
         return resolved;
       } catch (error) {
         if (!isSecretReferenceError(error)) {
-          for (const entry of pending) skipped.set(entry.name, "could not be resolved");
+          const why =
+            error instanceof ProfileTimeoutError
+              ? "password manager did not answer in time"
+              : "could not be resolved";
+          for (const entry of pending) skipped.set(entry.name, why);
           return resolved;
         }
         const failedRaw = new Map(error.failures.map((failure) => [failure.raw, failure.code]));
@@ -219,20 +292,12 @@ export function createCredentialEnvironment(
   }
 
   async function forCommand(use: SecretExecUse): Promise<CredentialEnvironmentResult> {
-    let profile: EffectiveCredentialProfile | null;
-    try {
-      profile = await loadProfile();
-    } catch {
-      return { env: {}, notes: ["credential profile could not be loaded; ran without it"] };
-    }
+    const profile = await currentProfile();
     if (!profile || (profile.entries.length === 0 && !profile.gitHelper)) return NOTHING;
     const resolver = input.resolver;
-    if (!resolver?.enabled) {
-      return {
-        env: {},
-        notes: ["credential profile not applied: secrets are turned off for this agent"],
-      };
-    }
+    // An agent with secrets turned off simply runs without the profile; a
+    // note on every one of its commands would only be noise.
+    if (!resolver?.enabled) return NOTHING;
     const skipped = new Map<string, string>();
     const entries: PreparedEntry[] = [];
     for (const entry of profile.entries) {
@@ -281,19 +346,21 @@ export function createCredentialEnvironment(
       }
     }
     const notes: string[] = [];
-    if (skipped.size > 0) {
-      notes.push(
-        `credential profile skipped ${[...skipped].map(([name, why]) => `${name} (${why})`).join(", ")}`,
-      );
-    }
+    const skippedNow = unseen([...skipped].map(([name, why]) => `${name} (${why})`));
+    if (skippedNow.length > 0) notes.push(`credential profile skipped ${skippedNow.join(", ")}`);
     if (profile.gitHelper) {
       if (env[CREDENTIAL_PROFILE_GIT_TOKEN_VARIABLE]) {
         Object.assign(env, credentialProfileGitHelperEnvironment(env));
       } else {
         notes.push(
-          `credential profile git helper not applied: ${CREDENTIAL_PROFILE_GIT_TOKEN_VARIABLE} is not set`,
+          ...unseen([
+            `credential profile git helper not applied: ${CREDENTIAL_PROFILE_GIT_TOKEN_VARIABLE} is not set`,
+          ]),
         );
       }
+    }
+    if (delivered.length > 0) {
+      env[CREDENTIAL_PROFILE_VARS_VARIABLE] = Object.keys(env).join(",");
     }
     if (delivered.length > 0) {
       try {
@@ -310,7 +377,10 @@ export function createCredentialEnvironment(
       try {
         return await forCommand(use);
       } catch {
-        return { env: {}, notes: ["credential profile could not be applied; ran without it"] };
+        return {
+          env: {},
+          notes: unseen(["credential profile could not be applied; ran without it"]),
+        };
       }
     },
   };

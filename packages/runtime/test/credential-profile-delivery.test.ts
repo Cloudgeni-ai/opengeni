@@ -120,6 +120,8 @@ describe("createCredentialEnvironment", () => {
     expect(result.env).toEqual({
       GH_TOKEN: VALUES["cloud-auth/GITHUB_TOKEN/value"],
       AZURE_CLIENT_SECRET: VALUES["cloud-auth/AZURE_CLIENT_SECRET/value"],
+      // The names (never values) the profile delivered, for the CLI wrappers.
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN,AZURE_CLIENT_SECRET",
     });
     // The known-value masking hook (part B) sees every delivered value.
     expect(delivered.sort()).toEqual(
@@ -141,7 +143,10 @@ describe("createCredentialEnvironment", () => {
       resolver,
     );
     const result = await credentials.forCommand(SHELL);
-    expect(result.env).toEqual({ GH_TOKEN: VALUES["cloud-auth/GITHUB_TOKEN/value"] });
+    expect(result.env).toEqual({
+      GH_TOKEN: VALUES["cloud-auth/GITHUB_TOKEN/value"],
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+    });
     expect(result.notes).toEqual([
       "credential profile skipped BROKEN (invalid reference), AZURE_TENANT_ID (secret not found)",
     ]);
@@ -150,7 +155,7 @@ describe("createCredentialEnvironment", () => {
     expect(JSON.stringify(result.notes)).not.toContain("ghp_");
   });
 
-  test("an approval request is asked once per attempt, not for every command", async () => {
+  test("an approval request is asked once per attempt and its note is shown once", async () => {
     const approval = ref("cloud-auth/AZURE_CLIENT_SECRET/value");
     const { resolver, calls } = approvalResolver(approval);
     const { credentials } = environmentFor(
@@ -163,11 +168,14 @@ describe("createCredentialEnvironment", () => {
     const first = await credentials.forCommand(SHELL);
     const second = await credentials.forCommand(SHELL);
     for (const result of [first, second]) {
-      expect(result.env).toEqual({ GH_TOKEN: VALUES["cloud-auth/GITHUB_TOKEN/value"] });
-      expect(result.notes).toEqual([
-        "credential profile skipped AZURE_CLIENT_SECRET (waiting for the person's approval)",
-      ]);
+      expect(result.env.GH_TOKEN).toBe(VALUES["cloud-auth/GITHUB_TOKEN/value"]);
+      expect(result.env.AZURE_CLIENT_SECRET).toBeUndefined();
     }
+    expect(first.notes).toEqual([
+      "credential profile skipped AZURE_CLIENT_SECRET (waiting for the person's approval)",
+    ]);
+    // The same note is not repeated on every later command of the attempt.
+    expect(second.notes).toEqual([]);
     expect(calls.filter((call) => call.includes(approval))).toHaveLength(1);
   });
 
@@ -176,21 +184,20 @@ describe("createCredentialEnvironment", () => {
       env: {},
       notes: [],
     });
+    // An agent with secrets turned off runs without the profile, silently.
     const off = environmentFor(
       profile([["GH_TOKEN", ref("Plain")]]),
       createStaticSecretResolver(VALUES, { enabled: false }),
     );
-    expect((await off.credentials.forCommand(SHELL)).notes[0]).toContain("secrets are turned off");
+    expect(await off.credentials.forCommand(SHELL)).toEqual({ env: {}, notes: [] });
+    // A profile that cannot be read changes nothing for the command.
     const broken = createCredentialEnvironment({
       resolver: createStaticSecretResolver(VALUES),
       load: async () => {
         throw new Error("database unavailable");
       },
     });
-    expect(await broken.forCommand(SHELL)).toEqual({
-      env: {},
-      notes: ["credential profile could not be loaded; ran without it"],
-    });
+    expect(await broken.forCommand(SHELL)).toEqual({ env: {}, notes: [] });
     const throwing: SecretResolver = {
       principal: createStaticSecretResolver({}).principal,
       enabled: true,
@@ -203,6 +210,57 @@ describe("createCredentialEnvironment", () => {
       env: {},
       notes: ["credential profile skipped GH_TOKEN (could not be resolved)"],
     });
+  });
+
+  test("a slow or failed profile read never stalls a command", async () => {
+    let clock = 1_000;
+    let mode: "ok" | "hang" | "fail" = "ok";
+    const credentials = createCredentialEnvironment({
+      resolver: createStaticSecretResolver(VALUES),
+      load: async () => {
+        if (mode === "hang") return await new Promise<never>(() => undefined);
+        if (mode === "fail") throw new Error("pool exhausted");
+        return profile([["GH_TOKEN", ref("Plain")]]);
+      },
+      profileTtlMs: 5_000,
+      loadTimeoutMs: 50,
+      now: () => clock,
+    });
+    // Nothing read yet and the database hangs: run without a profile, no note.
+    mode = "hang";
+    const started = Date.now();
+    expect(await credentials.forCommand(SHELL)).toEqual({ env: {}, notes: [] });
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // Once a profile was read, a hanging or failing read keeps using it.
+    clock += 5_000;
+    mode = "ok";
+    expect((await credentials.forCommand(SHELL)).env.GH_TOKEN).toBe(VALUES.Plain);
+    for (const next of ["hang", "fail"] as const) {
+      clock += 5_000;
+      mode = next;
+      const result = await credentials.forCommand(SHELL);
+      expect(result.env.GH_TOKEN).toBe(VALUES.Plain);
+      expect(result.notes).toEqual([]);
+    }
+  });
+
+  test("a password manager that does not answer skips the entries with a note", async () => {
+    const hanging: SecretResolver = {
+      principal: createStaticSecretResolver({}).principal,
+      enabled: true,
+      resolve: async () => await new Promise<never>(() => undefined),
+    };
+    const credentials = createCredentialEnvironment({
+      resolver: hanging,
+      load: async () => profile([["GH_TOKEN", ref("Plain")]]),
+      resolveTimeoutMs: 50,
+    });
+    expect(await credentials.forCommand(SHELL)).toEqual({
+      env: {},
+      notes: ["credential profile skipped GH_TOKEN (password manager did not answer in time)"],
+    });
+    // Shown once per attempt.
+    expect(await credentials.forCommand(SHELL)).toEqual({ env: {}, notes: [] });
   });
 
   test("the profile is read again only after its short cache window", async () => {
@@ -249,6 +307,7 @@ describe("createCredentialEnvironment", () => {
     expect((await withoutToken.credentials.forCommand(SHELL)).notes).toEqual([
       "credential profile git helper not applied: GH_TOKEN is not set",
     ]);
+    expect((await withoutToken.credentials.forCommand(SHELL)).notes).toEqual([]);
   });
 
   test("notes end the tool result and never replace it", () => {
@@ -273,13 +332,22 @@ describe("the profile carry", () => {
     });
     expect(prepared?.text).toBe("gh pr list");
     expect(prepared?.carry?.profileOnly).toBe(true);
-    expect(prepared?.carry?.profileEnv).toEqual({ GH_TOKEN: VALUES.Plain });
+    expect(prepared?.carry?.profileEnv).toEqual({
+      GH_TOKEN: VALUES.Plain,
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+    });
     const carry = bindSecretCarryToDispatch(prepared!.carry, "wrapped -- gh pr list -- marker");
     // Only the exact dispatch gets the profile, never a helper command.
     runWithSecretCarry(carry, () => {
       expect(secretExecCarryFor("wrapped -- gh pr list -- marker")).toBe(carry);
       expect(secretExecCarryFor("gh pr list")).toBe(carry);
       expect(secretExecCarryFor("cat /tmp/marker")).toBeNull();
+    });
+    // Without a wrapper (a Connected Machine), only the exact command matches.
+    const exact = bindSecretCarryToDispatch(prepared!.carry, "gh pr list");
+    runWithSecretCarry(exact, () => {
+      expect(secretExecCarryFor("gh pr list")).toBe(exact);
+      expect(secretExecCarryFor("sh -c 'gh pr list'")).toBeNull();
     });
   });
 
@@ -294,7 +362,10 @@ describe("the profile carry", () => {
     });
     expect(prepared?.text).toBe('echo "${OPENGENI_SECRET_0}"');
     expect(prepared?.carry?.profileOnly).toBeUndefined();
-    expect(prepared?.carry?.profileEnv).toEqual({ GH_TOKEN: VALUES.Plain });
+    expect(prepared?.carry?.profileEnv).toEqual({
+      GH_TOKEN: VALUES.Plain,
+      OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+    });
   });
 
   test("a reference failure still fails before the profile is read", async () => {
@@ -324,6 +395,98 @@ describe("the profile carry", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Connected Machine path through the turn's exec_command wrapper.
+// ---------------------------------------------------------------------------
+
+function execTool(
+  invoke: Extract<Tool<unknown>, { type: "function" }>["invoke"],
+): Extract<Tool<unknown>, { type: "function" }> {
+  return {
+    type: "function",
+    name: "exec_command",
+    description: "exec_command",
+    parameters: { type: "object", properties: {}, required: [], additionalProperties: true },
+    strict: false,
+    needsApproval: async () => false,
+    invoke,
+  };
+}
+
+const exitedOutput = (output: string) =>
+  [
+    "Chunk ID: abc123",
+    "Wall time: 0.0100 seconds",
+    "Process exited with code 0",
+    "Output:",
+    output,
+  ].join("\n");
+
+describe("credential profiles on a Connected Machine (exec_command wrapper)", () => {
+  async function connectedExec(
+    value: EffectiveCredentialProfile,
+    result: (cmd: string) => unknown = () => exitedOutput("ok\n"),
+  ) {
+    const resolver = createStaticSecretResolver(VALUES);
+    const { credentials } = environmentFor(value, resolver);
+    const controller = createTurnToolCancellationController(undefined, {
+      secretResolver: resolver,
+      credentials,
+    });
+    const seen: Array<{ cmd: string; env: Record<string, string> | undefined }> = [];
+    const [exec] = controller.wrapTools(
+      [
+        execTool(async (_context, raw) => {
+          const cmd = (JSON.parse(raw as string) as { cmd: string }).cmd;
+          const carry = secretExecCarryFor(cmd);
+          // A helper command in the same call never gets the profile.
+          seen.push({ cmd, env: carry?.profileEnv ? { ...carry.profileEnv } : undefined });
+          expect(secretExecCarryFor(`sh -c '${cmd}'`)).toBeNull();
+          return result(cmd) as never;
+        }),
+      ],
+      { commandCancellationTransport: async () => "remote_operation" as const },
+    ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+    const run = async (cmd: string) =>
+      await exec!.invoke({} as never, JSON.stringify({ cmd }), {
+        toolCall: { callId: `call_${crypto.randomUUID()}` },
+      } as never);
+    return { run, seen };
+  }
+
+  test("the exact command receives the variables; its text is unchanged", async () => {
+    const h = await connectedExec(profile([["GH_TOKEN", ref("cloud-auth/GITHUB_TOKEN/value")]]));
+    const output = await h.run("gh pr list");
+    expect(output).toContain("ok");
+    expect(output).not.toContain("[Note:");
+    expect(h.seen).toEqual([
+      {
+        cmd: "gh pr list",
+        env: {
+          GH_TOKEN: VALUES["cloud-auth/GITHUB_TOKEN/value"],
+          OPENGENI_CREDENTIAL_PROFILE_VARS: "GH_TOKEN",
+        },
+      },
+    ]);
+  });
+
+  test("notes end string and structured results once per attempt", async () => {
+    const value = profile([
+      ["GH_TOKEN", ref("cloud-auth/GITHUB_TOKEN/value")],
+      ["AZURE_TENANT_ID", ref("cloud-auth/NOT_SAVED/value")],
+    ]);
+    const note = "[Note: credential profile skipped AZURE_TENANT_ID (secret not found)]";
+    const text = await connectedExec(value);
+    expect(await text.run("az account show")).toContain(note);
+    expect(await text.run("az account show")).not.toContain("[Note:");
+    const structured = await connectedExec(value, () => ({ output: "ok\n", exitCode: 0 }));
+    expect(await structured.run("az account show")).toEqual({
+      output: `ok\n${note}`,
+      exitCode: 0,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Managed sandbox path: a real local sandbox, delivered through the env file.
 // ---------------------------------------------------------------------------
 
@@ -343,7 +506,10 @@ afterEach(async () => {
   });
 });
 
-async function localHarness(value: EffectiveCredentialProfile) {
+async function localHarness(
+  value: EffectiveCredentialProfile,
+  options: { kind?: "local" | "opensandbox" } = {},
+) {
   const settings = testSettings({ sandboxBackend: "local", webSearchEnabled: false });
   const client = createSandboxClientForBackend("local", settings) as {
     create(manifest?: unknown): Promise<LocalSession>;
@@ -365,7 +531,7 @@ async function localHarness(value: EffectiveCredentialProfile) {
     resolveActiveBackend: async () => ({
       session: local as never,
       sandboxId: null,
-      kind: "local",
+      kind: options.kind ?? "local",
       leaseEpoch: 1,
       providerInstanceId: "instance",
       activeEpoch: 0,
@@ -453,6 +619,32 @@ describe("credential profiles on a managed sandbox (env-file path)", () => {
     expect(output).toContain(
       "[Note: credential profile skipped AZURE_CLIENT_ID (secret not found)]",
     );
+  }, 60_000);
+
+  test("a sandbox that cannot receive the profile runs the command without it, with one note", async () => {
+    // OpenSandbox has no private file writes, so the env file cannot be written.
+    const h = await localHarness(profile([["GH_TOKEN", ref("cloud-auth/GITHUB_TOKEN/value")]]), {
+      kind: "opensandbox",
+    });
+    const first = await h.run('printf "<%s>" "${GH_TOKEN-unset}"');
+    expect(first).toContain("<unset>");
+    expect(first).toContain(
+      "[Note: credential profile not applied: this sandbox could not receive it]",
+    );
+    const second = await h.run('printf "<%s>" "${GH_TOKEN-unset}"');
+    expect(second).toContain("<unset>");
+    expect(second).not.toContain("[Note:");
+    for (const cmd of h.provider) expect(cmd).not.toContain(token);
+  }, 60_000);
+
+  test("helper commands in the same call never receive the profile", async () => {
+    const h = await localHarness(profile([["GH_TOKEN", ref("cloud-auth/GITHUB_TOKEN/value")]]));
+    await h.run('printf %s "$GH_TOKEN" | sha256sum');
+    // Only the one dispatched command is prefixed with the env file; the
+    // marker, kill and cleanup commands around it are not.
+    const sourced = h.provider.filter((cmd) => cmd.includes(`if . '${SECRET_FILE_ROOT}/`));
+    expect(sourced).toHaveLength(1);
+    expect(sourced[0]).toContain("sha256sum");
   }, 60_000);
 
   test("a command that keeps running in the background has the variable", async () => {
