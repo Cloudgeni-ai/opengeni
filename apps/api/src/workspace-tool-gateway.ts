@@ -1037,8 +1037,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
               defaultDecision: recommendation,
             },
           );
-          // A transport without a verified approval round trip omits any tool
-          // which could ask. Its execution still resolves the exact arguments.
+          // The filter then hides a tool that still needs approval only when
+          // its provider recommends Ask and it has no approval preflight. Its
+          // execution still resolves the exact arguments.
           return { ...definition, approval: permission.approvalRequired ? "human" : "policy" };
         },
         resolveApproval: async ({ call, entry }) => {
