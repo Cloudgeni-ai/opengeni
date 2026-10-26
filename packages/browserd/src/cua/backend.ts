@@ -1820,13 +1820,38 @@ export class CuaComputerBackend implements ComputerBackend {
       (this.recentObservations.get(command.targetId) ?? []).some(
         (recent) => recent.observationId === command.expectedObservationId,
       );
+    // Keys go to the window's focused element in its latest reading. Another
+    // read of the window since the caller's (the person's viewer, a parallel
+    // read) changes nothing they land on while that reading shows the same
+    // focused element, which keeps its ref across readings of one document.
+    const keyFenced =
+      action.type === "keyboard" &&
+      observed !== undefined &&
+      (this.recentObservations.get(command.targetId) ?? []).some(
+        (recent) =>
+          recent.observationId === command.expectedObservationId &&
+          recent.focusedRef === observed.focusedRef,
+      );
     if (
       !observed ||
       !command.expectedObservationId ||
-      (observed.observationId !== command.expectedObservationId && !refFenced)
+      (observed.observationId !== command.expectedObservationId && !refFenced && !keyFenced)
     ) {
       if (this.unreadableSheets.has(command.targetId) && this.sheetHosts(target).length)
         throw await this.sheetError(target);
+      if (
+        action.type === "keyboard" &&
+        observed &&
+        (this.recentObservations.get(command.targetId) ?? []).some(
+          (recent) => recent.observationId === command.expectedObservationId,
+        )
+      )
+        throw new ComputerBackendError(
+          "observation_stale",
+          "The focused element of this window changed since that observation, so no keys were sent; observe the window again",
+          false,
+          false,
+        );
       throw new ComputerBackendError(
         "observation_stale",
         "CUA action requires the current semantic observation",

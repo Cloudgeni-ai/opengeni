@@ -63,6 +63,7 @@ function firstPartyServer(log: string[]): PrefixedMcpServer {
         "computer_open",
         "browser_open",
         "computer_observe",
+        "computer_act",
       ].map((name) => ({
         name,
         inputSchema: { type: "object", properties: {} },
@@ -109,6 +110,8 @@ describe("route-moving tools", () => {
       opengeni__computer_open: callNamesConnectedMachine,
       opengeni__browser_open: callNamesConnectedMachine,
       opengeni__computer_observe: undefined,
+      // An action changes what later reads of the response see.
+      opengeni__computer_act: true,
       linear__sandbox_swap: undefined,
     });
     expect(
@@ -131,6 +134,43 @@ describe("route-moving tools", () => {
         exclusiveExecution?: boolean;
       },
     ).toMatchObject({ exclusiveExecution: true });
+  });
+
+  test("a computer action runs in model order with the reads of its response", async () => {
+    const log: string[] = [];
+    const model = new ScriptedModel([
+      [
+        call("before", "opengeni__computer_observe"),
+        call("act", "opengeni__computer_act", {
+          action: { type: "keyboard", action: "press", value: "Escape" },
+        }),
+        call("after", "opengeni__computer_observe"),
+      ],
+      [
+        {
+          type: "message",
+          id: "done",
+          role: "assistant",
+          status: "completed",
+          content: [{ type: "output_text", text: "Done." }],
+        },
+      ],
+    ]);
+    const agent = new Agent({ name: "Test", model, mcpServers: [firstPartyServer(log)] });
+    installRouteMoveOrdering(agent as never);
+    const result = await new Runner({ tracingDisabled: true }).run(agent, "Close the dialog");
+    expect(result.finalOutput).toBe("Done.");
+    // Started together, the read after the action could be served first and
+    // show the window before it, and the read before it could replace the
+    // reading the action was fenced on.
+    expect(log).toEqual([
+      "computer_observe:start",
+      "computer_observe:end",
+      "computer_act:start",
+      "computer_act:end",
+      "computer_observe:start",
+      "computer_observe:end",
+    ]);
   });
 
   test("an open runs in model order only when it names a Connected Machine", async () => {

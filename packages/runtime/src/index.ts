@@ -3737,6 +3737,13 @@ const PLACEMENT_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
   "computer_open",
   "browser_open",
 ]);
+/** First-party tools that change what a ComputerSession shows. A model that
+ * writes `computer_act` and then `computer_observe` in one response means the
+ * observation after the action; started together, the read could be served
+ * before the action ran and show the window as it was. A read that lands
+ * between an action's own fresh read and its dispatch also replaces the
+ * reading the action was fenced on. */
+const STATE_CHANGING_TOOL_FAMILIES: ReadonlySet<string> = new Set(["computer_act"]);
 
 /** Whether one call's arguments name a Connected Machine placement. */
 export function callNamesConnectedMachine(toolCall: { arguments: string }): boolean {
@@ -3764,6 +3771,12 @@ export function callNamesConnectedMachine(toolCall: { arguments: string }): bool
  * it is ordered the same way. A swap inside a Code Mode program is one step of
  * that program's single call and is not ordered against the response's other
  * calls.
+ *
+ * computer_act runs in model order too (see STATE_CHANGING_TOOL_FAMILIES): an
+ * observation written after an action in one response shows the window after
+ * it, one written before it shows the window before it, and no read of the
+ * response lands between the action's own fresh read and its dispatch. The
+ * response's other calls still wait for the action, as they do for a swap.
  */
 export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
@@ -3771,7 +3784,8 @@ export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
     (await listMcpTools(resolutionContext)).map((tool) => {
       if (tool.type !== "function") return tool;
       const family = toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "";
-      if (ROUTE_MOVING_TOOL_FAMILIES.has(family)) return { ...tool, exclusiveExecution: true };
+      if (ROUTE_MOVING_TOOL_FAMILIES.has(family) || STATE_CHANGING_TOOL_FAMILIES.has(family))
+        return { ...tool, exclusiveExecution: true };
       if (PLACEMENT_MOVING_TOOL_FAMILIES.has(family))
         return { ...tool, exclusiveExecution: callNamesConnectedMachine };
       return tool;
