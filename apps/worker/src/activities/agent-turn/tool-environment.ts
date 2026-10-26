@@ -85,7 +85,6 @@ import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
-import { sandboxRunAs } from "@opengeni/runtime";
 import {
   bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
@@ -636,7 +635,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         "Skill checkout/publish requires a sandbox or Connected Machine.",
       );
       const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
-      const runAs = sandboxRunAs(runSettings);
       const channel = new SandboxChannelAService({
         session: access.session,
         commandRunner: async (commandSession, args) => {
@@ -653,7 +651,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         emit: async (events) => {
           await eventing.publish?.(events, true);
         },
-        ...(runAs ? { runAs } : {}),
       });
       return guardSkillFilesystem(channel, {
         assertActive: () => {
@@ -780,14 +777,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         "code_search requires a sandbox or Connected Machine.",
       );
       const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
-      const runAs = sandboxRunAs(runSettings);
       return codeSearchWorkspaceFromChannel(
         new SandboxChannelAService({
           session: access.session,
           workspaceRoot: machineRoot ?? "/workspace",
           ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
           leaseEpoch: access.leaseEpoch,
-          ...(runAs ? { runAs } : {}),
         }),
       );
     },
@@ -949,7 +944,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     );
     const sandbox = sandboxAccess.sandbox;
     const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
-    const runAs = sandboxRunAs(runSettings);
     const channel = new SandboxChannelAService({
       session: sandboxAccess.session,
       workspaceRoot: machineRoot ?? "/workspace",
@@ -958,7 +952,6 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       emit: async (events) => {
         await eventing.publish?.(events, true);
       },
-      ...(runAs ? { runAs } : {}),
     });
     return await materializeConnectorAttachmentsInChannel(channel, request, {
       runMutation: async (mutation) => {
@@ -1092,14 +1085,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             media.sdkOwnedSandboxSession,
             "Gmail attachment filesystem is unavailable",
           );
-          const runAs = sandboxRunAs(runSettings);
           const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
           const channel = new SandboxChannelAService({
             session: access.session,
             workspaceRoot: machineRoot ?? "/workspace",
             ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
             leaseEpoch: access.leaseEpoch,
-            ...(runAs ? { runAs } : {}),
           });
           return await readGmailFileFromChannel(channel, request);
         },

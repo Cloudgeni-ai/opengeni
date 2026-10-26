@@ -34,7 +34,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
-import { permissionsRequiredByFirstPartyTools } from "../src/mcp/first-party-tool-permissions";
+import { permissionsRequiredByFirstPartyTools } from "@opengeni/contracts";
 import { registerScheduledTaskRoutes } from "../src/routes/scheduled-tasks";
 
 let available = true;

@@ -21,7 +21,6 @@ import {
   builtinAutomationTemplates,
   automationCadenceIssue,
   automationCadenceRepeats,
-  automationCadenceWords,
   automationNextRun,
   automationRunEventsLabel,
   automationScheduleSpec,
@@ -105,10 +104,6 @@ export interface ScheduleWords {
 
 export function scheduleWords(schedule: ScheduledTaskScheduleSpec, now: Date): ScheduleWords {
   return automationScheduleWords(t, schedule, now);
-}
-
-export function cadenceWords(cadence: CadenceValue, now: Date): ScheduleWords {
-  return automationCadenceWords(t, cadence, now);
 }
 
 /** The next run, or null when paused, on demand, or no runs are left. */

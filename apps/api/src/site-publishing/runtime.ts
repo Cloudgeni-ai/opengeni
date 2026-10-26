@@ -274,14 +274,6 @@ export function siteViewerCapabilities(
   };
 }
 
-export async function siteRuntimeLimits(
-  deps: SiteRuntimeDeps,
-  host: SiteRuntimeHost,
-  viewer?: Pick<SiteRuntimeViewer, "kind">,
-): Promise<SiteLimits> {
-  return (await siteRuntimeLimitProfile(deps, host, viewer)).limits;
-}
-
 /**
  * The limits that govern a viewer and the kind of limit profile they come
  * from: workspace members are never limited by Site limits (flood brakes

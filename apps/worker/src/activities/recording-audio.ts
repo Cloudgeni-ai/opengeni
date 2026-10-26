@@ -27,11 +27,6 @@ export type RecordingAudioChunk = {
   objectKey: string;
 };
 
-export type RecordingAudioRun = {
-  startMilliseconds: number;
-  chunks: RecordingAudioChunk[];
-};
-
 /** Whether a chunk begins a new container: an EBML, MP4 `ftyp` or Ogg header. */
 export function startsContainer(bytes: Uint8Array): boolean {
   if (

@@ -849,7 +849,6 @@ describe("fail-closed change impact", () => {
 
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
     for (const path of [
-      "apps/web/src/components/personal-workspace-badge.tsx",
       "apps/web/src/components/rail/switcher-block.tsx",
       "apps/web/src/components/rail/workspace-scope-nav.tsx",
       "apps/web/src/lib/workspace-scope-context.ts",

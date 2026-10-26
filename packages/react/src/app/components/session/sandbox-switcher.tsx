@@ -58,10 +58,6 @@ function SandboxMark({
   return <Icon className={cn("shrink-0", className)} />;
 }
 
-export function sessionSupportsFleetSwitching(_sandboxBackend: SandboxBackend): boolean {
-  return true;
-}
-
 /** Whether a machine can be a swap target right now (the active one always can,
  *  since selecting it is a harmless no-op; otherwise it must be compute-selectable). */
 function isSelectable(machine: MachineView): boolean {

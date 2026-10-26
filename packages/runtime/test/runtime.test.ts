@@ -149,7 +149,6 @@ import {
   sandboxArtifactRuntimeDoctorHooks,
   sandboxFileDownloadsForAgent,
   sandboxLifecycleHooksForIds,
-  sandboxRunAs,
   codemodeTokenSeedCommand,
   withSandboxFileDownloads,
   withSandboxSessionReady,
@@ -5594,10 +5593,6 @@ describe("runtime event normalization", () => {
   test("does not override the sandbox provider's default execution user", () => {
     // The sandbox provider is responsible for choosing a user that can write to
     // its workspace. Supplying a synthetic runAs user can break normal writes.
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "docker" }))).toBeUndefined();
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "local" }))).toBeUndefined();
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "modal" }))).toBeUndefined();
-    expect(sandboxRunAs(testSettings({ sandboxBackend: "none" }))).toBeUndefined();
     expect(
       (buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []) as any).runAs,
     ).toBeUndefined();

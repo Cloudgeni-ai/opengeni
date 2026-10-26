@@ -28,8 +28,6 @@ import { migrate } from "@opengeni/db/migrate";
 import {
   freezePersonalConnectionDelegations,
   listOwnConnectionAccountsForGrant,
-  googleDrivePublicationDelegationFromVisibleConnections,
-  personalAtlassianDelegationsFromVisibleConnections,
   personalConnectionDelegationSourceForGrant,
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
@@ -1137,29 +1135,6 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([social]);
   });
 
-  test("retired native Atlassian accounts never become execution authority", () => {
-    const authorityId = crypto.randomUUID();
-    const atlassian = googleDriveConnection({
-      id: crypto.randomUUID(),
-      providerDomain: "api.atlassian.com",
-      grantedScopes: [],
-      metadata: {},
-      authorityId,
-    });
-    expect(
-      personalAtlassianDelegationsFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [atlassian],
-      }),
-    ).toEqual([]);
-    expect(
-      personalAtlassianDelegationsFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [{ ...atlassian, authorityId: null }],
-      }),
-    ).toEqual([]);
-  });
-
   test("children drop native Atlassian authority while retaining the hosted MCP binding", () => {
     const hosted = {
       ...personalServer,
@@ -1201,7 +1176,6 @@ describe("personal MCP connection delegation", () => {
         settings: { mcpServers: [] },
         tools: [],
         source: { kind: "subject", subjectId: "user:owner", accountId: "account-1" },
-        googleDrivePublicationEnabled: true,
         authoritySelections: [
           {
             serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
@@ -1221,58 +1195,6 @@ describe("personal MCP connection delegation", () => {
         ],
       },
     });
-  });
-
-  test("native Drive publication never grants fresh or inherited authority", () => {
-    const drive = googleDriveConnection();
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [drive],
-      }),
-    ).toBeNull();
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [googleDriveConnection(), drive],
-        authoritySelection: {
-          serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-          connectionId: drive.id,
-        },
-      }),
-    ).toBeNull();
-    const historical: McpPersonalConnectionDelegation = {
-      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-      connectionId: drive.id,
-      originWorkspaceId: drive.workspaceId,
-      ownerSubjectId: "user:owner",
-      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
-      kind: "oauth2",
-    };
-    const officialServer = {
-      ...personalServer,
-      id: "google-drive",
-      url: "https://drivemcp.googleapis.com/mcp/v1",
-      connectionRef: {
-        ...personalServer.connectionRef,
-        providerDomain: "drivemcp.googleapis.com",
-      },
-    };
-    const official: McpPersonalConnectionDelegation = {
-      ...historical,
-      serverId: officialServer.id,
-      connectionId: crypto.randomUUID(),
-      providerDomain: "drivemcp.googleapis.com",
-    };
-    const parentDelegations = [historical, official];
-    expect(
-      personalConnectionDelegationsFromParent({
-        servers: [officialServer],
-        parentDelegations,
-      }),
-    ).toEqual([official]);
-    // Retirement filters new authority without rewriting historical receipts.
-    expect(parentDelegations).toEqual([historical, official]);
   });
 
   test("pins every caller surface to the same exact owner, UUID, provider, and kind", async () => {

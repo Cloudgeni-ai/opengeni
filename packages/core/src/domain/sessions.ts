@@ -3678,9 +3678,6 @@ async function createSessionForRequestInFileScope(
     firstPartyMcpTools,
     settings.mcpServers,
   );
-  const atlassianEnabled =
-    firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-    (!firstPartyMcpPermissions?.length || firstPartyMcpPermissions.includes("connections:read"));
   // Creation's stored tool snapshot can omit configured workspace defaults.
   // Freeze initial-turn accounts against the same executable policy as later
   // messages; explicit selections and exclusions remain exact.
@@ -3703,7 +3700,6 @@ async function createSessionForRequestInFileScope(
         resources,
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
-        atlassianEnabled,
       }),
     );
   if (effectiveGoal) {
@@ -4712,10 +4708,6 @@ async function acceptSessionUserMessageInFileScope(
         resources: [...existingSession.resources, ...requestedResources],
         source: connectionDelegationSource,
         targetSessionId: sessionId,
-        atlassianEnabled:
-          existingSession.firstPartyMcpTools.some((tool) => tool.startsWith("atlassian_")) &&
-          (!existingSession.firstPartyMcpPermissions?.length ||
-            existingSession.firstPartyMcpPermissions.includes("connections:read")),
         ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
       });
 
