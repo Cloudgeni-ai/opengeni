@@ -6,6 +6,7 @@ import {
   groupTranscriptTurns,
   meetingHereStatus,
   meetingPhase,
+  meetingTitle,
   speakerDisplayName,
   speakerIsNamed,
   transcriptErrorText,
@@ -237,7 +238,7 @@ export function useMeetingView({
                 accessibilityRole="header"
                 style={{ ...fontStyle(theme, 600), fontSize: 24, lineHeight: 30, color: c.fg }}
               >
-                {recording.title || msg("native.meetings.meetingsList.untitledMeeting")}
+                {meetingTitle(recording, msg)}
               </Text>
             </Pressable>
             <MetaLine recording={recording} />

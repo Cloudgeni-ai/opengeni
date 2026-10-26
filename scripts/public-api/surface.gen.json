@@ -37962,6 +37962,7 @@
       "meetingPhase": "value",
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
+      "meetingTitle": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
       "speakerColorSlots": "value",

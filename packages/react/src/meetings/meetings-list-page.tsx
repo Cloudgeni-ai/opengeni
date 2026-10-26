@@ -12,6 +12,7 @@ import {
   meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   useRecordingModels,
   useRecordings,
   useRecordingsClient,
@@ -275,7 +276,7 @@ function MeetingsListPageContent({
                   <ListRow
                     key={recording.id}
                     leading={<LogoTile icon={<AudioLinesIcon />} />}
-                    title={recording.title}
+                    title={meetingTitle(recording, msg)}
                     titleAddon={
                       recording.visibility === "private" ? (
                         <MetaChip icon={<LockIcon />}>
@@ -337,7 +338,7 @@ function MeetingsListPageContent({
                       </DropdownMenuItem>
                     }
                     menuLabel={msg("meetings.listPage.moreActionsForTitle", {
-                      title: recording.title,
+                      title: meetingTitle(recording, msg),
                     })}
                     href={meetingHref(recording.id)}
                     linkProps={{ onClick: inAppClick(() => onOpen(recording.id)) }}
@@ -365,7 +366,9 @@ function MeetingsListPageContent({
         </div>
       </div>
       <DeleteMeetingDialog
-        recording={pendingDelete}
+        recording={
+          pendingDelete && { id: pendingDelete.id, title: meetingTitle(pendingDelete, msg) }
+        }
         onClose={() => setPendingDelete(null)}
         onDelete={async (recordingId) => {
           await client.deleteRecording(workspaceId, recordingId);

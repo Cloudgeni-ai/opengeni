@@ -390,11 +390,51 @@ export function languageName(code: string, locale?: string): string {
   return LANGUAGE_NAMES[tag] ?? LANGUAGE_NAMES[tag.split("-")[0]!] ?? tag;
 }
 
-/** A short, readable default title for a new recording: "Meeting, Oct 23, 14:05". */
+const MONTH_KEYS = [
+  "time.month.jan",
+  "time.month.feb",
+  "time.month.mar",
+  "time.month.apr",
+  "time.month.may",
+  "time.month.jun",
+  "time.month.jul",
+  "time.month.aug",
+  "time.month.sep",
+  "time.month.oct",
+  "time.month.nov",
+  "time.month.dec",
+] as const;
+
+/**
+ * A short, readable default title for a new recording, in local time and the
+ * app's own date words and 24-hour clock: "Meeting, 23 Oct, 14:05".
+ */
 export function defaultMeetingTitle(now: Date, msg: OpenGeniText = defaultText): string {
-  const date = now.toLocaleDateString(msg.locale, { month: "short", day: "numeric" });
-  const time = now.toLocaleTimeString(msg.locale, { hour: "2-digit", minute: "2-digit" });
+  const month = msg(MONTH_KEYS[now.getMonth()] ?? "time.month.jan");
+  const date = msg("time.date", { day: now.getDate(), month });
+  const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   return msg("meetings.recordings.defaultTitle", { date, time });
+}
+
+/**
+ * The title to show for a meeting. One started without a title carries the
+ * server's stand-in, "Recording 2026-10-26 11:15 UTC"; it shows as a
+ * recorder would have named it, in the viewer's language and time.
+ */
+export function meetingTitle(
+  recording: Pick<Recording, "title" | "startedAt">,
+  msg: OpenGeniText = defaultText,
+): string {
+  const title = recording.title.trim();
+  const startedAt = new Date(recording.startedAt);
+  if (Number.isNaN(startedAt.getTime())) return title;
+  if (title && title !== serverDefaultTitle(startedAt)) return title;
+  return defaultMeetingTitle(startedAt, msg);
+}
+
+/** The title the server gives a recording started without one. */
+function serverDefaultTitle(startedAt: Date): string {
+  return `Recording ${startedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
 /** A finished stretch of live text on one track, as the live preview shows it. */

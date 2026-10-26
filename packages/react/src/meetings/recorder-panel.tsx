@@ -834,8 +834,7 @@ export function RecorderOptions({
               {msg("meetings.recorderPanel.liveTranscript")}
             </DropdownMenuCheckboxItem>
             <DropdownMenuNote>
-              {msg("meetings.recorderPanel.showsWhatSSaidAs")}{" "}
-              {liveCostHint(live.usdPerHour, msg)}
+              {msg("meetings.recorderPanel.showsWhatSSaidAs")} {liveCostHint(live.usdPerHour, msg)}
             </DropdownMenuNote>
             <DropdownMenuSeparator />
           </>

@@ -18,6 +18,7 @@ import {
   meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -356,4 +357,17 @@ test("a host's catalog and locale reach every label the helpers make", () => {
   // Language names follow the locale and start upper case, as a label does.
   expect(languageName("nob", "nb")).toBe("Norsk bokmål");
   expect(languageName("en", "nb")).toBe("Engelsk");
+});
+
+test("a meeting started without a title shows as a recorder would have named it", () => {
+  const startedAt = "2026-10-26T11:15:40.000Z";
+  const named = defaultMeetingTitle(new Date(startedAt));
+  expect(defaultMeetingTitle(new Date(2026, 9, 23, 14, 5))).toBe("Meeting, 23 Oct, 14:05");
+  expect(meetingTitle({ title: "Recording 2026-10-26 11:15 UTC", startedAt })).toBe(named);
+  expect(meetingTitle({ title: "  ", startedAt })).toBe(named);
+  // Its own title, or the stand-in for another time, stays as it is.
+  expect(meetingTitle({ title: "Weekly sync", startedAt })).toBe("Weekly sync");
+  expect(meetingTitle({ title: "Recording 2026-10-25 11:15 UTC", startedAt })).toBe(
+    "Recording 2026-10-25 11:15 UTC",
+  );
 });

@@ -9174,6 +9174,11 @@
       margin-inline: auto;
     }
   }
+:where(.og-root).max-sm\:-ml-3,:where(.og-root) .max-sm\:-ml-3 {
+    @media (width < 40rem) {
+      margin-left: calc(var(--spacing) * -3);
+    }
+  }
 :where(.og-root).max-sm\:hidden,:where(.og-root) .max-sm\:hidden {
     @media (width < 40rem) {
       display: none;
@@ -14467,7 +14472,7 @@
   padding: 20%;
 }
 :where(:where(.dark, [data-og-theme="dark"]) .og-connection-logo):where(.og-root),:where(:where(.dark, [data-og-theme="dark"]) .og-connection-logo):has(:where(.og-root)),:where(.og-root) :where(:where(.dark, [data-og-theme="dark"]) .og-connection-logo) {
-  --og-connection-mark-plate: #fafafa;
+  --og-connection-mark-plate: var(--og-color-fg,#fafafa);
 }
 :where(:where([data-og-theme="light"]) .og-connection-logo):where(.og-root),:where(:where([data-og-theme="light"]) .og-connection-logo):has(:where(.og-root)),:where(.og-root) :where(:where([data-og-theme="light"]) .og-connection-logo) {
   --og-connection-mark-plate: var(--og-color-surface,#ffffff);

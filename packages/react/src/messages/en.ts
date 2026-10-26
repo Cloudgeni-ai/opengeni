@@ -2540,16 +2540,14 @@ export const englishMessages = {
   "meetings.recorderPanel.stop": "Stop",
   "meetings.recorderPanel.tabAudio": "Tab audio",
   "meetings.recorderPanel.takeNotes": "Take notes",
-  "meetings.recorderPanel.theLiveTranscriptAddsAbout":
-    "About ${value} per hour.",
+  "meetings.recorderPanel.theLiveTranscriptAddsAbout": "About ${value} per hour.",
   "meetings.recorderPanel.theLiveTranscriptionAccountHas":
     "Live transcription is out of credit. Ask an admin to top it up.",
   "meetings.recorderPanel.theLiveTranscriptionProviderIs":
     "The live transcription provider is busy right now.",
   "meetings.recorderPanel.theLiveTranscriptionProviderRefused":
     "Live transcription rejected the workspace's key. Ask an admin to check it.",
-  "meetings.recorderPanel.theLiveTranscriptUsesExtra":
-    "Uses extra transcription credit.",
+  "meetings.recorderPanel.theLiveTranscriptUsesExtra": "Uses extra transcription credit.",
   "meetings.recorderPanel.theMeetingWasDeletedOr":
     "The meeting was deleted, or you no longer have access to it.",
   "meetings.recorderPanel.theServerRefusedTheAudio": "The server refused the audio.",
@@ -3144,7 +3142,6 @@ export const englishMessages = {
     "The meeting is uploaded and transcribed.",
   "native.meetings.meetingsList.thisVersionOfTheAppCantRecord":
     "This version of the app can't record. Update it to record meetings on this phone.",
-  "native.meetings.meetingsList.untitledMeeting": "Untitled meeting",
   "native.meetings.phoneText.anotherAppOrACall":
     "Another app or a call is using it. Try again when it's free.",
   "native.meetings.phoneText.connecting": "Connecting…",
