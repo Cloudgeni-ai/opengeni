@@ -398,6 +398,8 @@ export const embeddingMigrationTail = [
   "0961_secret_use_approval_host_cards.sql",
   // Extends 0961's containment update kinds by exact anchor; replay after it.
   "0972_capability_setup_continuations.sql",
+  // Calls 0345's tenancy fence routines on connected commands; replay after it.
+  "0984_connected_commands_rearm_on_runner_report.sql",
   // Rewrites keys on the withheld Knowledge tables by name; replay last.
   ...workspaceDeletionMigrationTail,
   // Builds on withheld 0275, 0345 and 0761; replay after all of them.
