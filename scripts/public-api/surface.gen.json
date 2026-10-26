@@ -38033,6 +38033,7 @@
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
       "meetingTitle": "value",
+      "ownerLiveLaneName": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
       "speakerColorSlots": "value",
