@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot as createReactRoot } from "react-dom/client";
@@ -6,7 +6,13 @@ import { createRoot as createReactRoot } from "react-dom/client";
 import { AppContext, type AppContextValue } from "../../app-context";
 import type { Session } from "../../types";
 
-import { SessionHeader } from "./session-header";
+// The agent tile is its own feature (it reads the deployment's client config);
+// these tests cover the header around it.
+mock.module("../session/agent-identity-control", () => ({
+  AgentIdentityControl: () => null,
+}));
+
+const { SessionHeader } = await import("./session-header");
 
 // The header only renders inside the session shell, which always has the app
 // context; its chat actions (copy link, pin) run through it. None of these
