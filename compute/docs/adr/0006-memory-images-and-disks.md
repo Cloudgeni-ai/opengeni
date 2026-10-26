@@ -77,7 +77,15 @@ restore depend on every earlier link.
   its VMM wrote from just before the free-space reading until every write
   it had started by the disk's read has returned (one API request: the VMM
   answers it on the thread that does its drives' synchronous I/O), with
-  1 MiB per write call for rounding. Space a guest freed before the
-  free-space reading is then booked as its own whatever it writes after, and
-  a disk that cannot be read that way books its whole length for that
-  reading.
+  1 MiB per write call for rounding. It also books 256 KiB per file page
+  the VMM dirtied meanwhile: a discard over part of a block makes no write
+  call, but zeroes the rest of the block in its page, and XFS writes a
+  shared block's page to a new copy-on-write extent (128 KiB by default).
+  Pages that write calls dirty count twice, a bound for a window of
+  milliseconds. Space a guest freed before the free-space reading is then
+  booked as its own whatever it writes after, and a disk that cannot be
+  read that way books its whole length for that reading. A pause has the
+  guest trim first and holds the VM, so no reading of its disk comes while
+  it runs: from a pause's start until a reading measures the disk again,
+  the sandbox books its disk's whole length, also for a wake that comes
+  before that reading.

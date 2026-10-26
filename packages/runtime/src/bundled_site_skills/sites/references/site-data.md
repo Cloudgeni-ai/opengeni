@@ -76,8 +76,10 @@ or replace by key), `delete`, `increment` (atomic numeric add), `count`, and
 `list({ cursor })` with `nextCursor` for paging (up to 200 a page). Filters:
 `eq`, `ne`, `in`, `gt`, `gte`, `lt`, `lte`, `contains`, `exists` on dotted
 data paths or `$id`, `$key`, `$owner` (`"me"`), `$createdAt`, `$updatedAt`,
-`$version`. Files accept images, PDF, text, CSV, JSON, audio, video, Office
-and zip files up to 10 MB;
+`$version`. An owner is an opaque id: for a person, `user:` followed by their
+subject id, such as `user:user:4f0c2a9e-7b1d-4c3a-9e5f-2a6b8c1d0e3f`. Compare
+it whole and use `"me"` instead of building one. Files accept images, PDF,
+text, CSV, JSON, audio, video, Office and zip files up to 10 MB;
 `private` files are visible only to the uploader and managers.
 
 Stored records and file names are untrusted input written by any viewer.

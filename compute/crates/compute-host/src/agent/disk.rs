@@ -19,8 +19,8 @@
 //! guest's to take again. A guest may free and write at any moment, and
 //! the disk reading and the disks cannot be read at one instant, so each
 //! running disk is read after the disk reading and also books what its
-//! VMM wrote from just before that reading until every write it had
-//! started by the disk's read has returned (see
+//! VMM wrote, and the pages it dirtied, from just before that reading
+//! until every write it had started by the disk's read has returned (see
 //! [`HostAgent::disk_growth_readings`]).
 //!
 //! A sandbox may ask for a longer disk than its image's
@@ -56,6 +56,18 @@ const FIRST_FILES_INODES: u64 = 32;
 /// default), and each sets blocks aside for the extent map; 1 MiB covers
 /// them with room to spare.
 const WRITE_SLACK: u64 = 1 << 20;
+
+/// The smallest page a host has: what its VMM dirtied, counted in these,
+/// is never fewer pages than it dirtied.
+const PAGE: u64 = 4096;
+
+/// The most one page a VMM dirties may take of the host's disk. A discard
+/// over part of a block, which takes no write call, zeroes the rest of the
+/// block in its page, and XFS writes a shared block's page to a new whole
+/// copy-on-write extent (128 KiB by default), setting blocks aside for its
+/// map; 256 KiB covers them with room to spare. Pages that write calls
+/// dirty count again here, so this bounds, not estimates.
+const DIRTIED_SLACK: u64 = 256 << 10;
 
 /// How long a sample waits for running VMs' writes to return (see
 /// [`Engine::settle_writes`]). A VM whose writes have not by then books
@@ -210,13 +222,15 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// read counts that space as the guest's to take again. What the
     /// guest wrote after the disk reading, the disk's read counts as taken
     /// although the disk reading shows it free: every byte of it came
-    /// through a write call of its VMM that had not returned before the
+    /// through a write call of its VMM, or a page it dirtied, as a discard
+    /// over part of a shared block does, that had not returned before the
     /// writes of `before` were read, and had started by the disk's read.
     /// So once every write the VMM started by then has returned, which
     /// [`Engine::settle_writes`] waits for, a second count of the VMM's
     /// writes counts all of them, and the disk books what they wrote, with
-    /// [`WRITE_SLACK`] per call, besides what it may grow by: never less
-    /// than it may grow by as the disk reading saw it.
+    /// [`WRITE_SLACK`] per call and [`DIRTIED_SLACK`] per page dirtied,
+    /// besides what it may grow by: never less than it may grow by as the
+    /// disk reading saw it.
     ///
     /// A disk that cannot be read, or whose VM's writes cannot be counted
     /// or do not return within [`SETTLE_WITHIN`], books all it may take,
@@ -274,10 +288,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     let since = wrote.since(first);
                     // No disk takes more than its whole bound.
                     let most = whole.unwrap_or(0).max(headroom.bound);
+                    let pages = since.dirtied.div_ceil(PAGE);
                     headroom
                         .left
                         .saturating_add(since.bytes)
                         .saturating_add(since.calls.saturating_mul(WRITE_SLACK))
+                        .saturating_add(pages.saturating_mul(DIRTIED_SLACK))
                         .min(most)
                 }
                 _ => match whole {

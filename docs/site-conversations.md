@@ -105,13 +105,25 @@
     it changes, replacing the frame once, in the same render as its HTML,
     and keeping the version on screen until the new one has loaded; a failed
     update tries again, waiting longer each time (up to 30 seconds), and a
-    hidden tab waits until it is shown. The frame's label says what is true
-    (`ArtifactSandbox` `liveState`): **Live**, **Updating** while a new
+    hidden tab waits until it is shown. The frame says only what needs
+    attention (`ArtifactSandbox` `liveState`): **Updating** while a new
     version loads, or **Reconnecting** when a check or update failed (the
     version shown stays); on a narrow screen only its dot shows, and it is
-    still announced. On a Site published to the web, the header's link to
-    the published Site stands in for **Live**, and **Updating** or
-    **Reconnecting** shows beside it.
+    still announced. The Site view never shows the frame's plain **Live**,
+    so "live" never reads as "on the web".
+  - The header's one publication control (`SitePublicationControl`, read
+    with the viewer's own `getSitePublicationLink`) says whether the Site is
+    on the web. **Published** opens a menu with the address (the primary URL
+    the API reports), **Open**, **Copy link** and, for people with
+    `artifacts:publish`, **Publishing settings**. An unpublished Site shows
+    **Publish** to those people and nothing to anyone else; a taken-down
+    Site says **Taken down**. Publish and Publishing settings open the
+    Site's own publish form (`SitePublishPage` with `useSiteManagement`,
+    exactly as its Settings tab) as a page in place of the Site, which stays
+    mounted behind it, with the chat beside it; full screen is left first.
+    A successful Publish or Save, or its back link, returns to the Site and
+    the header shows the change at once. Nothing shows while the address is
+    loading, or where publishing isn't available.
   - The version chip in the Site's header (`SiteVersionMenu`) shows the live
     version and its recent history (eight, then **All versions** on the
     details page). **Undo last change** restores the version that was live

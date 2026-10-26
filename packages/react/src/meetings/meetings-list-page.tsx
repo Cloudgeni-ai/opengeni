@@ -75,6 +75,7 @@ function MeetingsListPageContent({
   notice = null,
   header = true,
   recordingOff = null,
+  viewerName = null,
 }: {
   workspaceId: string;
   /** Whether the workspace shows a live transcript while recording by default. */
@@ -105,6 +106,8 @@ function MeetingsListPageContent({
    * already recorded stay listed, and a recording already underway keeps its controls.
    */
   recordingOff?: ReactNode;
+  /** The person recording's name, for their microphone's live text beside computer or tab audio. */
+  viewerName?: string | null;
 }) {
   const msg = useOpenGeniText();
   const columns: RowListColumn[] = [
@@ -173,6 +176,7 @@ function MeetingsListPageContent({
             autoStart={autoStart}
             externalRef={externalRef}
             notice={notice}
+            viewerName={viewerName}
             liveTranscript={
               liveTranscript && liveModel
                 ? { defaultOn: liveTranscriptDefault, usdPerHour: liveModel.usdPerHour }

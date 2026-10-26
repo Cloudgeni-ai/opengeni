@@ -135,12 +135,15 @@ impl Cgroup {
 
     /// What the group's processes have written through `write(2)` and its
     /// kin: the bytes (`wchar` in `/proc/<pid>/io`, every thread counted)
-    /// and the calls (`syscw`). A call counts once it returns. For a
-    /// Firecracker VMM that covers every write its synchronous block
-    /// devices make, besides its tap's and part of its vsock's traffic
-    /// (see [`Self::io_bytes`]). A process that ends between listing and
-    /// reading is left out, so only differences between readings of the
-    /// same processes mean anything.
+    /// and the calls (`syscw`), and the bytes of the pages they dirtied
+    /// for files (`write_bytes`). A call counts once it returns; a page
+    /// counts as it is dirtied, so also one dirtied without a write call,
+    /// as a hole punched over part of a block zeroes the rest of that
+    /// block. For a Firecracker VMM that covers every write and discard
+    /// its synchronous block devices make, besides its tap's and part of
+    /// its vsock's traffic (see [`Self::io_bytes`]). A process that ends
+    /// between listing and reading is left out, so only differences
+    /// between readings of the same processes mean anything.
     pub fn writes(&self) -> io::Result<Writes> {
         let mut total = Writes::default();
         self.each_io(|counters| {
@@ -148,6 +151,7 @@ impl Cgroup {
             total = Writes {
                 bytes: total.bytes.saturating_add(found.bytes),
                 calls: total.calls.saturating_add(found.calls),
+                dirtied: total.dirtied.saturating_add(found.dirtied),
             };
             Ok(())
         })?;
@@ -661,14 +665,17 @@ fn parse_cpu_usage(stat: &str) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cpu.stat has no usage_usec"))
 }
 
-/// What processes have written through `write(2)` and its kin; see
-/// [`Cgroup::writes`].
+/// What processes have written through `write(2)` and its kin, and the
+/// file pages they dirtied; see [`Cgroup::writes`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Writes {
     /// Bytes written.
     pub bytes: u64,
     /// Write calls that returned.
     pub calls: u64,
+    /// Bytes of the file pages dirtied, by write calls or otherwise: a
+    /// page dirtied again before it is written out counts once.
+    pub dirtied: u64,
 }
 
 impl Writes {
@@ -678,6 +685,7 @@ impl Writes {
         Self {
             bytes: self.bytes.saturating_sub(earlier.bytes),
             calls: self.calls.saturating_sub(earlier.calls),
+            dirtied: self.dirtied.saturating_sub(earlier.dirtied),
         }
     }
 }
@@ -695,6 +703,7 @@ fn parse_writes(counters: &str) -> io::Result<Writes> {
     Ok(Writes {
         bytes: io_counter(counters, "wchar:")?,
         calls: io_counter(counters, "syscw:")?,
+        dirtied: io_counter(counters, "write_bytes:")?,
     })
 }
 
@@ -1013,27 +1022,79 @@ mod tests {
     #[test]
     fn reads_writes_from_proc_io() {
         let counters = "rchar: 1000\nwchar: 234\nsyscr: 7\nsyscw: 3\nread_bytes: 4096\n\
-                        write_bytes: 0\ncancelled_write_bytes: 0\n";
+                        write_bytes: 8192\ncancelled_write_bytes: 0\n";
         let writes = parse_writes(counters).unwrap();
         assert_eq!(
             writes,
             Writes {
                 bytes: 234,
-                calls: 3
+                calls: 3,
+                dirtied: 8192,
             }
         );
         assert!(parse_writes("wchar: 5\n").is_err());
+        assert!(parse_writes("wchar: 5\nsyscw: 1\n").is_err());
         let earlier = Writes {
             bytes: 34,
             calls: 1,
+            dirtied: 4096,
         };
         assert_eq!(
             writes.since(earlier),
             Writes {
                 bytes: 200,
-                calls: 2
+                calls: 2,
+                dirtied: 4096,
             }
         );
         assert_eq!(earlier.since(writes), Writes::default());
+    }
+
+    /// A hole punched over part of a block a file shares takes a new block
+    /// for the rest of it: a page dirtied with no write call, which only
+    /// the dirtied pages count. Runs where `COMPUTE_TEST_SHARED_EXTENTS_DIR`
+    /// names a directory whose files share extents; a gate that lists
+    /// `shared-extents` in `COMPUTE_TEST_REQUIRE` fails it instead of
+    /// skipping.
+    #[test]
+    fn a_partial_discard_of_shared_blocks_counts_as_dirtied() {
+        use rustix::fs::{FallocateFlags, fallocate, ioctl_ficlone};
+        use std::os::unix::fs::FileExt;
+
+        const BLOCK: u64 = 4096;
+        const BLOCKS: u64 = 1024;
+        let Some(dir) = std::env::var_os("COMPUTE_TEST_SHARED_EXTENTS_DIR") else {
+            let required = std::env::var("COMPUTE_TEST_REQUIRE").unwrap_or_default();
+            assert!(
+                !required
+                    .split(',')
+                    .any(|need| need.trim() == "shared-extents"),
+                "a required test cannot run: COMPUTE_TEST_SHARED_EXTENTS_DIR is not set"
+            );
+            eprintln!("skipped: COMPUTE_TEST_SHARED_EXTENTS_DIR is not set");
+            return;
+        };
+        let dir = tempfile::tempdir_in(dir).unwrap();
+        let original = fs::File::create_new(dir.path().join("original")).unwrap();
+        original
+            .write_all_at(&vec![1_u8; usize::try_from(BLOCKS * BLOCK).unwrap()], 0)
+            .unwrap();
+        original.sync_all().unwrap();
+        let copy = fs::File::create_new(dir.path().join("copy")).unwrap();
+        ioctl_ficlone(&copy, &original).unwrap();
+
+        let own = || parse_writes(&fs::read_to_string("/proc/self/io").unwrap()).unwrap();
+        let before = own();
+        for block in 0..BLOCKS {
+            let flags = FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE;
+            fallocate(&copy, flags, block * BLOCK + 512, 512).unwrap();
+        }
+        let after = own().since(before);
+        // Other tests of this process may write meanwhile, but none
+        // dirties less.
+        assert!(
+            after.dirtied >= BLOCKS * BLOCK,
+            "{BLOCKS} partial discards dirtied only {after:?}"
+        );
     }
 }

@@ -263,4 +263,45 @@ describe("Opengeni object links inside an embedding host", () => {
     expect(button.getAttribute("aria-disabled")).toBeNull();
     await r.unmount();
   });
+
+  test("a chat reference opens in place on a plain click and keeps its page for modified clicks", async () => {
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <OpenGeniLinkProvider
+        resolveLink={(target) =>
+          target.kind === "session"
+            ? {
+                href: `/workspaces/${WORKSPACE}/sessions/${target.sessionId}`,
+                open: () => void opened.push(target.sessionId),
+              }
+            : null
+        }
+      >
+        <Markdown>{`See [Launch plan](session:${SITE}).`}</Markdown>
+      </OpenGeniLinkProvider>,
+    );
+    await flush();
+    const link = r.container.querySelector<HTMLAnchorElement>("a")!;
+    expect(link.getAttribute("href")).toBe(`/workspaces/${WORKSPACE}/sessions/${SITE}`);
+    expect(link.getAttribute("target")).toBeNull();
+    const click = (init: MouseEventInit) => {
+      const event = new MouseEvent("click", { bubbles: true, cancelable: true, ...init });
+      link.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    await actRun(() => void expect(click({ button: 0 })).toBe(true));
+    for (const modifier of [{ metaKey: true }, { ctrlKey: true }, { shiftKey: true }]) {
+      await actRun(() => void expect(click({ button: 0, ...modifier })).toBe(false));
+    }
+    expect(opened).toEqual([SITE]);
+    await r.unmount();
+  });
+
+  test("a chat reference no host opens shows just its title", () => {
+    const html = renderToStaticMarkup(<Markdown>{`See [Launch plan](session:${SITE}).`}</Markdown>);
+    expect(html).not.toContain("<a ");
+    expect(html).not.toContain("unavailable)");
+    expect(html).toContain('data-og-link-unavailable="session"');
+    expect(html).toContain("Launch plan");
+  });
 });

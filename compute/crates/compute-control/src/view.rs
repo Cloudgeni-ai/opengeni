@@ -12,6 +12,11 @@
 //! Placement passes over a host this replica has read no renewal from for
 //! its lease's term: the host runs no VM by then, and the leader may wait
 //! a while longer before giving up on it while it holds sandboxes.
+//!
+//! A replica that has itself read nothing for that long cannot tell which
+//! hosts renew, so it places nothing and says so ([`Unplaced::Blind`]),
+//! rather than pass over every host as silent and answer that none has
+//! room.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -90,6 +95,19 @@ struct Inner {
     zones: HashMap<String, ZoneId>,
     classes: HashMap<String, ClassId>,
     rng: Rng,
+    /// When this replica last read host rows from the store.
+    read_at: Option<Instant>,
+}
+
+/// Why [`View::place`] placed nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unplaced {
+    /// No live host heard renewing has room for it.
+    NoRoom,
+    /// This replica has read no host rows for longer than its view's
+    /// `silent_after`, for this long (`None`: none yet), so it cannot tell
+    /// which hosts renew.
+    Blind(Option<Duration>),
 }
 
 /// The hosts, as this replica last read them.
@@ -144,6 +162,7 @@ impl View {
                 zones: HashMap::new(),
                 classes: HashMap::new(),
                 rng: Rng::new(seed),
+                read_at: None,
             }),
             silent_after,
         }
@@ -162,10 +181,12 @@ impl View {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Takes in host rows as read from the store.
+    /// Takes in host rows as read from the store, the change rows of a
+    /// read that found none included.
     pub fn apply(&self, rows: &[HostRow]) {
         let now = Instant::now();
         let mut inner = self.write();
+        inner.read_at = Some(now);
         for row in rows {
             if inner
                 .heard
@@ -279,10 +300,19 @@ impl View {
 
     /// Places `demand` on a live host not in `exclude`, and heard renewing
     /// within the view's `silent_after`, and books it there until the host
-    /// next reports.
-    pub fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Option<Placement> {
+    /// next reports. Places nothing while this replica has read no host
+    /// rows within `silent_after` ([`Unplaced::Blind`]).
+    ///
+    /// # Errors
+    ///
+    /// Why it placed nothing.
+    pub fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Result<Placement, Unplaced> {
         let mut inner = self.write();
         let inner = &mut *inner;
+        match inner.read_at.map(|at| at.elapsed()) {
+            Some(since) if since <= self.silent_after => {}
+            since => return Err(Unplaced::Blind(since)),
+        }
         let silent: Vec<HostId> = inner
             .heard
             .iter()
@@ -290,14 +320,15 @@ impl View {
             .map(|(host, _)| *host)
             .collect();
         let placement = if silent.is_empty() {
-            inner.fleet.place(demand, exclude, &mut inner.rng)?
+            inner.fleet.place(demand, exclude, &mut inner.rng)
         } else {
             let mut exclude = exclude.clone();
             exclude.extend(silent);
-            inner.fleet.place(demand, &exclude, &mut inner.rng)?
-        };
+            inner.fleet.place(demand, &exclude, &mut inner.rng)
+        }
+        .ok_or(Unplaced::NoRoom)?;
         inner.fleet.reserve(placement, demand);
-        Some(placement)
+        Ok(placement)
     }
 
     /// Every host, by name.
@@ -395,5 +426,102 @@ pub async fn follow<S: Store>(view: Arc<View>, store: Arc<S>) {
             }
             Err(error) => tracing::warn!(%error, "reading the hosts failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compute_fleet::Prefer;
+
+    const SILENT_AFTER: Duration = Duration::from_millis(200);
+
+    fn demand() -> Demand {
+        Demand {
+            memory_mib: 1024,
+            memory_max_mib: 1024,
+            cpu_millis: 1000,
+            disk_mib: 1024,
+            prefer: Prefer::Any,
+        }
+    }
+
+    fn host(renewals: u64) -> HostRow {
+        HostRow {
+            id: HostId(1),
+            info: Described {
+                name: "host-1".to_owned(),
+                address: "10.0.0.1:8443".to_owned(),
+                zone: "zone-a".to_owned(),
+                profile: "nested".to_owned(),
+                cpu_template: "none".to_owned(),
+                memory_mib: 16 * 1024,
+                cpu_millis: 8000,
+                disk_mib: 100 * 1024,
+            },
+            epoch: HostEpoch(1),
+            state: HostState::Live,
+            renewals,
+            seq: renewals,
+            capacity: Reported {
+                memory_free_mib: 16 * 1024,
+                cpu_millis: 8000,
+                cpu_free_millis: 8000,
+                disk_free_mib: 100 * 1024,
+                ..Reported::default()
+            },
+            changed: renewals,
+        }
+    }
+
+    #[test]
+    fn a_replica_that_has_read_no_hosts_yet_is_blind_not_full() {
+        let view = View::new(1, SILENT_AFTER);
+        assert_eq!(
+            view.place(&demand(), &HashSet::new()),
+            Err(Unplaced::Blind(None))
+        );
+        // A read that finds no hosts at all is a fleet with no room.
+        view.apply_all(&[]);
+        assert_eq!(
+            view.place(&demand(), &HashSet::new()),
+            Err(Unplaced::NoRoom)
+        );
+    }
+
+    #[test]
+    fn a_replica_whose_reads_stopped_is_blind_until_it_reads_again() {
+        let view = View::new(1, SILENT_AFTER);
+        view.apply_all(&[host(1)]);
+        let placed = view.place(&demand(), &HashSet::new()).unwrap();
+        assert_eq!(placed.host, HostId(1));
+        std::thread::sleep(SILENT_AFTER + Duration::from_millis(50));
+        // Every host now looks silent, but only because this replica read
+        // nothing: it says so rather than that no host has room.
+        match view.place(&demand(), &HashSet::new()) {
+            Err(Unplaced::Blind(Some(since))) => assert!(since > SILENT_AFTER, "{since:?}"),
+            other => panic!("expected a blind view, got {other:?}"),
+        }
+        // A read that shows the host renewing places on it again.
+        view.apply(&[host(2)]);
+        assert_eq!(
+            view.place(&demand(), &HashSet::new())
+                .map(|placed| placed.host),
+            Ok(HostId(1))
+        );
+    }
+
+    #[test]
+    fn a_replica_that_reads_but_hears_no_renewal_passes_the_host_over() {
+        let view = View::new(1, SILENT_AFTER);
+        view.apply_all(&[host(1)]);
+        std::thread::sleep(SILENT_AFTER + Duration::from_millis(50));
+        // The replica reads on, but the host's count stands still: the
+        // host is silent, and nothing else has room.
+        view.apply(&[]);
+        assert_eq!(
+            view.place(&demand(), &HashSet::new()),
+            Err(Unplaced::NoRoom)
+        );
     }
 }

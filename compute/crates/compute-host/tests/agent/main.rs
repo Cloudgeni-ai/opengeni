@@ -158,9 +158,9 @@ struct World {
     unreadable_cpu: AtomicBool,
     /// While set, no VM's traffic can be read.
     unreadable_io: AtomicBool,
-    /// Bytes and calls every VM counts as written, as its VMM's writes to
-    /// its disk; the tests that write to a disk file as its guest would
-    /// add to them.
+    /// Bytes, calls and dirtied pages every VM counts as written, as its
+    /// VMM's writes and discards to its disk; the tests that change a disk
+    /// file as its guest would add to them.
     written: Mutex<Writes>,
     /// While set, no VM's writes ever return; see [`Engine::settle_writes`].
     unsettled: AtomicBool,
@@ -186,6 +186,9 @@ struct World {
     drives_resized: Mutex<Vec<(String, Vec<u64>, bool)>>,
     /// Times a guest was asked to write its disks out.
     syncs: AtomicUsize,
+    /// While set, a guest asked to write its disks out answers only once
+    /// it is cleared, as one still trimming its disk.
+    syncs_held: AtomicBool,
     /// While set, a paused VM's guest takes no connection, as with a real
     /// VMM, whose guest's processors do not run while it is paused.
     paused_take_nothing: AtomicBool,
@@ -482,6 +485,12 @@ async fn guest(listener: UnixListener, state: GuestState) {
             }
             let mut flood = None;
             while let Ok(Some(line)) = lines.next_line().await {
+                if line == "sync" {
+                    state.world.syncs.fetch_add(1, Ordering::SeqCst);
+                    while state.world.syncs_held.load(Ordering::SeqCst) {
+                        sleep(Duration::from_millis(5)).await;
+                    }
+                }
                 let Some(reply) = state.answer(&line, &mut flood) else {
                     break;
                 };
@@ -639,10 +648,8 @@ impl GuestState {
                 "ok".into()
             }
             ("activity", _) => format!("commands {}", work.lock().unwrap().commands),
-            ("sync", _) => {
-                world.syncs.fetch_add(1, Ordering::Relaxed);
-                "synced".into()
-            }
+            // Counted, and held while the world says, as it is asked.
+            ("sync", _) => "synced".into(),
             (other, _) => format!("unknown {other}"),
         })
     }

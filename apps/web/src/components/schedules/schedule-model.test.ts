@@ -202,12 +202,12 @@ describe("schedule requests", () => {
     prompt: "Summarize open incidents.",
   });
 
-  test("a new-chat schedule is created with the default overlap and its attachments", () => {
+  test("a new-chat schedule is created with the default overlap, steer, and its attachments", () => {
     const request = createRequestFromDraft(
       { ...base(), overlapPolicy: "skip", rigId: "rig-1" },
       { now: NOW, learningScope: "workspace" },
     );
-    expect(request.overlapPolicy).toBe("allow_concurrent");
+    expect(request.overlapPolicy).toBe("steer");
     if (!("agentConfig" in request)) throw new Error("Expected a separate agent");
     expect(request.rigId).toBe("rig-1");
     expect(request.name).toBe("Summarize open incidents");
@@ -220,6 +220,36 @@ describe("schedule requests", () => {
       { now: NOW, learningScope: "workspace" },
     );
     expect(request.overlapPolicy).toBe("skip");
+  });
+
+  test("a new automation starts on steer; an edit sends only a changed choice", () => {
+    expect(base().overlapPolicy).toBe("steer");
+    const initial: ScheduleDraft = {
+      ...base(),
+      runMode: "existing_session",
+      targetSessionId: "chat",
+    };
+    const stored = task({
+      runMode: "existing_session",
+      targetSessionId: "chat",
+      overlapPolicy: "steer",
+    });
+    expect(
+      updateRequestFromDraft(stored, initial, { ...initial, overlapPolicy: "skip" }, { now: NOW })
+        .overlapPolicy,
+    ).toBe("skip");
+    expect(
+      updateRequestFromDraft(stored, { ...initial, overlapPolicy: "skip" }, initial, { now: NOW })
+        .overlapPolicy,
+    ).toBe("steer");
+    const moved = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, runMode: "new_session_per_run", targetSessionId: "" },
+      { now: NOW },
+    );
+    expect(moved.runMode).toBe("new_session_per_run");
+    expect(moved.overlapPolicy).toBeUndefined();
   });
 
   test("Secrets narrowing is sent only when vaults are picked, and cleared back to all", () => {
