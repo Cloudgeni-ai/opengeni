@@ -123,6 +123,8 @@ export type RouteInputs = {
   queryParameters: string[];
   /** The replacement a retired route names (`routeRetired("METHOD /path", ...)`). */
   retired?: string;
+  /** The workspace permission the handler's first access check requires. */
+  permission?: string;
 };
 
 /**
@@ -331,7 +333,55 @@ export function routeInputs(sources: readonly string[]): RouteInputs {
     query: [...new Set(query)],
     queryParameters: [...queryParameters].sort(),
     ...(retired ? { retired } : {}),
+    ...gatePermission(sources),
   };
+}
+
+/** The shared access checks that take the permission a route needs as their last argument. */
+const ACCESS_GATES = new Set([
+  "requireAccessGrant",
+  "requireAccessGrantAuthorization",
+  "requireFreshAccessGrant",
+]);
+
+/**
+ * The permission a route requires before it does anything else: the one its
+ * handler passes to a shared access check (`await requireAccessGrant(c, deps,
+ * workspaceId, "sessions:read")`) in its opening declarations and statements,
+ * before any branch, return or throw that could skip it. Every handler of the
+ * route must name the same one. Anything less certain names none.
+ */
+function gatePermission(sources: readonly string[]): { permission?: string } {
+  const found = sources.map((source) => {
+    const parsed = parseSync("handler.js", `(${source});`);
+    if (parsed.errors.length > 0) return null;
+    const handler = astNodes(parsed.program).find(
+      (node) => node.type === "ArrowFunctionExpression" || node.type === "FunctionExpression",
+    );
+    if (handler?.body?.type !== "BlockStatement") return null;
+    for (const statement of handler.body.body as AstNode[]) {
+      const expressions =
+        statement.type === "VariableDeclaration"
+          ? (statement.declarations as AstNode[]).map((declarator) => declarator.init)
+          : statement.type === "ExpressionStatement"
+            ? [statement.expression]
+            : null;
+      if (!expressions) return null;
+      for (const expression of expressions) {
+        const call = expression?.type === "AwaitExpression" ? expression.argument : null;
+        if (call?.type !== "CallExpression" || !ACCESS_GATES.has(calleeName(call) ?? "")) continue;
+        const last = (call.arguments as AstNode[]).at(-1);
+        return last?.type === "Literal" &&
+          typeof last.value === "string" &&
+          contracts.Permission.safeParse(last.value).success
+          ? last.value
+          : null;
+      }
+    }
+    return null;
+  });
+  const [first] = found;
+  return first && found.every((permission) => permission === first) ? { permission: first } : {};
 }
 
 /**
@@ -455,6 +505,7 @@ export function buildActionCatalog(
         request,
         query: inputs.queryParameters,
         retired: inputs.retired,
+        permission: inputs.permission,
         response: response.length > 0 ? response : inlineResponseSchemas(method, path),
       };
     })
@@ -483,6 +534,7 @@ export function buildActionCatalog(
         response: [...route.response],
         ...(browserOnly ? { browserOnly } : {}),
         ...(route.retired ? { retired: route.retired } : {}),
+        ...(route.permission ? { permission: route.permission } : {}),
         ...(secretFields.length > 0 ? { secretFields } : {}),
       };
     })

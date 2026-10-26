@@ -45,6 +45,7 @@ import {
   requireWorkspace,
   getWorkspace,
   resolveNamedManagedPersonalWorkspaceGrant,
+  externalPersonPersonalWorkspaceId,
   type Database,
 } from "@opengeni/db";
 import type { Context } from "hono";
@@ -222,7 +223,8 @@ const delegatedHumanAuthorizationSchema = z.object({
 
 const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>();
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
-const verifiedSiteViewerProofs = new WeakSet<DelegatedHumanAuthorization>();
+/** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
+const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -306,6 +308,28 @@ export function stampSiteViewerSessionAuthorization(
     permissions: Permission[];
   },
 ): void {
+  stampWorkspacePersonAuthorization(request, input);
+}
+
+/**
+ * TRUSTED VERIFIED DISPATCH ONLY: act as one person in exactly one workspace.
+ * The caller has already verified who the person is (a published Site's signed
+ * viewer, or the person who sent a chat turn, frozen when it was accepted) and
+ * caps the permissions. Native people use the delegated-human resolver limited
+ * to that workspace. External users (people of a product that embeds Opengeni)
+ * reload their live access to that one workspace, intersected with these
+ * permissions, and get no organization-level authority; no identity is
+ * provisioned. Never call it with headers, token claims or other unverified input.
+ */
+export function stampWorkspacePersonAuthorization(
+  request: Request,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    subjectId: string;
+    permissions: Permission[];
+  },
+): void {
   if (input.subjectId.startsWith("user:")) {
     stampDelegatedHumanAuthorization(request, {
       ...input,
@@ -328,7 +352,7 @@ export function stampSiteViewerSessionAuthorization(
   Object.freeze(parsed.workspaceScope.workspaceIds);
   Object.freeze(parsed.workspaceScope);
   const proof = Object.freeze(parsed);
-  verifiedSiteViewerProofs.add(proof);
+  workspaceExternalPersonProofs.add(proof);
   delegatedHumanRequests.set(request, proof);
 }
 
@@ -1602,13 +1626,13 @@ async function resolveDelegatedHumanAccessContext(
       message: "delegated humans require native organization access",
     });
   }
-  if (verifiedSiteViewerProofs.has(proof)) {
+  if (workspaceExternalPersonProofs.has(proof)) {
     const workspaceId =
       proof.workspaceScope.kind === "selected" && proof.workspaceScope.workspaceIds.length === 1
         ? proof.workspaceScope.workspaceIds[0]
         : null;
     if (!workspaceId)
-      throw new HTTPException(403, { message: "Site viewer workspace unavailable" });
+      throw new HTTPException(403, { message: "this person's workspace is unavailable" });
     const grant = await withWorkspaceSubjectRls(
       deps.db,
       workspaceId,
@@ -1622,13 +1646,32 @@ async function resolveDelegatedHumanAccessContext(
           }))
         )
           return null;
-        return getWorkspaceGrant(tx, proof.subjectId, workspaceId, {
+        const membership = await getWorkspaceGrant(tx, proof.subjectId, workspaceId, {
           principalKind: "human_session",
         });
+        if (membership) return membership;
+        // Otherwise only the person's own workspace, as their active
+        // organization membership names it: the same access their own
+        // requests get there.
+        if (
+          (await externalPersonPersonalWorkspaceId(tx, {
+            accountId: proof.organizationId,
+            subjectId: proof.subjectId,
+          })) !== workspaceId
+        )
+          return null;
+        const own: AccessGrant = {
+          accountId: proof.organizationId,
+          workspaceId,
+          subjectId: proof.subjectId,
+          principalKind: "human_session",
+          permissions: [...managedPersonalWorkspacePermissions],
+        };
+        return own;
       },
     );
     if (!grant || grant.accountId !== proof.organizationId)
-      throw new HTTPException(403, { message: "Site viewer membership unavailable" });
+      throw new HTTPException(403, { message: "this person can no longer use this workspace" });
     const bounded = Object.freeze({
       ...grant,
       permissionMode: "explicit" as const,
