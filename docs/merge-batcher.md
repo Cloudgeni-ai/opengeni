@@ -337,6 +337,45 @@ label history is not permission to admit. Historical bindings remain immutable.
 `changeset-release/main` is a barrier: earlier PRs batch first, Version is a
 singleton, and later work does not speculate across it.
 
+### Main-fix priority lane
+
+Add the `queue-priority` label to a PR that fixes a red main. It is honoured
+only under the readiness trust rules above: the label must be on the PR now and
+its latest actual GraphQL label timeline event must be an add (GitHub requires
+triage or higher to label). Prose, comments or a label without a readable
+LabeledEvent grant nothing. The label is not readiness: the PR still needs
+`queue-ready` or native auto-merge, a non-draft exact head and every required
+green check. It is not part of the readiness binding, so adding or removing it
+never invalidates a candidate.
+
+Ready priority PRs sort ahead of the FIFO, including Version, and each runs as a
+singleton batch. When several are ready, the earliest ready event goes first.
+On a green or unknown base nothing else changes: a priority PR waits for
+speculation depth, barriers, landings and capacity like any other PR.
+
+When main CI at the exact base is conclusively red (the completed workflow
+failed, or a job of the running exact attempt already failed) and a priority PR
+is ready but not yet running, the planner may preempt:
+
+- A root candidate on that base with a failed or running Batch CI attempt is
+  abandoned. It and its speculative descendants are invalidated without blame,
+  retry, split or parking; their members return to the FIFO behind the fix with
+  unchanged bindings. A tested green root still lands, and a root without an
+  exact run keeps its reservation.
+- A candidate that contains a priority PR is never abandoned, so a failed fix
+  cannot be preempted by another fix in a loop. Remove its readiness to recover.
+- Pending bisection groups wait while the fix runs and resume afterwards.
+- Running Batch CI of abandoned candidates, and of other invalidated candidates
+  when the Batch slot is full, gets a durable `cancel` effect: a
+  `POST actions/runs/{id}/cancel` of that candidate's own queue-branch Batch CI.
+  It is fenced like every other REST effect, runs before the tick's other
+  effects, and is suppressed without a POST unless the candidate is still
+  invalidated and unlanded. The slot frees only when the provider reports the
+  run terminal; until then the fix is built locally but not published.
+
+The fix itself still needs green exact-tree Batch CI to land. A failed priority
+candidate keeps the ordinary red-base hold.
+
 Use native auto-merge (for example `gh pr merge --auto`) or `queue-ready`. While
 batcher admission is ON, protections must prevent native/direct auto-merge from
 bypassing this batcher. Only the
@@ -552,7 +591,8 @@ default remains one hosted run; a qualified configuration of two permits a
 successor to run while its predecessor is tested. `BATCHER_SPECULATION_DEPTH`
 bounds the chain, including local unpublished candidates. Missing publication
 outcomes retain their reservation; foreign, invalidated and waiting Batch runs
-still consume provider slots. No running CI is cancelled. Only a tested root
+still consume provider slots. No running CI is cancelled, except by the main-fix
+priority lane on a red exact base. Only a tested root
 whose base is current main may land, with exact tree/provenance/CAS checks;
 landing consumes no additional hosted slot and does not wait for successor CI.
 
@@ -911,7 +951,7 @@ remote ref deletion is performed by this implementation.
 
 ### Recoverable REST effects
 
-Comment, whole-run retry and follow-up PR intents live in `state.json`, with deterministic
+Comment, whole-run retry, priority-lane cancel and follow-up PR intents live in `state.json`, with deterministic
 IDs, comment markers, exact run/attempt identity, attempts and next-check times.
 An intent is durably marked `submitting` before POST; a final lease read reduces
 stale-owner races but is **not** an atomic Git/REST fence. Restart reconciliation

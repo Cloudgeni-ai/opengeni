@@ -52,6 +52,7 @@ export interface ActiveReads {
 export interface ActiveWrites {
   disableAutoMerge?(number: number, headSha: string, parkedAt: string): Promise<void>;
   retry(run: Run): Promise<void>;
+  cancel?(run: Run): Promise<void>;
   announce(number: number, body: string): Promise<void>;
   createFollowup(request: FollowupRequest): Promise<void>;
 }
@@ -283,6 +284,21 @@ export class GitHubActiveExecutor implements Executor {
         lastError: null,
       };
     }
+    if (effect.kind === "cancel")
+      for (const run of effect.runs) {
+        const id = digest({ kind: "cancel", id: run.id, attempt: run.attempt, head: run.headSha });
+        ledger.effects[id] ??= {
+          id,
+          kind: "cancel",
+          run,
+          batchId: run.branch.slice(this.config.branchPrefix.length),
+          status: "pending",
+          attempts: 0,
+          checks: 0,
+          nextAt: now,
+          lastError: null,
+        };
+      }
     if (effect.kind === "park") {
       const parked = ledger.parked?.find((item) => item.batchId === effect.key);
       if (parked) {
@@ -536,6 +552,10 @@ export class GitHubActiveExecutor implements Executor {
     }
     if (effect.kind === "comment") return this.reads.hasComment(effect.number, effect.marker);
     if (effect.kind === "followup") return (await this.reads.findFollowup(effect.request)) !== null;
+    if (effect.kind === "cancel") {
+      const current = await this.reads.currentAttempt(effect.run);
+      return current.attempt !== effect.run.attempt || current.status === "completed";
+    }
     const run = await this.reads.currentAttempt(effect.run);
     return run.attempt > effect.run.attempt;
   }
@@ -546,6 +566,23 @@ export class GitHubActiveExecutor implements Executor {
       original.headRepository === request.sourceRepository &&
       original.headRef === request.sourceRef &&
       original.branchHeadSha === request.headSha
+    );
+  }
+  /**
+   * Only the abandoned candidate's own Batch CI may be cancelled: the run must
+   * be on that candidate's queue branch and workflow, and the candidate must
+   * be durably invalidated and never landed under the current lease.
+   */
+  private cancelApplicable(
+    effect: Extract<DurableEffect, { kind: "cancel" }>,
+    ledger: Ledger,
+  ): boolean {
+    return (
+      /^[a-f0-9]{64}$/.test(effect.batchId) &&
+      effect.run.branch === `${this.config.branchPrefix}${effect.batchId}` &&
+      effect.run.workflow === this.config.workflow &&
+      ledger.invalidated.includes(effect.batchId) &&
+      !ledger.landed.includes(effect.batchId)
     );
   }
   private async retryApplicable(manifest: Manifest, state: State): Promise<boolean> {
@@ -624,6 +661,16 @@ export class GitHubActiveExecutor implements Executor {
           lastError: "Follow-up source snapshot changed before submission; no POST issued",
         });
         return "follow-up creation waits for current exact source snapshot";
+      }
+      if (
+        effect.kind === "cancel" &&
+        (!this.writes.cancel || !this.cancelApplicable(effect, state.ledger))
+      ) {
+        await this.patchEffect(effect.id, {
+          status: "blocked",
+          lastError: "Cancel target is not an abandoned, unlanded candidate run; no POST issued",
+        });
+        return "obsolete priority cancellation suppressed";
       }
       if (effect.kind === "rerun") {
         const current = await this.reads.currentAttempt(effect.run);
@@ -710,6 +757,13 @@ export class GitHubActiveExecutor implements Executor {
         });
         return "obsolete infrastructure retry suppressed after claim";
       }
+      if (effect.kind === "cancel" && !this.cancelApplicable(effect, beforePost.ledger)) {
+        await this.patchEffect(effect.id, {
+          status: "blocked",
+          lastError: "Cancel target changed after claim; no POST issued",
+        });
+        return "obsolete priority cancellation suppressed after claim";
+      }
       if (effect.kind === "followup") {
         if (await this.reads.findFollowup(effect.request)) {
           await this.patchEffect(effect.id, { status: "done", lastError: null });
@@ -727,7 +781,10 @@ export class GitHubActiveExecutor implements Executor {
       postStarted = true;
       if (effect.kind === "comment") await this.writes.announce(effect.number, effect.body);
       else if (effect.kind === "rerun") await this.writes.retry(effect.run);
-      else if (effect.kind === "disable-auto-merge") {
+      else if (effect.kind === "cancel") {
+        if (!this.writes.cancel) throw Error("Batch CI cancellation unavailable");
+        await this.writes.cancel(effect.run);
+      } else if (effect.kind === "disable-auto-merge") {
         if (!this.writes.disableAutoMerge) throw Error("Auto-merge mutation unavailable");
         await this.writes.disableAutoMerge(effect.number, effect.headSha, effect.parkedAt);
       } else await this.writes.createFollowup(effect.request);
@@ -928,6 +985,19 @@ export class GitHubActiveExecutor implements Executor {
     let state = await this.load();
     if (!this.available(state)) return null;
     const messages: string[] = [];
+    // A priority-abandoned candidate's Batch CI holds the slot until terminal,
+    // so its cancellation runs before the tick's other bounded effect work.
+    const cancel = Object.values(state.ledger.effects).find(
+      (item) =>
+        item.kind === "cancel" &&
+        !["done", "blocked"].includes(item.status) &&
+        Date.parse(item.nextAt) <= Date.parse(this.now()),
+    );
+    if (cancel) {
+      messages.push(await this.processEffect(state, cancel));
+      state = await this.load();
+      if (!this.available(state)) return messages.join("; ");
+    }
     // Explicit operator rollout ID only. Reading every open PR is independent
     // of admission/owner identity; the durable claim prevents repeated notices.
     if (this.config.onNoticeId && !state.ledger.onNotices?.[this.config.onNoticeId]) {

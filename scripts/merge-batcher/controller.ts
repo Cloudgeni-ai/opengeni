@@ -35,6 +35,7 @@ export type Effect =
   | { kind: "publish"; branch: string; manifest: Manifest }
   | { kind: "land"; manifest: Manifest; expectedBase: string; headRefresh?: HeadRefresh }
   | { kind: "retry"; run: Run }
+  | { kind: "cancel"; runs: Run[] }
   | { kind: "announce"; number: number; body: string; key: string; commentKey?: string }
   | { kind: "park"; number: number; body: string; key: string };
 /** Final read-only validation found contention; no transaction was attempted. */
@@ -212,7 +213,10 @@ export class LiveReader implements Reader {
     return {
       now: new Date().toISOString(),
       baseSha,
-      ...(failedRoot ? { baseCI: await this.github.baseCI(baseSha) } : {}),
+      // A ready priority fix needs exact-base evidence to decide preemption.
+      ...(failedRoot || admission.priority?.length
+        ? { baseCI: await this.github.baseCI(baseSha) }
+        : {}),
       // Do not make full-main-CI observation availability a hidden admission
       // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
@@ -363,7 +367,10 @@ export class Controller {
         }
       }
     } else if (action.kind === "record") ledger = action.ledger;
-    else if (action.kind === "land") {
+    else if (action.kind === "abandon") {
+      ledger = action.ledger;
+      if (action.runs.length) effect = { kind: "cancel", runs: action.runs };
+    } else if (action.kind === "land") {
       const manifest = await this.git.inspect(action.candidate.manifest.tipSha);
       if (!(await this.git.ancestor(observation.baseSha, manifest.tipSha)))
         throw new Error("Landing would not fast-forward");

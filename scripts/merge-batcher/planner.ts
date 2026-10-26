@@ -1,4 +1,5 @@
 import {
+  type BaseCiEvidence,
   bindingKey,
   compareText,
   ejectionKey,
@@ -17,6 +18,7 @@ import { failedBaseHold } from "./base-failure";
 export type Action =
   | { kind: "wait"; reason: string }
   | { kind: "record"; ledger: Ledger; reason: string }
+  | { kind: "abandon"; ledger: Ledger; runs: Run[]; reason: string }
   | { kind: "build"; spec: BatchSpec; publish: boolean; recoveryIndex: number | null }
   | { kind: "land"; candidate: Candidate }
   | { kind: "retry"; candidate: Candidate; run: Run }
@@ -57,14 +59,39 @@ export function infrastructureRetryReason(candidate: Candidate, run: Run, config
   if (reason === "no-job-logs" && run.outcome === "infrastructure") return reason;
   return null;
 }
-export function fifo(pulls: Pull[], cap: number): Pull[] {
+/**
+ * Exact-base main CI has conclusively failed: the completed workflow failed,
+ * or a job class of the still-running exact attempt already failed. Unknown,
+ * pending-without-failure, stale or unbound evidence is never red.
+ */
+export function exactBaseRed(base: BaseCiEvidence | undefined, baseSha: string): boolean {
+  return Boolean(
+    base &&
+    base.sha === baseSha &&
+    Number.isSafeInteger(base.runId) &&
+    base.runId! > 0 &&
+    Number.isSafeInteger(base.attempt) &&
+    base.attempt! > 0 &&
+    (base.status === "red" ||
+      (base.status === "classes" && Object.values(base.classes ?? {}).includes("red"))),
+  );
+}
+export function fifo(pulls: Pull[], cap: number, priority?: ReadonlySet<number>): Pull[] {
+  const urgent = (p: Pull) => priority?.has(p.number) === true;
   const ordered = [...pulls].sort(
     (a, b) =>
+      Number(urgent(b)) - Number(urgent(a)) ||
       Date.parse(a.binding.at) - Date.parse(b.binding.at) ||
       compareText(a.binding.eventId, b.binding.eventId) ||
       a.number - b.number,
   );
-  if (ordered[0]?.headRef === "changeset-release/main" || ordered[0]?.controlPlane)
+  // A main-fix priority PR runs alone, ahead of the FIFO (including Version).
+  if (
+    ordered[0] &&
+    (urgent(ordered[0]) ||
+      ordered[0].headRef === "changeset-release/main" ||
+      ordered[0].controlPlane)
+  )
     return ordered.slice(0, 1);
   const barrier = ordered.findIndex((p) => p.headRef === "changeset-release/main");
   return ordered
@@ -173,10 +200,94 @@ function planCandidate(o: Observation, c: Config): Action {
   // publication and the single retry. Landing fast-forwards main to the exact
   // tested tip and consumes no runner, so it never waits for headroom.
   const publicationBlocked = o.mainBusy || o.headroom?.publicationBlocked === true;
+  const assigned = new Set(live.flatMap((x) => x.manifest.pulls.map((p) => p.number)));
+  const alreadyLanded = (p: Pull) =>
+    o.candidates.some(
+      (x) =>
+        ledger.landed.includes(x.manifest.batchId) &&
+        x.manifest.pulls.some(
+          (member) => member.number === p.number && member.headSha === p.headSha,
+        ),
+    );
+  const eligible = (p: Pull) =>
+    !parked(p) &&
+    !alreadyLanded(p) &&
+    !o.candidates.some(
+      (candidate) =>
+        o.missingRuns?.[candidate.manifest.batchId]?.status === "released" &&
+        candidate.manifest.pulls.some((member) => ejectionKey(member) === ejectionKey(p)),
+    ) &&
+    !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p));
+  const queued = o.ready.filter((p) => !assigned.has(p.number) && eligible(p));
+  // Main-fix priority lane. Only a trusted, timeline-backed queue-priority label
+  // populates o.priority. It reorders admitted heads and, on a conclusively red
+  // exact base, may abandon a red-base candidate; it never supplies evidence,
+  // capacity or landing authority.
+  const urgent = new Set(o.priority ?? []);
+  const red = urgent.size > 0 && exactBaseRed(o.baseCI, o.baseSha);
+  const urgentQueued = queued.filter((p) => urgent.has(p.number));
+  const cancelRequested = (run: Run) =>
+    Object.values(ledger.effects).some(
+      (e) => e.kind === "cancel" && e.run.id === run.id && e.run.attempt === run.attempt,
+    );
+  const runningRuns = (ids: string[]) =>
+    o.candidates
+      .filter((x) => ids.includes(x.manifest.batchId))
+      .flatMap((x) => x.runs.filter((r) => r.workflow === c.workflow && r.status !== "completed"))
+      .filter((r) => !cancelRequested(r));
   // Full main CI is an independent backstop, not candidate admission evidence.
   // Retain any legacy baseHold for audit; it neither blocks a tested green tip
   // nor authorizes attribution of a failed subset to one of its members.
   const root = live.find((x) => x.manifest.baseSha === o.baseSha);
+  if (red && root && !root.manifest.pulls.some((p) => urgent.has(p.number))) {
+    const run = latestRun(root, c);
+    const abandoned = descendants(root.manifest.batchId, o.candidates).filter(
+      (id) => !ledger.invalidated.includes(id) && !ledger.landed.includes(id),
+    );
+    const members = new Set(
+      o.candidates
+        .filter((x) => abandoned.includes(x.manifest.batchId))
+        .flatMap((x) => x.manifest.pulls.map((p) => p.number)),
+    );
+    const fix = o.ready.some(
+      (p) =>
+        urgent.has(p.number) && eligible(p) && (!assigned.has(p.number) || members.has(p.number)),
+    );
+    const landable = run?.status === "completed" && run.trusted && run.outcome === "success";
+    // A tested green tip still lands. A candidate with no exact run keeps its
+    // reservation until terminal evidence or explicit missing-run release.
+    if (fix && run && !landable) {
+      ledger.invalidated = [...new Set([...ledger.invalidated, ...abandoned])];
+      return {
+        kind: "abandon",
+        ledger,
+        runs: runningRuns(abandoned),
+        reason:
+          "priority fix preempts red-base candidate; descendants invalidated, Batch CI cancel requested, no PR blame",
+      };
+    }
+  }
+  if (red && urgentQueued.length && inflight >= c.maxInflight) {
+    // Invalidated candidates can never land, yet their running Batch CI keeps
+    // holding the slot. Free it for the priority fix; candidates with a
+    // priority member keep running.
+    const stale = o.candidates
+      .filter(
+        (x) =>
+          ledger.invalidated.includes(x.manifest.batchId) &&
+          !ledger.landed.includes(x.manifest.batchId) &&
+          !x.manifest.pulls.some((p) => urgent.has(p.number)),
+      )
+      .map((x) => x.manifest.batchId);
+    const runs = runningRuns(stale);
+    if (runs.length)
+      return {
+        kind: "abandon",
+        ledger,
+        runs,
+        reason: "priority fix needs the Batch slot; cancel invalidated red-base Batch CI",
+      };
+  }
   if (root) {
     const run = latestRun(root, c);
     if (run?.status === "completed") {
@@ -283,6 +394,17 @@ function planCandidate(o: Observation, c: Config): Action {
         };
   const pendingPark = ledger.parked?.find((item) => !item.announced && !item.effectId);
   if (pendingPark) return { kind: "park", parked: pendingPark };
+  // On a red exact base, a priority fix runs before pending bisection groups,
+  // which resume unchanged once it lands or leaves the queue.
+  if (red && !live.length && urgentQueued.length && ledger.recovery.length)
+    return makeBuild(
+      o.baseSha,
+      null,
+      fifo(urgentQueued, 1, urgent),
+      null,
+      inflight < c.maxInflight && !publicationBlocked,
+      null,
+    );
   // Recovery tests subsets sequentially on the actual current base. No member
   // is ejected: failed singletons are parked, including legacy recovery groups.
   if (!live.length && ledger.recovery.length) {
@@ -316,28 +438,7 @@ function planCandidate(o: Observation, c: Config): Action {
     )
   )
     return { kind: "wait", reason: "Version barrier in flight" };
-  const assigned = new Set(live.flatMap((x) => x.manifest.pulls.map((p) => p.number)));
-  const alreadyLanded = (p: Pull) =>
-    o.candidates.some(
-      (x) =>
-        ledger.landed.includes(x.manifest.batchId) &&
-        x.manifest.pulls.some(
-          (member) => member.number === p.number && member.headSha === p.headSha,
-        ),
-    );
-  const queued = o.ready.filter(
-    (p) =>
-      !assigned.has(p.number) &&
-      !parked(p) &&
-      !alreadyLanded(p) &&
-      !o.candidates.some(
-        (candidate) =>
-          o.missingRuns?.[candidate.manifest.batchId]?.status === "released" &&
-          candidate.manifest.pulls.some((member) => ejectionKey(member) === ejectionKey(p)),
-      ) &&
-      !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p)),
-  );
-  const pulls = fifo(queued, c.maxBatchSize);
+  const pulls = fifo(queued, c.maxBatchSize, urgent);
   if (!pulls.length) return { kind: "wait", reason: "no eligible ready heads" };
   if (live.length && (pulls[0]!.headRef === "changeset-release/main" || pulls[0]!.controlPlane))
     return { kind: "wait", reason: "Version waits for preceding batches" };
