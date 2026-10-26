@@ -1183,9 +1183,18 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("memory_stats", error))
     }
 
-    fn halted(&self, vm: &FirecrackerVm) -> Result<bool, EngineError> {
-        console::says_halted(&vm.console, &vm.name)
-            .map_err(|error| EngineError::io("halted", error))
+    fn halted(
+        &self,
+        vm: &FirecrackerVm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        const OP: &str = "halted";
+        let (console, name) = (vm.console.clone(), vm.name.clone());
+        async move {
+            tokio::task::spawn_blocking(move || console::says_halted(&console, &name))
+                .await
+                .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+                .map_err(|error| EngineError::io(OP, error))
+        }
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {

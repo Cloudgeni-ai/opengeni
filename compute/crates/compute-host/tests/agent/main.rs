@@ -1026,8 +1026,12 @@ impl Engine for Fake {
         Ok(vm.work.lock().unwrap().cpu.total())
     }
 
-    fn halted(&self, vm: &FakeVm) -> Result<bool, EngineError> {
-        Ok(vm.work.lock().unwrap().said_halted)
+    fn halted(
+        &self,
+        vm: &FakeVm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+        let work = Arc::clone(&vm.work);
+        async move { Ok(work.lock().unwrap().said_halted) }
     }
 
     fn io_bytes(&self, vm: &FakeVm) -> Result<u64, EngineError> {

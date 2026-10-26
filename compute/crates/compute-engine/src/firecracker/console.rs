@@ -21,17 +21,18 @@ pub(super) const CONSOLE_LOG: &str = "console.log";
 /// their start.
 const TAIL: u64 = 64 << 10;
 
-/// What Linux writes as its last words when it halts, after a timestamp
-/// if its messages carry one: for a halt, and for a power-off it had no
-/// way to make.
+/// What Linux writes as its last words when it halts, alone on its line
+/// or after the time printk stamps on it: for a halt, and for a power-off
+/// it had no way to make.
 const HALTED: [&str; 2] = [
     "reboot: System halted",
     "reboot: Power off not available: System halted instead",
 ];
 
 /// Whether the last line the guest of VM `name` wrote on the console kept
-/// at `path` is its kernel saying it halted. Only the last: a guest that
-/// wrote anything after is not halted. Reads at most [`TAIL`] bytes.
+/// at `path` is its kernel saying it halted. Only the last, and only once
+/// it is finished: a guest that wrote anything after, or is still writing
+/// its line, is not halted. Reads at most [`TAIL`] bytes.
 pub(super) fn says_halted(path: &Path, name: &str) -> io::Result<bool> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
@@ -42,13 +43,45 @@ pub(super) fn says_halted(path: &Path, name: &str) -> io::Result<bool> {
 }
 
 /// Whether the last line in `tail` that is neither blank nor the VMM's is
-/// a [`HALTED`] one.
+/// the kernel's halt, ended by its newline. Text after the last newline is
+/// a line not finished yet: unless it is blank or the VMM's, it is the
+/// guest's last, and not a halt.
 fn last_line_halted(tail: &[u8], name: &str) -> bool {
-    String::from_utf8_lossy(tail)
-        .lines()
+    let text = String::from_utf8_lossy(tail);
+    let (finished, unfinished) = text.rsplit_once('\n').unwrap_or(("", &text));
+    let guests = |line: &&str| !line.is_empty() && !vmm_wrote(line, name);
+    if guests(&unfinished.trim_end()) {
+        return false;
+    }
+    finished
+        .split('\n')
         .map(str::trim_end)
-        .rfind(|line| !line.is_empty() && !vmm_wrote(line, name))
-        .is_some_and(|line| HALTED.iter().any(|said| line.ends_with(said)))
+        .rfind(guests)
+        .is_some_and(kernel_halted)
+}
+
+/// Whether `line` is exactly the kernel's halt, after the printk time
+/// (`[%5lu.%06lu] `) if it has one.
+fn kernel_halted(line: &str) -> bool {
+    let message = match line.strip_prefix('[') {
+        Some(stamped) => match stamped.split_once("] ") {
+            Some((time, message)) if printk_time(time) => message,
+            _ => return false,
+        },
+        None => line,
+    };
+    HALTED.contains(&message)
+}
+
+/// Whether `time` is a printk time: seconds since boot, right-aligned in
+/// at least five places, a point, and six digits of microseconds.
+fn printk_time(time: &str) -> bool {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    time.len() >= 12
+        && time
+            .trim_start_matches(' ')
+            .split_once('.')
+            .is_some_and(|(seconds, micros)| digits(seconds) && micros.len() == 6 && digits(micros))
 }
 
 /// Whether `line` is one of VM `name`'s VMM's own: when, then the VM and
@@ -82,17 +115,31 @@ mod tests {
         // the serial console's line endings.
         assert!(said("[   41.071811] reboot: System halted\r\n"));
         assert!(said(
-            "[    9.2] reboot: Power off not available: System halted instead\r\n"
+            "[    9.200000] reboot: Power off not available: System halted instead\r\n"
         ));
-        assert!(said("booted\nreboot: System halted"));
+        assert!(said("[123456.000001] reboot: System halted\n"));
+        assert!(said("booted\nreboot: System halted\n"));
         assert!(said("reboot: System halted\r\n\r\n\n"));
         // Anything after it, or nothing like it, is not a halt.
         assert!(!said("reboot: System halted\r\nstill here\r\n"));
+        assert!(!said("reboot: System halted\r\nstill wri"));
         assert!(!said("reboot: Restarting system\r\n"));
         assert!(!said("reboot: System halted instead of what\r\n"));
-        assert!(!said("[   41.07] reboot: Power down\r\n"));
+        assert!(!said("[   41.071811] reboot: Power down\r\n"));
         assert!(!said(""));
         assert!(!said("\r\n"));
+        // Only the kernel's line itself: one that mentions it, as a
+        // diagnostic saying the opposite does, is not a halt.
+        assert!(!said(
+            "healthcheck: expected but did not observe reboot: System halted\r\n"
+        ));
+        assert!(!said("echo reboot: System halted\r\n"));
+        assert!(!said("[app] reboot: System halted\r\n"));
+        assert!(!said("[   41.07] reboot: System halted\r\n"));
+        assert!(!said("[41.071811]reboot: System halted\r\n"));
+        // Nor one not finished yet: the guest may still be writing it.
+        assert!(!said("[   41.071811] reboot: System halted"));
+        assert!(!said("reboot: System halted"));
         // Bytes that are not text do not hide the line after them.
         assert!(last_line_halted(b"\xff\xfe\nreboot: System halted\n", NAME));
     }
@@ -105,10 +152,19 @@ mod tests {
                    2026-10-26T17:10:44.801173711 [01a1792e3b25748aa75de996ac0d454b:fc_api] \
                    The request was executed successfully. Status code: 200 OK.\n";
         assert!(said(&format!(
-            "[   41.07] reboot: System halted\r\n{vmm}{vmm}"
+            "[   41.071811] reboot: System halted\r\n{vmm}{vmm}"
         )));
         assert!(!said(&format!(
-            "[   41.07] reboot: System halted\r\n{vmm}up\r\n{vmm}"
+            "[   41.071811] reboot: System halted\r\n{vmm}up\r\n{vmm}"
+        )));
+        // The VMM's line it is still writing hides nothing; the guest's
+        // does.
+        let started = &vmm[..80];
+        assert!(said(&format!(
+            "[   41.071811] reboot: System halted\r\n{vmm}{started}"
+        )));
+        assert!(!said(&format!(
+            "[   41.071811] reboot: System halted\r\n{vmm}up"
         )));
         // Only this VM's VMM's: another's, or a guest's line with no date,
         // is the guest's.

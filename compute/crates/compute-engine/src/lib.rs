@@ -258,11 +258,15 @@ pub trait Engine: Send + Sync + 'static {
     /// its VMM gives it no way to make (Firecracker on x86). Its VM then
     /// runs on, but its guest never will. The words are the guest's own,
     /// and it can write them whenever it likes, so they say only why a
-    /// guest that also takes no connection has stopped. Reads a little of
-    /// a file. Engines that cannot tell say no.
-    fn halted(&self, vm: &Self::Vm) -> Result<bool, EngineError> {
+    /// guest that also takes no connection has stopped. The future reads
+    /// a little of a file off the caller's thread and does not borrow the
+    /// VM. Engines that cannot tell say no.
+    fn halted(
+        &self,
+        vm: &Self::Vm,
+    ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
         let _ = vm;
-        Ok(false)
+        std::future::ready(Ok(false))
     }
 
     /// Gives the VM new guarantees, as [`VmSpec::memory_request_mib`] and

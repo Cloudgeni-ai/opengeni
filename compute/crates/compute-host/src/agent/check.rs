@@ -99,6 +99,20 @@ pub(super) struct Check {
     pending: Option<Pending>,
 }
 
+/// How a check of VM process `incarnation` of `id`'s guest ended.
+#[derive(Debug)]
+pub(super) struct Checked {
+    pub id: Id,
+    pub incarnation: u64,
+    pub reach: Reach,
+    /// The host has no guard, or its guard says it did not freeze the VMs
+    /// while the check connected.
+    pub unfrozen: bool,
+    /// The guest took no connection, and its last words were that it
+    /// halted (see [`Engine::halted`]).
+    pub halted: bool,
+}
+
 /// A check under way, and what held when it began.
 #[derive(Debug, Clone, Copy)]
 struct Pending {
@@ -172,6 +186,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             let vsock = slot.spec.vsock_path();
             let events = self.events_tx.clone();
             let guard = guard.clone();
+            let halted = self.engine.halted(&live.vm);
             tokio::spawn(async move {
                 let before = guard.as_ref().and_then(|freezes| freezes.as_ref()?.read());
                 let reach = reachable(&vsock, port, REACH_LIMIT).await;
@@ -188,21 +203,37 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                     }
                     _ => true,
                 };
-                let _ = events.send(Event::Checked {
+                // Only a miss needs the guest's last words.
+                let halted = match reach {
+                    Reach::Unreached(_) => halted.await.unwrap_or_else(|error| {
+                        tracing::debug!(%id, %error, "could not read whether the guest said it halted");
+                        false
+                    }),
+                    _ => false,
+                };
+                let _ = events.send(Event::Checked(Checked {
                     id,
                     incarnation,
                     reach,
                     unfrozen,
-                });
+                    halted,
+                }));
             });
         }
     }
 
-    /// A check of VM process `incarnation` of `id` ended. A miss counts only
-    /// if its guest could run all through the check, and the guard (if the
-    /// host has one) says it did not freeze it meanwhile; the last one
-    /// allowed ends the VM, as does any one of a guest that said it halted.
-    pub(super) fn checked(&mut self, id: Id, incarnation: u64, reach: Reach, unfrozen: bool) {
+    /// A check ended. A miss counts only if its guest could run all through
+    /// the check, and the guard (if the host has one) says it did not
+    /// freeze it meanwhile; the last one allowed ends the VM, as does any
+    /// one of a guest that said it halted.
+    pub(super) fn checked(&mut self, done: Checked) {
+        let Checked {
+            id,
+            incarnation,
+            reach,
+            unfrozen,
+            halted,
+        } = done;
         let acting = self.may_act();
         let runs = self
             .core
@@ -251,11 +282,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         }
         check.misses += 1;
         if check.misses < allowed {
-            let halted = slot.vm.as_ref().map(|live| self.engine.halted(&live.vm));
-            if let Some(Err(unread)) = &halted {
-                tracing::debug!(%id, error = %unread, "could not read whether the guest said it halted");
-            }
-            if !matches!(halted, Some(Ok(true))) {
+            if !halted {
                 tracing::warn!(%id, misses = check.misses, %error, "guest took no connection on its notice port");
                 return;
             }
