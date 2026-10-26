@@ -248,6 +248,7 @@ import {
   prepareAttestedWorkspaceToolGateway,
   prepareMcpOAuthWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
+  requireWorkspaceToolApprovalAuthorization,
   workspaceToolGatewayDeclarations,
   workspaceToolGatewayServerTiming,
 } from "./workspace-tool-gateway";
@@ -2143,6 +2144,7 @@ export function createAppComposition(deps: AppDependencies): {
       await c.req.json().catch(() => null),
       { status: 400, message: "Invalid tool gateway approval" },
     );
+    requireWorkspaceToolApprovalAuthorization(authorization);
     const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
     try {
       return c.json(

@@ -676,6 +676,9 @@ The ordinary browser SDK uses `/tools/catalog`, `/tools/calls`, and
 boolean: the authenticated parent first creates a five-minute, hash-only,
 single-use approval capability bound to the current human, operation, catalog,
 identity, and arguments, then presents that token on the exact matching call.
+An organization API key acting as itself has no person to approve, so it cannot
+create approvals; a host approves as the verified external actor who saw its
+approval UI.
 After consumption, its hash-only row remains as an operation tombstone so the
 same operation id cannot be approved again after an ambiguous provider outcome.
 Live approval issuance and expiry queries use a subject-scoped partial index
