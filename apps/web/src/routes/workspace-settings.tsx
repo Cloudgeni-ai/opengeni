@@ -3,6 +3,7 @@
 // API keys and Developer. Models lives in Organization settings (a
 // workspace's Models URL redirects there), as does the org/billing console.
 import { t } from "@opengeni/react/app/lib/console-text";
+import { inferenceFeatureRestriction } from "@opengeni/react";
 import { NativeIdentityLinkAccounts } from "@/routes/identity-link";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { PencilIcon, Trash2Icon, UserIcon } from "lucide-react";
@@ -691,15 +692,23 @@ function CodeSearchPreferenceRow({
 }) {
   const context = useAppContext();
   const capability = context.clientConfig.codeSearch;
+  // EU-only workspace without an EU decision model: shown, switched off.
+  const regionRestricted = inferenceFeatureRestriction(t, context.clientConfig, "code_search");
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const explicit = workspace?.settings?.codeSearchEnabled;
-  const value = explicit === true ? "on" : explicit === false ? "off" : "default";
+  const value = regionRestricted
+    ? "off"
+    : explicit === true
+      ? "on"
+      : explicit === false
+        ? "off"
+        : "default";
   const [saving, setSaving] = useState(false);
-  if (capability?.available !== true) return null;
+  if (capability?.available !== true && !regionRestricted) return null;
   const defaultPhrase =
-    capability.workspaceDefault === "on"
+    capability?.workspaceDefault === "on"
       ? "Default turns it on"
-      : capability.workspaceDefault === "split"
+      : capability?.workspaceDefault === "split"
         ? "Default gives it to half of new sessions"
         : "Default leaves it off";
 
@@ -723,11 +732,16 @@ function CodeSearchPreferenceRow({
     }
   }
 
-  const reason = canManage ? undefined : "Only workspace admins can change this.";
+  const reason =
+    regionRestricted ?? (canManage ? undefined : "Only workspace admins can change this.");
   return (
     <SettingRow
       label="Fast code search"
-      description={`Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.`}
+      description={
+        regionRestricted
+          ? `Agents find code in one step. ${regionRestricted}.`
+          : `Agents find code in one step. ${defaultPhrase}; Off also pauses it in running sessions.`
+      }
       controlWidth="auto"
       control={
         <SegmentedControl
@@ -740,7 +754,7 @@ function CodeSearchPreferenceRow({
             { value: "off", label: "Off" },
           ].map((option) => ({
             ...option,
-            disabled: saving || !canManage,
+            disabled: saving || !canManage || regionRestricted !== null,
             ...(reason ? { disabledReason: reason } : {}),
           }))}
         />

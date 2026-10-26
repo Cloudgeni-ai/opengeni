@@ -4362,6 +4362,11 @@ export type ClientModel = {
   capabilities?: ModelCapabilitiesV1 | undefined;
   pricing?: ModelPricingScheduleV1 | undefined;
   definitionVersion?: string | undefined;
+  /**
+   * Transient availability hint. `reason: "region_restricted"`: the workspace
+   * is EU-only and this model's route is not EU by its residency record.
+   */
+  availability?: ModelAvailabilityV1 | undefined;
 };
 
 export type ModelAvailabilityV1 = {
@@ -4911,6 +4916,58 @@ export type OrganizationAgentAdminAccess = {
 export type UpdateOrganizationAgentAdminAccessRequest = {
   sessionAdminAccessAllowed?: boolean;
   chatActionsAllowed?: boolean;
+};
+
+/**
+ * The organization's EU-only inference setting. When on, every model call for
+ * its workspaces runs on an EU route or not at all. Any member can read it;
+ * owners and admins can turn it on, and only an owner or admin in the app in a
+ * browser can turn it off (`canTurnOff`).
+ */
+export type OrganizationInferenceResidency = {
+  organizationId: string;
+  euOnly: boolean;
+  /** 0 until the setting is first changed. */
+  version: number;
+  updatedAt: string | null;
+  /** Whether the caller may turn EU-only off: only an owner or admin in a browser. */
+  canTurnOff: boolean;
+  changed?: boolean | undefined;
+};
+
+/**
+ * Turn EU-only on or off. `expectedVersion` is the current `version` (a stale
+ * one is `409`); `operationId` makes a retry safe. Changes answer `503` while
+ * the deployment doesn't allow them yet.
+ */
+export type UpdateOrganizationInferenceResidencyRequest = {
+  euOnly: boolean;
+  expectedVersion: number;
+  operationId: string;
+};
+
+/** Model-backed features besides the chat model, as reported in `ClientConfig.inferenceFeatures`. */
+export type InferenceFeatureId =
+  | "web_search"
+  | "image_generation"
+  | "video_generation"
+  | "realtime_voice"
+  | "voice_input"
+  | "meeting_transcription"
+  | "knowledge_embeddings"
+  | "code_search";
+
+/**
+ * Why the server switched a feature off. `region_restricted`: the workspace
+ * is EU-only and the feature has no EU route here ("Not supported in EU").
+ */
+export type FeatureUnavailableReason = "region_restricted";
+
+/** One feature's availability for the caller's workspace. */
+export type InferenceFeatureAvailability = {
+  id: InferenceFeatureId;
+  available: boolean;
+  unavailableReason: FeatureUnavailableReason | null;
 };
 
 /**
@@ -5544,6 +5601,13 @@ export type ClientConfig = {
    * what workspaces without their own setting get (`split` = half of sessions).
    */
   codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
+  /**
+   * EU-only inference: each model-backed feature's region availability for the
+   * caller's workspace. `unavailableReason: "region_restricted"` means the
+   * workspace is EU-only and the feature has no EU route here. Absent on older
+   * servers.
+   */
+  inferenceFeatures?: InferenceFeatureAvailability[] | undefined;
   /**
    * Present only when this deployment archives idle sessions: after `idleDays`
    * without activity a session (unless kept live) becomes read-only.

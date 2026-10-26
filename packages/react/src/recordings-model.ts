@@ -172,6 +172,8 @@ export function transcriptErrorText(
       return msg("meetings.recordings.errorInvalidAudio");
     case "storage_unavailable":
       return msg("meetings.recordings.errorStorageUnavailable");
+    case "region_restricted":
+      return msg("inferenceRegion.notSupportedInEu");
     default:
       return msg("meetings.recordings.errorUnknown");
   }

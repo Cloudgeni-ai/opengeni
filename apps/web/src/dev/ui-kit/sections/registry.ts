@@ -126,6 +126,7 @@ export const SECTION_KEYS = [
   "page-meetings",
   "page-knowledge",
   "page-org-people",
+  "page-eu-only",
 ] as const;
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
@@ -930,6 +931,15 @@ export const SECTIONS: readonly SectionMeta[] = [
     purpose: "Everyone in Acme Robotics, with the person page.",
     usedOn: "Organization settings",
     load: () => import("./page-org-people"),
+  },
+  {
+    key: "page-eu-only",
+    group: "Pages",
+    title: "EU-only inference",
+    purpose:
+      "The organization setting and what an EU-only workspace switches off, in production components.",
+    usedOn: "Organization settings > Security & data, model pickers, feature settings",
+    load: () => import("./page-eu-only"),
   },
 ];
 

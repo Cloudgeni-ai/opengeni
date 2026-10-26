@@ -272,6 +272,22 @@ with none left it stays listed, switched off), video funding options `unavailabl
 (beside `reason`). Agents are not offered tools that are switched off, and the
 session's effective tools omit them.
 
+## In the app
+
+- **Organization settings > Security & data** shows **EU-only inference** to
+  every member. Owners and admins turn it on. Turning it off is offered only
+  when the API answers `canTurnOff` (an owner or admin in a browser) and asks
+  for confirmation first. A stale version (`409`) reloads the setting; while
+  the deployment does not take changes yet (`503`) the app says so.
+- Every model picker shows a model whose availability reason is
+  `region_restricted` as **Not supported in EU** and does not let it be chosen.
+- A feature reported with `region_restricted` (from `inferenceFeatures`, agent
+  capabilities, live voice, transcription models and errors, video funding)
+  shows **Not supported in EU** and is switched off. Surfaces read the reason
+  through one helper, `inferenceFeatureRestriction` / `regionRestrictedText` in
+  `@opengeni/react`.
+- No label says EU: names and labels never decide residency.
+
 ### Recording the region
 
 Usage events for side-feature calls (web search, live voice, transcription,

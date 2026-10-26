@@ -3,6 +3,7 @@
 // live under the workspace's `recordings` settings, which a patch replaces as
 // a whole.
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { regionRestrictedText } from "../inference-region";
 import { useState, type ComponentProps } from "react";
 import { toast } from "sonner";
 
@@ -55,6 +56,8 @@ export function transcriptionModelUnavailableReason(
   entry: RecordingTranscriptionModel,
   msg: OpenGeniText = defaultText,
 ): string {
+  const regionRestricted = regionRestrictedText(msg, entry.unavailableReason);
+  if (regionRestricted) return regionRestricted;
   const providerName = entry.providerName;
   switch (entry.funding) {
     case "workspace_subscription":

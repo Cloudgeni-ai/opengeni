@@ -8,6 +8,8 @@ import { SettingRow, SettingRowLink } from "@opengeni/react/ui/setting-row";
 import { Switch } from "@opengeni/react/ui/switch";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { userErrorText } from "@opengeni/react/ui/api-error";
+import { inferenceFeatureRestriction } from "@opengeni/react";
+import { t } from "@opengeni/react/app/lib/console-text";
 
 const SEEDANCE_2_5 = "bytedance/seedance-2.5";
 const GROK_IMAGINE_VIDEO_1_5 = "xai/grok-imagine-video-1.5";
@@ -28,7 +30,10 @@ export function VideoGenerationPreferenceRow({
   /** Opens the page that connects a workspace AI Gateway key. */
   onConnectGateway?: () => void;
 }) {
-  const client = useAppContext().client;
+  const context = useAppContext();
+  const client = context.client;
+  // EU-only workspace without an EU video route: shown, switched off.
+  const regionRestricted = inferenceFeatureRestriction(t, context.clientConfig, "video_generation");
   const [settings, setSettings] = useState<WorkspaceVideoGenerationSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -45,7 +50,7 @@ export function VideoGenerationPreferenceRow({
     return () => controller.abort();
   }, [client, refreshKey, workspaceId]);
 
-  const enabled = settings?.policy.enabledModelIds.length === 1;
+  const enabled = regionRestricted === null && settings?.policy.enabledModelIds.length === 1;
   const selectedFundingSource =
     settings?.fundingOptions.find(
       (option) => option.source === settings.policy.fundingSource && option.available,
@@ -124,24 +129,28 @@ export function VideoGenerationPreferenceRow({
   }));
   const noFunding =
     Boolean(settings) && !settings!.fundingOptions.some((option) => option.available);
-  const reason = failed
-    ? "Couldn't load video generation settings. Reload to try again."
-    : !canManage
-      ? "Only workspace admins can change this."
-      : !enabled && settings && !available
-        ? (selectedFunding?.unavailableReason ?? "Nothing is set up to pay for videos yet.")
-        : undefined;
+  const reason = regionRestricted
+    ? regionRestricted
+    : failed
+      ? "Couldn't load video generation settings. Reload to try again."
+      : !canManage
+        ? "Only workspace admins can change this."
+        : !enabled && settings && !available
+          ? (selectedFunding?.unavailableReason ?? "Nothing is set up to pay for videos yet.")
+          : undefined;
 
   return (
     <SettingRow
       label="Video generation"
       description={
-        noFunding
-          ? "Let agents make short videos. Needs an AI Gateway key or a plan to pay for them."
-          : "Let agents make short videos. Paid by the account you choose."
+        regionRestricted
+          ? regionRestricted
+          : noFunding
+            ? "Let agents make short videos. Needs an AI Gateway key or a plan to pay for them."
+            : "Let agents make short videos. Paid by the account you choose."
       }
       hint={
-        noFunding && canManage && onConnectGateway ? (
+        !regionRestricted && noFunding && canManage && onConnectGateway ? (
           <SettingRowLink onClick={onConnectGateway}>Connect AI Gateway</SettingRowLink>
         ) : undefined
       }

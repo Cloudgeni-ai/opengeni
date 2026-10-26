@@ -984,6 +984,7 @@ function voiceInputCode(code: string | null): string {
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
     case "policy_blocked":
+    case "region_restricted":
     case "not_supported":
     case "unavailable":
     case "too_large":

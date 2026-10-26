@@ -70,6 +70,7 @@ import {
 import { type MicrophoneAccess, useMicrophoneAccess } from "./microphone-access";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { errorMessage } from "@opengeni/contracts/values";
+import { regionRestrictedText } from "../inference-region";
 
 export {
   codexRealtimeAdmissionAllowed,
@@ -103,7 +104,7 @@ function realtimeRefusalLabel(t: OpenGeniText, code: string | null | undefined):
     case "credits_disabled":
       return t("realtime.realtimeControl.creditsOff");
     default:
-      return null;
+      return regionRestrictedText(t, code);
   }
 }
 
@@ -1027,6 +1028,7 @@ export function RealtimeModelPickerMenu(props: {
                   key={model.id}
                   label={model.label}
                   hint={
+                    regionRestrictedText(t, model.unavailableCode) ??
                     model.unavailableReason ??
                     (model.recommended
                       ? t("realtime.realtimeControl.recommendedDescription", {
@@ -1035,7 +1037,11 @@ export function RealtimeModelPickerMenu(props: {
                       : model.description)
                   }
                   disabled={props.disabled || !model.available}
-                  title={model.unavailableReason ?? model.description}
+                  title={
+                    regionRestrictedText(t, model.unavailableCode) ??
+                    model.unavailableReason ??
+                    model.description
+                  }
                   active={selected}
                   showChevron={false}
                   trailing={

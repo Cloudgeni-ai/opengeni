@@ -25,6 +25,8 @@ import {
   type ResolvedAgentCapabilities,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
+import { regionRestrictedText } from "../../inference-region";
+import { t } from "./console-text";
 
 export type { AgentCapabilityId, ResolvedAgentCapabilities };
 
@@ -102,6 +104,12 @@ export const UNAVAILABLE_CAPABILITY_REASON = "Not enabled on this server";
 export type CapabilityAvailability = {
   isAvailable: (id: AgentCapabilityId) => boolean;
   unavailable: ReadonlySet<AgentCapabilityId>;
+  /**
+   * Why a capability is unavailable: "Not supported in EU" when the server
+   * switched it off for an EU-only workspace, otherwise "Not enabled on this
+   * server".
+   */
+  unavailableReason: (id: AgentCapabilityId) => string;
 };
 
 export function capabilityAvailability(
@@ -109,10 +117,18 @@ export function capabilityAvailability(
   alsoUnavailable: readonly AgentCapabilityId[] = [],
 ): CapabilityAvailability {
   const unavailable = new Set<AgentCapabilityId>(alsoUnavailable);
+  const reasons = new Map<AgentCapabilityId, string>();
   for (const entry of config?.capabilities ?? []) {
-    if (!entry.available) unavailable.add(entry.id);
+    if (entry.available) continue;
+    unavailable.add(entry.id);
+    const regionRestricted = regionRestrictedText(t, entry.reason);
+    if (regionRestricted) reasons.set(entry.id, regionRestricted);
   }
-  return { unavailable, isAvailable: (id) => !unavailable.has(id) };
+  return {
+    unavailable,
+    isAvailable: (id) => !unavailable.has(id),
+    unavailableReason: (id) => reasons.get(id) ?? UNAVAILABLE_CAPABILITY_REASON,
+  };
 }
 
 export function baseCapabilities(from: AgentCapabilityStartingPoint): ResolvedAgentCapabilities {

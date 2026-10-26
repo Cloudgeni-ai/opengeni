@@ -12,6 +12,8 @@ import { RowSelect } from "./settings/row-select";
 import type { SelectOption } from "../../ui/select-menu";
 import { SettingRow } from "../../ui/setting-row";
 import { Switch } from "../../ui/switch";
+import { inferenceFeatureRestriction } from "../../inference-region";
+import { t } from "../lib/console-text";
 
 export const voiceInputProviderLabels: Record<VoiceInputProviderId, string> = {
   "supergrok-subscription": "SuperGrok subscription",
@@ -62,10 +64,13 @@ export function VoiceInputPreferences({
   const enabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
   const preferences = workspace?.settings.voiceInput as WorkspaceVoiceInputSettings | undefined;
   const providers = capability?.providers ?? [];
+  // EU-only workspace without an EU speech-to-text route: switched off.
+  const regionRestricted = inferenceFeatureRestriction(t, context.clientConfig, "voice_input");
   // Settings stay editable while any provider is ready: `capability.available`
   // honours the saved preference, so gating on it would lock an admin out of
   // changing a preference whose provider stopped being available.
-  const available = capability?.available === true || providers.length > 0;
+  const available =
+    regionRestricted === null && (capability?.available === true || providers.length > 0);
   // `azure-mai` is the older name of the Azure Speech provider.
   const saved = preferences?.preferredProvider ?? null;
   const selected = saved === "azure-mai" ? "azure-speech" : saved;
@@ -91,11 +96,13 @@ export function VoiceInputPreferences({
     }
   }
 
-  const reason = !available
-    ? "Voice input isn’t available in this workspace. Connect a supported subscription or ask your operator to enable it."
-    : !canManage
-      ? "Only workspace admins can change this."
-      : undefined;
+  const reason = regionRestricted
+    ? regionRestricted
+    : !available
+      ? "Voice input isn’t available in this workspace. Connect a supported subscription or ask your operator to enable it."
+      : !canManage
+        ? "Only workspace admins can change this."
+        : undefined;
   const options: SelectOption<string>[] = [
     {
       value: AUTOMATIC,
@@ -122,7 +129,9 @@ export function VoiceInputPreferences({
   return (
     <SettingRow
       label="Voice input"
-      description="Record a short message and add its transcript to the draft."
+      description={
+        regionRestricted ?? "Record a short message and add its transcript to the draft."
+      }
       control={
         <Switch
           checked={enabled && available}

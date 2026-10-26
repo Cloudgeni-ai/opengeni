@@ -36,6 +36,7 @@ import {
   type OrganizationAdminResource,
 } from "@opengeni/react/app/lib/organization-admin";
 import type {
+  OrganizationInferenceResidency,
   OrganizationPrivacySettings,
   OrganizationPrivateSessionSettings,
   OrganizationRetentionPolicy,
@@ -44,9 +45,9 @@ import type {
 import { useOrganizationDirectory } from "./organization-directory";
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Security & data: Only me chats and automations, full access for
-   agent sessions, how long a removed person's data is kept, and recovery
-   (owners, managed sign-in only).
+   Organization settings > Security & data: EU-only inference, Only me chats and
+   automations, full access for agent sessions, how long a removed person's data
+   is kept, and recovery (owners, managed sign-in only).
    -------------------------------------------------------------------------- */
 
 export function OrganizationSecurityPage() {
@@ -54,10 +55,20 @@ export function OrganizationSecurityPage() {
   const appContext = useAppContext();
   const client = appContext.client;
   const managedPeople = directory.managedSession && !directory.singleUser;
-  // Members see only Recovery: they may be recovery contacts.
+  // Members see Data residency and Recovery: they may be recovery contacts.
   const administrator = directory.canAdminister;
   return (
     <SectionStack>
+      {managedPeople ? (
+        // Every member sees it: it decides which models and features they can use.
+        <Section title="Data residency">
+          <InferenceResidencyRow
+            client={client}
+            identity={directory.identity}
+            canTurnOn={administrator}
+          />
+        </Section>
+      ) : null}
       {managedPeople && administrator ? (
         <Section title="Chats and automations">
           <PrivateChatsRow
@@ -178,6 +189,141 @@ function RowLoadFailure({
       {userErrorTextWithoutReference(error)}
     </ErrorMessage>
   );
+}
+
+/* ------------------------------------------------------- EU-only inference */
+
+const RESIDENCY_DESCRIPTION = "Models and features run only in the EU. Others are switched off.";
+
+/**
+ * EU-only inference, organization-wide. Any member sees it; owners and admins
+ * turn it on; it is offered off only when the server says so (`canTurnOff`:
+ * an owner or admin in a browser), behind a confirmation.
+ */
+export function InferenceResidencyRow({
+  client,
+  identity,
+  canTurnOn,
+}: {
+  client: Pick<
+    OpenGeniBrowserClient,
+    "getOrganizationInferenceResidency" | "updateOrganizationInferenceResidency"
+  >;
+  identity: OrganizationAdminIdentity;
+  /** An owner or admin. Turning off is the server's answer, `canTurnOff`. */
+  canTurnOn: boolean;
+}) {
+  const { claim, owns } = useOwnedOperations(identity, "inference-residency");
+  const [value, setValue] = useState<OrganizationInferenceResidency | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [pending, setPending] = useState<boolean | null>(null);
+  const [confirmOff, setConfirmOff] = useState(false);
+
+  const load = useCallback(async () => {
+    const operation = claim("read");
+    setError(null);
+    try {
+      const next = await client.getOrganizationInferenceResidency(identity.organizationId);
+      if (owns(operation)) setValue(next);
+    } catch (loadError) {
+      if (owns(operation))
+        setError(loadError instanceof Error ? loadError : new Error(String(loadError)));
+    }
+  }, [claim, client, identity.organizationId, owns]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  /** Resolves false when the change didn't happen; the toast says why. */
+  const save = useCallback(
+    async (current: OrganizationInferenceResidency, euOnly: boolean): Promise<boolean> => {
+      const operation = claim("mutation");
+      setPending(euOnly);
+      try {
+        const saved = await client.updateOrganizationInferenceResidency(identity.organizationId, {
+          euOnly,
+          expectedVersion: current.version,
+          operationId: crypto.randomUUID(),
+        });
+        if (!owns(operation)) return false;
+        setValue(saved);
+        toast.success(euOnly ? "EU-only inference is on" : "EU-only inference is off");
+        return true;
+      } catch (saveError) {
+        if (!owns(operation)) return false;
+        // Stale version, or a mode where it can't change: show what's true now.
+        if (isOrganizationConflict(saveError)) await load();
+        toast.error("Couldn't change EU-only inference", {
+          description: residencyChangeErrorText(saveError),
+        });
+        return false;
+      } finally {
+        if (owns(operation)) setPending(null);
+      }
+    },
+    [claim, client, identity.organizationId, load, owns],
+  );
+
+  if (error && value === null) {
+    return (
+      <RowLoadFailure
+        title="Couldn't load EU-only inference."
+        error={error}
+        onRetry={() => void load()}
+      />
+    );
+  }
+  if (value === null) return <SettingRowSkeleton />;
+
+  const euOnly = pending ?? value.euOnly;
+  const changeable = value.euOnly ? value.canTurnOff : canTurnOn;
+  return (
+    <SettingRowGroup>
+      <SettingRow
+        label="EU-only inference"
+        description={RESIDENCY_DESCRIPTION}
+        control={
+          <Switch
+            aria-label="EU-only inference"
+            checked={euOnly}
+            pending={pending !== null}
+            disabled={!changeable}
+            disabledReason={
+              value.euOnly
+                ? "Only an owner or admin can turn this off, in a browser."
+                : "Only owners and admins can change this."
+            }
+            onCheckedChange={(next) => {
+              if (next) void save(value, true);
+              else setConfirmOff(true);
+            }}
+          />
+        }
+      />
+      <FormDialog
+        open={confirmOff}
+        onOpenChange={setConfirmOff}
+        size="sm"
+        title="Turn off EU-only inference?"
+        description="Models and features outside the EU become available again."
+        submitLabel="Turn off"
+        pendingLabel="Turning off…"
+        tone="destructive"
+        initialFocus="cancel"
+        onSubmit={async () => {
+          await save(value, false);
+        }}
+        onSubmitted={() => setConfirmOff(false)}
+      />
+    </SettingRowGroup>
+  );
+}
+
+/** 503: the deployment doesn't take changes yet. Otherwise the usual advice. */
+function residencyChangeErrorText(error: unknown): string {
+  const status = (error as { status?: unknown } | null)?.status;
+  return status === 503 ? "It can't be changed yet." : userErrorText(error);
 }
 
 /* ----------------------------------------------- Only me chats and automations */

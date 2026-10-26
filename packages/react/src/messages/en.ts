@@ -1865,6 +1865,8 @@ export const englishMessages = {
   "identityLinkConsent.youCanCloseThisPage": "You can close this page without granting access.",
   "identityLinkConsent.yourCurrentPermissionsStillApply": "Your current permissions still apply.",
   "identityLinkConsent.yourOpengeniIdentity": "Your {product} identity",
+  /** A model or feature the server switched off because the workspace is EU-only. */
+  "inferenceRegion.notSupportedInEu": "Not supported in EU",
   "interactionInterventionBanner.actionNeeded": "Action needed",
   "interactionInterventionBanner.agentNeedsYourHelp": "Agent needs your help",
   "interactionInterventionBanner.cancelRequest": "Cancel request",

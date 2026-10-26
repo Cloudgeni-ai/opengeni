@@ -17,6 +17,8 @@ import { useAppContext } from "../app-context";
 import { useAppShotTarget } from "./desktop/app-shots";
 import { MessageContextPills } from "./message-context-pills";
 import { ComposerUsageNotice } from "./usage/usage-entry";
+import { inferenceFeatureRestriction } from "../../inference-region";
+import { t } from "../lib/console-text";
 
 export function useDraftAttachments(
   workspaceId: string,
@@ -64,6 +66,9 @@ export function ConsoleComposer(props: {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
   const voiceInputEnabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
+  // EU-only workspace without an EU speech-to-text route: the mic stays,
+  // switched off, and says why.
+  const voiceInputRestricted = inferenceFeatureRestriction(t, context.clientConfig, "voice_input");
   // In the desktop app, the app-shot shortcut attaches the captured window here.
   const regionRef = useRef<HTMLDivElement>(null);
   useAppShotTarget(props.fileUploadsEnabled ? props.attachments : null, regionRef);
@@ -101,16 +106,26 @@ export function ConsoleComposer(props: {
         controlsStart={props.controls}
         actionsStart={props.actions}
         transcriptionSuppressed={props.transcriptionSuppressed === true}
-        {...(context.clientConfig.voiceInput?.available
+        {...(voiceInputRestricted
           ? {
               transcription: {
-                client: context.client,
+                client: null,
                 workspaceId: props.workspaceId,
-                capability: context.clientConfig.voiceInput,
-                workspaceEnabled: voiceInputEnabled,
+                capability: null,
+                workspaceEnabled: false,
+                messages: { unavailable: voiceInputRestricted },
               },
             }
-          : {})}
+          : context.clientConfig.voiceInput?.available
+            ? {
+                transcription: {
+                  client: context.client,
+                  workspaceId: props.workspaceId,
+                  capability: context.clientConfig.voiceInput,
+                  workspaceEnabled: voiceInputEnabled,
+                },
+              }
+            : {})}
       />
     </div>
   );

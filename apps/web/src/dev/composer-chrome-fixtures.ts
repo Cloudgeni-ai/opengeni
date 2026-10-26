@@ -426,7 +426,7 @@ export const galleryModelRows: PickerModelRow[] = projectPickerRows(t, [
   }),
   catalogModel({
     id: "opper/aws/claude-opus-5-5",
-    label: "Claude Opus 5.5 (EU)",
+    label: "Claude Opus 5.5",
     shortLabel: "Opus 5.5",
     provider: "opper",
     providerLabel: "Opper",

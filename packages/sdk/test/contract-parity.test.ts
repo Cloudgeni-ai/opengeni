@@ -137,6 +137,9 @@ import {
   SaveWorkspaceSkillRequest as ContractSaveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest as ContractApplyWorkspaceSkillRevisionRequest,
   RemoveWorkspaceSkillRequest as ContractRemoveWorkspaceSkillRequest,
+  OrganizationInferenceResidency as ContractOrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest as ContractUpdateOrganizationInferenceResidencyRequest,
+  InferenceFeatureAvailability as ContractInferenceFeatureAvailability,
 } from "@opengeni/contracts";
 import { SandboxBackend as DeploymentSandboxBackend } from "@opengeni/deployment";
 import type { z } from "zod";
@@ -276,6 +279,9 @@ import type {
   ViewerHeartbeatResponse,
   ViewerHolder,
   WorkspaceMember,
+  OrganizationInferenceResidency,
+  UpdateOrganizationInferenceResidencyRequest,
+  InferenceFeatureAvailability,
 } from "../src/types";
 import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/transcription";
 import type {
@@ -1478,4 +1484,35 @@ test("Skill write requests the SDK sends are the ones the API validates", () => 
     reason: "Create",
   };
   expect(ContractSaveWorkspaceSkillRequest.parse(save).scope).toBe("workspace");
+});
+
+test("EU-only inference shapes match the contracts both ways", () => {
+  const fromContract = {
+    setting: (
+      value: z.infer<typeof ContractOrganizationInferenceResidency>,
+    ): OrganizationInferenceResidency => value,
+    feature: (
+      value: z.infer<typeof ContractInferenceFeatureAvailability>,
+    ): InferenceFeatureAvailability => value,
+  };
+  const toContract = {
+    setting: (
+      value: OrganizationInferenceResidency,
+    ): z.infer<typeof ContractOrganizationInferenceResidency> => value,
+    update: (
+      value: UpdateOrganizationInferenceResidencyRequest,
+    ): z.input<typeof ContractUpdateOrganizationInferenceResidencyRequest> => value,
+    feature: (
+      value: InferenceFeatureAvailability,
+    ): z.infer<typeof ContractInferenceFeatureAvailability> => value,
+  };
+  expect(Object.keys(fromContract)).toEqual(["setting", "feature"]);
+  expect(Object.keys(toContract)).toEqual(["setting", "update", "feature"]);
+  expect(
+    ContractInferenceFeatureAvailability.parse({
+      id: "web_search",
+      available: false,
+      unavailableReason: "region_restricted",
+    } satisfies InferenceFeatureAvailability).unavailableReason,
+  ).toBe("region_restricted");
 });
