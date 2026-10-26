@@ -2792,7 +2792,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    * it, including window.open popups, while it is paused before its first
    * script. Each gets its passkey authenticator and presented User-Agent, then
    * resumes. These sessions only host per-target setup; actions keep their own
-   * lazily attached session. Shared and service workers attach the same way
+   * lazily attached session. Shared workers always attach the same way, so a
+   * page's request for a shared worker's script, which finishes only on the
+   * worker's own session, counts as finished. Service workers attach only
    * when the presented User-Agent must reach them.
    */
   private async enableTargetAutoAttach(connection: BrowserCdpConnection): Promise<void> {
@@ -3529,8 +3531,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
-  /** Page-level auto-attach: one flattened child session per cross-origin
-   * (out-of-process) iframe, nested ones included. */
   /** Auto-attaches the cross-origin frames and dedicated workers a page,
    * frame or worker session starts. Its listeners join `owner`, the list that
    * session's own teardown runs. */
