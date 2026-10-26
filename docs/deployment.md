@@ -4444,7 +4444,7 @@ The AWS Terraform root lives at `deploy/terraform/aws`.
 
 It supports EKS, ECR, S3, AWS Secrets Manager, optional RDS PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.aws-managed.example.yaml` as the non-secret Helm values shape.
 
-With `postgres.mode = "managed"`, the RDS security group admits PostgreSQL from the created VPC CIDR, or from the EKS cluster security group when the root runs in an existing VPC (`network.create_vpc = false`). Declare any other client with `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids`. Existing-VPC deployments upgrading from the old `10.0.0.0/8` rule should read the upgrade note in `deploy/terraform/aws/README.md` first.
+With `postgres.mode = "managed"`, the RDS security group admits PostgreSQL from the created VPC CIDR, or from the EKS cluster security group when the root runs in an existing VPC (`network.create_vpc = false`). Declare any other client, including pods on Karpenter or self-managed nodes and Security Groups for Pods, with `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids`. Existing-VPC deployments upgrading from the old `10.0.0.0/8` rule should read the upgrade note in `deploy/terraform/aws/README.md` first.
 
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed S3 URLs without per-application registration.
@@ -4467,7 +4467,7 @@ After apply, save exact resource names and cleanup commands outside the reposito
 
 The GCP Terraform root lives at `deploy/terraform/gcp`.
 
-It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape. The runtime service account's Secret Manager access is scoped to the created runtime secret, not the project.
+It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape. The runtime service account's Secret Manager access is scoped to the created runtime secret (plus any IDs listed in `runtime_readable_secret_ids`), not the project; see the upgrade note in `deploy/terraform/gcp/README.md`.
 
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed GCS URLs without per-application registration.

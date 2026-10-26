@@ -79,6 +79,12 @@ run "open_internet_cidr_is_rejected" {
   expect_failures = [var.postgres]
 }
 
+run "near_global_cidr_is_rejected" {
+  command = plan
+  variables { postgres = { mode = "managed", allowed_client_cidrs = ["128.0.0.0/1"] } }
+  expect_failures = [var.postgres]
+}
+
 run "host_bits_cidr_is_rejected" {
   command = plan
   variables { postgres = { mode = "managed", allowed_client_cidrs = ["10.9.4.7/24"] } }

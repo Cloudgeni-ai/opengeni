@@ -222,6 +222,16 @@ resource "google_secret_manager_secret_iam_member" "runtime_secret_accessor" {
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
+# Operator-named extra secrets, each bound individually. Never grant
+# secretAccessor through google_project_iam_member: that reads every secret.
+resource "google_secret_manager_secret_iam_member" "runtime_readable_secrets" {
+  for_each  = toset(var.runtime_readable_secret_ids)
+  project   = var.project_id
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.runtime.email}"
+}
+
 resource "google_project_iam_member" "gke_admin" {
   for_each = toset(var.gke_admin_members)
   project  = var.project_id

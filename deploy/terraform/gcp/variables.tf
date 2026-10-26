@@ -82,6 +82,17 @@ variable "gke_admin_members" {
   default     = []
 }
 
+variable "runtime_readable_secret_ids" {
+  description = "Additional Secret Manager secret IDs in this project that the runtime service account may read, for example separate database or Temporal credential secrets synced through External Secrets. The created runtime secret is always readable; access is never granted project-wide."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for id in var.runtime_readable_secret_ids : can(regex("^[A-Za-z0-9_-]{1,255}$", id))])
+    error_message = "runtime_readable_secret_ids entries must be bare Secret Manager secret IDs (letters, digits, - and _), not resource names or wildcards."
+  }
+}
+
 variable "kubernetes_workload_identity" {
   description = "Kubernetes identity allowed to impersonate the GCP runtime service account."
   type = object({

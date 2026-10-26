@@ -52,4 +52,9 @@ The official Temporal chart still needs durable Postgres databases prepared outs
 
 Managed VPC deployments retain the existing `postgres_from_vpc[0]` resource address and VPC CIDR rule, so the plan shows no ingress change.
 
-Existing VPC deployments previously admitted `10.0.0.0/8`. The plan destroys that `postgres_from_vpc[0]` rule and creates `postgres_from_eks_cluster[0]` for the EKS cluster security group. Pods on this root's managed node group keep access. Any other client that reached RDS through the old range, such as a bastion, a migration runner outside the cluster or a Temporal server elsewhere, needs an entry in `postgres.allowed_client_cidrs` or `postgres.allowed_security_group_ids` before you apply.
+Existing VPC deployments previously admitted `10.0.0.0/8`. The plan destroys that `postgres_from_vpc[0]` rule and creates `postgres_from_eks_cluster[0]` for the EKS cluster security group. Pods on this root's managed node group keep access. Before you apply, add an entry in `postgres.allowed_security_group_ids` or `postgres.allowed_client_cidrs` for every other client that reached RDS through the old range:
+
+- Clients outside the cluster, such as a bastion, a migration runner or a Temporal server elsewhere.
+- Pods that don't carry the cluster security group: nodes added by Karpenter or self-managed node groups with their own security groups, Security Groups for Pods, or VPC CNI custom networking with per-subnet security groups. Add those node or pod security groups.
+
+The two rules are independent, so the old one may be removed a moment before the new one exists. Established connections are kept, but a new connection opened in that moment can be refused; apply outside peak traffic.

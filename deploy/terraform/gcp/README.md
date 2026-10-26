@@ -33,6 +33,10 @@ can reach public model providers and external Temporal endpoints. Cloud NAT adds
 provider charges; public-node deployments do not create it. NAT ports are
 allocated dynamically per node (64 up to 65536) because all pods on a node share
 them, and allocation errors are logged.
+If such a stack already has a hand-made Cloud NAT for this subnet, remove it or
+`terraform import` it as `google_compute_router.private_nodes[0]` and
+`google_compute_router_nat.private_nodes[0]` before upgrading; a second NAT
+gateway for the same subnet ranges is rejected.
 
 For `network.create_network = false`, the operator must supply internet egress
 for private nodes and pods, through existing Cloud NAT or another routing path.
@@ -47,8 +51,12 @@ the runtime secret only (`runtime_secret_id` output, `<name_prefix>-runtime`).
 The plan destroys `google_project_iam_member.runtime_secret_accessor` and creates
 `google_secret_manager_secret_iam_member.runtime_secret_accessor`. Before
 applying, confirm that the External Secrets `remoteRef`/`extract` key in your Helm
-values equals `runtime_secret_id`; a workload that read any other secret through
-this service account needs its own secret-level binding.
+values equals `runtime_secret_id`. If the same identity also syncs other secrets,
+such as separate database, Temporal, NATS or object-storage credentials, list
+their IDs in `runtime_readable_secret_ids`; each gets its own secret-level
+binding. IAM changes can take a few minutes to propagate, so an External Secrets
+refresh during the apply may fail once; synced Kubernetes Secrets and running
+pods are unaffected.
 
 ## Validate
 

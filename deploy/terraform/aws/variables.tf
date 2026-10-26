@@ -124,9 +124,9 @@ variable "postgres" {
     condition = alltrue([
       for cidr in var.postgres.allowed_client_cidrs :
       can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$", cidr)) &&
-      try(cidrsubnet(cidr, 0, 0) == cidr && tonumber(split("/", cidr)[1]) > 0, false)
+      try(cidrsubnet(cidr, 0, 0) == cidr && tonumber(split("/", cidr)[1]) >= 8, false)
     ])
-    error_message = "postgres.allowed_client_cidrs entries must be IPv4 CIDR blocks in network form (for example 10.20.0.0/16, not 10.20.1.5/16), and never 0.0.0.0/0."
+    error_message = "postgres.allowed_client_cidrs entries must be IPv4 CIDR blocks in network form (for example 10.20.0.0/16, not 10.20.1.5/16) with a prefix of /8 or longer; 0.0.0.0/0 and other near-global ranges are rejected."
   }
 
   validation {
