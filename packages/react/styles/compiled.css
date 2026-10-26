@@ -1825,6 +1825,9 @@
 :where(.og-root).min-h-2,:where(.og-root) .min-h-2 {
     min-height: calc(var(--spacing) * 2);
   }
+:where(.og-root).min-h-4,:where(.og-root) .min-h-4 {
+    min-height: calc(var(--spacing) * 4);
+  }
 :where(.og-root).min-h-6,:where(.og-root) .min-h-6 {
     min-height: calc(var(--spacing) * 6);
   }
