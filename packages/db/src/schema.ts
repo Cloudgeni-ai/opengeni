@@ -383,6 +383,47 @@ export const siteSidebarStates = pgTable(
   ],
 );
 
+/**
+ * "Always allow for this Site" (migration 1031): one person's standing consent
+ * for one Site to run one tool on one of their own connections. Personal;
+ * consulted only for that Site's calls; never overrides Block and never
+ * changes the connection-wide permission.
+ */
+export const siteToolAllowances = pgTable(
+  "site_tool_allowances",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    connectionId: text("connection_id").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.workspaceId,
+        table.subjectId,
+        table.siteId,
+        table.serverId,
+        table.toolName,
+        table.connectionId,
+      ],
+    }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_tool_allowances_site_idx").on(table.workspaceId, table.siteId),
+  ],
+);
+
 export const workspaceArtifactUploads = pgTable(
   "workspace_artifact_uploads",
   {

@@ -9440,14 +9440,17 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/approvals",
       "sdk": [
-        "OpenGeniToolsClient.forWorkspace"
+        "OpenGeniToolsClient.forWorkspace",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayApprovalResponse",
         "ToolGatewayCallResponse",
         "ToolGatewayCatalog",
-        "ToolGatewayDeclarationsResponse"
+        "ToolGatewayDeclarationsResponse",
+        "ToolGatewaySiteConsentResponse",
+        "ToolGatewayTargetApprovalResponse"
       ]
     },
     {
@@ -9455,14 +9458,17 @@
       "path": "/v1/workspaces/:workspaceId/tools/calls",
       "sdk": [
         "OpenGeniClient.callWorkspaceSiteTool",
-        "OpenGeniToolsClient.forWorkspace"
+        "OpenGeniToolsClient.forWorkspace",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayApprovalResponse",
         "ToolGatewayCallResponse",
         "ToolGatewayCatalog",
-        "ToolGatewayDeclarationsResponse"
+        "ToolGatewayDeclarationsResponse",
+        "ToolGatewaySiteConsentResponse",
+        "ToolGatewayTargetApprovalResponse"
       ]
     },
     {
@@ -9497,13 +9503,15 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/invoke",
       "sdk": [
-        "createKnownWorkspaceTools"
+        "createKnownWorkspaceTools",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayInvokeResponse",
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
+        "ToolGatewaySiteConsentResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -9511,13 +9519,15 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/manifest",
       "sdk": [
-        "createKnownWorkspaceTools"
+        "createKnownWorkspaceTools",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayInvokeResponse",
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
+        "ToolGatewaySiteConsentResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -9525,13 +9535,27 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/resolve",
       "sdk": [
-        "createKnownWorkspaceTools"
+        "createKnownWorkspaceTools",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayInvokeResponse",
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
+        "ToolGatewaySiteConsentResponse",
+        "ToolGatewayTargetApprovalResponse"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/tools/site-consent",
+      "sdk": [
+        "createSiteToolBridge"
+      ],
+      "request": [],
+      "response": [
+        "ToolGatewaySiteConsentResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -9539,13 +9563,15 @@
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/tools/target-approvals",
       "sdk": [
-        "createKnownWorkspaceTools"
+        "createKnownWorkspaceTools",
+        "createSiteToolBridge"
       ],
       "request": [],
       "response": [
         "ToolGatewayInvokeResponse",
         "ToolGatewayManifestResponse",
         "ToolGatewayResolvedTool",
+        "ToolGatewaySiteConsentResponse",
         "ToolGatewayTargetApprovalResponse"
       ]
     },
@@ -29459,6 +29485,50 @@
         "$.version": "const!=[\"1\"]"
       }
     },
+    "ToolGatewaySiteConsentAccount": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.account": "string!",
+        "$.connector": "string!",
+        "$.identity": "ref(AttemptToolIdentity)!"
+      }
+    },
+    "ToolGatewaySiteConsentResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accounts": "array!",
+        "$.accounts[]": "ref(ToolGatewaySiteConsentAccount)",
+        "$.connect": "object! null",
+        "$.connect.capabilityId": "string! null",
+        "$.connect.name": "string!",
+        "$.connect.providerDomain": "string!",
+        "$.review": "ref(ToolGatewaySiteConsentReview)! null",
+        "$.selected": "ref(AttemptToolIdentity)! null",
+        "$.version": "const!=[\"1\"]"
+      }
+    },
+    "ToolGatewaySiteConsentReview": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.email": "object?",
+        "$.email.attachments": "integer!",
+        "$.email.bcc": "string!",
+        "$.email.cc": "string!",
+        "$.email.from": "string!",
+        "$.email.subject": "string!",
+        "$.email.to": "string!",
+        "$.kind": "enum!=[\"\\\"generic\\\"\",\"\\\"gmail\\\"\"]"
+      }
+    },
     "ToolGatewayTargetApprovalResponse": {
       "io": [
         "output"
@@ -34761,6 +34831,11 @@
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
       "SiteToolCallRequest": "type",
+      "SiteToolConnectionRequiredError": "value",
+      "SiteToolConnectPrompt": "type",
+      "SiteToolConsentDecision": "type",
+      "SiteToolConsentDeclinedError": "value",
+      "SiteToolConsentPrompt": "type",
       "SiteViewAs": "type",
       "SiteViewer": "type",
       "SiteViewerCapabilities": "type",
@@ -34863,6 +34938,10 @@
       "ToolGatewayResolvedTool": "type",
       "ToolGatewayResolveRequest": "type",
       "ToolGatewayResult": "type",
+      "ToolGatewaySiteConsentAccount": "type",
+      "ToolGatewaySiteConsentRequest": "type",
+      "ToolGatewaySiteConsentResponse": "type",
+      "ToolGatewaySiteConsentReview": "type",
       "ToolGatewayTarget": "type",
       "ToolGatewayTargetApprovalRequest": "type",
       "ToolGatewayTargetApprovalResponse": "type",
@@ -36316,7 +36395,12 @@
       "siteSessionPath": "value",
       "SiteToolBridge": "type",
       "SiteToolCaller": "type",
-      "SiteToolCallRequest": "type"
+      "SiteToolCallRequest": "type",
+      "SiteToolConnectionRequiredError": "value",
+      "SiteToolConnectPrompt": "type",
+      "SiteToolConsentDecision": "type",
+      "SiteToolConsentDeclinedError": "value",
+      "SiteToolConsentPrompt": "type"
     },
     "@opengeni/sdk/site-bridge-host": {
       "handleSiteBridgeRequest": "value",
@@ -42390,6 +42474,16 @@
       "complete",
       "start"
     ],
+    "SiteToolConnectionRequiredError": [
+      "code",
+      "outcomeUnknown",
+      "retryable"
+    ],
+    "SiteToolConsentDeclinedError": [
+      "code",
+      "outcomeUnknown",
+      "retryable"
+    ],
     "ToolRequestError": [
       "status",
       "toResponse"
@@ -45274,6 +45368,28 @@
       ],
       "update": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"UpdateSiteAuthConnectionRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SiteAuthConnectionMutationResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ]
+    },
+    "@opengeni/sdk:SiteToolConnectionRequiredError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ]
+    },
+    "@opengeni/sdk:SiteToolConsentDeclinedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
       ]
     },
     "@opengeni/sdk:ToolRequestError": {
@@ -55326,6 +55442,28 @@
     "@opengeni/sdk/site:OpenGeniSiteBridgeError": {},
     "@opengeni/sdk/site:OpenGeniSiteDataError": {},
     "@opengeni/sdk/site:OpenGeniSiteSqlError": {},
+    "@opengeni/sdk/site:SiteToolConnectionRequiredError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ]
+    },
+    "@opengeni/sdk/site:SiteToolConsentDeclinedError": {
+      "code": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "outcomeUnknown": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ],
+      "retryable": [
+        "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"
+      ]
+    },
     "@opengeni/sdk/tool-auth:ToolRequestError": {
       "status": [
         "{\"kind\":\"property\",\"static\":false,\"optional\":false,\"readonly\":true,\"generics\":null,\"parameters\":[],\"result\":null}"

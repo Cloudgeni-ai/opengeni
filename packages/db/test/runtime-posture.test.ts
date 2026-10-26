@@ -1790,6 +1790,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1031 personal Site tool allowances: full DML and FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1918,7 +1924,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
-        1; // 1008 bot templates: full-DML, FORCE-RLS.
+        1 + // 1008 bot templates: full-DML, FORCE-RLS.
+        1; // 1031 personal Site tool allowances: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -1928,6 +1935,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("site_sidebar_states");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_sidebar_states");
+      expect(FORCE_RLS_TABLES).toContain("site_tool_allowances");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("site_tool_allowances");
       expect(FORCE_RLS_TABLES).toContain("secret_approval_rules");
       expect(RUNTIME_FULL_DML_TABLES).toContain("secret_approval_rules");
       expect(FORCE_RLS_TABLES).toContain("automation_templates");
