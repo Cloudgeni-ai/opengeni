@@ -72,6 +72,7 @@ import {
   providerRecoveryCode,
   providerRecoveryLimit,
   PROVIDER_OVERLOAD_RECOVERY_CODE,
+  modelSocketFallbackRecoveryLimit,
   providerRetryAfterMs,
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
@@ -1366,7 +1367,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         recovery: recoveryResult,
         httpOnly: providerTurn.persistentModelTransportHttpOnly === true,
         nextRecoveryCount: nextProviderRecoveryCount,
-        recoveryLimit: providerRecoveryLimit(recoveryCode) ?? Infinity,
+        recoveryLimit: modelSocketFallbackRecoveryLimit(recoveryCode),
       })
     ) {
       providerTurn.persistentModelTransportHttpOnly = true;
@@ -1451,7 +1452,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         control.turnMetricOutcome = "recovering";
         control.activityStatus = "recovering";
         control.activityError = error;
-        const recoveryCause = providerRecoveryCause(failure.code);
+        const recoveryCause = providerRecoveryCause(recoveryCode);
         if (recoveryCause) {
           recordProviderRecoveryOutcome(observability, {
             route: attempt.modelMetricRoute,
@@ -1463,7 +1464,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
-      const recoveryCause = providerRecoveryCause(failure.code);
+      const recoveryCause = providerRecoveryCause(recoveryCode);
       if (recoveryCause) {
         recordProviderRecoveryOutcome(observability, {
           route: attempt.modelMetricRoute,
