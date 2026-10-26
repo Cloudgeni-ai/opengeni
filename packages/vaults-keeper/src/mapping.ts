@@ -11,6 +11,7 @@ import {
   parseTotpInput,
 } from "./contract";
 import { nameKey, safeFieldName, safeSecretName, totpUri, uniqueName } from "./naming";
+import { keeperPasskeyMetas } from "./passkeys";
 import type { KeeperFile, KeeperRecord } from "./sdk";
 import { standardVaultFieldName, vaultItemCategoryToken } from "@opengeni/contracts";
 import {
@@ -547,6 +548,7 @@ export function mapRecord(record: KeeperRecord): MappedKeeperRecord {
       })),
       version: Number.isFinite(record.revision) ? String(record.revision) : null,
       updatedAt: null,
+      passkeys: keeperPasskeyMetas(record),
     },
     fields: collector.fields,
   };

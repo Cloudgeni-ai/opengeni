@@ -2291,6 +2291,7 @@ export function createAppComposition(deps: AppDependencies): {
             }
           : {}),
       }),
+    log: (event, fields) => console.warn(event, fields),
   });
   registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });

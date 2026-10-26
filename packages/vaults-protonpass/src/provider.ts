@@ -27,6 +27,7 @@ import {
   mapItem,
 } from "./mapping";
 import { nameKey, safeSecretName, totpUri } from "./naming";
+import { decodeProtonPasskey } from "./passkeys";
 import {
   VAULT_TYPE_MARKER_FIELD,
   encodeItemTypeMarker,
@@ -78,7 +79,9 @@ export function protonPassCapabilities(): VaultProviderCapabilities {
     // Legacy flag means file writes; reads are declared in operations.readFiles.
     files: false,
     groupGrants: false,
-    passkeys: false,
+    // Logins can hold passkeys; read through readPasskeys. pass-cli cannot
+    // edit items, so the signature counter is not written back.
+    passkeys: true,
     operations: {
       ...PROTON_PASS_OPERATIONS,
       createItemTypes: [...PROTON_PASS_OPERATIONS.createItemTypes],
@@ -97,6 +100,7 @@ export type ProtonPassVaultProviderOptions = ProtonCliOptions & {
 
 export type ProtonPassVaultProvider = VaultProvider & {
   readonly id: "protonpass";
+  readPasskeys: NonNullable<VaultProvider["readPasskeys"]>;
   /** Logs the CLI session out and wipes its private state directory. */
   close(): Promise<void>;
 };
@@ -229,6 +233,7 @@ export function planCreate(item: ProviderWriteItem): CreatePlan {
           password: password ?? "",
           totp_uri: totp ?? "",
           urls,
+          passkeys: [],
         },
       },
       note: "",
@@ -810,6 +815,20 @@ export function createProtonPassVaultProvider(
         });
       }
       return values;
+    },
+
+    async readPasskeys(ctx, externalVaultId, externalItemId) {
+      assertIds(externalVaultId, externalItemId);
+      const details = await cachedItem(ctx, externalVaultId, externalItemId);
+      if (details.item.share_id !== externalVaultId || details.item.state !== "Active") {
+        throw new VaultProviderError("provider_not_found", "No such Proton Pass vault or item");
+      }
+      const content = details.item.content.content;
+      if (typeof content !== "object" || !("Login" in content)) return [];
+      return content.Login.passkeys.flatMap((passkey) => {
+        const decoded = decodeProtonPasskey(passkey);
+        return decoded ? [decoded] : [];
+      });
     },
 
     async writeItem(ctx, externalVaultId, item): Promise<ProviderItemMeta> {
