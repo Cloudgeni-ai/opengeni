@@ -5,6 +5,7 @@ import {
   formatClock,
   formatDuration,
   groupLiveTurns,
+  meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
   tidyLiveText,
@@ -207,6 +208,10 @@ export function MeetingsList({
               recording={recording}
               live={recording.id === capturingId}
               paused={recorder?.state === "paused"}
+              transcribingHere={
+                recording.state === "capturing" &&
+                meetingHereStatus(recorder, recording.id) === "transcribing"
+              }
               first={index === 0}
               onPress={() => onOpen(recording.id)}
             />
@@ -234,6 +239,8 @@ function MeetingRow(props: {
   recording: Recording;
   live: boolean;
   paused: boolean;
+  /** Stopped on this phone with its last audio on its way: Transcribing, not In progress. */
+  transcribingHere: boolean;
   first: boolean;
   onPress: () => void;
 }) {
@@ -241,7 +248,12 @@ function MeetingRow(props: {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const { recording } = props;
-  const status = props.live ? null : meetingStatusLabel(meetingPhase(recording), msg);
+  const status = props.live
+    ? null
+    : meetingStatusLabel(
+        props.transcribingHere ? { kind: "transcribing", version: null } : meetingPhase(recording),
+        msg,
+      );
   const facts = [
     meetingDateLabel(msg, recording.startedAt),
     recording.durationMilliseconds ? formatDuration(recording.durationMilliseconds, msg) : null,

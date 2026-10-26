@@ -4,6 +4,7 @@ import {
   formatClock,
   formatDuration,
   groupTranscriptTurns,
+  meetingHereStatus,
   meetingPhase,
   speakerDisplayName,
   speakerIsNamed,
@@ -104,6 +105,10 @@ export function useMeetingView({
     : null;
   const recorder = useMeetingRecorder();
   const capturingHere = isCapturing(recorder) && recorder?.recordingId === recording?.id;
+  // Stopped on this phone, its last audio is on its way: that reads as Transcribing.
+  const transcribingHere =
+    recording?.state === "capturing" &&
+    meetingHereStatus(recorder, recording.id) === "transcribing";
   const [sheet, setSheet] = useState<Sheet>(null);
   const [pulling, setPulling] = useState(false);
   const tracks = recording?.tracks ?? [];
@@ -237,12 +242,12 @@ export function useMeetingView({
               <PhaseNote
                 text={msg("native.meetings.meetingView.recordingNowTheTranscriptStarts")}
               />
-            ) : phase?.kind === "uploading" ? (
+            ) : phase?.kind === "uploading" && !transcribingHere ? (
               <PhaseNote
                 spinning
                 text={msg("native.meetings.meetingView.waitingForTheRestOfTheAudio")}
               />
-            ) : phase?.kind === "transcribing" ? (
+            ) : phase?.kind === "transcribing" || transcribingHere ? (
               <PhaseNote spinning text={msg("native.meetings.meetingView.transcribingThisTakes")} />
             ) : phase?.kind === "failed" ? (
               <PhaseNote

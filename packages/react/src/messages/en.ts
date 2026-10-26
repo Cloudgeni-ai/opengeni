@@ -2320,7 +2320,6 @@ export const englishMessages = {
   "meetings.detailPage.speakers": "Speakers",
   "meetings.detailPage.speakersToReview": "Speakers to review",
   "meetings.detailPage.starting": "Starting…",
-  "meetings.detailPage.stillUploading": "Still uploading",
   "meetings.detailPage.suggestedFromTheirVoice": "Suggested from their voice",
   "meetings.detailPage.suggestionDismissed": "Suggestion dismissed",
   "meetings.detailPage.theAudioForThisMeeting":
@@ -2356,10 +2355,6 @@ export const englishMessages = {
     "{transcriptErrorText} This version is unchanged.",
   "meetings.detailPage.tryAgain": "Try again",
   "meetings.detailPage.undo": "Undo",
-  "meetings.detailPage.uploading": "Uploading",
-  "meetings.detailPage.uploadinghereKeepThisTabOpen":
-    "{uploadingHere} Keep this tab open, or come back later: the audio is saved in this browser until it's uploaded.",
-  "meetings.detailPage.uploadingTheAudio": "Uploading the audio",
   "meetings.detailPage.valuePerHour": "${value} per hour",
   "meetings.detailPage.versionVersionnumber": "Version {versionNumber}",
   "meetings.detailPage.voiceRecognitionIsOffIn":
@@ -2595,7 +2590,7 @@ export const englishMessages = {
   "meetings.recordings.durationHours": "{hours}\u00a0h",
   "meetings.recordings.durationHoursMinutes": "{hours}\u00a0h {minutes}\u00a0min",
   /** A meeting's state in the list. */
-  "meetings.recordings.uploading": "Uploading",
+  "meetings.recordings.inProgress": "In progress",
   "meetings.recordings.transcribing": "Transcribing",
   "meetings.recordings.transcriptFailed": "Transcript failed",
   "meetings.recordings.noTranscript": "No transcript",

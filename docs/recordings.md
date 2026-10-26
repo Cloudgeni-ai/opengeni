@@ -97,7 +97,13 @@ the console uses:
   `header={false}` when the list sits inside a page of your own.
 - `MeetingDetailPage`: one meeting, with its player, transcript, speaker
   naming, versions and sharing. `details` adds your own lines beside the
-  transcript, such as the project it belongs to.
+  transcript, such as the project it belongs to. While this device records
+  the meeting (Take notes opens it), the page shows the recording's clock with
+  Pause and Stop; after Stop it reads Transcribing. Audio uploads while it
+  records, so neither page says Uploading: a meeting still being recorded
+  elsewhere reads In progress, and only a lost connection or a refused upload
+  is called out. `meetingHereStatus` in `@opengeni/react/recordings` is that
+  rule for a host's own pages.
 - `MeetingDefaultsView`: the workspace's meeting settings over plain values
   and an `onSave`.
 - The smaller pieces they are built from: `RecorderPanel`,

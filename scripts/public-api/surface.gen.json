@@ -37910,6 +37910,8 @@
       "languageName": "value",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
+      "meetingHereStatus": "value",
+      "MeetingHereStatus": "type",
       "meetingPhase": "value",
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
