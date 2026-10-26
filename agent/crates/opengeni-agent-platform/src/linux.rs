@@ -2083,18 +2083,19 @@ fn resolve_keysym(
     None
 }
 
-/// Maps a small set of named keys to X11 keysyms (the keys the computer-use tool
-/// commonly emits). Printable single characters fall through to their ASCII
-/// codepoint, which equals the Latin-1 keysym for the printable range.
+/// Maps the named keys the computer-use tool accepts on every platform to X11
+/// keysyms. Printable single characters fall through to their ASCII codepoint,
+/// which equals the Latin-1 keysym for the printable range.
 fn named_key_to_keysym(name: &str) -> Option<u32> {
-    // X11 keysym constants (from keysymdef.h). Only the common control keys are
-    // named; everything else is treated as literal text by the caller.
-    let sym = match name.to_ascii_lowercase().as_str() {
+    // X11 keysym constants (from keysymdef.h).
+    let lower = name.to_ascii_lowercase();
+    let sym = match lower.as_str() {
         "enter" | "return" => 0xff0d,
         "tab" => 0xff09,
         "escape" | "esc" => 0xff1b,
         "backspace" => 0xff08,
-        "delete" => 0xffff,
+        "delete" | "del" => 0xffff,
+        "insert" => 0xff63,
         "space" | " " => 0x0020,
         "arrowleft" | "left" => 0xff51,
         "arrowup" | "up" => 0xff52,
@@ -2104,7 +2105,21 @@ fn named_key_to_keysym(name: &str) -> Option<u32> {
         "end" => 0xff57,
         "pageup" => 0xff55,
         "pagedown" => 0xff56,
+        "printscreen" | "print" => 0xff61,
+        "contextmenu" | "menu" | "apps" => 0xff67,
+        "capslock" => 0xffe5,
+        "numlock" => 0xff7f,
+        "scrolllock" => 0xff14,
+        "pause" => 0xff13,
         _ => {
+            // F1 to F24 are consecutive keysyms from F1 (0xffbe).
+            if let Some(number) = lower
+                .strip_prefix('f')
+                .filter(|digits| !digits.starts_with('0'))
+                .and_then(|digits| digits.parse::<u32>().ok())
+            {
+                return (1..=24).contains(&number).then(|| 0xffbe + number - 1);
+            }
             // A single printable char maps to its codepoint (Latin-1 keysym range).
             // Use the original spelling here: `A` intentionally resolves to the
             // shifted glyph, while named controls are case-insensitive.
@@ -2195,6 +2210,13 @@ fn parse_named_key_chord(name: &str) -> PlatformResult<Vec<u32>> {
             "X11 named key/chord contains an empty component".to_string(),
         ));
     }
+    // A modifier pressed on its own is a key too: a lone Super opens the
+    // application menu on most desktops.
+    if let [single] = parts.as_slice() {
+        if let Some(modifier) = modifier_keysym(single) {
+            return Ok(vec![modifier]);
+        }
+    }
     let mut result = Vec::with_capacity(parts.len());
     let mut seen_modifiers = BTreeSet::new();
     for (index, part) in parts.iter().enumerate() {
@@ -2213,7 +2235,9 @@ fn parse_named_key_chord(name: &str) -> PlatformResult<Vec<u32>> {
             )));
         }
         result.push(named_key_to_keysym(part).ok_or_else(|| {
-            PlatformError::Unsupported(format!("unknown X11 named key `{part}`"))
+            PlatformError::Unsupported(format!(
+                "unknown key `{part}`; use one character or a key name: Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24, PrintScreen, ContextMenu, CapsLock, NumLock, ScrollLock, Pause, or a modifier (Ctrl, Shift, Alt, Super) alone or with one key"
+            ))
         })?);
     }
     if result.is_empty() || result.len() == seen_modifiers.len() {
@@ -2905,6 +2929,62 @@ mod tests {
         assert!(validate_linux_named_key_chord("NotARealKey").is_err());
         assert!(parse_named_key_chord("Control+Control+c").is_err());
         assert!(parse_named_key_chord("Control+").is_err());
+    }
+
+    #[test]
+    fn named_keys_match_the_other_platforms() {
+        // keysymdef.h values.
+        for (name, keysym) in [
+            ("F1", 0xffbe),
+            ("f2", 0xffbf),
+            ("F12", 0xffc9),
+            ("F24", 0xffd5),
+            ("Insert", 0xff63),
+            ("Del", 0xffff),
+            ("PrintScreen", 0xff61),
+            ("ContextMenu", 0xff67),
+            ("Menu", 0xff67),
+            ("CapsLock", 0xffe5),
+            ("NumLock", 0xff7f),
+            ("ScrollLock", 0xff14),
+            ("Pause", 0xff13),
+        ] {
+            assert_eq!(named_key_to_keysym(name), Some(keysym), "{name}");
+        }
+        for name in ["F0", "F25", "F01", "Fx"] {
+            assert_eq!(named_key_to_keysym(name), None, "{name}");
+        }
+        // Single characters keep their meaning.
+        assert_eq!(named_key_to_keysym("f"), Some(0x66));
+        assert_eq!(named_key_to_keysym("F"), Some(0x46));
+        assert_eq!(
+            parse_named_key_chord("ALT+F2").unwrap(),
+            vec![0xffe9, 0xffbf]
+        );
+        assert_eq!(
+            linux_named_key_chord_keysyms("Shift+F10").unwrap(),
+            vec![0xffe1, 0xffc7]
+        );
+    }
+
+    #[test]
+    fn a_lone_modifier_is_a_key() {
+        for name in ["Super", "meta", "Ctrl", "Alt", "Shift"] {
+            assert!(validate_linux_named_key_chord(name).is_ok(), "{name}");
+        }
+        assert_eq!(parse_named_key_chord("Super").unwrap(), vec![0xffeb]);
+        assert_eq!(linux_named_key_chord_keysyms("Meta").unwrap(), vec![0xffeb]);
+        // Two modifiers still need a key, and a repeat is still refused.
+        assert!(parse_named_key_chord("Ctrl+Alt").is_err());
+        assert!(parse_named_key_chord("Super+Super").is_err());
+    }
+
+    #[test]
+    fn unknown_keys_are_refused_with_the_accepted_names() {
+        let error = parse_named_key_chord("Ctrl+Hyper").unwrap_err().to_string();
+        assert!(error.contains("unknown key `Hyper`"), "{error}");
+        assert!(error.contains("F1-F24"), "{error}");
+        assert!(parse_named_key_chord("NotARealKey").is_err());
     }
 
     #[test]
