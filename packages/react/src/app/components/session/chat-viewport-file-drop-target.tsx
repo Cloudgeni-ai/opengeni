@@ -31,20 +31,22 @@ export type ChatFileDropTargetHandle = Readonly<{
  * target registers while it accepts files.
  */
 export class ChatFileDropRelay {
-  #target: ChatFileDropTargetHandle | null = null;
+  // The latest registered target takes the files; when it goes, the one
+  // before it (still mounted, say, during a chat switch) takes over.
+  #targets: ChatFileDropTargetHandle[] = [];
   readonly #listeners = new Set<() => void>();
 
   register(target: ChatFileDropTargetHandle): () => void {
-    this.#target = target;
+    this.#targets = [...this.#targets.filter((entry) => entry !== target), target];
     this.#emit();
     return () => {
-      if (this.#target !== target) return;
-      this.#target = null;
+      if (!this.#targets.includes(target)) return;
+      this.#targets = this.#targets.filter((entry) => entry !== target);
       this.#emit();
     };
   }
 
-  readonly current = (): ChatFileDropTargetHandle | null => this.#target;
+  readonly current = (): ChatFileDropTargetHandle | null => this.#targets.at(-1) ?? null;
 
   readonly subscribe = (listener: () => void): (() => void) => {
     this.#listeners.add(listener);

@@ -199,6 +199,13 @@ import {
   type SessionCreationHandoff,
 } from "../app-context";
 import { useLiveSessionEvents } from "../../hooks/use-live-session-events";
+import {
+  sessionRouteAppState,
+  sessionRouteCreationHandoff,
+  type SessionRoutePlacement,
+} from "../lib/session-route-placement";
+import { SessionStartupProvider } from "../../lib/session-startup";
+import { useFindShortcut } from "../lib/find-shortcut";
 import type { InitialComposerDraft } from "../../hooks/use-composer";
 import { cn } from "../lib/utils";
 import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
@@ -416,7 +423,7 @@ export function SessionRoute({
    * session route. Whatever else differs is the host's: it turns off the
    * session panel with `SessionUiFeaturesOff` and passes the callbacks below.
    */
-  placement?: "page" | "panel" | undefined;
+  placement?: SessionRoutePlacement | undefined;
   /** Each event newer than the loaded history, in order. */
   onEvent?: ((event: SessionEvent) => void) | undefined;
   /** The host view's per-message model context, read at send time. */
@@ -434,6 +441,7 @@ export function SessionRoute({
   const dockEnabled = useSessionUiFeature("dock");
   useReadSessionInbox(sessionId);
   const context = useAppContext();
+  const routed = placement === "page";
   const rail = useRail();
   const navigate = useNavigate();
   const page = usePage();
@@ -489,7 +497,8 @@ export function SessionRoute({
   useEffect(() => observeSessionTurnEvents(sessionId, events), [events, sessionId]);
   useLiveSessionEvents(sessionId, events, initialHistoryReady, onEvent);
   // The embedding host follows the open chat from this stream.
-  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading });
+  // A chat in a panel beside another view isn't the page's open chat.
+  useReportSessionState({ sessionId, status: sessionStatus, events, initialLoading }, routed);
   const sessionDetailReadOwner = useRef<object>({});
   const beginSessionDetailRead = useCallback(
     () =>
@@ -528,7 +537,7 @@ export function SessionRoute({
     loadError,
     restoredSessionId,
     leave: leaveRestoredSession,
-    enabled: placement === "page",
+    enabled: routed,
   });
   useEffect(
     () => () =>
@@ -540,13 +549,13 @@ export function SessionRoute({
       context.sessionChannelProjectionAuthority.finishDetailReads(sessionDetailReadOwner.current);
     }
   }, [context.sessionChannelProjectionAuthority, loadError]);
-  const creationHandoff =
-    givenCreationHandoff?.session.id === sessionId
-      ? givenCreationHandoff
-      : context.sessionCreationHandoff?.session.id === sessionId &&
-          context.session?.id === sessionId
-        ? context.sessionCreationHandoff
-        : null;
+  const creationHandoff = sessionRouteCreationHandoff({
+    sessionId,
+    given: givenCreationHandoff,
+    app: context.sessionCreationHandoff,
+    appSession: context.session,
+    routed,
+  });
   const pendingCreationHandoff = creationHandoffReconciled(creationHandoff, events)
     ? null
     : creationHandoff;
@@ -687,11 +696,12 @@ export function SessionRoute({
   // open chat: the header, the sidebar's projections and the command menu
   // keep following the page, so it keeps its state to itself.
   const [panelEventFeed] = useState(createSessionEventFeedStore);
-  const routed = placement === "page";
   const { client, captureWorkspaceInvocation, ownsWorkspaceInvocation } = context;
-  const setContextSession = routed ? context.setSession : ignoreRoutedUpdate;
-  const setContextConnectionState = routed ? context.setConnectionState : ignoreRoutedUpdate;
-  const sessionEventFeedStore = routed ? context.sessionEventFeedStore : panelEventFeed;
+  const {
+    setSession: setContextSession,
+    setConnectionState: setContextConnectionState,
+    sessionEventFeedStore,
+  } = sessionRouteAppState(placement, context, panelEventFeed);
   const acknowledgedProjectionRef = useRef<string | null>(null);
   const confirmedProjectionRef = useRef<string | null>(null);
   const retriedProjectionRef = useRef<string | null>(null);
@@ -1456,7 +1466,8 @@ export function SessionRoute({
       onConnectGitHubApp={connectGitHubApp}
       resolveProviderLogo={resolveProviderLogo}
       onReloadSession={refreshSession}
-      onOpenSandboxFile={openSandboxFile}
+      // A file link opens the session panel's Files tab; without the panel it is plain text.
+      onOpenSandboxFile={dockEnabled ? openSandboxFile : undefined}
       // Both open the session panel's Agent tab; without the panel, neither shows.
       onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}
       onOpenUsageLimit={dockEnabled ? openUsageLimit : undefined}
@@ -1464,7 +1475,7 @@ export function SessionRoute({
     />
   );
 
-  return (
+  const routeView = (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
       {reconnectRequest && (
         <LazyPart fallback={<LoadingPanel label="Opening connection setup" />}>
@@ -1517,6 +1528,13 @@ export function SessionRoute({
       />
     </div>
   );
+  // The shell times the page's open chat; a panel chat times its own start, so
+  // its "starting" and "retrying" rows show too.
+  return routed ? (
+    routeView
+  ) : (
+    <SessionStartupProvider session={session}>{routeView}</SessionStartupProvider>
+  );
 
   async function approve(approvalId: string, decision: "approve" | "reject") {
     try {
@@ -1532,9 +1550,6 @@ export function SessionRoute({
     }
   }
 }
-
-/** A panel chat's updates to the page's open-chat state, which it doesn't own. */
-function ignoreRoutedUpdate(): void {}
 
 /** The embedding page's and the host view's per-message context, as a send extra. */
 function withHostMessageContext(
@@ -2004,7 +2019,7 @@ function useSessionEditableArtifactSummaries(input: {
 function SessionChatPane(props: {
   session: Session;
   /** A narrow panel beside another view gets narrower gutters. */
-  placement: "page" | "panel";
+  placement: SessionRoutePlacement;
   /** The host view's per-message model context, beside the embedding host's. */
   messageContext: (() => string | undefined) | undefined;
   /** What the person typed while the host view created this chat. */
@@ -2062,7 +2077,7 @@ function SessionChatPane(props: {
   onConnectGitHubApp: () => void;
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
-  onOpenSandboxFile: (path: string, line?: number) => void;
+  onOpenSandboxFile: ((path: string, line?: number) => void) | undefined;
   /** Composer + > Chat settings: open this chat's Agent tab. */
   onOpenAgentSettings: (() => void) | undefined;
   /** The usage limit notice's Change limit: open the Agent tab at Usage limit. */
@@ -2070,7 +2085,10 @@ function SessionChatPane(props: {
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
 }) {
   const findEvents = useUiEventTarget("document");
-  const findShortcutScope = usePortalContainer();
+  const portalContainer = usePortalContainer();
+  // A chat in a panel beside another view takes the find shortcut only while
+  // focus is inside it, so the view (or the browser) keeps its own find.
+  const [panelRoot, setPanelRoot] = useState<HTMLDivElement | null>(null);
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
@@ -2152,31 +2170,10 @@ function SessionChatPane(props: {
     props.searchTarget.matchOffset,
     openFind,
   ]);
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        !(event.ctrlKey || event.metaKey) ||
-        event.altKey ||
-        event.shiftKey ||
-        event.key.toLowerCase() !== "f"
-      )
-        return;
-      const target = event.target;
-      // Dialogs and embedded editors own their own keyboard search behavior.
-      if (
-        target instanceof Element &&
-        target.closest('[role="dialog"], .cm-editor, .xterm, [data-native-find]')
-      )
-        return;
-      event.preventDefault();
-      openFind();
-    };
-    // An embedded app takes the shortcut only while focus is inside it, so
-    // the host page keeps its own find.
-    const scope = findShortcutScope ?? window;
-    scope.addEventListener("keydown", onKeyDown as EventListener);
-    return () => scope.removeEventListener("keydown", onKeyDown as EventListener);
-  }, [findShortcutScope, openFind]);
+  useFindShortcut(
+    props.placement === "panel" ? { scope: panelRoot } : { scope: portalContainer ?? window },
+    openFind,
+  );
   const fundingRevision = useMemo(() => {
     for (let index = props.events.length - 1; index >= 0; index -= 1) {
       const event = props.events[index]!;
@@ -3647,7 +3644,11 @@ function SessionChatPane(props: {
     creditTopupPrompt,
     createElement(
       "div",
-      { className: reviewDetails ? "hidden" : "contents", ...inertProps(Boolean(reviewDetails)) },
+      {
+        className: reviewDetails ? "hidden" : "contents",
+        ...inertProps(Boolean(reviewDetails)),
+        ...(props.placement === "panel" ? { ref: setPanelRoot } : {}),
+      },
       createElement(
         LightboxProvider,
         null,

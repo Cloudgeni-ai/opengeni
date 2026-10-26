@@ -40,7 +40,13 @@ export function ConsoleNewConversation(props: ConsoleNewConversationProps) {
     modelPicker: true,
   });
   const { composer, catalog, files, uploadsEnabled, available } = creation;
-  const voice = useNewConversationVoice(creation);
+  // Voice offers what the console's new-chat page offers: the split model
+  // menu, with Codex voice when a ready Codex subscription is connected.
+  const codexConnected = catalog.rows.some(
+    (row) =>
+      row.provider === "codex-subscription" && row.catalog.credentialReadiness.status === "ready",
+  );
+  const voice = useNewConversationVoice(creation, { codexConnected, modelMenu: "split" });
   return (
     <ChatViewportFileDropTarget
       data-workspace-scroll-owner="self-managed"

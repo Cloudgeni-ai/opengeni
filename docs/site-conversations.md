@@ -57,7 +57,12 @@
   and steer row all work there. Files dragged over the page cover the Site
   (`ChatFileDropCover`), so a drop on the Site attaches to the chat rather
   than going to the Site's frame; the cover shows only while files are
-  dragged and the chat is shown and takes files. It resizes from its edge
+  dragged and the chat is shown and takes files. A Site with its own file
+  drop zone still gets a drag that enters the window directly over its
+  frame, until the drag crosses the console. The chat keeps the page's state
+  to itself: it isn't the header's or sidebar's open chat, isn't remembered
+  as the last chat and isn't reported to an embedding host, and Ctrl/⌘+F
+  opens its find only while focus is inside it. It resizes from its edge
   toward the Site (drag, or the arrow keys, Home and End on the focused
   handle; double-click resets) between 320 and 720 px, leaving the Site at
   least 360 px where there is room, and hides to a strip (Enter on the

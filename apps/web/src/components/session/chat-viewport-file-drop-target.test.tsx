@@ -200,4 +200,23 @@ describe("ChatFileDropRelay", () => {
     await act(async () => void (await new Promise((resolve) => setTimeout(resolve, 1100))));
     expect(coverOf(container)).toBeNull();
   });
+
+  test("when the newest chat goes, the one still mounted takes the files again", () => {
+    const relay = new ChatFileDropRelay();
+    const target = () => ({ attach: () => {}, highlight: () => {} });
+    const first = target();
+    const second = target();
+    let changes = 0;
+    relay.subscribe(() => void changes++);
+    const unregisterFirst = relay.register(first);
+    const unregisterSecond = relay.register(second);
+    expect(relay.current()).toBe(second);
+    unregisterSecond();
+    expect(relay.current()).toBe(first);
+    unregisterSecond();
+    expect(relay.current()).toBe(first);
+    unregisterFirst();
+    expect(relay.current()).toBeNull();
+    expect(changes).toBe(4);
+  });
 });
