@@ -3,7 +3,13 @@ import {
   SITE_VERSION_HEADER,
   siteConversationContext,
 } from "@opengeni/contracts/site-session-http";
-import type { Session, SessionEvent, SessionListResponse } from "@opengeni/sdk";
+import type {
+  Session,
+  SessionEvent,
+  SessionListResponse,
+  SitePublication,
+  WorkspaceArtifact,
+} from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   InfoIcon,
@@ -43,10 +49,11 @@ import { ResizeHandle } from "../../ui/resize-handle";
 import { Skeleton } from "../../ui/skeleton";
 import { useAppContext } from "../app-context";
 import {
-  SitePublicLink,
+  SitePublicationControl,
   useSitePublicationLink,
-  type SitePublicationLinkLoad,
 } from "../components/artifacts/site-public-link";
+import { SitePublishPage } from "../components/artifacts/site-publishing";
+import { useSiteManagement } from "../components/artifacts/site-settings";
 import { useAppApi } from "../lib/app-api";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
 import { Link, useNavigate } from "../lib/navigation";
@@ -62,6 +69,7 @@ import {
 } from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
+import { sitesClientConfig } from "../lib/site-publishing";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
 
@@ -92,6 +100,11 @@ type SiteState =
  * tool calls, and a check every few seconds for anyone else's), the preview
  * reloads in place when one is published or restored, and the version chip
  * in its header offers the history and one-click Undo.
+ *
+ * Its header says whether the Site is on the web: "Published" opens or
+ * copies the address, or Publish for people who can. Publishing and its
+ * settings open the Site's own publish form in place of the Site, with the
+ * chat still beside it.
  */
 export function SiteViewRoute({
   workspaceId,
@@ -108,14 +121,38 @@ export function SiteViewRoute({
 }) {
   const { client, accessContext } = useAppContext();
   const viewer = useConsoleSiteViewer();
-  // Anyone who can open the Site gets its published address in the header;
-  // Publish is offered only to people who can publish.
+  // Anyone who can open the Site sees whether it is published and its
+  // address; Publish and the publish form are for people who can publish.
   const canPublish = hasWorkspacePermission(accessContext, workspaceId, "artifacts:publish");
-  const publicationLink = useSitePublicationLink({ client, workspaceId, siteId });
+  const publication = useSitePublicationLink({ client, workspaceId, siteId });
   const toolBridge = useConsoleSiteToolBridge(workspaceId);
   useRecordSiteOpened(client, workspaceId, siteId);
   const live = useSiteLiveVersion(client, workspaceId, siteId);
   const artifact = live.detail?.artifact;
+  // The publish form, open for this Site; another Site starts without it.
+  const siteKey = `${workspaceId}/${siteId}`;
+  const [publishingFor, setPublishingFor] = useState<string | null>(null);
+  const publishingSite =
+    publishingFor === siteKey && artifact?.status === "active" ? artifact : null;
+  const publishing = publishingSite !== null;
+  // Full screen is the route's so opening the form can leave it first.
+  const [fullScreen, setFullScreen] = useState(false);
+  const openPublishing = useCallback(() => {
+    setFullScreen(false);
+    setPublishingFor(siteKey);
+  }, [siteKey]);
+  // Back from the form returns focus to the control that opened it.
+  const siteColumn = useRef<HTMLDivElement>(null);
+  const returnFocus = useRef(false);
+  const closePublishing = useCallback(() => {
+    returnFocus.current = true;
+    setPublishingFor(null);
+  }, []);
+  useEffect(() => {
+    if (publishing || !returnFocus.current) return;
+    returnFocus.current = false;
+    siteColumn.current?.querySelector<HTMLElement>("[data-site-publication]")?.focus();
+  }, [publishing]);
   const site = useMemo<SiteState>(
     () =>
       artifact
@@ -137,7 +174,17 @@ export function SiteViewRoute({
       className="flex min-h-0 min-w-0 flex-1 max-lg:flex-col"
       data-workspace-scroll-owner="self-managed"
     >
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <div ref={siteColumn} className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {publishingSite ? (
+          <SitePublishingPage
+            key={siteKey}
+            workspaceId={workspaceId}
+            siteId={siteId}
+            artifact={publishingSite}
+            onPublication={publication.update}
+            onBack={closePublishing}
+          />
+        ) : null}
         {artifact?.status === "archived" ? (
           <p className="p-4 text-sm text-fg-muted">
             This Site is archived.{" "}
@@ -151,32 +198,45 @@ export function SiteViewRoute({
             </Link>
           </p>
         ) : (
-          <SiteView
-            client={client}
-            workspaceId={workspaceId}
-            siteId={siteId}
-            toolBridge={toolBridge}
-            viewer={viewer}
-            liveStatus={siteLiveStatus(publicationLink, canPublish, workspaceId, siteId)}
-            versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
-            watch={live.watch}
-            versionControl={
-              live.detail ? (
-                <SiteVersionMenu
-                  workspaceId={workspaceId}
-                  siteId={siteId}
-                  detail={live.detail}
+          // Hidden, not unmounted, behind the form: the Site keeps its page.
+          <div className={cn("flex min-h-0 min-w-0 flex-1 flex-col", publishing && "hidden")}>
+            <SiteView
+              client={client}
+              workspaceId={workspaceId}
+              siteId={siteId}
+              toolBridge={toolBridge}
+              viewer={viewer}
+              // The one publication control. The Site view never says "Live":
+              // it stays current, and says so only while Updating or Reconnecting.
+              liveStatus={
+                <SitePublicationControl
+                  load={publication.load}
                   canPublish={canPublish}
-                  onRestored={check}
+                  onOpenPublishing={openPublishing}
                 />
-              ) : undefined
-            }
-            archivedMessage={
-              canPublish
-                ? "This Site is archived. Restore it from Site details."
-                : "This Site is archived."
-            }
-          />
+              }
+              versionId={artifact ? (artifact.currentVersion?.id ?? null) : undefined}
+              watch={live.watch}
+              versionControl={
+                live.detail ? (
+                  <SiteVersionMenu
+                    workspaceId={workspaceId}
+                    siteId={siteId}
+                    detail={live.detail}
+                    canPublish={canPublish}
+                    onRestored={check}
+                  />
+                ) : undefined
+              }
+              fullScreen={fullScreen}
+              onFullScreenChange={setFullScreen}
+              archivedMessage={
+                canPublish
+                  ? "This Site is archived. Restore it from Site details."
+                  : "This Site is archived."
+              }
+            />
+          </div>
         )}
       </div>
       <SiteChatPanel
@@ -193,6 +253,63 @@ export function SiteViewRoute({
           if (siteMayHaveChanged(event)) check();
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * Publish to web for the Site on screen: the same form, permissions and
+ * publication as the Site's Settings, as a page in place of the Site. Its
+ * back link (and a successful Publish or Save) returns to the Site.
+ */
+function SitePublishingPage({
+  workspaceId,
+  siteId,
+  artifact,
+  onPublication,
+  onBack,
+}: {
+  workspaceId: string;
+  siteId: string;
+  artifact: WorkspaceArtifact;
+  /** Every change to the publication, so the header shows it at once. */
+  onPublication: (publication: SitePublication) => void;
+  onBack: () => void;
+}) {
+  const { client, clientConfig } = useAppContext();
+  // Sharing with the workspace (to publish an Only me Site) changes it here.
+  const [shown, setShown] = useState<WorkspaceArtifact>(artifact);
+  const management = useSiteManagement({
+    workspaceId,
+    siteId,
+    artifact: shown,
+    onArtifactChanged: setShown,
+    onStatusChanged: () => undefined,
+  });
+  const { publication, audience } = management;
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-bg">
+      <SitePublishPage
+        layout="page"
+        client={client}
+        workspaceId={workspaceId}
+        workspaceName={management.workspaceName}
+        site={shown}
+        load={publication.load}
+        onPublication={(next) => {
+          publication.setPublication(next);
+          onPublication(next);
+        }}
+        onReload={() => void publication.reload()}
+        onBack={onBack}
+        onSubmitted={onBack}
+        canManage={management.manageData}
+        isAdmin={management.isAdmin}
+        onShareWithWorkspace={management.showAudience ? audience.share : undefined}
+        personalWorkspace={!management.showAudience}
+        sites={sitesClientConfig(clientConfig)}
+      />
+      {management.showAudience ? audience.dialog : null}
     </div>
   );
 }
@@ -717,23 +834,6 @@ function SiteChatPanel({
         </div>
       ) : null}
     </>
-  );
-}
-
-/** The header's publication control, or undefined for the plain "Live". */
-function siteLiveStatus(
-  load: SitePublicationLinkLoad,
-  canPublish: boolean,
-  workspaceId: string,
-  siteId: string,
-) {
-  // Nothing until the answer, so an unpublished Site never flashes "Live".
-  if (load.state === "loading") return null;
-  // No Sites domain, no access to the address, or a failed read: the plain "Live".
-  if (load.state === "unavailable" || load.state === "forbidden" || load.state === "error")
-    return undefined;
-  return (
-    <SitePublicLink load={load} workspaceId={workspaceId} siteId={siteId} canPublish={canPublish} />
   );
 }
 

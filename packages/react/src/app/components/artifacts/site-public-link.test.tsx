@@ -1,36 +1,39 @@
 import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type ReactNode } from "react";
+import { act, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { SitePublicationLink } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 
 import type { SitePublicationLinkLoad } from "./site-public-link";
 
-// The router isn't mounted here: a Link is a plain anchor with its target.
-mock.module("../../lib/navigation", () => ({
-  Link: ({
-    to,
-    params,
-    search,
+// The menu renders open, so its rows can be read and clicked directly.
+mock.module("../../../ui/dropdown-menu", () => ({
+  DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
+  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
+  DropdownMenuItem: ({
     children,
-    className,
+    onSelect,
+    asChild,
   }: {
-    to: string;
-    params: Record<string, string>;
-    search?: Record<string, string>;
     children: ReactNode;
-    className?: string;
-  }) => (
-    <a
-      data-to={to}
-      data-params={JSON.stringify(params)}
-      data-search={JSON.stringify(search ?? {})}
-      className={className}
-    >
+    onSelect?: (event: ReactMouseEvent) => void;
+    asChild?: boolean;
+  }) =>
+    asChild ? (
+      children
+    ) : (
+      <button type="button" role="menuitem" onClick={(event) => onSelect?.(event)}>
+        {children}
+      </button>
+    ),
+  DropdownMenuLabel: ({ children, title }: { children: ReactNode; title?: string }) => (
+    <p data-menu-label="" title={title}>
       {children}
-    </a>
+    </p>
   ),
+  DropdownMenuSeparator: () => <hr />,
 }));
 
 let module: typeof import("./site-public-link");
@@ -65,17 +68,22 @@ const ready = (patch: Partial<SitePublicationLink> = {}): SitePublicationLinkLoa
 });
 
 let mounted: { root: Root; host: HTMLElement } | null = null;
-afterEach(async () => {
+async function unmount() {
   if (!mounted) return;
   const { root, host } = mounted;
   await act(async () => root.unmount());
   host.remove();
   mounted = null;
-});
+}
+afterEach(unmount);
 
 async function render(
   load: SitePublicationLinkLoad,
-  props: { canPublish?: boolean; openExternal?: (url: string) => boolean } = {},
+  props: {
+    canPublish?: boolean;
+    onOpenPublishing?: () => void;
+    openExternal?: (url: string) => boolean;
+  } = {},
 ) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -83,11 +91,10 @@ async function render(
   mounted = { root, host };
   await act(async () =>
     root.render(
-      <module.SitePublicLink
+      <module.SitePublicationControl
         load={load}
-        workspaceId="ws"
-        siteId="site"
         canPublish={props.canPublish ?? true}
+        onOpenPublishing={props.onOpenPublishing ?? (() => {})}
         {...(props.openExternal ? { openExternal: props.openExternal } : {})}
       />,
     ),
@@ -117,24 +124,35 @@ async function clickPrevented(target: HTMLElement, init: MouseEventInit): Promis
   return prevented!;
 }
 
-const openLink = (host: HTMLElement) =>
-  host.querySelector<HTMLAnchorElement>('a[aria-label^="Live: open "]');
-const copyButton = (host: HTMLElement) =>
-  host.querySelector<HTMLButtonElement>('button[aria-label="Copy link"]');
+const trigger = (host: HTMLElement) =>
+  host.querySelector<HTMLButtonElement>('[data-site-publication="published"]');
+const openRow = (host: HTMLElement) => host.querySelector<HTMLAnchorElement>("a[href]");
+const row = (host: HTMLElement, text: string) =>
+  [...host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((item) =>
+    item.textContent?.startsWith(text),
+  ) ?? null;
 
-test("a published Site's Live opens its address in a new tab on the web", async () => {
+test("a published Site says Published, and its menu names the address and opens it", async () => {
   const host = await render(ready(), { openExternal: () => false });
-  const link = openLink(host)!;
-  expect(link.textContent).toBe("Live");
+  expect(trigger(host)!.textContent).toBe("Published");
+  expect(trigger(host)!.getAttribute("aria-label")).toBe(
+    "Published at newsletter-4k9x.sites.example",
+  );
+  // Never the old "Live", which reads as the live preview.
+  expect(host.textContent).not.toContain("Live");
+  const label = host.querySelector<HTMLElement>("[data-menu-label]")!;
+  expect(label.textContent).toBe("newsletter-4k9x.sites.example");
+  expect(label.title).toBe("https://newsletter-4k9x.sites.example/");
+  const link = openRow(host)!;
+  expect(link.textContent).toBe("Open");
   expect(link.getAttribute("href")).toBe("https://newsletter-4k9x.sites.example/");
   expect(link.getAttribute("target")).toBe("_blank");
   expect(link.getAttribute("rel")).toBe("noopener noreferrer");
-  expect(link.getAttribute("aria-label")).toBe("Live: open newsletter-4k9x.sites.example");
   // On the web the anchor itself opens the tab: the click isn't cancelled.
   expect(await clickPrevented(link, {})).toBe(false);
 });
 
-test("copying the link confirms with Copied, then settles back", async () => {
+test("Copy link copies the address and says Copied in the open menu, then settles back", async () => {
   const writes: string[] = [];
   const previous = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   Object.defineProperty(navigator, "clipboard", {
@@ -143,17 +161,63 @@ test("copying the link confirms with Copied, then settles back", async () => {
   });
   try {
     const host = await render(ready());
-    expect(copyButton(host)!.textContent).toBe("");
-    await act(async () => copyButton(host)!.click());
+    const copy = row(host, "Copy link")!;
+    // The menu stays open (its select is cancelled) so the confirmation shows.
+    expect(await clickPrevented(copy, {})).toBe(true);
     expect(writes).toEqual(["https://newsletter-4k9x.sites.example/"]);
-    expect(copyButton(host)!.textContent).toBe("Copied");
+    expect(copy.textContent).toBe("Copied");
     expect(host.querySelector('[role="status"]')!.textContent).toBe("Link copied");
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 2100)));
-    expect(copyButton(host)!.textContent).toBe("");
+    expect(copy.textContent).toBe("Copy link");
   } finally {
     if (previous) Object.defineProperty(navigator, "clipboard", previous);
     else Reflect.deleteProperty(navigator, "clipboard");
   }
+});
+
+test("a copy the browser refuses says it couldn't copy", async () => {
+  const previous = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const previousExec = Object.getOwnPropertyDescriptor(document, "execCommand");
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: async () => {
+        throw new Error("denied");
+      },
+    },
+  });
+  Object.defineProperty(document, "execCommand", { configurable: true, value: () => false });
+  try {
+    const host = await render(ready());
+    await act(async () => row(host, "Copy link")!.click());
+    expect(row(host, "Couldn't copy")).not.toBeNull();
+    expect(host.querySelector('[role="status"]')!.textContent).toBe("Couldn't copy the link");
+  } finally {
+    if (previous) Object.defineProperty(navigator, "clipboard", previous);
+    else Reflect.deleteProperty(navigator, "clipboard");
+    if (previousExec) Object.defineProperty(document, "execCommand", previousExec);
+    else Reflect.deleteProperty(document, "execCommand");
+  }
+});
+
+test("Publishing settings opens the publish form, only for people who can publish", async () => {
+  let opened = 0;
+  const host = await render(ready(), { onOpenPublishing: () => (opened += 1) });
+  await act(async () => row(host, "Publishing settings")!.click());
+  expect(opened).toBe(1);
+  await unmount();
+
+  const viewer = await render(ready(), {
+    canPublish: false,
+    openExternal: () => false,
+    onOpenPublishing: () => (opened += 1),
+  });
+  // Someone who can open the Site but not publish still opens and copies it.
+  expect(trigger(viewer)!.textContent).toBe("Published");
+  expect(openRow(viewer)!.getAttribute("href")).toBe("https://newsletter-4k9x.sites.example/");
+  expect(row(viewer, "Copy link")).not.toBeNull();
+  expect(row(viewer, "Publishing settings")).toBeNull();
+  expect(viewer.querySelector("hr")).toBeNull();
 });
 
 test("a custom hostname uses the primary URL the publication API reports", async () => {
@@ -166,34 +230,59 @@ test("a custom hostname uses the primary URL the publication API reports", async
     hostname: "news.acme.example",
   });
   const host = await render(load);
-  expect(openLink(host)!.getAttribute("href")).toBe("https://news.acme.example/");
-  expect(openLink(host)!.getAttribute("aria-label")).toBe("Live: open news.acme.example");
-  // Restricted access still links straight to the Site, without warnings.
-  expect(host.textContent).toBe("Live");
+  expect(openRow(host)!.getAttribute("href")).toBe("https://news.acme.example/");
+  expect(host.querySelector("[data-menu-label]")!.textContent).toBe("news.acme.example");
+  expect(trigger(host)!.getAttribute("aria-label")).toBe("Published at news.acme.example");
 });
 
-test("an unpublished Site shows no link, and Publish for people who can", async () => {
+test("an unpublished Site offers Publish to people who can, and nothing to anyone else", async () => {
   for (const load of [{ state: "none" } as const, ready({ status: "unpublished" })]) {
-    const host = await render(load);
-    expect(openLink(host)).toBeNull();
-    expect(copyButton(host)).toBeNull();
+    let opened = 0;
+    const host = await render(load, { onOpenPublishing: () => (opened += 1) });
+    expect(trigger(host)).toBeNull();
     expect(host.querySelector("a[href]")).toBeNull();
-    expect(host.textContent).toBe("Not publishedPublish");
-    const publish = host.querySelector<HTMLAnchorElement>("a[data-to]")!;
-    expect(publish.dataset.to).toBe("/workspaces/$workspaceId/artifacts/$artifactId");
-    expect(JSON.parse(publish.dataset.params!)).toEqual({ workspaceId: "ws", artifactId: "site" });
-    expect(JSON.parse(publish.dataset.search!)).toEqual({ tab: "settings" });
-    await act(async () => mounted!.root.unmount());
-    mounted!.host.remove();
-    mounted = null;
+    const publish = host.querySelector<HTMLButtonElement>('[data-site-publication="unpublished"]')!;
+    // One word, no "Not published" beside it: Publish says it isn't.
+    expect(host.textContent).toBe("Publish");
+    await act(async () => publish.click());
+    expect(opened).toBe(1);
+    await unmount();
   }
   const host = await render({ state: "none" }, { canPublish: false });
-  expect(host.textContent).toBe("Not published");
+  expect(host.innerHTML).toBe("");
   expect(module.publishedSiteLink(ready({ status: "suspended" }))).toBeNull();
   expect(module.publishedSiteLink({ state: "loading" })).toBeNull();
 });
 
-test("in the desktop app Live opens the default browser through the shell", async () => {
+test("nothing shows until the answer, or when publishing isn't available", async () => {
+  for (const load of [
+    { state: "loading" },
+    { state: "unavailable" },
+    { state: "forbidden" },
+    { state: "error", error: new Error("boom") },
+  ] as const) {
+    const host = await render(load);
+    expect(host.innerHTML).toBe("");
+    await unmount();
+  }
+});
+
+test("a taken-down Site says so, with no link; its settings are for people who can publish", async () => {
+  let opened = 0;
+  const host = await render(ready({ status: "suspended" }), {
+    onOpenPublishing: () => (opened += 1),
+  });
+  expect(host.textContent).toBe("Taken down");
+  expect(host.querySelector("a")).toBeNull();
+  await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+  expect(opened).toBe(1);
+  await unmount();
+  const viewer = await render(ready({ status: "suspended" }), { canPublish: false });
+  expect(viewer.textContent).toBe("Taken down");
+  expect(viewer.querySelector("button")).toBeNull();
+});
+
+test("in the desktop app Open opens the default browser through the shell", async () => {
   const opened: string[] = [];
   const bridge = {
     openExternal: async (url: string) => {
@@ -208,19 +297,11 @@ test("in the desktop app Live opens the default browser through the shell", asyn
     openExternal: (url) => module.openPublishedSite(url, bridge),
   });
   // The shell opened it, so the page itself doesn't navigate.
-  expect(await clickPrevented(openLink(host)!, {})).toBe(true);
+  expect(await clickPrevented(openRow(host)!, {})).toBe(true);
   expect(opened).toEqual(["https://a.example/", "https://newsletter-4k9x.sites.example/"]);
   // A modified click keeps the browser's own behaviour.
-  expect(await clickPrevented(openLink(host)!, { metaKey: true })).toBe(false);
+  expect(await clickPrevented(openRow(host)!, { metaKey: true })).toBe(false);
   expect(opened).toHaveLength(2);
-});
-
-test("someone who can open the Site but not publish still gets open and copy", async () => {
-  const host = await render(ready(), { canPublish: false, openExternal: () => false });
-  expect(openLink(host)!.getAttribute("href")).toBe("https://newsletter-4k9x.sites.example/");
-  expect(copyButton(host)).not.toBeNull();
-  expect(host.querySelector("a[data-to]")).toBeNull();
-  expect(host.textContent).toBe("Live");
 });
 
 test("the header reads the Site's address with the viewer's own read, not the publisher API", async () => {
@@ -236,7 +317,7 @@ test("the header reads the Site's address with the viewer's own read, not the pu
         JSON.stringify({ error: { code: "sites_publishing_disabled" } }),
       );
     },
-    // An older API without the route: never "Not published" for a Site that may be live.
+    // An older API without the route: never Publish for a Site that may be live.
     async () => {
       throw new OpenGeniApiError(404, "Not Found");
     },
@@ -249,8 +330,7 @@ test("the header reads the Site's address with the viewer's own read, not the pu
   };
   const seen: SitePublicationLinkLoad[] = [];
   function Probe({ siteId }: { siteId: string }) {
-    const load = module.useSitePublicationLink({ client, workspaceId: "ws", siteId });
-    seen.push(load);
+    seen.push(module.useSitePublicationLink({ client, workspaceId: "ws", siteId }).load);
     return null;
   }
   const host = document.createElement("div");
@@ -274,7 +354,7 @@ test("a late answer for the previous Site never shows on the next one", async ()
   };
   let latest = { state: "loading" } as SitePublicationLinkLoad;
   function Probe({ siteId }: { siteId: string }) {
-    latest = module.useSitePublicationLink({ client, workspaceId: "ws", siteId });
+    latest = module.useSitePublicationLink({ client, workspaceId: "ws", siteId }).load;
     return null;
   }
   const host = document.createElement("div");
@@ -295,29 +375,33 @@ test("a late answer for the previous Site never shows on the next one", async ()
   expect(latest.state === "ready" && latest.link.status).toBe("unpublished");
 });
 
-test("a taken-down Site says so, with no link", async () => {
-  const host = await render(ready({ status: "suspended" }));
-  expect(host.textContent).toBe("Taken down");
-  expect(host.querySelector("a")).toBeNull();
-});
-
-test("a copy the browser refuses says it couldn't copy", async () => {
-  const previous = Object.getOwnPropertyDescriptor(navigator, "clipboard");
-  Object.defineProperty(navigator, "clipboard", {
-    configurable: true,
-    value: {
-      writeText: async () => {
-        throw new Error("denied");
-      },
-    },
-  });
-  try {
-    const host = await render(ready());
-    await act(async () => copyButton(host)!.click());
-    expect(copyButton(host)!.textContent).toBe("Couldn't copy");
-    expect(host.querySelector('[role="status"]')!.textContent).toBe("Couldn't copy the link");
-  } finally {
-    if (previous) Object.defineProperty(navigator, "clipboard", previous);
-    else Reflect.deleteProperty(navigator, "clipboard");
+test("a publication changed here shows at once, and a read already on its way can't undo it", async () => {
+  const pending: Array<(link: SitePublicationLink) => void> = [];
+  const client = {
+    getSitePublicationLink: () =>
+      new Promise<SitePublicationLink>((resolve) => pending.push(resolve)),
+  };
+  let latest: ReturnType<typeof module.useSitePublicationLink> | null = null;
+  function Probe() {
+    latest = module.useSitePublicationLink({ client, workspaceId: "ws", siteId: "site" });
+    return null;
   }
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  mounted = { root, host };
+  await act(async () => root.render(<Probe />));
+  expect(latest!.load).toEqual({ state: "loading" });
+  await act(async () =>
+    latest!.update({
+      siteId: "site",
+      hostname: "fresh.sites.example",
+      url: "https://fresh.sites.example/",
+      status: "active",
+    }),
+  );
+  expect(module.publishedSiteLink(latest!.load)?.hostname).toBe("fresh.sites.example");
+  // The read from before the publish answers "not published": it is stale.
+  await act(async () => pending[0]!(publicationLink({ status: "unpublished" })));
+  expect(module.publishedSiteLink(latest!.load)?.hostname).toBe("fresh.sites.example");
 });

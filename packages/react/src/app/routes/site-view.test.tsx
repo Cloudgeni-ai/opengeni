@@ -65,12 +65,25 @@ const client = {
     siteReads++;
     return await siteDetails();
   },
-  // The header's published-link read; these tests are about the chat panel,
-  // so the link stays the plain "Live" an API without the route gives.
-  getSitePublicationLink: async () => {
-    throw new OpenGeniApiError(404, "");
-  },
+  // The header's published-link read: an API without the route (404) unless
+  // a test publishes the Site.
+  getSitePublicationLink: async () => await publicationLink(),
 };
+let publicationLink: () => Promise<unknown> = async () => {
+  throw new OpenGeniApiError(404, "");
+};
+const notPublished = async () => {
+  throw new OpenGeniApiError(404, JSON.stringify({ error: { code: "site_not_published" } }));
+};
+const published = {
+  siteId,
+  hostname: "usage-4k9x.sites.example",
+  url: "https://usage-4k9x.sites.example/",
+  status: "active",
+};
+const publishPageProps: Array<Record<string, unknown>> = [];
+const managementArgs: Array<Record<string, unknown>> = [];
+const publications: unknown[] = [];
 mock.module("../app-context", () => ({
   useAppContext: () => ({
     client,
@@ -134,6 +147,8 @@ mock.module("../../artifacts", () => ({
     archivedMessage?: string;
     versionId?: string | null;
     versionControl?: ReactNode;
+    liveStatus?: ReactNode;
+    fullScreen?: boolean;
   }) => {
     siteViewProps.push(props);
     return (
@@ -141,9 +156,50 @@ mock.module("../../artifacts", () => ({
         data-site-view={props.siteId}
         data-version={props.versionId ?? ""}
         data-archived-message={props.archivedMessage}
+        data-full-screen={String(props.fullScreen)}
       >
         {props.versionControl}
+        <div data-live-status-slot="">{props.liveStatus}</div>
       </div>
+    );
+  },
+}));
+// The Site's own publish form and its management, as the Settings tab uses
+// them; the form's own behaviour is tested with it.
+mock.module("../components/artifacts/site-settings", () => ({
+  useSiteManagement: (args: Record<string, unknown>) => {
+    managementArgs.push(args);
+    return {
+      canPublish: true,
+      isAdmin: false,
+      manageData: true,
+      workspaceName: "Acme",
+      showAudience: true,
+      publication: {
+        load: { state: "none" },
+        reload: async () => {},
+        setPublication: (next: unknown) => publications.push(next),
+      },
+      audience: { share: undefined, dialog: <div data-audience-dialog="" /> },
+    };
+  },
+}));
+mock.module("../components/artifacts/site-publishing", () => ({
+  SitePublishPage: (props: Record<string, unknown>) => {
+    publishPageProps.push(props);
+    const publish = () => {
+      (props.onPublication as (next: unknown) => void)({ ...published, access: "members" });
+      (props.onSubmitted as () => void)();
+    };
+    return (
+      <form data-publish-page={String(props.layout)}>
+        <button type="button" onClick={publish}>
+          Publish now
+        </button>
+        <button type="button" onClick={props.onBack as () => void}>
+          Back to the Site
+        </button>
+      </form>
     );
   },
 }));
@@ -195,7 +251,28 @@ mock.module("../../ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
-  DropdownMenuItem: ({ children }: { children: ReactNode; asChild?: boolean }) => children,
+  DropdownMenuItem: ({
+    children,
+    asChild,
+    onSelect,
+  }: {
+    children: ReactNode;
+    asChild?: boolean;
+    onSelect?: (event: Event) => void;
+  }) =>
+    asChild || !onSelect ? (
+      children
+    ) : (
+      <button
+        type="button"
+        role="menuitem"
+        onClick={(event) => onSelect(event as unknown as Event)}
+      >
+        {children}
+      </button>
+    ),
+  DropdownMenuLabel: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+  DropdownMenuSeparator: () => <hr />,
 }));
 
 let module: typeof import("./site-view");
@@ -222,6 +299,12 @@ afterEach(() => {
   siteReads = 0;
   siteViewProps.length = 0;
   versionMenuProps.length = 0;
+  publicationLink = async () => {
+    throw new OpenGeniApiError(404, "");
+  };
+  publishPageProps.length = 0;
+  managementArgs.length = 0;
+  publications.length = 0;
   hintRefresh = null;
   hintOptions = undefined;
   listPage = null;
@@ -842,4 +925,97 @@ test("Edit with Opengeni on a Site already open starts a new conversation once",
   // Until the address drops the request, rendering again asks nothing more.
   await rerender(id(1), true);
   expect(navigations).toHaveLength(1);
+});
+
+const publicationSlot = (container: HTMLElement) =>
+  container.querySelector<HTMLElement>("[data-live-status-slot]")!;
+const siteHidden = (container: HTMLElement) =>
+  container.querySelector("[data-site-view]")!.parentElement!.classList.contains("hidden");
+
+test("an unpublished Site offers Publish, which opens its publish form beside the chat", async () => {
+  conversations = [conversation(1, "Make the header blue", 2)];
+  permissions = ["sessions:create", "artifacts:publish"];
+  publicationLink = notPublished;
+  const { container } = await render();
+  expect(publicationSlot(container).textContent).toBe("Publish");
+  expect(container.querySelector("[data-publish-page]")).toBeNull();
+
+  await act(async () => button(container, "Publish")!.click());
+  // The Site's own publish form, as a page in place of the Site; the Site
+  // stays mounted behind it and the chat stays beside it.
+  expect(container.querySelector("[data-publish-page]")?.getAttribute("data-publish-page")).toBe(
+    "page",
+  );
+  expect(siteHidden(container)).toBe(true);
+  expect(container.querySelector("[data-site-view]")).not.toBeNull();
+  expect(openConversation(container)).toBe(id(1));
+  expect(managementArgs.at(-1)).toMatchObject({ workspaceId, siteId });
+  expect(publishPageProps.at(-1)).toMatchObject({
+    workspaceId,
+    workspaceName: "Acme",
+    canManage: true,
+    isAdmin: false,
+    personalWorkspace: false,
+    site: { title: "Opengeni usage" },
+    load: { state: "none" },
+  });
+  expect(container.querySelector("[data-audience-dialog]")).not.toBeNull();
+
+  // Publishing returns to the Site, which now says Published at once.
+  await act(async () => button(container, "Publish now")!.click());
+  await settle();
+  expect(container.querySelector("[data-publish-page]")).toBeNull();
+  expect(siteHidden(container)).toBe(false);
+  expect(publications).toHaveLength(1);
+  expect(publicationSlot(container).textContent).toContain("Published");
+  expect(publicationSlot(container).textContent).toContain("usage-4k9x.sites.example");
+  // Focus goes back to the control that opened the form.
+  expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
+});
+
+test("a published Site's settings open the same form; its back link returns to the Site", async () => {
+  conversations = [];
+  permissions = ["sessions:create", "artifacts:publish"];
+  publicationLink = async () => published;
+  const { container } = await render();
+  const slot = publicationSlot(container);
+  expect(slot.textContent).toContain("Published");
+  expect(slot.querySelector("a")?.getAttribute("href")).toBe("https://usage-4k9x.sites.example/");
+
+  // From full screen, the form first leaves it.
+  await act(async () =>
+    (siteViewProps.at(-1)!.onFullScreenChange as (next: boolean) => void)(true),
+  );
+  expect(siteViewProps.at(-1)!.fullScreen).toBe(true);
+  await act(async () => button(container, "Publishing settings")!.click());
+  expect(siteViewProps.at(-1)!.fullScreen).toBe(false);
+  expect(container.querySelector("[data-publish-page]")).not.toBeNull();
+
+  await act(async () => button(container, "Back to the Site")!.click());
+  expect(container.querySelector("[data-publish-page]")).toBeNull();
+  expect(siteHidden(container)).toBe(false);
+  expect(publications).toHaveLength(0);
+  expect(document.activeElement?.getAttribute("data-site-publication")).toBe("published");
+});
+
+test("people who can't publish see Published and its address, with no Publish or settings", async () => {
+  conversations = [];
+  publicationLink = async () => published;
+  const { container } = await render();
+  expect(publicationSlot(container).textContent).toContain("Published");
+  expect(button(container, "Publishing settings")).toBeUndefined();
+  act(() => root?.unmount());
+  publicationLink = notPublished;
+  const next = await render();
+  expect(publicationSlot(next.container).textContent).toBe("");
+  expect(managementArgs).toHaveLength(0);
+});
+
+test("the header never says Live, also where publishing isn't available", async () => {
+  conversations = [];
+  permissions = ["sessions:create", "artifacts:publish"];
+  const { container } = await render();
+  // A replacement is always given, so the frame's plain "Live" never shows.
+  expect(siteViewProps.at(-1)!.liveStatus).toBeDefined();
+  expect(publicationSlot(container).textContent).toBe("");
 });

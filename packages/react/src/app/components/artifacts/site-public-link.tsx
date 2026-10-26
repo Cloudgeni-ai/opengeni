@@ -1,22 +1,35 @@
-import type { SitePublicationLink } from "@opengeni/contracts";
+import type { SitePublication, SitePublicationLink } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { DesktopBridge } from "@opengeni/sdk/desktop-bridge";
-import { ArrowUpRightIcon, CheckIcon, CopyIcon } from "lucide-react";
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import {
+  ArrowUpRightIcon,
+  CheckIcon,
+  ChevronDownIcon,
+  GlobeIcon,
+  LinkIcon,
+  Settings2Icon,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 
 import { copyTextToClipboard } from "../../../lib/clipboard";
 import { apiErrorFacts } from "../../../ui/api-error";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../../../ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../../../ui/dropdown-menu";
 import { desktopCapability } from "../../lib/desktop";
-import { Link } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 
 /* ----------------------------------------------------------------------------
-   The Site view's way to the published Site: "Live ↗" opens the address the
-   publication API reports (the Site's primary public URL), and a small copy
-   button copies it. Anyone who can open the Site gets both; an unpublished
-   Site says so instead, with Publish beside it for people who can publish.
-   Access never changes the link.
+   The Site view's one publication control. A Site on the web shows
+   "Published": its menu names the address and opens or copies it. One that
+   isn't shows Publish to people who can publish, and nothing to anyone else.
+   Publishing and its settings open the same publish form as the Site's
+   Settings, through `onOpenPublishing`. Access never changes the link.
    -------------------------------------------------------------------------- */
 
 /** Where the Site's published address stands, from the API's answer. */
@@ -28,7 +41,10 @@ export type SitePublicationLinkLoad =
   | { state: "error"; error: unknown }
   | { state: "ready"; link: SitePublicationLink };
 
-/** The Site's published address, for anyone who can open the Site. */
+/**
+ * The Site's published address, for anyone who can open the Site. `update`
+ * shows a publication this page just changed without waiting for a read.
+ */
 export function useSitePublicationLink({
   client,
   workspaceId,
@@ -37,7 +53,10 @@ export function useSitePublicationLink({
   client: Pick<OpenGeniBrowserClient, "getSitePublicationLink">;
   workspaceId: string;
   siteId: string;
-}): SitePublicationLinkLoad {
+}): {
+  load: SitePublicationLinkLoad;
+  update: (publication: Pick<SitePublication, "siteId" | "hostname" | "url" | "status">) => void;
+} {
   // Keyed by Site, so moving to another Site never shows the last one's link.
   const key = `${workspaceId}/${siteId}`;
   const [answer, setAnswer] = useState<{ key: string; load: SitePublicationLinkLoad } | null>(null);
@@ -55,8 +74,11 @@ export function useSitePublicationLink({
       document.removeEventListener("visibilitychange", refresh);
     };
   }, []);
+  // A change made here wins over a read already on its way.
+  const request = useRef<AbortController | null>(null);
   useEffect(() => {
     const abort = new AbortController();
+    request.current = abort;
     client
       .getSitePublicationLink(workspaceId, siteId, { signal: abort.signal })
       .then((link) => {
@@ -68,13 +90,28 @@ export function useSitePublicationLink({
       });
     return () => abort.abort();
   }, [client, key, revision, siteId, workspaceId]);
-  return answer?.key === key ? answer.load : { state: "loading" };
+  const update = useCallback(
+    ({
+      siteId: publishedSiteId,
+      hostname,
+      url,
+      status,
+    }: Pick<SitePublication, "siteId" | "hostname" | "url" | "status">) => {
+      request.current?.abort();
+      setAnswer({
+        key,
+        load: { state: "ready", link: { siteId: publishedSiteId, hostname, url, status } },
+      });
+    },
+    [key],
+  );
+  return { load: answer?.key === key ? answer.load : { state: "loading" }, update };
 }
 
 /**
  * Only the API's own "not published" answer means not published. Any other
- * 404 (an older API without this route, publishing off) leaves the plain
- * "Live" rather than offering Publish for a Site that may be on the web.
+ * 404 (an older API without this route, publishing off) shows nothing rather
+ * than offering Publish for a Site that may be on the web.
  */
 export function sitePublicationLinkLoadFromError(error: unknown): SitePublicationLinkLoad {
   const { status, code } = apiErrorFacts(error);
@@ -118,63 +155,83 @@ export function openPublishedSite(
   return true;
 }
 
+/** The header's quiet control: the version chip's height, its type and hover. */
 const CONTROL =
-  "inline-flex h-7 items-center rounded-md text-2xs font-medium text-fg-muted outline-hidden transition-colors hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40";
+  "mr-1 inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-1.5 text-2xs font-medium text-fg-muted outline-hidden transition-colors hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:h-8";
 
-export function SitePublicLink({
+export function SitePublicationControl({
   load,
-  workspaceId,
-  siteId,
   canPublish,
+  onOpenPublishing,
   openExternal = openPublishedSite,
 }: {
   load: SitePublicationLinkLoad;
-  workspaceId: string;
-  siteId: string;
-  /** Offer Publish on an unpublished Site. */
+  /** May publish the Site and change how it is published. */
   canPublish: boolean;
+  /** Open the publish form: to publish, or for a published Site's settings. */
+  onOpenPublishing: () => void;
   /** The desktop path; returns true when it handled the open. */
   openExternal?: ((url: string) => boolean) | undefined;
 }) {
   const link = publishedSiteLink(load);
-  if (link) return <PublishedLink {...link} openExternal={openExternal} />;
-  if (load.state === "none" || (load.state === "ready" && load.link.status === "unpublished"))
+  if (link)
     return (
-      <span className="mr-1 hidden items-center gap-2 sm:inline-flex">
-        <span className="inline-flex items-center gap-1.5 text-2xs font-medium text-fg-subtle">
-          <span aria-hidden="true" className="size-1.5 rounded-full border border-fg-subtle" />
-          Not published
-        </span>
-        {canPublish ? (
-          <Link
-            to="/workspaces/$workspaceId/artifacts/$artifactId"
-            params={{ workspaceId, artifactId: siteId }}
-            search={{ tab: "settings" }}
-            className={cn(CONTROL, "px-1.5 text-fg")}
-          >
-            Publish
-          </Link>
-        ) : null}
-      </span>
+      <PublishedMenu
+        {...link}
+        openExternal={openExternal}
+        onOpenPublishing={canPublish ? onOpenPublishing : undefined}
+      />
     );
-  if (load.state === "ready" && load.link.status === "suspended")
-    return (
-      <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-subtle sm:inline-flex">
+  const unpublished =
+    load.state === "none" || (load.state === "ready" && load.link.status === "unpublished");
+  if (unpublished)
+    return canPublish ? (
+      <button
+        type="button"
+        onClick={onOpenPublishing}
+        data-site-publication="unpublished"
+        className={cn(CONTROL, "text-fg")}
+      >
+        <GlobeIcon aria-hidden="true" className="size-3.5" />
+        Publish
+      </button>
+    ) : null;
+  if (load.state === "ready" && load.link.status === "suspended") {
+    const content = (
+      <>
         <span aria-hidden="true" className="size-1.5 rounded-full bg-status-failed" />
         Taken down
+      </>
+    );
+    // Restoring is in the publish form, for the people who may.
+    return canPublish ? (
+      <button
+        type="button"
+        onClick={onOpenPublishing}
+        data-site-publication="suspended"
+        className={CONTROL}
+      >
+        {content}
+      </button>
+    ) : (
+      <span data-site-publication="suspended" className={cn(CONTROL, "hover:bg-transparent")}>
+        {content}
       </span>
     );
+  }
   return null;
 }
 
-function PublishedLink({
+function PublishedMenu({
   url,
   hostname,
   openExternal,
+  onOpenPublishing,
 }: {
   url: string;
   hostname: string;
   openExternal: (url: string) => boolean;
+  onOpenPublishing?: (() => void) | undefined;
 }) {
   const [copy, setCopy] = useState<"copied" | "failed" | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -191,51 +248,55 @@ function PublishedLink({
     timer.current = setTimeout(() => setCopy(null), 2000);
   };
   return (
-    <TooltipProvider delayDuration={300}>
-      <span data-site-public-link="" className="mr-1 inline-flex items-center gap-0.5">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              aria-label={`Live: open ${hostname}`}
-              onClick={open}
-              className={cn(CONTROL, "gap-1.5 px-1.5")}
-            >
-              <span
-                aria-hidden="true"
-                className="size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10"
-              />
-              Live
-              <ArrowUpRightIcon aria-hidden="true" className="size-3" />
-            </a>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">{hostname}</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              aria-label="Copy link"
-              onClick={() => void copyLink()}
-              className={cn(CONTROL, "gap-1 px-1.5", copy && "text-fg")}
-            >
-              {copy === "copied" ? (
-                <CheckIcon aria-hidden="true" className="size-3" />
-              ) : (
-                <CopyIcon aria-hidden="true" className="size-3" />
-              )}
-              {copy === "copied" ? <span>Copied</span> : null}
-              {copy === "failed" ? <span>Couldn't copy</span> : null}
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Copy link</TooltipContent>
-        </Tooltip>
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Published at ${hostname}`}
+          data-site-publication="published"
+          className={cn(CONTROL, "gap-1 data-[state=open]:bg-hover data-[state=open]:text-fg")}
+        >
+          <span
+            aria-hidden="true"
+            className="mr-0.5 size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10"
+          />
+          Published
+          <ChevronDownIcon aria-hidden="true" className="size-3" />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel className="truncate" title={url}>
+          {hostname}
+        </DropdownMenuLabel>
+        <DropdownMenuItem asChild>
+          <a href={url} target="_blank" rel="noopener noreferrer" onClick={open}>
+            <ArrowUpRightIcon aria-hidden="true" />
+            Open
+          </a>
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          // The menu stays open so "Copied" shows, in full screen too.
+          onSelect={(event) => {
+            event.preventDefault();
+            void copyLink();
+          }}
+        >
+          {copy === "copied" ? <CheckIcon aria-hidden="true" /> : <LinkIcon aria-hidden="true" />}
+          {copy === "copied" ? "Copied" : copy === "failed" ? "Couldn't copy" : "Copy link"}
+        </DropdownMenuItem>
+        {onOpenPublishing ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onOpenPublishing}>
+              <Settings2Icon aria-hidden="true" />
+              Publishing settings
+            </DropdownMenuItem>
+          </>
+        ) : null}
         <span role="status" aria-live="polite" className="sr-only">
           {copy === "copied" ? "Link copied" : copy === "failed" ? "Couldn't copy the link" : ""}
         </span>
-      </span>
-    </TooltipProvider>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
