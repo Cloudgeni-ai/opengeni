@@ -65410,12 +65410,15 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 // selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
 // before this helper so replaying one already-approved request does not rotate.
 //
-// A personal machine belongs to the workspace it was first connected from, and
-// finalize_scoped_enrollment reuses the owner's enrollment for the same public
-// key wherever that is. Credentials and connection lookups are per workspace,
-// so a personal finalize from any other workspace is refused with
-// PersonalMachineConnectedElsewhereError. The caller's transaction rolls back,
-// so nothing is written and a single-use token is not claimed.
+// A live personal machine belongs to the workspace it was connected from, and
+// finalize_scoped_enrollment reuses the owner's live enrollment for the same
+// public key wherever that is. Credentials and connection lookups are per
+// workspace, so a personal finalize from any other workspace while it is live
+// is refused with PersonalMachineConnectedElsewhereError (the machine serves
+// the owner's other workspaces through grants instead). The caller's
+// transaction rolls back, so nothing is written and a single-use token is not
+// claimed. Once removed, the machine can be connected again from any of the
+// owner's workspaces: a new enrollment is made there (0996).
 export class PersonalMachineConnectedElsewhereError extends Error {
   constructor() {
     super("this machine was first connected as a personal machine from another workspace");
