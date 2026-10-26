@@ -40,11 +40,11 @@ function upload(overrides: Record<string, unknown>): MeetingRecorder["upload"] {
 describe("phone recorder wording", () => {
   test("says where the audio is while recording, paused and after Stop, never Uploading", () => {
     expect(phoneUploadLine(msg, recorder({ state: "recording", upload: upload({}) }))).toBe(
-      "Keeps recording when the screen is locked or you switch apps. Audio is saved on this phone as you go.",
+      "Keeps recording when the screen is locked or you switch apps.",
     );
     expect(
       phoneUploadLine(msg, recorder({ state: "paused", pauseReason: "interruption" })),
-    ).toStartWith("Paused while another app or a call uses the microphone.");
+    ).toStartWith("Paused while a call or another app uses the microphone.");
     expect(phoneUploadLine(msg, recorder({ state: "paused", pauseReason: "person" }))).toBe(
       "Nothing is recorded while paused.",
     );
@@ -53,7 +53,7 @@ describe("phone recorder wording", () => {
         msg,
         recorder({ state: "recording", upload: upload({ retryingAfterError: true }) }),
       ),
-    ).toStartWith("No connection right now. Recording continues");
+    ).toStartWith("Offline. Recording continues");
     expect(
       phoneUploadLine(msg, recorder({ state: "idle", upload: upload({ pendingChunks: 3 }) })),
     ).toBe("Saving the rest of the audio.");

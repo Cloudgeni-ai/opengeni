@@ -34,7 +34,7 @@ import { Notice } from "../ui/notice";
 import { NativeSelect } from "../ui/select-menu";
 import { cn } from "../app/lib/utils";
 
-import { formatClock } from "../recordings";
+import { defaultMeetingTitle, formatClock } from "../recordings";
 import type { MeetingRecorder } from "./recorder-context";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -134,13 +134,13 @@ export function uploadLine(
   if (recorder.state === "paused")
     return msg("meetings.recorderPanel.nothingIsRecordedWhilePaused");
   if (capturing) {
-    return msg("meetings.recorderPanel.capturingwhatValue", {
-      capturingWhat: capturingWhat(recorder, msg),
-      value:
-        recorder.systemAudioKind === "desktop"
-          ? msg("meetings.recorderPanel.youCanKeepUsingOther")
-          : msg("meetings.recorderPanel.youCanUseOtherPages"),
-    });
+    // In a browser, closing the tab ends the recording; an app keeps recording.
+    return recorder.systemAudioKind === "desktop"
+      ? capturingWhat(recorder, msg)
+      : msg("meetings.recorderPanel.capturingwhatValue", {
+          capturingWhat: capturingWhat(recorder, msg),
+          value: msg("meetings.recorderPanel.youCanUseOtherPages"),
+        });
   }
   if (!upload || recorder.state === "starting") return null;
   // After Stop: the audio uploaded while it recorded, so usually only its end
@@ -590,7 +590,8 @@ function RecorderPanelContent({
     if (!recorder) return;
     setErrorDismissed(false);
     await recorder.start({
-      ...(titleText.trim() ? { title: titleText.trim() } : {}),
+      // Unnamed, it is named after when it starts, in the viewer's own words and time.
+      title: titleText.trim() || defaultMeetingTitle(new Date(), msg),
       systemAudio: tabAudio,
       ...(liveOn ? { liveTranscript: true } : {}),
       ...(externalRef ? { externalRef } : {}),
