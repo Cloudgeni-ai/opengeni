@@ -97,6 +97,7 @@ import {
   updateSessionCommandReceiptResult,
 } from "./session-control";
 import { sessionRealtimeIsActiveInTransaction } from "./session-realtime-state";
+import { lockSiteRuntimeAdmission } from "./site-runtime-admission";
 import { autoResumeGoalPausedByCapInTransaction } from "./session-goal-pacing";
 import {
   mirrorSessionRealtimeContextInTransaction,
@@ -2372,7 +2373,26 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
-  const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
+  // The canonical prefix already holds the session semantic lock and its
+  // event cursor through this transaction. Receipt reservation and control
+  // projection above do not mutate either row. Keep the late Site and RLS
+  // visibility checks, but reuse the validated row instead of fetching its
+  // full payload and locking the same event cursor again.
+  await lockSiteRuntimeAdmission(db, input.workspaceId, [input.sessionId]);
+  const [visibleSession] = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    )
+    .for("no key update");
+  if (!visibleSession || !promptTarget) {
+    throw new Error(`Session not found: ${input.sessionId}`);
+  }
+  const storedSession = promptTarget;
   const [session] = await withEffectiveSessionPolicy(db, input.workspaceId, [storedSession]);
   if (!session) throw new Error("Session disappeared during prompt admission");
   if (session.status === "cancelled") {

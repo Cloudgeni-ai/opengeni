@@ -50,6 +50,8 @@ function routeFixture(
     ticketProtocolVersion?: number;
     uncomposed?: boolean;
     privateSessionOwner?: string;
+    candidateIds?: readonly string[];
+    readArtifacts?: EditableArtifactApplicationPort["readArtifacts"];
   }> = {},
 ): RecordedApplication {
   const modality = options.modality ?? "spreadsheet";
@@ -62,6 +64,7 @@ function routeFixture(
   const officeImportError = { value: null as Error | null };
   const failWith = { value: null as Error | null };
   const application = {
+    ...(options.readArtifacts ? { readArtifacts: options.readArtifacts } : {}),
     createArtifact: async (input) => {
       createCalls.push(input);
       if (failWith.value) throw failWith.value;
@@ -110,7 +113,7 @@ function routeFixture(
     },
     editableArtifactSessionArtifactIds: async (scope, sourceSessionId, limit) => {
       listCalls.push([scope, sourceSessionId, limit]);
-      return [ARTIFACT_ID];
+      return options.candidateIds ?? [ARTIFACT_ID];
     },
     ...(options.uncomposed ? {} : { editableArtifacts: application }),
   });
@@ -513,6 +516,83 @@ describe("editable artifact create/open routes", () => {
       artifactId: ARTIFACT_ID,
       actor: { kind: "human", replicaId: REPLICA_ID },
     });
+  });
+
+  test.each([0, 1, 8, 9, 20, 64])(
+    "batch discovery preserves order for %i candidates",
+    async (count) => {
+      const ids = Array.from({ length: count }, (_, index) =>
+        (index + 1).toString(16).padStart(32, "0"),
+      );
+      const batches: string[][] = [];
+      const fixture = routeFixture({
+        candidateIds: ids,
+        readArtifacts: async (input) => {
+          expect(input.scope).toEqual({ accountId: ACCOUNT_ID, workspaceId: WORKSPACE_ID });
+          expect(input.actor).toMatchObject({ kind: "human", replicaId: REPLICA_ID });
+          expect(input.artifactIds.length).toBeLessThanOrEqual(8);
+          batches.push([...input.artifactIds]);
+          return input.artifactIds.map((id) => ({
+            status: "fulfilled" as const,
+            value: { ...artifactResult("document"), id },
+          }));
+        },
+      });
+      const response = await fixture.app.request(
+        `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}&replicaId=${REPLICA_ID}`,
+        { headers: { authorization: await bearer() } },
+      );
+      expect(response.status).toBe(200);
+      expect((await response.json()).artifacts.map((item: { id: string }) => item.id)).toEqual(ids);
+      expect(batches.flat()).toEqual(ids);
+      expect(batches).toHaveLength(Math.ceil(count / 8));
+      expect(fixture.readCalls).toEqual([]);
+    },
+  );
+
+  test("batch discovery skips invisible entries and fails closed on malformed results or storage failures", async () => {
+    const ids = ["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((id) => id.repeat(32));
+    for (const mode of ["mixed", "short", "throw", "rejected"] as const) {
+      let batches = 0;
+      const fixture = routeFixture({
+        candidateIds: ids,
+        readArtifacts: async (input) => {
+          batches++;
+          if (mode === "short") return [];
+          if (mode === "throw") throw new EditableArtifactApplicationError("unavailable");
+          return input.artifactIds.map((id, index) => {
+            if (index < 2)
+              return {
+                status: "rejected" as const,
+                reason: new EditableArtifactApplicationError(
+                  index === 0 ? "not_found" : "forbidden",
+                ),
+              };
+            if (mode === "rejected")
+              return {
+                status: "rejected" as const,
+                reason: new EditableArtifactApplicationError("unavailable"),
+              };
+            return { status: "fulfilled" as const, value: { ...artifactResult("document"), id } };
+          });
+        },
+      });
+      const response = await fixture.app.request(
+        `http://api.test/v1/workspaces/${WORKSPACE_ID}/editable-artifacts?sourceSessionId=${SESSION_ID}&replicaId=${REPLICA_ID}`,
+        { headers: { authorization: await bearer() } },
+      );
+      if (mode === "mixed") {
+        expect(response.status).toBe(200);
+        expect((await response.json()).artifacts.map((item: { id: string }) => item.id)).toEqual(
+          ids.slice(2, 8),
+        );
+        expect(batches).toBe(2);
+      } else {
+        expect(response.status).toBeGreaterThanOrEqual(500);
+        expect(batches).toBe(1);
+      }
+      expect(fixture.readCalls).toEqual([]);
+    }
   });
 
   test("rejects incomplete session discovery queries before touching storage", async () => {

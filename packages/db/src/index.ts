@@ -78748,7 +78748,12 @@ async function sessionInputWaitStateTx(
     return { disposition: "none" };
   }
   const [decidingTurn] = await db
-    .select({ id: schema.sessionTurns.id })
+    .select({
+      id: schema.sessionTurns.id,
+      // now() is stable for this transaction; reading it here retains the
+      // deciding-turn snapshot without another round trip for its clock.
+      transactionTime: sql<string | Date>`now()`,
+    })
     .from(schema.sessionTurns)
     .where(
       and(
@@ -78767,7 +78772,9 @@ async function sessionInputWaitStateTx(
   if (decidingTurn?.id !== wait.inputWaitTurnId) {
     return { disposition: "superseded" };
   }
-  const dbNow = await transactionNow(db);
+  const value = decidingTurn.transactionTime;
+  if (value === undefined) throw new Error("Failed to read the transaction clock");
+  const dbNow = value instanceof Date ? value : new Date(value);
   return {
     disposition: wait.inputWaitUntil.getTime() <= dbNow.getTime() ? "timeout" : "held",
   };

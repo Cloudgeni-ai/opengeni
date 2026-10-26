@@ -18,6 +18,7 @@ import {
   type EditableArtifactPinnedVersion,
 } from "../../src/domain/editable-artifacts/durable-export";
 import {
+  editableArtifactId,
   editableArtifactClientTransactionId,
   editableArtifactContentHash,
   editableArtifactReplicaId,
@@ -45,6 +46,82 @@ const agentActor: EditableArtifactActor = Object.freeze({
 });
 
 describe("editable artifact agent application", () => {
+  test.each([0, 1, 8, 9, 20, 64])(
+    "lists %i artifacts in ordered bounded batches",
+    async (count) => {
+      const fixture = await artifactFixture();
+      const artifact = await fixture.store.getArtifact(scope, artifactId);
+      if (!artifact) throw new Error("missing fixture artifact");
+      const ids = Array.from({ length: count }, (_, index) =>
+        editableArtifactId((index + 1).toString(16).padStart(32, "0")),
+      );
+      const batches: string[][] = [];
+      let pending = false;
+      fixture.service.getArtifacts = async (input) => {
+        expect(pending).toBe(false);
+        pending = true;
+        expect(input.scope).toEqual(scope);
+        expect(input.actor).toEqual(agentActor);
+        expect(input.artifactIds.length).toBeLessThanOrEqual(8);
+        batches.push([...input.artifactIds]);
+        await Promise.resolve();
+        pending = false;
+        return input.artifactIds.map((id) => ({
+          status: "fulfilled" as const,
+          value: { ...artifact, id },
+        }));
+      };
+      const application = applicationFor(fixture.service, {
+        listArtifactIds: async () => ids,
+        touch: async () => undefined,
+      });
+      const result = await application.list({ scope, actor: agentActor, sessionId });
+      expect(result.map((item) => item.id)).toEqual(ids);
+      expect(batches.flat()).toEqual(ids);
+      expect(batches).toHaveLength(Math.ceil(count / 8));
+      expect(Object.isFrozen(result)).toBe(true);
+    },
+  );
+
+  test("list skips denied and missing items but propagates the first other failure before another batch", async () => {
+    const fixture = await artifactFixture();
+    const artifact = await fixture.store.getArtifact(scope, artifactId);
+    if (!artifact) throw new Error("missing fixture artifact");
+    const { EditableArtifactNotFoundError, EditableArtifactForbiddenError } =
+      await import("../../src/domain/editable-artifacts/errors");
+    let calls = 0;
+    const failure = new Error("metadata storage unavailable");
+    fixture.service.getArtifacts = async () => {
+      calls++;
+      return [
+        { status: "rejected", reason: new EditableArtifactNotFoundError() },
+        { status: "rejected", reason: new EditableArtifactForbiddenError("read") },
+        { status: "fulfilled", value: artifact },
+        ...Array.from({ length: 5 }, () => ({ status: "fulfilled" as const, value: artifact })),
+      ];
+    };
+    const application = applicationFor(fixture.service, {
+      listArtifactIds: async () => Array(8).fill(artifactId),
+      touch: async () => undefined,
+    });
+    expect(await application.list({ scope, actor: agentActor, sessionId })).toHaveLength(6);
+    fixture.service.getArtifacts = async () => {
+      calls++;
+      return [
+        { status: "rejected", reason: new EditableArtifactForbiddenError("read") },
+        { status: "rejected", reason: failure },
+        { status: "rejected", reason: new Error("later failure must not mask first") },
+        ...Array.from({ length: 5 }, () => ({ status: "fulfilled" as const, value: artifact })),
+      ];
+    };
+    const failing = applicationFor(fixture.service, {
+      listArtifactIds: async () => Array(9).fill(artifactId),
+      touch: async () => undefined,
+    });
+    await expect(failing.list({ scope, actor: agentActor, sessionId })).rejects.toBe(failure);
+    expect(calls).toBe(2);
+  });
+
   test("mints document inspection proof only after successful native query and decode", async () => {
     const fixture = await artifactFixture({ seed: false });
     let malformed = false;

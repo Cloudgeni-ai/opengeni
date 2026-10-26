@@ -37,7 +37,7 @@ import {
   EditableArtifactNotFoundError,
   EditableArtifactStaleBaseError,
 } from "./errors";
-import type { EditableArtifactService } from "./service";
+import { EDITABLE_ARTIFACT_READ_BATCH_LIMIT, type EditableArtifactService } from "./service";
 import {
   editableArtifactClientTransactionId,
   editableArtifactId,
@@ -208,15 +208,18 @@ export class EditableArtifactAgentApplication {
       limit,
     });
     const artifacts: EditableArtifactAgentMetadata[] = [];
-    for (const artifactId of ids) {
-      try {
-        const artifact = await this.dependencies.domain.getArtifact({
-          scope: context.scope,
-          actor: context.actor,
-          artifactId,
-        });
-        artifacts.push(projectArtifact(artifact));
-      } catch (error) {
+    for (let offset = 0; offset < ids.length; offset += EDITABLE_ARTIFACT_READ_BATCH_LIMIT) {
+      const outcomes = await this.dependencies.domain.getArtifacts({
+        scope: context.scope,
+        actor: context.actor,
+        artifactIds: ids.slice(offset, offset + EDITABLE_ARTIFACT_READ_BATCH_LIMIT),
+      });
+      for (const outcome of outcomes) {
+        if (outcome.status === "fulfilled") {
+          artifacts.push(projectArtifact(outcome.value));
+          continue;
+        }
+        const error = outcome.reason;
         if (
           error instanceof EditableArtifactNotFoundError ||
           (error instanceof EditableArtifactDomainError && error.code === "forbidden")
