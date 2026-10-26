@@ -566,25 +566,20 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             settings: eventing.modelRunSettings,
             workspaceId: input.workspaceId,
             creditModelsAllowed: deps.workspaceCreditModelsAllowed !== false,
-            // Who can turn video on, decided live: someone this turn's app
-            // actions can change the workspace's settings for, else by who
-            // sent the message.
-            actor: async () => {
-              if (
-                await turnCanChangeWorkspaceSettings(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId: turn.id,
-                })
-              ) {
-                return "settings_admin";
-              }
-              const sender =
-                turn.initiatingHumanSubjectId ??
-                (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : null);
-              return sender?.startsWith("external_user:") ? "external_person" : "member";
-            },
+            // Who can turn video on: someone who uses Opengeni through
+            // another product has no Settings page; whether this turn's app
+            // actions can change the workspace's settings is decided live.
+            external: (
+              turn.initiatingHumanSubjectId ??
+              (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : "")
+            ).startsWith("external_user:"),
+            canChangeSettings: () =>
+              turnCanChangeWorkspaceSettings(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turn.id,
+              }),
             readPolicy: () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
             resolveCredential: resolveVideoGenerationCredential,
             admit: async ({ policy, credential, toolInput, toolCallId }) => {

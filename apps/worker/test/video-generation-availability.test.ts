@@ -24,6 +24,12 @@ const offPolicy: VideoGenerationPolicy = {
   defaultModelId: null,
 };
 
+type Actor = { canChangeSettings: boolean; external: boolean };
+const ADMIN: Actor = { canChangeSettings: true, external: false };
+const MEMBER: Actor = { canChangeSettings: false, external: false };
+const EXTERNAL: Actor = { canChangeSettings: false, external: true };
+const EXTERNAL_ADMIN: Actor = { canChangeSettings: true, external: true };
+
 const managedSettings = (overrides: Parameters<typeof testSettings>[0] = {}) =>
   testSettings({
     environmentsEncryptionKey: ENCRYPTION_KEY,
@@ -39,7 +45,7 @@ describe("video generation while it is off", () => {
       workspaceId: WORKSPACE_ID,
       policy: offPolicy,
       creditModelsAllowed: true,
-      actor: "settings_admin",
+      actor: ADMIN,
     });
     expect(result).toEqual({
       schemaVersion: 1,
@@ -70,7 +76,7 @@ describe("video generation while it is off", () => {
       workspaceId: WORKSPACE_ID,
       policy: { ...offPolicy, revision: 0 },
       creditModelsAllowed: true,
-      actor: "settings_admin",
+      actor: ADMIN,
     });
     expect(result.message).toContain("a 5-second 480p clip costs $1.00 (720p: $2.01).");
     expect(result.turnOn?.body.expectedRevision).toBe(0);
@@ -82,7 +88,7 @@ describe("video generation while it is off", () => {
       workspaceId: WORKSPACE_ID,
       policy: offPolicy,
       creditModelsAllowed: true,
-      actor: "settings_admin",
+      actor: ADMIN,
     });
     expect(result.message).toBe(
       "Video generation is off in this workspace. It can run on this deployment's video gateway, at no charge to this workspace. Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again. If you can't run it, they can turn it on in Settings.",
@@ -101,7 +107,7 @@ describe("video generation while it is off", () => {
           workspaceId: WORKSPACE_ID,
           policy: offPolicy,
           creditModelsAllowed,
-          actor: "settings_admin",
+          actor: ADMIN,
         }),
       ).toEqual({
         schemaVersion: 1,
@@ -121,7 +127,7 @@ describe("video generation while it is off", () => {
         workspaceId: WORKSPACE_ID,
         policy: offPolicy,
         creditModelsAllowed: true,
-        actor: "settings_admin",
+        actor: ADMIN,
       }).message,
     ).toBe(
       "Video generation is off in this workspace, and Opengeni credits can't pay for it here. A workspace admin can turn it on in Settings with the workspace's own Vercel AI Gateway key or a connected SuperGrok account. Tell the person plainly; offer an image instead if that helps.",
@@ -135,7 +141,7 @@ describe("video generation while it is off", () => {
         workspaceId: WORKSPACE_ID,
         policy: offPolicy,
         creditModelsAllowed: true,
-        actor: "settings_admin",
+        actor: ADMIN,
       }),
     ).toEqual({
       schemaVersion: 1,
@@ -158,7 +164,7 @@ describe("video generation while it is off", () => {
           defaultModelId: SEEDANCE_2_5_MODEL_ID,
         },
         creditModelsAllowed: true,
-        actor: "settings_admin",
+        actor: ADMIN,
       }),
     ).toEqual({
       schemaVersion: 1,
@@ -172,7 +178,7 @@ describe("video generation while it is off", () => {
 
   test("only someone who can change the workspace's settings is offered the switch", () => {
     const answer = (
-      actor: "settings_admin" | "member" | "external_person",
+      actor: Actor,
       overrides: {
         settings?: ReturnType<typeof managedSettings>;
         policy?: VideoGenerationPolicy;
@@ -185,10 +191,10 @@ describe("video generation while it is off", () => {
         creditModelsAllowed: true,
         actor,
       });
-    expect(answer("settings_admin").turnOn?.body.expectedRevision).toBe(7);
+    expect(answer(ADMIN).turnOn?.body.expectedRevision).toBe(7);
 
     // A member who isn't an admin hears the price and who can turn it on.
-    expect(answer("member")).toEqual({
+    expect(answer(MEMBER)).toEqual({
       schemaVersion: 1,
       status: "unavailable",
       code: "video_generation_off",
@@ -205,7 +211,7 @@ describe("video generation while it is off", () => {
       managedSettings(),
       managedSettings({ vercelAiGatewayApiKey: undefined }),
     ]) {
-      expect(answer("external_person", { settings })).toEqual({
+      expect(answer(EXTERNAL, { settings })).toEqual({
         schemaVersion: 1,
         status: "unavailable",
         code: "video_generation_off",
@@ -214,7 +220,7 @@ describe("video generation while it is off", () => {
       });
     }
     expect(
-      answer("external_person", {
+      answer(EXTERNAL, {
         policy: {
           ...offPolicy,
           enabledModelIds: [SEEDANCE_2_5_MODEL_ID],
@@ -224,12 +230,38 @@ describe("video generation while it is off", () => {
     ).toBe(
       "Video generation is on in this workspace, but its payment method can't be used right now. A workspace admin can fix it. Tell the person plainly; offer an image instead if that helps.",
     );
-    for (const actor of ["member", "external_person"] as const) {
+    for (const actor of [MEMBER, EXTERNAL]) {
       expect(answer(actor).message).not.toContain("Ask the person");
       expect(
         answer(actor, { settings: managedSettings({ vercelAiGatewayApiKey: undefined }) }),
       ).not.toHaveProperty("turnOn");
     }
+  });
+
+  test("someone using another product who can change settings is offered it, with no Settings pointer", () => {
+    const result = videoGenerationOffResult({
+      settings: managedSettings(),
+      workspaceId: WORKSPACE_ID,
+      policy: offPolicy,
+      creditModelsAllowed: true,
+      actor: EXTERNAL_ADMIN,
+    });
+    expect(result.message).toBe(
+      "Video generation is off in this workspace. Opengeni credits can pay for it: a 5-second 480p clip costs $0.78 (720p: $1.75). Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again. If you can't run it, they can turn it on.",
+    );
+    expect(result.turnOn?.body.expectedRevision).toBe(7);
+    // Where credits can't pay, the same plain line as anyone using another product.
+    expect(
+      videoGenerationOffResult({
+        settings: managedSettings({ vercelAiGatewayApiKey: undefined }),
+        workspaceId: WORKSPACE_ID,
+        policy: offPolicy,
+        creditModelsAllowed: true,
+        actor: EXTERNAL_ADMIN,
+      }).message,
+    ).toBe(
+      "Video generation is off in this workspace. A workspace admin can turn it on. Tell the person plainly; offer an image instead if that helps.",
+    );
   });
 });
 
@@ -244,15 +276,16 @@ const prompt: GenerateVideoToolInput = { prompt: "a golden retriever on a beach 
 function adapterFor(
   readPolicy: () => Promise<VideoGenerationPolicy>,
   admit: Parameters<typeof createVideoGenerationToolAdapter>[0]["admit"],
-  actor: () => Promise<"settings_admin" | "member" | "external_person"> = async () =>
-    "settings_admin",
+  canChangeSettings: () => Promise<boolean> = async () => true,
+  options: { external?: boolean; settings?: ReturnType<typeof managedSettings> } = {},
 ) {
   const credentialReads: string[] = [];
   const adapter = createVideoGenerationToolAdapter({
-    settings: managedSettings(),
+    settings: options.settings ?? managedSettings(),
     workspaceId: WORKSPACE_ID,
     creditModelsAllowed: true,
-    actor,
+    external: options.external ?? false,
+    canChangeSettings,
     readPolicy,
     resolveCredential: async (policy) => {
       credentialReads.push(policy.fundingSource);
@@ -325,7 +358,7 @@ describe("video generation tools read live state on every call", () => {
   test("who can turn video on is read live, and only while video is off", async () => {
     let policy = offPolicy;
     let actorReads = 0;
-    let actor: "settings_admin" | "member" = "member";
+    let canChange = false;
     const { adapter } = adapterFor(
       async () => policy,
       async () => ({
@@ -335,11 +368,11 @@ describe("video generation tools read live state on every call", () => {
       }),
       async () => {
         actorReads += 1;
-        return actor;
+        return canChange;
       },
     );
     await expect(adapter.capabilities()).resolves.not.toHaveProperty("turnOn");
-    actor = "settings_admin";
+    canChange = true;
     const off = await adapter.execute(prompt, { toolCallId: "call-video" });
     if (!("turnOn" in off) || !off.turnOn) throw new Error("expected a turn-on call");
     expect(actorReads).toBe(2);
@@ -352,6 +385,49 @@ describe("video generation tools read live state on every call", () => {
     };
     await adapter.capabilities();
     expect(actorReads).toBe(2);
+  });
+
+  test("a failed permission read answers by who sent the message instead of failing", async () => {
+    const failing = async () => {
+      throw new Error("database unavailable");
+    };
+    const notAdmitted = async () => {
+      throw new Error("must not admit");
+    };
+    const member = adapterFor(async () => offPolicy, notAdmitted, failing).adapter;
+    const memberOff = await member.capabilities();
+    expect(memberOff).toMatchObject({ code: "video_generation_off" });
+    expect(memberOff).not.toHaveProperty("turnOn");
+    expect((memberOff as { message: string }).message).toContain(
+      "A workspace admin can turn it on in Settings.",
+    );
+    await expect(member.execute(prompt, { toolCallId: "call-video" })).resolves.toEqual(memberOff);
+    const external = adapterFor(async () => offPolicy, notAdmitted, failing, {
+      external: true,
+    }).adapter;
+    await expect(external.capabilities()).resolves.toMatchObject({
+      message:
+        "Video generation is off in this workspace. A workspace admin can turn it on. Tell the person plainly; offer an image instead if that helps.",
+    });
+  });
+
+  test("a deployment that can't make video never checks who can turn it on", async () => {
+    let reads = 0;
+    const { adapter } = adapterFor(
+      async () => offPolicy,
+      async () => {
+        throw new Error("must not admit");
+      },
+      async () => {
+        reads += 1;
+        return true;
+      },
+      { settings: managedSettings({ environmentsEncryptionKey: undefined }) },
+    );
+    await expect(adapter.capabilities()).resolves.toMatchObject({
+      code: "video_generation_unsupported",
+    });
+    expect(reads).toBe(0);
   });
 
   test("a credit refusal at admission is a plain result, not a tool error", async () => {

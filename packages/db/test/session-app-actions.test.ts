@@ -536,6 +536,14 @@ describe("app actions in a chat", () => {
     expect(
       await canChange(org.owner, { subjectId: org.owner, changes: "confirm", permissions: admin }),
     ).toBe(true);
+    // The same admin, but the message's recorded access leaves settings out.
+    expect(
+      await canChange(org.owner, {
+        subjectId: org.owner,
+        changes: "confirm",
+        permissions: SENT_PERMISSIONS,
+      }),
+    ).toBe(false);
     // The same admin through an embed or other read-only sign-in.
     expect(
       await canChange(org.owner, { subjectId: org.owner, changes: "none", permissions: admin }),
@@ -560,6 +568,24 @@ describe("app actions in a chat", () => {
     ).toBe(false);
     expect(
       await canChange(org.owner, { subjectId: org.owner, ...none }, org.workspaceId, true),
+    ).toBe(true);
+    // A Personal workspace's owner holds no admin grant there, but its settings
+    // are theirs: with full access, or a confirmed turn that recorded them.
+    const [own] = await shared!.admin<{ id: string }[]>`
+      select personal_workspace_id as id from organization_memberships
+      where account_id = ${org.accountId} and subject_id = ${org.member}`;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${own!.id}, ${org.accountId}) on conflict do nothing`;
+    expect(await canChange(org.member, { subjectId: org.member, ...none }, own!.id, true)).toBe(
+      true,
+    );
+    expect(
+      await canChange(
+        org.member,
+        { subjectId: org.member, changes: "confirm", permissions: admin },
+        own!.id,
+      ),
     ).toBe(true);
     // Someone using Opengeni through another product reads only, by default.
     expect(

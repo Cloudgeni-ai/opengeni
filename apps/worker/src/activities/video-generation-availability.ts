@@ -54,12 +54,18 @@ function dollars(micros: number): string {
 }
 
 /**
- * Who reads the answer, for who can turn video on: someone this turn's app
- * actions can change the workspace's settings for, anyone else in the
- * workspace, or someone who uses Opengeni through another product (who has
- * no Opengeni Settings page to be pointed to).
+ * Who reads the answer, for who can turn video on: whether this turn's app
+ * actions can change the workspace's settings, and whether the sender uses
+ * Opengeni through another product (and so has no Opengeni Settings page to
+ * be pointed to).
  */
-export type VideoGenerationActor = "settings_admin" | "member" | "external_person";
+export type VideoGenerationActor = { canChangeSettings: boolean; external: boolean };
+
+/** False when this deployment can't make a video for any workspace. */
+export function videoGenerationSupported(settings: Settings): boolean {
+  // Every funding source stores an encrypted credential with the operation.
+  return environmentsEncryptionKeyBytes(settings) !== null;
+}
 
 /**
  * What the video tools return while the workspace can't make a video: off,
@@ -78,9 +84,8 @@ export function videoGenerationOffResult(input: {
   actor: VideoGenerationActor;
 }): VideoGenerationUnavailableResult {
   const { settings, policy, actor } = input;
-  const inSettings = actor === "external_person" ? "" : " in Settings";
-  // Every funding source stores an encrypted credential with the operation.
-  if (!environmentsEncryptionKeyBytes(settings)) {
+  const inSettings = actor.external ? "" : " in Settings";
+  if (!videoGenerationSupported(settings)) {
     return unavailable(
       "video_generation_unsupported",
       `Video generation is not available on this deployment. ${PLAIN_ENDING}`,
@@ -92,16 +97,17 @@ export function videoGenerationOffResult(input: {
       `Video generation is on in this workspace, but its payment method can't be used right now. A workspace admin can fix it${inSettings}. ${PLAIN_ENDING}`,
     );
   }
-  if (actor === "external_person") {
-    return unavailable(
+  const externalOff = () =>
+    unavailable(
       "video_generation_off",
       `Video generation is off in this workspace. A workspace admin can turn it on. ${PLAIN_ENDING}`,
     );
-  }
+  if (actor.external && !actor.canChangeSettings) return externalOff();
   const creditModel = VIDEO_GENERATION_MODEL_CATALOG.find((model) =>
     videoGenerationModelSupportsFundingSource(model.modelId, "opengeni_credits"),
   );
   if (!creditModel || !settings.vercelAiGatewayApiKey || !input.creditModelsAllowed) {
+    if (actor.external) return externalOff();
     const ways = settings.supergrokSubscriptionEnabled
       ? "the workspace's own Vercel AI Gateway key or a connected SuperGrok account"
       : "the workspace's own Vercel AI Gateway key";
@@ -121,7 +127,7 @@ export function videoGenerationOffResult(input: {
   const payment = videoGenerationCreditsCharged(settings)
     ? `Opengeni credits can pay for it: a ${QUOTED_CLIP_SECONDS}-second 480p clip costs ${clipPrice("480p")} (720p: ${clipPrice("720p")}).`
     : "It can run on this deployment's video gateway, at no charge to this workspace.";
-  if (actor === "member") {
+  if (!actor.canChangeSettings) {
     return unavailable(
       "video_generation_off",
       `Video generation is off in this workspace. ${payment} A workspace admin can turn it on in Settings. ${PLAIN_ENDING}`,
@@ -129,7 +135,7 @@ export function videoGenerationOffResult(input: {
   }
   return unavailable(
     "video_generation_off",
-    `Video generation is off in this workspace. ${payment} Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again. If you can't run it, they can turn it on in Settings.`,
+    `Video generation is off in this workspace. ${payment} Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again. If you can't run it, they can turn it on${inSettings}.`,
     {
       id: "updateVideoGenerationPolicy",
       pathParameters: { workspaceId: input.workspaceId },
@@ -187,8 +193,13 @@ export function createVideoGenerationToolAdapter(deps: {
   settings: Settings;
   workspaceId: string;
   creditModelsAllowed: boolean;
-  /** Read only while video is off, to say who can turn it on. */
-  actor: () => Promise<VideoGenerationActor>;
+  /** The sender uses Opengeni through another product. */
+  external: boolean;
+  /**
+   * Whether this turn can change the workspace's settings, read only while
+   * video is off and possible here, to say who can turn it on.
+   */
+  canChangeSettings: () => Promise<boolean>;
   readPolicy: () => Promise<VideoGenerationPolicy>;
   resolveCredential: (
     policy: VideoGenerationPolicy,
@@ -200,6 +211,9 @@ export function createVideoGenerationToolAdapter(deps: {
     toolCallId: string;
   }) => Promise<VideoGenerationToolResult>;
 }): VideoGenerationToolAdapter {
+  // A failed read answers by who sent the message instead of failing the call.
+  const canChangeSettings = async () =>
+    videoGenerationSupported(deps.settings) && (await deps.canChangeSettings().catch(() => false));
   const current = async () => {
     const policy = await deps.readPolicy();
     const credential = videoGenerationPolicyEnabled(policy)
@@ -212,7 +226,7 @@ export function createVideoGenerationToolAdapter(deps: {
           workspaceId: deps.workspaceId,
           policy,
           creditModelsAllowed: deps.creditModelsAllowed,
-          actor: await deps.actor(),
+          actor: { canChangeSettings: await canChangeSettings(), external: deps.external },
         }),
       } as const;
     }
