@@ -27,24 +27,26 @@ use std::io::{BufRead as _, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use x11rb::errors::ConnectError;
-use x11rb::reexports::x11rb_protocol::parse_display::parse_display;
+use x11rb::reexports::x11rb_protocol::parse_display::{
+    parse_display, ConnectAddress, ParsedDisplay,
+};
 use x11rb::reexports::x11rb_protocol::xauth::{get_auth, Family};
 use x11rb::rust_connection::{DefaultStream, RustConnection};
 
-/// Which X server a display may be served by. It is checked before the
-/// connection setup, which carries the cookie, is sent.
+/// The address family and address of a connected X server, as x11rb reports
+/// it for the authority lookup.
+type PeerAddr = (Family, Vec<u8>);
+
+/// Which user may run the X server of a local display. It is checked before
+/// the connection setup, which carries the cookie, is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum XServerCheck {
-    /// Connect the way any X client does (abstract socket, socket file,
-    /// TCP). Used only where there is no session state to check a display
-    /// against: a host without logind.
-    #[default]
-    Unchecked,
-    /// Only the display's socket file, served by the agent's own user: the
-    /// agent's virtual desktop, or an X server the user runs themselves.
+    /// The agent's own user: the agent's virtual desktop, an X server the
+    /// user runs themselves, or Xwayland.
     AgentUser,
-    /// Only the display's socket file, served by the agent's user or by root
-    /// (a rootful X server): the screen of the user's own login session.
+    /// The agent's user or root (a rootful X server): the screen of the
+    /// user's own login session, or the display of a host without logind.
+    #[default]
     AgentUserOrRoot,
 }
 
@@ -65,15 +67,15 @@ pub struct X11Display {
 }
 
 impl X11Display {
-    /// A display with the default authority, connected without a server
-    /// check.
+    /// A display with the default authority, served by the agent's user or
+    /// root.
     #[must_use]
     pub fn named(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             authority: None,
             session: None,
-            server: XServerCheck::Unchecked,
+            server: XServerCheck::AgentUserOrRoot,
         }
     }
 
@@ -81,43 +83,22 @@ impl X11Display {
     /// file. The file is read on every connect, so a cookie the display manager
     /// rewrites at login is picked up by the next connection.
     ///
-    /// A checked display is reached only through its socket file in
+    /// A local display (`:N`) is reached only through its socket file in
     /// `/tmp/.X11-unix`, never the abstract socket name or TCP, which any
     /// local user can claim, and the server's user is verified before the
-    /// cookie is sent.
+    /// cookie is sent. A display on another host (`host:N`, as X forwarding
+    /// or a remote X server names it) is reached over TCP only.
     ///
     /// # Errors
     ///
     /// The X11 connect failure, such as a refused cookie or a server run by
     /// another user.
     pub fn connect(&self) -> Result<(RustConnection, usize), ConnectError> {
-        let allow_root = match self.server {
-            XServerCheck::Unchecked => return self.connect_unchecked(),
-            XServerCheck::AgentUser => false,
-            XServerCheck::AgentUserOrRoot => true,
-        };
         let parsed = parse_display(Some(&self.name))?;
-        let number = display_number(&self.name).ok_or(ConnectError::DisplayParsingError(
-            x11rb::errors::DisplayParsingError::Unknown,
-        ))?;
-        let path = SessionRoots::default()
-            .x11_sockets
-            .join(format!("X{number}"));
-        let stream = std::os::unix::net::UnixStream::connect(&path)?;
-        let server_uid = rustix::net::sockopt::socket_peercred(&stream)
-            .map_err(std::io::Error::from)?
-            .uid
-            .as_raw();
-        if !server_allowed(server_uid, nix::unistd::getuid().as_raw(), allow_root) {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!(
-                    "the X server of display {} runs as another user (uid {server_uid})",
-                    self.name
-                ),
-            )));
-        }
-        let (stream, (family, address)) = DefaultStream::from_unix_stream(stream)?;
+        let (stream, (family, address)) = match display_number(&self.name) {
+            Some(number) => self.local_stream(number)?,
+            None => remote_stream(&parsed)?,
+        };
         let (name, data) = match &self.authority {
             Some(authority) => authority_cookie(authority, family, &address, parsed.display),
             None => get_auth(family, &address, parsed.display).ok().flatten(),
@@ -132,32 +113,55 @@ impl X11Display {
         .map(|connection| (connection, usize::from(parsed.screen)))
     }
 
-    /// The X11 default connect order, for hosts with no session state.
-    fn connect_unchecked(&self) -> Result<(RustConnection, usize), ConnectError> {
-        let Some(authority) = &self.authority else {
-            return x11rb::connect(Some(&self.name));
-        };
-        let parsed = parse_display(Some(&self.name))?;
-        let screen = usize::from(parsed.screen);
-        let mut error = None;
-        for address in parsed.connect_instruction() {
-            match DefaultStream::connect(&address) {
-                Ok((stream, (family, peer))) => {
-                    let (name, data) = authority_cookie(authority, family, &peer, parsed.display)
-                        .unwrap_or_default();
-                    let connection = RustConnection::connect_to_stream_with_auth_info(
-                        stream, screen, name, data,
-                    )?;
-                    return Ok((connection, screen));
-                }
-                Err(failure) => error = Some(failure),
-            }
+    /// The display's socket file, once its server is known to be run by a
+    /// user this display allows.
+    fn local_stream(&self, number: u16) -> Result<(DefaultStream, PeerAddr), ConnectError> {
+        let path = SessionRoots::default()
+            .x11_sockets
+            .join(format!("X{number}"));
+        let stream = std::os::unix::net::UnixStream::connect(&path)?;
+        let server_uid = rustix::net::sockopt::socket_peercred(&stream)
+            .map_err(std::io::Error::from)?
+            .uid
+            .as_raw();
+        let allow_root = self.server == XServerCheck::AgentUserOrRoot;
+        if !server_allowed(server_uid, nix::unistd::getuid().as_raw(), allow_root) {
+            return Err(ConnectError::IoError(other_users_server(
+                &self.name, server_uid,
+            )));
         }
-        Err(error.map_or(
-            ConnectError::DisplayParsingError(x11rb::errors::DisplayParsingError::Unknown),
-            ConnectError::IoError,
-        ))
+        Ok(DefaultStream::from_unix_stream(stream)?)
     }
+}
+
+/// The first TCP address of a display on another host that answers.
+fn remote_stream(parsed: &ParsedDisplay) -> Result<(DefaultStream, PeerAddr), ConnectError> {
+    let mut error = None;
+    for address in parsed
+        .connect_instruction()
+        .filter(|address| matches!(address, ConnectAddress::Hostname(..)))
+    {
+        match DefaultStream::connect(&address) {
+            Ok(connected) => return Ok(connected),
+            Err(failure) => error = Some(failure),
+        }
+    }
+    Err(error.map_or(
+        ConnectError::DisplayParsingError(x11rb::errors::DisplayParsingError::Unknown),
+        ConnectError::IoError,
+    ))
+}
+
+/// The refusal of a display whose X server runs as a user it may not, with
+/// what makes it work.
+fn other_users_server(display: &str, server_uid: u32) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        format!(
+            "the X server of display {display} runs as another user (uid {server_uid}); run the \
+             agent as that user, or start it with --virtual-desktop"
+        ),
+    )
 }
 
 /// Whether an X server run by `server_uid` may receive this agent's cookie.
@@ -320,7 +324,7 @@ pub(crate) fn display_candidates(agent: &AgentIdentity, roots: &SessionRoots) ->
         name: name.clone(),
         authority: agent.xauthority.clone(),
         session: None,
-        server: XServerCheck::Unchecked,
+        server: XServerCheck::AgentUserOrRoot,
     });
     // The agent's own virtual desktop is the only display it may use: falling
     // back to the person's screen would surprise them. The agent started its
@@ -1244,6 +1248,20 @@ mod tests {
     }
 
     #[test]
+    fn a_server_run_by_another_user_says_what_makes_it_work() {
+        let fixture = Fixture::new();
+        std::fs::remove_dir_all(fixture.root.path().join("run/sessions")).unwrap();
+        let found = display_candidates(&agent(), &fixture.roots());
+        let error = other_users_server(":0", 1234).to_string();
+        assert_eq!(
+            unavailable_reason(&found, ":0", &error),
+            "No graphical desktop is reachable: display :0 could not be opened (the X server of \
+             display :0 runs as another user (uid 1234); run the agent as that user, or start it \
+             with --virtual-desktop)."
+        );
+    }
+
+    #[test]
     fn only_the_agents_user_or_root_for_its_own_session_may_serve_a_checked_display() {
         assert!(server_allowed(1000, 1000, false));
         assert!(server_allowed(1000, 1000, true));
@@ -1281,6 +1299,37 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    fn assert_no_client(listener: &std::os::unix::net::UnixListener, what: impl std::fmt::Display) {
+        assert_eq!(
+            listener.accept().map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "{what}"
+        );
+    }
+
+    /// What `listener` receives from a client that connects to the socket
+    /// `path` in X11's default order and sends `cookie` in its setup.
+    fn default_order_sends(
+        listener: &std::os::unix::net::UnixListener,
+        path: &Path,
+        cookie: &'static [u8],
+    ) -> Vec<u8> {
+        let address = ConnectAddress::Socket(path.to_string_lossy().into_owned());
+        let client = std::thread::spawn(move || {
+            let (stream, _) = DefaultStream::connect(&address).unwrap();
+            RustConnection::connect_to_stream_with_auth_info(
+                stream,
+                0,
+                MIT_MAGIC_COOKIE_1.to_vec(),
+                cookie.to_vec(),
+            )
+            .is_ok()
+        });
+        let received = first_client_bytes(listener, cookie);
+        assert!(!client.join().unwrap());
+        received
     }
 
     /// What the first client to reach `listener` sends, up to `needle`.
@@ -1392,20 +1441,33 @@ mod tests {
             },
         ] {
             assert!(display.connect().is_err());
-            assert_eq!(
-                squatter.accept().map(|_| ()).unwrap_err().kind(),
-                std::io::ErrorKind::WouldBlock,
-                "{display:?} reached the abstract listener"
+            assert_no_client(
+                &squatter,
+                format!("{display:?} reached the abstract listener"),
             );
         }
-        // The default X11 order would have handed the cookie to the listener.
-        let unchecked = X11Display {
-            server: XServerCheck::Unchecked,
-            ..display
+        // So is the display of a host without logind, which root may serve.
+        let no_logind = SessionRoots {
+            logind: fixture.root.path().join("absent"),
+            ..roots
         };
-        let client = std::thread::spawn(move || unchecked.connect().is_ok());
-        let received = first_client_bytes(&squatter, cookie);
-        assert!(!client.join().unwrap());
+        let found = display_candidates(&agent, &no_logind);
+        assert_eq!(found.displays[0].server, XServerCheck::AgentUserOrRoot);
+        assert!(found.displays[0].connect().is_err());
+        assert_no_client(
+            &squatter,
+            "the display of a host without logind reached the abstract listener",
+        );
+        // Typing's keymap lookup on a layout display (Xwayland) is checked the
+        // same way and falls back to unchecked keysyms.
+        assert_eq!(
+            crate::linux::linux_layout_text_keysyms(Some(&format!(":{number}")), "a").unwrap(),
+            vec![0x61]
+        );
+        assert_no_client(&squatter, "the keymap lookup reached the abstract listener");
+        // X11's default order (abstract name first) would have handed the
+        // cookie to the listener.
+        let received = default_order_sends(&squatter, &path, cookie);
         assert!(received
             .windows(cookie.len())
             .any(|window| window == cookie));
