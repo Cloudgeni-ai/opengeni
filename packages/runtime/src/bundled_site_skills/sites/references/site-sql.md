@@ -22,11 +22,13 @@ Site HTML never sends SQL:
    `audience`: `everyone` (guests of public Sites too), `signed_in` (default;
    viewers signed in as a person) or `managers` (never from the page).
 
-`:viewer` (the viewer's stable id, such as `user:<id>` or `guest:<visitor>`),
-`:viewer_kind` and `:viewer_signed_in` are bound by the host from the signed-in
-viewer. Use `:viewer` for ownership and per-person rows; never take a person's
-identity from a page parameter, and never pass `viewer*` params from the page
-(they are refused):
+`:viewer` (the viewer's stable, opaque id: for a person, `user:` followed by
+their subject id, such as `user:user:4f0c2a9e-7b1d-4c3a-9e5f-2a6b8c1d0e3f`, or
+`guest:<visitor>` for a guest), `:viewer_kind` and `:viewer_signed_in` are
+bound by the host from the signed-in viewer. Use `:viewer` for ownership and
+per-person rows instead of building an id; never take a person's identity
+from a page parameter, and never pass `viewer*` params from the page (they are
+refused):
 
 ```sql
 -- cast_vote, audience signed_in
