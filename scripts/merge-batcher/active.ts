@@ -24,7 +24,7 @@ import {
   type FollowupPull,
   type BatchReservation,
 } from "./model";
-import { latestRun, infrastructureRetryReason } from "./planner";
+import { latestRun, infrastructureRetryReason, unseenRunHoldsSlot } from "./planner";
 import { observeDurableUncertainty, writeResolved } from "./cycle-outcome";
 import { proveHeadRefresh } from "./head-refresh";
 
@@ -407,10 +407,7 @@ export class GitHubActiveExecutor implements Executor {
         (item) => item.workflow === this.config.workflow && item.status !== "completed",
       ))
         reservations.push({ branch, headSha: sha, runId: run.id });
-      if (
-        !latestRun(candidate, this.config) &&
-        ledger.missingRuns[manifest.batchId]?.status !== "released"
-      )
+      if (unseenRunHoldsSlot(candidate, ledger, this.config))
         reservations.push({ branch, headSha: sha });
     }
     return reservations;

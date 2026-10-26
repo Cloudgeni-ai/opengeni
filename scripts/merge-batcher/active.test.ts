@@ -2709,6 +2709,13 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       old = await f.publish();
     f.verdict(old);
     expect((await f.controller().step()).action.kind).toBe("land");
+    // A settled batch whose finish the ledger never recorded (for example one
+    // settled before stages were kept) has no terminal evidence of its own.
+    await f.seed((ledger) => {
+      ledger.stages[old.batchId]!.landedAt = null;
+      ledger.stages[old.batchId]!.ciCompletedAt = null;
+    });
+    await rm(f.controller().journal.path, { force: true });
     f.api.workflowRuns = [];
     f.api.cache.get = async () => null; // Disposable provider cache is unavailable after restart.
     f.change();
@@ -2763,6 +2770,43 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       recovered.ledger.missingRuns[old.batchId]?.recovery,
     );
     expect((await f.state()).ledger.ejected).toEqual([]);
+  });
+  test("a cold cache never turns a batch the ledger records as landed into a held Batch slot", async () => {
+    const f = await fixture(),
+      old = await f.publish();
+    f.verdict(old);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect((await f.state()).ledger.stages[old.batchId]?.landedAt).not.toBeNull();
+    // Restart on a fresh host: run history and the local journal are gone.
+    await rm(f.controller().journal.path, { force: true });
+    f.api.workflowRuns = [];
+    f.api.cache.get = async () => null;
+    f.change();
+    const next = await f.controller().step();
+    expect(next.action.kind).toBe("build");
+    if (next.action.kind === "build") expect(next.action.publish).toBe(true);
+    expect((await f.state()).ledger.missingRuns[old.batchId]).toBeUndefined();
+  });
+  test("an earlier missing-run hold on a batch the ledger records as landed is dropped", async () => {
+    const f = await fixture(),
+      old = await f.publish();
+    f.verdict(old);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    await f.seed((ledger) => {
+      ledger.missingRuns[old.batchId] = {
+        firstSeenAt: NOW,
+        status: "abandoned",
+        updatedAt: NOW,
+        kind: "historical-run-history",
+      };
+    });
+    f.api.workflowRuns = [];
+    f.api.cache.get = async () => null;
+    f.change();
+    const next = await f.controller().step();
+    expect(next.action.kind).toBe("build");
+    if (next.action.kind === "build") expect(next.action.publish).toBe(true);
+    expect((await f.state()).ledger.missingRuns[old.batchId]).toBeUndefined();
   });
   test("failed landing does not record fabricated measured landed time", async () => {
     const f = await fixture(),

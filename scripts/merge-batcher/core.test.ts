@@ -35,7 +35,13 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { fifo, plan, infrastructureRetryReason } from "./planner";
+import {
+  fifo,
+  plan,
+  infrastructureRetryReason,
+  settledCiFinished,
+  unseenRunHoldsSlot,
+} from "./planner";
 import { classifyExit, verifyResult } from "./result";
 import { QueueOnlyPublisher, ShadowCiController } from "./shadow-ci";
 import { ObservationJournal, latencySummary } from "./journal";
@@ -494,6 +500,51 @@ describe("readiness and deterministic planning", () => {
     expect(next.kind).toBe("build");
     if (next.kind === "build") expect(next.publish).toBe(false);
     expect(child.runs[0]!.status).toBe("in_progress");
+  });
+  test("settled batches with a recorded finish never hold the Batch slot when their history is unloaded", () => {
+    const stage = (batchId: string) => ({
+      batchId,
+      readyAt: NOW,
+      readyBindings: [],
+      builtAt: NOW,
+      publishedAt: NOW,
+      ciStartedAt: NOW,
+      ciCompletedAt: null as string | null,
+      landedAt: null as string | null,
+      observedAt: NOW,
+    });
+    const landed = candidate([pull(1)]);
+    const dropped = candidate([pull(2)]);
+    const unknown = candidate([pull(3)]);
+    const o = observation([pull(4)], [landed, dropped, unknown]);
+    o.ledger.landed = [landed.manifest.batchId];
+    o.ledger.invalidated = [dropped.manifest.batchId, unknown.manifest.batchId];
+    o.ledger.stages = {
+      [landed.manifest.batchId]: { ...stage(landed.manifest.batchId), landedAt: NOW },
+      [dropped.manifest.batchId]: { ...stage(dropped.manifest.batchId), ciCompletedAt: NOW },
+      // Invalidated while its CI was still running: no recorded finish.
+      [unknown.manifest.batchId]: stage(unknown.manifest.batchId),
+    };
+    expect(settledCiFinished(o.ledger, landed.manifest.batchId)).toBe(true);
+    expect(settledCiFinished(o.ledger, dropped.manifest.batchId)).toBe(true);
+    expect(unseenRunHoldsSlot(landed, o.ledger, cfg)).toBe(false);
+    expect(unseenRunHoldsSlot(dropped, o.ledger, cfg)).toBe(false);
+    expect(unseenRunHoldsSlot(unknown, o.ledger, cfg)).toBe(true);
+    // Only the batch whose CI may still be running holds a slot.
+    expect(plan(o, { ...cfg, maxInflight: 1 })).toMatchObject({ kind: "build", publish: false });
+    o.ledger.stages[unknown.manifest.batchId]!.ciCompletedAt = NOW;
+    expect(plan(o, { ...cfg, maxInflight: 1 })).toMatchObject({ kind: "build", publish: true });
+
+    // A retry requested after the recorded finish may be running again.
+    o.ledger.retries[dropped.manifest.batchId] = {
+      runId: 100,
+      fromAttempt: 1,
+      requestedAt: new Date(Date.parse(NOW) + 60_000).toISOString(),
+    };
+    expect(settledCiFinished(o.ledger, dropped.manifest.batchId)).toBe(false);
+    expect(plan(o, { ...cfg, maxInflight: 1 })).toMatchObject({ kind: "build", publish: false });
+    // A live batch is never settled, whatever its stage says.
+    expect(settledCiFinished(o.ledger, candidate([pull(5)]).manifest.batchId)).toBe(false);
   });
   test("multiple innocent singleton failures park without inventing a shared fingerprint", () => {
     const ready = [pull(5436), pull(5439), pull(5440), pull(5500)];
