@@ -4977,7 +4977,11 @@ export type PreparedAgentTools = {
 export type LocalMcpServerRegistration = {
   id: string;
   server: MCPServer;
-  /** Exact connection identity frozen while constructing the local adapter. */
+  /**
+   * Exact connection identity frozen while constructing the local adapter. It is
+   * the approval identity only for a connector-backed (`connectionRef`) server;
+   * a server without one is approved under its synthetic session-MCP identity.
+   */
   resolvedConnectionId?: string;
   /** Metadata-only authority revision bound into current-human approvals. */
   approvalAuthority?: unknown;
