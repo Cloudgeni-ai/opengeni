@@ -876,6 +876,7 @@ export function requireInitializedState(stateSha: string | null, ledger: Ledger)
   }
 }
 export interface Observation {
+  conflicts?: { number: number; headSha: string }[];
   baseCI?: BaseCiEvidence;
   now: string;
   baseSha: string;

@@ -499,12 +499,17 @@ export class GitHubReader {
     }
     throw new Error("Timeline pagination incomplete");
   }
-  async ready(): Promise<{ ready: Pull[]; excluded: { number: number; reason: string }[] }> {
+  async ready(): Promise<{
+    ready: Pull[];
+    excluded: { number: number; reason: string }[];
+    conflicts?: { number: number; headSha: string }[];
+  }> {
     const pulls = await this.pages(
       `pulls?state=open&base=${encodeURIComponent(this.config.baseBranch)}`,
     );
     const ready: Pull[] = [],
       excluded: { number: number; reason: string }[] = [];
+    const conflicts: { number: number; headSha: string }[] = [];
     const rules = await this.pages(`rules/branches/${encodeURIComponent(this.config.baseBranch)}`);
     if (!Array.isArray(rules)) throw new Error("Effective branch rules unavailable");
     if (rules.some((r) => ["workflows", "required_workflows"].includes(r.type)))
@@ -547,6 +552,25 @@ export class GitHubReader {
       const autoMerge = pull.auto_merge != null;
       if (!queueReady && !autoMerge) {
         excluded.push({ number, reason: "auto-merge or queue-ready required" });
+        continue;
+      }
+      // Listing responses do not reliably include mergeability. Observe the
+      // exact marked-ready head before fast-check admission can hide a conflict.
+      const detail = await this.get(`pulls/${number}`);
+      if (
+        !Array.isArray(detail) &&
+        detail.state === "open" &&
+        !detail.draft &&
+        detail.mergeable === false &&
+        detail.head?.sha === pull.head?.sha &&
+        /^[a-f0-9]{40}$/.test(detail.head.sha) &&
+        detail.base?.ref === this.config.baseBranch &&
+        (detail.auto_merge != null ||
+          (Array.isArray(detail.labels) &&
+            detail.labels.some((label: Json) => label.name === "queue-ready")))
+      ) {
+        conflicts.push({ number, headSha: detail.head.sha });
+        excluded.push({ number, reason: "head conflicts with main" });
         continue;
       }
       let events: ReadyEvent[];
@@ -616,7 +640,7 @@ export class GitHubReader {
       if (admission.ready) ready.push(admission.ready);
       else excluded.push({ number, reason: admission.reason });
     }
-    return { ready, excluded };
+    return { ready, excluded, conflicts };
   }
   async openPullNumbers(): Promise<number[]> {
     const pulls = await this.pages("pulls?state=open");

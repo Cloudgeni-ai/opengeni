@@ -335,9 +335,10 @@ async function fixture() {
     beforeCreate: (() => void) | null = null;
     followups: (FollowupPull & { sourceRepository: string; sourceRef: string; body: string })[] =
       [];
-    override async ready() {
+    conflicts: { number: number; headSha: string }[] = [];
+    override async ready(): ReturnType<GitHubReader["ready"]> {
       this.onReady?.();
-      return { ready: structuredClone(this.pulls), excluded: [] };
+      return { ready: structuredClone(this.pulls), excluded: [], conflicts: this.conflicts };
     }
     override async runs(_manifest: Manifest, branch: string) {
       return structuredClone(this.workflowRuns.filter((r) => r.branch === branch));
@@ -1339,6 +1340,39 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(f.api.calls).toHaveLength(1);
     },
   );
+  test("main conflict comments are durable once per head, including restart and changed head", async () => {
+    const f = await fixture();
+    f.api.pulls = [];
+    f.api.conflicts = [{ number: 1, headSha: "a".repeat(40) }];
+    await f.controller().step();
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    await f.controller().step();
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(1);
+    const effects = Object.values((await f.state()).ledger.effects);
+    expect(effects[0]?.kind).toBe("comment");
+    expect(JSON.stringify(effects)).toContain("batcher-effect:");
+    expect(JSON.stringify(effects)).toContain("Rebase or merge main");
+    f.api.conflicts = [{ number: 1, headSha: "b".repeat(40) }];
+    await f.controller().step();
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(2);
+    // The predecessor-only path shares the head key, not its ready-event key.
+    f.api.conflicts = [];
+    await f.seed((ledger) =>
+      ledger.ejected.push({
+        pull: f.makePull("b".repeat(40)),
+        batchId: "c".repeat(64),
+        reason: "merge-tree conflict against candidate predecessor",
+        announced: false,
+      }),
+    );
+    await f.controller().step();
+    await f.executor().maintain();
+    expect(f.api.calls).toHaveLength(2);
+    expect((await f.state()).ledger.ejected[0]?.announced).toBe(true);
+  });
   test("crash after durable claim blocks boundedly; explicit CAS recovery resumes", async () => {
     const f = await fixture();
     await f.seed((l) => {
@@ -1546,12 +1580,18 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
       f.verdict(m);
       // Main-CI observation failure must not become an indirect admission gate.
+      f.api.conflicts = [{ number: 99, headSha: "a".repeat(40) }];
       f.api.baseCI = async () => {
         throw Error("full main CI unavailable");
       };
       expect((await f.controller().step()).action.kind).toBe("land");
       expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
       expect((await f.state()).ledger.landed).toContain(m.batchId);
+      expect(
+        Object.values((await f.state()).ledger.effects).some(
+          (effect) => effect.kind === "comment" && effect.number === 99,
+        ),
+      ).toBe(true);
       expect(f.api.comments).toHaveLength(1);
       expect(f.api.comments[0]).toContain("landed the exact tested PR head");
       expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);

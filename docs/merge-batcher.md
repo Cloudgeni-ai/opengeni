@@ -720,6 +720,11 @@ failure fingerprints. Matching job names, exit codes or free-text reasons cannot
 establish the same failure. No attribution or landing hold is fabricated from them.
 Failed speculative descendants may be invalidated, but running CI is never cancelled.
 Main advancement or readiness changes still invalidate unparked candidates normally.
+Marked-ready PRs with a confirmed exact-head conflict against main receive an
+actionable comment even when fast checks have not passed. Unknown mergeability
+does not imply conflict. Main and predecessor-conflict notices share the durable
+comment-effect key for that PR head, so readiness toggles or controller restarts
+do not repeat the notice; a new conflicting head can receive a new notice.
 Merge-tree conflicts retain their distinct
 conflict reason and comment path, not a fabricated CI failure. Legacy receipt
 `retryable` flags do not override the controller's single exact-attempt retry policy.

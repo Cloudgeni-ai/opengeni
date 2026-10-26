@@ -242,7 +242,20 @@ export class GitHubActiveExecutor implements Executor {
     await this.push([{ ref: this.writer.stateRef, expected: state.sha, next: sha }]);
     return { sha, ledger, main: state.main };
   }
-  prepareLedger(ledger: Ledger, effect: Effect, now: string): Ledger {
+  prepareLedger(
+    ledger: Ledger,
+    effect: Effect,
+    now: string,
+    conflicts: { number: number; headSha: string }[] = [],
+  ): Ledger {
+    for (const conflict of conflicts)
+      addComment(
+        ledger,
+        `conflict:${conflict.headSha}`,
+        conflict.number,
+        `Not queued: this PR conflicts with main at head ${conflict.headSha}. Rebase or merge main into it and push; it re-queues automatically once required checks pass.`,
+        now,
+      );
     if (effect.kind === "publish")
       for (const pull of effect.manifest.pulls)
         addComment(
@@ -295,7 +308,13 @@ export class GitHubActiveExecutor implements Executor {
       );
     }
     if (effect.kind === "announce") {
-      const id = addComment(ledger, `ejection:${effect.key}`, effect.number, effect.body, now);
+      const id = addComment(
+        ledger,
+        effect.commentKey ?? `ejection:${effect.key}`,
+        effect.number,
+        effect.body,
+        now,
+      );
       ledger.ejected = ledger.ejected.map((item) =>
         bindingKey(item.pull) === effect.key
           ? { ...item, announced: ledger.effects[id]!.status === "done", effectId: id }
