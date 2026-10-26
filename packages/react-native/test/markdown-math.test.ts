@@ -1,6 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { prepareMathMarkdown } from "@opengeni/react/markdown-math";
-import { createMathEngine } from "../src/timeline/math-engine";
+import type { MathEngine } from "../src/timeline/math-engine";
 import { markdownItMath } from "../src/timeline/markdown-math-parser";
 
 type Node = { type: string; content?: string; children: Node[] };
@@ -54,7 +54,19 @@ describe("native math parsing", () => {
 });
 
 describe("native math typesetting", () => {
-  const typeset = createMathEngine();
+  let typeset: MathEngine;
+  beforeAll(async () => {
+    // React Native has no `document`; MathJax reads it while loading, and other test
+    // files in this suite leave a partial one behind.
+    const scope = globalThis as { document?: unknown };
+    const saved = scope.document;
+    delete scope.document;
+    try {
+      typeset = (await import("../src/timeline/math-engine")).createMathEngine();
+    } finally {
+      if (saved !== undefined) scope.document = saved;
+    }
+  });
 
   test("TeX becomes an SVG with its size and baseline", () => {
     const math = typeset("\\frac{a}{b}", false);
