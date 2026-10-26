@@ -791,8 +791,11 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
  */
 export function recordQueuedTurnHoldGauges(
   observability: Observability,
-  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary>,
+  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary> | null,
 ): void {
+  // Null until a later migration grants 0988's withheld runtime EXECUTE:
+  // publish nothing rather than a misleading all-zero split.
+  if (!summary) return;
   for (const hold of QUEUED_TURN_HOLDS) {
     const entry = summary[hold];
     observability.setGauge({

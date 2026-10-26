@@ -54,4 +54,16 @@ describe("queued turn hold metrics", () => {
     expect(metrics).toMatch(/opengeni_turns_queued_by_hold\{[^}]*hold="ready"[^}]*\} 0/);
     expect(metrics).toMatch(/opengeni_turns_queued_oldest_age_seconds\{[^}]*hold="ready"[^}]*\} 0/);
   });
+
+  test("publishes no split while the summary is not granted", async () => {
+    const observability = createObservability(testSettings(), { component: "worker-control" });
+
+    recordTurnsQueuedGauge(observability, 7);
+    recordQueuedTurnHoldGauges(observability, null);
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_turns_queued\{[^}]*\} 7/);
+    expect(metrics).not.toMatch(/^opengeni_turns_queued_by_hold\{/m);
+    expect(metrics).not.toMatch(/^opengeni_turns_queued_oldest_age_seconds\{/m);
+  });
 });

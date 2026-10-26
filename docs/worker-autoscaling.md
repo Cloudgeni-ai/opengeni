@@ -96,6 +96,9 @@ Pause, a failed turn or a required human action. Use
 `opengeni_turns_queued_by_hold{hold="ready"}` (and its
 `opengeni_turns_queued_oldest_age_seconds`) for prompts that are only waiting
 for dispatch; an old `ready` prompt is a stranded queue, not missing capacity.
+The split appears only after the follow-up migration grants the runtime EXECUTE
+that 0988 defers; until then only the total is published. Prompts from a
+non-owner waiting for a personal machine's owner still count as `ready`.
 The producer contract assumes one turn SDK poller for each registry/queue/pod
 UID, as in the normal chart Deployment. Embedded hosts running multiple
 same-identity workers must aggregate their SDK occupancy first; scrape

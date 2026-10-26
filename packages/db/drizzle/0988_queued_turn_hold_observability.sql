@@ -19,13 +19,19 @@
 -- waiting_capacity, cancelled, behind_active_turn, ready. The existing
 -- count_queued_turns() is unchanged, so pre-0988 workers keep working.
 --
+-- The pause check is evaluated once per candidate session, never per queued
+-- turn: a running maximum over each ancestry path finds the newest
+-- descendant-side override for every pause row, and the workspace pause uses a
+-- single anti-join. Failed sessions keep their queues indefinitely, so the
+-- cost must stay near linear in the backlog.
+--
 -- The function is created with its runtime EXECUTE withheld for one release
 -- (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): the previous release
 -- does not know it and rejects a runtime grant on an unknown SECURITY DEFINER
 -- routine. Until a later migration grants it, the control worker checks the
 -- grant first and does not publish the split.
 
-CREATE OR REPLACE FUNCTION opengeni_private.summarize_queued_turns_by_hold()
+CREATE FUNCTION opengeni_private.summarize_queued_turns_by_hold()
 RETURNS TABLE (
   hold text,
   count bigint,
@@ -93,42 +99,42 @@ AS $summarize_queued_turns_by_hold$
     WHERE child.parent_session_id IS NOT NULL
       AND NOT child.cycle
       AND child.depth < 10000
-  ), effectively_paused AS (
+  ), ancestry_overrides AS (
+    -- Newest override on a strictly deeper (descendant-side) row of the path.
+    SELECT
+      path_row.*,
+      max(path_row.subtree_run_override_revision) OVER (
+        PARTITION BY path_row.candidate_session_id
+        ORDER BY path_row.depth
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+      ) AS descendant_override_revision
+    FROM ancestry path_row
+  ), effectively_paused AS MATERIALIZED (
+    -- A session pause is defeated only by a strictly newer override on a
+    -- strictly deeper (descendant-side) path row.
+    SELECT pause.candidate_session_id AS session_id
+    FROM ancestry_overrides pause
+    WHERE NOT pause.cycle
+      AND pause.direct_control_state = 'paused'
+      AND pause.direct_pause_revision IS NOT NULL
+      AND (
+        pause.descendant_override_revision IS NULL
+        OR pause.descendant_override_revision <= pause.direct_pause_revision
+      )
+    UNION
+    -- A workspace pause is defeated by any newer override on the path.
     SELECT candidate.session_id
     FROM candidate_sessions candidate
-    WHERE
-      -- A session pause is defeated only by a strictly newer override on a
-      -- strictly deeper (descendant-side) path row.
-      EXISTS (
-        SELECT 1
-        FROM ancestry pause
-        WHERE pause.candidate_session_id = candidate.session_id
-          AND NOT pause.cycle
-          AND pause.direct_control_state = 'paused'
-          AND pause.direct_pause_revision IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM ancestry override_row
-            WHERE override_row.candidate_session_id = candidate.session_id
-              AND override_row.depth < pause.depth
-              AND override_row.subtree_run_override_revision > pause.direct_pause_revision
-          )
-      )
-      -- A workspace pause is defeated by any newer override on the path.
-      OR EXISTS (
-        SELECT 1
-        FROM workspace_inference_controls control_row
-        WHERE control_row.workspace_id = candidate.workspace_id
-          AND control_row.workspace_state = 'paused'
-          AND NOT EXISTS (
-            SELECT 1
-            FROM ancestry override_row
-            WHERE override_row.candidate_session_id = candidate.session_id
-              AND control_row.workspace_pause_revision IS NOT NULL
-              AND override_row.subtree_run_override_revision
-                > control_row.workspace_pause_revision
-          )
-      )
+    JOIN workspace_inference_controls control_row
+      ON control_row.workspace_id = candidate.workspace_id
+     AND control_row.workspace_state = 'paused'
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM ancestry override_row
+      WHERE override_row.candidate_session_id = candidate.session_id
+        AND control_row.workspace_pause_revision IS NOT NULL
+        AND override_row.subtree_run_override_revision > control_row.workspace_pause_revision
+    )
   ), classified AS (
     SELECT
       CASE

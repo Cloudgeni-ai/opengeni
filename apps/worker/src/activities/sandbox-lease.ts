@@ -3632,9 +3632,9 @@ async function refreshQueueLeaseAndCreditGauges(
     })(),
     (async () => {
       try {
-        // Null until a later migration grants 0988's withheld runtime EXECUTE.
-        const holds = await summarizeQueuedTurnsByHold(db);
-        if (holds) recordQueuedTurnHoldGauges(observability, holds);
+        // Publishes nothing until a later migration grants 0988's withheld
+        // runtime EXECUTE (the summary is null).
+        recordQueuedTurnHoldGauges(observability, await summarizeQueuedTurnsByHold(db));
       } catch (error) {
         observability.warn("sandbox reaper: queued-turn hold gauge refresh failed", {
           error: error instanceof Error ? error.message : String(error),

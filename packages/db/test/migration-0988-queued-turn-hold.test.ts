@@ -10,6 +10,7 @@ import {
   countQueuedTurns,
   createDb,
   createSession,
+  enqueueSessionTurn,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
@@ -211,6 +212,123 @@ describe("queued turns classified by what holds them (migration 0988)", () => {
     });
     expect(claimed.action).toBe("claimed");
     expect((await counts()).ready).toBe(all.ready - 1);
+  }, 180_000);
+
+  test("keeps the canonical override depth rules and finds prompts behind a claimed turn", async () => {
+    await grantDeferredRuntimeAccess(shared.admin);
+    const delta = async (before: Record<QueuedTurnHold, number>) => {
+      const after = await counts();
+      return Object.fromEntries(
+        QUEUED_TURN_HOLDS.map((hold) => [hold, after[hold] - before[hold]]),
+      ) as Record<QueuedTurnHold, number>;
+    };
+
+    // An ancestor Resume issued after a descendant Pause is not descendant-side,
+    // so the child's own Pause still holds its prompt.
+    let before = await counts();
+    const ancestorResume = await fixture();
+    await sessionControl(ancestorResume, ancestorResume.child.id, "pause");
+    await sessionControl(ancestorResume, ancestorResume.root.id, "pause");
+    await sessionControl(ancestorResume, ancestorResume.root.id, "resume");
+    expect(await delta(before)).toEqual(expected({ ready: 1, paused: 1 }));
+
+    // A newer session Resume overrides an active workspace Pause for that
+    // session's subtree only.
+    before = await counts();
+    const sessionResume = await fixture();
+    await workspaceControl(sessionResume, "pause");
+    expect(await delta(before)).toEqual(expected({ paused: 2 }));
+    await sessionControl(sessionResume, sessionResume.child.id, "resume");
+    expect(await delta(before)).toEqual(expected({ ready: 1, paused: 1 }));
+    await workspaceControl(sessionResume, "resume");
+
+    // A real claim makes the initial turn active; a later prompt waits behind it.
+    before = await counts();
+    const active = await fixture();
+    const claimed = await claimSessionWorkForAttempt(client.db, active.workspaceId, {
+      sessionId: active.root.id,
+      workflowId: `session-${active.root.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    await enqueueSessionTurn(client.db, {
+      accountId: active.grant.accountId,
+      workspaceId: active.workspaceId,
+      sessionId: active.root.id,
+      triggerEventId: crypto.randomUUID(),
+      temporalWorkflowId: `session-${active.root.id}`,
+      source: "api",
+      prompt: "follow-up",
+      resources: [],
+      tools: [],
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      sandboxBackend: "none",
+      metadata: {},
+      initiator: { kind: "service", subjectId: "host" },
+    });
+    expect(await delta(before)).toEqual(expected({ ready: 1, behind_active_turn: 1 }));
+  }, 180_000);
+
+  test("classifies a large backlog without rescanning pauses per queued turn", async () => {
+    // The first form evaluated the pause check per queued turn and per
+    // candidate session, so 500 sessions already took tens of seconds. Clone
+    // one idle session with its queued prompt into thousands of sessions, a
+    // third of them directly paused, and require the summary to stay fast.
+    await grantDeferredRuntimeAccess(shared.admin);
+    const template = await fixture();
+    const before = await counts();
+    const clones = 3_000;
+    await shared.admin.begin(async (tx) => {
+      // Bulk fixture only: skip row triggers and FK triggers for the clones.
+      // LATERAL evaluates each record once; `(f()).*` would call it per column.
+      await tx`set local session_replication_role = replica`;
+      await tx`
+        with source as (
+          select to_jsonb(s) as row from sessions s
+          where s.workspace_id = ${template.workspaceId} and s.id = ${template.root.id}
+        ), clone as (
+          select gen_random_uuid() as id, n from generate_series(1, ${clones}::integer) n
+        ), inserted as (
+          insert into sessions
+          select cloned.*
+          from source, clone, lateral jsonb_populate_record(null::sessions, source.row || jsonb_build_object(
+            'id', clone.id,
+            'create_idempotency_key', null,
+            'parent_session_id', null,
+            'control_version', greatest((source.row->>'control_version')::bigint, 1),
+            'direct_control_state',
+              case when clone.n % 3 = 0 then 'paused' else source.row->>'direct_control_state' end,
+            'direct_pause_revision',
+              case when clone.n % 3 = 0 then to_jsonb(1) else source.row->'direct_pause_revision' end
+          )) cloned
+          returning id
+        )
+        insert into session_turns
+        select cloned.*
+        from inserted, session_turns turn,
+          lateral jsonb_populate_record(null::session_turns, to_jsonb(turn) || jsonb_build_object(
+            'id', gen_random_uuid(),
+            'session_id', inserted.id
+          )) cloned
+        where turn.workspace_id = ${template.workspaceId}
+          and turn.session_id = ${template.root.id}
+          and turn.status = 'queued'
+      `;
+    });
+    const started = performance.now();
+    const after = await counts();
+    const elapsedMs = performance.now() - started;
+    expect(after.ready - before.ready).toBe(clones - clones / 3);
+    expect(after.paused - before.paused).toBe(clones / 3);
+    expect(Object.values(after).reduce((sum, value) => sum + value, 0)).toBe(
+      await countQueuedTurns(client.db),
+    );
+    // Generous for loaded CI hosts; the per-turn form needs minutes here.
+    expect(elapsedMs).toBeLessThan(20_000);
   }, 180_000);
 
   test("keeps the least-privilege content-free function contract", async () => {
