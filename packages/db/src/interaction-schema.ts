@@ -677,6 +677,12 @@ export const browserSessions = pgTable(
       "browser_sessions_device_workspace_check",
       sql`${table.deviceWorkspaceId} is null or ${table.deviceId} is not null`,
     ),
+    // Migration 0989: running browsers by last use, scanned every few minutes
+    // by list_agent_held_browser_sessions to renew the holds of the ones agent
+    // sessions hold.
+    activeLastUsed: index("browser_sessions_active_last_used_idx")
+      .on(table.lastUsedAt, table.id)
+      .where(sql`${table.lifecycle} = 'active' and ${table.controllerGeneration} is not null`),
     // Migration 0705: saved browsers still bound to a controller (cleanup
     // pending), scanned by list_orphaned_idle_browser_checkpoints.
     suspendedController: index("browser_sessions_suspended_controller_idx")

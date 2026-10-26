@@ -350,6 +350,9 @@ export type BrowserHoldRenewal = {
   listed: number;
   /** Of those, the browsers whose controllers hold them. */
   held: number;
+  /** The pass reached its limit, so less recently used held browsers may
+   * have been left to their plain idle release. */
+  capped: boolean;
 };
 
 /**
@@ -5290,8 +5293,8 @@ export function registerBrowserSessionRoutes(
   /**
    * Renews the hold on every browser an agent session holds right now (see
    * `listAgentHeldBrowserSessions`): each controller keeps its browser
-   * running, page state and all, at least until `BROWSER_HOLD_RENEWAL_MS`
-   * from now (capped by the controller at `BROWSER_WAIT_HOLD_MAX_MS` after
+   * running, page state and all, at least `BROWSER_HOLD_RENEWAL_MS` after
+   * its renewal is sent (capped by the controller at `BROWSER_WAIT_HOLD_MAX_MS` after
    * the browser's last use). Stateless: every pass asks the database which
    * browsers are held, so a later turn that never touches the browser is held
    * again, and once the session neither works nor waits the renewals stop and
@@ -5304,12 +5307,15 @@ export function registerBrowserSessionRoutes(
     const browsers = await listAgentHeldBrowserSessions(deps.db, {
       limit: BROWSER_HOLD_RENEWAL_LIMIT,
     });
-    const until = new Date(Date.now() + BROWSER_HOLD_RENEWAL_MS);
-    const renewal: BrowserHoldRenewal = { listed: browsers.length, held: 0 };
+    const renewal: BrowserHoldRenewal = {
+      listed: browsers.length,
+      held: 0,
+      capped: browsers.length >= BROWSER_HOLD_RENEWAL_LIMIT,
+    };
     let next = 0;
     const renewNext = async (): Promise<void> => {
       for (let browser = browsers[next++]; browser; browser = browsers[next++]) {
-        if (await sendBrowserHold(browser, until)) renewal.held += 1;
+        if (await sendBrowserHold(browser)) renewal.held += 1;
       }
     };
     await Promise.all(Array.from({ length: BROWSER_HOLD_RENEWAL_CONCURRENCY }, renewNext));
@@ -5318,7 +5324,7 @@ export function registerBrowserSessionRoutes(
 
   /** One browser's renewal; whether its controller holds it. Failures are
    * logged, never thrown. */
-  async function sendBrowserHold(browser: AgentHeldBrowserSession, until: Date): Promise<boolean> {
+  async function sendBrowserHold(browser: AgentHeldBrowserSession): Promise<boolean> {
     try {
       return await holdBrowser(
         {
@@ -5328,7 +5334,6 @@ export function registerBrowserSessionRoutes(
         },
         browser.workspaceId,
         browser.browserSessionId,
-        until,
       );
     } catch (error) {
       console.warn("browser.hold_failed", {
@@ -5344,7 +5349,6 @@ export function registerBrowserSessionRoutes(
     caller: BrowserHoldCaller,
     workspaceId: string,
     browserSessionId: string,
-    until: Date,
   ): Promise<boolean> {
     const record = await getBrowserSessionControlRecord(deps.db, {
       accountId: caller.accountId,
@@ -5356,9 +5360,11 @@ export function registerBrowserSessionRoutes(
     const signal = AbortSignal.timeout(BROWSER_HOLD_REQUEST_TIMEOUT_MS);
     const hold = async (placement: BrowserPlacement): Promise<boolean> =>
       // Never touches the browser's own last use: the cap counts from it.
+      // The hold's end counts from the moment it is sent, so a pass slowed
+      // by other controllers or by routing never sends one already over.
       await connectController(deps, caller, record, placement).holdForWait(
         { browserSessionId, controllerGeneration: binding.controllerGeneration },
-        until,
+        new Date(Date.now() + BROWSER_HOLD_RENEWAL_MS),
       );
     const cached = await cachedBrowserPlacement(record);
     if (cached) return await hold(cached);

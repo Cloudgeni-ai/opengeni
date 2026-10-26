@@ -709,7 +709,7 @@ test("held browsers are renewed on every pass while their agent sessions work or
       // person started is not routed at all.
       {
         sweep: "working",
-        renewal: { listed: 4, held: 1 },
+        renewal: { listed: 4, held: 1, capped: false },
         records: ["attached", "cold-box", "machine", "unrouted"],
         leaseReads: ["cold-box", "cold-box"],
         channels: [asPerson],
@@ -719,7 +719,7 @@ test("held browsers are renewed on every pass while their agent sessions work or
       // The turn ended and nothing waits: nothing is listed or sent.
       {
         sweep: "idle",
-        renewal: { listed: 0, held: 0 },
+        renewal: { listed: 0, held: 0, capped: false },
         records: [],
         leaseReads: [],
         channels: [],
@@ -729,17 +729,39 @@ test("held browsers are renewed on every pass while their agent sessions work or
       // A new turn that never touches the browser: held again.
       {
         sweep: "working-again",
-        renewal: { listed: 1, held: 1 },
+        renewal: { listed: 1, held: 1, capped: false },
         records: ["machine"],
         leaseReads: [],
         channels: [asPerson],
         viewers: [],
         holds: [hold],
       },
+      // Reaching the controller took minutes (slow routing, or other
+      // controllers ahead of it in the pass): the hold still runs five
+      // minutes from when it is sent, not from the start of the pass.
+      {
+        sweep: "slow-route",
+        renewal: { listed: 1, held: 1, capped: false },
+        records: ["machine"],
+        leaseReads: [],
+        channels: [asPerson],
+        viewers: [],
+        holds: [hold],
+      },
+      // More browsers are held than one pass renews: the pass says so.
+      {
+        sweep: "saturated",
+        renewal: { listed: 500, held: 0, capped: true },
+        records: Array(500).fill("unrouted"),
+        leaseReads: [],
+        channels: [],
+        viewers: [],
+        holds: [],
+      },
       // The task moved to another machine: the browser left behind is not held.
       {
         sweep: "machine-moved",
-        renewal: { listed: 1, held: 0 },
+        renewal: { listed: 1, held: 0, capped: false },
         records: ["machine"],
         leaseReads: [],
         channels: [],
@@ -791,6 +813,11 @@ async function holdRenewalFixture() {
   }
   let listed: string[] = [];
   let sweep = "working";
+  // Fake time for the slow sweep: the API and the controller read the same
+  // clock.
+  let clockOffset = 0;
+  const realNow = Date.now.bind(Date);
+  Date.now = () => realNow() + clockOffset;
   let records: string[] = [];
   let leaseReads: string[] = [];
   let channels: Array<Record<string, unknown>> = [];
@@ -798,13 +825,15 @@ async function holdRenewalFixture() {
   let holds: Array<Record<string, unknown>> = [];
   mock.module(resolveFromApi("@opengeni/db"), () => ({
     ...db,
-    listAgentHeldBrowserSessions: async () =>
-      listed.map((name) => ({
-        accountId,
-        workspaceId,
-        browserSessionId: ids[name]!,
-        routeSubjectId: name === "unrouted" ? null : "synthetic-person",
-      })),
+    listAgentHeldBrowserSessions: async (_db: unknown, input: { limit: number }) =>
+      (sweep === "saturated" ? Array<string>(input.limit).fill("unrouted") : listed).map(
+        (name) => ({
+          accountId,
+          workspaceId,
+          browserSessionId: ids[name]!,
+          routeSubjectId: name === "unrouted" ? null : "synthetic-person",
+        }),
+      ),
     getBrowserSessionControlRecord: async (_db: unknown, input: { browserSessionId: string }) => {
       const name = names.get(input.browserSessionId)!;
       records.push(name);
@@ -888,6 +917,8 @@ async function holdRenewalFixture() {
       subjectId: context.subjectId,
       grant: context.grant !== undefined,
     });
+    // Three minutes pass before the controller is reached.
+    if (sweep === "slow-route") clockOffset += 3 * 60_000;
     return await callback({
       routingSession: {
         prime: async () => ({
@@ -920,6 +951,8 @@ async function holdRenewalFixture() {
       ["working", ["machine", "cold-box", "attached", "unrouted"]],
       ["idle", []],
       ["working-again", ["machine"]],
+      ["slow-route", ["machine"]],
+      ["saturated", []],
       ["machine-moved", ["machine"]],
     ];
     for (const [next, held] of sweeps) {
