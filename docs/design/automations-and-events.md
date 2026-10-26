@@ -92,7 +92,8 @@ MCP source the trigger also holds the subscription arguments the server's
    (the GitHub App bot, the Slack bot). Triggers ignore them unless they opt in,
    as GitHub Actions ignores events made by a workflow's own token. Every event
    run records its trigger and events, so chains are visible. A hop limit waits
-   for internal events, where causation is fully visible.
+   for internal events, where causation is fully visible; the proposal is in
+   [Opengeni's own events as automation triggers](opengeni-events-as-triggers.md).
 7. **MCP Events follows SEP-3415.** Details below. Opengeni is the client and
    the webhook receiver, like a gateway in the spec's forward-proxy topology.
 8. **Ownership and visibility.** A webhook endpoint belongs to the person who
@@ -248,7 +249,8 @@ two fields and Linear checks a body timestamp.
 Things that happen in Opengeni itself are events too. Today these are meeting
 recordings (`recording_events`, the facts workspace webhooks already send);
 the general internal event spine comes later and adds its types to the same
-source.
+source ([proposal](opengeni-events-as-triggers.md): chat outcomes, approvals,
+questions, notifications and usage, with a chain limit).
 
 - **One source per person.** A "This workspace" source shows its owner the
   workspace's events that person may see, so it is private to them like a
