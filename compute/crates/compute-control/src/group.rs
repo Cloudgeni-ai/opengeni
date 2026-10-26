@@ -19,6 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use compute_protocol::fleet::Boot;
 use ring::rand::SystemRandom;
 use ring::signature::{RSA_PKCS1_SHA256, RsaKeyPair};
 use rustls::pki_types::PrivatePkcs8KeyDer;
@@ -176,12 +177,26 @@ pub enum Fenced {
     /// It was reset: its memory is gone and it boots afresh, keeping its
     /// disks.
     Reset,
+    /// Its machine restarted since the host's registration: the instance
+    /// says it runs a later boot, so nothing the host ran then runs any
+    /// more, and it is left as it is.
+    Restarted,
 }
 
 #[derive(Deserialize)]
 struct Instance {
     status: String,
 }
+
+/// A guest attribute, as the API reads one.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuestAttribute {
+    variable_value: String,
+}
+
+/// The guest attribute a host writes the boot of its machine to.
+const BOOT_ATTRIBUTE: &str = "compute/boot";
 
 #[derive(Deserialize)]
 struct Operation {
@@ -373,14 +388,65 @@ impl GcpGroup {
         Ok(Some(instance.status))
     }
 
-    /// Whether instance `name` may still hold its memory: it runs, or may
-    /// (starting, as one resuming from a suspend does, suspended, or being
-    /// repaired). One gone, stopped or stopping holds nothing.
-    pub async fn may_hold_memory(&self, name: &str) -> anyhow::Result<bool> {
-        Ok(self
+    /// Whether instance `name` may still hold the memory of its host's
+    /// registration from the machine's boot `boot`, if the registration
+    /// named one: it runs, or may (starting, as one resuming from a
+    /// suspend does, suspended, or being repaired), and it has not
+    /// restarted since ([`Self::restarted_since`]). One gone, stopped or
+    /// stopping holds nothing.
+    pub async fn may_hold_memory(&self, name: &str, boot: Option<&Boot>) -> anyhow::Result<bool> {
+        let holds = self
             .status(name)
             .await?
-            .is_some_and(|status| !matches!(status.as_str(), "TERMINATED" | "STOPPING")))
+            .is_some_and(|status| !matches!(status.as_str(), "TERMINATED" | "STOPPING"));
+        Ok(holds && !self.restarted_since(name, boot).await)
+    }
+
+    /// Whether instance `name`'s machine has restarted since boot `boot`:
+    /// its guest attribute names a later boot ([`Boot::follows`]). Only
+    /// software on the machine writes it, its host's agent as it starts,
+    /// so a later boot there means the one named has ended, and every VM
+    /// with it. An earlier boot there may be one written before the
+    /// registration, the host's own write failing, so it proves nothing;
+    /// nor does a boot to compare missing, or an attribute that cannot be
+    /// read.
+    pub async fn restarted_since(&self, name: &str, boot: Option<&Boot>) -> bool {
+        let Some(boot) = boot else {
+            return false;
+        };
+        match self.boot(name).await {
+            Ok(Some(now)) => now.follows(boot),
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(%error, %name, "reading an instance's boot failed");
+                false
+            }
+        }
+    }
+
+    /// The boot instance `name`'s host last wrote to its guest attribute,
+    /// or `None` if there is none to read (guest attributes off, or not
+    /// written yet).
+    async fn boot(&self, name: &str) -> anyhow::Result<Option<Boot>> {
+        let token = self.token().await?;
+        let response = self
+            .http
+            .get(format!("{}/getGuestAttributes", self.instance_url(name)))
+            .query(&[("variableKey", BOOT_ATTRIBUTE)])
+            .bearer_auth(token)
+            .send()
+            .await?;
+        // Not written, the instance gone, or guest attributes off.
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::BAD_REQUEST
+        ) {
+            return Ok(None);
+        }
+        let attribute: GuestAttribute = response.error_for_status()?.json().await?;
+        let boot = serde_json::from_str(&attribute.variable_value)
+            .with_context(|| format!("reading the boot {:?}", attribute.variable_value))?;
+        Ok(Some(boot))
     }
 
     /// Asks for `action` (`reset`, `stop` or `start`) on instance `name`.
@@ -436,20 +502,32 @@ impl GcpGroup {
         }
     }
 
-    /// Makes sure nothing that ran on instance `name` runs any more, within
-    /// `within`: resets it once it runs, stops it if it is suspended (which
-    /// would keep its memory), and finds it already fenced only if it is
-    /// stopped or gone. Meanwhile it waits: while the instance starts,
-    /// stops, suspends or is repaired. A starting instance is not taken as
-    /// fenced, since one resuming from a suspend passes through the same
-    /// states with its memory kept. An error proves nothing: the host may
-    /// still run.
-    pub async fn fence(&self, name: &str, within: Duration) -> anyhow::Result<Fenced> {
+    /// Makes sure nothing that ran on instance `name` under its host's
+    /// registration from the machine's boot `boot` (if it named one) runs
+    /// any more, within `within`: resets it once it runs, stops it if it is
+    /// suspended (which would keep its memory), and finds it already
+    /// fenced only if it is stopped or gone, or if it runs or is suspended
+    /// under a later boot ([`Self::restarted_since`]). Meanwhile it waits:
+    /// while the instance starts, stops, suspends or is repaired. A
+    /// starting instance is not taken as fenced, since one resuming from a
+    /// suspend passes through the same states with its memory kept. An
+    /// error proves nothing: the host may still run.
+    pub async fn fence(
+        &self,
+        name: &str,
+        boot: Option<&Boot>,
+        within: Duration,
+    ) -> anyhow::Result<Fenced> {
         let deadline = Instant::now() + within;
         loop {
             let Some(status) = self.status(name).await? else {
                 return Ok(Fenced::Gone);
             };
+            if matches!(status.as_str(), "RUNNING" | "SUSPENDED")
+                && self.restarted_since(name, boot).await
+            {
+                return Ok(Fenced::Restarted);
+            }
             match status.as_str() {
                 "TERMINATED" => return Ok(Fenced::Stopped),
                 "RUNNING" => {

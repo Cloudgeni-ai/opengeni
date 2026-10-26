@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compute_fleet::{At, Expiry, GroupView, HostId, LeaseTerms, ScaleDecision, ScalePolicy};
+use compute_protocol::fleet::Boot as MachineBoot;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -235,7 +236,9 @@ type FenceResult = (HostId, Result<Option<usize>, String>);
 /// What follows for a host whose count stood still too long.
 enum Lapse {
     GiveUp,
-    Fence(Arc<GcpGroup>, String),
+    /// Fence its instance, named so, whose host's registration named the
+    /// machine's boot so, if it did.
+    Fence(Arc<GcpGroup>, String, Option<MachineBoot>),
     /// Not known yet, or a fence is under way or failed just now.
     Later,
 }
@@ -320,11 +323,11 @@ impl<L: Leases> Leading<L> {
                     let result = self.leases.give_up(host, renewals).await;
                     self.given_up(host, draining, result.map_err(|error| error.to_string()));
                 }
-                Lapse::Fence(group, name) => {
+                Lapse::Fence(group, name, boot) => {
                     let leases = Arc::clone(&self.leases);
                     let task = self
                         .fences
-                        .spawn(fence_and_give_up(leases, group, host, name, renewals));
+                        .spawn(fence_and_give_up(leases, group, host, name, boot, renewals));
                     self.fencing.insert(task.id(), (host, draining));
                 }
                 Lapse::Later => {}
@@ -356,7 +359,7 @@ impl<L: Leases> Leading<L> {
         let Some(group) = self.group.clone() else {
             return if waits { Lapse::Later } else { Lapse::GiveUp };
         };
-        let Some(name) = view.name(host) else {
+        let Some((name, boot)) = view.name_and_boot(host) else {
             // The view has not caught up with the store yet.
             return Lapse::Later;
         };
@@ -377,10 +380,10 @@ impl<L: Leases> Leading<L> {
             .as_deref()
             .is_some_and(|prefix| name.starts_with(prefix))
         {
-            if waits && self.may_hold_memory(host, &group, &name) {
+            if waits && self.may_hold_memory(host, &group, &name, boot.as_ref()) {
                 return Lapse::Later;
             }
-            Lapse::Fence(group, name)
+            Lapse::Fence(group, name, boot)
         } else if waits {
             Lapse::Later
         } else {
@@ -388,11 +391,18 @@ impl<L: Leases> Leading<L> {
         }
     }
 
-    /// Whether the instance `name` of silent host `host` may still hold
-    /// its memory, as the cloud last answered; it asks again, apart from
-    /// the tick, at most every [`LOOK_EVERY`]. Until it answers that the
-    /// instance is stopped or gone, it may.
-    fn may_hold_memory(&mut self, host: HostId, group: &Arc<GcpGroup>, name: &str) -> bool {
+    /// Whether the instance `name` of silent host `host`, whose
+    /// registration named the machine's boot `boot` if it did, may still
+    /// hold its memory, as the cloud last answered; it asks again, apart
+    /// from the tick, at most every [`LOOK_EVERY`]. Until it answers that
+    /// the instance is stopped or gone, or has restarted since, it may.
+    fn may_hold_memory(
+        &mut self,
+        host: HostId,
+        group: &Arc<GcpGroup>,
+        name: &str,
+        boot: Option<&MachineBoot>,
+    ) -> bool {
         let look = self.waiting.entry(host).or_default();
         if look.holds == Some(false) {
             return false;
@@ -404,8 +414,9 @@ impl<L: Leases> Leading<L> {
             look.asked = Some(Instant::now());
             let group = Arc::clone(group);
             let name = name.to_owned();
+            let boot = boot.cloned();
             self.looks.spawn(async move {
-                match group.may_hold_memory(&name).await {
+                match group.may_hold_memory(&name, boot.as_ref()).await {
                     Ok(holds) => (host, ask, Some(holds)),
                     Err(error) => {
                         tracing::warn!(%error, %name, "reading a silent host's instance failed");
@@ -483,19 +494,22 @@ impl<L: Leases> Leading<L> {
     }
 }
 
-/// Fences host `host`'s instance `name`, then gives up on the host if its
+/// Fences host `host`'s instance `name`, whose machine ran boot `boot`
+/// when the host registered, if it said, then gives up on the host if its
 /// count is still `renewals`, and starts the instance again if the fence
-/// found it stopped: it then registers afresh.
+/// found it stopped: it then registers afresh. One that restarted since
+/// already does.
 async fn fence_and_give_up<L: Leases>(
     leases: Arc<L>,
     group: Arc<GcpGroup>,
     host: HostId,
     name: String,
+    boot: Option<MachineBoot>,
     renewals: u64,
 ) -> FenceResult {
     let result = async {
         let fenced = group
-            .fence(&name, FENCE_WITHIN)
+            .fence(&name, boot.as_ref(), FENCE_WITHIN)
             .await
             .map_err(|error| format!("fencing {name}: {error:#}"))?;
         tracing::info!(host = host.0, %name, ?fenced, "fenced a host");

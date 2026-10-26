@@ -145,7 +145,20 @@ can be built and tested.
   created, started or resumed is waited for and reset once it runs (a
   resuming instance passes through the same states as a starting one,
   with its memory kept, so neither is taken as fenced); a suspended one is
-  stopped. A
+  stopped. One whose machine restarted since its host registered is
+  fenced already, since a restart ends every VM, and is left as it is,
+  without the wait for a host holding sandboxes either: a host names its
+  machine's boot (the kernel's boot id and when it began) when it
+  registers, and as it starts it writes that boot to its instance's guest
+  attributes, which only software on the machine can write (the guest
+  network closes the metadata server to sandboxes) and the leader reads
+  through the cloud's API. Only a later boot there than the registration
+  named counts: an earlier one may have been written before the
+  registration, with the host's own write failing, so it proves nothing,
+  and neither does no attribute or one that cannot be read; the instance
+  is reset as before. Without this, a machine its watchdog reset, or that
+  crashed, was reset a second time once its old registration lapsed,
+  just as its new host came up. A
   fence the cloud does not confirm in two minutes, or that fails, keeps
   the host live and is tried again five seconds later, so nothing is
   handed on from a host whose VMs might still run. Once given up on, a
@@ -170,10 +183,7 @@ can be built and tested.
   on their deadline, guard and watchdog alone.
 - **A host that comes back is fenced until it has caught up.** It
   registers again only once its last registration lapsed (the store
-  refuses while that one is live, since its VMs may still run), or at
-  once if the machine restarted since that registration (both name the
-  kernel's boot they came from, and the boots differ: a restart ends
-  every VM, so nothing of the old one runs), and lists
+  refuses while that one is live, since its VMs may still run), and lists
   what it still has. The answer says, for each sandbox, to keep it, get it
   back, fetch it again from its archive, or drop it (`reconcile`: only a
   copy nobody took since it last ran is the newest). The host drops and

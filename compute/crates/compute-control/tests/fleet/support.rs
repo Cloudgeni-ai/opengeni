@@ -19,8 +19,8 @@ use compute_control::tls::Tls;
 use compute_control::{Config, Running};
 use compute_fleet::{LeaseTerms, OwnerEpoch, Stamp};
 use compute_protocol::fleet::{
-    Answer, Answered, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH, RENEW_PATH,
-    ReadyClones, Register, Registered, Renew, Renewed, Verdict,
+    Answer, Answered, Boot, Capacity, Envelope, Held, HostInfo, METRICS_PATH, REGISTER_PATH,
+    RENEW_PATH, ReadyClones, Register, Registered, Renew, Renewed, Verdict,
 };
 use compute_protocol::host::{ErrorCode, Id, ImageId, Reply, Request};
 use compute_storage::store::{Begun, ChunkStore};
@@ -526,6 +526,8 @@ struct HostInner {
     /// the request as expired, as a real host does; 0 never refuses.
     window: AtomicU64,
     attempt: AtomicU64,
+    /// The boot of its machine it names when it registers.
+    boot: Mutex<Boot>,
 }
 
 /// A host that registers with the service and answers its requests.
@@ -576,6 +578,10 @@ impl FakeHost {
             check_open: AtomicBool::new(false),
             window: AtomicU64::new(0),
             attempt: AtomicU64::new(u64::from_le_bytes(random) >> 1),
+            boot: Mutex::new(Boot {
+                id: format!("boot-{:016x}", u64::from_le_bytes(random)),
+                at: 1_761_480_000,
+            }),
         });
         let acceptor = TlsAcceptor::from(Arc::new(fleet.pki.host_server(name)));
         let mut host = Self {
@@ -600,6 +606,22 @@ impl FakeHost {
     #[must_use]
     pub fn epoch(&self) -> u64 {
         self.inner.epoch.load(Ordering::SeqCst)
+    }
+
+    /// The boot of its machine it names when it registers.
+    #[must_use]
+    pub fn boot(&self) -> Boot {
+        self.inner.boot.lock().unwrap().clone()
+    }
+
+    /// Has its machine restart, as far as the boot it names goes: it
+    /// names another, begun a minute later, from its next registration,
+    /// which it returns.
+    pub fn restart(&self) -> Boot {
+        let mut boot = self.inner.boot.lock().unwrap();
+        boot.id.push_str("-again");
+        boot.at += 60;
+        boot.clone()
     }
 
     /// Registers anew, as a restarted agent does: a new attempt, listing
@@ -800,7 +822,7 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
             memory_mib: 64 * 1024,
             cpu_millis: 64_000,
             disk_mib: 1 << 20,
-            boot: None,
+            boot: Some(inner.boot.lock().unwrap().clone()),
         },
         capacity: inner.capacity.lock().unwrap().clone(),
         held,

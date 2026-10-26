@@ -11,8 +11,8 @@ use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId};
 
 use super::{
-    Admission, Admits, HostRow, Known, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store,
-    Write, admits, rule,
+    Admission, Admits, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow, Store, Write,
+    admits, rule,
 };
 
 #[derive(Debug)]
@@ -118,12 +118,10 @@ impl MemoryStore {
     fn register_now(&self, register: &Register) -> Admission {
         let mut inner = self.lock();
         let known = inner.by_name.get(&register.info.name).copied();
-        let row = known.and_then(|id| inner.hosts.get(&id)).map(|host| Known {
-            state: host.row.state,
-            answered: host.attempt,
-            boot: host.row.info.boot.as_deref(),
-        });
-        match admits(row, register.attempt, register.info.boot.as_deref()) {
+        let row = known
+            .and_then(|id| inner.hosts.get(&id))
+            .map(|host| (host.row.state, host.attempt));
+        match admits(row, register.attempt) {
             Admits::Again => {
                 let host = &inner.hosts[&known.expect("a row")];
                 return Admission::Registered {

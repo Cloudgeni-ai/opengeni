@@ -196,8 +196,7 @@ pub enum Admission {
 /// What a registration attempt meets in the host's row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Admits {
-    /// A new registration: the host is new, was given up on, or restarted
-    /// since its live registration.
+    /// A new registration: the host is new, or was given up on.
     Fresh,
     /// Another copy of the attempt the stored answer answered.
     Again,
@@ -205,34 +204,12 @@ pub(crate) enum Admits {
     StillLive,
 }
 
-/// What a registering host's row holds that decides its admission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Known<'a> {
-    pub state: HostState,
-    /// The attempt it last answered.
-    pub answered: u64,
-    /// The machine's boot that attempt came from, if the host told.
-    pub boot: Option<&'a str>,
-}
-
-/// What an attempt numbered `attempt`, from the machine's boot `boot`,
-/// meets, given the host's row if it has one.
-///
-/// While the last registration is live, its VMs may still run, so another
-/// attempt waits for it to lapse, unless both name the boot they come
-/// from and the boots differ: the machine restarted in between, and a
-/// restart leaves no VM running.
-pub(crate) fn admits(row: Option<Known<'_>>, attempt: u64, boot: Option<&str>) -> Admits {
+/// What an attempt numbered `attempt` meets, given the host's row, if it
+/// has one, as its state and the attempt it last answered.
+pub(crate) fn admits(row: Option<(HostState, u64)>, attempt: u64) -> Admits {
     match row {
-        None
-        | Some(Known {
-            state: HostState::Lost,
-            ..
-        }) => Admits::Fresh,
-        Some(known) if known.answered == attempt => Admits::Again,
-        Some(Known {
-            boot: Some(live), ..
-        }) if boot.is_some_and(|now| now != live) => Admits::Fresh,
+        None | Some((HostState::Lost, _)) => Admits::Fresh,
+        Some((_, answered)) if answered == attempt => Admits::Again,
         Some(_) => Admits::StillLive,
     }
 }
@@ -532,60 +509,12 @@ mod tests {
 
     #[test]
     fn an_attempt_is_answered_again_refused_while_live_and_fresh_once_lost() {
-        let known = |state, answered| {
-            Some(Known {
-                state,
-                answered,
-                boot: None,
-            })
-        };
-        assert_eq!(admits(None, 7, None), Admits::Fresh);
-        assert_eq!(admits(known(HostState::Lost, 7), 7, None), Admits::Fresh);
-        assert_eq!(admits(known(HostState::Live, 7), 7, None), Admits::Again);
-        assert_eq!(
-            admits(known(HostState::Draining, 7), 7, None),
-            Admits::Again
-        );
-        assert_eq!(
-            admits(known(HostState::Live, 6), 7, None),
-            Admits::StillLive
-        );
-        assert_eq!(
-            admits(known(HostState::Draining, 6), 7, None),
-            Admits::StillLive
-        );
-    }
-
-    /// A restart ends every VM on the machine: an attempt from another
-    /// boot than the live registration's is taken at once, whether the
-    /// host is live or draining. Only both boots named and different
-    /// prove it; the same boot, or one not told, waits as before.
-    #[test]
-    fn an_attempt_from_a_later_boot_of_the_machine_is_fresh_at_once() {
-        let known = |state, boot| {
-            Some(Known {
-                state,
-                answered: 6,
-                boot,
-            })
-        };
-        for state in [HostState::Live, HostState::Draining] {
-            assert_eq!(admits(known(state, Some("a")), 7, Some("b")), Admits::Fresh);
-            assert_eq!(
-                admits(known(state, Some("a")), 7, Some("a")),
-                Admits::StillLive,
-                "the same boot: its VMs may still run"
-            );
-            assert_eq!(admits(known(state, None), 7, Some("b")), Admits::StillLive);
-            assert_eq!(admits(known(state, Some("a")), 7, None), Admits::StillLive);
-        }
-        // Another copy of the live attempt is still answered as it was.
-        let live = Some(Known {
-            state: HostState::Live,
-            answered: 7,
-            boot: Some("a"),
-        });
-        assert_eq!(admits(live, 7, Some("b")), Admits::Again);
+        assert_eq!(admits(None, 7), Admits::Fresh);
+        assert_eq!(admits(Some((HostState::Lost, 7)), 7), Admits::Fresh);
+        assert_eq!(admits(Some((HostState::Live, 7)), 7), Admits::Again);
+        assert_eq!(admits(Some((HostState::Draining, 7)), 7), Admits::Again);
+        assert_eq!(admits(Some((HostState::Live, 6)), 7), Admits::StillLive);
+        assert_eq!(admits(Some((HostState::Draining, 6)), 7), Admits::StillLive);
     }
 
     #[test]

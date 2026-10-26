@@ -21,7 +21,7 @@ use compute_fleet::{
     Capacity, ClassId, Demand, Fleet, HostEpoch, HostId, HostInfo, HostState, Placement, Rng,
     ShapeKey, ZoneId,
 };
-use compute_protocol::fleet::{Capacity as Reported, HostInfo as Described};
+use compute_protocol::fleet::{Boot, Capacity as Reported, HostInfo as Described};
 
 use crate::store::{HostRow, Store};
 
@@ -241,6 +241,16 @@ impl View {
             .hosts
             .get(&host)
             .map(|known| known.target.name.clone())
+    }
+
+    /// The name of host `host`, whatever its state, and the boot of its
+    /// machine its registration named, if it named one.
+    #[must_use]
+    pub fn name_and_boot(&self, host: HostId) -> Option<(String, Option<Boot>)> {
+        self.read()
+            .hosts
+            .get(&host)
+            .map(|known| (known.target.name.clone(), known.info.boot.clone()))
     }
 
     /// Whether host `host` is draining ahead of its removal.

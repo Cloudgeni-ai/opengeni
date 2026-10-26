@@ -87,15 +87,39 @@ pub struct HostInfo {
     pub cpu_millis: u64,
     /// Disk it gives sandboxes, in MiB.
     pub disk_mib: u64,
-    /// The machine's current boot, as its kernel names it (Linux
-    /// `/proc/sys/kernel/random/boot_id`). A restart ends every VM on the
-    /// machine, so a host that registers from another boot than its live
-    /// registration's leaves nothing of that registration running, and
-    /// the service takes the new attempt at once instead of waiting for
-    /// the old one to lapse. `None` from a host that does not tell, which
-    /// then waits as before.
+    /// The boot of its machine it registers from. A restart ends every VM
+    /// on the machine: once this registration has lapsed, a machine its
+    /// cloud says runs a later boot (on Compute Engine, the instance's
+    /// `compute/boot` guest attribute, which the host writes as it
+    /// starts) runs nothing of it, so the service gives up on it without
+    /// fencing it or waiting for it. `None` from a host that does not
+    /// tell, which is fenced as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boot: Option<String>,
+    pub boot: Option<Boot>,
+}
+
+/// One boot of a host's machine, from its kernel.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Boot {
+    /// What the kernel names it (Linux `/proc/sys/kernel/random/boot_id`),
+    /// which no other boot shares.
+    pub id: String,
+    /// When it began, in seconds since the Unix epoch (Linux `btime`).
+    pub at: u64,
+}
+
+impl Boot {
+    /// Whether this boot came after `earlier` on the same machine: another
+    /// one, begun later. Telling the order matters: a cloud may answer
+    /// with an earlier boot than a registration's, written before it (or
+    /// still there, if the host could not write its own), and that machine
+    /// may still run what it registered. Start times are the machine's
+    /// wall clock: only one set back across a restart by more than the
+    /// earlier boot lasted mistakes the order.
+    #[must_use]
+    pub fn follows(&self, earlier: &Boot) -> bool {
+        self.id != earlier.id && self.at > earlier.at
+    }
 }
 
 /// Ready clones a host holds of one image and shape (see the host's ready
@@ -433,12 +457,31 @@ mod tests {
         assert_eq!(info.boot, None);
         assert!(!serde_json::to_string(&info).unwrap().contains("boot"));
         let named = HostInfo {
-            boot: Some("8c5f0e9e-4f4b-4b5e-9a49-1c0b7d0b6a11".into()),
+            boot: Some(Boot {
+                id: "8c5f0e9e-4f4b-4b5e-9a49-1c0b7d0b6a11".into(),
+                at: 1_761_480_000,
+            }),
             ..info
         };
         let wire = serde_json::to_value(&named).unwrap();
-        assert_eq!(wire["boot"], "8c5f0e9e-4f4b-4b5e-9a49-1c0b7d0b6a11");
+        assert_eq!(
+            wire["boot"],
+            serde_json::json!({"id": "8c5f0e9e-4f4b-4b5e-9a49-1c0b7d0b6a11", "at": 1_761_480_000})
+        );
         assert_eq!(serde_json::from_value::<HostInfo>(wire).unwrap(), named);
+    }
+
+    /// A boot follows another only if it is another, begun later: the
+    /// same one, or an earlier one, does not.
+    #[test]
+    fn a_boot_follows_only_an_earlier_other_boot() {
+        let boot = |id: &str, at| Boot { id: id.into(), at };
+        let first = boot("a", 100);
+        assert!(boot("b", 160).follows(&first));
+        assert!(!first.follows(&first));
+        assert!(!first.follows(&boot("b", 160)));
+        assert!(!boot("b", 100).follows(&first), "not begun later");
+        assert!(!boot("a", 160).follows(&first), "the same boot");
     }
 
     #[test]

@@ -18,7 +18,11 @@
 //!   second before the deadline in that file and kills them if they are
 //!   not frozen by then, and holds the kernel watchdog, so the VMs stop
 //!   whatever happens to the agent.
+//! - The host names the boot of its machine it runs under, to the service
+//!   and to its cloud ([`boot`]), so that a restart, which ends every VM,
+//!   is seen as one.
 
+mod boot;
 mod gate;
 mod guard;
 mod kept;
@@ -43,6 +47,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
+pub use boot::this_boot;
 pub use gate::Admission;
 pub use gate::{LeaseGate, boot_now, slept};
 pub use guard::{
@@ -63,18 +68,6 @@ use crate::agent::{Handle, HostError};
 /// times within ten seconds would hit systemd's start limit and leave it
 /// down until the host's lease ran out.
 pub const GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// The machine's current boot as its kernel names it, which a restart
-/// changes: the host tells the service in its description, so a
-/// registration after a restart is taken at once (see
-/// [`HostInfo::boot`](compute_protocol::fleet::HostInfo::boot)). `None`
-/// where the kernel does not say.
-#[must_use]
-pub fn this_boot() -> Option<String> {
-    let read = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
-    let boot = read.trim();
-    (!boot.is_empty()).then(|| boot.to_owned())
-}
 
 /// Waits until a guard whose lock is `lock` is ready, up to `within`, and
 /// says whether it is.
@@ -306,6 +299,9 @@ impl FleetConfig {
             .await
             .with_context(|| format!("listening on {}", self.listen))?;
         tracing::info!(listen = %self.listen, control = %self.control, "joining the fleet");
+        if let Some(boot) = self.info.boot.clone() {
+            tokio::spawn(async move { boot::tell_cloud(boot::METADATA, &boot).await });
+        }
         let listening = listen::Listening {
             acceptor: TlsAcceptor::from(Arc::clone(&tls.server)),
             service: tls::service_name(&self.control)?,
@@ -343,16 +339,6 @@ impl FleetConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The boot a host names is the kernel's, the same however often it
-    /// is read while the machine runs.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_host_names_the_kernels_boot() {
-        let boot = this_boot().expect("Linux names its boot");
-        assert_eq!(boot.len(), 36, "a UUID: {boot}");
-        assert_eq!(this_boot().as_deref(), Some(boot.as_str()));
-    }
 
     /// The agent waits for a guard that gets ready a moment after it
     /// starts, and gives up on one that does not.
