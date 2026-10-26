@@ -49,6 +49,12 @@ mock.module("../../../ui/dropdown-menu", () => ({
   ),
 }));
 
+// The agent tile is its own feature (it reads the deployment's client config);
+// this test covers the header's menu only.
+mock.module("../session/agent-identity-control", () => ({
+  AgentIdentityControl: () => null,
+}));
+
 const { SessionHeader } = await import("./session-header");
 
 beforeAll(() => {
