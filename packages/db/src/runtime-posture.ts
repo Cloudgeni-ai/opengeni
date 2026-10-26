@@ -770,6 +770,7 @@ const SCOPED_COMPUTE_AUTHORITY_ROUTINES = [
 ] as const;
 const CANONICAL_HUMAN_IDENTITY_ROUTINES = [
   "mutate_managed_sign_in_method(text, text, jsonb)",
+  "mutate_managed_passkey(text, text, jsonb)",
   "assert_managed_sign_in_recovery(text, text, uuid, jsonb)",
   "replay_managed_sign_in_method(text, text, jsonb)",
   "claim_managed_sign_in_notification(uuid, text, text, integer)",
@@ -2213,6 +2214,7 @@ export const FORCE_RLS_TABLES = [
  */
 export const NON_RLS_RUNTIME_TABLES = [
   "auth_identities",
+  "auth_passkeys",
   "auth_rate_limits",
   "auth_sessions",
   "auth_users",
@@ -2245,6 +2247,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "api_keys",
   "audit_events",
   "auth_identities",
+  "auth_passkeys",
   "auth_rate_limits",
   "auth_sessions",
   "auth_users",

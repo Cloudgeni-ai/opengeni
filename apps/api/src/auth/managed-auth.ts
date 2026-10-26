@@ -788,6 +788,9 @@ export async function sendManagedAuthEmail(
   transport: ManagedEmailTransport,
   input: Omit<ManagedEmailMessage, "from">,
 ): Promise<void> {
+  // Reserved `.invalid` addresses (RFC 2606), such as the placeholder of an
+  // account created with only a passkey, can never receive mail.
+  if (input.to.toLowerCase().endsWith(".invalid")) return;
   const result = await transport.send({ ...input, from: transport.sender });
   if (result.status !== "sent") throw new Error(`managed email ${result.status}`);
 }

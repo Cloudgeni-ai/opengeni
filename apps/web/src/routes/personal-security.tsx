@@ -1,7 +1,14 @@
 import { useBrowserAccounts } from "@opengeni/react/accounts";
+import { isPasskeyOnlyAccountEmail } from "@opengeni/contracts/managed-sign-in-methods";
 import { RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiBaseUrl } from "@/api";
+import {
+  browserSupportsPasskeys,
+  createPasskey,
+  passkeyAlreadyRegistered,
+  passkeyPromptDismissed,
+} from "@/lib/passkeys";
 import {
   SIGN_IN_METHOD_ORIGIN_MESSAGE,
   signInMethodsHaveSameOrigin,
@@ -38,6 +45,25 @@ import {
 } from "@/lib/sign-in-methods-api";
 import { signInMethodFailure } from "@/lib/sign-in-method-failure";
 
+/** What a successful change did, in the person's words. */
+function changeDescription(command: PreparedSignInCommand): string {
+  switch (command.path) {
+    case "password":
+      return "Your password was saved.";
+    case "passkey":
+      return "Passkey added. You can now sign in with it.";
+    case "passkey/remove":
+      return "Passkey removed. It can no longer sign in to your account.";
+    default:
+      return `${providerLabel((command.body as { provider: "google" | "github" }).provider)} was disconnected from sign-in.`;
+  }
+}
+
+/** An account created with only a passkey has no email address to show. */
+function shownEmail(email: string): string {
+  return isPasskeyOnlyAccountEmail(email) ? "Passkey account" : email;
+}
+
 export function PersonalSecurityRoute() {
   const context = usePersonalSecurityContext();
   if (!context || context.clientConfig.auth.mode !== "managedSession") {
@@ -50,7 +76,7 @@ export function PersonalSecurityRoute() {
   }
   if (!signInMethodsHaveSameOrigin(apiBaseUrl, window.location.href)) {
     return (
-      <PersonalSettingsShell email={context.authSession.user.email}>
+      <PersonalSettingsShell email={shownEmail(context.authSession.user.email)}>
         <SecurityPageHeader />
         <SecurityPageBody>
           <Notice tone="failed">
@@ -157,6 +183,7 @@ export function SecurityController({
   const [uncertain, setUncertain] = useState<PreparedSignInCommand | null>(null);
   const [revision, setRevision] = useState(0);
   const [committed, setCommitted] = useState(false);
+  const [passkeysSupported] = useState(browserSupportsPasskeys);
   const isCurrent = useCallback(() => live.current && owner.current === userId, [userId]);
   useEffect(() => {
     live.current = true;
@@ -226,15 +253,27 @@ export function SecurityController({
         window.location.assign(target.href);
         return true;
       }
-      const changed =
-        command.path === "password"
-          ? "Your password was saved."
-          : `${providerLabel((command.body as { provider: "google" | "github" }).provider)} was disconnected from sign-in.`;
+      const changed = changeDescription(command);
+      if (!result.reauthenticationRequired) {
+        // Only how this account signs in changed for one passkey; this
+        // session stays signed in. Reload the list in place.
+        setSuccess(changed);
+        setError(null);
+        void api
+          .list()
+          .then((next) => {
+            if (isCurrent() && acceptedLifecycle === lifecycle.current) setInventory(next);
+          })
+          .catch(() => {
+            if (isCurrent() && acceptedLifecycle === lifecycle.current) setRevision((v) => v + 1);
+          });
+        return true;
+      }
       const notification =
-        result.notification === "sent"
+        result.notification === "sent" || result.notification === "none"
           ? ""
           : " The change succeeded, but the security notification could not be confirmed as delivered.";
-      const message = `${changed}${notification} Sign in again as ${email} with a remaining sign-in method to continue.`;
+      const message = `${changed}${notification} Sign in again${isPasskeyOnlyAccountEmail(email) ? "" : ` as ${email}`} with a remaining sign-in method to continue.`;
       retainSignInChangeFeedback({ userId, email, message: `${changed}${notification}` });
       setSuccess(message);
       setRequiresAuth(true);
@@ -253,13 +292,21 @@ export function SecurityController({
         // only. A transport failure is not proof the mutation failed.
         setUncertain(command);
       }
-      setError(failure.message);
+      setError(
+        command.path === "passkey" &&
+          (caught as { code?: unknown } | null)?.code === "SIGN_IN_METHOD_ALREADY_CONNECTED"
+          ? "This passkey is already connected to an Opengeni account."
+          : failure.message,
+      );
       return false;
     }
   }
   async function mutate(
     path: PreparedSignInCommand["path"],
-    fields: { provider: "google" | "github" } | { newPassword: string; currentPassword?: string },
+    fields:
+      | { provider: "google" | "github" }
+      | { newPassword: string; currentPassword?: string }
+      | { passkeyId: string },
   ) {
     if (!inventory || inFlight.current || requiresAuth || uncertain) return false;
     inFlight.current = true;
@@ -288,7 +335,66 @@ export function SecurityController({
       }
     }
   }
+  async function addPasskey() {
+    if (!inventory || inFlight.current || requiresAuth || uncertain) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    setSuccess(null);
+    const acceptedLifecycle = lifecycle.current;
+    const stale = () => !isCurrent() || acceptedLifecycle !== lifecycle.current;
+    try {
+      let ceremony;
+      try {
+        ceremony = await api.passkeyOptions();
+      } catch (caught) {
+        if (stale()) return;
+        const failure = signInMethodFailure(caught);
+        if (failure.kind === "reauth" || failure.kind === "identity_changed") setRequiresAuth(true);
+        // Nothing was changed yet, so an unknown outcome here is safe to retry.
+        setError(
+          failure.kind === "unknown"
+            ? "Couldn't start adding a passkey. Check your connection and try again."
+            : failure.message,
+        );
+        return;
+      }
+      if (stale()) return;
+      let response;
+      try {
+        response = await createPasskey(ceremony);
+      } catch (caught) {
+        if (stale()) return;
+        setError(
+          passkeyAlreadyRegistered(caught)
+            ? "This device or password manager already has a passkey for your account."
+            : passkeyPromptDismissed(caught)
+              ? "No passkey was added. Try again when you're ready."
+              : "Couldn't create a passkey here. Try again, or use another device or security key.",
+        );
+        return;
+      }
+      if (stale()) return;
+      const command = await api.prepare("passkey", {
+        operationId: crypto.randomUUID(),
+        expectedIdentityId: inventory.identityId,
+        expectedIdentityRevision: inventory.identityRevision,
+        challengeId: ceremony.challengeId,
+        response,
+      });
+      if (stale()) return;
+      await execute(command, acceptedLifecycle);
+    } catch {
+      if (!stale()) setError("Couldn't prepare this change. Refresh your methods and try again.");
+    } finally {
+      if (!stale()) {
+        setBusy(false);
+        inFlight.current = false;
+      }
+    }
+  }
   const password = inventory?.methods.find((method) => method.provider === "credential");
+  const passkeyOnly = isPasskeyOnlyAccountEmail(inventory?.email ?? email);
   // While a change's result is unknown, keep saying so even after a refresh
   // cleared the message: new changes stay locked until the same request is retried.
   const shownError =
@@ -298,7 +404,7 @@ export function SecurityController({
       ? "The result of your last change is unknown. Retry the same request, or refresh to check your methods."
       : null);
   return (
-    <PersonalSettingsShell email={inventory?.email ?? email}>
+    <PersonalSettingsShell email={shownEmail(inventory?.email ?? email)}>
       {committed ? (
         <div className="min-w-0">
           <SecurityPageHeader />
@@ -366,7 +472,7 @@ export function SecurityController({
       ) : (
         <SignInMethodsView
           methods={inventory.methods
-            .filter((method) => method.provider !== "credential")
+            .filter((method) => method.provider !== "credential" && !passkeyOnly)
             .map((method) => ({
               provider: method.provider as "google" | "github",
               connected: method.connected,
@@ -379,6 +485,22 @@ export function SecurityController({
             }))}
           hasPassword={password?.connected ?? false}
           passwordAvailable={password?.available ?? false}
+          showPassword={!passkeyOnly}
+          passkeys={
+            inventory.passkeysAvailable || (inventory.passkeys?.length ?? 0) > 0
+              ? {
+                  items: inventory.passkeys ?? [],
+                  available: inventory.passkeysAvailable === true,
+                  supported: passkeysSupported,
+                  canRemove: inventory.canRemovePasskey === true,
+                  onlyMethod: passkeyOnly,
+                }
+              : null
+          }
+          onAddPasskey={() => {
+            void addPasskey();
+          }}
+          onRemovePasskey={(passkeyId) => mutate("passkey/remove", { passkeyId })}
           busy={busy}
           mutationLocked={uncertain !== null}
           recentAuthRequired={requiresAuth}

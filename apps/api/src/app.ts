@@ -396,6 +396,11 @@ import {
   registerManagedSignInMethodRoutes,
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
+import {
+  managedPasskeySignInOffered,
+  managedPasskeySignUpOffered,
+  registerManagedPasskeyRoutes,
+} from "./routes/managed-passkeys";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
@@ -1189,6 +1194,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedOnboardingRoutes(app, routeDeps);
   registerManagedAuthSessionSetRoutes(app, routeDeps);
   registerManagedSignInMethodRoutes(app, routeDeps);
+  registerManagedPasskeyRoutes(app, routeDeps, { newSignupsGate: managedAuthNewSignupsGate });
   registerNativeAppAuthRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
@@ -2687,6 +2693,8 @@ function clientAuthConfig(settings: AppDependencies["settings"], newSignupsEnabl
       session: "cookie" as const,
       emailVerificationRequired: managedAuthRequiresEmailVerification(settings),
       newSignupsEnabled,
+      passkeySignIn: managedPasskeySignInOffered({ settings }),
+      passkeySignUp: managedPasskeySignUpOffered({ settings }, newSignupsEnabled),
       ...(settings.signupChallengeEnabled
         ? { signupChallengeSiteKey: settings.signupChallengeSiteKey }
         : {}),

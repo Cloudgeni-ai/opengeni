@@ -30,8 +30,10 @@ import {
   getStoredAccessKey,
   setStoredAccessKey,
   signInEmail,
+  signInPasskey,
   signOutManaged,
   signUpEmail,
+  signUpPasskey,
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
@@ -147,6 +149,8 @@ const webAppStateHost: AppStateHost = {
   signUpEmail,
   signOutManaged,
   startManagedSocialSignIn,
+  signInPasskey,
+  signUpPasskey,
   configureManagedActorEpoch,
   getStoredAccessKey,
   setStoredAccessKey,
@@ -202,11 +206,14 @@ export function RootRouteComponent() {
     managedEmailVerificationRequired,
     managedNewSignupsEnabled,
     managedSocialProviders,
+    managedPasskeySignIn,
+    managedPasskeySignUp,
     browserAccountsConfigured,
     browserAccountsEnabled,
     handleManagedAuth,
     handleManagedSessionSetSignup,
     handleManagedSocialAuth,
+    handleManagedPasskeyAuth,
     handleManagedSignOut,
     handleBrowserActorTransition,
     completeOrganizationOnboarding,
@@ -310,6 +317,9 @@ export function RootRouteComponent() {
               }
               socialProviders={managedSocialProviders}
               onSocialSubmit={handleManagedSocialAuth}
+              passkeySignIn={managedPasskeySignIn}
+              passkeySignUp={managedPasskeySignUp}
+              onPasskeySubmit={handleManagedPasskeyAuth}
             />
           )}
         </SignedOutPage>

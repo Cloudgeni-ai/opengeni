@@ -20862,6 +20862,10 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       // safety switch). Sign-in for existing accounts stays available.
       newSignupsEnabled: primitives.boolean.default(true),
       signupChallengeSiteKey: z.string().optional(),
+      // Sign in with a passkey, and add passkeys to an account in Security.
+      passkeySignIn: primitives.boolean.default(false),
+      // Create an account with only a passkey: no email address or password.
+      passkeySignUp: primitives.boolean.default(false),
     }),
   ]),
 );

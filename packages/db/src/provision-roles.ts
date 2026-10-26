@@ -651,6 +651,7 @@ async function grantAppRoleIfSchemaExists(
   const managedAuthSessionSetRoutines = `ARRAY[${[
     "assert_managed_sign_in_recovery(text,text,uuid,jsonb)",
     "replay_managed_sign_in_method(text,text,jsonb)",
+    "mutate_managed_passkey(text,text,jsonb)",
     "claim_managed_sign_in_notification(uuid,text,text,integer)",
     "settle_managed_sign_in_notification(uuid,uuid,text)",
     "get_canonical_human_exact_login_binding(text,text)",
