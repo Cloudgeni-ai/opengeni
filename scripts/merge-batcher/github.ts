@@ -376,6 +376,7 @@ export class GitHubReader {
     if (!scan.ok) return { ...result, reason: HEADROOM_HOLD_REASONS[scan.hold] };
     const { mainDemand, otherDemand } = scan;
     result.mainDemand = mainDemand;
+    result.attestedMainRuns = scan.attestedMainRuns;
     result.occupied = mainDemand + otherDemand;
     const decision = capacityDecision({
       mainDemand,

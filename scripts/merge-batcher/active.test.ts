@@ -1137,10 +1137,11 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           const path = String(url);
           if (path.includes("/jobs?"))
             return Response.json({
-              total_count: 4,
+              // One queued job after the MAIN_PRE_FANOUT_JOBS pre-plan jobs.
+              total_count: 5,
               jobs: [
                 { status: "queued" },
-                ...Array.from({ length: 3 }, () => ({ status: "completed" })),
+                ...Array.from({ length: 4 }, () => ({ status: "completed" })),
               ],
             });
           const status = new URL(path).searchParams.get("status");
@@ -1952,9 +1953,9 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           { id: 1, status: "queued", ...MAIN },
           { id: 3, status: "queued", ...MAIN, head_branch: "production" },
         ],
-        // Fan-out already instantiated (more than the 3 pre-plan jobs listed).
+        // Fan-out already instantiated (more than the 4 pre-plan jobs listed).
         {
-          1: page(jobs("waiting", "waiting", "completed", "completed")),
+          1: page(jobs("waiting", "waiting", "completed", "completed", "completed")),
           3: page(jobs("queued", "in_progress")),
         },
       );
@@ -2188,7 +2189,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         run: { id: 1000, status: "waiting", ...MAIN },
         jobs: () =>
           approved
-            ? page(jobs("queued", "queued", "completed", "completed"))
+            ? page(jobs("queued", "queued", "completed", "completed", "completed"))
             : page(jobs("waiting", "waiting", "completed")),
       };
       const fixtures = [transition, ...idleOther(32)];
@@ -2529,6 +2530,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         },
         mainQueuedJobs: 0,
         preFanoutMainRuns: [],
+        attestedMainRuns: [],
       });
       // The wall-clock deadline holds mid-scan instead of admitting partial demand.
       let clock = 0;
@@ -2585,6 +2587,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         // One queued job: the newly approved run has not instantiated its fan-out.
         mainQueuedJobs: 1,
         preFanoutMainRuns: [1],
+        attestedMainRuns: [],
       });
       // Completed runs listed between pages are not scanned; invalid identities hold.
       expect(

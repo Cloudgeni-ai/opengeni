@@ -3092,6 +3092,11 @@ unit coverage from a successful Batch attempt only with identical-tree, canonica
 manifest, exact attempt and archive-digest proof (`scripts/ci/reuse-batch-units.ts`).
 Impact-selected subsets or missing/unknown evidence run the ordinary main units;
 the full-green release receipt contract is unchanged.
+Separately, a non-Version, non-control-plane, non-CI-definition batcher landing whose exact tree passed
+a trusted `queue/live` Batch attempt skips main's test lanes by attestation
+(`scripts/ci/batch-attestation.ts`); artifacts, images and the unchanged receipts
+still run; release admission refuses such receipts. This is a documented
+coverage reduction (see docs/merge-batcher.md).
 Candidate plan/source/selected-unit/ready success may land on red or unknown
 full-main CI. A two-hour latency breaker retains raw measurements and deducts only
 bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible

@@ -359,6 +359,86 @@ proof, enable the request only after stable ON is verified and keep ON throughou
 the proof; retain the exact candidate, run/attempt, tested tree and native MERGED
 readback separately from any Manual-fallback merge.
 
+### Main-push Batch CI attestation
+
+A landing fast-forwards main to the exact `queue/live/<batchId>` tip that Batch CI
+tested, so the push-to-main `ci.yml` run would otherwise re-run the whole suite on
+a tree that already passed. Its `Batch CI attestation` job
+(`scripts/ci/batch-attestation.ts`) looks for a trusted, completed, successful
+latest attempt of `.github/workflows/batch-ci.yml` on a `queue/live/<64-hex>` ref
+whose tested commit has exactly the main commit's Git tree. It reuses the
+unit-reuse proof machinery and binds the run and attempt, the canonical per-PR
+Git manifest (whose `batchId` must name the run's own live ref), the SHA-256
+digests of the plan and result archives, and a complete successful Batch result
+with every expected shard receipt. It also requires the tested tip to be the main
+commit or an ancestor of it, so a tree-preserving refresh landing qualifies. A
+batch containing a Version PR (`changeset-release/main`) or a control-plane PR
+never attests; both flags are bound into the manifest digest. Nor does a push
+whose landed range (`github.event.before` to `GITHUB_SHA`, which must be a proper
+ancestor range) changes `.github/`, `scripts/ci/` or `scripts/merge-batcher/`:
+those paths define main's own lanes, so a change to them runs the changed lanes.
+The impact planner's broader full-mode fences, such as changesets, the lockfile
+and toolchain files, do not block attestation; Batch CI tests them. A
+final read rejects an attempt that changed during discovery. The
+`Reuse identical-tree Batch CI` step then re-verifies the persisted proof offline
+and runs only for a verified proof. `plan` adopts the attested topology only when
+the attestation job succeeded with well-formed identities and the tree matches
+`GITHUB_SHA^{tree}`. Missing, expired, ambiguous, partial, inconsistent or
+unreadable evidence, a proof error, or any other event runs the ordinary full
+suite. Discovery never fails the workflow.
+
+On an attested run:
+
+- **Skipped (Batch verdict reused):** `Source and type contracts`, unit shards,
+  real-service shards, impacted E2E shards, real-service and recovery tests,
+  browser and visual acceptance, package and bundle contracts and the real
+  Chromium browser controller.
+- **Still run:** `plan` (impact plan and image inputs), `Deployment artifacts`,
+  the artifact runtime (including its macOS and Windows native smoke receipts),
+  release-image validation, every workload image, `Workload image builds` (and its
+  canary image receipt), `Typecheck and unit tests`, `Verify landed merge content`
+  and `Publish fully green main SHA`.
+
+`scripts/ci/required-results.jq` has an explicit attested mode. It accepts only
+a full-mode main push that builds images, where every skipped lane above is
+`skipped` (none partially ran) and deployment, artifact runtime and images
+succeeded. The aggregate job names, the `Full CI` commit status and the
+`full-green-main-<sha>` receipt (`schemaVersion: 1`, `mode: "full"`) are
+unchanged for publish/canary admission, Opengeni-ops `Deploy Staging Canary`
+and the merge-content audit. The receipt adds an `attestation` object (Batch run
+ID, attempt, tested head and tree), and the status description names the Batch
+run. Release admission (`scripts/check-release-pr-automation.mjs`) refuses a
+receipt with `attestation`: a release source, including a later tested
+descendant of a Version merge, needs the full main suite. The `batch-attestation-<sha>` artifact
+keeps the full proof for 30 days.
+
+**Coverage.** This is an explicit coverage reduction for batcher landings. Batch
+CI covers impact-selected source contracts and impact-selected unit shards on the
+exact tree. It does not cover the full unit inventory, real-service, E2E,
+browser, package-contract, publish-closure, SDK-compatibility or example-build
+lanes. Those lanes were never landing gates, because the batcher lands on Batch
+success whatever main CI reports. Staging canary deploys attested SHAs with
+those images. The lanes still run in full on every push without an
+identical-tree trusted `queue/live` Batch attempt (ordinary direct pushes), on
+Version PR, control-plane and CI-definition landings, on the weekly schedule and
+on the `workflow_dispatch` run of every exact Version PR head before a release.
+A direct push or revert whose tree exactly equals an earlier tested batch tip
+also attests. Release admission requires a non-attested full-green receipt, so
+queue-green and attested main remain non-release evidence. An attested base's
+green `units` class covers only the units Batch selected, so failed-cohort
+comparison can blame a cohort for a failure an unselected main test already had.
+
+The merge batcher treats a run as attested only from its complete job listing.
+It needs exactly one successful `Batch CI attestation` job whose
+`Reuse identical-tree Batch CI` step succeeded, and no skipped-lane job in any
+state but `skipped`. An attested run is never pre-fan-out, never counts as queued
+main and is never `latestMain`; it has no test fan-out to protect. Its
+runner-holding jobs remain `mainDemand` inside the main reserve and the provider
+pool, because they really occupy runners. `stage.json` headroom lists them as
+`attestedMainRuns`. An attested exact base reports green `source` and `units`
+classes for failed-cohort comparison, because the same tree passed both in Batch
+CI. Any lane that ran falls back to ordinary job-class evidence.
+
 ## Immutable candidates and CI result contract
 
 Version commit subjects retain literal `changeset-release/main` for the existing
@@ -452,7 +532,9 @@ full-green workflow receipt. The reader traverses complete attempt-scoped job pa
 checks totals and duplicate/run/attempt identities, and rereads the latest run/attempt
 before accepting those classes. Pending relevant jobs, unknown/error evidence,
 missing failure classes, duplicate jobs and incomplete shard sets do not release
-the hold. A verified full-green base also clears it. This is class relevance,
+the hold. A verified full-green base also clears it. A Batch-attested exact base
+reports green `source` and `units` classes from its identical-tree Batch verdict.
+This is class relevance,
 not a same-assertion fingerprint proof, requeue operation or green-test waiver.
 Otherwise a trusted second code failure splits the cohort or parks a failing singleton;
 a second infrastructure or unknown outcome holds. Invalidated, landed or obsolete-base
@@ -521,6 +603,9 @@ This saturated model excludes failures, partial batches and downtime; two
 slots alone do not increase that runner-budget ceiling. Main complete-unit
 reuse, if independently qualified, would lower the modeled combined cost
 from 519 to 369 job-minutes, not make runner capacity unlimited.
+Main-push Batch CI attestation removes the attested landing's test lanes. Its
+remaining artifact, image and receipt jobs are not re-measured here, so the
+modeled main cost above is an upper bound for batcher landings.
 Failed or changed predecessors invalidate descendants without cancelling their
 runs. Version barriers, control-plane singleton isolation and sequential bisection remain unchanged.
 Full-main capacity estimates remain observable rather than reserving runners.
@@ -656,20 +741,23 @@ main-capacity wait no longer accrues when capacity is informational; latency
 comparisons across this policy change are therefore not like-for-like.
 
 - **Main before fan-out.** `ci.yml` first creates only automation-admission,
-  merge-content and plan; every other job needs plan and appears together, about
-  77–92 seconds later (measured), as a fan-out of up to 46 runner-holding jobs.
-  An active full-main push run whose complete job list has at most those 3 jobs
+  batch-attestation, merge-content and plan; every other job needs plan and
+  appears together (measured before batch-attestation existed: about 77–92
+  seconds later), as a fan-out of up to 46 runner-holding jobs.
+  An active full-main push run whose complete job list has at most those 4 jobs
   (any status, including a just-pushed run without jobs or a run held by its
   concurrency group) is pre-fan-out: its observed demand understates what it is
   about to request; this is reported without withholding a ready candidate.
   A drained run still lists its completed fan-out jobs, so it is not pre-fan-out.
   A run proven approval-only (an old rerun waiting for environment approval) is
   idle; once approved, a later observation sees its demand. A job-less waiting
-  or pending main run is reported as pre-fan-out. A test checks the 3-job constant
-  against `ci.yml`.
+  or pending main run is reported as pre-fan-out. A test checks the 4-job constant
+  against `ci.yml`. A Batch-attested run (see "Main-push Batch CI attestation") is
+  never pre-fan-out once its attestation step has succeeded: it has no test fan-out.
 - **Main jobs waiting for runners.** If any active full-main push CI run, newest
   or an older rerun, has a `queued` or `requested` job, its count and oldest wait
-  are retained. Main CI itself is never gated, cancelled or skipped.
+  are retained. Main CI itself is never gated or cancelled. Batch-attested runs
+  are excluded: their artifact and image jobs may wait without holding a candidate.
 - **Provider pool fit.** Observed repository demand (main + other) plus
   `BATCHER_OTHER_REPOSITORY_ALLOWANCE` plus the 18 candidate slots is compared with
   `BATCHER_PROVIDER_JOB_LIMIT`. With the defaults, 60 - 28 - 18 = 14 observed
@@ -715,6 +803,8 @@ actual run/job creation and start timestamps to measure provider queue delay.
 `stage.json` headroom now also records `capacity`: the configured limit and
 allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (queued or
 requested jobs across all active main runs), `preFanoutMainRuns` (their run IDs),
+`attestedMainRuns` (top-level headroom: active Batch-attested main runs, excluded
+from both),
 and `latestMain` (newest main run ID, jobs
 waiting for runners, oldest current queue age, and the largest `started_at -
 created_at` among started jobs, all measured from the job timestamps). These are
