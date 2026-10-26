@@ -39,6 +39,8 @@ class Fixture implements CuaDesktopRuntime {
   title = "Fixture";
   /** The name of the window element the reading carries, when it has one. */
   windowName?: string;
+  /** Whether the reading shows the Apply button focused. */
+  applyFocused = false;
   mutation = result({ effect: "confirmed", route: "accessibility" });
   async callTool(name: string, argumentsJson: string): Promise<ToolResult> {
     const args = JSON.parse(argumentsJson) as Record<string, unknown>;
@@ -82,6 +84,7 @@ class Fixture implements CuaDesktopRuntime {
               label: this.applyLabel,
               actions: ["AXPress"],
               frame: { x: 60, y: 60, w: 40, h: 20 },
+              ...(this.applyFocused ? { focused: true } : {}),
             },
             {
               element_index: 1,
@@ -841,6 +844,104 @@ describe("CUA desktop boundary", () => {
         message: "This element offers no actions; act on a nearby control or its window instead",
       });
       expect(fixture.calls.filter((call) => call.name === "set_value")).toHaveLength(1);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("keys fenced on a reading another read has since replaced go where that reading showed the focus", async () => {
+    const fixture = new Fixture();
+    fixture.applyFocused = true;
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      // The caller's reading, then another read of the window before the
+      // keys arrive (the person's viewer, or a read run alongside them).
+      const planned = await backend.observe(target.id);
+      const between = await backend.observe(target.id);
+      expect(between.observationId).not.toBe(planned.observationId);
+      expect(between.focusedRef).toBe(planned.focusedRef);
+      const escape = (observation: ComputerBackendObservation) =>
+        backend.dispatch({
+          ...command(observation),
+          action: { type: "keyboard", action: "press", value: "Escape" },
+        });
+      await escape(planned);
+      // The keys go to the focused element of the latest reading, whose
+      // token belongs to the snapshot CUA holds now.
+      expect(
+        [...fixture.calls].reverse().find((call) => call.name === "press_key")?.args,
+      ).toMatchObject({ key: "escape", element_token: `s${fixture.snapshot - 1}:0` });
+      // When the focus moved since the caller's reading, no keys are sent.
+      const before = await backend.observe(target.id);
+      fixture.applyFocused = false;
+      await backend.observe(target.id);
+      const sent = fixture.calls.filter((call) => call.name === "press_key").length;
+      await expect(escape(before)).rejects.toMatchObject({
+        code: "observation_stale",
+        dispatched: false,
+        message:
+          "The focused element of this window changed since that observation, so no keys were sent; observe the window again",
+      });
+      expect(fixture.calls.filter((call) => call.name === "press_key")).toHaveLength(sent);
+      // A reading this window never had is still refused as before.
+      await expect(
+        backend.dispatch({
+          ...command(before),
+          expectedObservationId: "unknown:s1",
+          action: { type: "keyboard", action: "press", value: "Escape" },
+        }),
+      ).rejects.toMatchObject({
+        code: "observation_stale",
+        message: "CUA action requires the current semantic observation",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("keys fenced on a replaced reading are refused when nothing was focused or the document changed", async () => {
+    const fixture = new Fixture();
+    fixture.windowName = "Report A";
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const type = (observation: ComputerBackendObservation) =>
+        backend.dispatch({
+          ...command(observation),
+          action: { type: "keyboard", action: "type", value: "secret" },
+        });
+      const typed = () => fixture.calls.filter((call) => call.name === "type_text").length;
+      const refused = {
+        code: "observation_stale",
+        dispatched: false,
+        message: "CUA action requires the current semantic observation",
+      };
+      // Nothing focused, then the window shows another document, still with
+      // nothing focused: the keys would land wherever the focus is by then.
+      const planned = await backend.observe(target.id);
+      expect(planned.focusedRef).toBeNull();
+      fixture.windowName = "Report B";
+      expect((await backend.observe(target.id)).focusedRef).toBeNull();
+      await expect(type(planned)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // Nothing focused in the same document: only the latest reading fences
+      // the keys.
+      const same = await backend.observe(target.id);
+      await backend.observe(target.id);
+      await expect(type(same)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // An element focused in both readings, but of another document.
+      fixture.applyFocused = true;
+      const focused = await backend.observe(target.id);
+      expect(focused.focusedRef).not.toBeNull();
+      fixture.windowName = "Report C";
+      expect((await backend.observe(target.id)).focusedRef).not.toBeNull();
+      await expect(type(focused)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // The latest reading still fences them.
+      await type(await backend.observe(target.id));
+      expect(typed()).toBe(1);
     } finally {
       await backend.close();
     }
