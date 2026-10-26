@@ -19,10 +19,11 @@ tools or an embedded agent.
   `rate_limited`, `site_budget_exhausted` and retryable `site_budget_busy` (429), and
   `site_platform_brake_engaged` (503) as normal UI states.
 - The same Site HTML and Site Data work there; no rebuild is needed.
-- A member's conversation is their ordinary private chat, as described under
-  "Authoring, preview, and viewer access" in build-and-preview.md: their saved
-  settings and live permissions decide its tools and compute, and it has no Site
-  budget or stamped session usage limit.
+- A member's conversation is their ordinary private chat (see ai-and-chat.md):
+  ordinary chat defaults, or an existing chat's own saved selections, within the
+  member's live permissions decide its tools and compute, and it has no Site
+  budget or stamped session usage limit. Members without publishing or data
+  permissions can still chat; never request extra permission just to chat.
 - People outside the workspace get only this Site's `site_data_query` and
   `site_data_write`, plus `site_sql_run` when SQL is enabled. The server pins the
   Site and binds calls to the conversation's viewer, including collection

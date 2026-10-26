@@ -284,9 +284,10 @@ Operations:
     Site/viewer audience enforced by native authorization and RLS. No fabricated
     workspace membership or shared fallback is used. Disabled private-session
     policy explicitly refuses a new conversation.
-    - A workspace member's conversation is an ordinary private chat: the
-      member's saved settings and live permissions decide its tools, memory
-      and compute, and the publication adds only its model and instructions.
+    - A workspace member's conversation is an ordinary private chat:
+      ordinary chat defaults (or an existing chat's own saved selections),
+      within the member's live permissions, decide its tools, memory and
+      compute, and the publication adds only its model and instructions.
     - For people outside the workspace it uses `agentAccess: "session"`, the
       publication's model and instructions, memory off and no sandbox
       (`sandboxBackend: "none"`; a publication has no sandbox setting).
