@@ -185,6 +185,7 @@ import { streamTokenDegraded } from "@opengeni/config";
 import {
   recordAuditEvent,
   acceptSessionApprovalDecision,
+  SessionApprovalAnswerError,
   acceptSessionHumanInputResponse,
   clearSessionGoal,
   clearSessionContext,
@@ -4346,6 +4347,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+          throw new HTTPException(422, { message: error.message });
+        }
+        if (error instanceof SessionApprovalAnswerError) {
           throw new HTTPException(422, { message: error.message });
         }
         throw error;

@@ -50,6 +50,7 @@ import {
 import {
   acceptSessionHumanInputResponse,
   acceptSessionApprovalDecision,
+  SessionApprovalAnswerError,
   approveSlackUserLinkAccessRequest,
   advanceSlackInteractionDelivery,
   bindSlackInteractionSession,
@@ -4449,14 +4450,25 @@ async function executeSlackAction(
   if (handle.actionKind === "approval_approve" || handle.actionKind === "approval_reject") {
     if (!handle.targetId) throw new SlackInteractionPermanentError("slack_action_target_invalid");
     const decision = handle.actionKind === "approval_approve" ? "approve" : "reject";
-    const accepted = await acceptSessionApprovalDecision(deps.db, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      sessionId: handle.sessionId,
-      subjectId: grant.subjectId,
-      payload: { approvalId: handle.targetId, decision },
-      clientEventId: `slack-action:${handle.id}`,
-    });
+    let accepted: Awaited<ReturnType<typeof acceptSessionApprovalDecision>>;
+    try {
+      accepted = await acceptSessionApprovalDecision(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: handle.sessionId,
+        subjectId: grant.subjectId,
+        payload: { approvalId: handle.targetId, decision },
+        clientEventId: `slack-action:${handle.id}`,
+      });
+    } catch (error) {
+      // An MCP server asked questions that need typed answers; Slack shows
+      // only Approve and Decline, so the person answers in the session.
+      if (!(error instanceof SessionApprovalAnswerError)) throw error;
+      return {
+        result: "needs_answer",
+        text: `${mention}This approval asks questions that need answers. Answer them in the session. ${openSessionText(deps, interaction.workspaceId, handle.sessionId)}`,
+      };
+    }
     if (accepted.action === "conflict") {
       return {
         result: "stale",

@@ -1,36 +1,3 @@
-diff --git a/node_modules/@openai/agents-core/.bun-tag-13b9d251eacb7a57 b/.bun-tag-13b9d251eacb7a57
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-1a92431e4f62cd51 b/.bun-tag-1a92431e4f62cd51
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-2b0b2155efcca04e b/.bun-tag-2b0b2155efcca04e
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-2da6ec976600e880 b/.bun-tag-2da6ec976600e880
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-34013d846a17e8af b/.bun-tag-34013d846a17e8af
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-36e825f6e7410141 b/.bun-tag-36e825f6e7410141
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-7c21d377cb19cf3e b/.bun-tag-7c21d377cb19cf3e
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-ac46de758592501 b/.bun-tag-ac46de758592501
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-b6cfd288f3599860 b/.bun-tag-b6cfd288f3599860
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-c0c42b29c1e5d144 b/.bun-tag-c0c42b29c1e5d144
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@openai/agents-core/.bun-tag-dadebcd64451c0aa b/.bun-tag-dadebcd64451c0aa
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.d.ts b/dist/index.d.ts
 index 21b58188472152339a1747df5cfe8dd256356cd1..1ecb7bff25d73312059991d05d44978f9331b033 100644
 --- a/dist/index.d.ts
@@ -49,10 +16,26 @@ index 21b58188472152339a1747df5cfe8dd256356cd1..1ecb7bff25d73312059991d05d44978f
  export { HostedTool, attachClientToolSearchExecutor, ComputerTool, computerTool, ShellTool, shellTool, ApplyPatchTool, applyPatchTool, HostedMCPTool, hostedMcpTool, FunctionTool, FunctionToolResult, FunctionToolTimeoutBehavior, ToolTimeoutErrorFunction, Tool, tool, toolNamespace, invokeFunctionTool, getClientToolSearchExecutor, getToolSearchRuntimeToolKey, ToolExecuteArgument, ToolEnabledFunction, ToolOptionsWithGuardrails, ToolAllowedCaller, ToolAllowedCallers, } from './tool';
  export type { ClientToolSearchExecutor, ClientToolSearchExecutorArgs, ClientToolSearchExecutorResult, ComputerOnSafetyCheckFunction, ComputerSafetyCheck, ComputerSafetyCheckResult, ShellToolEnvironment, ShellToolLocalEnvironment, ShellToolLocalSkill, ShellToolHostedEnvironment, ShellToolContainerAutoEnvironment, ShellToolContainerReferenceEnvironment, ShellToolContainerSkill, ShellToolSkillReference, ShellToolInlineSkill, ShellToolInlineSkillSource, ShellToolContainerNetworkPolicy, ShellToolContainerNetworkPolicyAllowlist, ShellToolContainerNetworkPolicyDisabled, ShellToolContainerNetworkPolicyDomainSecret, ToolInputParameters, ToolOutputSchema, ToolOptions, ToolNamespaceOptions, ToolOutputCustomData, FunctionToolCustomDataContext, FunctionToolCustomDataExtractor, ComputerToolCustomDataContext, ComputerToolCustomDataExtractor, ApplyPatchToolCustomDataContext, ApplyPatchToolCustomDataExtractor, } from './tool';
 diff --git a/dist/mcp.d.ts b/dist/mcp.d.ts
-index aa0b62edaa91a10ab64d7daa6a736ae22a35fa0b..e4eed13aacb0d060041fd8bc0629a8eee7a81d7e 100644
+index aa0b62edaa91a10ab64d7daa6a736ae22a35fa0b..0a4a718c07cb570a2ef9f4854c9a52b74c34bd22 100644
 --- a/dist/mcp.d.ts
 +++ b/dist/mcp.d.ts
-@@ -294,6 +294,27 @@ export interface MCPServerStreamableHttpOptions {
+@@ -14,6 +14,15 @@ export type MCPToolErrorFunction = (args: {
+ }) => Promise<string> | string;
+ export interface MCPCallToolOptions {
+     signal?: AbortSignal;
++    /**
++     * Declare form elicitation for this one call on a 2026-07-28 connection and
++     * return an `input_required` result as is instead of failing. Retries carry
++     * the answers and the server's byte-exact `requestState`.
++     */
++    inputRequired?: {
++        inputResponses?: Record<string, unknown>;
++        requestState?: string;
++    };
+ }
+ /**
+  * Interface for MCP server implementations.
+@@ -294,6 +303,27 @@ export interface MCPServerStreamableHttpOptions {
      fetch?: any;
      reconnectionOptions?: any;
      sessionId?: string;
@@ -2159,7 +2142,7 @@ index 34dc1b761aee009ea97f2a26529f7246c44d018e..4ff195c2cfe634b56b942a675491b1f2
              if (toolNotFoundBehavior !== 'return_error_to_model') {
                  throwFunctionToolNotFound(resolved.toolName, agent);
 diff --git a/dist/runner/toolExecution.js b/dist/runner/toolExecution.js
-index e512db81769570ddd61957d4c6e12835025559f1..ef1024121867d155415264c4f1314c89efa09f53 100644
+index e512db81769570ddd61957d4c6e12835025559f1..0fe873e7a317036fb1d053e701bfa0c1831c1c4b 100644
 --- a/dist/runner/toolExecution.js
 +++ b/dist/runner/toolExecution.js
 @@ -262,7 +262,7 @@ async function executeFunctionToolCalls(agent, toolRuns, runner, state, toolErro
@@ -2218,8 +2201,46 @@ index e512db81769570ddd61957d4c6e12835025559f1..ef1024121867d155415264c4f1314c89
  function getMaxFunctionToolConcurrency(toolExecution) {
      return toolExecution?.maxFunctionToolConcurrency ?? undefined;
  }
+@@ -362,6 +402,19 @@ function buildApprovalRequestResult(deps, toolRun) {
+         runItem: new items_1.RunToolApprovalItem(toolRun.toolCall, deps.agent, getFunctionToolIdentity(toolRun), (0, toolIdentity_1.getFunctionToolStateKey)(toolRun.tool)),
+     };
+ }
++/**
++ * A tool invocation can return `{ [TOOL_CALL_AWAITS_APPROVAL]: request }` when
++ * it stopped before finishing and needs a person to approve the same call (for
++ * example an MCP server asking a question mid-call). The call then pauses like
++ * an approval requested before execution, and the request is kept on the
++ * approval item under the same symbol for the host that resumes it.
++ */
++const TOOL_CALL_AWAITS_APPROVAL = Symbol.for('opengeni.toolCall.awaitsApproval');
++function awaitedApprovalRequest(output) {
++    return output !== null && typeof output === 'object'
++        ? output[TOOL_CALL_AWAITS_APPROVAL]
++        : undefined;
++}
+ function buildFunctionFailureResult(deps, toolRun, output) {
+     return {
+         type: 'function_output',
+@@ -783,6 +836,17 @@ async function runApprovedFunctionTool(deps, toolRun, approvalArgs, preparedInpu
+                 if ((0, abortSignals_1.isSiblingCancellationSignal)(signal)) {
+                     return buildSiblingCancellationResult();
+                 }
++                const awaitedApproval = awaitedApprovalRequest(invokedToolOutput);
++                if (awaitedApproval !== undefined) {
++                    toolStarted = false;
++                    emitFunctionToolEnd(runner, state._context, agent, toolRun.tool, '', toolRun.toolCall, refreshRedaction, true);
++                    const approval = buildApprovalRequestResult(deps, toolRun);
++                    Object.defineProperty(approval.runItem, TOOL_CALL_AWAITS_APPROVAL, {
++                        value: awaitedApproval,
++                        enumerable: false,
++                    });
++                    return approval;
++                }
+                 const redactedBeforeOutputGuardrails = refreshRedaction();
+                 const outputGuardrailResults = [];
+                 try {
 diff --git a/dist/runner/toolExecution.mjs b/dist/runner/toolExecution.mjs
-index afe9d23168c0aff1474008da0b267a04312b2c12..847ce99450b9ec1c4f83f7c25ddc737501cf4280 100644
+index afe9d23168c0aff1474008da0b267a04312b2c12..a67f0cb23259bbf11ad8d60928552ab5df91f9e3 100644
 --- a/dist/runner/toolExecution.mjs
 +++ b/dist/runner/toolExecution.mjs
 @@ -219,7 +219,7 @@ export async function executeFunctionToolCalls(agent, toolRuns, runner, state, t
@@ -2278,6 +2299,44 @@ index afe9d23168c0aff1474008da0b267a04312b2c12..847ce99450b9ec1c4f83f7c25ddc7375
  function getMaxFunctionToolConcurrency(toolExecution) {
      return toolExecution?.maxFunctionToolConcurrency ?? undefined;
  }
+@@ -319,6 +359,19 @@ function buildApprovalRequestResult(deps, toolRun) {
+         runItem: new RunToolApprovalItem(toolRun.toolCall, deps.agent, getFunctionToolIdentity(toolRun), getFunctionToolStateKey(toolRun.tool)),
+     };
+ }
++/**
++ * A tool invocation can return `{ [TOOL_CALL_AWAITS_APPROVAL]: request }` when
++ * it stopped before finishing and needs a person to approve the same call (for
++ * example an MCP server asking a question mid-call). The call then pauses like
++ * an approval requested before execution, and the request is kept on the
++ * approval item under the same symbol for the host that resumes it.
++ */
++const TOOL_CALL_AWAITS_APPROVAL = Symbol.for('opengeni.toolCall.awaitsApproval');
++function awaitedApprovalRequest(output) {
++    return output !== null && typeof output === 'object'
++        ? output[TOOL_CALL_AWAITS_APPROVAL]
++        : undefined;
++}
+ function buildFunctionFailureResult(deps, toolRun, output) {
+     return {
+         type: 'function_output',
+@@ -740,6 +793,17 @@ async function runApprovedFunctionTool(deps, toolRun, approvalArgs, preparedInpu
+                 if (isSiblingCancellationSignal(signal)) {
+                     return buildSiblingCancellationResult();
+                 }
++                const awaitedApproval = awaitedApprovalRequest(invokedToolOutput);
++                if (awaitedApproval !== undefined) {
++                    toolStarted = false;
++                    emitFunctionToolEnd(runner, state._context, agent, toolRun.tool, '', toolRun.toolCall, refreshRedaction, true);
++                    const approval = buildApprovalRequestResult(deps, toolRun);
++                    Object.defineProperty(approval.runItem, TOOL_CALL_AWAITS_APPROVAL, {
++                        value: awaitedApproval,
++                        enumerable: false,
++                    });
++                    return approval;
++                }
+                 const redactedBeforeOutputGuardrails = refreshRedaction();
+                 const outputGuardrailResults = [];
+                 try {
 diff --git a/dist/runner/turnPreparation.js b/dist/runner/turnPreparation.js
 index 614a7400173bbd735b7d789592d902172898d0cf..8dde349e682a079c7e91518d6ef49de618a2d46c 100644
 --- a/dist/runner/turnPreparation.js
@@ -2854,7 +2913,7 @@ index fc2aa3141933c96cc080d65b05f7cffb13ee18d7..c4324d271c7bc90128dad0285198f687
  //# sourceMappingURL=workspacePaths.mjs.map
 \ No newline at end of file
 diff --git a/dist/shims/mcp-server/node.js b/dist/shims/mcp-server/node.js
-index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949fc0f8b78 100644
+index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..acc557238ed0e85c01ff40af252d19e3abb4b9eb 100644
 --- a/dist/shims/mcp-server/node.js
 +++ b/dist/shims/mcp-server/node.js
 @@ -35,6 +35,8 @@ var __importStar = (this && this.__importStar) || (function () {
@@ -2876,7 +2935,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
              throw error;
          }
          throw (0, mcpLogging_1.sanitizeMcpTransportError)(error, endpoint, operation);
-@@ -573,6 +576,236 @@ class NodeMCPServerSSE extends mcpShared_1.BaseMCPServerSSE {
+@@ -573,6 +576,248 @@ class NodeMCPServerSSE extends mcpShared_1.BaseMCPServerSSE {
      }
  }
  exports.NodeMCPServerSSE = NodeMCPServerSSE;
@@ -3083,6 +3142,18 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
 +    }
 +    return listAllMcpToolsV2(client, requestOptions, maxListPages);
 +}
++function isModernEraClient(client) {
++    try {
++        return client.getProtocolEra() === 'modern';
++    }
++    catch {
++        return false;
++    }
++}
++function withoutOutputSchema(tool) {
++    const { outputSchema: _outputSchema, ...rest } = tool;
++    return rest;
++}
 +function getListedToolForCall(clientModule, tools, toolName) {
 +    const tool = tools.find((tool) => tool.name === toolName);
 +    if (tool?.execution?.taskSupport === 'required') {
@@ -3113,7 +3184,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
  class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHttp {
      session = null;
      _cacheDirty = true;
-@@ -581,6 +814,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -581,6 +826,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      serverInitializeResult = null;
      clientSessionTimeoutSeconds;
      timeout;
@@ -3121,7 +3192,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
      params;
      _name;
      transport = null;
-@@ -590,18 +824,25 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -590,18 +836,25 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      connectionStateVersion = 0;
      constructor(params) {
          super(params);
@@ -3153,7 +3224,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
      }
      createStreamableHttpTransport(StreamableHTTPClientTransport, options = {}) {
          const transportOptions = {
-@@ -620,16 +861,44 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -620,16 +873,44 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
      async createConnectedStreamableHttpClient(options = {}) {
          const { clientModule, transportModule } = await this.loadStreamableHttpRuntime();
@@ -3198,7 +3269,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
              return { client, transport };
          }
          catch (error) {
-@@ -647,25 +916,13 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -647,25 +928,13 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      getClientSessionTimeoutMs() {
          return Math.max(1, (this.clientSessionTimeoutSeconds ?? 5) * 1000);
      }
@@ -3225,7 +3296,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
              this._toolsList = [];
          }
          await (0, mcpToolCache_1.invalidateServerToolsCache)(this.name);
-@@ -698,7 +955,10 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -698,7 +967,10 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              });
              try {
                  if (typeof detachedTransport.terminateSession === 'function') {
@@ -3237,16 +3308,40 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
                  }
              }
              finally {
-@@ -740,18 +1000,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -740,18 +1012,53 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          await this.terminateDetachedStreamableHttpSession(transport, terminateWarningMessage);
      }
      async callToolWithClient(client, toolName, args, meta, options) {
 -        const { CallToolResultSchema } = await Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/types.js'))).catch(failedToImport);
 +        const { clientModule } = await this.loadStreamableHttpRuntime();
++        // A caller that can answer input requests later (form elicitation in
++        // the 2026-07-28 multi round-trip pattern) declares that on this one
++        // request, sends any answers and the server's echoed requestState, and
++        // receives an `input_required` result as is. Legacy-era connections
++        // never declare it.
++        const inputRequired = options?.inputRequired !== undefined && isModernEraClient(client)
++            ? options.inputRequired
++            : undefined;
          const params = {
              name: toolName,
              arguments: args ?? {},
-             ...(meta != null ? { _meta: meta } : {}),
+-            ...(meta != null ? { _meta: meta } : {}),
++            ...(inputRequired !== undefined
++                ? {
++                    _meta: {
++                        [clientModule.CLIENT_CAPABILITIES_META_KEY]: clientModule.mergeCapabilities(client._capabilities ?? {}, { elicitation: { form: {} } }),
++                        ...(meta ?? {}),
++                    },
++                    ...(inputRequired.inputResponses !== undefined
++                        ? { inputResponses: inputRequired.inputResponses }
++                        : {}),
++                    ...(inputRequired.requestState !== undefined
++                        ? { requestState: inputRequired.requestState }
++                        : {}),
++                }
++                : meta != null
++                    ? { _meta: meta }
++                    : {}),
          };
 -        const response = await callWithMCPRequestSignal(options?.signal, (requestSignal) => client.callTool(params, undefined, buildRequestOptions(this.clientSessionTimeoutSeconds, {
 -            timeout: this.timeout,
@@ -3254,18 +3349,28 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
 -        })));
 -        const parsed = CallToolResultSchema.parse(response);
 -        return attachParsedCallToolResultMetadata(parsed);
++        const listedTool = getListedToolForCall(clientModule, this._toolsList, toolName);
 +        const response = await callWithMCPRequestSignal(options?.signal, (requestSignal) => client.callTool(params, {
 +            ...buildRequestOptions(this.clientSessionTimeoutSeconds, {
 +                timeout: this.timeout,
 +                signal: requestSignal,
 +            }),
-+            toolDefinition: getListedToolForCall(clientModule, this._toolsList, toolName),
++            // An input request has no structured content, so it is not checked
++            // against the tool's output schema here; the caller validates the
++            // final result.
++            toolDefinition: inputRequired !== undefined && listedTool?.outputSchema !== undefined
++                ? withoutOutputSchema(listedTool)
++                : listedTool,
++            ...(inputRequired !== undefined ? { allowInputRequired: true } : {}),
 +        }));
++        if (inputRequired !== undefined && response?.resultType === 'input_required') {
++            return response;
++        }
 +        return attachParsedCallToolResultMetadata(response);
      }
      async closeStreamableHttpClient(args, options) {
          const { client, transport } = args;
-@@ -771,6 +1033,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -771,6 +1078,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', options.closeWarningMessage, error);
          });
      }
@@ -3277,7 +3382,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
      async reconnectExistingStreamableHttpClient(args) {
          const { transportModule } = await this.loadStreamableHttpRuntime();
          const { StreamableHTTPClientTransport } = transportModule;
-@@ -781,7 +1048,8 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -781,7 +1093,8 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          try {
              const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
              await args.client.connect(transport, requestOptions);
@@ -3287,7 +3392,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
                  // Reconnecting with an existing session skips initialize(), so resend
                  // initialized to reopen the shared SSE stream for async responses.
                  await this.reopenSharedStreamableHttpSession(args.client);
-@@ -838,14 +1106,21 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -838,14 +1151,21 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  throw new Error('Cannot reconnect streamable HTTP MCP server without an active client.');
              }
              try {
@@ -3317,7 +3422,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
                  const recovered = await this.reconnectExistingStreamableHttpClient({
                      client: previousClient,
                      protocolVersion,
-@@ -872,7 +1147,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -872,7 +1192,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  await this.publishConnectedStreamableHttpClient({
                      client: recovered.client,
                      transport: recovered.transport,
@@ -3326,7 +3431,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
                  });
                  return recovered.client;
              }
-@@ -909,13 +1184,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -909,13 +1229,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          if (this.params.sessionId !== undefined) {
              return 'none';
          }
@@ -3352,7 +3457,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
              ? 'reconnect-only'
              : 'none';
      }
-@@ -948,7 +1230,6 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -948,7 +1275,6 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              await this.publishConnectedStreamableHttpClient({
                  client,
                  transport,
@@ -3360,7 +3465,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
              });
              this.serverInitializeResult = {
                  serverInfo: { name: this._name, version: '1.0.0' },
-@@ -967,7 +1248,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -967,7 +1293,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          catch (e) {
              // A losing concurrent connect can fail after another connect already
              // published a healthy shared session, so avoid closing shared state here.
@@ -3369,7 +3474,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
              (0, logger_1.logToolActionError)(this.logger, 'Error initializing MCP server:', error);
              throw error;
          }
-@@ -975,11 +1256,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -975,11 +1301,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
      async invalidateToolsCache() {
          this._toolsCacheGeneration += 1;
@@ -3383,7 +3488,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
          if (!this.session) {
              throw new Error('Server not initialized. Make sure you call connect() first.');
          }
-@@ -988,19 +1269,34 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -988,19 +1314,34 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          }
          const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
          const session = this.session;
@@ -3423,7 +3528,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
          this._toolsList = tools;
          this._cacheDirty = false;
          return tools;
-@@ -1022,18 +1318,18 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1022,18 +1363,18 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              if (isCallerAbortReason(error, options?.signal)) {
                  throw error;
              }
@@ -3446,7 +3551,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
              }
              try {
                  result = await this.callToolWithClient(recoveredClient, toolName, args, meta, options);
-@@ -1042,41 +1338,38 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1042,41 +1383,38 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  if (isCallerAbortReason(retryError, options?.signal)) {
                      throw retryError;
                  }
@@ -3496,14 +3601,14 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949
      }
      get name() {
          return this._name;
-@@ -1130,4 +1423,3 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1130,4 +1468,3 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
  }
  exports.NodeMCPServerStreamableHttp = NodeMCPServerStreamableHttp;
 -//# sourceMappingURL=node.js.map
 \ No newline at end of file
 diff --git a/dist/shims/mcp-server/node.mjs b/dist/shims/mcp-server/node.mjs
-index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db4b920c76 100644
+index f5f1dc3e616690fc91032d545369333f95f49944..94393fb69ffade4eda2984119669c62209f0edf0 100644
 --- a/dist/shims/mcp-server/node.mjs
 +++ b/dist/shims/mcp-server/node.mjs
 @@ -1,9 +1,12 @@
@@ -3529,7 +3634,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
              throw error;
          }
          throw sanitizeMcpTransportError(error, endpoint, operation);
-@@ -535,6 +539,235 @@ export class NodeMCPServerSSE extends BaseMCPServerSSE {
+@@ -535,6 +539,247 @@ export class NodeMCPServerSSE extends BaseMCPServerSSE {
          });
      }
  }
@@ -3735,6 +3840,18 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
 +    }
 +    return listAllMcpToolsV2(client, requestOptions, maxListPages);
 +}
++function isModernEraClient(client) {
++    try {
++        return client.getProtocolEra() === 'modern';
++    }
++    catch {
++        return false;
++    }
++}
++function withoutOutputSchema(tool) {
++    const { outputSchema: _outputSchema, ...rest } = tool;
++    return rest;
++}
 +function getListedToolForCall(clientModule, tools, toolName) {
 +    const tool = tools.find((tool) => tool.name === toolName);
 +    if (tool?.execution?.taskSupport === 'required') {
@@ -3765,7 +3882,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
  export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      session = null;
      _cacheDirty = true;
-@@ -543,6 +776,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -543,6 +788,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      serverInitializeResult = null;
      clientSessionTimeoutSeconds;
      timeout;
@@ -3773,7 +3890,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
      params;
      _name;
      transport = null;
-@@ -552,18 +786,25 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -552,18 +798,25 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      connectionStateVersion = 0;
      constructor(params) {
          super(params);
@@ -3805,7 +3922,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
      }
      createStreamableHttpTransport(StreamableHTTPClientTransport, options = {}) {
          const transportOptions = {
-@@ -582,16 +823,44 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -582,16 +835,44 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      }
      async createConnectedStreamableHttpClient(options = {}) {
          const { clientModule, transportModule } = await this.loadStreamableHttpRuntime();
@@ -3850,7 +3967,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
              return { client, transport };
          }
          catch (error) {
-@@ -609,25 +878,13 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -609,25 +890,13 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      getClientSessionTimeoutMs() {
          return Math.max(1, (this.clientSessionTimeoutSeconds ?? 5) * 1000);
      }
@@ -3877,7 +3994,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
              this._toolsList = [];
          }
          await invalidateServerToolsCache(this.name);
-@@ -660,7 +917,10 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -660,7 +929,10 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              });
              try {
                  if (typeof detachedTransport.terminateSession === 'function') {
@@ -3889,16 +4006,40 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
                  }
              }
              finally {
-@@ -702,18 +962,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -702,18 +974,53 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          await this.terminateDetachedStreamableHttpSession(transport, terminateWarningMessage);
      }
      async callToolWithClient(client, toolName, args, meta, options) {
 -        const { CallToolResultSchema } = await import('@modelcontextprotocol/sdk/types.js').catch(failedToImport);
 +        const { clientModule } = await this.loadStreamableHttpRuntime();
++        // A caller that can answer input requests later (form elicitation in
++        // the 2026-07-28 multi round-trip pattern) declares that on this one
++        // request, sends any answers and the server's echoed requestState, and
++        // receives an `input_required` result as is. Legacy-era connections
++        // never declare it.
++        const inputRequired = options?.inputRequired !== undefined && isModernEraClient(client)
++            ? options.inputRequired
++            : undefined;
          const params = {
              name: toolName,
              arguments: args ?? {},
-             ...(meta != null ? { _meta: meta } : {}),
+-            ...(meta != null ? { _meta: meta } : {}),
++            ...(inputRequired !== undefined
++                ? {
++                    _meta: {
++                        [clientModule.CLIENT_CAPABILITIES_META_KEY]: clientModule.mergeCapabilities(client._capabilities ?? {}, { elicitation: { form: {} } }),
++                        ...(meta ?? {}),
++                    },
++                    ...(inputRequired.inputResponses !== undefined
++                        ? { inputResponses: inputRequired.inputResponses }
++                        : {}),
++                    ...(inputRequired.requestState !== undefined
++                        ? { requestState: inputRequired.requestState }
++                        : {}),
++                }
++                : meta != null
++                    ? { _meta: meta }
++                    : {}),
          };
 -        const response = await callWithMCPRequestSignal(options?.signal, (requestSignal) => client.callTool(params, undefined, buildRequestOptions(this.clientSessionTimeoutSeconds, {
 -            timeout: this.timeout,
@@ -3906,18 +4047,28 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
 -        })));
 -        const parsed = CallToolResultSchema.parse(response);
 -        return attachParsedCallToolResultMetadata(parsed);
++        const listedTool = getListedToolForCall(clientModule, this._toolsList, toolName);
 +        const response = await callWithMCPRequestSignal(options?.signal, (requestSignal) => client.callTool(params, {
 +            ...buildRequestOptions(this.clientSessionTimeoutSeconds, {
 +                timeout: this.timeout,
 +                signal: requestSignal,
 +            }),
-+            toolDefinition: getListedToolForCall(clientModule, this._toolsList, toolName),
++            // An input request has no structured content, so it is not checked
++            // against the tool's output schema here; the caller validates the
++            // final result.
++            toolDefinition: inputRequired !== undefined && listedTool?.outputSchema !== undefined
++                ? withoutOutputSchema(listedTool)
++                : listedTool,
++            ...(inputRequired !== undefined ? { allowInputRequired: true } : {}),
 +        }));
++        if (inputRequired !== undefined && response?.resultType === 'input_required') {
++            return response;
++        }
 +        return attachParsedCallToolResultMetadata(response);
      }
      async closeStreamableHttpClient(args, options) {
          const { client, transport } = args;
-@@ -733,6 +995,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -733,6 +1040,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', options.closeWarningMessage, error);
          });
      }
@@ -3929,7 +4080,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
      async reconnectExistingStreamableHttpClient(args) {
          const { transportModule } = await this.loadStreamableHttpRuntime();
          const { StreamableHTTPClientTransport } = transportModule;
-@@ -743,7 +1010,8 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -743,7 +1055,8 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          try {
              const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
              await args.client.connect(transport, requestOptions);
@@ -3939,7 +4090,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
                  // Reconnecting with an existing session skips initialize(), so resend
                  // initialized to reopen the shared SSE stream for async responses.
                  await this.reopenSharedStreamableHttpSession(args.client);
-@@ -800,14 +1068,21 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -800,14 +1113,21 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  throw new Error('Cannot reconnect streamable HTTP MCP server without an active client.');
              }
              try {
@@ -3969,7 +4120,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
                  const recovered = await this.reconnectExistingStreamableHttpClient({
                      client: previousClient,
                      protocolVersion,
-@@ -834,7 +1109,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -834,7 +1154,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  await this.publishConnectedStreamableHttpClient({
                      client: recovered.client,
                      transport: recovered.transport,
@@ -3978,7 +4129,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
                  });
                  return recovered.client;
              }
-@@ -871,13 +1146,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -871,13 +1191,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          if (this.params.sessionId !== undefined) {
              return 'none';
          }
@@ -4004,7 +4155,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
              ? 'reconnect-only'
              : 'none';
      }
-@@ -910,7 +1192,6 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -910,7 +1237,6 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              await this.publishConnectedStreamableHttpClient({
                  client,
                  transport,
@@ -4012,7 +4163,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
              });
              this.serverInitializeResult = {
                  serverInfo: { name: this._name, version: '1.0.0' },
-@@ -929,7 +1210,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -929,7 +1255,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          catch (e) {
              // A losing concurrent connect can fail after another connect already
              // published a healthy shared session, so avoid closing shared state here.
@@ -4021,7 +4172,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
              logToolActionError(this.logger, 'Error initializing MCP server:', error);
              throw error;
          }
-@@ -937,11 +1218,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -937,11 +1263,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      }
      async invalidateToolsCache() {
          this._toolsCacheGeneration += 1;
@@ -4035,7 +4186,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
          if (!this.session) {
              throw new Error('Server not initialized. Make sure you call connect() first.');
          }
-@@ -950,19 +1231,34 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -950,19 +1276,34 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          }
          const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
          const session = this.session;
@@ -4075,7 +4226,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
          this._toolsList = tools;
          this._cacheDirty = false;
          return tools;
-@@ -984,18 +1280,18 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -984,18 +1325,18 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              if (isCallerAbortReason(error, options?.signal)) {
                  throw error;
              }
@@ -4098,7 +4249,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
              }
              try {
                  result = await this.callToolWithClient(recoveredClient, toolName, args, meta, options);
-@@ -1004,41 +1300,38 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -1004,41 +1345,38 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  if (isCallerAbortReason(retryError, options?.signal)) {
                      throw retryError;
                  }
@@ -4149,7 +4300,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db
      get name() {
          return this._name;
 diff --git a/dist/tool.d.ts b/dist/tool.d.ts
-index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..ef965a36fe56c8419ab99d49d96b26b0101c1ca3 100644
+index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..17cc21d81bee2f7139e836c47232ef8cf55afa80 100644
 --- a/dist/tool.d.ts
 +++ b/dist/tool.d.ts
 @@ -195,6 +195,11 @@ export type FunctionTool<Context = UnknownContext, TParameters extends ToolInput

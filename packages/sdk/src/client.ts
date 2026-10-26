@@ -3,7 +3,11 @@ import {
   recordObservedSessionSequence,
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
-import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import type {
+  ComputerNativeCallRequest,
+  ComputerNativeReceipt,
+  McpElicitationContent,
+} from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import {
   currentMessageTimeZone,
@@ -3305,6 +3309,8 @@ export class OpenGeniClient {
       approvalId: string;
       decision: "approve" | "reject";
       message?: string;
+      /** Answers to the approval's `elicitation` forms; only with `approve`. */
+      content?: McpElicitationContent;
       clientEventId?: string;
     },
   ): Promise<SessionEvent> {

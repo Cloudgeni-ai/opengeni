@@ -36,6 +36,14 @@ import type {
   SessionAutomationWaitSummary,
 } from "@opengeni/contracts";
 export type {
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  McpElicitationField,
+  McpElicitationRequestedSchema,
+  McpElicitationValue,
+} from "@opengeni/contracts";
+import type { McpElicitationApprovalRequest, McpElicitationContent } from "@opengeni/contracts";
+export type {
   ClaudeSubscriptionOAuthStartResponse,
   ClaudeSubscriptionOAuthCompleteRequest,
   ClaudeSubscriptionOAuthCompleteResponse,
@@ -10289,6 +10297,13 @@ export type SessionApprovalRequest = {
   name: string;
   /** Tool arguments as the model produced them (usually a JSON string). */
   arguments: unknown;
+  /**
+   * Present when the tool's MCP server stopped mid-call to ask the person
+   * (form elicitation). Approving sends the answers as `content`, keyed by
+   * `requests[].id` and then by field name; omitted fields take the form's
+   * defaults. Rejecting declines the question and ends the call.
+   */
+  elicitation?: McpElicitationApprovalRequest | undefined;
   [compatibilityField: string]: unknown;
 };
 
@@ -10300,6 +10315,8 @@ export type UserApprovalDecisionEventInput = {
     approvalId: string;
     decision: "approve" | "reject";
     message?: string | undefined;
+    /** Answers to the approval's `elicitation` forms; only with `approve`. */
+    content?: McpElicitationContent | undefined;
     /** Server-owned header rotation applied atomically when the response is accepted. */
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
   };

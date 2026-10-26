@@ -761,8 +761,8 @@ function ConversationView({
                   className="mx-auto max-w-3xl"
                   {...approvalProps}
                   approvals={approvals}
-                  onApprove={async (approval) => {
-                    await control.approve(approval.id);
+                  onApprove={async (approval, answer) => {
+                    await control.approve(approval.id, undefined, answer);
                   }}
                   onReject={async (approval) => {
                     await control.reject(approval.id);

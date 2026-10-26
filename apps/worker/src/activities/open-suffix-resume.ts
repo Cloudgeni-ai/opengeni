@@ -4,6 +4,7 @@ import {
   approvalIdentifier,
   withPublicApprovalFields,
   type HumanInputResponse,
+  type McpElicitationContent,
   type SessionEvent,
 } from "@opengeni/contracts";
 import {
@@ -13,13 +14,18 @@ import {
   listTurnOpenSuffixToolCalls,
   nextSessionHistoryPosition,
   recordPendingSessionToolCallResult,
+  replacePendingToolCallMcpInputRequest,
   type Database,
   type OpenSuffixPendingToolCall,
 } from "@opengeni/db";
 import {
   functionCallResultItem,
   invokePreparedAgentTool,
+  mcpElicitationApproval,
+  mcpInputRequestOf,
+  parseMcpInputRequest,
   sanitizeHistoryItemsForModel,
+  type McpInputRequest,
 } from "@opengeni/runtime";
 
 export type OpenSuffixResumeOutcome =
@@ -59,6 +65,9 @@ function pendingApprovalProjection(row: OpenSuffixPendingToolCall): unknown {
     name: toolNameFromCallItem(row.callItem),
     arguments: row.callItem.arguments ?? null,
     raw: row.callItem,
+    ...(row.mcpInputRequest
+      ? { elicitation: mcpElicitationApproval(parseMcpInputRequest(row.mcpInputRequest)) }
+      : {}),
   };
 }
 
@@ -165,6 +174,14 @@ function memberResult(input: {
   };
 }
 
+/**
+ * A resumed member either finishes with a result or, when its MCP server asks
+ * the person another question, stays paused with that question.
+ */
+export type OpenSuffixMemberOutcome =
+  | { resultItem: Record<string, unknown>; eventOutput: unknown }
+  | { asked: McpInputRequest };
+
 export async function resultItemForOpenSuffixMember(input: {
   agent: Agent<any, any>;
   row: OpenSuffixPendingToolCall;
@@ -174,8 +191,9 @@ export async function resultItemForOpenSuffixMember(input: {
     toolCallId: string;
     response: HumanInputResponse;
   } | null;
-}): Promise<{ resultItem: Record<string, unknown>; eventOutput: unknown }> {
+}): Promise<OpenSuffixMemberOutcome> {
   const name = toolNameFromCallItem(input.row.callItem);
+  const asked = input.row.mcpInputRequest ? parseMcpInputRequest(input.row.mcpInputRequest) : null;
   const rejected = (): { resultItem: Record<string, unknown>; eventOutput: unknown } => {
     const payload = input.trigger.payload as { message?: unknown; decision?: unknown };
     if (
@@ -183,6 +201,14 @@ export async function resultItemForOpenSuffixMember(input: {
       payload.decision === "reject" &&
       !(typeof payload.message === "string" && payload.message.trim().length > 0)
     ) {
+      if (asked) {
+        // The server received the call and stopped to ask; it never finished.
+        return memberResult({
+          callId: input.row.callId,
+          name,
+          output: `The person declined to answer ${asked.server}'s question, so this tool call did not finish.`,
+        });
+      }
       // This approval was rejected before invocation, not interrupted during execution.
       return memberResult({
         callId: input.row.callId,
@@ -231,7 +257,17 @@ export async function resultItemForOpenSuffixMember(input: {
       toolName: name,
       argumentsJson: argumentsJsonFromCallItem(input.row.callItem),
       callId: input.row.callId,
+      ...(asked
+        ? {
+            mcpInputAnswer: {
+              request: asked,
+              content: (input.trigger.payload as { content?: McpElicitationContent }).content ?? {},
+            },
+          }
+        : {}),
     });
+    const askedAgain = mcpInputRequestOf(output);
+    if (askedAgain) return { asked: askedAgain };
     return memberResult({
       callId: input.row.callId,
       name,
@@ -301,98 +337,8 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     throw new Error("Open suffix resume event does not match an interruption");
   }
   if (target && callId) {
-    const truncationTokens =
-      input.modelToolOutputTruncationTokens ?? target.modelToolOutputTruncationTokens ?? undefined;
-    let resultItem = target.resultItem;
-    let eventOutput: unknown = resultItem?.output;
-    if (!resultItem) {
-      const member = await resultItemForOpenSuffixMember({
-        agent: input.agent,
-        row: target,
-        trigger: input.trigger,
-        humanInputResume: input.humanInputResume,
-      });
-      resultItem = member.resultItem;
-      eventOutput = member.eventOutput;
-      const recorded = await recordPendingSessionToolCallResult(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        executionGeneration: input.executionGeneration,
-        attemptId: input.attemptId,
-        callId: target.callId,
-        ...(truncationTokens !== undefined
-          ? { modelToolOutputTruncationTokens: truncationTokens }
-          : {}),
-        resultItem,
-        eventOutput,
-      });
-      if (!recorded.accepted) {
-        return { action: "cancelled" };
-      }
-      if (!recorded.recorded) {
-        const latest = resolveOpenSuffixResumeTarget(
-          await listTurnOpenSuffixToolCalls(
-            input.db,
-            input.workspaceId,
-            input.sessionId,
-            input.turnId,
-          ),
-          callId,
-        );
-        resultItem = latest?.resultItem ?? resultItem;
-      } else if (input.publish) {
-        await input.publish([
-          {
-            type: "agent.toolCall.output",
-            payload: { id: target.callId, output: eventOutput },
-          },
-        ]);
-      }
-    }
-    if (!resultItem) {
-      throw new Error(`Open suffix resume for ${target.callId} has no result item`);
-    }
-    const history = await getActiveSessionHistoryItems(
-      input.db,
-      input.workspaceId,
-      input.sessionId,
-    );
-    if (
-      !openSuffixPairPresentInHistory(
-        history.map((row) => row.item),
-        callId,
-      )
-    ) {
-      const historyItems = openSuffixHistoryItems(target, resultItem);
-      if (historyItems.length === 0) {
-        throw new Error(`Open suffix resume for ${target.callId} produced no paired history`);
-      }
-      const nextPosition = await nextSessionHistoryPosition(
-        input.db,
-        input.workspaceId,
-        input.sessionId,
-      );
-      const appended = await appendSessionHistoryItems(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        expectedExecutionGeneration: input.executionGeneration,
-        expectedAttemptId: input.attemptId,
-        ...(truncationTokens !== undefined
-          ? { modelToolOutputTruncationTokens: truncationTokens }
-          : {}),
-        items: historyItems.map((item, offset) => ({
-          position: nextPosition + offset,
-          item,
-        })),
-      });
-      if (!appended) {
-        return { action: "cancelled" };
-      }
-    }
+    const settled = await settleOpenSuffixTarget(input, target);
+    if (settled === "cancelled") return { action: "cancelled" };
   }
   const remaining = (
     await listTurnOpenSuffixToolCalls(input.db, input.workspaceId, input.sessionId, input.turnId)
@@ -432,6 +378,113 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
     },
   });
   return settled ? { action: "requires_action" } : { action: "cancelled" };
+}
+
+/**
+ * Settle the call the person decided on: record its result and pair it in
+ * history, or keep it open with its MCP server's next question.
+ */
+async function settleOpenSuffixTarget(
+  input: Parameters<typeof settleOpenSuffixResumeIfNeeded>[0],
+  target: OpenSuffixPendingToolCall,
+): Promise<"settled" | "asked" | "cancelled"> {
+  const truncationTokens =
+    input.modelToolOutputTruncationTokens ?? target.modelToolOutputTruncationTokens ?? undefined;
+  let resultItem = target.resultItem;
+  if (!resultItem) {
+    const member = await resultItemForOpenSuffixMember({
+      agent: input.agent,
+      row: target,
+      trigger: input.trigger,
+      humanInputResume: input.humanInputResume,
+    });
+    if ("asked" in member) {
+      const replaced = await replacePendingToolCallMcpInputRequest(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        executionGeneration: input.executionGeneration,
+        attemptId: input.attemptId,
+        callId: target.callId,
+        mcpInputRequest: member.asked,
+      });
+      return replaced.accepted ? "asked" : "cancelled";
+    }
+    resultItem = member.resultItem;
+    const recorded = await recordPendingSessionToolCallResult(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      executionGeneration: input.executionGeneration,
+      attemptId: input.attemptId,
+      callId: target.callId,
+      ...(truncationTokens !== undefined
+        ? { modelToolOutputTruncationTokens: truncationTokens }
+        : {}),
+      resultItem,
+      eventOutput: member.eventOutput,
+    });
+    if (!recorded.accepted) {
+      return "cancelled";
+    }
+    if (!recorded.recorded) {
+      const latest = resolveOpenSuffixResumeTarget(
+        await listTurnOpenSuffixToolCalls(
+          input.db,
+          input.workspaceId,
+          input.sessionId,
+          input.turnId,
+        ),
+        target.callId,
+      );
+      resultItem = latest?.resultItem ?? resultItem;
+    } else if (input.publish) {
+      await input.publish([
+        {
+          type: "agent.toolCall.output",
+          payload: { id: target.callId, output: member.eventOutput },
+        },
+      ]);
+    }
+  }
+  const history = await getActiveSessionHistoryItems(input.db, input.workspaceId, input.sessionId);
+  if (
+    !openSuffixPairPresentInHistory(
+      history.map((row) => row.item),
+      target.callId,
+    )
+  ) {
+    const historyItems = openSuffixHistoryItems(target, resultItem);
+    if (historyItems.length === 0) {
+      throw new Error(`Open suffix resume for ${target.callId} produced no paired history`);
+    }
+    const nextPosition = await nextSessionHistoryPosition(
+      input.db,
+      input.workspaceId,
+      input.sessionId,
+    );
+    const appended = await appendSessionHistoryItems(input.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      expectedExecutionGeneration: input.executionGeneration,
+      expectedAttemptId: input.attemptId,
+      ...(truncationTokens !== undefined
+        ? { modelToolOutputTruncationTokens: truncationTokens }
+        : {}),
+      items: historyItems.map((item, offset) => ({
+        position: nextPosition + offset,
+        item,
+      })),
+    });
+    if (!appended) {
+      return "cancelled";
+    }
+  }
+  return "settled";
 }
 
 export function interruptionCallIdsFromPause(input: {

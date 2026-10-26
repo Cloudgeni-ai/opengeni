@@ -271,3 +271,63 @@ describe("parallel connector-backed tool calls", () => {
     expect(row?.status).toBe("completed");
   });
 });
+
+describe("a provider that asks the person mid-call", () => {
+  test("returns the request to pending, so only an answered approval executes it again", async () => {
+    const { identity, connectionId, serverId } = await claimedAttempt();
+    const call = {
+      approvalId: "asked-mid-call",
+      connectionId,
+      serverId,
+      toolName: "send_message",
+      arguments: { chat: "team" },
+      defaultDecision: "allow" as const,
+    };
+    const admission = await beginConnectorActionExecution(client.db, identity, call);
+    if (!admission.allowed || !admission.managed) throw new Error("explicit Allow was denied");
+    const complete = (outcome: "input_required" | "completed") =>
+      completeConnectorActionExecution(client.db, {
+        accountId: identity.accountId,
+        workspaceId: identity.workspaceId,
+        requestId: admission.requestId,
+        attemptId: identity.attemptId,
+        outcome,
+      });
+    const status = async () =>
+      (
+        await shared.admin<Array<{ status: string }>>`
+          select status from connector_action_requests where id = ${admission.requestId}`
+      )[0]?.status;
+
+    await complete("input_required");
+    expect(await status()).toBe("pending");
+    // A repeated settlement of the same question is a no-op.
+    await complete("input_required");
+    const audit = await shared.admin<Array<{ action: string; metadata: string }>>`
+      select action, metadata::text as metadata from audit_events
+      where target_id = ${admission.requestId} order by occurred_at, id`;
+    expect(audit.map((entry) => entry.action)).toEqual([
+      "connector.action.execution_started",
+      "connector.action.approval_requested",
+    ]);
+    expect(audit[1]?.metadata).toContain("input_required");
+
+    // Until the person answers, the call cannot run again.
+    expect(await beginConnectorActionExecution(client.db, identity, call)).toMatchObject({
+      allowed: false,
+      reason: "approval_required",
+    });
+    // The answer approves the request; the retry executes once under it.
+    await shared.admin`
+      update connector_action_requests set status = 'approved' where id = ${admission.requestId}`;
+    expect(await beginConnectorActionExecution(client.db, identity, call)).toMatchObject({
+      allowed: true,
+      requestId: admission.requestId,
+    });
+    await complete("completed");
+    expect(await status()).toBe("completed");
+    await expect(complete("input_required")).rejects.toThrow(
+      "Connector action request cannot ask from completed",
+    );
+  });
+});

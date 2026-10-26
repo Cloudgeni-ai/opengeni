@@ -933,6 +933,9 @@ import {
 
 import {
   approvalIdentifier,
+  McpElicitationApprovalRequest,
+  McpElicitationContent,
+  resolveMcpElicitationContent,
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -29718,7 +29721,13 @@ export async function completeConnectorActionExecution(
     workspaceId: string;
     requestId: string;
     attemptId: string;
-    outcome: "completed" | "uncertain" | "not_executed";
+    /**
+     * `input_required`: the provider stopped before finishing to ask the
+     * person a question (MCP elicitation). The request returns to `pending`,
+     * so the answer is an approval decision and the retry executes once
+     * under it.
+     */
+    outcome: "completed" | "uncertain" | "not_executed" | "input_required";
   },
 ): Promise<void> {
   await runConnectorActionLedgerTransaction(
@@ -29752,6 +29761,25 @@ export async function completeConnectorActionExecution(
       });
       const [existing] = await request().for("update").limit(1);
       if (!existing) throw new Error("Connector action request not found for completion");
+      if (input.outcome === "input_required") {
+        if (existing.status === "pending") return;
+        if (existing.status !== "executing") {
+          throw new Error(`Connector action request cannot ask from ${existing.status}`);
+        }
+        const [row] = await tx
+          .update(schema.connectorActionRequests)
+          .set({ status: "pending", updatedAt: new Date() })
+          .where(eq(schema.connectorActionRequests.id, existing.id))
+          .returning();
+        if (!row) throw new Error("Connector action request disappeared while asking");
+        await insertConnectorActionAudit(tx, {
+          row,
+          action: "connector.action.approval_requested",
+          subjectId: row.initiatorSubjectId,
+          extra: { outcome: "input_required" },
+        });
+        return;
+      }
       // A not-executed completion is a terminal failure whose provider
       // request never happened; it keeps the existing status vocabulary.
       // Reaching the terminal status is idempotent even when a concurrent
@@ -42181,6 +42209,8 @@ export type OpenSuffixPendingToolCall = {
   tiedReasoningItems: Array<Record<string, unknown>>;
   resultItem: Record<string, unknown> | null;
   modelToolOutputTruncationTokens: number | null;
+  /** Private state of the MCP server question that paused this call, if any. */
+  mcpInputRequest?: Record<string, unknown> | null;
 };
 
 function asOpenSuffixInterruptionKind(value: string | null): OpenSuffixInterruptionKind | null {
@@ -42204,6 +42234,8 @@ export async function attachOpenSuffixToPendingToolCalls(
       callId: string;
       interruptionKind: OpenSuffixInterruptionKind;
       reasoningItems: Array<Record<string, unknown>>;
+      /** The MCP server question that paused this call, kept outside events. */
+      mcpInputRequest?: Record<string, unknown>;
     }>;
   },
 ): Promise<{ accepted: boolean; attached: number }> {
@@ -42265,6 +42297,7 @@ export async function attachOpenSuffixToPendingToolCalls(
                 {
                   interruptionKind: member.interruptionKind,
                   tiedReasoningItems: member.reasoningItems,
+                  ...(member.mcpInputRequest ? { mcpInputRequest: member.mcpInputRequest } : {}),
                 },
                 "tiedReasoningItems",
                 "tiedReasoningItemsCodecVersion",
@@ -42314,9 +42347,57 @@ export async function listTurnOpenSuffixToolCalls(
         tiedReasoningItems: Array.isArray(row.tiedReasoningItems) ? row.tiedReasoningItems : [],
         resultItem: row.resultItem ?? null,
         modelToolOutputTruncationTokens: row.modelToolOutputTruncationTokens,
+        mcpInputRequest: row.mcpInputRequest ?? null,
       };
     });
   });
+}
+
+/**
+ * The MCP server answered a resumed call with another question: replace the
+ * paused call's stored question so the next approval answers the new one. The
+ * call stays open; only the attempt that resumed it may write.
+ */
+export async function replacePendingToolCallMcpInputRequest(
+  db: Database,
+  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
+    callId: string;
+    mcpInputRequest: Record<string, unknown>;
+  },
+): Promise<{ accepted: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          rowProjection: "event",
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) return { accepted: false };
+        const updated = await tx
+          .update(schema.sessionPendingToolCalls)
+          .set({ mcpInputRequest: input.mcpInputRequest })
+          .where(
+            and(
+              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+              eq(schema.sessionPendingToolCalls.callId, input.callId),
+              isNull(schema.sessionPendingToolCalls.resultItem),
+            ),
+          )
+          .returning({ id: schema.sessionPendingToolCalls.id });
+        if (updated.length !== 1) {
+          throw new Error(`Paused call ${input.callId} is no longer open`);
+        }
+        return { accepted: true };
+      }),
+  );
 }
 
 /**
@@ -88371,6 +88452,43 @@ export type AcceptSessionApprovalDecisionResult =
     }
   | { action: "conflict"; sessionStatus: SessionStatus };
 
+/** The answer to an approval's MCP server questions does not fit their forms. */
+export class SessionApprovalAnswerError extends Error {
+  override readonly name = "SessionApprovalAnswerError";
+}
+
+/**
+ * The decision payload to record for one pending approval. An approval with
+ * MCP server questions records the complete answer (the forms' defaults plus
+ * what the person entered), checked against each form; a rejection carries no
+ * answer. `content` for an approval without questions is refused.
+ */
+function approvalDecisionPayloadWithAnswer(
+  pending: unknown,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const elicitation =
+    pending && typeof pending === "object"
+      ? (pending as { elicitation?: unknown }).elicitation
+      : undefined;
+  const { content, ...withoutContent } = payload;
+  if (elicitation === undefined) {
+    if (content !== undefined) {
+      throw new SessionApprovalAnswerError("This approval has no questions to answer");
+    }
+    return payload;
+  }
+  if (payload.decision !== "approve") return withoutContent;
+  const request = McpElicitationApprovalRequest.parse(elicitation);
+  const given = content === undefined ? undefined : McpElicitationContent.safeParse(content);
+  if (given && !given.success) {
+    throw new SessionApprovalAnswerError("The answer is not a set of form values");
+  }
+  const resolution = resolveMcpElicitationContent(request, given?.data);
+  if (!resolution.ok) throw new SessionApprovalAnswerError(resolution.problem);
+  return { ...withoutContent, content: resolution.content };
+}
+
 /**
  * Accept exactly one decision for the currently waiting approval boundary.
  * The session and active turn are locked with the append so concurrent Pause,
@@ -88406,7 +88524,8 @@ export async function acceptSessionApprovalDecision(
 ): Promise<AcceptSessionApprovalDecisionResult> {
   // Defense in depth for internal callers: this field is ingress-only even
   // when a caller accidentally passes the complete public request payload.
-  const { mcpCredentialUpdates: _writeOnlyCredentials, ...payload } = input.payload;
+  const { mcpCredentialUpdates: _writeOnlyCredentials, ...requestedPayload } = input.payload;
+  let payload = requestedPayload;
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -88529,19 +88648,20 @@ export async function acceptSessionApprovalDecision(
           )
           .orderBy(desc(schema.agentRunStates.stateVersion))
           .limit(1);
-        if (
-          typeof approvalId !== "string" ||
-          !runState ||
-          !fromPostgresLosslessJson(
-            runState.pendingApprovals,
-            runState.pendingApprovalsCodecVersion,
-          ).some((pending) => approvalIdentifier(pending) === approvalId)
-        ) {
+        const pendingApproval =
+          typeof approvalId === "string" && runState
+            ? fromPostgresLosslessJson(
+                runState.pendingApprovals,
+                runState.pendingApprovalsCodecVersion,
+              ).find((pending) => approvalIdentifier(pending) === approvalId)
+            : undefined;
+        if (typeof approvalId !== "string" || pendingApproval === undefined) {
           return {
             action: "conflict",
             sessionStatus: "requires_action",
           } as const;
         }
+        payload = approvalDecisionPayloadWithAnswer(pendingApproval, payload);
         if (input.interactionIntervention) {
           const expectedInteractionDecision =
             input.interactionIntervention.outcome === "completed" ? "approve" : "reject";

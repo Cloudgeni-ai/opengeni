@@ -3,6 +3,10 @@ import {
   type ToolDisplayMetadata,
   type SessionEvent,
 } from "@opengeni/sdk";
+import {
+  McpElicitationApprovalRequest,
+  type McpElicitationApprovalRequest as McpElicitation,
+} from "@opengeni/contracts/mcp-elicitation";
 
 /* ----------------------------------------------------------------------------
    Pending-approvals projection
@@ -32,6 +36,11 @@ export type PendingApproval = {
   name: string;
   display?: ToolDisplayMetadata;
   arguments?: unknown;
+  /**
+   * The tool's MCP server stopped mid-call to ask the person these questions.
+   * Approving answers them; declining ends the call.
+   */
+  elicitation?: McpElicitation;
   /** The raw approval entry from the `session.requiresAction` payload. */
   raw?: unknown;
 };
@@ -55,12 +64,17 @@ export function approvalsFromRequiresAction(payload: unknown): PendingApproval[]
         ? (raw.rawItem as Record<string, unknown>)
         : {};
     const display = parseToolDisplayMetadata(raw.display);
+    const elicitation =
+      raw.elicitation === undefined
+        ? undefined
+        : McpElicitationApprovalRequest.safeParse(raw.elicitation);
     return {
       // Mirror the runtime's canonical interruption identity before retaining
       // the legacy top-level callId fallback for already-normalized payloads.
       id: String(rawItem.callId ?? rawItem.id ?? raw.id ?? raw.callId ?? raw.name ?? index),
       name: String(raw.name ?? raw.toolName ?? rawItem.name ?? "approval"),
       ...(display ? { display } : {}),
+      ...(elicitation?.success ? { elicitation: elicitation.data } : {}),
       arguments: raw.arguments ?? rawItem.arguments,
       raw: approval,
     };

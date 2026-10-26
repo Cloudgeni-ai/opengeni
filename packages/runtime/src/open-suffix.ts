@@ -1,6 +1,10 @@
 import { RunContext, type Agent } from "@openai/agents";
-import { INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME } from "@opengeni/contracts";
+import {
+  INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+  type McpElicitationContent,
+} from "@opengeni/contracts";
 import { HUMAN_INPUT_TOOL_NAME } from "./run-events";
+import { runWithMcpInputAnswer, type McpInputRequest } from "./mcp-input-requests";
 import {
   extractOpenSuffixMembers,
   type HistoryItem,
@@ -160,6 +164,12 @@ export async function invokePreparedAgentTool(input: {
   toolName: string;
   argumentsJson: string;
   callId: string;
+  /**
+   * The person's answers to the MCP server question that paused this call.
+   * The output carries a new question instead (`mcpInputRequestOf`) when the
+   * server asks again.
+   */
+  mcpInputAnswer?: { request: McpInputRequest; content: McpElicitationContent };
 }): Promise<unknown> {
   const hosted = input.agent.tools.find(
     (tool) => tool.type === "function" && tool.name === input.toolName,
@@ -175,12 +185,16 @@ export async function invokePreparedAgentTool(input: {
       `Open suffix cannot invoke missing tool ${input.toolName}`,
     );
   }
-  return await tool.invoke(new RunContext(), input.argumentsJson, {
-    toolCall: {
-      type: "function_call",
-      callId: input.callId,
-      name: input.toolName,
-      arguments: input.argumentsJson,
-    },
-  });
+  const invoke = async () =>
+    await tool.invoke(new RunContext(), input.argumentsJson, {
+      toolCall: {
+        type: "function_call",
+        callId: input.callId,
+        name: input.toolName,
+        arguments: input.argumentsJson,
+      },
+    });
+  return input.mcpInputAnswer
+    ? await runWithMcpInputAnswer({ callId: input.callId, ...input.mcpInputAnswer }, invoke)
+    : await invoke();
 }

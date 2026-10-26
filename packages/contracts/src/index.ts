@@ -169,6 +169,8 @@ export * from "./product-analytics";
 export * from "./desktop-app";
 export * from "./event-triggers";
 export * from "./automation-templates";
+export * from "./mcp-elicitation";
+import { McpElicitationContent, type McpElicitationApprovalRequest } from "./mcp-elicitation";
 import {
   ScheduledOccurrenceEvents,
   ScheduledTaskEvents,
@@ -20442,6 +20444,12 @@ export type SessionApprovalRequestPublicFields = {
   id: string;
   name: string;
   arguments: unknown;
+  /**
+   * Present when an MCP server asked the person a question in the middle of
+   * this call (form elicitation). Approving answers it; see `content` on
+   * `user.approvalDecision`.
+   */
+  elicitation?: McpElicitationApprovalRequest;
 };
 
 export function withPublicApprovalFields<T>(
@@ -20521,6 +20529,12 @@ export const ClientSessionEvent = /* @__PURE__ */ defineSchema(() =>
         approvalId: primitives.nonEmptyString.max(SESSION_OPERATION_KEY_MAX_CHARS),
         decision: z.enum(["approve", "reject"]),
         message: z.string().optional(),
+        /**
+         * Answers to an approval's `elicitation` questions, keyed by request
+         * id. Checked against each form; omitted fields take the server's
+         * defaults, so a form without required fields needs no content.
+         */
+        content: McpElicitationContent.optional(),
         // Write-only header rotation committed with the response before resume.
         mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
       }),

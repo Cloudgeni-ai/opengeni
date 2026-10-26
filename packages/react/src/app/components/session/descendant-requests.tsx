@@ -4,6 +4,7 @@
 // through the same requests its own page sends, so the agent cannot tell the
 // difference and the server's permission checks apply unchanged.
 import type {
+  McpElicitationContent,
   OpenGeniClient,
   SessionEvent,
   SessionSummary,
@@ -232,11 +233,16 @@ function DescendantRequestItem({
     [client, sessionId, workspaceId],
   );
 
-  const decide = async (approval: PendingApproval, decision: "approve" | "reject") => {
+  const decide = async (
+    approval: PendingApproval,
+    decision: "approve" | "reject",
+    answer?: { content: McpElicitationContent },
+  ) => {
     try {
       await client.sendApprovalDecision(workspaceId, sessionId, {
         approvalId: approval.id,
         decision,
+        ...(answer ? { content: answer.content } : {}),
       });
     } catch (error) {
       toast.error("Couldn't submit the decision", { description: userErrorText(error) });
@@ -311,7 +317,7 @@ function DescendantRequestItem({
               approvals={approvals}
               loadReview={loadReview}
               loadDetails={loadDetails}
-              onApprove={(approval) => decide(approval, "approve")}
+              onApprove={(approval, answer) => decide(approval, "approve", answer)}
               onReject={(approval) => decide(approval, "reject")}
             />
           </div>

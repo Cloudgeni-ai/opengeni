@@ -54,7 +54,11 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(type: ResponseType, granted = permissions) {
+async function fixture(
+  type: ResponseType,
+  granted = permissions,
+  pendingApproval: Record<string, unknown> = { id: "crm-call" },
+) {
   const suffix = crypto.randomUUID();
   const subjectId = `user:${suffix}`;
   const access = await bootstrapWorkspace(client.db, {
@@ -144,7 +148,7 @@ async function fixture(type: ResponseType, granted = permissions) {
     activeTurnId: claim.turn.id,
     runState: {
       serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB,
-      pendingApprovals: type === "user.approvalDecision" ? [{ id: "crm-call" }] : [],
+      pendingApprovals: type === "user.approvalDecision" ? [pendingApproval] : [],
       humanInputRequests:
         type === "user.humanInputResponse"
           ? [
@@ -613,4 +617,43 @@ test("approval storage never echoes write-only request fields from an internal c
   expect(result.event.payload).toEqual(f.event.payload);
   expect(JSON.stringify(await responseEvents(f))).not.toContain(refreshedToken);
   expect((await stored(f)).credential_version).toBe(1);
+});
+
+test("an approval whose MCP server asks a question needs the answer, or says why not", async () => {
+  const f = await fixture("user.approvalDecision", permissions, {
+    id: "crm-call",
+    elicitation: {
+      server: "CRM",
+      requests: [
+        {
+          id: "room",
+          message: "Which room?",
+          requestedSchema: {
+            type: "object",
+            properties: { name: { type: "string", title: "Room" } },
+            required: ["name"],
+          },
+        },
+      ],
+    },
+  });
+  const { app, bus, signals } = appFor(f);
+
+  const unanswered = await send(app, f, null);
+  expect(unanswered.status).toBe(422);
+  expect(await unanswered.text()).toContain("Room is required");
+  expect(await responseEvents(f)).toHaveLength(0);
+  expect(bus.published).toHaveLength(0);
+  expect(signals).toHaveLength(0);
+
+  const answer: ClientSessionEvent = {
+    ...f.event,
+    payload: { ...f.event.payload, content: { room: { name: "Small" } } },
+  } as ClientSessionEvent;
+  expect((await send(app, f, null, answer)).status).toBe(202);
+  const [recorded] = (await responseEvents(f)) as unknown as Array<{
+    payload: { content?: unknown };
+  }>;
+  expect(recorded?.payload.content).toEqual({ room: { name: "Small" } });
+  expect(signals).toHaveLength(1);
 });
