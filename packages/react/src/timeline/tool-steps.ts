@@ -283,6 +283,8 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   secret_save: "savePassword",
   secret_move: "savePassword",
   secret_delete: "deletePassword",
+  secret_profile_get: "checkSettings",
+  secret_profile_set: "updateSettings",
   variable_set_list: "checkSettings",
   environment_list: "checkSettings",
   variable_set_get_variable: "checkSettings",
