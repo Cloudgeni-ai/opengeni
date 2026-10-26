@@ -554,10 +554,12 @@ describe("reaping a real cluster", () => {
       join(state, (await readdir(state)).find((entry) => entry.startsWith("opengeni-"))!);
     let reaperPid: number | null = null;
     const reaperExited = async (timeoutMs: number) => {
+      const pid = reaperPid;
+      if (pid === null) return;
       const deadline = Date.now() + timeoutMs;
-      while (reaperPid !== null && Date.now() < deadline) {
+      while (Date.now() < deadline) {
         try {
-          process.kill(reaperPid, 0);
+          process.kill(pid, 0);
         } catch {
           return; // the reaper finished
         }
