@@ -348,13 +348,10 @@ export function useMcpCapabilityConnect({
       let reserved: ReturnType<ConnectWindowHost["reserve"]>;
       try {
         reserved = windowHost.current.reserve();
-      } catch (failure) {
-        // Opening the sign-in window explains itself (for example, allow popups).
-        throw new ConnectCardMessage(
-          failure instanceof Error
-            ? failure.message
-            : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
-        );
+      } catch {
+        // The browser refused the sign-in window (usually a pop-up blocker);
+        // its own error text is technical and untranslated.
+        throw new ConnectCardMessage(t("connectWindowHost.allowPopups"));
       }
       reservedPopup.current = reserved.close;
       try {

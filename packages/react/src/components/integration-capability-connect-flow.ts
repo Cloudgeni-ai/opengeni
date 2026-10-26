@@ -285,7 +285,7 @@ export function useIntegrationCapabilityConnect({
     try {
       reserved = windowHost.current.reserve();
     } catch {
-      setError(t("sessionIntegrationCapabilityCard.couldNotStart"));
+      setError(t("connectWindowHost.allowPopups"));
       return;
     }
     setBusy(true);

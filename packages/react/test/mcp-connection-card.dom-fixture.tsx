@@ -188,6 +188,54 @@ test("stopping sign-in restores retry without waiting for an unresponsive backen
   }
 });
 
+test("a blocked sign-in window shows the card's own line, not the browser helper's", async () => {
+  const disconnected = {
+    ...item,
+    id: "service-blocked",
+    enabled: false,
+    connectionRef: null,
+  } as CapabilityCatalogItem;
+  let begun = 0;
+  const client = {
+    listCapabilities: async () => ({ items: [disconnected] }),
+    connectTransport: () => ({
+      begin: async () => {
+        begun += 1;
+        throw new Error("must not begin without a window");
+      },
+    }),
+  } as unknown as OpenGeniClient;
+  const previousOpen = window.open;
+  window.open = (() => null) as unknown as typeof window.open;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      capabilityId="service-blocked"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const continueButton = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent === "Continue to Example service",
+    );
+    expect(continueButton).toBeDefined();
+    await actRun(() => continueButton!.click());
+    await flush();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Your browser blocked the sign-in window.");
+    expect(text).not.toContain("Allow popups to connect your account");
+    expect(text).not.toContain("Connect popup");
+    expect(begun).toBe(0);
+  } finally {
+    await view.unmount();
+    window.open = previousOpen;
+  }
+});
+
 test("custom MCP setup retains discovery failures and can retry into sign-in", async () => {
   let inspections = 0;
   const custom = { ...item, enabled: false, authKind: null, connectionRef: null };
