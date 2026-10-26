@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Settings } from "@opengeni/config";
-import { HTTPException } from "hono/http-exception";
+import { ApiHttpError } from "../http/api-error";
 import { APIError } from "better-auth/api";
 
 const admission = new AsyncLocalStorage<boolean>();
@@ -17,9 +17,12 @@ export function requireSignupChallenge(settings: Settings): void {
   }
 }
 
-function challengeError(status: 403 | 503, code: string, message: string): HTTPException {
-  return new HTTPException(status, {
-    res: Response.json({ code, message, retryable: status === 503 }, { status }),
+function challengeError(status: 403 | 503, code: string, message: string): ApiHttpError {
+  return new ApiHttpError(status, {
+    code: status === 503 ? "upstream_unavailable" : "forbidden",
+    message,
+    retryable: status === 503,
+    details: { managedAuthCode: code },
   });
 }
 

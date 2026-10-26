@@ -54,6 +54,8 @@ test("email and OAuth creation require a single-use challenge, including direct 
     if (String(url) !== "https://challenges.cloudflare.com/turnstile/v0/siteverify")
       return originalFetch(url, init);
     const token = JSON.parse(String(init?.body)).response;
+    if (token === "provider-unavailable")
+      return Response.json({ success: false, "error-codes": ["internal-error"] });
     const success = !consumed.has(token);
     consumed.add(token);
     return Response.json({
@@ -66,15 +68,32 @@ test("email and OAuth creation require a single-use challenge, including direct 
   const post = (path: string, body: unknown) =>
     app.request(path, { method: "POST", headers, body: JSON.stringify(body) });
   try {
-    expect(
-      (
-        await post("/v1/auth/sign-up/email", {
-          name: "Human",
-          email,
-          password: "long-password-123",
-        })
-      ).status,
-    ).toBe(403);
+    for (const [token, status, code, message] of [
+      [undefined, 403, "SIGNUP_CHALLENGE_REQUIRED", "Complete the signup verification."],
+      [
+        "provider-unavailable",
+        503,
+        "SIGNUP_CHALLENGE_UNAVAILABLE",
+        "Verification is unavailable. Please try again.",
+      ],
+    ] as const) {
+      const refused = await post("/v1/auth/sign-up/email", {
+        name: "Human",
+        email,
+        password: "long-password-123",
+        signupChallengeToken: token,
+      });
+      expect(refused.status).toBe(status);
+      expect(await refused.json()).toMatchObject({
+        error: {
+          status,
+          code: status === 503 ? "upstream_unavailable" : "forbidden",
+          message,
+          retryable: status === 503,
+          details: { managedAuthCode: code },
+        },
+      });
+    }
     expect(
       (
         await post("/v1/auth/sign-up/email", {

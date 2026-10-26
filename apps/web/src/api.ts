@@ -853,8 +853,19 @@ async function authRequest<T>(path: string, init?: RequestInit): Promise<T> {
     let code: string | null = null;
     let message = "Authentication request failed";
     try {
-      const payload = JSON.parse(text) as { code?: unknown; message?: unknown };
-      if (typeof payload.code === "string" && payload.code.trim()) {
+      const body = JSON.parse(text) as {
+        code?: unknown;
+        message?: unknown;
+        error?: { code?: unknown; message?: unknown; details?: { managedAuthCode?: unknown } };
+      };
+      // Better Auth emits a flat body; API admission failures use the common
+      // envelope and retain their auth-specific code in safe details.
+      const payload = body.error ?? body;
+      const authCode = body.error?.details?.managedAuthCode;
+      if (typeof authCode === "string" && authCode.trim()) {
+        code = authCode.trim();
+      }
+      if (code === null && typeof payload.code === "string" && payload.code.trim()) {
         code = payload.code.trim();
       }
       if (typeof payload.message === "string" && payload.message.trim()) {
