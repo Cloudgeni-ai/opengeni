@@ -325,6 +325,8 @@ const RUN_ERROR_KEYS: Readonly<Record<string, RunErrorKey>> = {
   scheduled_authority_unavailable: "automations.run.error.accessUnavailable",
   scheduled_authority_exhausted: "automations.run.error.accessUnavailable",
   scheduled_authority_snapshot_missing: "automations.run.error.accessUnavailable",
+  scheduled_run_authority_proof_rejected: "automations.run.error.accessUnavailable",
+  scheduled_causal_membership_changed: "automations.run.error.accessUnavailable",
   connection_account_unavailable: "automations.run.error.accountUnavailable",
   scheduled_model_unavailable: "automations.run.error.modelUnavailable",
   variable_set_unavailable: "automations.run.error.variableSetUnavailable",

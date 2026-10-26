@@ -497,7 +497,8 @@ export const englishMessages = {
   "automations.rows.sentAgain_one": "Sent again once",
   "automations.rows.sentAgain_other": "Sent again {count} times",
   "automations.rows.type": "Type",
-  "automations.run.error.accessUnavailable": "The access it was set up with is no longer valid.",
+  "automations.run.error.accessUnavailable":
+    "The access it was saved with has changed. Save it again to approve it with your current access.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
