@@ -77,6 +77,7 @@ export type ToolIconKind =
   | "skill"
   | "settings"
   | "bell"
+  | "phone"
   | "inbox"
   | "help"
   | "model"
@@ -874,6 +875,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Chats, goals and notifications
   nameChat: "rename",
   notify: "bell",
+  callYou: "phone",
   withdrawNotification: "bell",
   tidyInbox: "inbox",
   setGoal: "target",
@@ -1277,7 +1279,9 @@ function computerActPreview(action: ComputerActAction): string | undefined {
  */
 export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
   const goalPreview =
-    goalToolPreview(item.name, parseToolArgs(item.arguments)) ?? skillToolPreview(item);
+    goalToolPreview(item.name, parseToolArgs(item.arguments)) ??
+    skillToolPreview(item) ??
+    callUserPreview(t, item);
   const title = toolDisplayName(t, item.name, item.display, callStepPhase(item));
   if (item.status !== "running") {
     const { text: outText, isError } = unwrapMcpOutput(item.output);
@@ -1331,6 +1335,36 @@ export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): To
 
 /** The runtime's exact refusal for a tool whose effective permission is Block. */
 const BLOCKED_OUTPUT = /Connector action was not executed: blocked\b/;
+
+/**
+ * An agent calling the person: why while it rings, then how it ended
+ * ("No answer · Production is down").
+ */
+export function callUserPreview(t: OpenGeniText, item: ToolCallItem): string | null {
+  if (mcpToolLeaf(item.name) !== "call_user") return null;
+  const args = parseToolArgs(item.arguments);
+  const reason =
+    args && typeof args === "object" && typeof (args as { reason?: unknown }).reason === "string"
+      ? truncatePreview((args as { reason: string }).reason, 80)
+      : null;
+  if (item.status === "running") return reason;
+  const result = tryParseJson(unwrapMcpOutput(item.output).text);
+  const record = result && typeof result === "object" ? (result as Record<string, unknown>) : null;
+  const outcome =
+    record?.placed === false
+      ? t("timeline.toolPresentation.callUser.notPlaced")
+      : record?.outcome === "answered"
+        ? t("timeline.toolPresentation.callUser.answered")
+        : record?.outcome === "declined"
+          ? t("timeline.toolPresentation.callUser.declined")
+          : record?.outcome === "missed"
+            ? t("timeline.toolPresentation.callUser.missed")
+            : record?.outcome === "cancelled"
+              ? t("timeline.toolPresentation.callUser.cancelled")
+              : null;
+  if (outcome && reason) return `${outcome} · ${reason}`;
+  return outcome ?? reason;
+}
 /** The runtime's refusal to guess whether an approved action ran. */
 const UNCERTAIN_OUTPUT = /Connector action outcome is uncertain\b/;
 

@@ -13,6 +13,7 @@ import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-p
 import { registerClaudeSubscriptionOAuthRoutes } from "./routes/claude-subscription-oauth";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import { registerAgentCallRoutes } from "./routes/agent-calls";
 import { registerInboxRoutes } from "./routes/inbox";
 import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
 import { registerOrganizationIntegrationRoutes } from "./routes/organization-integrations";
@@ -2407,6 +2408,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerSiteSessionAccessRoutes(app, routeDeps);
   registerSessionHistoryImportRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
+  registerAgentCallRoutes(app, routeDeps);
   registerWorkspaceIntegrationRoutes(app, routeDeps);
   registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);

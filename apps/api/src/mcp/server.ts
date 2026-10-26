@@ -15,6 +15,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { assertGoalResumeAllowed } from "@opengeni/core";
 import { mintEnrollToken } from "../sandbox/enrollment";
 import { enableMachineScreenControl, enrollmentAccess } from "../sandbox/screen-control";
+import { registerAgentCallTools } from "./agent-call-tools";
 import { registerNotificationTools } from "./notification-tools";
 import { excelAddinSetup, registerExcelTools } from "./excel-tools";
 import {
@@ -1210,6 +1211,18 @@ export function buildOpenGeniMcpServer(
   // when new, their phones (see notification-tools.ts).
   if (sessionId !== null) {
     registerNotificationTools({
+      server,
+      deps,
+      grant,
+      sessionId,
+      authorize: async () => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      },
+      attempt: () => exactAgentCommandContext(grant, sessionId),
+      json,
+    });
+    // Calling the person: their phones ring (see agent-call-tools.ts).
+    registerAgentCallTools({
       server,
       deps,
       grant,

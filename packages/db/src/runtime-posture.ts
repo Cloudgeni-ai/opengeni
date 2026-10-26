@@ -1697,6 +1697,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  */
 export const FORCE_RLS_TABLES = [
   "additional_organization_creation_receipts",
+  "agent_calls",
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
@@ -2634,6 +2635,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
+  "agent_calls",
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",

@@ -1,5 +1,9 @@
 import { requireOptionalNativeModule } from "expo-modules-core";
-import { parseNativeCallEvent, type RawNativeCallEvent } from "./call-events";
+import {
+  parseNativeCallEvent,
+  parseNativeIncomingCall,
+  type RawNativeCallEvent,
+} from "./call-events";
 import type { NativeCallAdapter } from "./native-call";
 
 type OpenGeniCallNativeModule = {
@@ -10,6 +14,10 @@ type OpenGeniCallNativeModule = {
   setMuted(callId: string, muted: boolean): Promise<void>;
   setSpeaker(on: boolean): Promise<void>;
   takePendingStartRequest(): Promise<{ target: string | null } | null>;
+  // Agent calls (absent in builds before them).
+  getVoipToken?(): Promise<string | null>;
+  takeIncomingCalls?(): Promise<RawNativeCallEvent[]>;
+  endIncomingCall?(callId: string, reason: string): void;
   addListener(
     eventName: "onCallEvent",
     listener: (event: RawNativeCallEvent) => void,
@@ -38,6 +46,18 @@ export function createExpoCallAdapter(
     setMuted: (callId, muted) => native.setMuted(id(callId), muted),
     setSpeaker: (on) => native.setSpeaker(on),
     takePendingStartRequest: () => native.takePendingStartRequest(),
+    incoming:
+      native.getVoipToken && native.takeIncomingCalls && native.endIncomingCall
+        ? {
+            getVoipToken: () => native.getVoipToken!(),
+            takeIncomingCalls: async () =>
+              (await native.takeIncomingCalls!()).flatMap((raw) => {
+                const call = parseNativeIncomingCall(raw);
+                return call ? [call] : [];
+              }),
+            endIncomingCall: (callId, reason) => native.endIncomingCall!(id(callId), reason),
+          }
+        : undefined,
     subscribe(listener) {
       const subscription = native.addListener("onCallEvent", (raw) => {
         const event = parseNativeCallEvent(raw);

@@ -120,6 +120,7 @@ const TOOL_ICON: Record<ToolIconKind, NativeIconName> = {
   skill: "graduation-cap",
   settings: "settings",
   bell: "bell",
+  phone: "phone",
   inbox: "inbox",
   help: "hand",
   model: "sparkles",

@@ -294,6 +294,8 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   notify_user: "humanInput",
   notification_withdraw: "humanInput",
   inbox_tidy: "humanInput",
+  // Ringing the person's phone for a live voice call.
+  call_user: "humanInput",
   command_wait: "sandbox",
   command_read: "sandbox",
 

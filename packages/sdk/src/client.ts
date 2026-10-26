@@ -471,6 +471,7 @@ import type {
   UpdateInboxItemInput,
   NativePushDevice,
   RegisterNativePushDeviceInput,
+  AgentCall,
   CreateCapabilityCatalogItemRequest,
   InstallSkillRequest,
   InstallLibrarySkillRequest,
@@ -11027,6 +11028,43 @@ export class OpenGeniClient {
   /** Stop pushes to this device for this app credential. */
   async unregisterNativePushDevice(): Promise<void> {
     await this.requestJson<unknown>("DELETE", "/v1/native-app/push-device");
+  }
+
+  /** An agent's call to the signed-in person, while it rings and after. */
+  async getAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}`,
+    );
+    return call;
+  }
+
+  /**
+   * Take an agent's call. The first phone to answer wins; the call comes back
+   * `answered` with `answeredHere: true`, then start the chat's voice call.
+   * A call already taken, declined or rung out comes back in that state.
+   */
+  async answerAgentCall(
+    workspaceId: string,
+    callId: string,
+    options: { device?: string } = {},
+  ): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/answer`,
+      options,
+    );
+    return call;
+  }
+
+  /** Decline an agent's call: it stops ringing everywhere and the agent is told. */
+  async declineAgentCall(workspaceId: string, callId: string): Promise<AgentCall> {
+    const { call } = await this.requestJson<{ call: AgentCall }>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-calls/${encodeURIComponent(callId)}/decline`,
+      {},
+    );
+    return call;
   }
 
   // --- Organization-wide sessions ----------------------------------------------------------------

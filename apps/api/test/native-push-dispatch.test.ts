@@ -3,10 +3,12 @@ import { generateKeyPairSync } from "node:crypto";
 import type { ClaimedNativePushDelivery } from "@opengeni/db";
 import {
   createFcmSender,
+  nativeCallPushBody,
   nativePushAlert,
   nativePushInterruptionLevel,
   nativePushCategory,
   nativePushData,
+  nativePushRingsCall,
 } from "../src/native-push-dispatch";
 import { nativeAppRedirectAllowed, pkceS256Challenge } from "../src/routes/native-app-auth";
 
@@ -139,6 +141,37 @@ describe("native push presentation", () => {
       rule: "needs_input",
     });
     expect(nativePushData({ ...payload, sequence: 42 })).toMatchObject({ sequence: 42 });
+  });
+
+  test("a call ring goes to PushKit with the call, and shows as a call on Android", () => {
+    const ring = {
+      ...payload,
+      rule: "call" as const,
+      callId: "44444444-4444-4444-8444-444444444444",
+      title: "Deploy watcher",
+      body: "Production is down",
+      ringUntil: "2026-10-26T18:00:40.000Z",
+    };
+    expect(nativePushRingsCall(ring)).toBe(true);
+    expect(nativePushRingsCall(payload)).toBe(false);
+    expect(nativeCallPushBody(ring)).toEqual({
+      aps: {},
+      call: {
+        callId: ring.callId,
+        sessionId: payload.sessionId,
+        workspaceId: payload.workspaceId,
+        subjectId: "user:abc",
+        title: "Deploy watcher",
+        reason: "Production is down",
+        ringUntil: ring.ringUntil,
+      },
+    });
+    expect(nativePushAlert(ring)).toEqual({
+      title: "Deploy watcher is calling",
+      body: "Production is down",
+    });
+    expect(nativePushInterruptionLevel(ring)).toBe("time-sensitive");
+    expect(nativePushData(ring)).toMatchObject({ callId: ring.callId, ringUntil: ring.ringUntil });
   });
 });
 

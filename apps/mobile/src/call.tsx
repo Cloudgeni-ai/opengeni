@@ -2,6 +2,7 @@ import {
   NativeAgentCallProvider,
   useNativeAgentCall,
   type NativeAgentCallContextValue,
+  type NativeCallAdapter,
   type NativeOutsideCallContext,
 } from "@opengeni/react-native";
 import { createExpoCallAdapter } from "@opengeni/react-native/expo";
@@ -28,6 +29,13 @@ export function useAgentCall(): NativeAgentCallContextValue {
 
 const webrtc = createReactNativeWebRtcAdapter();
 
+let callAdapterInstance: NativeCallAdapter | null | undefined;
+/** The app's one system call integration (CallKit), shared by calls and Settings. */
+export function sharedCallAdapter(): NativeCallAdapter | null {
+  if (callAdapterInstance === undefined) callAdapterInstance = createExpoCallAdapter();
+  return callAdapterInstance;
+}
+
 /**
  * Where a call from outside the app goes (Phone recents, Siri, the Control
  * Center control, the home-screen action, the opengeni://call link): the
@@ -53,7 +61,7 @@ async function resolveOutsideCall(context: NativeOutsideCallContext): Promise<st
  */
 export function CallProvider({ children }: { children: ReactNode }) {
   const { client, workspaceId, models } = useAccount();
-  const callAdapter = useMemo(() => createExpoCallAdapter(), []);
+  const callAdapter = useMemo(() => sharedCallAdapter(), []);
   useEffect(() => (callAdapter ? connectCallAudioToWebRtc(callAdapter) : undefined), [callAdapter]);
   const codexConnected = models.some(
     (model) => model.provider === "codex" || model.id.startsWith("codex/"),

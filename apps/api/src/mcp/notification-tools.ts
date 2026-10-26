@@ -98,7 +98,7 @@ type Member = { subjectId: string; label: string };
  * their member name (case-insensitive). Null when it names nobody in the
  * workspace, or more than one person.
  */
-async function resolveMember(
+export async function resolveMember(
   deps: ApiRouteDeps,
   workspaceId: string,
   recipient: string,
@@ -124,7 +124,7 @@ async function resolveMember(
 }
 
 /** How a person is named to other members: their member name, else their profile. */
-async function personLabel(
+export async function personLabel(
   deps: ApiRouteDeps,
   workspaceId: string,
   subjectId: string,

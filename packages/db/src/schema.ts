@@ -15716,6 +15716,50 @@ export const feedbackSubmissions = pgTable(
   }),
 );
 
+/**
+ * An agent ringing a person's phones (0988): one row per call, from ringing
+ * to its outcome. Answering opens the chat's voice call.
+ */
+export const agentCalls = pgTable(
+  "agent_calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    calleeSubjectId: text("callee_subject_id").notNull(),
+    callerSubjectId: text("caller_subject_id"),
+    callerLabel: text("caller_label"),
+    reason: text("reason").notNull(),
+    state: text("state").notNull().default("ringing"),
+    devices: integer("devices").notNull().default(0),
+    ringUntil: timestamp("ring_until", { withTimezone: true }).notNull(),
+    answeredBy: text("answered_by"),
+    realtimeId: uuid("realtime_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (table) => ({
+    session: index("agent_calls_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt.desc(),
+    ),
+    ringingCallee: index("agent_calls_ringing_callee_idx")
+      .on(table.calleeSubjectId)
+      .where(sql`${table.state} = 'ringing'`),
+    ringingDeadline: index("agent_calls_ringing_deadline_idx")
+      .on(table.ringUntil)
+      .where(sql`${table.state} = 'ringing'`),
+    stateCheck: check(
+      "agent_calls_state_chk",
+      sql`${table.state} in ('ringing', 'answered', 'declined', 'missed', 'cancelled')`,
+    ),
+  }),
+);
+
 /** Promotion eligibility is separate from account access and paid funding. */
 export const promotionDecisions = pgTable("promotion_decisions", {
   accountId: uuid("account_id").primaryKey(),

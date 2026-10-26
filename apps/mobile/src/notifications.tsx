@@ -13,6 +13,8 @@ import { AppState, Linking, Platform } from "react-native";
 import { useAccount } from "@/account";
 import { appSessionPath } from "@/app-links";
 import type { SettingsSection } from "@/settings-model";
+import { useNativeVoipToken } from "@opengeni/react-native";
+import { sharedCallAdapter } from "@/call";
 
 /** The rules a person can turn on, in the order Settings shows them. */
 export const NOTIFICATION_RULES: Array<{ rule: NativePushRule; title: string; subtitle: string }> =
@@ -28,6 +30,15 @@ export const NOTIFICATION_RULES: Array<{ rule: NativePushRule; title: string; su
   ];
 
 const DEFAULT_RULES: NativePushRule[] = ["needs_input", "failed", "agent"];
+
+/** Agents ringing this phone: off until the person turns it on here. */
+const CALL_RULES: readonly NativePushRule[] = ["call", "call_members"];
+const isCallRule = (rule: NativePushRule) => CALL_RULES.includes(rule);
+
+/** Whether this build can ring for agent calls (PushKit and CallKit on iPhone). */
+function agentCallsSupported(): boolean {
+  return Platform.OS === "ios" && Boolean(sharedCallAdapter()?.incoming);
+}
 
 /** The data every Opengeni push carries, so a tap can open the right place. */
 export interface PushData {
@@ -189,12 +200,16 @@ async function devicePushToken(): Promise<string> {
 
 /**
  * The Notifications section of Settings for the active account: whether this
- * device gets pushes for it, and for which events. Each signed-in account
- * registers this device with its own credential, so every account's pushes
- * arrive and sign-out stops them.
+ * device gets pushes for it, and for which events; and whether agents may call
+ * this phone. Each signed-in account registers this device with its own
+ * credential, so every account's pushes arrive and sign-out stops them.
  */
-export function useNotificationSettingsSection(inbox: InboxSettingsState): SettingsSection | null {
+export function useNotificationSettingsSections(inbox: InboxSettingsState): {
+  notifications: SettingsSection | null;
+  agentCalls: SettingsSection | null;
+} {
   const { account, client, status } = useAccount();
+  const voipToken = useNativeVoipToken(sharedCallAdapter());
   const [device, setDevice] = useState<NativePushDevice | null | undefined>(undefined);
   const [permission, setPermission] = useState<Notifications.PermissionStatus | null>(null);
   // Android 13+ reports "denied" before the first prompt; only a refusal the
@@ -232,7 +247,9 @@ export function useNotificationSettingsSection(inbox: InboxSettingsState): Setti
           setDevice(null);
           return;
         }
-        let granted = permission === "granted";
+        // Calls ring through PushKit, which needs no notification permission;
+        // everything else does.
+        let granted = permission === "granted" || rules.every(isCallRule);
         if (!granted) {
           const asked = await Notifications.requestPermissionsAsync();
           setPermission(asked.status);
@@ -248,6 +265,7 @@ export function useNotificationSettingsSection(inbox: InboxSettingsState): Setti
             environment: __DEV__ ? "development" : "production",
             token,
             rules,
+            voipToken: Platform.OS === "ios" ? voipToken : null,
           }),
         );
       } catch (caught) {
@@ -259,75 +277,141 @@ export function useNotificationSettingsSection(inbox: InboxSettingsState): Setti
         );
       }
     },
-    [client, permission],
+    [client, permission, voipToken],
   );
 
-  if (status !== "ready" || device === undefined) return null;
+  if (status !== "ready" || device === undefined) return { notifications: null, agentCalls: null };
   const rules = device?.rules ?? [];
+  const agentCalls = agentCallSection({
+    rules,
+    voipToken,
+    problem,
+    save: (next) => void save(next),
+  });
   if (permission === "denied" && !canAskAgain) {
     return {
-      id: "notifications",
-      title: "Notifications",
-      footer: "Notifications are off for Opengeni in system settings.",
-      rows: [
-        {
-          kind: "action",
-          id: "open-settings",
-          title: "Turn on in system settings",
-          symbol: "bell.badge",
-          onPress: () => void Linking.openSettings(),
-        },
-      ],
-    };
-  }
-  return {
-    id: "notifications",
-    title: "Notifications",
-    footer:
-      problem ??
-      inbox.problem ??
-      (device
-        ? "Sent to this device for sessions you start. Tap one to open the session."
-        : "Get a push when a session you started needs you."),
-    rows: device
-      ? NOTIFICATION_RULES.flatMap(({ rule, title, subtitle }) => [
+      agentCalls,
+      notifications: {
+        id: "notifications",
+        title: "Notifications",
+        footer: "Notifications are off for Opengeni in system settings.",
+        rows: [
           {
-            kind: "toggle" as const,
-            id: rule,
-            title,
-            subtitle,
-            value: rules.includes(rule),
-            onChange: (on: boolean) =>
-              void save(on ? [...rules, rule] : rules.filter((each) => each !== rule)),
-          },
-          // Right under "Needs you": let questions and approvals break through
-          // Focus. A person-wide server setting; only iPhone has Focus levels,
-          // and a server that doesn't keep it leaves it out.
-          ...(rule === "needs_input" &&
-          rules.includes("needs_input") &&
-          Platform.OS === "ios" &&
-          typeof inbox.settings?.timeSensitiveNeedsYou === "boolean"
-            ? [
-                {
-                  kind: "toggle" as const,
-                  id: "time-sensitive-needs-you",
-                  title: "Time-sensitive",
-                  subtitle: "Questions and approvals break through Focus",
-                  value: inbox.settings.timeSensitiveNeedsYou,
-                  onChange: (on: boolean) => void inbox.change({ timeSensitiveNeedsYou: on }),
-                },
-              ]
-            : []),
-        ])
-      : [
-          {
-            kind: "action" as const,
-            id: "enable",
-            title: "Turn on notifications",
-            symbol: "bell" as const,
-            onPress: () => void save(DEFAULT_RULES),
+            kind: "action",
+            id: "open-settings",
+            title: "Turn on in system settings",
+            symbol: "bell.badge",
+            onPress: () => void Linking.openSettings(),
           },
         ],
+      },
+    };
+  }
+  const notificationRules = rules.filter((rule) => !isCallRule(rule));
+  const callRules = rules.filter(isCallRule);
+  return {
+    agentCalls,
+    notifications: {
+      id: "notifications",
+      title: "Notifications",
+      footer:
+        problem ??
+        inbox.problem ??
+        (notificationRules.length > 0
+          ? "Sent to this device for sessions you start. Tap one to open the session."
+          : "Get a push when a session you started needs you."),
+      rows:
+        notificationRules.length > 0
+          ? NOTIFICATION_RULES.flatMap(({ rule, title, subtitle }) => [
+              {
+                kind: "toggle" as const,
+                id: rule,
+                title,
+                subtitle,
+                value: rules.includes(rule),
+                onChange: (on: boolean) =>
+                  void save(on ? [...rules, rule] : rules.filter((each) => each !== rule)),
+              },
+              // Right under "Needs you": let questions and approvals break through
+              // Focus. A person-wide server setting; only iPhone has Focus levels,
+              // and a server that doesn't keep it leaves it out.
+              ...(rule === "needs_input" &&
+              rules.includes("needs_input") &&
+              Platform.OS === "ios" &&
+              typeof inbox.settings?.timeSensitiveNeedsYou === "boolean"
+                ? [
+                    {
+                      kind: "toggle" as const,
+                      id: "time-sensitive-needs-you",
+                      title: "Time-sensitive",
+                      subtitle: "Questions and approvals break through Focus",
+                      value: inbox.settings.timeSensitiveNeedsYou,
+                      onChange: (on: boolean) => void inbox.change({ timeSensitiveNeedsYou: on }),
+                    },
+                  ]
+                : []),
+            ])
+          : [
+              {
+                kind: "action" as const,
+                id: "enable",
+                title: "Turn on notifications",
+                symbol: "bell" as const,
+                onPress: () => void save([...DEFAULT_RULES, ...callRules]),
+              },
+            ],
+    },
+  };
+}
+
+/**
+ * Calls from agents: whether agents may ring this phone with the system's
+ * incoming-call screen. Off unless the person turns it on, per phone.
+ */
+function agentCallSection(input: {
+  rules: NativePushRule[];
+  voipToken: string | null;
+  problem: string | null;
+  save: (rules: NativePushRule[]) => void;
+}): SettingsSection | null {
+  if (!agentCallsSupported()) return null;
+  const { rules, voipToken, save } = input;
+  const own = rules.includes("call");
+  const members = rules.includes("call_members");
+  const without = rules.filter((rule) => !isCallRule(rule));
+  const notReady = !voipToken;
+  return {
+    id: "agent-calls",
+    title: "Calls from agents",
+    footer: notReady
+      ? "This iPhone isn't ready to take calls yet. Open the app again in a moment."
+      : own
+        ? "Agents call only when something can't wait: it rings like a phone call, follows Focus, and answering opens a voice call in that chat. If you miss it, you get a notification."
+        : "Let an agent phone you when something can't wait, such as an outage or a decision blocking urgent work. Off until you turn it on.",
+    rows: [
+      {
+        kind: "toggle",
+        id: "agent-calls-own",
+        title: "Let agents call this iPhone",
+        subtitle: "Agents working for you",
+        value: own,
+        disabled: notReady && !own,
+        onChange: (on: boolean) => save(on ? [...without, "call"] : without),
+      },
+      ...(own
+        ? [
+            {
+              kind: "toggle" as const,
+              id: "agent-calls-members",
+              title: "Teammates' agents too",
+              subtitle: "Agents working for others in your workspaces",
+              value: members,
+              onChange: (on: boolean) =>
+                save(on ? [...without, "call", "call_members"] : [...without, "call"]),
+            },
+          ]
+        : []),
+    ],
   };
 }
 
@@ -456,7 +540,8 @@ export function NotificationRouting() {
     return () => subscription.remove();
   }, [client, status]);
 
-  // Tokens rotate: re-register the current token for the active account.
+  // Tokens rotate: re-register the current tokens for the active account.
+  const voipToken = useNativeVoipToken(sharedCallAdapter());
   useEffect(() => {
     if (status !== "ready") return;
     let live = true;
@@ -464,9 +549,14 @@ export function NotificationRouting() {
       const device = await client.getNativePushDevice().catch(() => null);
       if (!live || !device || device.rules.length === 0) return;
       const { status: granted } = await Notifications.getPermissionsAsync();
-      if (granted !== "granted") return;
+      if (granted !== "granted" && !device.rules.every(isCallRule)) return;
       const token = await devicePushToken().catch(() => null);
-      if (!token || token === device.token) return;
+      const callsNeedToken =
+        Platform.OS === "ios" &&
+        device.rules.some(isCallRule) &&
+        voipToken !== null &&
+        voipToken !== (device.voipToken ?? null);
+      if (!token || (token === device.token && !callsNeedToken)) return;
       await client
         .registerNativePushDevice({
           platform: Platform.OS === "android" ? "android" : "ios",
@@ -474,13 +564,14 @@ export function NotificationRouting() {
           environment: __DEV__ ? "development" : "production",
           token,
           rules: device.rules,
+          voipToken: Platform.OS === "ios" ? (voipToken ?? device.voipToken ?? null) : null,
         })
         .catch(() => undefined);
     })();
     return () => {
       live = false;
     };
-  }, [client, status]);
+  }, [client, status, voipToken]);
 
   return null;
 }

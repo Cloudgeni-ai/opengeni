@@ -27,6 +27,7 @@ import {
 } from "./native-call";
 import type { NativeWebRtcAdapter } from "./native-realtime";
 import { useNativeSessionRealtime } from "./use-native-session-realtime";
+import { useIncomingAgentCalls } from "./incoming-agent-calls";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 
 /** Copy the call surfaces draw outside the call screen itself. */
@@ -138,7 +139,13 @@ function defaultError(title: string, message?: string): void {
   Alert.alert(title, message);
 }
 
-type CallTarget = { workspaceId: string; sessionId: string; systemTarget: string | null };
+type CallTarget = {
+  workspaceId: string;
+  sessionId: string;
+  systemTarget: string | null;
+  /** An agent's call the person answered: voice runs on that system call. */
+  answeredCallId?: string | undefined;
+};
 
 /**
  * One call with an agent at a time, above navigation: it keeps talking while the
@@ -223,6 +230,26 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
     [client, messages.couldNotStart, resolveOutsideCall, workspaceId],
   );
 
+  // An agent calling this phone: answering on the ring screen opens its chat's call.
+  useIncomingAgentCalls({
+    client,
+    callAdapter,
+    onAnswered: (call) => {
+      setTarget({
+        workspaceId: call.workspaceId,
+        sessionId: call.sessionId,
+        systemTarget: call.sessionId,
+        answeredCallId: call.callId,
+      });
+      setExpanded(true);
+    },
+    onError: (error) =>
+      onErrorRef.current(
+        messages.couldNotStart,
+        error instanceof Error ? error.message : undefined,
+      ),
+  });
+
   const outsideRef = useRef(callFromOutside);
   outsideRef.current = callFromOutside;
   useEffect(() => {
@@ -263,7 +290,7 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
       {props.children}
       {target ? (
         <ActiveAgentCall
-          key={target.sessionId}
+          key={`${target.sessionId}:${target.answeredCallId ?? ""}`}
           {...props}
           target={target}
           messages={messages}
@@ -334,6 +361,7 @@ function ActiveAgentCall(
     call: props.callAdapter,
     title,
     target: props.target.systemTarget,
+    answeredCallId: props.target.answeredCallId,
   });
 
   // Start once, as soon as the session and voice model are ready. The voice

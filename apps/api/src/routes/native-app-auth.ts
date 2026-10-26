@@ -81,6 +81,8 @@ const PushDeviceBody = z.object({
   environment: z.enum(["development", "production"]),
   token: z.string().min(8).max(4096),
   rules: z.array(z.enum(NATIVE_PUSH_RULES)).max(NATIVE_PUSH_RULES.length),
+  /** iOS PushKit token; agent calls ring it. Without one, iOS keeps no call rules. */
+  voipToken: z.string().min(8).max(4096).nullish(),
 });
 
 const StoredGrant = z.object({

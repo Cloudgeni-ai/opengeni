@@ -13,6 +13,8 @@ export const WORKSPACE_WEBHOOK_EVENT_TYPES = [
   "session.humanInput.requested",
   "session.notification.posted",
   "session.notification.withdrawn",
+  "session.agentCall.ringing",
+  "session.agentCall.settled",
   "usage.threshold_reached",
   "usage.exhausted",
   "usage.period_reset",

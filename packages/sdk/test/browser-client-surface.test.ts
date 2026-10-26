@@ -145,7 +145,10 @@ const integrationMethods = [
 // The native app exchanges its sign-in code, signs out and manages its push
 // device through the public client. The web app only starts the authorization.
 const nativeAppMethods = [
+  "answerAgentCall",
+  "declineAgentCall",
   "exchangeNativeAppCode",
+  "getAgentCall",
   "getNativePushDevice",
   "registerNativePushDevice",
   "signOutNativeApp",

@@ -4,8 +4,17 @@ import UIKit
 
 /// Turns system call launches into start requests: a call from the Phone
 /// app's recents or Siri (INStartCallIntent), and the home-screen quick action
-/// whose type ends in ".call".
+/// whose type ends in ".call". Registers for agent calls (PushKit) at launch,
+/// since iOS may launch the app in the background just to ring one.
 public class OpenGeniCallAppDelegateSubscriber: ExpoAppDelegateSubscriber {
+  public func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+  ) -> Bool {
+    OpenGeniVoipRegistry.shared.start()
+    return true
+  }
+
   public func application(
     _ application: UIApplication,
     continue userActivity: NSUserActivity,

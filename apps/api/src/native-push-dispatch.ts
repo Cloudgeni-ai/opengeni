@@ -115,6 +115,13 @@ export function nativePushAlert(payload: NativePushPayload): {
     // A secret is answered only in the app's secure card (AC-5): no inline reply.
     return { title: payload.title ?? "The agent needs a secret", body: SECRET_QUESTION_PUSH_BODY };
   }
+  if (payload.rule === "call" || payload.rule === "call_members") {
+    // Android shows a call as a notification; iOS rings through PushKit instead.
+    return {
+      title: `${payload.title ?? "Your agent"} is calling`,
+      body: payload.body ? plainNotificationText(payload.body) : "Tap to answer.",
+    };
+  }
   const fallback =
     payload.rule === "needs_input"
       ? "The agent needs you"
@@ -150,8 +157,9 @@ export function nativePushInterruptionLevel(
   payload: ClaimedNativePushDelivery["payload"],
 ): "time-sensitive" | "active" {
   if (
-    (payload.rule === "agent" || payload.rule === "needs_input") &&
-    payload.urgency === "time_sensitive"
+    ((payload.rule === "agent" || payload.rule === "needs_input") &&
+      payload.urgency === "time_sensitive") ||
+    payload.rule === "call"
   ) {
     return "time-sensitive";
   }
@@ -167,6 +175,33 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
     rule: payload.rule,
     ...(payload.eventType ? { eventType: payload.eventType } : {}),
     ...(payload.sequence ? { sequence: payload.sequence } : {}),
+    ...(payload.callId ? { callId: payload.callId } : {}),
+    ...(payload.ringUntil ? { ringUntil: payload.ringUntil } : {}),
+  };
+}
+
+/** Whether a delivery rings a call (rather than showing a notification). */
+export function nativePushRingsCall(payload: ClaimedNativePushDelivery["payload"]): boolean {
+  return payload.rule === "call" && typeof payload.callId === "string";
+}
+
+/**
+ * The PushKit payload of a call ring. iOS hands it to the app, which must
+ * report it to CallKit at once: the ring screen shows `title` (who calls) and
+ * the app keeps `reason` for the call.
+ */
+export function nativeCallPushBody(payload: ClaimedNativePushDelivery["payload"]) {
+  return {
+    aps: {},
+    call: {
+      callId: payload.callId,
+      sessionId: payload.sessionId,
+      workspaceId: payload.workspaceId,
+      subjectId: payload.subjectId,
+      title: payload.title ?? null,
+      reason: payload.body ?? null,
+      ringUntil: payload.ringUntil ?? null,
+    },
   };
 }
 
@@ -245,29 +280,51 @@ export function createApnsSender(input: {
   return async (delivery) => {
     const host =
       delivery.environment === "development" ? "api.sandbox.push.apple.com" : "api.push.apple.com";
+    const ring = nativePushRingsCall(delivery.payload);
+    if (ring && !delivery.voipToken) {
+      return { outcome: "failed", error: "No PushKit token for this phone" };
+    }
     const alert = nativePushAlert(delivery.payload);
     const category = nativePushCategory(delivery.payload);
-    const body = JSON.stringify({
-      aps: {
-        alert,
-        sound: "default",
-        "thread-id": delivery.payload.sessionId,
-        "interruption-level": nativePushInterruptionLevel(delivery.payload),
-        ...(category ? { category } : {}),
-      },
-      body: nativePushData(delivery.payload),
-    });
+    const body = JSON.stringify(
+      ring
+        ? nativeCallPushBody(delivery.payload)
+        : {
+            aps: {
+              alert,
+              sound: "default",
+              "thread-id": delivery.payload.sessionId,
+              "interruption-level": nativePushInterruptionLevel(delivery.payload),
+              ...(category ? { category } : {}),
+            },
+            body: nativePushData(delivery.payload),
+          },
+    );
+    const ringUntil = Date.parse(delivery.payload.ringUntil ?? "");
+    const requestHeaders = ring
+      ? {
+          ":method": "POST",
+          ":path": `/3/device/${delivery.voipToken}`,
+          authorization: `bearer ${bearer()}`,
+          "apns-topic": `${delivery.appId}.voip`,
+          "apns-push-type": "voip",
+          "apns-priority": "10",
+          // A ring that cannot arrive before the call stops ringing is dropped.
+          "apns-expiration": String(Number.isFinite(ringUntil) ? Math.floor(ringUntil / 1000) : 0),
+          "content-type": "application/json",
+        }
+      : {
+          ":method": "POST",
+          ":path": `/3/device/${delivery.token}`,
+          authorization: `bearer ${bearer()}`,
+          "apns-topic": delivery.appId,
+          "apns-push-type": "alert",
+          "apns-priority": "10",
+          "apns-collapse-id": `${delivery.payload.sessionId}:${delivery.payload.rule}`.slice(0, 64),
+          "content-type": "application/json",
+        };
     return await new Promise<NativePushSendResult>((resolve) => {
-      const request = session(host).request({
-        ":method": "POST",
-        ":path": `/3/device/${delivery.token}`,
-        authorization: `bearer ${bearer()}`,
-        "apns-topic": delivery.appId,
-        "apns-push-type": "alert",
-        "apns-priority": "10",
-        "apns-collapse-id": `${delivery.payload.sessionId}:${delivery.payload.rule}`.slice(0, 64),
-        "content-type": "application/json",
-      });
+      const request = session(host).request(requestHeaders);
       let status = 0;
       let text = "";
       request.setTimeout(10_000, () => request.close());
@@ -288,7 +345,12 @@ export function createApnsSender(input: {
           }
         })();
         if (status === 410 || reason === "BadDeviceToken" || reason === "Unregistered") {
-          return resolve({ outcome: "unregistered", error: `${status} ${reason}` });
+          // A stale PushKit token must not drop the phone's notifications; the
+          // app registers a fresh one on its next launch.
+          return resolve({
+            outcome: ring ? "failed" : "unregistered",
+            error: `${status} ${reason}`,
+          });
         }
         resolve({
           outcome: status === 429 || status >= 500 || status === 0 ? "retry" : "failed",
@@ -417,12 +479,17 @@ export async function drainNativePushDeliveries(
   await Promise.all(
     claimed.map(async (delivery) => {
       const sender = senders[delivery.platform];
-      const result: NativePushSendResult = sender
-        ? await sender(delivery).catch((error: unknown) => ({
-            outcome: "retry" as const,
-            error: String(error),
-          }))
-        : { outcome: "failed", error: `No ${delivery.platform} push credentials configured` };
+      const rangOut =
+        delivery.payload.rule === "call" &&
+        Date.parse(delivery.payload.ringUntil ?? "") <= Date.now();
+      const result: NativePushSendResult = rangOut
+        ? { outcome: "failed", error: "The call stopped ringing before it could be sent" }
+        : sender
+          ? await sender(delivery).catch((error: unknown) => ({
+              outcome: "retry" as const,
+              error: String(error),
+            }))
+          : { outcome: "failed", error: `No ${delivery.platform} push credentials configured` };
       const outcome =
         result.outcome === "retry" && delivery.attempts >= MAX_ATTEMPTS ? "failed" : result.outcome;
       if (outcome === "delivered") delivered += 1;

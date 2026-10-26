@@ -1856,6 +1856,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0988 agent calls: read, insert and update, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1915,7 +1921,8 @@ describe("runtime database posture evaluator", () => {
         2 + // 0952 secret approval rules and use approvals: full-DML, FORCE-RLS.
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
-        1; // 0971 per-message app-action grants: full-DML, FORCE-RLS.
+        1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
+        1; // 0988 agent calls: read, insert and update, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
