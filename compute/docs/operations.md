@@ -442,7 +442,8 @@ authority alone for agent links.
   once it renews again; giving up on it would end every program they
   run. Meanwhile their wakes retry and new sandboxes go elsewhere. Then
   the service fences it (on GCP it resets the
-  instance, or finds it stopped or gone), then clears its sandboxes'
+  instance, or finds it stopped or gone, or restarted since: see below),
+  then clears its sandboxes'
   owner with a raised epoch, and each wakes on another host from its
   latest archived copy on its next request. It boots from that copy's
   files: its programs end and start afresh, and what it wrote since the
@@ -453,6 +454,19 @@ authority alone for agent links.
   host raises the `programs_lost` alarm for each sandbox whose memory it
   set aside, as a host does for a VM that died. Nothing has to be done by
   hand, except replacing the machine where no group does it.
+  A GCP host whose machine restarted (its watchdog reset it, or it
+  crashed) is given up on as soon as its lease lapses, with no second
+  reset and no wait: its agent writes the machine's boot to the
+  instance's `compute/boot` guest attribute as it starts, numbered one
+  past the boot named there before, and the service sees a boot numbered
+  higher there than the old registration named. The agent registers
+  only once it has written the boot (or given up, within ten seconds),
+  and names it only if the write was taken. The
+  host template turns guest attributes on (`enable-guest-attributes`) and
+  the service's role may read them
+  (`compute.instances.getGuestAttributes`); without either, the agent
+  logs that the metadata server refused the boot, and a restarted
+  machine is reset once more before its host rejoins, as before.
   If the host comes back, its guard has already stopped its VMs (its
   lease ran out), and it registers again; the raised epochs keep it from
   running any sandbox that moved (ADR 18). A host given up on stays in
