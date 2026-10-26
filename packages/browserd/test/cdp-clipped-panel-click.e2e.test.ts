@@ -8,102 +8,119 @@ import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 import { CdpConnection } from "../src/cdp";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
+const headed = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1";
 
 const LONG = "Quarterly handoff reference for the printable export of the east wing project";
+
+const fixture = (lines: string[]) => `data:text/html,${encodeURIComponent(lines.join(""))}`;
 
 // A split view: a folder tree in a fixed-width side panel that clips its
 // rows, and the file list beside it. Long rows run past the panel's edge, so
 // their centers lie over the file list, which the panel's clip leaves on top
 // there. Every row still shows its start, which is where a person clicks.
-const FIXTURE = `data:text/html,${encodeURIComponent(
-  [
-    "<!doctype html><title>Folders</title>",
-    "<style>",
-    "body{margin:0;font:14px sans-serif}",
-    "#split{display:flex;height:100vh}",
-    "#side{flex:0 0 260px;overflow:hidden}",
-    "#scroller{height:100%;overflow-x:hidden;overflow-y:auto}",
-    "[role=treeitem]{display:flex;width:max-content;min-width:100%;white-space:nowrap;line-height:28px;cursor:pointer}",
-    "#files{flex:1;background:#f4f4f4}",
-    "#menu{position:fixed;left:0;top:0;width:280px;height:100vh;background:#fff}",
-    "</style>",
-    // Above the tree, a pinned row in a strip that clips without scrolling,
-    // indented wholly past the panel's edge.
-    '<div id="split"><div id="side"><div style="overflow:clip"><div role="treeitem" id="pinned" aria-level="1" tabindex="-1" style="padding-left:300px"><span>Past the edge</span></div></div>',
-    '<div id="scroller"><div role="tree" aria-label="Folders">',
-    '<div role="treeitem" id="exports" aria-level="1" aria-expanded="false" tabindex="0" style="padding-left:8px"><span><span>Exports</span></span></div>',
-    '<div role="group" id="children" hidden>',
-    `<div role="treeitem" id="year" aria-level="2" tabindex="-1" style="padding-left:24px"><span><span>2026 ${LONG}</span></span></div>`,
-    "</div>",
-    `<div role="treeitem" id="handoff" aria-level="1" tabindex="-1" style="padding-left:8px"><span><span>${LONG}</span></span></div>`,
-    "</div></div></div>",
-    '<div role="group" aria-label="Files" id="files"><nav><button>Files</button></nav></div></div>',
-    "<script>",
-    "globalThis.log=[];",
-    'document.getElementById("files").addEventListener("click",()=>log.push("FILES"));',
-    'for (const row of document.querySelectorAll("[role=treeitem]")) row.addEventListener("click",(event)=>{event.stopPropagation();log.push(row.id)});',
-    'document.getElementById("exports").addEventListener("click",()=>{const children=document.getElementById("children");children.hidden=!children.hidden;document.getElementById("exports").setAttribute("aria-expanded",String(!children.hidden))});',
-    "</script>",
-  ].join(""),
-)}`;
+const FIXTURE = fixture([
+  "<!doctype html><title>Folders</title>",
+  "<style>",
+  "body{margin:0;font:14px sans-serif}",
+  "#split{display:flex;height:100vh}",
+  "#side{flex:0 0 260px;overflow:hidden}",
+  "#scroller{height:100%;overflow-x:hidden;overflow-y:auto}",
+  "[role=treeitem]{display:flex;width:max-content;min-width:100%;white-space:nowrap;line-height:28px;cursor:pointer}",
+  "#files{flex:1;background:#f4f4f4}",
+  "#menu{position:fixed;left:0;top:0;width:280px;height:100vh;background:#fff}",
+  "</style>",
+  // Above the tree, a pinned row in a strip that clips without scrolling,
+  // indented wholly past the panel's edge.
+  '<div id="split"><div id="side"><div style="overflow:clip"><div role="treeitem" id="pinned" aria-level="1" tabindex="-1" style="padding-left:300px"><span>Past the edge</span></div></div>',
+  '<div id="scroller"><div role="tree" aria-label="Folders">',
+  '<div role="treeitem" id="exports" aria-level="1" aria-expanded="false" tabindex="0" style="padding-left:8px"><span><span>Exports</span></span></div>',
+  '<div role="group" id="children" hidden>',
+  `<div role="treeitem" id="year" aria-level="2" tabindex="-1" style="padding-left:24px"><span><span>2026 ${LONG}</span></span></div>`,
+  "</div>",
+  `<div role="treeitem" id="handoff" aria-level="1" tabindex="-1" style="padding-left:8px"><span><span>${LONG}</span></span></div>`,
+  "</div></div></div>",
+  '<div role="group" aria-label="Files" id="files"><nav><button>Files</button></nav></div></div>',
+  "<script>",
+  "globalThis.log=[];",
+  'document.getElementById("files").addEventListener("click",()=>log.push("FILES"));',
+  'for (const row of document.querySelectorAll("[role=treeitem]")) row.addEventListener("click",(event)=>{event.stopPropagation();log.push(row.id)});',
+  'document.getElementById("exports").addEventListener("click",()=>{const children=document.getElementById("children");children.hidden=!children.hidden;document.getElementById("exports").setAttribute("aria-expanded",String(!children.hidden))});',
+  "</script>",
+]);
+
+interface Session {
+  evaluate: (expression: string) => Promise<unknown>;
+  click: (
+    action: BrowserActionCommand["action"],
+  ) => ReturnType<BrowserInteractionController["run"]>;
+}
+
+const treeitem = (name: string) => ({ kind: "role", role: "treeitem", name, exact: true }) as const;
+
+async function withSession(page: string, body: (session: Session) => Promise<void>) {
+  const directory = await mkdtemp("/tmp/ogb-clipped-panel-click-");
+  const browserSessionId = randomUUID();
+  const controllerGeneration = `controller-${randomUUID()}`;
+  const runner = await ManagedBrowserRunner.create({
+    profileDirectory: join(directory, "profile"),
+    headed,
+    ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+      ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+      : {}),
+  });
+  const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
+  const controller = new BrowserInteractionController({
+    browserSessionId,
+    controllerGeneration,
+    driver,
+  });
+  let cdp: CdpConnection | null = null;
+  const command = (
+    observation: BrowserObservation,
+    action: BrowserActionCommand["action"],
+  ): BrowserActionCommand => ({
+    protocolVersion: 1,
+    operationId: randomUUID(),
+    browserSessionId,
+    controllerGeneration,
+    targetId: observation.target.id,
+    expectedTargetGeneration: observation.target.targetGeneration,
+    expectedDocumentGeneration: observation.target.documentGeneration!,
+    expectedFrameId: observation.frameId!,
+    actor: { kind: "human", subjectId: "clipped-panel-click-fixture" },
+    observationMode: "none",
+    action,
+  });
+  try {
+    const initial = await driver.start(page);
+    const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
+    cdp = await CdpConnection.connect(endpoint.cdpUrl);
+    const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
+      targetId: initial.target.id,
+      flatten: true,
+    });
+    const evaluate = async (expression: string) =>
+      (
+        await cdp!.send<{ result: { value: unknown } }>(
+          "Runtime.evaluate",
+          { expression, returnByValue: true, awaitPromise: true },
+          { sessionId: attached.sessionId },
+        )
+      ).result.value;
+    const click = async (action: BrowserActionCommand["action"]) =>
+      await controller.run(command(await driver.observe(initial.target.id), action));
+    await body({ evaluate, click });
+  } finally {
+    await cdp?.close();
+    await driver.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 e2e(
   "a tree row that runs past its panel's clipped edge is clicked where it shows; a real cover still refuses",
   async () => {
-    const directory = await mkdtemp("/tmp/ogb-clipped-panel-click-");
-    const browserSessionId = randomUUID();
-    const controllerGeneration = `controller-${randomUUID()}`;
-    const runner = await ManagedBrowserRunner.create({
-      profileDirectory: join(directory, "profile"),
-      headed: false,
-      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
-        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
-        : {}),
-    });
-    const driver = new AgentBrowserDriver({ browserSessionId, controllerGeneration, runner });
-    const controller = new BrowserInteractionController({
-      browserSessionId,
-      controllerGeneration,
-      driver,
-    });
-    let cdp: CdpConnection | null = null;
-    const command = (
-      observation: BrowserObservation,
-      action: BrowserActionCommand["action"],
-    ): BrowserActionCommand => ({
-      protocolVersion: 1,
-      operationId: randomUUID(),
-      browserSessionId,
-      controllerGeneration,
-      targetId: observation.target.id,
-      expectedTargetGeneration: observation.target.targetGeneration,
-      expectedDocumentGeneration: observation.target.documentGeneration!,
-      expectedFrameId: observation.frameId!,
-      actor: { kind: "human", subjectId: "clipped-panel-click-fixture" },
-      observationMode: "none",
-      action,
-    });
-    try {
-      const initial = await driver.start(FIXTURE);
-      const endpoint = await runner.run<{ cdpUrl: string }>(["get", "cdp-url"]);
-      cdp = await CdpConnection.connect(endpoint.cdpUrl);
-      const attached = await cdp.send<{ sessionId: string }>("Target.attachToTarget", {
-        targetId: initial.target.id,
-        flatten: true,
-      });
-      const evaluate = async (expression: string) =>
-        (
-          await cdp!.send<{ result: { value: unknown } }>(
-            "Runtime.evaluate",
-            { expression, returnByValue: true, awaitPromise: true },
-            { sessionId: attached.sessionId },
-          )
-        ).result.value;
-      const click = async (action: BrowserActionCommand["action"]) =>
-        await controller.run(command(await driver.observe(initial.target.id), action));
-      const treeitem = (name: string) =>
-        ({ kind: "role", role: "treeitem", name, exact: true }) as const;
-
+    await withSession(FIXTURE, async ({ evaluate, click }) => {
       // The row's center is over the file list, but its start shows in the
       // panel. Both the row and its label text take the click there.
       expect(
@@ -154,11 +171,164 @@ e2e(
         '(invalid_action: browser element is covered by menu "Folder actions" where it shows)',
       );
       expect(await evaluate("log")).toEqual(["handoff", "handoff", "exports", "year"]);
-    } finally {
-      await cdp?.close();
-      await driver.close();
-      await rm(directory, { recursive: true, force: true });
-    }
+    });
+  },
+  60_000,
+);
+
+// A row cut off at its side panel's edge, with a narrow menu over the middle
+// of the part that shows. In the content group beside the panel, a header
+// that transforms and clips its overflow holds an open popover menu: the
+// popover is in the top layer, so the header does not clip it, and a toast
+// opened later in the top layer covers its item.
+const COVERS = fixture([
+  "<!doctype html><title>Covers</title>",
+  "<style>",
+  "body{margin:0;font:14px sans-serif}",
+  "#split{display:flex;height:100vh}",
+  "#side{flex:0 0 260px;overflow:hidden}",
+  "[role=treeitem]{display:flex;width:max-content;min-width:100%;white-space:nowrap;line-height:28px;padding-left:8px}",
+  "#files{flex:1;background:#f4f4f4}",
+  "#popup{position:fixed;left:100px;top:0;width:60px;height:200px;background:#fff}",
+  "header{transform:translateX(0);overflow:hidden;height:40px;background:#ddd}",
+  "[popover]{position:fixed;inset:auto;margin:0;border:0;padding:0;background:#fff}",
+  "#actions{left:400px;top:200px;width:200px;height:120px}",
+  "#rename{display:block;height:120px}",
+  "#toast{left:450px;top:240px;width:100px;height:40px}",
+  "</style>",
+  '<div id="split"><div id="side"><div role="tree" aria-label="Folders">',
+  `<div role="treeitem" id="handoff" aria-level="1" tabindex="-1"><span>${LONG} ${LONG}</span></div>`,
+  "</div></div>",
+  '<div role="group" aria-label="Files" id="files"><header><div popover="manual" id="actions" role="menu" aria-label="Actions"><div role="menuitem" id="rename" tabindex="-1">Rename</div></div></header></div></div>',
+  '<div id="popup" role="menu" aria-label="Popup"></div>',
+  '<div popover="manual" id="toast" role="status" aria-label="Saved">Saved</div>',
+  "<script>",
+  "globalThis.log=[];",
+  'document.getElementById("files").addEventListener("click",()=>log.push("FILES"));',
+  'document.getElementById("popup").addEventListener("click",()=>log.push("POPUP"));',
+  'for (const id of ["handoff","rename"]) document.getElementById(id).addEventListener("click",(event)=>{event.stopPropagation();log.push(id);globalThis.at=event.clientX});',
+  'document.getElementById("actions").showPopover();',
+  "</script>",
+]);
+
+e2e(
+  "a cover over the middle of where a cut-off row shows refuses; a covered top-layer item is covered, not cut off",
+  async () => {
+    await withSession(COVERS, async ({ evaluate, click }) => {
+      const row = treeitem(`${LONG} ${LONG}`);
+      expect(
+        await evaluate(
+          'const r = document.getElementById("handoff").getBoundingClientRect(); r.left + r.width / 2 > 260',
+        ),
+      ).toBe(true);
+
+      // The menu sits over the middle of the part of the row that shows: a
+      // real cover there, even though the row shows on either side of it.
+      const covered = await click({ type: "click", locator: row });
+      expect(covered.state).not.toBe("completed");
+      expect(covered.error?.message).toContain(
+        'browser element is covered by menu "Popup" where it shows',
+      );
+      expect(await evaluate("log")).toEqual([]);
+
+      // Moved off that middle, the menu still covers part of what shows, but
+      // the row takes the click at the middle.
+      await evaluate('document.getElementById("popup").style.left = "200px"');
+      const clicked = await click({ type: "click", locator: row });
+      expect(clicked.error ?? null).toBeNull();
+      expect(clicked.state).toBe("completed");
+      expect(await evaluate("log")).toEqual(["handoff"]);
+      // Pressed at the middle of the part that shows, the panel's 260px.
+      expect(Math.abs(Number(await evaluate("at")) - 130)).toBeLessThanOrEqual(3);
+
+      // The popover's item lies outside the clipping header, which does not
+      // clip the top layer: it takes the click.
+      const item = { kind: "role", role: "menuitem", name: "Rename", exact: true } as const;
+      const renamed = await click({ type: "click", locator: item });
+      expect(renamed.error ?? null).toBeNull();
+      expect(renamed.state).toBe("completed");
+      expect(await evaluate("log")).toEqual(["handoff", "rename"]);
+
+      // A toast opened over it covers it at its center: that is the refusal,
+      // not a cut-off one that would send the agent scrolling a panel.
+      await evaluate('document.getElementById("toast").showPopover()');
+      const toasted = await click({ type: "click", locator: item });
+      expect(toasted.state).not.toBe("completed");
+      expect(toasted.error?.message).toContain(
+        'browser element is covered by status "Saved" at its center',
+      );
+
+      // A long label of characters outside the BMP is cut on a character
+      // boundary, within 160 bytes of UTF-8, and its quote still closes.
+      await evaluate(
+        'document.getElementById("toast").setAttribute("aria-label", "\\u{1F5C2}".repeat(100))',
+      );
+      const long = await click({ type: "click", locator: item });
+      expect(long.state).not.toBe("completed");
+      const named = /browser element is covered by (.*) at its center/.exec(
+        long.error?.message ?? "",
+      );
+      expect(named).not.toBeNull();
+      const cover = named![1]!;
+      expect(cover).toStartWith('status "\u{1F5C2}');
+      expect(cover).toEndWith('…"');
+      // No half of a surrogate pair: it would not survive UTF-8 unchanged.
+      expect(Buffer.from(cover, "utf8").toString("utf8")).toBe(cover);
+      expect(Buffer.byteLength(cover, "utf8")).toBeLessThanOrEqual(160);
+      expect(JSON.parse(cover.slice("status ".length))).toEndWith("…");
+      expect(await evaluate("log")).toEqual(["handoff", "rename"]);
+    });
+  },
+  60_000,
+);
+
+const SPLIT_STYLE = [
+  ".split{display:flex;height:100px;width:900px}",
+  ".side{flex:0 0 260px;overflow:hidden}",
+  "[role=treeitem]{display:flex;width:max-content;min-width:100%;white-space:nowrap;line-height:28px;padding-left:8px}",
+  ".files{flex:1;background:#f4f4f4}",
+].join("");
+const split = (id: string, label: string) =>
+  `<div class="split"><div class="side"><div role="tree" aria-label="${label} folders"><div role="treeitem" id="${id}" aria-level="1" tabindex="-1"><span>${label} ${LONG}</span></div></div></div><div role="group" aria-label="${label} files" class="files"></div></div>`;
+const LISTENERS =
+  'for (const row of document.querySelectorAll("[role=treeitem]")) row.addEventListener("click",(event)=>{event.stopPropagation();top.log.push(row.id)});for (const files of document.querySelectorAll(".files")) files.addEventListener("click",()=>top.log.push("FILES"));';
+const srcdoc = (html: string) => html.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+
+// The same cut-off row in a panel scaled by a transform, in one magnified by
+// CSS zoom, and in a same-origin frame.
+const TRANSFORMED = fixture([
+  "<!doctype html><title>Panels</title>",
+  `<style>body{margin:0;font:14px sans-serif}${SPLIT_STYLE}</style>`,
+  `<div style="transform:scale(0.8);transform-origin:0 0;height:100px">${split("scaled", "Scaled")}</div>`,
+  `<div style="zoom:1.5">${split("zoomed", "Zoomed")}</div>`,
+  `<iframe title="Panel" style="display:block;width:900px;height:120px;border:0" srcdoc="${srcdoc(
+    `<!doctype html><style>body{margin:0;font:14px sans-serif}${SPLIT_STYLE}</style>${split("framed", "Framed")}<script>${LISTENERS}</script>`,
+  )}"></iframe>`,
+  `<script>globalThis.log=[];${LISTENERS}</script>`,
+]);
+
+e2e(
+  "a cut-off row in a scaled, zoomed or framed panel is clicked where it shows",
+  async () => {
+    await withSession(TRANSFORMED, async ({ evaluate, click }) => {
+      expect(
+        await evaluate(
+          'new Promise((resolve) => { const check = () => document.querySelector("iframe").contentDocument?.getElementById("framed") ? resolve(true) : setTimeout(check, 20); check(); })',
+        ),
+      ).toBe(true);
+      // Every row's center lies past its panel's edge, over its file list.
+      expect(
+        await evaluate(
+          '[document, document.querySelector("iframe").contentDocument].flatMap((page) => [...page.querySelectorAll("[role=treeitem]")].map((row) => { const r = row.getBoundingClientRect(); const side = row.closest(".side").getBoundingClientRect(); return r.left + r.width / 2 > side.right; }))',
+        ),
+      ).toEqual([true, true, true]);
+      for (const label of ["Scaled", "Zoomed", "Framed"]) {
+        const result = await click({ type: "click", locator: treeitem(`${label} ${LONG}`) });
+        expect(result.error ?? null).toBeNull();
+        expect(result.state).toBe("completed");
+      }
+      expect(await evaluate("log")).toEqual(["scaled", "zoomed", "framed"]);
+    });
   },
   60_000,
 );
