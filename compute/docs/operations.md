@@ -401,7 +401,10 @@ authority alone for agent links.
   before this option ignores it and leaves those sandboxes `left`.
   `POST /v1/sandboxes/<id>/move` takes
   `"awake": true` too. `POST /v1/hosts/<name>/undrain` takes the host
-  back.
+  back. A drained host stays drained until then, even if it is given up
+  on meanwhile (its lease lapsed, or it was fenced) and registers again:
+  it comes back draining, so a host on its way out never takes new
+  sandboxes.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,
   `gcloud compute instance-groups managed delete-instances` so the group
   does not replace it). Never delete a host that still owns sandboxes: the

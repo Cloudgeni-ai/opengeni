@@ -22,6 +22,9 @@ struct Host {
     answer: Vec<Ruling>,
     /// When it was given up on, while it is.
     gone_ms: Option<u64>,
+    /// Whether an operator drained it and has not undrained it since,
+    /// which outlasts its being given up on.
+    drained: bool,
 }
 
 #[derive(Debug, Default)]
@@ -147,7 +150,11 @@ impl MemoryStore {
             }
             rulings.push(ruling);
         }
-        let renewals = inner.hosts.get(&id).map_or(0, |host| host.row.renewals) + 1;
+        let (renewals, drained) = inner
+            .hosts
+            .get(&id)
+            .map_or((0, false), |host| (host.row.renewals, host.drained));
+        let renewals = renewals + 1;
         let changed = inner.change();
         inner.by_name.insert(register.info.name.clone(), id);
         inner.hosts.insert(
@@ -157,7 +164,11 @@ impl MemoryStore {
                     id,
                     info: register.info.clone(),
                     epoch,
-                    state: HostState::Live,
+                    state: if drained {
+                        HostState::Draining
+                    } else {
+                        HostState::Live
+                    },
                     renewals,
                     seq: 0,
                     capacity: register.capacity.clone(),
@@ -166,6 +177,7 @@ impl MemoryStore {
                 attempt: register.attempt,
                 answer: rulings.clone(),
                 gone_ms: None,
+                drained,
             },
         );
         Admission::Registered {
@@ -269,10 +281,18 @@ impl MemoryStore {
         let Some(entry) = inner.hosts.get_mut(&host) else {
             return false;
         };
-        if entry.row.state != from {
+        let undrained_while_lost = entry.row.state == HostState::Lost
+            && entry.drained
+            && from == HostState::Draining
+            && to == HostState::Live;
+        let marked_apart = entry.row.state == to && entry.drained != (to == HostState::Draining);
+        if entry.row.state != from && !undrained_while_lost && !marked_apart {
             return false;
         }
-        entry.row.state = to;
+        if !undrained_while_lost {
+            entry.row.state = to;
+        }
+        entry.drained = to == HostState::Draining;
         entry.row.changed = changed;
         inner.changes = changed;
         true

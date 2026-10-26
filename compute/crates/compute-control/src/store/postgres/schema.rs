@@ -8,7 +8,13 @@ use crate::store::Result;
 /// The schema, one migration for each version, applied in order by
 /// [`migrate`]. A released migration is never changed: a change to the
 /// schema is a new one at the end.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4];
+const MIGRATIONS: &[&str] = &[
+    MIGRATION_1,
+    MIGRATION_2,
+    MIGRATION_3,
+    MIGRATION_4,
+    MIGRATION_5,
+];
 
 /// Version 1: the tables, made if missing.
 const MIGRATION_1: &str = "
@@ -119,6 +125,13 @@ create table if not exists compute_image_names (
     primary key (name, source)
 );
 create index if not exists compute_image_names_by_use on compute_image_names (name, used);
+";
+
+/// Version 5: whether an operator drained each host and has not undrained
+/// it since, which, unlike its state, outlasts its being given up on.
+const MIGRATION_5: &str = "
+alter table compute_hosts add column if not exists drained boolean not null default false;
+update compute_hosts set drained = true where state = 'draining';
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take
