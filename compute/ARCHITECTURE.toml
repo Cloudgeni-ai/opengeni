@@ -71,6 +71,9 @@ allow = [
   "crates/compute-link/src/link.rs",
   "crates/compute-link/src/saved.rs",
   "crates/compute-pager/**",
+  # GitHub runner pools: a client of GitHub and of compute's API, outside
+  # the fleet's core.
+  "crates/compute-runners/**",
   "crates/compute-storage/**",
 ]
 
