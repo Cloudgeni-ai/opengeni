@@ -5381,8 +5381,7 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "MachinesResponse"
-    ],
-    "permission": "enrollments:read"
+    ]
   },
   {
     "id": "listMemorySlackPublicationChannels",
