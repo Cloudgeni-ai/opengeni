@@ -66,7 +66,7 @@ export function SignInCallbackNotice({
   const ownReceipt = receipt && (userId === null || receipt.userId === userId) ? receipt : null;
   if (!shownMessage && !ownReceipt && !returned) return null;
   return (
-    <div role="alert" className="mx-auto w-full max-w-3xl px-4 pt-3">
+    <div role="alert" data-app-notice className="mx-auto w-full max-w-3xl px-4 pt-3">
       <Notice
         tone={shownMessage ? "failed" : "info"}
         title={shownMessage ? "Sign-in needs attention" : "Review your sign-in methods"}

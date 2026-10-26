@@ -116,3 +116,130 @@ test("expanded Sites keep desktop navigation clear of native controls", async ()
     await web.stop();
   }
 }, 210_000);
+
+// The app's notices across the top of the window sit where the desktop app
+// draws its window controls. macOS: the traffic lights end about 72px in,
+// and the purple badge macOS swaps in while the window is shared ends about
+// 80px in, both within the top 44px. Windows: the caption buttons fill the
+// top-right corner (138px by 56px here).
+test("app notices keep clear of the desktop window controls", async () => {
+  const port = await freePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const web = await startProcess(
+    [
+      "bun",
+      "run",
+      "vite",
+      "dev",
+      ".",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(port),
+      "--strictPort",
+    ],
+    {
+      cwd: fileURLToPath(new URL("../../apps/web", import.meta.url)),
+      ready: async () =>
+        (await fetch(`${baseUrl}/test/desktop-notices.html`).catch(() => null))?.ok === true,
+      timeoutMs: 45_000,
+    },
+  );
+  const browser = await chromium.launch({
+    headless: true,
+    executablePath: process.env.OPENGENI_TEST_CHROMIUM ?? chromium.executablePath(),
+  });
+  const controls = { macos: { right: 84, bottom: 44 }, windows: { width: 138, height: 56 } };
+  try {
+    for (const platform of ["macos", "windows", "linux", "browser"] as const) {
+      for (const width of [1000, 720]) {
+        const page = await browser.newPage({ viewport: { width, height: 640 } });
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        const open = async (query: string) => {
+          await page.goto(`${baseUrl}/test/desktop-notices.html?platform=${platform}${query}`);
+          await page.getByText("Sample page").waitFor({ timeout: 90_000 });
+        };
+        /** Fails if a box reaches into the corner the platform's window controls fill. */
+        const clear = (box: { x: number; y: number; width: number; height: number }) => {
+          if (platform === "macos") {
+            expect(box.y >= controls.macos.bottom || box.x >= controls.macos.right).toBe(true);
+          } else if (platform === "windows") {
+            expect(
+              box.y >= controls.windows.height ||
+                box.x + box.width <= width - controls.windows.width,
+            ).toBe(true);
+          }
+        };
+        const desktopTitleBar = platform === "macos" || platform === "windows";
+
+        // The update notice: one sentence and one action, the same in a tab and
+        // in the app, and the window's top row on the desktop.
+        await open("");
+        const notice = page.locator("#opengeni-api-update-notice");
+        await notice.waitFor();
+        expect(await notice.innerText()).not.toContain("tab");
+        await notice.getByText("Opengeni updated.", { exact: true }).waitFor();
+        const reload = notice.getByRole("button", { name: "Reload", exact: true });
+        expect(await notice.getByRole("button").count()).toBe(1);
+        const bar = (await notice.boundingBox())!;
+        expect(bar.x).toBe(0);
+        expect(bar.width).toBe(width);
+        expect(bar.height).toBeGreaterThanOrEqual(desktopTitleBar ? 56 : 40);
+        const message = (await notice.getByText("Opengeni updated.").boundingBox())!;
+        const button = (await reload.boundingBox())!;
+        clear(message);
+        clear(button);
+        if (platform === "browser" || platform === "linux") expect(message.x).toBeLessThan(30);
+        if (desktopTitleBar) {
+          // Centred on the title row, like the window controls.
+          expect(Math.abs(message.y + message.height / 2 - 28)).toBeLessThanOrEqual(2);
+          expect(
+            await notice.evaluate((el) =>
+              getComputedStyle(el).getPropertyValue("-webkit-app-region"),
+            ),
+          ).toBe("drag");
+          expect(
+            await reload.evaluate((el) =>
+              getComputedStyle(el).getPropertyValue("-webkit-app-region"),
+            ),
+          ).toBe("no-drag");
+        }
+        // The page below starts under the notice.
+        expect((await page.locator("nav").boundingBox())!.y).toBeGreaterThanOrEqual(
+          bar.y + bar.height,
+        );
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        await Promise.all([page.waitForEvent("load"), reload.click()]);
+
+        // Other notices above every page, and a page banner beside a
+        // collapsed rail, keep clear too.
+        await open("&update=0&signin");
+        const signIn = page.locator("[data-app-notice] [data-slot='notice']");
+        await signIn.getByText("Google is now connected").waitFor();
+        clear((await signIn.boundingBox())!);
+        await open("&update=0&paused");
+        const banner = page.locator("[data-canvas] > [data-slot='notice']");
+        await banner.getByText("Agent work is paused").waitFor();
+        for (const part of [
+          banner.locator("svg").first(),
+          banner.getByText("Agent work is paused"),
+          banner.getByRole("button", { name: "Resume" }),
+        ])
+          clear((await part.boundingBox())!);
+        // Beside the open rail the banner keeps its usual spacing.
+        await open("&update=0&paused&rail=open");
+        expect((await banner.getByText("Agent work is paused").boundingBox())!.x).toBeLessThan(
+          240 + 60,
+        );
+        expect(errors).toEqual([]);
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+    await web.stop();
+  }
+}, 210_000);

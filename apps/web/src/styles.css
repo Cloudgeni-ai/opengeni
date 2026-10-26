@@ -160,3 +160,68 @@ html[data-desktop="windows"] [data-artifact-fullscreen] > [data-window-drag] {
   min-height: var(--og-caption-row-height);
   padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
 }
+
+/* The update notice (apps/web/src/api.ts) is plain DOM, so it can show before
+   React renders. `:where` keeps these defaults below the desktop rules. */
+:where(#opengeni-api-update-notice) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  width: 100%;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--og-color-border);
+  background: var(--og-color-surface-1);
+  color: var(--og-color-fg);
+  font: 500 14px/1.4 Inter, system-ui, sans-serif;
+  padding: 10px 14px;
+}
+
+:where(#opengeni-api-update-notice) button {
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--og-color-border-strong);
+  border-radius: 6px;
+  background: var(--og-color-surface-2);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+:where(#opengeni-api-update-notice) button:hover {
+  background: var(--og-color-surface-3);
+}
+
+/* Notices across the top of the app sit in the window's top row, where the
+   desktop app draws its window controls: the macOS traffic lights (or the
+   wider purple badge macOS swaps in while the window is shared), and the
+   Windows caption buttons. They keep clear of them.
+
+   Above every page (the update notice, sign-in and connection notices): they
+   start after the macOS controls and end before the Windows buttons. The
+   update bar is as tall as the title row, so its text lines up with the
+   controls. */
+html[data-desktop="macos"] [data-app-notice] {
+  padding-left: 84px;
+}
+
+html[data-desktop="windows"] [data-app-notice] {
+  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
+}
+
+html:is([data-desktop="macos"], [data-desktop="windows"]) #opengeni-api-update-notice {
+  min-height: var(--og-caption-row-height, 56px);
+}
+
+/* A banner across the top of a page beside the rail (agent work paused, on a
+   page with no session title bar above it): beside a collapsed rail it starts
+   after the macOS controls, like the title bar, and it ends before the
+   Windows buttons. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-canvas] > [data-slot="notice"]:first-child {
+  padding-left: 32px;
+}
+
+html[data-desktop="windows"] [data-canvas] > [data-slot="notice"]:first-child {
+  padding-right: calc(var(--og-caption-buttons-width) + 0.5rem);
+}
