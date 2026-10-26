@@ -787,6 +787,34 @@ describe("organization MCP action inputs", () => {
     ).toBe("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
   });
 
+  test("the route source reader names the permission a route checks before anything else", () => {
+    const gate = (...sources: string[]) => routeInputs(sources).permission;
+    expect(
+      gate(`async (c) => {
+        const workspaceId = c.req.param("workspaceId"), payload = await parseRequestJson(c, X);
+        const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+        return c.json(await list(grant, payload));
+      }`),
+    ).toBe("sessions:read");
+    // Not when a branch, return or throw could skip the check, the checked
+    // value isn't a permission, or the route's handlers disagree.
+    expect(
+      gate(`async (c) => {
+        if (c.req.query("public")) return c.json({});
+        await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:read");
+      }`),
+    ).toBeUndefined();
+    expect(gate(`async (c) => { await requireAccessGrant(c, deps, id, scope); }`)).toBeUndefined();
+    expect(
+      gate(
+        `async (c) => { await requireAccessGrant(c, deps, id, "sessions:read"); }`,
+        `async (c) => { await requireAccessGrant(c, deps, id, "workspace:read"); }`,
+      ),
+    ).toBeUndefined();
+    expect(byId("listSessionPage").permission).toBe("sessions:read");
+    expect(byId("getMyUsage").permission).toBeUndefined();
+  });
+
   test("every hand-named request schema is still needed", () => {
     for (const rule of ACTION_REQUEST_SCHEMAS) {
       const routes = registeredApiRoutes().filter((route) => rule.pattern.test(routeKey(route)));

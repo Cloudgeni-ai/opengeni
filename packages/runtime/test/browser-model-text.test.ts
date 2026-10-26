@@ -83,6 +83,25 @@ describe("browser model text", () => {
     expect(browserObservationText(observation)).toContain('- generic "Menu" [e00000010]');
   });
 
+  test("a scrolling panel shows its ref and the directions it can scroll", () => {
+    const observation = formObservation();
+    observation.agentView = {
+      sourceKind: "snapshot",
+      nodes: [
+        {
+          ref: "e00000011",
+          role: "generic",
+          depth: 0,
+          states: ["focusable", "scrollable=up,down"],
+          actions: ["scroll"],
+        },
+      ],
+    };
+    expect(browserObservationText(observation)).toContain(
+      "- generic [e00000011] scrollable=up,down",
+    );
+  });
+
   test("reports dialogs, diagnostics, diffs, redaction and removals", () => {
     const text = browserObservationText({
       target: { ...target, kind: "popup" },
@@ -172,6 +191,20 @@ describe("browser model text", () => {
     expect(
       browserObservationText({ target, agentView: { sourceKind: "none", nodes: [] } }),
     ).toContain("No accessibility view is available for this tab.");
+  });
+
+  test("says when a page was too large to read whole, only then", () => {
+    const nodes = [{ ref: "e00000010", role: "button", depth: 0, name: "Create" }];
+    const partial = browserObservationText({
+      target,
+      agentView: { sourceKind: "snapshot", nodes, unreadNodeCount: 5_900 },
+    });
+    expect(partial.split("\n").at(-1)).toBe(
+      "Partial outline: the page is too large to read whole, and at least 5900 elements were not read. It lists the page's structure and the part on screen; scroll to bring other parts into it.",
+    );
+    expect(
+      browserObservationText({ target, agentView: { sourceKind: "snapshot", nodes } }),
+    ).not.toContain("Partial outline");
   });
 
   test("an action receipt names the outcome, the resolved elements and the page after", () => {

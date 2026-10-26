@@ -1150,6 +1150,7 @@ export const englishMessages = {
   "composerMessages.sendingFailedYourDraftIs":
     "Sending failed — your draft is still here. Try again.",
   "composerMessages.sendMessage": "Send message",
+  "composerMessages.sendMessageEnter": "Send message (Enter)",
   "composerMessages.showPauseDetails": "Show pause details",
   "composerMessages.singleSendBusyTitle": "Send (Enter): the agent reads it as soon as it can",
   "composerMessages.singleSendPausedPlaceholder":
@@ -1472,8 +1473,10 @@ export const englishMessages = {
   "connectSetup.setupCouldNotFinish": "Setup could not finish",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
+  "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
   "connectSetup.theIntegrationSourceChangedReview":
     "The integration source changed. Review the updated tools before adding them.",
+  "connectSetup.trySigningInAgain": "Try signing in again",
   "connectSetup.verificationCode": "Verification code:",
   "connectSetup.verifyingConnection": "Verifying connection…",
   "connectSetup.waitingForAnOrganizationOwner": "Waiting for an organization owner",
@@ -1704,6 +1707,10 @@ export const englishMessages = {
   "hooks.useMachines.itsComputerIsntWorking": "Its computer isn't working properly right now.",
   "hooks.useMachines.itsComputerCouldntBeRestored": "Its computer couldn't be restored.",
   "hooks.useMachines.tryAgain": "Try again.",
+  "hooks.useMachines.thatMachineHasntReported":
+    "That machine hasn't reported its workspace folder. Update the agent on it and reconnect, then try again.",
+  "hooks.useMachines.thisChatSWorkingFolder":
+    "This chat's working folder isn't inside that machine's workspace. Start a new chat on that machine instead.",
   "hooks.useMachines.onlyTheMachineSOwner": "Only the machine's owner can use it in this chat.",
   "hooks.useMachines.theMachineSOwnerHas":
     "The machine's owner has not allowed this chat to use it.",
@@ -3242,6 +3249,8 @@ export const englishMessages = {
   "native.timeline.imageViewer.couldnTShareThisImage": "Couldn't share this image.",
   "native.timeline.imageViewer.doubleTapToZoom": "Double-tap to zoom",
   "native.timeline.imageViewer.share": "Share",
+  "native.timeline.inChatConnect.close": "Close",
+  "native.timeline.inChatConnect.couldNotLoad": "Couldn't load this connection. Try again.",
   "native.timeline.inbox.alreadyAnswered": "Already answered",
   "native.timeline.inbox.answer": "Answer",
   "native.timeline.inbox.answeredLabel": "Answered: {label}",
@@ -3389,10 +3398,7 @@ export const englishMessages = {
     "Your dictation is ready. Insert it into your draft?",
   "native.timeline.messages.yourRecordingIsSaved": "Your recording is saved.",
   "native.timeline.messageTimeline.agentAsked": "Agent asked",
-  "native.timeline.messageTimeline.connectionNeeded": "Connection needed",
   "native.timeline.messageTimeline.loadEarlierMessages": "Load earlier messages",
-  "native.timeline.messageTimeline.providerdomainNeedsToBeReconnected":
-    "{providerDomain} needs to be reconnected before the agent can continue.",
   "native.timeline.messageTimeline.retry": "Retry",
   "native.timeline.messageTimeline.workerReportedBack": "Worker reported back",
   "native.timeline.modelPicker.done": "Done",
@@ -3568,6 +3574,21 @@ export const englishMessages = {
   "pluginDiscovery.retry": "Retry",
   "pluginDiscovery.showMorePlugins": "Show more plugins",
   "pluginDiscovery.viewAllPlugins": "View all plugins",
+  "preparedMcpSetup.chatAccessFailed":
+    "Connected, but chat access could not be confirmed. Your key is saved; do not submit it again.",
+  "preparedMcpSetup.checkChatAccess": "Check chat access",
+  "preparedMcpSetup.checkingChatAccess": "Connected. Checking this chat's tool access…",
+  "preparedMcpSetup.connect": "Connect",
+  "preparedMcpSetup.connected": "Connected. Its tools are available from your next message.",
+  "preparedMcpSetup.loadFailed":
+    "Could not load this connection setup. Your key has not been submitted.",
+  "preparedMcpSetup.needsManager":
+    "Someone with connection and integration management access needs to connect this server.",
+  "preparedMcpSetup.note":
+    "Keys stay in the protected form, never in chat. The server and headers are already configured.",
+  "preparedMcpSetup.preparing": "Preparing the key form…",
+  "preparedMcpSetup.reloadSetup": "Reload setup",
+  "preparedMcpSetup.startNewSetup": "Start a new setup",
   "previewLoading.preparingPreview": "Preparing preview…",
   "provider.clientExpectedApiActual": "Client {expected} · API {actual}",
   "provider.opengeniUpdated": "{product} updated",

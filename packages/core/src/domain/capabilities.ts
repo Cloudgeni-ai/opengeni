@@ -1997,6 +1997,14 @@ const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
 };
 
 /**
+ * The catalog category chosen for a reviewed integration definition, if one
+ * was. Its catalog entry shows "productivity" when none was chosen.
+ */
+export function integrationDefinitionCategory(definitionId: string): string | undefined {
+  return INTEGRATION_DEFINITION_DISCOVERY[definitionId]?.category;
+}
+
+/**
  * Agent-facing entries for the reviewed API integration definitions this
  * deployment can connect. Like the GitHub App and Connected Machine entries,
  * these are recommendations for the native Connect flow, not rows in the
@@ -2016,7 +2024,7 @@ export function integrationDefinitionCapabilityRecommendations(
       source: "built_in",
       name: definition.name,
       description: discovery?.description ?? definition.summary,
-      category: discovery?.category ?? "productivity",
+      category: integrationDefinitionCategory(definition.id) ?? "productivity",
       tags: [...(discovery?.tags ?? [definition.provider.id])],
       homepageUrl: null,
       providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",

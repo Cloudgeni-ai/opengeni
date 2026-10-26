@@ -8,6 +8,7 @@ import {
   buildTimeline,
   groupTimeline,
   type AgentMessageItem,
+  type AuthNeededItem,
   type HumanInputItem,
   type TimelineGroup,
   type TimelineAnnotationSourceDescriptor,
@@ -24,6 +25,7 @@ import {
   isAgentWorkHumanInput,
   isPreparingWork,
   noticeDisplayText,
+  noticeIsResolvedApproval,
   noticeTone,
   QUESTION_NAV_MARGIN_PX,
   recordedWaitSummaryText,
@@ -57,12 +59,14 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   type StyleProp,
+  type TextStyle,
   type ViewStyle,
 } from "react-native";
 import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
 import { ActivityDisclosure, ReleaseFollowProvider, withAlpha } from "./primitives";
+import { NativeAuthNeededRow } from "./in-chat-connect";
 import { humanInputAnswerLines } from "./secret-field-model";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import {
@@ -90,6 +94,14 @@ import {
   type AnnotationSourceNode,
 } from "./annotations";
 import { measureQuoteAnchors, useNativeTextAnnotation } from "./text-selection";
+import {
+  InlineInputFocusContext,
+  type InlineInputFocus,
+  type InlineInputNode,
+} from "./inline-input-focus";
+
+/** Room kept above a focused card field, so its label and card stay in view. */
+const INLINE_INPUT_CONTEXT_PX = 96;
 
 /* ----------------------------------------------------------------------------
    Native MessageTimeline: the web MessageTimeline (components/message-timeline)
@@ -99,7 +111,12 @@ import { measureQuoteAnchors, useNativeTextAnnotation } from "./text-selection";
 
 export type NativeMarkdownRenderer = (
   text: string,
-  options: { tone: "body" | "muted"; streaming?: boolean | undefined },
+  options: {
+    tone: "body" | "muted";
+    streaming?: boolean | undefined;
+    /** Overrides the body text style, for Markdown inside compact card chrome. */
+    textStyle?: TextStyle | undefined;
+  },
 ) => ReactNode;
 
 /** Start fetching older history this far before the reader reaches the top. */
@@ -122,6 +139,12 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   /** Files sent with a user message, shown above its bubble (images as previews). */
   renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
+  /**
+   * Draw a connection request (an agent asking the person to connect an
+   * account, or a lapsed connection). Return undefined for the default row.
+   * `NativeSessionScreen` supplies the in-chat connect cards.
+   */
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode) | undefined;
   onCopy?: ((text: string) => void) | undefined;
   /** Rendered after the last group (pending questions, approvals, errors). */
   trailing?: ReactNode;
@@ -200,6 +223,11 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   // "Back to your message": prompt rows' content offsets, read on scroll.
   const promptFrames = useRef(new Map<string, { top: number; bottom: number }>()).current;
   const [questionNav, setQuestionNav] = useState<string | null>(null);
+  // A field in a card is being filled in: room for the keyboard below the
+  // content (the composer floats over the timeline, so it does not shrink),
+  // and no floating buttons over the card.
+  const [inlineInput, setInlineInput] = useState<{ keyboard: number } | null>(null);
+  const inlineNode = useRef<InlineInputNode | null>(null);
   // Expanded outer turn headers, for the pinned copy (web: sticky in its section).
   const stickyHeaders = useRef(new Map<string, StickyWorkHeader>()).current;
   const scrollY = useRef(0);
@@ -270,6 +298,61 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     [sourceNodes],
   );
   if (props.annotationRevealRef) props.annotationRevealRef.current = revealSource;
+  const revealInlineInput = useCallback((keyboard: { screenY: number; height: number }) => {
+    setInlineInput({ keyboard: keyboard.height });
+    // Once the room for the keyboard is laid out, scroll just enough to show
+    // the field above the keyboard and the composer, its label and card above it.
+    setTimeout(() => {
+      const node = inlineNode.current;
+      const scroller = scrollRef.current?.getNativeScrollRef?.();
+      if (!node || !scroller) return;
+      scroller.measureInWindow((_scrollX, scrollTop, _scrollWidth, scrollHeight) => {
+        node.measureInWindow((_x, top, _width, height) => {
+          const bottom =
+            Math.min(scrollTop + scrollHeight, keyboard.screenY) - overlayInsetBottom.current - 12;
+          const above = scrollTop + INLINE_INPUT_CONTEXT_PX;
+          let delta = 0;
+          if (top + height > bottom) delta = Math.min(top + height - bottom, top - scrollTop - 8);
+          else if (top < above) delta = top - above;
+          if (Math.abs(delta) < 1) return;
+          scrollY.current = Math.max(0, scrollY.current + delta);
+          scrollRef.current?.scrollTo({ y: scrollY.current, animated: true });
+        });
+      });
+    }, 80);
+  }, []);
+  const inlineInputFocus = useMemo<InlineInputFocus>(
+    () => ({
+      focused(node) {
+        inlineNode.current = node;
+        // The reader is filling in a card; new content must not scroll it away.
+        following.current = false;
+        setInlineInput((current) => current ?? { keyboard: 0 });
+        const metrics = Keyboard.isVisible() ? Keyboard.metrics() : undefined;
+        if (metrics) revealInlineInput(metrics);
+      },
+      blurred(node) {
+        if (inlineNode.current !== node) return;
+        inlineNode.current = null;
+        setInlineInput(null);
+      },
+    }),
+    [revealInlineInput],
+  );
+  const editingInline = inlineInput !== null;
+  useEffect(() => {
+    if (!editingInline) return;
+    const shown = Keyboard.addListener("keyboardDidShow", (event) =>
+      revealInlineInput(event.endCoordinates),
+    );
+    const hidden = Keyboard.addListener("keyboardDidHide", () =>
+      setInlineInput((current) => (current ? { keyboard: 0 } : current)),
+    );
+    return () => {
+      shown.remove();
+      hidden.remove();
+    };
+  }, [editingInline, revealInlineInput]);
   const draftMarkers = useMemo(
     () => draftMarkersBySource(props.draftAnnotations),
     [props.draftAnnotations],
@@ -508,162 +591,166 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     renderPreparing: props.renderPreparing,
     renderMessageActions: props.renderMessageActions,
     renderUserAttachments: props.renderUserAttachments,
+    renderAuthNeeded: props.renderAuthNeeded,
     onCopy: props.onCopy,
     reportLiveFold,
     onRevealAnnotation: revealSource,
   };
   return (
     <AnnotationSourcesContext.Provider value={annotationSourcesValue}>
-      <NativeActivityOptionsProvider value={activityOptions}>
-        <FoldMemoryProvider value={foldMemory}>
-          <StickyWorkHeaderProvider value={registerSticky}>
-            <ReleaseFollowProvider value={releaseFollow}>
-              <View style={[{ flex: 1, backgroundColor: theme.colors.bg }, props.style]}>
-                <ScrollView
-                  ref={scrollRef}
-                  onScroll={onScroll}
-                  onScrollBeginDrag={() => {
-                    readerScrolling.current = true;
-                    // The reader takes over: a live turn re-lays out the content many
-                    // times a second, and snapping to the end on each pass would undo
-                    // the drag before it got far. Follow is re-decided when it ends.
-                    following.current = false;
-                  }}
-                  onScrollEndDrag={onScrollEnd}
-                  onMomentumScrollEnd={onScrollEnd}
-                  onLayout={(event: LayoutChangeEvent) => {
-                    viewportHeight.current = event.nativeEvent.layout.height;
-                    if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
-                  }}
-                  scrollEventThrottle={32}
-                  onContentSizeChange={onContentSizeChange}
-                  keyboardDismissMode="interactive"
-                  keyboardShouldPersistTaps="handled"
-                  contentContainerStyle={{
-                    paddingTop: props.contentInsetTop ?? 16,
-                    paddingHorizontal: 16,
-                    paddingBottom: props.contentInsetBottom ?? 24,
-                    gap: ROW_GAP_PX,
-                    flexGrow: 1,
-                  }}
-                >
-                  <View>
-                    {props.hasOlder ? (
-                      <OlderHistoryRow
-                        loading={props.loadingOlder === true}
-                        onPress={requestOlder}
-                      />
-                    ) : null}
-                    {props.header}
-                  </View>
-                  {groups.length === 0 && props.emptyState ? props.emptyState : null}
-                  {groups.map((group, index) => {
-                    const key = groupKey(group);
-                    const prompt = group.kind === "item" && group.item.kind === "user-message";
-                    // Agent messages keep one wrapper so a progress note can fold
-                    // (stay mounted, out of layout) without remounting.
-                    const noteId =
-                      group.kind === "item" && group.item.kind === "agent-message"
-                        ? group.item.id
-                        : null;
-                    const liveNote = noteId !== null && liveNotes.notes.has(noteId);
-                    const folded = noteId !== null && foldedNotes.has(noteId);
-                    // The landing row keeps one wrapper for its life, so landing never remounts it.
-                    const landing = focusSequence !== null && index === focusIndex;
-                    return prompt || landing || noteId !== null ? (
-                      <View
-                        key={key}
-                        style={folded ? { display: "none" } : undefined}
-                        onLayout={(event) => {
-                          const { y, height } = event.nativeEvent.layout;
-                          if (prompt) promptFrames.set(key, { top: y, bottom: y + height });
-                          if (liveNote && !folded && height > 0) {
-                            liveNoteHeights.set(noteId, height);
-                          }
-                          if (landing && landed.current !== focusSequence) {
-                            groupTops.set(key, y);
-                            setLayoutPass((pass) => pass + 1);
-                          }
-                        }}
-                      >
-                        <TimelineGroupView group={group} context={context} />
-                      </View>
-                    ) : (
-                      <TimelineGroupView key={key} group={group} context={context} />
-                    );
-                  })}
-                  {props.trailing}
-                </ScrollView>
-                {pinned && stickyHeaders.get(pinned.key) ? (
-                  <View
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      right: 0,
+      <InlineInputFocusContext.Provider value={inlineInputFocus}>
+        <NativeActivityOptionsProvider value={activityOptions}>
+          <FoldMemoryProvider value={foldMemory}>
+            <StickyWorkHeaderProvider value={registerSticky}>
+              <ReleaseFollowProvider value={releaseFollow}>
+                <View style={[{ flex: 1, backgroundColor: theme.colors.bg }, props.style]}>
+                  <ScrollView
+                    ref={scrollRef}
+                    onScroll={onScroll}
+                    onScrollBeginDrag={() => {
+                      readerScrolling.current = true;
+                      // The reader takes over: a live turn re-lays out the content many
+                      // times a second, and snapping to the end on each pass would undo
+                      // the drag before it got far. Follow is re-decided when it ends.
+                      following.current = false;
+                    }}
+                    onScrollEndDrag={onScrollEnd}
+                    onMomentumScrollEnd={onScrollEnd}
+                    onLayout={(event: LayoutChangeEvent) => {
+                      viewportHeight.current = event.nativeEvent.layout.height;
+                      if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
+                    }}
+                    scrollEventThrottle={32}
+                    onContentSizeChange={onContentSizeChange}
+                    keyboardDismissMode="interactive"
+                    keyboardShouldPersistTaps="handled"
+                    contentContainerStyle={{
+                      paddingTop: props.contentInsetTop ?? 16,
                       paddingHorizontal: 16,
-                      backgroundColor: theme.colors.bg,
-                      transform: [{ translateY: pinned.offset }],
+                      paddingBottom:
+                        (props.contentInsetBottom ?? 24) + (inlineInput?.keyboard ?? 0),
+                      gap: ROW_GAP_PX,
+                      flexGrow: 1,
                     }}
                   >
-                    {stickyHeaders.get(pinned.key)!.render()}
-                  </View>
-                ) : null}
-                {/* Web timeline navigation: two identical small round arrow buttons at
+                    <View>
+                      {props.hasOlder ? (
+                        <OlderHistoryRow
+                          loading={props.loadingOlder === true}
+                          onPress={requestOlder}
+                        />
+                      ) : null}
+                      {props.header}
+                    </View>
+                    {groups.length === 0 && props.emptyState ? props.emptyState : null}
+                    {groups.map((group, index) => {
+                      const key = groupKey(group);
+                      const prompt = group.kind === "item" && group.item.kind === "user-message";
+                      // Agent messages keep one wrapper so a progress note can fold
+                      // (stay mounted, out of layout) without remounting.
+                      const noteId =
+                        group.kind === "item" && group.item.kind === "agent-message"
+                          ? group.item.id
+                          : null;
+                      const liveNote = noteId !== null && liveNotes.notes.has(noteId);
+                      const folded = noteId !== null && foldedNotes.has(noteId);
+                      // The landing row keeps one wrapper for its life, so landing never remounts it.
+                      const landing = focusSequence !== null && index === focusIndex;
+                      return prompt || landing || noteId !== null ? (
+                        <View
+                          key={key}
+                          style={folded ? { display: "none" } : undefined}
+                          onLayout={(event) => {
+                            const { y, height } = event.nativeEvent.layout;
+                            if (prompt) promptFrames.set(key, { top: y, bottom: y + height });
+                            if (liveNote && !folded && height > 0) {
+                              liveNoteHeights.set(noteId, height);
+                            }
+                            if (landing && landed.current !== focusSequence) {
+                              groupTops.set(key, y);
+                              setLayoutPass((pass) => pass + 1);
+                            }
+                          }}
+                        >
+                          <TimelineGroupView group={group} context={context} />
+                        </View>
+                      ) : (
+                        <TimelineGroupView key={key} group={group} context={context} />
+                      );
+                    })}
+                    {props.trailing}
+                  </ScrollView>
+                  {pinned && stickyHeaders.get(pinned.key) ? (
+                    <View
+                      style={{
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        paddingHorizontal: 16,
+                        backgroundColor: theme.colors.bg,
+                        transform: [{ translateY: pinned.offset }],
+                      }}
+                    >
+                      {stickyHeaders.get(pinned.key)!.render()}
+                    </View>
+                  ) : null}
+                  {/* Web timeline navigation: two identical small round arrow buttons at
               fixed, centered spots that never dodge the content beneath them. */}
-                {questionNav ? (
-                  <View
-                    pointerEvents="box-none"
-                    style={{
-                      position: "absolute",
-                      // Below a pinned work header so that strip stays a full-width target.
-                      top: pinned ? pinned.height + pinned.offset + 8 : 12,
-                      left: 0,
-                      right: 0,
-                      alignItems: "center",
-                    }}
-                  >
-                    <NavButton
-                      icon="arrow-up"
-                      label={m.backToYourMessage}
-                      onPress={() => {
-                        const frame = promptFrames.get(questionNav);
-                        if (!frame) return;
-                        following.current = false;
-                        scrollRef.current?.scrollTo({
-                          y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
-                          animated: true,
-                        });
+                  {questionNav && !editingInline ? (
+                    <View
+                      pointerEvents="box-none"
+                      style={{
+                        position: "absolute",
+                        // Below a pinned work header so that strip stays a full-width target.
+                        top: pinned ? pinned.height + pinned.offset + 8 : 12,
+                        left: 0,
+                        right: 0,
+                        alignItems: "center",
                       }}
-                    />
-                  </View>
-                ) : null}
-                {showJump ? (
-                  <View
-                    pointerEvents="box-none"
-                    style={{
-                      position: "absolute",
-                      bottom: (props.overlayInsetBottom ?? 0) + 12,
-                      left: 0,
-                      right: 0,
-                      alignItems: "center",
-                    }}
-                  >
-                    <NavButton
-                      icon="arrow-down"
-                      label={m.jumpToLatest}
-                      onPress={() => {
-                        following.current = true;
-                        scrollRef.current?.scrollToEnd({ animated: true });
+                    >
+                      <NavButton
+                        icon="arrow-up"
+                        label={m.backToYourMessage}
+                        onPress={() => {
+                          const frame = promptFrames.get(questionNav);
+                          if (!frame) return;
+                          following.current = false;
+                          scrollRef.current?.scrollTo({
+                            y: Math.max(0, frame.top - QUESTION_NAV_MARGIN_PX),
+                            animated: true,
+                          });
+                        }}
+                      />
+                    </View>
+                  ) : null}
+                  {showJump && !editingInline ? (
+                    <View
+                      pointerEvents="box-none"
+                      style={{
+                        position: "absolute",
+                        bottom: (props.overlayInsetBottom ?? 0) + 12,
+                        left: 0,
+                        right: 0,
+                        alignItems: "center",
                       }}
-                    />
-                  </View>
-                ) : null}
-              </View>
-            </ReleaseFollowProvider>
-          </StickyWorkHeaderProvider>
-        </FoldMemoryProvider>
-      </NativeActivityOptionsProvider>
+                    >
+                      <NavButton
+                        icon="arrow-down"
+                        label={m.jumpToLatest}
+                        onPress={() => {
+                          following.current = true;
+                          scrollRef.current?.scrollToEnd({ animated: true });
+                        }}
+                      />
+                    </View>
+                  ) : null}
+                </View>
+              </ReleaseFollowProvider>
+            </StickyWorkHeaderProvider>
+          </FoldMemoryProvider>
+        </NativeActivityOptionsProvider>
+      </InlineInputFocusContext.Provider>
     </AnnotationSourcesContext.Provider>
   );
 }
@@ -712,6 +799,7 @@ type GroupContext = {
   renderPreparing?: ((props: PreparingProps) => ReactNode) | undefined;
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
+  renderAuthNeeded?: ((item: AuthNeededItem) => ReactNode) | undefined;
   onCopy?: ((text: string) => void) | undefined;
   /** A live work row reports its open state, so its progress notes above fold. */
   reportLiveFold?: ((workId: string, open: boolean) => void) | undefined;
@@ -922,7 +1010,11 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
       return isAgentWorkHumanInput(item) ? (
         <AgentWorkHumanInputRow item={item} />
       ) : (
-        <HumanInputRow item={item} onCopy={context.onCopy} />
+        <HumanInputRow
+          item={item}
+          onCopy={context.onCopy}
+          renderMarkdown={context.renderMarkdown}
+        />
       );
     case "session-status": {
       const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
@@ -972,35 +1064,9 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
         </View>
       );
     case "auth-needed":
-      return (
-        <View
-          style={{
-            borderRadius: theme.radius.md,
-            borderWidth: 1,
-            borderColor: theme.colors.border,
-            padding: 14,
-            backgroundColor: theme.colors["surface-1"],
-          }}
-        >
-          <Text
-            style={{ ...fontStyle(theme, 500), fontSize: theme.size.md, color: theme.colors.fg }}
-          >
-            {t("native.timeline.messageTimeline.connectionNeeded")}
-          </Text>
-          <Text
-            style={{
-              ...fontStyle(theme),
-              marginTop: 4,
-              fontSize: theme.size.sm,
-              color: theme.colors["fg-muted"],
-            }}
-          >
-            {t("native.timeline.messageTimeline.providerdomainNeedsToBeReconnected", {
-              providerDomain: item.providerDomain,
-            })}
-          </Text>
-        </View>
-      );
+      // An agent's connect request becomes a card the person can finish
+      // here; anything else (a lapsed account, unavailable tools) is a row.
+      return context.renderAuthNeeded?.(item) ?? <NativeAuthNeededRow item={item} />;
     default:
       return null;
   }
@@ -1077,7 +1143,11 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
       }}
     >
       <View style={{ marginTop: 2, opacity: item.tone === "cancelled" ? 0.6 : 1 }}>
-        <Icon name="triangle-alert" size={16} color={accent} />
+        {noticeIsResolvedApproval(item) ? (
+          <Icon name="check" size={16} color={accent} />
+        ) : (
+          <Icon name="triangle-alert" size={16} color={accent} />
+        )}
       </View>
       <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
         {noticeDisplayText(t, item)}
@@ -1470,9 +1540,11 @@ function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
 function HumanInputRow({
   item,
   onCopy,
+  renderMarkdown,
 }: {
   item: HumanInputItem;
   onCopy?: ((text: string) => void) | undefined;
+  renderMarkdown?: NativeMarkdownRenderer | undefined;
 }) {
   const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
@@ -1498,6 +1570,18 @@ function HumanInputRow({
     .join("\n");
   const savedLines = lines.filter((line) => line.secret);
   const copyText = lines.map((line) => line.text).join("\n");
+  // The prompt reads as the web row does: inline Markdown in the card's type style.
+  const promptStyles = useMemo(() => {
+    const style = (labelled: boolean): TextStyle => ({
+      ...fontStyle(theme),
+      fontSize: labelled ? theme.size.sm : theme.size.md,
+      lineHeight: labelled ? 18 : 24,
+      color: labelled ? theme.colors["fg-muted"] : theme.colors.fg,
+    });
+    return { labelled: style(true), plain: style(false) };
+  }, [theme]);
+  const promptStyle = (labelled: boolean): TextStyle =>
+    labelled ? promptStyles.labelled : promptStyles.plain;
   return (
     <View style={{ gap: 10 }}>
       <View
@@ -1555,17 +1639,29 @@ function HumanInputRow({
                     {question.label}
                   </Text>
                 ) : null}
-                <Text
+                <View
                   style={{
-                    ...fontStyle(theme),
-                    fontSize: question.label ? theme.size.sm : theme.size.md,
-                    lineHeight: question.label ? 18 : 24,
+                    flexDirection: "row",
+                    alignItems: "flex-start",
                     marginTop: question.label ? 2 : 0,
-                    color: question.label ? theme.colors["fg-muted"] : theme.colors.fg,
                   }}
                 >
-                  {question.prompt}
-                </Text>
+                  {!question.label && multiple ? (
+                    <Text style={{ ...promptStyle(false), color: theme.colors["fg-muted"] }}>
+                      {`${index + 1}. `}
+                    </Text>
+                  ) : null}
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    {renderMarkdown ? (
+                      renderMarkdown(question.prompt, {
+                        tone: question.label ? "muted" : "body",
+                        textStyle: promptStyle(Boolean(question.label)),
+                      })
+                    ) : (
+                      <Text style={promptStyle(Boolean(question.label))}>{question.prompt}</Text>
+                    )}
+                  </View>
+                </View>
               </View>
             ))}
           </View>

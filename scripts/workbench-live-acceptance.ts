@@ -2680,34 +2680,72 @@ async function markIncompleteContrastTargetsForManualAudit(
 
 async function assertTouchTargets(page: Page, mobile: boolean): Promise<void> {
   if (!mobile) return;
-  const undersized = await page.evaluate(() =>
-    Array.from(
-      document.querySelectorAll<HTMLElement>(
-        'button:not([disabled]),select:not([disabled]),input:not([disabled]):not([type="hidden"]),textarea:not([disabled]),a[href],[role=button],[role=tab]',
-      ),
-    )
-      .filter((element) => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return (
-          style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          rect.width > 0 &&
-          rect.height > 0
-        );
-      })
-      .map((element) => {
-        const rect = element.getBoundingClientRect();
-        return {
+  const undersized = await page.evaluate(findUndersizedTouchTargets);
+  if (undersized.length > 0)
+    throw new Error(`undersized touch targets: ${JSON.stringify(undersized)}`);
+}
+
+/** Runs in the page, so it must stay self-contained. A compact control may
+ * extend its tap area beyond its painted box, for example with a pseudo-element
+ * over its row's padding. Judge what a tap actually reaches: every probe at the
+ * edges and corners of the 44 px square around the control's centre must hit
+ * the control itself, so clipping or an overlapping neighbour still fails.
+ * Inert content takes no taps or focus, so it holds no touch targets: on a
+ * narrow screen the open workspace covers the chat and makes it inert, and only
+ * the workspace's own controls can be tapped. Those are still checked. */
+export function findUndersizedTouchTargets(): Array<{
+  label: string | undefined;
+  width: number;
+  height: number;
+}> {
+  const minimum = 44;
+  const reachesMinimum = (element: HTMLElement, rect: DOMRect) => {
+    const half = minimum / 2 - 1;
+    const x = rect.left + rect.width / 2;
+    const y = rect.top + rect.height / 2;
+    const probes: Array<[number, number]> = [
+      [x, y - half],
+      [x, y + half],
+      [x - half, y],
+      [x + half, y],
+      [x - half, y - half],
+      [x + half, y - half],
+      [x - half, y + half],
+      [x + half, y + half],
+    ];
+    return probes.every(([probeX, probeY]) => {
+      const hit = document.elementFromPoint(probeX, probeY);
+      return hit !== null && (hit === element || element.contains(hit));
+    });
+  };
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(
+      'button:not([disabled]),select:not([disabled]),input:not([disabled]):not([type="hidden"]),textarea:not([disabled]),a[href],[role=button],[role=tab]',
+    ),
+  )
+    .filter((element) => {
+      if (element.closest("[inert]")) return false;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    })
+    .flatMap((element) => {
+      const rect = element.getBoundingClientRect();
+      if (rect.width >= minimum && rect.height >= minimum) return [];
+      if (reachesMinimum(element, rect)) return [];
+      return [
+        {
           label: element.getAttribute("aria-label") ?? element.textContent?.trim().slice(0, 60),
           width: Math.round(rect.width),
           height: Math.round(rect.height),
-        };
-      })
-      .filter((target) => target.width < 44 || target.height < 44),
-  );
-  if (undersized.length > 0)
-    throw new Error(`undersized touch targets: ${JSON.stringify(undersized)}`);
+        },
+      ];
+    });
 }
 
 async function manualAccessibilityAudit(page: Page): Promise<{

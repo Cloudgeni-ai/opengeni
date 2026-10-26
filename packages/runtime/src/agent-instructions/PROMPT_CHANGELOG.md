@@ -14,6 +14,60 @@ the plain-Markdown renderer module adds `session:` to the links it forbids. Both
 compositions change identically; legacy prompt digests are refreshed for this
 reviewed change.
 
+Several connected accounts. No prompt or tool description text changes for
+the common case. When the person has more than one connected account (for
+example Gmail and Outlook Mail) that serve the same need, the first
+`tool_search` result in a turn that shows the model a tool reaching one of
+them, but not all, now names the others, in a new `connectedAccounts` field
+(a developer message right after the result on native search routes, joined
+with any `notConnected` notice):
+`These tools reach Gmail. Also connected: Outlook Mail. If the request could
+mean those accounts too (the person's email, calendar or files), check each
+that fits, or say which account you checked and offer the others.` That text
+is 200 bytes plus the account labels (217 bytes in that example), at most ten
+named and the rest counted, once per turn and only in that one search result.
+"The same need" means another account of the same connector, or a connector
+with the same catalog category (such as communication or files; the broad
+"integrations" category, the "custom" one every custom server gets and a
+reviewed definition's fallback category never count), so Linear plus Slack,
+Gmail and GitHub says nothing for a Linear search, and two unrelated custom
+servers never name each other. An account whose tools failed to load this
+turn is reported as an unavailable source and is not named. Before, "Have I
+got any new emails?" loaded only Gmail's search tool and the answer silently
+covered Gmail alone. People with one connected account, accounts of unrelated
+kinds, or searches that load only first-party tools see exactly what they did
+before; loads by exact name never carry it. API integration routes (Outlook
+Mail and other Microsoft 365 or OpenAPI integrations) are now labelled like
+connector routes, so with two or more accounts of one integration their tool
+descriptions gain the existing `Account: … Use only this account…` first line.
+That can happen from the next turn after a second account is connected in the
+middle of a session, as it already does for connectors; frozen disclosures
+(earlier search results and messages) are unchanged.
+
+Connect cards in fewer calls. No prompt or tool description text changes.
+`tool_search` now also covers integrations the person could connect: when no
+installed tool clearly matches a query, it looks the query up in the
+integration catalog, and when the query contains the whole name of an
+integration whose next step is a Connect card the person completes (one of the
+catalog's top three matches; not items a workspace admin must enable, and not
+a one-word name the ranker reads as an operation, such as "Send" or "Make"),
+the result loads `capability_authorization_request` after its normal
+matches and says, in a new `notConnected` field (a developer message right
+after the result on native search routes): `Not connected yet: Gmail
+(capabilityId "…"). If the task needs it, call capability_authorization_request
+with that capabilityId and a short rationale to show the person its Connect
+card.` With several names it reads "If the task needs one, call
+capability_authorization_request with its capabilityId". That text is 178
+bytes with one name's wrapper (194 for Gmail), plus about 25 to 80 bytes per
+further name, and the card schema about 1.5 KB, only in that one search
+result. The catalog read runs alongside ranking and any decision model. The two setup
+tools (`capability_catalog_search`, `capability_authorization_request`) also
+load together when either is chosen. Before, "check my gmail" loaded an
+unrelated tool or nothing, and the agent listed tool groups and searched twice
+more before the card: 4 to 6 calls and a mean 15.3 s on five staging runs.
+Searches an installed tool clearly matches never look anything up and load
+exactly what they did before; earlier requests are unchanged.
+
 Prompt-cache stability. Workspace governance (instruction policies, learning
 settings, organization profile) no longer composes into the system prompt: it
 differs by who starts a turn and changes when a policy is edited, and every

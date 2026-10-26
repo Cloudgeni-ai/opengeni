@@ -31,6 +31,28 @@ export async function namedSubjectPersonalWorkspaceId(
   input: { accountId: string; subjectId: string },
 ): Promise<string | null> {
   if (!input.subjectId.startsWith("user:")) return null;
+  return await activeMembershipPersonalWorkspaceId(db, input);
+}
+
+/**
+ * The same pointer for an external user of the organization (an
+ * `external_user:` subject, such as a person in an embedded chat): their own
+ * workspace, named by their active organization membership. Null for every
+ * other subject. The same oracle caveat applies: it does not establish that
+ * the caller is that person.
+ */
+export async function externalPersonPersonalWorkspaceId(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<string | null> {
+  if (!input.subjectId.startsWith("external_user:")) return null;
+  return await activeMembershipPersonalWorkspaceId(db, input);
+}
+
+async function activeMembershipPersonalWorkspaceId(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<string | null> {
   // `listSelfOrganizationMemberships` opens its own scope and sets
   // `opengeni.subject_id` to the probed subject. Under drizzle a nested
   // transaction is a SAVEPOINT, and releasing a savepoint does NOT undo a

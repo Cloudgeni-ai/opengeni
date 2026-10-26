@@ -460,7 +460,8 @@ impl PostgresStore {
              (id, name, info, epoch, state, renewals, seq, attempt, answer, capacity, changed) \
              values ($1, $2, $3, $4, 'live', 1, 0, $5, $6, $7, nextval('compute_changes')) \
              on conflict (id) do update set info = excluded.info, epoch = excluded.epoch, \
-             state = 'live', renewals = compute_hosts.renewals + 1, seq = 0, \
+             state = case when compute_hosts.drained then 'draining' else 'live' end, \
+             renewals = compute_hosts.renewals + 1, seq = 0, \
              attempt = excluded.attempt, answer = excluded.answer, \
              capacity = excluded.capacity, changed = excluded.changed, gone_ms = null",
             &[
@@ -652,8 +653,12 @@ impl Store for PostgresStore {
             .client()
             .await?
             .execute(
-                "update compute_hosts set state = $3, changed = nextval('compute_changes') \
-                 where id = $1 and state = $2",
+                "update compute_hosts \
+                 set state = case when state = 'lost' then state else $3 end, \
+                 drained = $3 = 'draining', changed = nextval('compute_changes') \
+                 where id = $1 and (state = $2 \
+                 or (state = $3 and drained <> ($3 = 'draining')) \
+                 or (state = 'lost' and drained and $2 = 'draining' and $3 = 'live'))",
                 &[&big(host.0)?, &state_name(from), &state_name(to)],
             )
             .await

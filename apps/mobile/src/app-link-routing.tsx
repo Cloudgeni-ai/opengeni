@@ -49,6 +49,8 @@ interface OpenContext {
   setWorkspaceId(id: string): void;
   /** Close an open sheet, so the conversation opens on the main stack. */
   closeSheet(): void;
+  /** The path of the screen the person is on (not the handoff screen). */
+  currentPath(): string;
 }
 
 /** Open a link in the account already in use. */
@@ -67,6 +69,10 @@ async function openHere(link: AppLink, context: OpenContext): Promise<void> {
               context.workspaceId,
             );
     if (!workspaceId) return openInBrowser(link.webUrl);
+    // Already in that conversation, for example back from a sign-in it
+    // started: stay on it rather than stacking a second copy.
+    if (!link.at && context.currentPath() === `/session/${encodeURIComponent(link.sessionId)}`)
+      return;
     context.closeSheet();
     router.push(appSessionPath(link.sessionId, workspaceId, link.at));
     return;
@@ -109,6 +115,7 @@ export function AppLinkRouting() {
       screenRef.current = "";
       router.back();
     },
+    currentPath: () => screenRef.current,
   };
   const contextRef = useRef(context);
   contextRef.current = context;

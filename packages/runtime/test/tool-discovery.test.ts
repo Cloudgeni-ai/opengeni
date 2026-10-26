@@ -17,12 +17,19 @@ import { createHttpDecisionModel } from "@opengeni/decisions";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
 import { rankToolPool } from "../src/codex-tool-search";
 import {
+  catalogConnectableIntegrationLookup,
+  connectableIntegrationNotice,
+  connectableIntegrationsFromCatalogResult,
+  connectableIntegrationsNamedIn,
+  connectedAccountsNotice,
   createResolveMissingFunctionTool,
   expandInteractionFamilyDisclosures,
   installLazyToolRuntime,
   LazyToolRuntime,
   LazyToolModelProvider,
   transformGenericDispatchResponse,
+  type ConnectableIntegrationLookup,
+  type ConnectedToolAccount,
 } from "../src/lazy-tool-transport";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { projectHistoryForProvider, TOOL_DISCLOSURE_KEY } from "../src/provider-history-adapter";
@@ -796,4 +803,797 @@ test("native routes never reinterpret an application function named tool_invoke 
   for await (const event of result.toStream()) void event;
   await result.completed;
   expect(invoked).toBe(1);
+});
+
+describe("searches that name an integration the person can connect", () => {
+  const CATALOG = "opengeni__capability_catalog_search";
+  const CARD = "opengeni__capability_authorization_request";
+  const GMAIL = { capabilityId: "api:gmail", name: "Gmail" };
+  const CALENDAR = { capabilityId: "api:google-calendar", name: "Google Calendar" };
+  // A catalog search ranks loosely (descriptions, spelling): only a whole
+  // integration name the query actually contains may be named.
+  const CATALOG_ENTRIES = [
+    { ...GMAIL, words: ["gmail", "email", "inbox"] },
+    { ...CALENDAR, words: ["calendar", "google", "meeting"] },
+    { capabilityId: "registry:read-ai", name: "Read AI", words: ["read", "meeting", "summary"] },
+    { capabilityId: "api:outlook-mail", name: "Outlook Mail", words: ["outlook", "inbox"] },
+  ];
+  const fakeLookup = () => {
+    const queries: string[] = [];
+    const lookup = async (query: string) => {
+      queries.push(query);
+      const words = query.toLowerCase().split(/\W+/);
+      return CATALOG_ENTRIES.filter((entry) => entry.words.some((w) => words.includes(w))).map(
+        ({ capabilityId, name }) => ({ capabilityId, name }),
+      );
+    };
+    return { queries, lookup };
+  };
+  const pool = (withSetup = true) => [
+    candidate(
+      "opengeni__inbox_tidy",
+      "See and look after the inbox of the person this session works for. Lists the open items you may manage.",
+    ),
+    candidate(
+      "opengeni__knowledge_search",
+      "Find Knowledge by subject or entity name. Omit scope to search all authorized scopes.",
+    ),
+    candidate(
+      "opengeni__scheduled_tasks_create",
+      "Schedule a message in this chat by supplying name, schedule and prompt.",
+    ),
+    candidate(
+      "opengeni__notify_user",
+      "Notify the person who owns this session: it goes to their inbox and, when new, to their phone.",
+    ),
+    ...(withSetup
+      ? [
+          candidate(
+            CATALOG,
+            "Find integrations in the reviewed workspace catalog when the user asks to add one or needed access is missing. Search by integration name or task outcome.",
+          ),
+          candidate(
+            CARD,
+            "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction.",
+          ),
+        ]
+      : []),
+  ];
+  const runtimeWith = (
+    transport: "generic_dispatch" | "openai_native" | "codex_native",
+    lookup?: ConnectableIntegrationLookup,
+    decision?: ToolSelector,
+    withSetup = true,
+  ) => {
+    const runtime = new LazyToolRuntime(
+      transport,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      decision,
+      undefined,
+      lookup,
+    );
+    runtime.refresh(pool(withSetup));
+    return runtime;
+  };
+  const loaded = (result: { tools?: { name?: unknown }[] }) =>
+    result.tools?.map((t) => t.name) ?? [];
+  const GMAIL_NOTICE =
+    'Not connected yet: Gmail (capabilityId "api:gmail"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.';
+
+  test("names only whole integration names the query contains", () => {
+    const matches = CATALOG_ENTRIES.map(({ capabilityId, name }) => ({ capabilityId, name }));
+    expect(connectableIntegrationsNamedIn("check my gmail this week", matches)).toEqual([GMAIL]);
+    expect(
+      connectableIntegrationsNamedIn("Gmail and google-calendar, then GMAIL again", [
+        ...matches,
+        GMAIL,
+      ]),
+    ).toEqual([GMAIL, CALENDAR]);
+    expect(connectableIntegrationsNamedIn("read my outlook inbox", matches)).toEqual([]);
+    expect(connectableIntegrationsNamedIn("read the meeting summary", matches)).toEqual([]);
+    expect(
+      connectableIntegrationsNamedIn(
+        "a b c d",
+        ["a", "b", "c", "d"].map((name) => ({ capabilityId: name, name })),
+      ),
+    ).toHaveLength(3);
+    expect(connectableIntegrationNotice([GMAIL])).toBe(GMAIL_NOTICE);
+  });
+
+  test("reads only exact catalog matches whose next step is a Connect card", () => {
+    const text = JSON.stringify({
+      query: "gmail",
+      matches: [
+        {
+          ...GMAIL,
+          approximate: false,
+          setup: {
+            status: "authorization_required",
+            nextAction: { toolName: "capability_authorization_request", capabilityId: "api:gmail" },
+          },
+        },
+        { capabilityId: "api:slack", name: "Slack", setup: { status: "ready", nextAction: null } },
+        {
+          capabilityId: "registry:gmall",
+          name: "Gmall",
+          approximate: true,
+          setup: { nextAction: { toolName: "capability_authorization_request" } },
+        },
+      ],
+    });
+    const content = [{ type: "text", text }];
+    expect(connectableIntegrationsFromCatalogResult({ content })).toEqual([GMAIL]);
+    expect(connectableIntegrationsFromCatalogResult(content)).toEqual([GMAIL]);
+    expect(connectableIntegrationsFromCatalogResult({ content, isError: true })).toEqual([]);
+    expect(
+      connectableIntegrationsFromCatalogResult({ content: [{ type: "text", text: "no" }] }),
+    ).toEqual([]);
+  });
+
+  test("the catalog lookup calls the harness catalog search with a bounded query", async () => {
+    const calls: { name: string; args: unknown; signal?: AbortSignal }[] = [];
+    const lookup = catalogConnectableIntegrationLookup({
+      callTool: async () => {
+        throw new Error("callToolResult is preferred");
+      },
+      callToolResult: async (name, args, _meta, options) => {
+        calls.push({ name, args, ...(options?.signal ? { signal: options.signal } : {}) });
+        return { content: [{ type: "text", text: JSON.stringify({ matches: [] }) }] };
+      },
+    });
+    expect(await lookup("x".repeat(600))).toEqual([]);
+    expect(calls[0]!.name).toBe(CATALOG);
+    expect(calls[0]!.args).toEqual({ query: "x".repeat(500), limit: 3 });
+    expect(calls[0]!.signal).toBeDefined();
+  });
+
+  for (const transport of ["generic_dispatch", "openai_native", "codex_native"] as const) {
+    test(`${transport}: a search naming an unconnected integration loads the card tool and names it`, async () => {
+      const { queries, lookup } = fakeLookup();
+      const result = await runtimeWith(transport, lookup).prepareSearch({
+        query: "check my gmail and tell me if anything important came this week",
+      });
+      expect(queries).toHaveLength(1);
+      expect(loaded(result)).toContain(CARD);
+      expect(loaded(result)).not.toContain(CATALOG);
+      expect(loaded(result).at(-1)).toBe(CARD);
+      const output = JSON.parse(result.output);
+      expect(output.notConnected).toBe(GMAIL_NOTICE);
+      expect(output.tools.map((t: { name: string }) => t.name)).toEqual(loaded(result));
+      // Native results cannot carry text: the notice rides on the marker.
+      expect(result.notice).toBe(transport === "generic_dispatch" ? undefined : GMAIL_NOTICE);
+    });
+
+    test(`${transport}: installed-tool searches never look up or change`, async () => {
+      const { queries, lookup } = fakeLookup();
+      for (const args of [
+        { query: "create a scheduled message in this chat" },
+        { query: "notify the person on their phone" },
+        { query: "Search workspace Knowledge by subject" },
+        { query: "inbox_tidy gmail" },
+        { query: "", names: ["opengeni__knowledge_search"] },
+      ]) {
+        const withLookup = await runtimeWith(transport, lookup).prepareSearch(args);
+        const without = await runtimeWith(transport).prepareSearch(args);
+        expect(withLookup).toEqual(without);
+      }
+      expect(queries).toEqual([]);
+    });
+
+    test(`${transport}: unnamed matches, lookup failures and chats without setup tools change nothing`, async () => {
+      const { queries, lookup } = fakeLookup();
+      // "read my outlook inbox" strongly matches the installed inbox tool, so it
+      // never looks up; "read the meeting summary" looks up and names nothing.
+      for (const query of ["read the meeting summary", "read my outlook inbox"]) {
+        expect(await runtimeWith(transport, lookup).prepareSearch({ query })).toEqual(
+          await runtimeWith(transport).prepareSearch({ query }),
+        );
+      }
+      expect(queries).toEqual(["read the meeting summary"]);
+      const failing = async () => {
+        throw new Error("catalog offline");
+      };
+      const query = "check my gmail";
+      expect(await runtimeWith(transport, failing).prepareSearch({ query })).toEqual(
+        await runtimeWith(transport).prepareSearch({ query }),
+      );
+      const none = fakeLookup();
+      expect(
+        await runtimeWith(transport, none.lookup, undefined, false).prepareSearch({ query }),
+      ).toEqual(await runtimeWith(transport, undefined, undefined, false).prepareSearch({ query }));
+      expect(none.queries).toEqual([]);
+    });
+
+    test(`${transport}: cancellation during the lookup belongs to the turn`, async () => {
+      const controller = new AbortController();
+      const lookup = async () => {
+        controller.abort();
+        throw new Error("aborted");
+      };
+      await expect(
+        runtimeWith(transport, lookup).prepareSearch(
+          { query: "check my gmail" },
+          controller.signal,
+        ),
+      ).rejects.toThrow();
+    });
+
+    test(`${transport}: either setup tool brings the other`, async () => {
+      const runtime = runtimeWith(transport, fakeLookup().lookup);
+      expect(
+        loaded(await runtime.prepareSearch({ query: "", names: [CATALOG], limit: 1 })),
+      ).toEqual([CATALOG, CARD]);
+      expect(loaded(await runtime.prepareSearch({ query: "", names: [CARD] }))).toEqual([
+        CARD,
+        CATALOG,
+      ]);
+      expect(
+        loaded(await runtime.prepareSearch({ query: "capability_catalog_search gmail", limit: 1 })),
+      ).toEqual([CATALOG, CARD]);
+    });
+  }
+
+  test("one-word names the ranker reads as operations never name an integration", async () => {
+    const verbs = [
+      { capabilityId: "registry:send", name: "Send" },
+      { capabilityId: "registry:make", name: "Make" },
+      { capabilityId: "registry:tool", name: "Tool" },
+    ];
+    for (const query of [
+      "send message to another session",
+      "send message to another session; read session events",
+      "make a new recurring reminder",
+      "send an email",
+      "find a tool for this",
+    ])
+      expect(connectableIntegrationsNamedIn(query, verbs)).toEqual([]);
+    // Product names and multi-word names that contain an operation still count.
+    expect(
+      connectableIntegrationsNamedIn("send it with sendgrid, then use make com", [
+        { capabilityId: "registry:sendgrid", name: "SendGrid" },
+        { capabilityId: "registry:make-com", name: "Make.com" },
+      ]).map((m) => m.name),
+    ).toEqual(["SendGrid", "Make.com"]);
+    for (const transport of ["generic_dispatch", "openai_native"] as const) {
+      const runtime = runtimeWith(transport, async () => verbs);
+      const result = await runtime.prepareSearch({ query: "make a new recurring reminder" });
+      expect(loaded(result)).not.toContain(CARD);
+      expect(JSON.parse(result.output).notConnected).toBeUndefined();
+    }
+  });
+
+  test("accepted residual: an ordinary word that is an integration's whole name still names it", async () => {
+    // Only operation words are excluded. Other ordinary words that happen to
+    // be a connectable integration's whole name (Box, Close, Front, Notion)
+    // still name it when nothing installed matches the search strongly. The
+    // notice says "if the task needs it", so the model can ignore it; a word
+    // list to filter these out was judged worse than this residual.
+    const box = { capabilityId: "registry:box", name: "Box" };
+    const close = { capabilityId: "registry:close", name: "Close" };
+    expect(connectableIntegrationsNamedIn("check the box", [box])).toEqual([box]);
+    expect(connectableIntegrationsNamedIn("close the browser tab", [close])).toEqual([close]);
+    for (const transport of ["generic_dispatch", "openai_native"] as const) {
+      const runtime = runtimeWith(transport, async () => [box]);
+      const result = await runtime.prepareSearch({ query: "check the box" });
+      expect(loaded(result)).toContain(CARD);
+      expect(JSON.parse(result.output).notConnected).toBe(
+        'Not connected yet: Box (capabilityId "registry:box"). If the task needs it, call capability_authorization_request with that capabilityId and a short rationale to show the person its Connect card.',
+      );
+    }
+  });
+
+  test("only Connect cards the person completes are named, with wording for several", () => {
+    const match = (capabilityId: string, name: string, action: string) => ({
+      capabilityId,
+      name,
+      approximate: false,
+      setup: {
+        status: "authorization_required",
+        action,
+        nextAction: { toolName: "capability_authorization_request", capabilityId },
+      },
+    });
+    const content = [
+      {
+        type: "text",
+        text: JSON.stringify({
+          matches: [
+            match("api:gmail", "Gmail", "connect"),
+            match("registry:weather", "Weather", "add_credentials"),
+            match("registry:archive", "Archive", "enable"),
+          ],
+        }),
+      },
+    ];
+    expect(connectableIntegrationsFromCatalogResult({ content })).toEqual([
+      GMAIL,
+      { capabilityId: "registry:weather", name: "Weather" },
+    ]);
+    expect(connectableIntegrationNotice([GMAIL, CALENDAR])).toBe(
+      'Not connected yet: Gmail (capabilityId "api:gmail"), Google Calendar (capabilityId "api:google-calendar"). If the task needs one, call capability_authorization_request with its capabilityId and a short rationale to show the person its Connect card.',
+    );
+  });
+
+  test("the catalog read runs alongside the decision model", async () => {
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const lookup: ConnectableIntegrationLookup = async (query) => {
+      events.push("lookup:start");
+      await gate;
+      events.push("lookup:end");
+      return fakeLookup().lookup(query);
+    };
+    const runtime = runtimeWith("generic_dispatch", lookup, async () => {
+      events.push("decision");
+      release();
+      return ["opengeni__knowledge_search"];
+    });
+    const result = await runtime.prepareSearch({ query: "find my gmail stuff" });
+    expect(events).toEqual(["lookup:start", "decision", "lookup:end"]);
+    expect(loaded(result)).toEqual(["opengeni__knowledge_search", CARD]);
+    expect(JSON.parse(result.output).notConnected).toBe(GMAIL_NOTICE);
+  });
+
+  test("decision-model selections and their fallback carry the card tool and notice", async () => {
+    let consulted = 0;
+    const selected = runtimeWith("generic_dispatch", fakeLookup().lookup, async () => {
+      consulted++;
+      return ["opengeni__knowledge_search"];
+    });
+    const chosen = await selected.prepareSearch({ query: "find my gmail stuff" });
+    expect(loaded(chosen)).toEqual(["opengeni__knowledge_search", CARD]);
+    expect(JSON.parse(chosen.output).notConnected).toBe(GMAIL_NOTICE);
+    expect(consulted).toBe(1);
+    const unavailable = runtimeWith("generic_dispatch", fakeLookup().lookup, async () => {
+      throw new Error("offline");
+    });
+    const fallback = await unavailable.prepareSearch({ query: "find my gmail stuff" });
+    expect(loaded(fallback).at(-1)).toBe(CARD);
+    expect(JSON.parse(fallback.output)).toMatchObject({
+      fallback: "decision_model_unavailable",
+      schemasLoaded: true,
+      notConnected: GMAIL_NOTICE,
+    });
+    const strong = runtimeWith("generic_dispatch", fakeLookup().lookup, async () => {
+      throw new Error("must bypass inference");
+    });
+    expect(
+      loaded(await strong.prepareSearch({ query: "notify the person on their phone" })),
+    ).toEqual(["opengeni__notify_user"]);
+  });
+
+  test("a native search's notice follows its result as one stable developer message", async () => {
+    const runtime = runtimeWith("openai_native", fakeLookup().lookup);
+    const marker = await runtime.prepareSearch({ query: "check my gmail" });
+    const searchItem = {
+      type: "tool_search_call",
+      call_id: "s1",
+      execution: "client",
+      status: "completed",
+      arguments: { query: "check my gmail" },
+      providerData: { "opengeni.lazy_search.v1": marker },
+    };
+    const output = {
+      type: "tool_search_output",
+      status: "completed",
+      tools: marker.tools,
+      providerData: { call_id: "s1", execution: "client" },
+    };
+    const user = { type: "message", role: "user", content: "check my gmail" };
+    const first = expandInteractionFamilyDisclosures<Record<string, unknown>>([
+      user,
+      searchItem,
+      output,
+    ]);
+    expect(first).toHaveLength(4);
+    expect(first[3]).toEqual({ type: "message", role: "developer", content: GMAIL_NOTICE });
+    const later = expandInteractionFamilyDisclosures<Record<string, unknown>>([
+      user,
+      searchItem,
+      output,
+      done,
+    ]);
+    expect(later[3]).toBe(first[3]);
+    expect(later).toHaveLength(5);
+    const wire = projectHistoryForProvider(later, "responses", { declaresAdditionalTools: true });
+    expect(wire[3]).toEqual({
+      type: "unknown",
+      providerData: { type: "message", role: "developer", content: GMAIL_NOTICE },
+    });
+    // A search without a notice adds nothing.
+    const plain = await runtimeWith("openai_native").prepareSearch({ query: "check my gmail" });
+    expect(
+      expandInteractionFamilyDisclosures<Record<string, unknown>>([
+        user,
+        { ...searchItem, providerData: { "opengeni.lazy_search.v1": plain } },
+        output,
+      ]),
+    ).toHaveLength(3);
+  });
+
+  test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
+    "%s: search then the Connect card through the real SDK, with a stable prefix",
+    async (transport) => {
+      const cards: unknown[] = [];
+      const card = tool({
+        name: CARD,
+        description:
+          "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search with setup.nextAction.",
+        parameters: {
+          type: "object",
+          properties: { capabilityId: { type: "string" }, rationale: { type: "string" } },
+          required: ["capabilityId", "rationale"],
+          additionalProperties: false,
+        },
+        strict: false,
+        execute: (args) => {
+          cards.push(args);
+          return "card shown";
+        },
+      }) as Tool;
+      const agent = new Agent({
+        name: "discovery",
+        model: "scripted",
+        tools: [...pool().filter((t) => (t as Tool & { name: string }).name !== CARD), card],
+      });
+      const { queries, lookup } = fakeLookup();
+      const runtime = installLazyToolRuntime(
+        agent,
+        transport,
+        new Set(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        lookup,
+      );
+      const args = { capabilityId: "api:gmail", rationale: "Read this week's mail" };
+      const model = new ScriptedModel([
+        [searchCall(transport, "find", { query: "check my gmail this week" })],
+        [invokeCall(transport, "card", CARD, args)],
+        [done],
+      ]);
+      const result = await new Runner({
+        modelProvider: new LazyToolModelProvider({ getModel: () => model }, runtime),
+      }).run(agent, "check my gmail and tell me if anything important came this week", {
+        stream: true,
+        historyOwnership: "external",
+        resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime),
+        callModelInputFilter: baseModelInputFilterForSettings(
+          testSettings({ sandboxBackend: "none" }),
+        ),
+      });
+      for await (const event of result.toStream()) void event;
+      await result.completed;
+      expect(queries).toHaveLength(1);
+      expect(cards).toEqual([args]);
+      expect(JSON.stringify(model.requests[1]!.input)).toContain("Not connected yet: Gmail");
+      if (transport !== "generic_dispatch") {
+        // As the production Responses model does before building the request.
+        const request = model.requests[1]!;
+        const wire = responsesWire().wire({
+          ...request,
+          input: projectHistoryForProvider(
+            request.input as Record<string, unknown>[],
+            "responses",
+            { declaresAdditionalTools: true },
+          ) as ModelRequest["input"],
+        });
+        expect(wire.input).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: "message", role: "developer", content: GMAIL_NOTICE }),
+          ]),
+        );
+        expect(JSON.stringify(wire)).not.toContain("opengeni.lazy_search.v1");
+      }
+      for (let i = 1; i < model.requests.length; i++) {
+        expect(model.requests[i]!.tools).toEqual(model.requests[0]!.tools);
+        const previous = model.requests[i - 1]!.input as unknown[];
+        expect((model.requests[i]!.input as unknown[]).slice(0, previous.length)).toEqual(previous);
+      }
+    },
+  );
+});
+
+describe("searches that reach one of several connected accounts", () => {
+  const GMAIL_SEARCH = "mcp__gmail__search_messages";
+  const GMAIL_SEND = "mcp__gmail__send_message";
+  const OUTLOOK = "mcp__outlook__me_messages_list";
+  const LINEAR = "mcp__linear__list_issues";
+  const SLACK = "mcp__slack__post_message";
+  const pool = () => [
+    candidate(GMAIL_SEARCH, "Search the Gmail mailbox for new or matching email messages."),
+    candidate(GMAIL_SEND, "Send an email message from the Gmail mailbox."),
+    candidate(OUTLOOK, "Get me messages: list the messages in the signed-in user's mailbox."),
+    candidate(LINEAR, "List Linear issues in the workspace's projects and cycles."),
+    candidate(SLACK, "Post a message to a Slack channel or thread."),
+    candidate(
+      "opengeni__knowledge_search",
+      "Find Knowledge by subject or entity name. Omit scope to search all authorized scopes.",
+    ),
+    candidate(
+      "opengeni__notify_user",
+      "Notify the person who owns this session: it goes to their inbox and, when new, to their phone.",
+    ),
+  ];
+  const gmail = { source: "gmail", label: "Gmail", connector: "Gmail", kind: "communication" };
+  const outlook = {
+    source: "outlook",
+    label: "Outlook Mail",
+    connector: "Outlook Mail",
+    kind: "communication",
+  };
+  const linear = {
+    source: "linear",
+    label: "Linear",
+    connector: "Linear",
+    kind: "project-management",
+  };
+  const BOTH: ReadonlyMap<string, ConnectedToolAccount> = new Map([
+    [GMAIL_SEARCH, gmail],
+    [GMAIL_SEND, gmail],
+    [OUTLOOK, outlook],
+  ]);
+  const ONLY_GMAIL: ReadonlyMap<string, ConnectedToolAccount> = new Map([
+    [GMAIL_SEARCH, gmail],
+    [GMAIL_SEND, gmail],
+  ]);
+  const NOTICE =
+    "These tools reach Gmail. Also connected: Outlook Mail. If the request could mean those accounts too (the person's email, calendar or files), check each that fits, or say which account you checked and offer the others.";
+  const runtimeWith = (
+    transport: "generic_dispatch" | "openai_native" | "codex_native",
+    accounts?: ReadonlyMap<string, ConnectedToolAccount>,
+    lookup?: ConnectableIntegrationLookup,
+  ) => {
+    const runtime = new LazyToolRuntime(
+      transport,
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      lookup,
+      accounts ? () => accounts : undefined,
+    );
+    runtime.refresh(pool());
+    return runtime;
+  };
+  const loaded = (result: { tools?: { name?: unknown }[] }) =>
+    result.tools?.map((t) => t.name) ?? [];
+
+  test("names the reached and the other accounts, capped with a count", () => {
+    expect(connectedAccountsNotice(["Gmail"], ["Outlook Mail"])).toBe(NOTICE);
+    const others = Array.from({ length: 12 }, (_, i) => `Account ${i + 1}`);
+    const capped = connectedAccountsNotice(
+      ["Gmail (a@example.com)", "Gmail (b@example.com)"],
+      others,
+    );
+    expect(capped).toStartWith(
+      "These tools reach Gmail (a@example.com), Gmail (b@example.com). Also connected: Account 1,",
+    );
+    expect(capped).toContain("Account 10, and 2 more.");
+    expect(capped).not.toContain("Account 11");
+  });
+
+  for (const transport of ["generic_dispatch", "openai_native", "codex_native"] as const) {
+    test(`${transport}: the first search reaching one account names the others, once per run`, async () => {
+      const runtime = runtimeWith(transport, BOTH);
+      const first = await runtime.prepareSearch({ query: "search gmail for new email", limit: 2 });
+      expect(loaded(first)).toContain(GMAIL_SEARCH);
+      expect(loaded(first)).not.toContain(OUTLOOK);
+      const output = JSON.parse(first.output);
+      expect(output.connectedAccounts).toBe(NOTICE);
+      expect(output.tools.map((t: { name: string }) => t.name)).toEqual(loaded(first));
+      expect(first.notice).toBe(transport === "generic_dispatch" ? undefined : NOTICE);
+      const second = await runtime.prepareSearch({ query: "search gmail for new email", limit: 2 });
+      expect(JSON.parse(second.output).connectedAccounts).toBeUndefined();
+      expect(second.notice).toBeUndefined();
+    });
+
+    test(`${transport}: one connected account, first-party tools and names loads change nothing`, async () => {
+      for (const [accounts, args] of [
+        [ONLY_GMAIL, { query: "search gmail for new email", limit: 2 }],
+        [BOTH, { query: "notify the person on their phone" }],
+        [BOTH, { query: "", names: [GMAIL_SEARCH] }],
+      ] as const) {
+        const runtime = runtimeWith(transport, accounts);
+        expect(await runtime.prepareSearch(args)).toEqual(
+          await runtimeWith(transport).prepareSearch(args),
+        );
+        // Neither kind of search spends the run's one notice.
+        if (accounts === BOTH) {
+          const later = await runtime.prepareSearch({ query: "search gmail for new email" });
+          expect(JSON.parse(later.output).connectedAccounts).toBe(NOTICE);
+        }
+      }
+    });
+
+    test(`${transport}: a search reaching every connected account names none`, async () => {
+      const result = await runtimeWith(transport, BOTH).prepareSearch({
+        query: "",
+        names: [GMAIL_SEARCH, OUTLOOK],
+      });
+      expect(JSON.parse(result.output).connectedAccounts).toBeUndefined();
+      const both = await runtimeWith(transport, BOTH).prepareSearch({
+        query: "search gmail email; get me messages in the mailbox",
+      });
+      expect(loaded(both)).toEqual(expect.arrayContaining([GMAIL_SEARCH, OUTLOOK]));
+      expect(JSON.parse(both.output).connectedAccounts).toBeUndefined();
+      expect(both.notice).toBeUndefined();
+    });
+  }
+
+  test("only accounts that serve the same need are named", async () => {
+    const slack = { source: "slack", label: "Slack", connector: "Slack", kind: "communication" };
+    const github = { source: "github", label: "GitHub", connector: "GitHub" };
+    const linearWork = { ...linear, source: "linear-work", label: "Linear (work@example.com)" };
+    const GITHUB = "mcp__github__list_repositories";
+    const notice = async (
+      accounts: ReadonlyArray<readonly [string, ConnectedToolAccount]>,
+      query: string,
+    ) => {
+      const runtime = runtimeWith("generic_dispatch", new Map(accounts));
+      runtime.refresh([
+        ...pool(),
+        candidate("mcp__linear_work__list_issues", "List Linear issues in the workspace."),
+        candidate(GITHUB, "List GitHub repositories the person can reach."),
+      ]);
+      const result = await runtime.prepareSearch({ query, limit: 1 });
+      return JSON.parse(result.output).connectedAccounts as string | undefined;
+    };
+    // Linear, Slack, Gmail and GitHub connected: a Linear search names none of them.
+    const team = [
+      [LINEAR, linear],
+      [SLACK, slack],
+      [GMAIL_SEARCH, gmail],
+      [GITHUB, github],
+    ] as const;
+    expect(await notice(team, "list linear issues in the projects and cycles")).toBeUndefined();
+    expect(
+      await notice(team.slice(0, 2), "list linear issues in the projects and cycles"),
+    ).toBeUndefined();
+    // Another account of the same connector always counts, kind or not.
+    expect(
+      await notice(
+        [
+          [LINEAR, linear],
+          ["mcp__linear_work__list_issues", linearWork],
+          [SLACK, slack],
+        ],
+        "list linear issues in the projects and cycles",
+      ),
+    ).toStartWith("These tools reach Linear. Also connected: Linear (work@example.com). If");
+    // Accounts of one kind are named together; an unknown kind never matches.
+    expect(
+      await notice(
+        [
+          [GMAIL_SEARCH, gmail],
+          [OUTLOOK, outlook],
+          [LINEAR, linear],
+          [GITHUB, github],
+        ],
+        "search gmail for new email",
+      ),
+    ).toBe(NOTICE);
+    expect(
+      await notice(
+        [
+          [GMAIL_SEARCH, { ...gmail, kind: undefined }],
+          [OUTLOOK, { ...outlook, kind: undefined }],
+        ],
+        "search gmail for new email",
+      ),
+    ).toBeUndefined();
+    // Custom servers have no kind: two unrelated ones say nothing, while two
+    // accounts of the same custom server still name each other.
+    const home = { source: "home", label: "Home Hub", connector: "Home Hub" };
+    const company = { source: "company", label: "Company Wiki", connector: "Company Wiki" };
+    expect(
+      await notice(
+        [
+          [LINEAR, { ...linear, kind: undefined }],
+          [GITHUB, home],
+          [SLACK, company],
+        ],
+        "list linear issues in the projects and cycles",
+      ),
+    ).toBeUndefined();
+    expect(
+      await notice(
+        [
+          [LINEAR, { ...home, label: "Home Hub (a@example.com)" }],
+          [
+            "mcp__linear_work__list_issues",
+            { ...home, source: "home-2", label: "Home Hub (b@example.com)" },
+          ],
+          [SLACK, company],
+        ],
+        "list linear issues in the projects and cycles",
+      ),
+    ).toStartWith(
+      "These tools reach Home Hub (a@example.com). Also connected: Home Hub (b@example.com). If",
+    );
+  });
+
+  test("compact candidates count as reached only where the output shows them", async () => {
+    // Two accounts' identical tools tie, so the search loads nothing and
+    // lists compact candidates; native outputs cannot show those.
+    const SECOND = "mcp__gmail_work__search_messages";
+    const accounts: ReadonlyMap<string, ConnectedToolAccount> = new Map([
+      ...BOTH,
+      [SECOND, { source: "gmail-work", label: "Gmail (work@example.com)", connector: "Gmail" }],
+    ]);
+    const tied = (transport: "generic_dispatch" | "openai_native") => {
+      const runtime = runtimeWith(transport, accounts);
+      runtime.refresh([
+        ...pool(),
+        candidate(SECOND, "Search the Gmail mailbox for new or matching email messages."),
+      ]);
+      return runtime;
+    };
+    const args = { query: "search the gmail mailbox for matching email messages", limit: 1 };
+    const generic = await tied("generic_dispatch").prepareSearch(args);
+    expect(loaded(generic)).toEqual([]);
+    const output = JSON.parse(generic.output);
+    expect(output.schemasLoaded).toBe(false);
+    expect(output.connectedAccounts).toStartWith("These tools reach Gmail");
+    expect(output.connectedAccounts).toContain("Outlook Mail");
+    const native = tied("openai_native");
+    const compact = await native.prepareSearch(args);
+    expect(loaded(compact)).toEqual([]);
+    expect(compact.notice).toBeUndefined();
+    // The run's one notice waits for a search the model can see.
+    const later = await native.prepareSearch({ query: "get me messages in the mailbox" });
+    expect(loaded(later)).toEqual([OUTLOOK]);
+    expect(later.notice).toStartWith("These tools reach Outlook Mail. Also connected: Gmail");
+  });
+
+  test("a native search with both notices carries them as one joined notice", async () => {
+    const lookup: ConnectableIntegrationLookup = async () => [
+      { capabilityId: "api:google-calendar", name: "Google Calendar" },
+    ];
+    const runtime = runtimeWith("openai_native", BOTH, lookup);
+    runtime.refresh([
+      ...pool(),
+      candidate(
+        "opengeni__capability_catalog_search",
+        "Find integrations in the reviewed workspace catalog when the user asks to add one or needed access is missing.",
+      ),
+      candidate(
+        "opengeni__capability_authorization_request",
+        "Show a Connect card in this chat for a suitable capability returned by capability_catalog_search.",
+      ),
+    ]);
+    const result = await runtime.prepareSearch({
+      query: "compare my google calendar with gmail invites",
+    });
+    const output = JSON.parse(result.output);
+    expect(output.notConnected).toStartWith("Not connected yet: Google Calendar");
+    expect(output.connectedAccounts).toBe(NOTICE);
+    expect(result.notice).toBe(`${output.notConnected}\n${NOTICE}`);
+  });
 });

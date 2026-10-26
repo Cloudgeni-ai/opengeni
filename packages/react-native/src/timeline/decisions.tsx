@@ -6,6 +6,14 @@ import type {
 } from "@opengeni/sdk";
 import type { PendingApproval } from "@opengeni/react/session";
 import {
+  approvalAnswerLabels,
+  approvalArgumentsText,
+  approvalToolName,
+  formatApprovalToolName,
+  pendingApprovalReview,
+  reviewFacts,
+} from "@opengeni/react/approval-review-model";
+import {
   answersFromDrafts,
   defaultHumanInputFormMessages,
   emptyDraft,
@@ -26,9 +34,10 @@ import {
   type ReactNode,
 } from "react";
 import { createOpenGeniText, useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View, type TextStyle } from "react-native";
 import { Button } from "./controls";
 import { Icon } from "./icon";
+import type { NativeMarkdownRenderer } from "./message-timeline";
 import { blendOver, withAlpha } from "./primitives";
 import { SecretQuestionField } from "./secret-field";
 import {
@@ -71,6 +80,8 @@ export interface HumanInputCardProps {
   messages?: Partial<HumanInputFormMessages> | undefined;
   /** Copy for secret questions (Save to, Generate, show / hide). */
   secretMessages?: Partial<SecretFieldMessages> | undefined;
+  /** The conversation's Markdown renderer, so questions read as the web form does. */
+  renderMarkdown?: NativeMarkdownRenderer | undefined;
 }
 
 const HumanInputMessagesContext = createContext<HumanInputFormMessages>(
@@ -79,6 +90,51 @@ const HumanInputMessagesContext = createContext<HumanInputFormMessages>(
 const SecretFieldMessagesContext = createContext<SecretFieldMessages>(
   defaultSecretFieldMessages(createOpenGeniText()),
 );
+const QuestionMarkdownContext = createContext<NativeMarkdownRenderer | undefined>(undefined);
+
+/** Emphasis, code, links, lists or line breaks: text a plain label would show raw. */
+const MARKDOWN_SYNTAX = /[*_`#[\]]|https?:\/\/|\n/;
+
+/**
+ * Question copy as the web form shows it (inline Markdown, so links and
+ * emphasis work). Plain text keeps the card's own type style; only copy that
+ * actually carries Markdown goes through the conversation's renderer.
+ */
+function QuestionText({
+  text,
+  style,
+  tone,
+  prefix,
+  suffix,
+}: {
+  text: string;
+  style: TextStyle;
+  tone: "body" | "muted";
+  /** Plain lead-in kept outside the Markdown, such as a "2. " step number. */
+  prefix?: string;
+  suffix?: ReactNode;
+}) {
+  const render = useContext(QuestionMarkdownContext);
+  // Callers build the style inline; keep it stable for the Markdown renderer.
+  const styleKey = JSON.stringify(style);
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- keyed on the style's content
+  const textStyle = useMemo(() => style, [styleKey]);
+  if (!render || !MARKDOWN_SYNTAX.test(text))
+    return (
+      <Text style={style}>
+        {prefix}
+        {text}
+        {suffix}
+      </Text>
+    );
+  return (
+    <View style={{ flexDirection: "row", alignItems: "flex-start" }}>
+      {prefix ? <Text style={style}>{prefix}</Text> : null}
+      <View style={{ flexShrink: 1, minWidth: 0 }}>{render(text, { tone, textStyle })}</View>
+      {suffix ? <Text style={style}>{suffix}</Text> : null}
+    </View>
+  );
+}
 
 /** One decision shell for pending requests, oldest first, "N of M" when stepping. */
 export function HumanInputCard({
@@ -88,6 +144,7 @@ export function HumanInputCard({
   error,
   messages,
   secretMessages,
+  renderMarkdown,
 }: HumanInputCardProps) {
   const t = useOpenGeniText();
   const merged = useMemo(
@@ -119,21 +176,23 @@ export function HumanInputCard({
   return (
     <HumanInputMessagesContext.Provider value={merged}>
       <SecretFieldMessagesContext.Provider value={mergedSecret}>
-        <HumanInputForm
-          key={active.id}
-          request={active}
-          progressLabel={
-            batchTotal.current > 1
-              ? t("native.timeline.decisions.positionOfCurrent", {
-                  position,
-                  current: batchTotal.current,
-                })
-              : null
-          }
-          submitting={respondingRequestId !== null}
-          error={error ?? null}
-          onSubmit={(response) => onSubmit(active.id, response)}
-        />
+        <QuestionMarkdownContext.Provider value={renderMarkdown}>
+          <HumanInputForm
+            key={active.id}
+            request={active}
+            progressLabel={
+              batchTotal.current > 1
+                ? t("native.timeline.decisions.positionOfCurrent", {
+                    position,
+                    current: batchTotal.current,
+                  })
+                : null
+            }
+            submitting={respondingRequestId !== null}
+            error={error ?? null}
+            onSubmit={(response) => onSubmit(active.id, response)}
+          />
+        </QuestionMarkdownContext.Provider>
       </SecretFieldMessagesContext.Provider>
     </HumanInputMessagesContext.Provider>
   );
@@ -299,28 +358,28 @@ function HumanInputForm({
           <Icon name="message-circle-question" size={16} color={tone.waiting} />
         </View>
         <View style={{ flex: 1, minWidth: 0 }}>
-          <Text
+          <QuestionText
+            text={heading.title}
+            tone="body"
             style={{
               ...fontStyle(theme, 600),
               fontSize: theme.size.md,
               lineHeight: 24,
               color: c.fg,
             }}
-          >
-            {heading.title}
-            {required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null}
-          </Text>
+            suffix={required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null}
+          />
           {heading.description ? (
-            <Text
+            <QuestionText
+              text={heading.description}
+              tone="muted"
               style={{
                 ...fontStyle(theme),
                 fontSize: theme.size.sm,
                 lineHeight: 18,
                 color: c["fg-muted"],
               }}
-            >
-              {heading.description}
-            </Text>
+            />
           ) : null}
           {progressLabel ? (
             <Text
@@ -484,35 +543,38 @@ function QuestionControls({
   const hint = multi
     ? messages.selectionHint(question.validation?.minSelections, question.validation?.maxSelections)
     : null;
+  const secondary: TextStyle = {
+    ...fontStyle(theme),
+    fontSize: theme.size.sm,
+    lineHeight: 18,
+    color: c["fg-muted"],
+  };
+  // A lone question's heading already shows its help unless a label took the title.
+  const help = question.helpText && (index !== null || question.label) ? question.helpText : null;
   return (
     <View style={{ gap: 10 }}>
       {index !== null ? (
         <View>
-          <Text
+          <QuestionText
+            prefix={`${index}. `}
+            text={question.label ?? question.prompt}
+            tone="body"
             style={{
               ...fontStyle(theme, 600),
               fontSize: theme.size.sm,
               lineHeight: 18,
               color: c.fg,
             }}
-          >
-            {`${index}. ${question.label ?? question.prompt}`}
-            {question.required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null}
-          </Text>
+            suffix={
+              question.required ? <Text style={{ color: c["status-failed"] }}> *</Text> : null
+            }
+          />
           {question.label ? (
-            <Text
-              style={{
-                ...fontStyle(theme),
-                fontSize: theme.size.sm,
-                lineHeight: 18,
-                color: c["fg-muted"],
-              }}
-            >
-              {question.prompt}
-            </Text>
+            <QuestionText text={question.prompt} tone="muted" style={secondary} />
           ) : null}
         </View>
       ) : null}
+      {help ? <QuestionText text={help} tone="muted" style={secondary} /> : null}
       {hint ? (
         <Text style={{ ...fontStyle(theme), fontSize: theme.size.xs, color: c["fg-subtle"] }}>
           {hint}
@@ -554,16 +616,16 @@ function QuestionControls({
                 <View style={{ flex: 1, minWidth: 0 }}>
                   <Text style={label}>{option.label}</Text>
                   {option.description ? (
-                    <Text
+                    <QuestionText
+                      text={option.description}
+                      tone="muted"
                       style={{
                         ...fontStyle(theme),
                         fontSize: theme.size.xs,
                         lineHeight: 16,
                         color: c["fg-muted"],
                       }}
-                    >
-                      {option.description}
-                    </Text>
+                    />
                   ) : null}
                 </View>
               </Pressable>
@@ -636,7 +698,7 @@ export interface ApprovalStripMessages {
   reject: string;
   approved: string;
   rejected: string;
-  /** The tool's display name; the web live strip shows the raw name. */
+  /** The tool's readable name, the card's title when the runtime gives none. */
   formatToolName: (name: string) => string;
 }
 
@@ -645,7 +707,7 @@ export const defaultApprovalStripMessages = (t: OpenGeniText): ApprovalStripMess
   reject: t("native.timeline.decisions.reject"),
   approved: t("native.timeline.decisions.approved"),
   rejected: t("native.timeline.decisions.rejected"),
-  formatToolName: (name) => name,
+  formatToolName: (name) => formatApprovalToolName(t, name),
 });
 
 export interface ApprovalStripProps {
@@ -654,7 +716,12 @@ export interface ApprovalStripProps {
   messages?: Partial<ApprovalStripMessages> | undefined;
 }
 
-/** The web live decision strip: one waiting Notice per pending tool approval. */
+/**
+ * The live decision strip: one readable review card per pending tool approval,
+ * as the web approval surface shows it. An app action (a setting changed
+ * through chat) reads as a plain question answered with Allow or Cancel; the
+ * raw arguments stay behind Details.
+ */
 export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
   const t = useOpenGeniText();
   const messages = { ...defaultApprovalStripMessages(t), ...overrides };
@@ -663,6 +730,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
   const c = theme.colors;
   const [pending, setPending] = useState<Record<string, "approve" | "reject">>({});
   const [settled, setSettled] = useState<Record<string, "approve" | "reject">>({});
+  const [details, setDetails] = useState<Record<string, boolean>>({});
   if (approvals.length === 0) return null;
   const decide = async (id: string, decision: "approve" | "reject") => {
     setPending((current) => ({ ...current, [id]: decision }));
@@ -677,14 +745,32 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
       });
     }
   };
+  const small = { ...fontStyle(theme), fontSize: theme.size.xs, lineHeight: 16 };
+  const body = { ...fontStyle(theme), fontSize: theme.size.sm, lineHeight: 20 };
   return (
-    <ScrollView style={{ maxHeight: 256 }} contentContainerStyle={{ gap: 12 }} nestedScrollEnabled>
+    <ScrollView style={{ maxHeight: 320 }} contentContainerStyle={{ gap: 12 }} nestedScrollEnabled>
       {approvals.map((approval) => {
         const busy = Boolean(pending[approval.id]) || Boolean(settled[approval.id]);
-        const payload = JSON.stringify(approval.arguments ?? approval.raw ?? {}, null, 2);
+        const toolName = approvalToolName(approval);
+        const answer = approvalAnswerLabels(t, toolName);
+        const review = pendingApprovalReview(approval, {
+          formatToolName: messages.formatToolName,
+          approveLabel: answer?.approve ?? messages.approve,
+        });
+        const facts = reviewFacts(review);
+        const note = review.consequence;
+        // A request without recorded arguments keeps its Approve, as it
+        // always had here; only the readable summary is unavailable.
+        const canApprove =
+          review.availableActions.includes("approve") || approval.arguments === undefined;
+        const showDetails = details[approval.id] === true;
+        const payload = showDetails ? approvalArgumentsText(approval) : "";
+        const approveLabel = answer?.approve ?? messages.approve;
+        const rejectLabel = answer?.reject ?? messages.reject;
         return (
           <View
             key={approval.id}
+            accessibilityLabel={review.title}
             style={{
               borderRadius: theme.radius.lg,
               borderWidth: 1,
@@ -697,58 +783,128 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
             }}
           >
             <View style={{ paddingTop: 2 }}>
-              <Icon name="circle-alert" size={16} color={tone.waiting} />
+              <Icon name="shield-check" size={16} color={tone.waiting} />
             </View>
-            <View style={{ flex: 1, minWidth: 0 }}>
-              <Text
-                style={{ ...fontStyle(theme, 500), fontSize: 14, lineHeight: 20, color: c.fg }}
-                numberOfLines={2}
-              >
-                {messages.formatToolName(approval.name)}
-              </Text>
-              <ScrollView
-                style={{
-                  marginTop: 8,
-                  maxHeight: 160,
-                  borderRadius: theme.radius.md,
-                  borderWidth: 1,
-                  borderColor: c.border,
-                  backgroundColor: withAlpha(c["surface-2"], 0.6),
-                }}
-                contentContainerStyle={{ padding: 10 }}
-                nestedScrollEnabled
-              >
-                <Text
-                  selectable
-                  style={{
-                    ...fontStyle(theme, 400, "mono"),
-                    fontSize: theme.size.sm,
-                    lineHeight: 20,
-                    color: c["fg-muted"],
-                  }}
-                >
-                  {payload}
+            <View style={{ flex: 1, minWidth: 0, gap: 8 }}>
+              <View style={{ gap: 2 }}>
+                <Text style={{ ...small, color: tone.waiting }}>
+                  {t("toolActionReview.approvalNeeded")}
                 </Text>
-              </ScrollView>
+                <Text
+                  accessibilityRole="header"
+                  style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 21, color: c.fg }}
+                >
+                  {review.title}
+                </Text>
+                {review.accountLabel ? (
+                  <Text style={{ ...small, color: c["fg-muted"] }}>{review.accountLabel}</Text>
+                ) : null}
+              </View>
+              {note ? <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text> : null}
+              {facts.effects.length > 0 ? (
+                <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
+                  {facts.effects.map((effect) => (
+                    <Text key={effect} style={{ ...body, color: c.fg }}>
+                      {"\u2022 "}
+                      {effect}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+              {facts.shown.length > 0 ? (
+                <View style={{ gap: 6 }}>
+                  {facts.shown.map((field) => (
+                    <View key={field.path}>
+                      <Text style={{ ...small, color: c["fg-muted"] }}>{field.label}</Text>
+                      <Text numberOfLines={4} style={{ ...body, color: c.fg }}>
+                        {field.preview}
+                      </Text>
+                    </View>
+                  ))}
+                  {facts.hiddenFields > 0 ? (
+                    <Text style={{ ...small, color: c["fg-subtle"] }}>
+                      {facts.hiddenFields === 1
+                        ? t("toolActionReview.n1MoreValue")
+                        : t("toolActionReview.hiddenfieldsMoreValues", {
+                            hiddenFields: facts.hiddenFields,
+                          })}
+                    </Text>
+                  ) : null}
+                </View>
+              ) : null}
+              {!canApprove ? (
+                <Text style={{ ...body, color: c.fg }}>
+                  {t("toolActionReview.theDetailsOfThisOlder")}
+                </Text>
+              ) : null}
+              {showDetails ? (
+                <ScrollView
+                  style={{
+                    maxHeight: 160,
+                    borderRadius: theme.radius.md,
+                    borderWidth: 1,
+                    borderColor: c.border,
+                    backgroundColor: withAlpha(c["surface-2"], 0.6),
+                  }}
+                  contentContainerStyle={{ padding: 10 }}
+                  nestedScrollEnabled
+                >
+                  <Text
+                    selectable
+                    style={{
+                      ...fontStyle(theme, 400, "mono"),
+                      fontSize: theme.size.sm,
+                      lineHeight: 20,
+                      color: c["fg-muted"],
+                    }}
+                  >
+                    {payload}
+                  </Text>
+                </ScrollView>
+              ) : null}
               <View
-                style={{ marginTop: 12, flexDirection: "row", justifyContent: "flex-end", gap: 8 }}
+                style={{
+                  marginTop: 4,
+                  flexDirection: "row",
+                  flexWrap: "wrap",
+                  alignItems: "center",
+                  gap: 8,
+                }}
               >
-                <Button
-                  icon="check"
-                  variant="primary"
-                  label={settled[approval.id] === "approve" ? messages.approved : messages.approve}
-                  busy={pending[approval.id] === "approve"}
-                  disabled={busy}
-                  onPress={() => void decide(approval.id, "approve")}
-                />
+                {review.detailsAvailable ? (
+                  <Button
+                    variant="ghost"
+                    label={
+                      showDetails
+                        ? t("approvalSurface.backToReview")
+                        : t("toolActionReview.details")
+                    }
+                    onPress={() =>
+                      setDetails((current) => ({ ...current, [approval.id]: !showDetails }))
+                    }
+                  />
+                ) : null}
+                <View style={{ flex: 1 }} />
                 <Button
                   icon="x"
-                  variant="destructive"
-                  label={settled[approval.id] === "reject" ? messages.rejected : messages.reject}
+                  variant="secondary"
+                  size="form"
+                  label={settled[approval.id] === "reject" ? messages.rejected : rejectLabel}
                   busy={pending[approval.id] === "reject"}
                   disabled={busy}
                   onPress={() => void decide(approval.id, "reject")}
                 />
+                {canApprove ? (
+                  <Button
+                    icon="check"
+                    variant="primary"
+                    size="form"
+                    label={settled[approval.id] === "approve" ? messages.approved : approveLabel}
+                    busy={pending[approval.id] === "approve"}
+                    disabled={busy}
+                    onPress={() => void decide(approval.id, "approve")}
+                  />
+                ) : null}
               </View>
             </View>
           </View>

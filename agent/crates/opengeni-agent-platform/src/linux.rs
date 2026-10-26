@@ -2159,7 +2159,16 @@ pub fn linux_layout_text_keysyms(
     text: &str,
 ) -> PlatformResult<Vec<u32>> {
     let mapping = layout_display
-        .and_then(|display| x11rb::connect(Some(display)).ok())
+        .and_then(|display| {
+            // Xwayland runs as the user; its socket file and server are
+            // checked like any other display before the cookie is sent.
+            X11Display {
+                server: XServerCheck::AgentUser,
+                ..X11Display::named(display)
+            }
+            .connect()
+            .ok()
+        })
         .and_then(|(conn, _)| keyboard_mapping(&conn));
     text.chars()
         .map(|character| match &mapping {

@@ -72,7 +72,11 @@ export type MeetingsListProps = {
    * the list refreshes when the person comes back to it.
    */
   focused?: boolean;
-  /** Space below the list, such as the bottom safe-area inset. */
+  /**
+   * Extra space below the list, such as Android's bottom safe-area inset. On iOS the
+   * list already keeps clear of the bars and the home indicator, including a
+   * translucent header drawn over it.
+   */
   bottomInset?: number;
 };
 
@@ -133,6 +137,7 @@ export function MeetingsList({
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: c.bg }}
+      contentInsetAdjustmentBehavior="automatic"
       refreshControl={
         <RefreshControl
           refreshing={pulling}

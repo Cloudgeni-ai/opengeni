@@ -211,10 +211,12 @@ import {
 } from "./mcp-network";
 import {
   LazyToolModelProvider,
+  catalogConnectableIntegrationLookup,
   createResolveMissingFunctionTool,
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
   restoreDirectDeferredCallArgumentTypes,
+  type ConnectedToolAccount,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { createToolSelector } from "./tool-discovery-decision";
@@ -3597,6 +3599,9 @@ function maybeInstallLazyToolTransport(
       .filter((server) => mcpServerDefersModelSchemas(server))
       .map((server) => mcpServerRegistryId(server)),
   );
+  const harnessControlServer = mcpServers.find(
+    (server) => mcpServerRegistryId(server) === HARNESS_CONTROL_MCP_SERVER_ID,
+  );
   installLazyToolRuntime(
     agent as unknown as Parameters<typeof installLazyToolRuntime>[0],
     transport,
@@ -3639,6 +3644,26 @@ function maybeInstallLazyToolTransport(
       ? createToolSelector(options.toolSearchDecisionModel)
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
+    harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
+    () => {
+      // A labelled account route is a connected account: its connector, the
+      // account when the connector has several, and the kind of need it serves.
+      const accounts = new Map<string, ConnectedToolAccount>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+          continue;
+        const route = server.connectedAccountRoute();
+        if (!route) continue;
+        const account: ConnectedToolAccount = {
+          source: server.registryId,
+          label: route.account ? `${route.connector} (${route.account})` : route.connector,
+          connector: route.connector,
+          ...(route.kind ? { kind: route.kind } : {}),
+        };
+        for (const name of server.modelToolNames()) accounts.set(name, account);
+      }
+      return accounts;
+    },
   );
 }
 
@@ -3737,6 +3762,57 @@ const PLACEMENT_MOVING_TOOL_FAMILIES: ReadonlySet<string> = new Set([
   "computer_open",
   "browser_open",
 ]);
+/** Browser tools whose calls act on one tab; the other browser tools (tabs,
+ * open, lifecycle and so on) act on the whole BrowserSession. */
+const BROWSER_TAB_TOOL_FAMILIES: ReadonlySet<string> = new Set([
+  "browser_act",
+  "browser_observe",
+  "browser_screenshot",
+  "browser_read",
+]);
+
+function stringArgument(args: unknown, name: string): string | undefined {
+  const value =
+    args && typeof args === "object" ? (args as Record<string, unknown>)[name] : undefined;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * The ordering keys of one computer or browser call: the ComputerSession it
+ * names (`computer:<id>`), or for the browser the BrowserSession and, for a
+ * tool that acts on one tab, that tab (`browser:<id>:<tab>`). A call that
+ * names no session acts on the chat's current one, which may be any of them,
+ * so its key is the bare `computer` or `browser`, ordered with every call of
+ * that kind. An open that names no session starts or finds one of its own and
+ * has no key, so several opens of one response still run together. Undefined
+ * for the other tools, whose calls are never ordered by key.
+ */
+export function interactionOrderKeys(
+  family: string,
+): ((toolCall: { arguments: string }) => string[]) | undefined {
+  const computer = family.startsWith("computer_");
+  if (!computer && !family.startsWith("browser_")) return undefined;
+  const opens = PLACEMENT_MOVING_TOOL_FAMILIES.has(family);
+  return (toolCall) => {
+    let args: unknown;
+    try {
+      args = JSON.parse(toolCall.arguments);
+    } catch {
+      args = undefined;
+    }
+    if (computer) {
+      const session = stringArgument(args, "computerSessionId");
+      if (session) return [`computer:${session}`];
+      return opens ? [] : ["computer"];
+    }
+    const session = stringArgument(args, "browserSessionId");
+    if (!session) return opens ? [] : ["browser"];
+    const tab = BROWSER_TAB_TOOL_FAMILIES.has(family)
+      ? stringArgument(args, "targetId")
+      : undefined;
+    return [tab ? `browser:${session}:${tab}` : `browser:${session}`];
+  };
+}
 
 /** Whether one call's arguments name a Connected Machine placement. */
 export function callNamesConnectedMachine(toolCall: { arguments: string }): boolean {
@@ -3764,6 +3840,16 @@ export function callNamesConnectedMachine(toolCall: { arguments: string }): bool
  * it is ordered the same way. A swap inside a Code Mode program is one step of
  * that program's single call and is not ordered against the response's other
  * calls.
+ *
+ * Computer and browser calls that use the same ComputerSession, or the same
+ * BrowserSession tab, also run in model order among themselves (see
+ * interactionOrderKeys). A model that writes an action and then an
+ * observation in one response means the state after the action; started
+ * together, the read could be served first and show the window as it was, or
+ * land between an unfenced action's own fresh read and its dispatch and
+ * replace the reading the action was fenced on. Calls on other sessions or
+ * tabs, and every other tool, stay parallel with them. Native CUA tools are
+ * of the computer_act family, so they are ordered the same way.
  */
 export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
   const listMcpTools = agent.getMcpTools.bind(agent);
@@ -3772,9 +3858,11 @@ export function installRouteMoveOrdering(agent: ApprovalCapableAgent): void {
       if (tool.type !== "function") return tool;
       const family = toolCallFamily(agent.mcpServers ?? [], [], tool.name) ?? "";
       if (ROUTE_MOVING_TOOL_FAMILIES.has(family)) return { ...tool, exclusiveExecution: true };
+      const executionOrderKeys = interactionOrderKeys(family);
+      const ordered = executionOrderKeys ? { ...tool, executionOrderKeys } : tool;
       if (PLACEMENT_MOVING_TOOL_FAMILIES.has(family))
-        return { ...tool, exclusiveExecution: callNamesConnectedMachine };
-      return tool;
+        return { ...ordered, exclusiveExecution: callNamesConnectedMachine };
+      return ordered;
     });
   const clone = agent.clone?.bind(agent);
   if (clone) {
@@ -5285,6 +5373,11 @@ class DeferredPreparedMcpServer implements MCPServer {
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.preparedTarget?.toolDisplayMetadata(name);
+  }
+
+  /** The connected account this server reaches, once prepared. */
+  connectedAccountRoute(): McpAccountRouteLabel | undefined {
+    return this.preparedTarget?.connectedAccountRoute();
   }
 
   async reviewContext(toolName: string, args: Record<string, unknown>) {
@@ -8824,6 +8917,11 @@ export class PrefixedMcpServer implements MCPServer {
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
+  }
+
+  /** The connected account this server reaches, when it is an account route. */
+  connectedAccountRoute(): McpAccountRouteLabel | undefined {
+    return this.accountLabel;
   }
   /** Exact attempt-local classification, including names too long for a prefix. */
   modelToolNames(): Iterable<string> {

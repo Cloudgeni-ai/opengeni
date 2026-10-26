@@ -36994,6 +36994,16 @@
     "@opengeni/react/app.css": {
       "default": "value"
     },
+    "@opengeni/react/approval-review-model": {
+      "APP_ACTION_TOOL_NAME": "value",
+      "approvalAnswerLabels": "value",
+      "approvalArgumentsText": "value",
+      "approvalToolName": "value",
+      "formatApprovalToolName": "value",
+      "pendingApprovalReview": "value",
+      "reviewFacts": "value",
+      "VISIBLE_REVIEW_FIELDS": "value"
+    },
     "@opengeni/react/artifacts": {
       "ArtifactBadge": "value",
       "ArtifactButton": "value",
@@ -37555,6 +37565,42 @@
       "enableCodeEditor": "value",
       "languageForPath": "value",
       "registerCodeEditor": "value"
+    },
+    "@opengeni/react/in-chat-connect-model": {
+      "authNeededPresentation": "value",
+      "AuthNeededPresentation": "type",
+      "canFinishPreparedMcpSetup": "value",
+      "ConnectAttempt": "type",
+      "ConnectAttemptHints": "type",
+      "ConnectController": "type",
+      "ConnectNavigation": "type",
+      "ConnectSetupFlow": "type",
+      "ConnectSetupFlowOptions": "type",
+      "connectSetupStatus": "value",
+      "ConnectView": "type",
+      "ConnectWindowHost": "type",
+      "inChatConnectDecision": "value",
+      "InChatConnectDecision": "type",
+      "InChatConnectSource": "type",
+      "InChatConnectSupport": "type",
+      "IntegrationCapabilityAvailability": "type",
+      "IntegrationCapabilityConnect": "type",
+      "IntegrationCapabilityConnectInput": "type",
+      "isAgentCapabilityRequest": "value",
+      "isInChatConnectRequest": "value",
+      "isPreparedMcpSetup": "value",
+      "McpCapabilityConnect": "type",
+      "McpCapabilityConnectInput": "type",
+      "providerLabel": "value",
+      "reconnectCandidate": "value",
+      "useChatConnectionsAllowed": "value",
+      "useConnect": "value",
+      "useConnectSetupFlow": "value",
+      "useInChatConnectSupport": "value",
+      "useIntegrationCapabilityConnect": "value",
+      "useMcpCapabilityConnect": "value",
+      "usePreparedMcpSetupAccess": "value",
+      "usePreparedMcpSetupAttempt": "value"
     },
     "@opengeni/react/interaction": {
       "AttachedBrowsersClient": "type",
@@ -38192,6 +38238,7 @@
       "SessionAutomationWait": "type",
       "sessionAutomationWaitLabel": "value",
       "sessionDisplayTitle": "value",
+      "sessionHasPendingWake": "value",
       "sessionHasUpcomingSchedule": "value",
       "sessionInputWait": "value",
       "SessionListRow": "type",
@@ -38201,7 +38248,8 @@
       "SessionRecencyGroup": "type",
       "sessionRenameSeed": "value",
       "sessionRepoLabel": "value",
-      "SessionStatusTone": "type"
+      "SessionStatusTone": "type",
+      "withLineageAutomationFacts": "value"
     },
     "@opengeni/react/session-realtime": {
       "CODEX_LIVE_MODEL": "value",

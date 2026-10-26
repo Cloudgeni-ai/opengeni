@@ -278,6 +278,7 @@ import type { ConnectionMetadata, Session, SessionEvent } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
 import { FORK_CURRENT_CHAT_EVENT } from "../lib/actions/events";
 import { usePortalContainer } from "../../ui/portal-container";
+import { sessionHasPendingWake, withLineageAutomationFacts } from "../../session-list-model";
 
 const InlineChatArtifact = lazy(() =>
   import("../components/artifacts/retained-file-preview").then((module) => ({
@@ -1320,6 +1321,7 @@ export function SessionRoute({
       goal={goal}
       queue={queue}
       agentNodes={agentNodes}
+      pendingWake={sessionHasPendingWake(withLineageAutomationFacts(session, lineage.lineage))}
       descendantRefreshSignal={descendantRefreshSignal}
       onDescendantResolved={() => void lineage.refresh()}
       hasOlder={hasOlder}
@@ -1937,6 +1939,8 @@ function SessionChatPane(props: {
   queue: ReturnType<typeof useTurnQueue>;
   /** Spawned-worker lineage children — feeds SessionChrome agents segment. */
   agentNodes: LineageNode[];
+  /** Something will wake this session on its own (a timed wait or an automation). */
+  pendingWake: boolean;
   /** Bumped when a sub-session in this tree changed; open request cards re-read. */
   descendantRefreshSignal: number;
   /** A sub-session's request was settled from this page: re-read the tree. */
@@ -3873,6 +3877,7 @@ function SessionChatPane(props: {
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
                 queuedRecall={queuedRecall}
+                running={usageLimitTreeActive || props.pendingWake}
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,

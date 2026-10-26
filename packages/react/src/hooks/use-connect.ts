@@ -1,8 +1,12 @@
-import type { ConnectController } from "@opengeni/connect";
+import type { ConnectController, ConnectSnapshot } from "@opengeni/connect";
 import { useMemo, useSyncExternalStore } from "react";
 
+/** One Connect attempt as a component sees it: the controller's snapshot and its steps. */
+export type ConnectView = ConnectSnapshot &
+  Pick<ConnectController, "begin" | "recover" | "refresh" | "waitForAction" | "advance" | "cancel">;
+
 /** Internal consumers import the hook directly so setup surfaces stay lazy. */
-export function useConnect(controller: ConnectController) {
+export function useConnect(controller: ConnectController): ConnectView {
   const snapshot = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,

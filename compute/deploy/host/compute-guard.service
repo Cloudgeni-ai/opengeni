@@ -1,9 +1,30 @@
 # The guard of a compute host in a fleet (ADR 18): it stops every VM when
 # the host's lease runs out, whatever happens to the agent, and feeds the
-# watchdog while it runs. It is never restarted and never stopped by an
-# upgrade: if it ends, the watchdog resets the machine, which is what
-# keeps a host that lost its lease from running sandboxes the fleet has
-# already given to another host. Installed by install.sh.
+# watchdog while it runs. If it ends, the watchdog resets the machine,
+# which is what keeps a host that lost its lease from running sandboxes
+# the fleet has already given to another host; so it is never restarted
+# on failure (an exit of its own does not stop the agent, which Requires=
+# it, but the reset follows within the watchdog's timeout).
+#
+# Opening or closing the watchdog, which stays armed (nowayout), feeds it.
+# So the guard opens it only at a step that may feed it (the lease valid or
+# the VMs stopped), and has systemd keep it in this service's file
+# descriptor store, which outlives the guard however it ends: the next
+# guard takes it over from the store without opening it. The store is
+# kept while the service is stopped or failed too, so a guard that crashed
+# never closes it. A guard is ready (and the agent, which waits for that,
+# joins) only once systemd lists the watchdog in the store.
+#
+# An upgrade hands it over: install.sh restarts a guard running another
+# binary once systemd keeps its watchdog (a guard of a release before the
+# store runs on until the host starts again or is replaced). Asked to
+# stop, a guard ends only at a step that may feed the watchdog all the
+# same: at once while the lease is valid, otherwise once the VMs have
+# stopped (if they never do, the watchdog resets the machine, well before
+# the stop times out). The new guard goes on from what the lease file and
+# the freezer show, as any guard starting does, well inside the watchdog's
+# timeout.
+# Installed by install.sh.
 [Unit]
 Description=Opengeni compute host guard: stops the VMs when the fleet lease ends
 Documentation=https://github.com/Cloudgeni-ai/opengeni/blob/main/compute/docs/operations.md
@@ -13,6 +34,9 @@ Requires=compute-host-setup.service
 [Service]
 ExecStart=/opt/compute/current/compute-host guard
 Restart=no
+NotifyAccess=main
+FileDescriptorStoreMax=1
+FileDescriptorStorePreserve=yes
 # The guard holds no memory worth reclaiming and must never be the one the
 # kernel ends.
 OOMScoreAdjust=-1000

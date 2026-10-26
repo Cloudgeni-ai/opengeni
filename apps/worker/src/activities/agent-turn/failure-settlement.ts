@@ -72,6 +72,7 @@ import {
   providerRecoveryCode,
   providerRecoveryLimit,
   PROVIDER_OVERLOAD_RECOVERY_CODE,
+  modelSocketFallbackRecoveryLimit,
   providerRetryAfterMs,
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
@@ -1261,11 +1262,19 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     attempt.executionGeneration > 0;
   const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
   // Call-scoped proof that an in-flight exec_command never dispatched its
-  // command. Those calls settle as not started (replay safe), never unknown,
-  // whether this turn recovers or fails.
+  // command: the provider's typed pre-dispatch refusal in the error, or a call
+  // whose every operation was still waiting for (or had failed in) sandbox
+  // resolution, which settling closes so it never dispatches later. Those
+  // calls settle as not started (replay safe), never unknown, whether this
+  // turn recovers or fails.
   const notStartedToolCallIds = isRoutingMutationOutcomeUnknownError(error)
     ? []
-    : toolCallCommandNotStartedCallIds(error);
+    : [
+        ...new Set([
+          ...toolCallCommandNotStartedCallIds(error),
+          ...(eventing.toolCancellationFenceRef?.current?.settleCommandCallsNotStarted?.() ?? []),
+        ]),
+      ];
   // Custody decides whether replay is safe, not what caused the failure. Keep
   // the existing diagnostic in the permission-controlled terminal event;
   // never copy it into logs or use its retry classification for admission.
@@ -1366,7 +1375,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         recovery: recoveryResult,
         httpOnly: providerTurn.persistentModelTransportHttpOnly === true,
         nextRecoveryCount: nextProviderRecoveryCount,
-        recoveryLimit: providerRecoveryLimit(recoveryCode) ?? Infinity,
+        recoveryLimit: modelSocketFallbackRecoveryLimit(recoveryCode),
       })
     ) {
       providerTurn.persistentModelTransportHttpOnly = true;
@@ -1451,7 +1460,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         control.turnMetricOutcome = "recovering";
         control.activityStatus = "recovering";
         control.activityError = error;
-        const recoveryCause = providerRecoveryCause(failure.code);
+        const recoveryCause = providerRecoveryCause(recoveryCode);
         if (recoveryCause) {
           recordProviderRecoveryOutcome(observability, {
             route: attempt.modelMetricRoute,
@@ -1463,7 +1472,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         return claimedResult(recoveryResult);
       }
       failure = providerRecoveryExhaustedFailure(failure, recoveryResult);
-      const recoveryCause = providerRecoveryCause(failure.code);
+      const recoveryCause = providerRecoveryCause(recoveryCode);
       if (recoveryCause) {
         recordProviderRecoveryOutcome(observability, {
           route: attempt.modelMetricRoute,
