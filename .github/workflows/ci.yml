@@ -217,9 +217,11 @@ jobs:
   # already passed a trusted Batch CI attempt. That push reuses the Batch
   # verdict: its test lanes are skipped, while deployment artifacts, the
   # artifact runtime (including macOS/Windows smoke receipts), workload images,
-  # landed-content verification and the full-green receipts still run. Direct
-  # pushes, schedules, dispatches and any unverifiable evidence run the full
-  # suite. The merge batcher reads this job and step name; see
+  # landed-content verification and the full-green receipts still run. Version
+  # PR, control-plane and CI-definition landings, pushes without such a Batch
+  # attempt, schedules, dispatches and any unverifiable evidence run the full
+  # suite; release admission refuses attested receipts. The merge batcher reads
+  # this job and step name; see
   # docs/merge-batcher.md "Main-push Batch CI attestation".
   batch-attestation:
     name: Batch CI attestation
@@ -247,12 +249,15 @@ jobs:
         id: find
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # Previous main tip: a push that lands CI definitions never attests.
+          BEFORE_SHA: ${{ github.event.before }}
         run: bun scripts/ci/batch-attestation.ts
       # Runs only for a verified proof. Its success is the observable signal the
       # merge batcher's capacity scan uses to stop counting this run as full main.
       - name: Reuse identical-tree Batch CI
         if: ${{ steps.find.outputs.attested == 'true' }}
         env:
+          BEFORE_SHA: ${{ github.event.before }}
           EXPECTED_BATCH_RUN_ID: ${{ steps.find.outputs.batch_run_id }}
           EXPECTED_BATCH_RUN_ATTEMPT: ${{ steps.find.outputs.batch_run_attempt }}
           EXPECTED_BATCH_HEAD_SHA: ${{ steps.find.outputs.batch_head_sha }}

@@ -366,8 +366,12 @@ digests of the plan and result archives, and a complete successful Batch result
 with every expected shard receipt. It also requires the tested tip to be the main
 commit or an ancestor of it, so a tree-preserving refresh landing qualifies. A
 batch containing a Version PR (`changeset-release/main`) or a control-plane PR
-never attests: a release tip and a CI or batcher definition change keep the full
-suite. Both flags are bound into the manifest digest. A
+never attests; both flags are bound into the manifest digest. Nor does a push
+whose landed range (`github.event.before` to `GITHUB_SHA`, which must be a proper
+ancestor range) changes `.github/`, `scripts/ci/` or `scripts/merge-batcher/`:
+those paths define main's own lanes, so a change to them runs the changed lanes.
+The impact planner's broader full-mode fences, such as changesets, the lockfile
+and toolchain files, do not block attestation; Batch CI tests them. A
 final read rejects an attempt that changed during discovery. The
 `Reuse identical-tree Batch CI` step then re-verifies the persisted proof offline
 and runs only for a verified proof. `plan` adopts the attested topology only when
@@ -393,10 +397,12 @@ a full-mode main push that builds images, where every skipped lane above is
 `skipped` (none partially ran) and deployment, artifact runtime and images
 succeeded. The aggregate job names, the `Full CI` commit status and the
 `full-green-main-<sha>` receipt (`schemaVersion: 1`, `mode: "full"`) are
-unchanged for release candidate selection, publish/canary admission,
-Opengeni-ops `Deploy Staging Canary` and ordinary release. The receipt adds an
-`attestation` object (Batch run ID, attempt, tested head and tree), and the
-status description names the Batch run. The `batch-attestation-<sha>` artifact
+unchanged for publish/canary admission, Opengeni-ops `Deploy Staging Canary`
+and the merge-content audit. The receipt adds an `attestation` object (Batch run
+ID, attempt, tested head and tree), and the status description names the Batch
+run. Release admission (`scripts/check-release-pr-automation.mjs`) refuses a
+receipt with `attestation`: a release source, including a later tested
+descendant of a Version merge, needs the full main suite. The `batch-attestation-<sha>` artifact
 keeps the full proof for 30 days.
 
 **Coverage.** This is an explicit coverage reduction for batcher landings. Batch
@@ -404,10 +410,16 @@ CI covers impact-selected source contracts and impact-selected unit shards on th
 exact tree. It does not cover the full unit inventory, real-service, E2E,
 browser, package-contract, publish-closure, SDK-compatibility or example-build
 lanes. Those lanes were never landing gates, because the batcher lands on Batch
-success whatever main CI reports. They still run in full on direct pushes, the
-weekly schedule and the `workflow_dispatch` run of every exact Version PR head
-before a release. That dispatch is the release gate: queue-green and attested
-main remain non-release evidence.
+success whatever main CI reports. Staging canary deploys attested SHAs with
+those images. The lanes still run in full on every push without an
+identical-tree trusted `queue/live` Batch attempt (ordinary direct pushes), on
+Version PR, control-plane and CI-definition landings, on the weekly schedule and
+on the `workflow_dispatch` run of every exact Version PR head before a release.
+A direct push or revert whose tree exactly equals an earlier tested batch tip
+also attests. Release admission requires a non-attested full-green receipt, so
+queue-green and attested main remain non-release evidence. An attested base's
+green `units` class covers only the units Batch selected, so failed-cohort
+comparison can blame a cohort for a failure an unselected main test already had.
 
 The merge batcher treats a run as attested only from its complete job listing.
 It needs exactly one successful `Batch CI attestation` job whose

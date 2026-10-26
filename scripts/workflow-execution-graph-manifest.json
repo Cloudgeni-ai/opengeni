@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "02640a2376862515db1a512eca8aafd8ad5094b673c73172f87430bebee59d6b"
+      "sha256": "3e5b1a79c089cf7e181249f1492bebcc76f755f23d78a5851ea9d769634a58e2"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -753,13 +753,13 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "batch-attestation",
       "step": "Find identical-tree trusted Batch CI",
-      "sha256": "197c7af50913333558bef743809b654a11d73f23fc2b148d05e9cc507287718b"
+      "sha256": "03c091c9f5a0c11333c400cf60a4bd63633e4b8e8c32501a8a32e816dc697be3"
     },
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "batch-attestation",
       "step": "Reuse identical-tree Batch CI",
-      "sha256": "c0e5c31a2c7e55733a0f01e538c1df1755ee76d0e6385bc97ed8358d489427f4"
+      "sha256": "cac69930744d714d81f2e464cd54826647dd05845a9fab11dd6359ce34abe301"
     },
     {
       "workflow": ".github/workflows/ci.yml",

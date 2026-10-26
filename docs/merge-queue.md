@@ -93,9 +93,10 @@ A merge-batcher landing whose exact tree already passed a trusted Batch CI attem
 publishes the same status and receipt (`mode: "full"`) from an attested run. Its
 test lanes are skipped, while deployment artifacts, the artifact runtime, workload
 images and landed-content checks still run. The receipt's `attestation` object
-names the reused Batch run, attempt, tested head and tree. Version PR and
-control-plane landings, direct pushes, schedules and dispatches always run the full
-suite. See "Main-push Batch CI attestation" in [merge-batcher.md](merge-batcher.md)
+names the reused Batch run, attempt, tested head and tree. Version PR,
+control-plane and CI-definition landings, pushes without an identical-tree Batch
+attempt, schedules and dispatches run the full suite. Release admission refuses
+attested receipts. See "Main-push Batch CI attestation" in [merge-batcher.md](merge-batcher.md)
 for the proof and the explicit coverage trade-off.
 
 Every push also runs `merge-content.yml`, independently of full-run coalescing.

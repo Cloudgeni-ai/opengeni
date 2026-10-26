@@ -30,6 +30,18 @@ export const ATTESTATION_BRANCH = /^queue\/live\/[a-f0-9]{64}$/;
 /** ci.yml job/step names; the merge batcher's capacity scan reads the same names. */
 export const ATTESTATION_JOB = MAIN_ATTESTATION_JOB;
 export const ATTESTATION_STEP = MAIN_ATTESTATION_STEP;
+/**
+ * Paths that define main's own test lanes, required results or batcher trust
+ * (workflows, composite actions, CI scripts, the batcher). A push that lands
+ * any of them runs the full suite, so the changed lanes really execute. The
+ * impact planner's broader full-mode fences (changesets, lockfile, toolchain)
+ * are still tested by Batch CI and do not prevent attestation.
+ */
+export const ATTESTATION_BLOCKING_PATHS = [
+  /^\.github\//,
+  /^scripts\/ci\//,
+  /^scripts\/merge-batcher\//,
+] as const;
 
 export type BatchAttestation = BatchUnitProof;
 export type AttestationReads = ProofReads & {
@@ -50,7 +62,11 @@ function reject(reason: string): never {
  */
 export function verifyBatchAttestation(
   raw: unknown,
-  expected: BatchTreeExpectation & { testedIsAncestor: boolean },
+  expected: BatchTreeExpectation & {
+    testedIsAncestor: boolean;
+    /** Every path this push lands (`before..mainSha`), or null when unknown. */
+    landedPaths: readonly string[] | null;
+  },
 ): BatchAttestation {
   const proof = verifyBatchTreeProof(raw, { ...expected, branch: ATTESTATION_BRANCH });
   if (proof.batch.head_branch !== `queue/live/${proof.manifest.batchId}`)
@@ -64,15 +80,27 @@ export function verifyBatchAttestation(
     )
   )
     reject("Version PR and control-plane landings run the full main suite");
+  requireAttestablePush(expected.landedPaths);
   if (expected.testedIsAncestor !== true) reject("tested Batch tip is not contained in main");
   return proof;
+}
+
+/** Rejects an unknown push range or one that changes main's own CI definitions. */
+export function requireAttestablePush(landedPaths: readonly string[] | null): void {
+  if (!Array.isArray(landedPaths) || landedPaths.length === 0)
+    reject("this push's landed paths are unknown");
+  const blocking = landedPaths.find((path) =>
+    ATTESTATION_BLOCKING_PATHS.some((pattern) => pattern.test(path)),
+  );
+  if (blocking !== undefined) reject(`push changes CI definition ${blocking}`);
 }
 
 /** Bounded discovery of the newest trusted identical-tree live Batch attempt. */
 export async function findBatchAttestation(
   reads: AttestationReads,
-  context: BatchTreeExpectation,
+  context: BatchTreeExpectation & { landedPaths: readonly string[] | null },
 ): Promise<BatchAttestation | null> {
+  requireAttestablePush(context.landedPaths);
   const proof = await findBatchTreeProof(reads, context, {
     branch: ATTESTATION_BRANCH,
     acceptPlan: (plan) => validInventory(plan.unitTests),
@@ -112,12 +140,13 @@ async function gitContext(env: Record<string, string | undefined>) {
   const gitDir = (await Bun.$`git rev-parse --absolute-git-dir`.text()).trim();
   const git = new GitStore(gitDir);
   const mainSha = await git.exec(["rev-parse", "HEAD"]);
-  const context: BatchTreeExpectation = {
+  const context: BatchTreeExpectation & { landedPaths: string[] | null } = {
     repository: env.GITHUB_REPOSITORY ?? "",
     mainSha,
     tree: await git.exec(["rev-parse", `${mainSha}^{tree}`]),
     runId: Number(env.GITHUB_RUN_ID),
     attempt: Number(env.GITHUB_RUN_ATTEMPT),
+    landedPaths: null,
   };
   if (
     env.GITHUB_EVENT_NAME !== "push" ||
@@ -135,7 +164,27 @@ async function gitContext(env: Record<string, string | undefined>) {
       throw error;
     }
   };
+  // Everything this push lands: the push event's previous main tip must be a
+  // proper ancestor (no force push, branch creation or unknown range).
+  context.landedPaths = await pushLandedPaths(git, env.BEFORE_SHA ?? "", mainSha, isAncestor);
   return { git, context, isAncestor };
+}
+
+/**
+ * Paths changed by a main push from `before` to `mainSha`, or null when the
+ * range is unknown: a missing, zero or equal `before`, or one that `mainSha`
+ * does not contain (force push).
+ */
+export async function pushLandedPaths(
+  git: Pick<GitStore, "exec">,
+  before: string,
+  mainSha: string,
+  isAncestor: (sha: string) => Promise<boolean>,
+): Promise<string[] | null> {
+  if (!/^[a-f0-9]{40}$/.test(before) || /^0+$/.test(before) || before === mainSha) return null;
+  if (!(await isAncestor(before))) return null;
+  const diff = await git.exec(["diff", "--name-only", "--no-renames", before, mainSha]);
+  return diff.split("\n").filter(Boolean);
 }
 
 function emit(env: Record<string, string | undefined>, proof: BatchAttestation | null) {

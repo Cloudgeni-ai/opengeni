@@ -13,6 +13,7 @@ import {
   attestationOutputs,
   attestationSummary,
   findBatchAttestation,
+  pushLandedPaths,
   verifyBatchAttestation,
   type AttestationReads,
 } from "./batch-attestation";
@@ -61,6 +62,10 @@ function landing(options: { inventory?: string[]; pull?: Record<string, unknown>
     tree: context.tree,
     runId: context.runId,
     attempt: context.attempt,
+    // Ordinary product landing: changesets and lockfiles do not block.
+    landedPaths: ["apps/web/src/page.tsx", ".changeset/quiet-owls.md", "bun.lock"] as
+      | string[]
+      | null,
   };
   return { proof, expectation };
 }
@@ -131,6 +136,36 @@ describe("main-push Batch CI attestation", () => {
     ).toBe(plain.proof);
   });
 
+  test.each([
+    ".github/workflows/ci.yml",
+    ".github/actions/setup/action.yml",
+    "scripts/ci/required-results.jq",
+    "scripts/ci/run-unit-shard.ts",
+    "scripts/merge-batcher/model.ts",
+  ])("keeps the full suite for a push that lands %s", async (path) => {
+    const { proof, expectation } = landing();
+    const landed = { ...expectation, landedPaths: ["apps/web/src/page.tsx", path] };
+    expect(() => verifyBatchAttestation(proof, { ...landed, testedIsAncestor: true })).toThrow(
+      `push changes CI definition ${path}`,
+    );
+    // Discovery refuses before any provider read.
+    const reads = attestationReads(proof);
+    reads.get = async () => {
+      throw new Error("provider read");
+    };
+    await expect(findBatchAttestation(reads, landed)).rejects.toThrow("CI definition");
+  });
+
+  test.each([[null], [[]]] as [string[] | null][])(
+    "an unknown push range (%p) keeps the full suite",
+    (landedPaths) => {
+      const { proof, expectation } = landing();
+      expect(() =>
+        verifyBatchAttestation(proof, { ...expectation, landedPaths, testedIsAncestor: true }),
+      ).toThrow("landed paths are unknown");
+    },
+  );
+
   test("accepts a complete docs/control-only Batch plan with no unit shards", () => {
     const { proof, expectation } = landing({ inventory: [] });
     expect(
@@ -171,6 +206,41 @@ describe("main-push Batch CI attestation", () => {
         tree: "e".repeat(40),
       }),
     ).toBeNull();
+  });
+
+  test("push range is the exact landed diff and unknown for force pushes or new refs", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "batch-attestation-git-"));
+    try {
+      const git = (...args: string[]) => {
+        const run = Bun.spawnSync(["git", "-C", directory, ...args], {
+          env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+        });
+        if (run.exitCode !== 0) throw new Error(run.stderr.toString());
+        return run.stdout.toString().trim();
+      };
+      git("init", "-q", "-b", "main");
+      const commit = (path: string) => {
+        writeFileSync(join(directory, path.replaceAll("/", "_")), path);
+        git("add", "-A");
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", path);
+        return git("rev-parse", "HEAD");
+      };
+      const first = commit("a.ts");
+      const second = commit("b.ts");
+      const third = commit("c.ts");
+      git("checkout", "-q", "-b", "side", first);
+      const side = commit("d.ts");
+      const store = { exec: async (args: string[]) => git(...args) };
+      const ancestor = (tip: string) => async (sha: string) =>
+        Bun.spawnSync(["git", "-C", directory, "merge-base", "--is-ancestor", sha, tip])
+          .exitCode === 0;
+      expect(await pushLandedPaths(store, first, third, ancestor(third))).toEqual(["b.ts", "c.ts"]);
+      expect(await pushLandedPaths(store, second, third, ancestor(third))).toEqual(["c.ts"]);
+      for (const before of ["", "0".repeat(40), third, side, "not-a-sha"])
+        expect(await pushLandedPaths(store, before, third, ancestor(third))).toBeNull();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("no verified proof means the full suite", () => {
@@ -225,6 +295,9 @@ describe("ci.yml attested topology", () => {
     const step = job.steps!.find((s) => s.name === MAIN_ATTESTATION_STEP)!;
     expect(step.if).toBe("${{ steps.find.outputs.attested == 'true' }}");
     expect(step.run).toBe("bun scripts/ci/batch-attestation.ts verify");
+    const find = job.steps!.find((s) => s.id === "find")! as { env?: Record<string, string> };
+    for (const bound of [find, step as { env?: Record<string, string> }])
+      expect(bound.env?.BEFORE_SHA).toBe("${{ github.event.before }}");
     expect(needs(workflow.jobs.plan!)).toContain("batch-attestation");
     const bind = workflow.jobs.plan!.steps!.find((s) => s.id === "attestation")!;
     expect(bind.run).toContain('[ "$RESULT" = success ]');
