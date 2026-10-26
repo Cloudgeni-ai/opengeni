@@ -19,7 +19,7 @@ import {
   isTurnExecutionEvidence,
   orderTimelineEvents,
   prescanTurnAnchors,
-} from "@opengeni/contracts/timeline-order";
+} from "@opengeni/sdk/timeline-order";
 import fleetDecisionItem from "./fleet-decision-projection";
 import { isAgentWorkHumanInput } from "./agent-work-human-input";
 import { learningRefusalFromToolOutput } from "@opengeni/sdk/learning-refusal";

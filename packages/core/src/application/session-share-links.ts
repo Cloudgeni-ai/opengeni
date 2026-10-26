@@ -5,6 +5,7 @@ import {
   SHARED_SESSION_MAX_BYTES,
   SHARED_SESSION_MAX_MESSAGES,
   SharedSessionSnapshot,
+  SessionEventType,
   type AccessGrant,
   type Session,
   type SessionEvent,
@@ -14,7 +15,11 @@ import {
   type SharedSession,
   type SharedSessionMessage,
 } from "@opengeni/contracts";
-import { orderTimelineEvents, prescanTurnAnchors } from "@opengeni/contracts/timeline-order";
+import {
+  isTurnExecutionEvidence,
+  orderTimelineEvents,
+  prescanTurnAnchors,
+} from "@opengeni/contracts/timeline-order";
 import {
   findLiveSessionShareLink,
   getLiveSessionShareLink,
@@ -69,23 +74,32 @@ type SnapshotEvent = Pick<SessionEvent, "id" | "type" | "sequence" | "turnId" | 
  * The events that decide what the chat shows: each message and reply, and
  * the queue and turn signals that say whether a queued message ever ran
  * (edited, deleted or cancelled before it started means it never appears).
+ * Every kind the timeline counts as a turn having run is included, so older
+ * chats missing `turn.started` place messages exactly as the chat does.
+ * Streaming deltas, tool calls and model usage are left out: they only ever
+ * follow their turn's model request, which already counts, so they can't
+ * change the result and would only add bulky reads.
  */
-const SNAPSHOT_EVENT_TYPES = [
-  "user.message",
-  "agent.message.completed",
-  "turn.queued",
-  "turn.started",
-  "turn.completed",
-  "turn.failed",
-  "turn.cancelled",
-  "turn.superseded",
-  "turn.recovery.requested",
-  "turn.capacity_waiting",
-  "session.requiresAction",
-  "usage.exhausted",
-  "session.queue.changed",
-  "session.control.steer_requested",
-] as const satisfies readonly SessionEvent["type"][];
+function isOrderingOnlyAfterModelRequest(type: string): boolean {
+  return (
+    type.endsWith(".delta") || type.startsWith("agent.toolCall.") || type === "agent.model.usage"
+  );
+}
+
+export const SNAPSHOT_EVENT_TYPES: readonly SessionEvent["type"][] = [
+  ...new Set<SessionEvent["type"]>([
+    "user.message",
+    "agent.message.completed",
+    "turn.queued",
+    "turn.started",
+    "turn.cancelled",
+    "session.queue.changed",
+    "session.control.steer_requested",
+    ...SessionEventType.options.filter(
+      (type) => isTurnExecutionEvidence(type) && !isOrderingOnlyAfterModelRequest(type),
+    ),
+  ]),
+];
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)

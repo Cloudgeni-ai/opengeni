@@ -9462,6 +9462,11 @@
       margin-top: calc(var(--spacing) * 0.5);
     }
   }
+:where(.og-root).sm\:mr-auto,:where(.og-root) .sm\:mr-auto {
+    @media (width >= 40rem) {
+      margin-right: auto;
+    }
+  }
 :where(.og-root).sm\:line-clamp-2,:where(.og-root) .sm\:line-clamp-2 {
     @media (width >= 40rem) {
       overflow: hidden;

@@ -36242,6 +36242,14 @@
       "ThisComputerSystemNames": "type",
       "ThisComputerUnsubscribe": "type"
     },
+    "@opengeni/sdk/timeline-order": {
+      "isAgentActivityEvent": "value",
+      "isTurnExecutionEvidence": "value",
+      "orderTimelineEvents": "value",
+      "prescanTurnAnchors": "value",
+      "TimelineOrderEvent": "type",
+      "TurnAnchorPrescan": "type"
+    },
     "@opengeni/sdk/tool-auth": {
       "deriveToolTokenKey": "value",
       "mintToolToken": "value",

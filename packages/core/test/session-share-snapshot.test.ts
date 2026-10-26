@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { SHARED_SESSION_MAX_MESSAGES } from "@opengeni/contracts";
+import { SHARED_SESSION_MAX_MESSAGES, SessionEventType } from "@opengeni/contracts";
+import { isTurnExecutionEvidence } from "@opengeni/contracts/timeline-order";
 
 import {
   buildSharedSessionSnapshot,
   plainShareTitle,
+  SNAPSHOT_EVENT_TYPES,
   sharedMessageText,
   sharedSenderName,
 } from "../src/application/session-share-links";
@@ -136,6 +138,49 @@ describe("chat share link snapshot", () => {
       event(6, "agent.message.completed", { text: "First answer.", phase: "final_answer" }, "t1"),
       event(7, "turn.completed", {}, "t1"),
       event(8, "turn.started", { triggerEventId: "e4" }, "t2"),
+      event(9, "agent.message.completed", { text: "Second answer.", phase: "final_answer" }, "t2"),
+      event(10, "turn.completed", {}, "t2"),
+    ]);
+    expect(snapshot.messages.map((message) => message.text)).toEqual([
+      "First",
+      "First answer.",
+      "Second, sent while the first ran",
+      "Second answer.",
+    ]);
+  });
+
+  test("reads every kind the timeline counts as a turn having run, except bulk that follows a model request", () => {
+    const evidence = SessionEventType.options.filter(isTurnExecutionEvidence);
+    const skipped = evidence.filter((type) => !SNAPSHOT_EVENT_TYPES.includes(type));
+    expect(skipped.sort()).toEqual(
+      evidence
+        .filter(
+          (type) =>
+            type.endsWith(".delta") ||
+            type.startsWith("agent.toolCall.") ||
+            type === "agent.model.usage",
+        )
+        .sort(),
+    );
+    expect(SNAPSHOT_EVENT_TYPES).toContain("agent.model.request");
+    expect(SNAPSHOT_EVENT_TYPES).toContain("turn.startup.phase.started");
+    expect(SNAPSHOT_EVENT_TYPES).toContain("tool.auth_needed");
+  });
+
+  test("an older chat without turn.started places a queued message where its turn first ran", () => {
+    const { snapshot } = buildSharedSessionSnapshot([
+      event(1, "user.message", { text: "First", routing: "accepted_for_execution" }),
+      event(
+        2,
+        "turn.queued",
+        { turnId: "t1", triggerEventId: "e1", routing: "accepted_for_execution" },
+        "t1",
+      ),
+      event(3, "turn.started", { triggerEventId: "e1" }, "t1"),
+      ...queued(4, "Second, sent while the first ran", "t2"),
+      event(6, "agent.message.completed", { text: "First answer.", phase: "final_answer" }, "t1"),
+      event(7, "turn.completed", {}, "t1"),
+      event(8, "turn.startup.phase.started", {}, "t2"),
       event(9, "agent.message.completed", { text: "Second answer.", phase: "final_answer" }, "t2"),
       event(10, "turn.completed", {}, "t2"),
     ]);
