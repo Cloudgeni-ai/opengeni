@@ -620,6 +620,15 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
               this.forgetReleasedAttachment(tabId);
             throw error;
           }
+          // Chrome refuses, before sending it anywhere, a command for a tab it
+          // no longer debugs: the attachment ended (Chrome ends it when
+          // another extension adds a frame to the page) and its detach has
+          // not been reported yet. Nothing of this command reached the page.
+          if (chromeNotAttached(error)) throw new EndedAttachmentRefusal();
+          // Refused because the tab holds another extension's page; nothing
+          // of this command ran.
+          const frameRefusal = commandFrameRefusal(error);
+          if (frameRefusal) throw frameRefusal;
           // Chrome ended the attachment while it handled this command, so
           // nothing of it is left to arrive later; whether it took effect is
           // unknown.
@@ -657,8 +666,32 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       }
       return (await this.browserCommand(method, params)) as T;
     } catch (error) {
+      if (error instanceof EndedAttachmentRefusal && options.sessionId) {
+        await this.endAttachmentChromeEnded(options.sessionId);
+        throw new InteractionControllerError(
+          "resource_unavailable",
+          "Browser tab debugging disconnected; observe the tab again",
+          true,
+        );
+      }
       throw mapBridgeError(method, error, options.sessionId);
     }
+  }
+
+  /** Chrome no longer debugs the tab of this session, though the extension
+   * has not reported its detach yet. Wait briefly for that report, which ends
+   * the session the way any detach does; without it, end the session here,
+   * so the tab's next use attaches again rather than repeating the refusal. */
+  private async endAttachmentChromeEnded(sessionId: string): Promise<void> {
+    const tabId = this.sessionTabs.get(sessionId);
+    if (!tabId) return;
+    const deadline = Date.now() + REFUSED_NAVIGATION_DETACH_WAIT_MS;
+    while (this.sessionTabs.get(sessionId) === tabId) {
+      if (this.stopped || this.failure || Date.now() >= deadline) break;
+      this.wakePoll?.();
+      await delay(POLL_INTERVAL_MS);
+    }
+    if (this.sessionTabs.get(sessionId) === tabId) this.forgetReleasedAttachment(tabId);
   }
 
   on(method: string, listener: EventListener, sessionId?: string): () => void {
@@ -1428,15 +1461,7 @@ function attachRefusal(error: unknown): unknown {
       boundedReason(reason, 1_024),
       false,
     );
-  if (reason.includes(OTHER_EXTENSION_FRAME_REFUSAL))
-    return new InteractionControllerError(
-      "resource_unavailable",
-      "Another browser extension has added its own frame to this page (password managers do " +
-        "this for their inline menu), and Chrome does not let the Opengeni Browser extension " +
-        "control a tab while it has one. Update the Opengeni Browser extension, turn off that " +
-        "extension's inline menu for this site, or use a managed browser",
-      false,
-    );
+  if (reason.includes(OTHER_EXTENSION_FRAME_REFUSAL)) return otherExtensionFrameError();
   return new InteractionControllerError(
     "resource_unavailable",
     `Chrome would not let the Opengeni Browser extension control this tab (${boundedReason(
@@ -1445,6 +1470,38 @@ function attachRefusal(error: unknown): unknown {
     )}); retrying will not help until that changes. Use another tab or a managed browser`,
     false,
   );
+}
+
+function otherExtensionFrameError(): InteractionControllerError {
+  return new InteractionControllerError(
+    "resource_unavailable",
+    "Another browser extension has added its own frame to this page (password managers do " +
+      "this for their inline menu), and Chrome does not let the Opengeni Browser extension " +
+      "control a tab while it has one. Update the Opengeni Browser extension, turn off that " +
+      "extension's inline menu for this site, or use a managed browser",
+    false,
+  );
+}
+
+/** Chrome can keep a tab attached while it holds another extension's page as
+ * a frame (it attached while the frame was still loading), but then refuses
+ * every command with the same words as a refused attach, without running it.
+ * The extension removes such frames and sends the command again; when it
+ * could not (or is older), the tab stays refused until the page changes.
+ * Null for any other failure. */
+function commandFrameRefusal(error: unknown): InteractionControllerError | null {
+  if (!(error instanceof AttachedBrowserBridgeError) || error.code !== "driver_rejected")
+    return null;
+  const reason = error.message.trim();
+  if (error.extensionCode === "tab_unavailable" && reason.length > 0)
+    return new InteractionControllerError(
+      "resource_unavailable",
+      boundedReason(reason, 1_024),
+      false,
+    );
+  return reason.startsWith(`Cannot access a ${OTHER_EXTENSION_FRAME_REFUSAL}`)
+    ? otherExtensionFrameError()
+    : null;
 }
 
 /** At most `maxBytes` UTF-8 bytes of `text`, cut on a code point, with an
@@ -1472,6 +1529,20 @@ function chromeDetachedDuringCommand(error: unknown): boolean {
     error.message.trim() === "Detached while handling command."
   );
 }
+
+/** chrome.debugger refuses a command for a tab it is not attached to with
+ * "Debugger is not attached to the tab with id: 7.", without sending it. */
+function chromeNotAttached(error: unknown): boolean {
+  return (
+    error instanceof AttachedBrowserBridgeError &&
+    error.code === "driver_rejected" &&
+    /^Debugger is not attached to the \w+ with id\b/u.test(error.message.trim())
+  );
+}
+
+/** A command Chrome refused because the attachment it was sent on had already
+ * ended; carried from the bridge call to where the session is ended. */
+class EndedAttachmentRefusal extends Error {}
 
 /** chrome.debugger rejects a command the browser refused with the protocol's
  * own error object serialized as the message, for example

@@ -185,6 +185,15 @@ describe("BrowserControlServer", () => {
       error: new CdpSessionDetachedError("Page.getFrameTree"),
     },
     {
+      // The target state route is as read-only as an observation.
+      operation: "targetState" as const,
+      label: "observation",
+      suffix: "/state",
+      code: "resource_unavailable",
+      status: 503,
+      error: new CdpSessionDetachedError("Page.getFrameTree"),
+    },
+    {
       operation: "listTargets" as const,
       label: "target inventory",
       suffix: "",
@@ -1537,7 +1546,13 @@ async function withServer(
     screenshotError?: Error;
     closeError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch",
     ) => void;
     allowedOrigins?: readonly string[];
     uploadArtifact?: (path: string, authority: BrowserStateUploadAuthority) => Promise<void>;
@@ -1612,7 +1627,13 @@ function fakeDriver(
     screenshotError?: Error;
     closeError?: Error;
     beforeDriverOperation?: (
-      operation: "listTargets" | "observe" | "openTarget" | "openTargetWithInventory" | "dispatch",
+      operation:
+        | "listTargets"
+        | "observe"
+        | "targetState"
+        | "openTarget"
+        | "openTargetWithInventory"
+        | "dispatch",
     ) => void;
   },
 ): BrowserSupervisorDriver {
@@ -1685,6 +1706,7 @@ function fakeDriver(
       return observation();
     },
     async targetState() {
+      options.beforeDriverOperation?.("targetState");
       return {
         browserSessionId: context.browserSessionId,
         controllerGeneration: context.controllerGeneration,

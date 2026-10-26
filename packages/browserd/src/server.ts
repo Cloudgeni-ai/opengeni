@@ -878,7 +878,9 @@ export class BrowserControlServer {
       );
     }
     if (operation === "state" && request.method === "GET") {
-      return success(await this.supervisor.targetState(reference, targetId));
+      return await browserReadResponse("observation", () =>
+        this.supervisor.targetState(reference, targetId),
+      );
     }
     if (operation === "dom-read" && request.method === "POST") {
       const parsed = BrowserDomReadRequest.safeParse(await readJson(request));

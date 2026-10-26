@@ -42,9 +42,10 @@ const UPDATE_CHECK_INTERVAL_MS = 10 * 60_000;
 // extension adds one of its own pages to it as a frame, and refuses to attach
 // again while that frame is there; Chromium treats this as intended. Password
 // managers do it whenever a login field gets focus, to show their inline menu.
-// So when Chrome ends debugging of a tab, or refuses to attach to one, the
-// extension removes other extensions' frames from it. A page that keeps adding
-// them is left alone after this many removals in this window.
+// So when Chrome ends debugging of a tab, refuses to attach to one, or refuses
+// a command for one, the extension removes other extensions' frames from it. A
+// page that keeps adding them is left alone after this many removals in this
+// window.
 const FRAME_REMOVAL_LIMIT = 5;
 const FRAME_REMOVAL_WINDOW_MS = 30_000;
 // Extensions known to add such frames, named in the error when one keeps doing it.
@@ -424,8 +425,30 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
         tabId,
         ...(command.sessionId ? { sessionId: command.sessionId } : {}),
       };
-      const response = await chrome.debugger.sendCommand(source, command.method, command.params);
-      return { result: response ?? {} };
+      const send = () => chrome.debugger.sendCommand(source, command.method, command.params);
+      try {
+        return { result: (await send()) ?? {} };
+      } catch (error) {
+        // Chrome can keep debugging a tab that holds another extension's page
+        // as a frame (one it attached to while the frame was still loading)
+        // but then refuses every command, without running it. Remove the
+        // frames and send the command again, once.
+        if (!otherExtensionFrameRefusal(error)) throw error;
+        const removed = await removeOtherExtensionFrames(tabId);
+        if (removed === null) throw otherExtensionFramesError(tabId);
+        if (attachedDebuggerTabs.get(tabId) !== attachment) {
+          throw new BridgeCommandError(
+            "debugger_unavailable",
+            `The ${BRAND.product} attachment this command was sent for has ended`,
+          );
+        }
+        try {
+          return { result: (await send()) ?? {} };
+        } catch (retry) {
+          if (!otherExtensionFrameRefusal(retry)) throw retry;
+          throw removed.length > 0 ? otherExtensionFramesError(tabId) : unremovableFrameError();
+        }
+      }
     }
     case "downloads.find":
       return { downloads: await findDownloads(command.url, command.startedAfter) };
