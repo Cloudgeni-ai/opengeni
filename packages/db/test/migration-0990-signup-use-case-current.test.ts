@@ -17,7 +17,7 @@ import {
   inspectRuntimeDatabasePosture,
 } from "../src/runtime-posture";
 
-const migration = new URL("../drizzle/0982_signup_use_case_current.sql", import.meta.url);
+const migration = new URL("../drizzle/0990_signup_use_case_current.sql", import.meta.url);
 const TABLE = "organization_signup_current_use_cases";
 
 test("the current answer is a securely shaped tenant table with row grants only", async () => {

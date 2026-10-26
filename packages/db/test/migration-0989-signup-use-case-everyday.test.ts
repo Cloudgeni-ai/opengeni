@@ -7,7 +7,7 @@ import { provisionRoles } from "../src/provision-roles";
 import { createDb } from "../src/database";
 import { recordOrganizationSignupUseCase } from "../src/organization-signup-use-cases";
 
-const migration = new URL("../drizzle/0981_signup_use_case_everyday.sql", import.meta.url);
+const migration = new URL("../drizzle/0989_signup_use_case_everyday.sql", import.meta.url);
 
 test("everyday widens the signup answers and keeps the capability's search path", async () => {
   const source = await readFile(migration, "utf8");
