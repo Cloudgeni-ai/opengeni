@@ -4,6 +4,7 @@ import {
 } from "./provider-recovery-clock";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
+import { resolveSessionAppActionAuthority } from "./session-admin-access";
 export * from "./site-session-access";
 import { siteSessionAccessFilter } from "./site-session-access";
 import {
@@ -2249,6 +2250,35 @@ export async function resolveNamedManagedPersonalWorkspaceGrant(
     permissions: managedPersonalWorkspacePermissions,
     principalKind: "human_session",
   };
+}
+
+/**
+ * Whether this turn's app actions can change the workspace's settings right
+ * now: the turn may make changes (full access, or each change confirmed by the
+ * person who sent it), its access includes workspace:admin, and the person it
+ * acts as still holds the grant the settings routes accept (workspace:admin
+ * here, or ownership of this Personal workspace). The route still decides.
+ */
+export async function turnCanChangeWorkspaceSettings(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<boolean> {
+  const authority = await resolveSessionAppActionAuthority(db, input);
+  if (authority.kind === "unavailable" || authority.kind === "read_only") return false;
+  if (authority.kind === "confirm" && !authority.permissions.includes("workspace:admin")) {
+    return false;
+  }
+  const { subjectId } = authority;
+  return await withWorkspaceSubjectRls(db, input.workspaceId, subjectId, async (tx) => {
+    const membership = await getWorkspaceGrant(tx, subjectId, input.workspaceId);
+    if (membership?.accountId === input.accountId) {
+      return membership.permissions.includes("workspace:admin");
+    }
+    return (
+      subjectId.startsWith("user:") &&
+      (await resolveNamedManagedPersonalWorkspaceGrant(tx, { ...input, subjectId })) !== null
+    );
+  });
 }
 
 export const allAccountPermissions: Permission[] = [

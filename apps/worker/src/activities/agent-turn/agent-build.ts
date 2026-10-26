@@ -11,6 +11,7 @@ import {
   readSubscriptionCoreProviderRouteForWorkspace,
   SUBSCRIPTION_CORE_XAI,
   SUBSCRIPTION_CORE_XAI_PROVIDER,
+  turnCanChangeWorkspaceSettings,
 } from "@opengeni/db";
 import { subscriptionCoreVideoGenerationCredentialLease } from "../video-generation-subscription-core";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
@@ -509,10 +510,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
-  // The video tools stay attached wherever video could ever run here; each
-  // call reads the workspace's live policy and credential, so a turn that
-  // turns video on can use it, and a workspace with video off gets a plain
-  // answer (with the way to turn it on) instead of a missing tool.
+  // The video tools are attached whenever the deployment has object storage,
+  // a sandbox and the agent has the media tools, whatever the workspace's
+  // policy. Each call reads the live policy and credential, so a turn that
+  // turns video on can use it, and while video is off the tools answer
+  // plainly (with who can turn it on) instead of being missing.
   const resolveVideoGenerationCredential = async (
     policy: VideoGenerationPolicy,
   ): Promise<VideoGenerationCredentialLease | null> => {
@@ -564,6 +566,25 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             settings: eventing.modelRunSettings,
             workspaceId: input.workspaceId,
             creditModelsAllowed: deps.workspaceCreditModelsAllowed !== false,
+            // Who can turn video on, decided live: someone this turn's app
+            // actions can change the workspace's settings for, else by who
+            // sent the message.
+            actor: async () => {
+              if (
+                await turnCanChangeWorkspaceSettings(db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                })
+              ) {
+                return "settings_admin";
+              }
+              const sender =
+                turn.initiatingHumanSubjectId ??
+                (turn.initiator?.kind === "subject" ? turn.initiator.subjectId : null);
+              return sender?.startsWith("external_user:") ? "external_person" : "member";
+            },
             readPolicy: () => getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
             resolveCredential: resolveVideoGenerationCredential,
             admit: async ({ policy, credential, toolInput, toolCallId }) => {

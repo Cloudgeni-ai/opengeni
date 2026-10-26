@@ -306,6 +306,7 @@ export const VideoGenerationUnavailableCode = /* @__PURE__ */ defineSchema(() =>
     "video_generation_unsupported",
     "insufficient_credits",
     "generation_limit_reached",
+    "video_storage_full",
   ]),
 );
 export type VideoGenerationUnavailableCode = z.infer<typeof VideoGenerationUnavailableCode>;

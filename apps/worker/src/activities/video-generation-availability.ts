@@ -54,11 +54,20 @@ function dollars(micros: number): string {
 }
 
 /**
+ * Who reads the answer, for who can turn video on: someone this turn's app
+ * actions can change the workspace's settings for, anyone else in the
+ * workspace, or someone who uses Opengeni through another product (who has
+ * no Opengeni Settings page to be pointed to).
+ */
+export type VideoGenerationActor = "settings_admin" | "member" | "external_person";
+
+/**
  * What the video tools return while the workspace can't make a video: off,
- * on without a usable way to pay, or not possible on this deployment. When
- * Opengeni credits can pay, it carries the price and the exact app action
- * call that turns video on, built from the live policy revision and the
- * catalog's credit-funded model, so the agent can offer it in one step.
+ * on without a usable way to pay, or not possible on this deployment. Only
+ * when Opengeni credits can pay and this turn can change the workspace's
+ * settings does it carry the price and the exact app action call that turns
+ * video on, built from the live policy revision and the catalog's
+ * credit-funded model, so the agent can offer it in one step.
  */
 export function videoGenerationOffResult(input: {
   settings: Settings;
@@ -66,8 +75,10 @@ export function videoGenerationOffResult(input: {
   policy: VideoGenerationPolicy;
   /** False when the workspace turned Opengeni credits off. */
   creditModelsAllowed: boolean;
+  actor: VideoGenerationActor;
 }): VideoGenerationUnavailableResult {
-  const { settings, policy } = input;
+  const { settings, policy, actor } = input;
+  const inSettings = actor === "external_person" ? "" : " in Settings";
   // Every funding source stores an encrypted credential with the operation.
   if (!environmentsEncryptionKeyBytes(settings)) {
     return unavailable(
@@ -78,7 +89,13 @@ export function videoGenerationOffResult(input: {
   if (videoGenerationPolicyEnabled(policy)) {
     return unavailable(
       "video_generation_unfunded",
-      `Video generation is on in this workspace, but its payment method can't be used right now. A workspace admin can fix it in Settings. ${PLAIN_ENDING}`,
+      `Video generation is on in this workspace, but its payment method can't be used right now. A workspace admin can fix it${inSettings}. ${PLAIN_ENDING}`,
+    );
+  }
+  if (actor === "external_person") {
+    return unavailable(
+      "video_generation_off",
+      `Video generation is off in this workspace. A workspace admin can turn it on. ${PLAIN_ENDING}`,
     );
   }
   const creditModel = VIDEO_GENERATION_MODEL_CATALOG.find((model) =>
@@ -104,9 +121,15 @@ export function videoGenerationOffResult(input: {
   const payment = videoGenerationCreditsCharged(settings)
     ? `Opengeni credits can pay for it: a ${QUOTED_CLIP_SECONDS}-second 480p clip costs ${clipPrice("480p")} (720p: ${clipPrice("720p")}).`
     : "It can run on this deployment's video gateway, at no charge to this workspace.";
+  if (actor === "member") {
+    return unavailable(
+      "video_generation_off",
+      `Video generation is off in this workspace. ${payment} A workspace admin can turn it on in Settings. ${PLAIN_ENDING}`,
+    );
+  }
   return unavailable(
     "video_generation_off",
-    `Video generation is off in this workspace. ${payment} Ask the person whether to turn it on; if they agree, run the app action in turnOn, then call this tool again. Without app actions here, tell them a workspace admin can turn it on in Settings.`,
+    `Video generation is off in this workspace. ${payment} Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again. If you can't run it, they can turn it on in Settings.`,
     {
       id: "updateVideoGenerationPolicy",
       pathParameters: { workspaceId: input.workspaceId },
@@ -134,10 +157,15 @@ export function videoGenerationAdmissionRefusedResult(
     );
   }
   if (error instanceof VideoGenerationCapacityError) {
-    return unavailable(
-      "generation_limit_reached",
-      `Video generation can't start: ${withoutFinalStop(error.message)}. Nothing was generated or charged.`,
-    );
+    return error.limit === "storage"
+      ? unavailable(
+          "video_storage_full",
+          "Video generation can't start: this workspace's video storage is full. Deleting videos it no longer needs frees space. Nothing was generated or charged.",
+        )
+      : unavailable(
+          "generation_limit_reached",
+          "Video generation can't start: this workspace is already making as many videos as it can at once. Try again when one finishes. Nothing was generated or charged.",
+        );
   }
   return null;
 }
@@ -159,6 +187,8 @@ export function createVideoGenerationToolAdapter(deps: {
   settings: Settings;
   workspaceId: string;
   creditModelsAllowed: boolean;
+  /** Read only while video is off, to say who can turn it on. */
+  actor: () => Promise<VideoGenerationActor>;
   readPolicy: () => Promise<VideoGenerationPolicy>;
   resolveCredential: (
     policy: VideoGenerationPolicy,
@@ -182,6 +212,7 @@ export function createVideoGenerationToolAdapter(deps: {
           workspaceId: deps.workspaceId,
           policy,
           creditModelsAllowed: deps.creditModelsAllowed,
+          actor: await deps.actor(),
         }),
       } as const;
     }

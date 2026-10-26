@@ -6,6 +6,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  ensureExternalIdentity,
   getOrganizationAgentAdminAccess,
   grantSessionAdminAccess,
   listConfirmedAppActionChanges,
@@ -15,6 +16,7 @@ import {
   sessionStartedByPerson,
   setOrganizationAgentAdminAccess,
   submitHumanPromptInTransaction,
+  turnCanChangeWorkspaceSettings,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
   type Database,
@@ -485,5 +487,104 @@ describe("app actions in a chat", () => {
       update connector_action_requests set status = 'completed'
       where turn_id = ${turn.turnId} and approval_id = 'call-invite'`;
     expect(await confirmed()).toEqual([]);
+  });
+
+  test("can change the workspace's settings only as a live admin whose turn may make changes", async () => {
+    if (!client) return;
+    const db = client.db;
+    const org = await organization("app-actions-settings");
+    // Someone using Opengeni through another product, in their own workspace.
+    const person = await ensureExternalIdentity(db, {
+      accountId: org.accountId,
+      externalId: `end-user-${crypto.randomUUID()}`,
+    });
+    await shared!.admin`
+      update workspace_memberships set permissions = '["workspace:admin"]'::jsonb
+      where workspace_id = ${org.workspaceId} and subject_id = ${org.owner}`;
+    await shared!.admin`
+      update workspace_memberships set permissions = '["workspace:read","sessions:read"]'::jsonb
+      where workspace_id = ${org.workspaceId} and subject_id = ${org.member}`;
+    const canChange = async (
+      sender: string,
+      frozen: TurnAppActionGrant,
+      workspaceId = org.workspaceId,
+      fullAccess = false,
+    ): Promise<boolean> => {
+      const turn = await claimedTurn(
+        { ...org, workspaceId },
+        { createdBy: { kind: "subject", subjectId: sender }, sender, frozen },
+      );
+      if (fullAccess) {
+        await grantSessionAdminAccess(db, {
+          organizationId: org.accountId,
+          workspaceId,
+          sessionId: turn.sessionId,
+          actorSubjectId: sender,
+          durationHours: null,
+        });
+      }
+      return await turnCanChangeWorkspaceSettings(db, {
+        accountId: org.accountId,
+        workspaceId,
+        sessionId: turn.sessionId,
+        turnId: turn.turnId,
+      });
+    };
+    const admin = ["workspace:admin"] as const;
+
+    // An admin signed in to the app, whose changes they confirm in the chat.
+    expect(
+      await canChange(org.owner, { subjectId: org.owner, changes: "confirm", permissions: admin }),
+    ).toBe(true);
+    // The same admin through an embed or other read-only sign-in.
+    expect(
+      await canChange(org.owner, { subjectId: org.owner, changes: "none", permissions: admin }),
+    ).toBe(false);
+    // A member who isn't an admin.
+    expect(
+      await canChange(org.member, {
+        subjectId: org.member,
+        changes: "confirm",
+        permissions: SENT_PERMISSIONS,
+      }),
+    ).toBe(false);
+    // Full access acts as the person who gave it, with their live access.
+    await setOrganizationAgentAdminAccess(db, {
+      organizationId: org.accountId,
+      actorSubjectId: org.owner,
+      sessionAdminAccessAllowed: true,
+    });
+    const none = { changes: "none", permissions: [] } as const;
+    expect(
+      await canChange(org.member, { subjectId: org.member, ...none }, org.workspaceId, true),
+    ).toBe(false);
+    expect(
+      await canChange(org.owner, { subjectId: org.owner, ...none }, org.workspaceId, true),
+    ).toBe(true);
+    // Someone using Opengeni through another product reads only, by default.
+    expect(
+      await canChange(
+        person.subjectId,
+        { subjectId: person.subjectId, changes: "none", permissions: admin },
+        person.personalWorkspaceId,
+      ),
+    ).toBe(false);
+    // Even where changes from such sign-ins are allowed, their access to
+    // their workspace doesn't include its settings.
+    expect(
+      await canChange(
+        person.subjectId,
+        { subjectId: person.subjectId, changes: "confirm", permissions: admin },
+        person.personalWorkspaceId,
+      ),
+    ).toBe(false);
+
+    // The live grant decides: an admin who lost workspace:admin can't.
+    await shared!.admin`
+      update workspace_memberships set permissions = '["workspace:read"]'::jsonb
+      where workspace_id = ${org.workspaceId} and subject_id = ${org.owner}`;
+    expect(
+      await canChange(org.owner, { subjectId: org.owner, changes: "confirm", permissions: admin }),
+    ).toBe(false);
   });
 });

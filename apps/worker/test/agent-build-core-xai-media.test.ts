@@ -15,6 +15,8 @@ afterEach(() => {
 });
 
 const LEGACY_REACHED = "legacy SuperGrok credential read";
+// Every live check of whether this turn can change the workspace's settings.
+const settingsChecks: unknown[] = [];
 
 // Execute the production builder for a SuperGrok turn with SuperGrok-funded
 // video and a connected image credential, and capture the media options it
@@ -78,6 +80,10 @@ async function buildSuperGrokTurn(
     } as unknown as ReturnType<typeof db.subscriptionCoreOperationConnections>),
     ...legacyReaders,
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
+    spyOn(db, "turnCanChangeWorkspaceSettings").mockImplementation(async (_db, input) => {
+      settingsChecks.push(input);
+      return false;
+    }),
     spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue(
       policyEnabled
         ? {
@@ -266,6 +272,7 @@ test("a workspace with video off keeps both video tools, which answer that it is
   await built;
   const adapter = options[0]?.videoGeneration;
   expect(adapter).toBeDefined();
+  settingsChecks.length = 0;
   const off = await adapter!.capabilities();
   expect(off).toMatchObject({
     schemaVersion: 1,
@@ -273,9 +280,18 @@ test("a workspace with video off keeps both video tools, which answer that it is
     code: "video_generation_off",
     operationCreated: false,
   });
+  expect(off).not.toHaveProperty("turnOn");
   await expect(
     adapter!.execute({ prompt: "a beach" }, { toolCallId: "call-video" }),
   ).resolves.toEqual(off);
+  // Who can turn it on is decided live, on each call, for this turn.
+  expect(settingsChecks).toHaveLength(2);
+  expect(settingsChecks[0]).toEqual({
+    accountId: "account",
+    workspaceId: "workspace",
+    sessionId: "session",
+    turnId: expect.any(String),
+  });
   // An off policy reads no credential.
   expect(coreFundingCalls).toEqual([]);
 });

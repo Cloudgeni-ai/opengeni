@@ -39,13 +39,14 @@ describe("video generation while it is off", () => {
       workspaceId: WORKSPACE_ID,
       policy: offPolicy,
       creditModelsAllowed: true,
+      actor: "settings_admin",
     });
     expect(result).toEqual({
       schemaVersion: 1,
       status: "unavailable",
       code: "video_generation_off",
       message:
-        "Video generation is off in this workspace. Opengeni credits can pay for it: a 5-second 480p clip costs $0.78 (720p: $1.75). Ask the person whether to turn it on; if they agree, run the app action in turnOn, then call this tool again. Without app actions here, tell them a workspace admin can turn it on in Settings.",
+        "Video generation is off in this workspace. Opengeni credits can pay for it: a 5-second 480p clip costs $0.78 (720p: $1.75). Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again. If you can't run it, they can turn it on in Settings.",
       operationCreated: false,
       turnOn: {
         id: "updateVideoGenerationPolicy",
@@ -69,6 +70,7 @@ describe("video generation while it is off", () => {
       workspaceId: WORKSPACE_ID,
       policy: { ...offPolicy, revision: 0 },
       creditModelsAllowed: true,
+      actor: "settings_admin",
     });
     expect(result.message).toContain("a 5-second 480p clip costs $1.00 (720p: $2.01).");
     expect(result.turnOn?.body.expectedRevision).toBe(0);
@@ -80,9 +82,10 @@ describe("video generation while it is off", () => {
       workspaceId: WORKSPACE_ID,
       policy: offPolicy,
       creditModelsAllowed: true,
+      actor: "settings_admin",
     });
     expect(result.message).toBe(
-      "Video generation is off in this workspace. It can run on this deployment's video gateway, at no charge to this workspace. Ask the person whether to turn it on; if they agree, run the app action in turnOn, then call this tool again. Without app actions here, tell them a workspace admin can turn it on in Settings.",
+      "Video generation is off in this workspace. It can run on this deployment's video gateway, at no charge to this workspace. Ask the person whether to turn it on for every chat in this workspace; if they agree, run the app action in turnOn, then call this tool again. If you can't run it, they can turn it on in Settings.",
     );
     expect(result.turnOn?.body.fundingSource).toBe("opengeni_credits");
   });
@@ -98,6 +101,7 @@ describe("video generation while it is off", () => {
           workspaceId: WORKSPACE_ID,
           policy: offPolicy,
           creditModelsAllowed,
+          actor: "settings_admin",
         }),
       ).toEqual({
         schemaVersion: 1,
@@ -117,6 +121,7 @@ describe("video generation while it is off", () => {
         workspaceId: WORKSPACE_ID,
         policy: offPolicy,
         creditModelsAllowed: true,
+        actor: "settings_admin",
       }).message,
     ).toBe(
       "Video generation is off in this workspace, and Opengeni credits can't pay for it here. A workspace admin can turn it on in Settings with the workspace's own Vercel AI Gateway key or a connected SuperGrok account. Tell the person plainly; offer an image instead if that helps.",
@@ -130,6 +135,7 @@ describe("video generation while it is off", () => {
         workspaceId: WORKSPACE_ID,
         policy: offPolicy,
         creditModelsAllowed: true,
+        actor: "settings_admin",
       }),
     ).toEqual({
       schemaVersion: 1,
@@ -152,6 +158,7 @@ describe("video generation while it is off", () => {
           defaultModelId: SEEDANCE_2_5_MODEL_ID,
         },
         creditModelsAllowed: true,
+        actor: "settings_admin",
       }),
     ).toEqual({
       schemaVersion: 1,
@@ -161,6 +168,68 @@ describe("video generation while it is off", () => {
         "Video generation is on in this workspace, but its payment method can't be used right now. A workspace admin can fix it in Settings. Tell the person plainly; offer an image instead if that helps.",
       operationCreated: false,
     });
+  });
+
+  test("only someone who can change the workspace's settings is offered the switch", () => {
+    const answer = (
+      actor: "settings_admin" | "member" | "external_person",
+      overrides: {
+        settings?: ReturnType<typeof managedSettings>;
+        policy?: VideoGenerationPolicy;
+      } = {},
+    ) =>
+      videoGenerationOffResult({
+        settings: overrides.settings ?? managedSettings(),
+        workspaceId: WORKSPACE_ID,
+        policy: overrides.policy ?? offPolicy,
+        creditModelsAllowed: true,
+        actor,
+      });
+    expect(answer("settings_admin").turnOn?.body.expectedRevision).toBe(7);
+
+    // A member who isn't an admin hears the price and who can turn it on.
+    expect(answer("member")).toEqual({
+      schemaVersion: 1,
+      status: "unavailable",
+      code: "video_generation_off",
+      message:
+        "Video generation is off in this workspace. Opengeni credits can pay for it: a 5-second 480p clip costs $0.78 (720p: $1.75). A workspace admin can turn it on in Settings. Tell the person plainly; offer an image instead if that helps.",
+      operationCreated: false,
+    });
+
+    // Someone using Opengeni through another product has no Settings page,
+    // no Opengeni credits and no gateway key of their own.
+    const external =
+      "Video generation is off in this workspace. A workspace admin can turn it on. Tell the person plainly; offer an image instead if that helps.";
+    for (const settings of [
+      managedSettings(),
+      managedSettings({ vercelAiGatewayApiKey: undefined }),
+    ]) {
+      expect(answer("external_person", { settings })).toEqual({
+        schemaVersion: 1,
+        status: "unavailable",
+        code: "video_generation_off",
+        message: external,
+        operationCreated: false,
+      });
+    }
+    expect(
+      answer("external_person", {
+        policy: {
+          ...offPolicy,
+          enabledModelIds: [SEEDANCE_2_5_MODEL_ID],
+          defaultModelId: SEEDANCE_2_5_MODEL_ID,
+        },
+      }).message,
+    ).toBe(
+      "Video generation is on in this workspace, but its payment method can't be used right now. A workspace admin can fix it. Tell the person plainly; offer an image instead if that helps.",
+    );
+    for (const actor of ["member", "external_person"] as const) {
+      expect(answer(actor).message).not.toContain("Ask the person");
+      expect(
+        answer(actor, { settings: managedSettings({ vercelAiGatewayApiKey: undefined }) }),
+      ).not.toHaveProperty("turnOn");
+    }
   });
 });
 
@@ -175,12 +244,15 @@ const prompt: GenerateVideoToolInput = { prompt: "a golden retriever on a beach 
 function adapterFor(
   readPolicy: () => Promise<VideoGenerationPolicy>,
   admit: Parameters<typeof createVideoGenerationToolAdapter>[0]["admit"],
+  actor: () => Promise<"settings_admin" | "member" | "external_person"> = async () =>
+    "settings_admin",
 ) {
   const credentialReads: string[] = [];
   const adapter = createVideoGenerationToolAdapter({
     settings: managedSettings(),
     workspaceId: WORKSPACE_ID,
     creditModelsAllowed: true,
+    actor,
     readPolicy,
     resolveCredential: async (policy) => {
       credentialReads.push(policy.fundingSource);
@@ -250,6 +322,38 @@ describe("video generation tools read live state on every call", () => {
     expect(admissions).toBe(0);
   });
 
+  test("who can turn video on is read live, and only while video is off", async () => {
+    let policy = offPolicy;
+    let actorReads = 0;
+    let actor: "settings_admin" | "member" = "member";
+    const { adapter } = adapterFor(
+      async () => policy,
+      async () => ({
+        schemaVersion: 1,
+        status: "accepted",
+        operationId: "77777777-7777-4777-8777-777777777777",
+      }),
+      async () => {
+        actorReads += 1;
+        return actor;
+      },
+    );
+    await expect(adapter.capabilities()).resolves.not.toHaveProperty("turnOn");
+    actor = "settings_admin";
+    const off = await adapter.execute(prompt, { toolCallId: "call-video" });
+    if (!("turnOn" in off) || !off.turnOn) throw new Error("expected a turn-on call");
+    expect(actorReads).toBe(2);
+    policy = {
+      schemaVersion: 1,
+      revision: 8,
+      fundingSource: off.turnOn.body.fundingSource,
+      enabledModelIds: off.turnOn.body.enabledModelIds,
+      defaultModelId: off.turnOn.body.defaultModelId,
+    };
+    await adapter.capabilities();
+    expect(actorReads).toBe(2);
+  });
+
   test("a credit refusal at admission is a plain result, not a tool error", async () => {
     const onPolicy: VideoGenerationPolicy = {
       schemaVersion: 1,
@@ -276,11 +380,19 @@ describe("video generation tools read live state on every call", () => {
         },
       ],
       [
-        new VideoGenerationCapacityError("Workspace video generation limit reached"),
+        new VideoGenerationCapacityError("Workspace video generation limit reached", "concurrency"),
         {
           code: "generation_limit_reached",
           message:
-            "Video generation can't start: Workspace video generation limit reached. Nothing was generated or charged.",
+            "Video generation can't start: this workspace is already making as many videos as it can at once. Try again when one finishes. Nothing was generated or charged.",
+        },
+      ],
+      [
+        new VideoGenerationCapacityError("Workspace video storage quota reached", "storage"),
+        {
+          code: "video_storage_full",
+          message:
+            "Video generation can't start: this workspace's video storage is full. Deleting videos it no longer needs frees space. Nothing was generated or charged.",
         },
       ],
     ] as const;
