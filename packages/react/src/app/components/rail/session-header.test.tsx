@@ -160,8 +160,15 @@ test("reuses the compact Schedule button without requiring creation metadata", a
     await act(async () => root.render(render(true)));
     const button = container.querySelector<HTMLButtonElement>("button[data-automation-wait]");
     expect(button?.getAttribute("data-automation-wait")).toBe("schedule");
-    expect(button?.title).toBe("On a schedule. Open this chat's automations.");
+    expect(button?.getAttribute("aria-label")).toBe("On a schedule. Open this chat's automations.");
+    // The hover card explains the wait; no native tooltip doubles it.
+    expect(button?.hasAttribute("title")).toBe(false);
     expect(button?.textContent?.trim()).toBe("On a schedule");
+    // One header row: the chip shares the title's row instead of adding one above it.
+    const title = container.querySelector("button[title$='click to rename']");
+    const row = container.querySelector("header")?.firstElementChild;
+    expect(row?.contains(title ?? null)).toBe(true);
+    expect(row?.contains(button ?? null)).toBe(true);
     await act(async () => button?.click());
     expect(opened).toBe(1);
     await act(async () => root.render(render(false)));
@@ -189,7 +196,9 @@ test("reuses the compact Schedule button without requiring creation metadata", a
     const inactive = container.querySelector<HTMLButtonElement>(
       'button[data-automation-wait="none"]',
     );
-    expect(inactive?.title).toBe("Nothing upcoming. Open this chat's automations.");
+    expect(inactive?.getAttribute("aria-label")).toBe(
+      "Nothing upcoming. Open this chat's automations.",
+    );
     expect(inactive?.textContent?.trim()).toBe("Automation");
     expect(inactive?.querySelector("svg")?.getAttribute("class")).toContain("lucide-zap-off");
     await act(async () => inactive?.click());
@@ -215,7 +224,9 @@ test("reuses the compact Schedule button without requiring creation metadata", a
     const listening = container.querySelector<HTMLButtonElement>(
       'button[data-automation-wait="event"]',
     );
-    expect(listening?.title).toBe("Waiting for an event. Open this chat's automations.");
+    expect(listening?.getAttribute("aria-label")).toBe(
+      "Waiting for an event. Open this chat's automations.",
+    );
     expect(listening?.textContent?.trim()).toBe("Waiting on an event");
     expect(listening?.querySelector("svg")?.getAttribute("class")).toContain("lucide-zap");
     // With the details, the pill names the source and its tooltip the event.
@@ -251,7 +262,7 @@ test("reuses the compact Schedule button without requiring creation metadata", a
     const detailed = container.querySelector<HTMLButtonElement>(
       'button[data-automation-wait="event"]',
     );
-    expect(detailed?.title).toBe(
+    expect(detailed?.getAttribute("aria-label")).toBe(
       "Waiting for check_suite.completed from GitHub. Open this chat's automations.",
     );
     expect(detailed?.textContent?.trim()).toBe("Waiting on GitHub");
@@ -292,7 +303,7 @@ test("reuses the compact Schedule button without requiring creation metadata", a
       ),
     );
     const both = container.querySelector<HTMLButtonElement>('button[data-automation-wait="event"]');
-    expect(both?.title).toBe(
+    expect(both?.getAttribute("aria-label")).toBe(
       "Waiting for check_suite.completed from GitHub or message.received from Gmail. Open this chat's automations.",
     );
     expect(both?.textContent?.trim()).toBe("Waiting on GitHub and Gmail");

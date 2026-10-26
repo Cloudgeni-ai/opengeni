@@ -46,6 +46,25 @@ export function machineScopeLabel(t: OpenGeniText, scope: MachineView["scope"]):
   return t("sandboxLabelModel.workspace");
 }
 
+type NamedMachine = Pick<MachineView, "sandboxId" | "isSessionGroup" | "kind" | "name" | "scope">;
+
+/**
+ * Who can use a machine, only when another listed machine shows the same name.
+ * A person's own machine and a workspace machine are often both called after
+ * the same host ("build-box"); in a picker the scope is what tells them apart.
+ */
+export function machineNameTwinLabel(
+  t: OpenGeniText,
+  machine: NamedMachine,
+  listed: readonly NamedMachine[],
+): string | undefined {
+  const name = machineDisplayName(t, machine);
+  const twin = listed.some(
+    (other) => other.sandboxId !== machine.sandboxId && machineDisplayName(t, other) === name,
+  );
+  return twin ? machineScopeLabel(t, machine.scope) : undefined;
+}
+
 /** The compute label a session timeline shows: the active machine, else the cloud box. */
 export function sessionComputeLabel(
   t: OpenGeniText,

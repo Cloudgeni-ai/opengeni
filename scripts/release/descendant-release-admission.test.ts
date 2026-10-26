@@ -1342,6 +1342,20 @@ describe("tested-descendant release admission", () => {
         "full-green receipt names another source or mode",
       ],
       [
+        // A Batch-attested main push skipped its test lanes: not a release source.
+        (fixture) =>
+          changeReceipt(fixture, "full-green-main-", (body) => {
+            body.attestation = {
+              workflow: ".github/workflows/batch-ci.yml",
+              batchRunId: "9001",
+              batchRunAttempt: "1",
+              batchHeadSha: s.candidate,
+              tree: "f".repeat(40),
+            };
+          }),
+        "full-green receipt reused Batch CI; a release source needs the full main suite",
+      ],
+      [
         (fixture) =>
           changeReceipt(fixture, "canary-images-", (body) => {
             body.producer.runAttempt = "1";

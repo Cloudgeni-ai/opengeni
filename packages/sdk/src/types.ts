@@ -3529,7 +3529,7 @@ export type ScheduledTaskStatus = "active" | "paused";
 
 export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session" | "existing_session";
 
-export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one";
+export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one" | "steer";
 
 export type ScheduledTaskDayOfWeek =
   | "SUNDAY"

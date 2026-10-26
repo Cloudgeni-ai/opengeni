@@ -522,6 +522,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       public: payload.public,
       includeCiPermissions: payload.includeCiPermissions,
       setupUrl: `${baseUrl}/v1/github/setup`,
+      webhookBaseUrl: settings.webhookBaseUrl,
     });
     const organization = payload.organization?.trim();
     return c.json({

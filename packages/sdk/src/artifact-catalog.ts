@@ -33,6 +33,8 @@ export type ArtifactCatalogItem = {
 
 export type ArtifactCatalogListOptions = {
   sourceSessionId?: string;
+  /** With `sourceSessionId`: also that chat's sub-sessions, in the same read. */
+  includeSubSessions?: boolean;
   q?: string;
   kind?: ArtifactCatalogKind;
   sort?: "updated" | "newest" | "title";

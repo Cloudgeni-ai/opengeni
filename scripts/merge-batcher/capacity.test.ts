@@ -2,11 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { capacitySetting, readHeadroom } from "../ci/batch-traffic-shadow";
 import { GitHubAuth, GitHubReader } from "./github";
 import {
+  ATTESTED_SKIPPED_LANES,
   CANDIDATE_SLOTS,
   capacityDecision,
   config,
   DEFAULT_OTHER_REPOSITORY_ALLOWANCE,
   DEFAULT_PROVIDER_JOB_LIMIT,
+  MAIN_ATTESTATION_JOB,
+  MAIN_ATTESTATION_STEP,
   MAIN_PRE_FANOUT_JOBS,
   observeMainQueue,
   scanRunnerDemand,
@@ -41,7 +44,7 @@ const defaults = {
 };
 const idleMain = { runId: 1, queuedJobs: 0, oldestQueuedSeconds: null, maxStartWaitSeconds: null };
 const idleMainRuns = { mainQueuedJobs: 0, preFanoutMainRuns: [] as number[] };
-/** The 3 jobs ci.yml creates before plan completes, already finished (fan-out instantiated). */
+/** The jobs ci.yml creates before plan completes, already finished (fan-out instantiated). */
 const prePlan = () => many(MAIN_PRE_FANOUT_JOBS, "completed");
 
 describe("hosted capacity decision", () => {
@@ -660,6 +663,110 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     expect(r.lastHeadroom?.capacity?.hold).toBe("main-queued");
   });
 
+  /** A Batch-attested main push: proof verified, test lanes skipped or not yet created. */
+  const attestation = (verified = true) => ({
+    name: MAIN_ATTESTATION_JOB,
+    status: "completed",
+    conclusion: "success",
+    steps: [
+      { name: "Find identical-tree trusted Batch CI", status: "completed", conclusion: "success" },
+      {
+        name: MAIN_ATTESTATION_STEP,
+        status: "completed",
+        conclusion: verified ? "success" : "skipped",
+      },
+    ],
+  });
+  const attestedPlanPhase = (verified = true) => [
+    { name: "automation-admission", status: "completed", conclusion: "skipped" },
+    attestation(verified),
+    { name: "Verify landed merge content", status: "in_progress", conclusion: null },
+    { name: "Explain change impact", status: "in_progress", conclusion: null },
+  ];
+  const skippedLanes = () =>
+    ATTESTED_SKIPPED_LANES.map((lane) => ({
+      name: `${lane} x`,
+      status: "completed",
+      conclusion: "skipped",
+    }));
+
+  test("an attested main push is never pre-fan-out, queued main or latestMain", async () => {
+    const runs: Run[] = [{ id: 1000, status: "in_progress", ...MAIN }];
+    const plan = await scan(runs, { 1000: attestedPlanPhase() });
+    expect(plan).toMatchObject({
+      ok: true,
+      mainDemand: 2,
+      attestedMainRuns: [1000],
+      preFanoutMainRuns: [],
+      mainQueuedJobs: 0,
+      latestMain: null,
+    });
+    // Fanned out: image jobs waiting for runners do not hold a candidate, but
+    // running jobs remain main demand inside the reserve and provider pool.
+    const images = [
+      ...attestedPlanPhase(),
+      ...skippedLanes(),
+      ...many(6, "in_progress", { name: "API image" }),
+      ...many(3, "queued", { name: "Sandbox image", created_at: iso(120) }),
+    ];
+    const d = await decide(runs, { 1000: images });
+    expect(d.capacity).toMatchObject({
+      hold: null,
+      preFanoutMainRuns: [],
+      mainQueuedJobs: 0,
+      latestMain: null,
+      providerRequired: 11 + 28 + 18,
+    });
+    const r = await both(runs, { 1000: images });
+    expect(r.batcher).toMatchObject({ attestedMainRuns: [1000], mainDemand: 11 });
+    expect(r.traffic).toMatchObject({ allowed: true });
+  });
+
+  test("attestation without its verified step, or with any running test lane, is full main", async () => {
+    const runs: Run[] = [{ id: 1001, status: "in_progress", ...MAIN }];
+    expect((await decide(runs, { 1001: attestedPlanPhase(false) })).capacity).toMatchObject({
+      hold: "main-pre-fanout",
+      preFanoutMainRuns: [1001],
+    });
+    for (const lane of ATTESTED_SKIPPED_LANES) {
+      const jobs = [
+        ...attestedPlanPhase(),
+        ...skippedLanes().filter((job) => !job.name.startsWith(lane)),
+        { name: `${lane} 1`, status: "queued", conclusion: null, created_at: iso(5) },
+      ];
+      const s = await scan(runs, { 1001: jobs });
+      expect(s).toMatchObject({ ok: true, attestedMainRuns: [], mainQueuedJobs: 1 });
+    }
+    const failed = attestedPlanPhase();
+    (failed[1] as { conclusion: string }).conclusion = "failure";
+    expect(await scan(runs, { 1001: failed })).toMatchObject({
+      attestedMainRuns: [],
+      preFanoutMainRuns: [1001],
+    });
+    const duplicate = [...attestedPlanPhase(), attestation()];
+    expect(await scan(runs, { 1001: duplicate })).toMatchObject({ attestedMainRuns: [] });
+  });
+
+  test("a full main run beside an attested one still holds and stays latestMain", async () => {
+    const runs: Run[] = [
+      { id: 1100, status: "in_progress", ...MAIN },
+      { id: 1090, status: "in_progress", ...MAIN },
+    ];
+    const d = await decide(runs, {
+      1100: [
+        ...attestedPlanPhase(),
+        ...skippedLanes(),
+        ...many(2, "in_progress", { name: "Web image" }),
+      ],
+      1090: [...prePlan(), ...many(4, "queued", { created_at: iso(60) })],
+    });
+    expect(d.capacity).toMatchObject({
+      hold: "main-queued",
+      mainQueuedJobs: 4,
+      latestMain: { runId: 1090, queuedJobs: 4 },
+    });
+  });
+
   test("MAIN_PRE_FANOUT_JOBS matches the ci.yml jobs that do not need plan, plus plan", async () => {
     const workflow = Bun.YAML.parse(
       await Bun.file(new URL("../../.github/workflows/ci.yml", import.meta.url)).text(),
@@ -682,7 +789,7 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     const early = Object.keys(workflow.jobs)
       .filter((name) => !needsPlan(name))
       .sort();
-    expect(early).toEqual(["automation-admission", "merge-content", "plan"]);
+    expect(early).toEqual(["automation-admission", "batch-attestation", "merge-content", "plan"]);
     expect(early.length).toBe(MAIN_PRE_FANOUT_JOBS);
   });
 });

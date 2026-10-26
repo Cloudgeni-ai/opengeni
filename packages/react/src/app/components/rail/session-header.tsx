@@ -71,7 +71,11 @@ import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "../../lib/session-rail";
-import { sessionAutomationWaitWords } from "../../../components/automations/automation-model";
+import {
+  sessionAutomationWaitLines,
+  sessionAutomationWaitWords,
+} from "../../../components/automations/automation-model";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover-card";
 import { useSessionStartup } from "../../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
@@ -194,8 +198,6 @@ export function SessionHeader({
   const uiEvents = useUiEventTarget("document");
   const page = usePage();
   const waiting = sessionInputWait({ ...session, status });
-  // A paused or finished automation still links to its settings, marked inactive.
-  const automationWait = sessionAutomationWaitWords(t, session, { now: new Date() });
   // A session the runtime could not start reads as stuck, not "Waiting on you".
   const displayStatus = sessionDisplayStatus({
     status,
@@ -277,60 +279,43 @@ export function SessionHeader({
       className="@container/titlebar flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap"
     >
       {leading}
-      {/* The title takes every pixel the actions leave; it truncates last. */}
-      <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
-        {/* Child sessions link back to the manager that spawned them, and a
-            session links to the automations that post into it. */}
-        <div className="flex min-w-0 items-center gap-1.5">
-          <SessionAncestryBreadcrumb
-            workspaceId={session.workspaceId}
-            parentSessionId={session.parentSessionId}
-            ancestors={ancestors}
-            loading={lineageLoading}
-            error={lineageError}
+      {/* One row for every chat, so the header is the same height whether or
+          not a chat has a parent, a Site or automations. The parent link
+          leads into the title; what only some chats have comes last, so the
+          title and access chips never move when a chat gains one. The title
+          takes every pixel the actions leave and truncates first. */}
+      <div className="flex min-w-20 flex-[1_1_5rem] items-center gap-1.5">
+        <SessionAncestryBreadcrumb
+          workspaceId={session.workspaceId}
+          parentSessionId={session.parentSessionId}
+          ancestors={ancestors}
+          loading={lineageLoading}
+          error={lineageError}
+        />
+        <SessionTitleEditor session={session} rename={rename} />
+        {/* Below lg the lifecycle is a dot beside the title; the full badge
+            and connection pill take over from lg. */}
+        <CompactSessionStatus
+          paused={sessionControlPaused(session)}
+          waiting={Boolean(waiting)}
+          status={displayStatus}
+          label={startupLabel}
+        />
+        {accessSlot}
+        {adminAccess ? (
+          <SessionAdminAccessIndicator
+            control={adminAccess}
+            onChangeTimeLimit={() => setGrantAdminOpen(true)}
           />
-          <SiteOriginLink session={session} />
-          {onOpenAutomations ? (
-            <button
-              type="button"
-              onClick={onOpenAutomations}
-              data-automation-wait={automationWait?.kind ?? "none"}
-              className="inline-flex min-w-0 max-w-80 shrink items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
-              title={t("automations.wait.openPanel", {
-                wait: automationWait?.label ?? t("automations.wait.none"),
-              })}
-            >
-              {automationWait?.kind === "event" ? (
-                <ZapIcon aria-hidden className="size-3 shrink-0" />
-              ) : automationWait?.kind === "schedule" ? (
-                <CalendarClockIcon aria-hidden className="size-3 shrink-0" />
-              ) : (
-                <ZapOffIcon aria-hidden className="size-3 shrink-0" />
-              )}
-              <span className="truncate">
-                {automationWait?.short ?? t("sessionChrome.automation")}
-              </span>
-            </button>
-          ) : null}
-        </div>
-        <div className="flex min-w-0 items-center gap-1.5">
-          <SessionTitleEditor session={session} rename={rename} />
-          {/* Below lg the lifecycle is a dot beside the title; the full badge
-              and connection pill take over from lg. */}
-          <CompactSessionStatus
-            paused={sessionControlPaused(session)}
-            waiting={Boolean(waiting)}
-            status={displayStatus}
-            label={startupLabel}
-          />
-          {accessSlot}
-          {adminAccess ? (
-            <SessionAdminAccessIndicator
-              control={adminAccess}
-              onChangeTimeLimit={() => setGrantAdminOpen(true)}
-            />
-          ) : null}
-        </div>
+        ) : null}
+        <SiteOriginLink session={session} />
+        {onOpenAutomations ? (
+          // Only the room the title and access chips leave: its words
+          // truncate before the title does, and at worst it is its icon.
+          <div className="flex min-w-6 flex-[1_1_0%] pointer-coarse:min-w-11">
+            <AutomationWaitChip session={session} onOpen={onOpenAutomations} />
+          </div>
+        ) : null}
       </div>
       <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
         {/* Provider + model · effort · speed stay one cluster on the action side. */}
@@ -586,6 +571,73 @@ export function SessionHeader({
         ) : null}
       </div>
     </header>
+  );
+}
+
+/**
+ * The automations that post into this chat: what they wait for in a few
+ * words, every wait on hover, and their settings on click. A paused or
+ * finished automation still links to its settings, marked inactive. Narrow
+ * headers keep only the icon; its name always carries the whole wait.
+ */
+function AutomationWaitChip({ session, onOpen }: { session: Session; onOpen: () => void }) {
+  const now = new Date();
+  const wait = sessionAutomationWaitWords(t, session, { now });
+  const lines = sessionAutomationWaitLines(t, session, { now });
+  const kind = wait?.kind ?? "none";
+  return (
+    <HoverCard openDelay={150} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <button
+          type="button"
+          onClick={onOpen}
+          data-automation-wait={kind}
+          aria-label={t("automations.wait.openPanel", {
+            wait: wait?.label ?? t("automations.wait.none"),
+          })}
+          className="inline-flex min-w-0 max-w-60 items-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
+        >
+          <AutomationWaitIcon kind={kind} />
+          <span className="hidden min-w-0 truncate sm:block @max-[34rem]/titlebar:hidden!">
+            {wait?.short ?? t("sessionChrome.automation")}
+          </span>
+        </button>
+      </HoverCardTrigger>
+      <HoverCardContent
+        collisionPadding={8}
+        className="w-auto min-w-56 max-w-[min(22rem,calc(100vw-16px))] p-3"
+      >
+        <div data-automation-wait-details="" className="grid min-w-0 gap-2.5">
+          <p className="text-xs font-medium text-fg">{t("automations.wait.details.heading")}</p>
+          <ul className="grid min-w-0 gap-1.5">
+            {lines.map((line) => (
+              <li
+                key={line.text}
+                className="flex min-w-0 items-start gap-2 text-xs leading-4 text-fg-muted"
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center text-fg-subtle">
+                  <AutomationWaitIcon kind={line.kind} />
+                </span>
+                <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{line.text}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="border-t border-border pt-2 text-2xs text-fg-subtle">
+            {t("automations.wait.details.open")}
+          </p>
+        </div>
+      </HoverCardContent>
+    </HoverCard>
+  );
+}
+
+function AutomationWaitIcon({ kind }: { kind: "event" | "schedule" | "none" }) {
+  return kind === "event" ? (
+    <ZapIcon aria-hidden className="size-3 shrink-0" />
+  ) : kind === "schedule" ? (
+    <CalendarClockIcon aria-hidden className="size-3 shrink-0" />
+  ) : (
+    <ZapOffIcon aria-hidden className="size-3 shrink-0" />
   );
 }
 

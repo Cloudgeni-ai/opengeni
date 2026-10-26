@@ -15544,7 +15544,7 @@
         "$|1.metadata": "object?",
         "$|1.metadata{}": "unknown",
         "$|1.name": "string!",
-        "$|1.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]",
+        "$|1.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]",
         "$|1.pinnedAccounts": "array?",
         "$|1.pinnedAccounts[]": "ref(McpConnectionAccountSelection)",
         "$|1.pinnedAccountsRequired": "boolean?",
@@ -15776,7 +15776,7 @@
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
         "$.name": "string!",
-        "$.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]",
+        "$.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]",
         "$.prompt": "string!",
         "$.runMode": "const?=[\"\\\"existing_session\\\"\"]",
         "$.schedule": "ref(ScheduledTaskScheduleSpec)!",
@@ -25561,7 +25561,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]"
+        "$": "enum=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]"
       }
     },
     "ScheduledTaskPolicyDrift": {
@@ -38077,6 +38077,7 @@
       "CLOUD_SANDBOX_LABEL": "value",
       "LOCAL_SANDBOX_LABEL": "value",
       "machineDisplayName": "value",
+      "machineNameTwinLabel": "value",
       "machineScopeLabel": "value",
       "NO_SANDBOX_LABEL": "value",
       "sessionComputeLabel": "value",
