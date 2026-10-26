@@ -1352,7 +1352,7 @@ export function createInteractionAttemptToolDefinitions(
   ): Promise<unknown> => {
     if (requestedId === undefined || !isMissingSessionError(error, kind)) return error;
     const open = await ownOpenSessions(kind).catch(() => null);
-    return open === null ? error : missingSessionError(error, kind, open, use);
+    return open === null ? error : missingSessionError(error, kind, open, use, requestedId);
   };
   /** Run a call that names a session directly, answering a missing id with
    * the open sessions of that kind this chat may use. */
@@ -5873,12 +5873,26 @@ function apiRefusalText(error: OpenGeniApiError): string {
 function missingSessionError(
   error: OpenGeniApiError,
   kind: InteractionSessionKind,
-  open: ReadonlyArray<{ id: string; name: string }>,
+  openSessions: ReadonlyArray<{ id: string; name: string }>,
   use: MissingSessionUse,
+  requestedId: string,
 ): OpenGeniApiError {
+  // A session the API did not find is never listed as open, even if this
+  // chat's listing still shows it (it ended between the call and the
+  // listing). An id that nearly matches an open one is named as differing
+  // from it: a slip of a few characters in a long id is easy to read past.
+  const sent = requestedId.trim().toLowerCase();
+  const stillListed = openSessions.some((session) => session.id.toLowerCase() === sent);
+  const open = openSessions.filter((session) => session.id.toLowerCase() !== sent);
   const listed = open.slice(0, MISSING_SESSION_HINT_LIMIT);
   const opener = kind === "BrowserSession" ? "browser_open" : "computer_open";
   const parameter = kind === "BrowserSession" ? "browserSessionId" : "computerSessionId";
+  const nearMiss = stillListed ? null : nearMissSession(requestedId, listed);
+  const sentNote = stillListed
+    ? ` ${requestedId} was listed as open in this chat a moment ago, so it may have just ended or restarted.`
+    : nearMiss
+      ? ` The ${parameter} you sent, ${requestedId}, is not ${nearMiss.id}: they differ in ${nearMiss.difference} character${nearMiss.difference === 1 ? "" : "s"}.`
+      : "";
   const instead =
     use === "current"
       ? `, or omit ${parameter} to use the one you used last`
@@ -5903,7 +5917,7 @@ function missingSessionError(
     retryable: false,
     outcomeUnknown: false,
     correlationId: error.correlationId,
-    displayMessage: `${refusal}${/[.!?]$/u.test(refusal) ? "" : "."} ${hint}`,
+    displayMessage: `${refusal}${/[.!?]$/u.test(refusal) ? "" : "."}${sentNote} ${hint}`,
   });
 }
 
@@ -5913,6 +5927,46 @@ function sessionHintLabel(name: string): string {
   // character into a lone surrogate.
   const characters = Array.from(name.replace(/\s+/gu, " ").trim());
   return characters.length <= 60 ? characters.join("") : `${characters.slice(0, 59).join("")}…`;
+}
+
+/** The most characters a sent id may differ from an open session's id in
+ * and still be named as a near miss of it. Two random UUIDs differ in about
+ * 34 of their 36 characters; a model copying an id slips on a few. */
+const NEAR_MISS_MAX_DIFFERENCE = 8;
+
+/** How many characters must be inserted, removed or changed to turn one
+ * string into the other (Levenshtein distance). */
+function characterDifference(left: string, right: string): number {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= right.length; column += 1) {
+      current[column] = Math.min(
+        previous[column]! + 1,
+        current[column - 1]! + 1,
+        previous[column - 1]! + (left[row - 1] === right[column - 1] ? 0 : 1),
+      );
+    }
+    previous = current;
+  }
+  return previous[right.length]!;
+}
+
+/** The open session whose id the sent one most nearly matches, when it is
+ * close enough to be a slip in copying that id. */
+function nearMissSession(
+  requestedId: string,
+  open: ReadonlyArray<{ id: string }>,
+): { id: string; difference: number } | null {
+  const sent = requestedId.trim().toLowerCase();
+  let best: { id: string; difference: number } | null = null;
+  for (const session of open) {
+    const difference = characterDifference(sent, session.id.toLowerCase());
+    if (difference > 0 && difference <= NEAR_MISS_MAX_DIFFERENCE) {
+      if (!best || difference < best.difference) best = { id: session.id, difference };
+    }
+  }
+  return best;
 }
 
 /** The named tab no longer exists, while its browser does: the controller's

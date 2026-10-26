@@ -1902,10 +1902,65 @@ describe("interaction attempt tools", () => {
       });
       const message = (result.structuredContent as { error: { message: string } }).error.message;
       expect(message).toBe(
-        `API 404: BrowserSession not found. This chat's open BrowserSessions, most recently used first: ${browserSessionId} "Research browser", ${older.id} "${"x".repeat(59)}…". Use one of these ids, or omit browserSessionId to use the one you used last. Reference: request-1.`,
+        `API 404: BrowserSession not found. The browserSessionId you sent, ${mistyped}, is not ${browserSessionId}: they differ in 1 character. This chat's open BrowserSessions, most recently used first: ${browserSessionId} "Research browser", ${older.id} "${"x".repeat(59)}…". Use one of these ids, or omit browserSessionId to use the one you used last. Reference: request-1.`,
       );
     },
   );
+
+  test("an id two characters off an open BrowserSession is named as not that session", async () => {
+    const open = discoveredBrowserSession("44867760-0b48-4b43-aa93-91eb19c94f64", sessionId);
+    open.lifecycle = "active";
+    open.name = "Signup";
+    const sent = "44867760-0b48-4b43-aa89-91eb19c94f64";
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [open] }) as never,
+        observeBrowserTarget: async () => {
+          throw new OpenGeniApiError(404, "BrowserSession not found");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId: sent, targetId: "tab-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+      `API 404: BrowserSession not found. The browserSessionId you sent, ${sent}, is not ${open.id}: they differ in 2 characters. This chat's open BrowserSessions, most recently used first: ${open.id} "Signup". Use one of these ids, or omit browserSessionId to use the one you used last.`,
+    );
+  });
+
+  test("a BrowserSession the API did not find is never listed as open", async () => {
+    const gone = discoveredBrowserSession(browserSessionId, sessionId);
+    gone.lifecycle = "active";
+    gone.name = "Research";
+    const other = discoveredBrowserSession(randomUUID(), sessionId);
+    other.lifecycle = "active";
+    other.name = "Other";
+    other.lastUsedAt = new Date(Date.parse(gone.lastUsedAt) - 60_000).toISOString();
+    const definitions = createInteractionAttemptToolDefinitions({
+      transport: partialTransport({
+        listBrowserSessions: async () => ({ revision: 1, sessions: [gone, other] }) as never,
+        observeBrowserTarget: async () => {
+          throw new OpenGeniApiError(404, "BrowserSession not found");
+        },
+      }),
+      workspaceId,
+      sessionId,
+      selectedTools: ["browser_observe"],
+      permissions: ["sessions:read", "sessions:control"],
+    });
+    const result = await definitions[0]!.execute(
+      { browserSessionId, targetId: "tab-1" },
+      { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+    );
+    expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
+      `API 404: BrowserSession not found. ${browserSessionId} was listed as open in this chat a moment ago, so it may have just ended or restarted. This chat's open BrowserSessions, most recently used first: ${other.id} "Other". Use one of these ids, or omit browserSessionId to use the one you used last.`,
+    );
+  });
 
   test("a missing BrowserSession in a chat with no open browser says to open one", async () => {
     const definitions = createInteractionAttemptToolDefinitions({
