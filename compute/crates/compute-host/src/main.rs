@@ -305,7 +305,8 @@ struct ServeArgs {
     /// Every guest must listen on it: the agent also connects to it to
     /// find guests that stopped while their VMs run on (a power-off, a
     /// halt, a hung kernel), and ends the VM of one that takes no
-    /// connection for five checks thirty seconds apart, as if it crashed.
+    /// connection for five checks thirty seconds apart, as if it crashed;
+    /// one whose kernel said on its console that it halted, at its first.
     #[arg(long)]
     restore_notice_port: Option<u32>,
     /// Keep warm templates: a guest vsock port that accepts connections

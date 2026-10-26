@@ -253,6 +253,18 @@ pub trait Engine: Send + Sync + 'static {
         ))
     }
 
+    /// Whether the guest's last words were that it halted: it stopped its
+    /// processors for good, as Linux does for a halt and for a power-off
+    /// its VMM gives it no way to make (Firecracker on x86). Its VM then
+    /// runs on, but its guest never will. The words are the guest's own,
+    /// and it can write them whenever it likes, so they say only why a
+    /// guest that also takes no connection has stopped. Reads a little of
+    /// a file. Engines that cannot tell say no.
+    fn halted(&self, vm: &Self::Vm) -> Result<bool, EngineError> {
+        let _ = vm;
+        Ok(false)
+    }
+
     /// Gives the VM new guarantees, as [`VmSpec::memory_request_mib`] and
     /// [`VmSpec::cpu_weight`] give a new one: its processor share at once,
     /// its memory protection from its next resume, which is when a VM gets

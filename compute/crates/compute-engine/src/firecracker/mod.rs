@@ -9,6 +9,7 @@
 
 mod api;
 mod balloon;
+mod console;
 mod holder;
 mod jail;
 mod pager;
@@ -446,6 +447,7 @@ impl Firecracker {
             jail: jail.clone(),
             memory_low: AtomicU64::new(u64::from(spec.memory_request_mib) << 20),
             runtime: recorded_runtime(jail),
+            console: spec.logs.join(console::CONSOLE_LOG),
         })
     }
 
@@ -601,7 +603,7 @@ fn prepare(
     }
     fs::create_dir_all(logs)?;
     Ok((
-        fresh_log(&logs.join("console.log"))?,
+        fresh_log(&logs.join(console::CONSOLE_LOG))?,
         fresh_log(&logs.join("vmm.log"))?,
     ))
 }
@@ -651,6 +653,8 @@ pub struct FirecrackerVm {
     balloon: Balloon,
     /// See [`Engine::vm_runtime`].
     runtime: String,
+    /// Its guest's serial console, written by this VM process alone.
+    console: PathBuf,
 }
 
 impl FirecrackerVm {
@@ -1177,6 +1181,11 @@ impl Engine for Firecracker {
         vm.cgroup
             .memory_stats()
             .map_err(|error| EngineError::io("memory_stats", error))
+    }
+
+    fn halted(&self, vm: &FirecrackerVm) -> Result<bool, EngineError> {
+        console::says_halted(&vm.console, &vm.name)
+            .map_err(|error| EngineError::io("halted", error))
     }
 
     fn exited(&self, vm: &FirecrackerVm) -> impl Future<Output = ()> + Send + 'static {
