@@ -85,7 +85,6 @@ import { Notice } from "../ui/notice";
 import { formatAbsoluteTime } from "../ui/relative-time";
 import { NativeSelect, type SelectOption } from "../ui/select-menu";
 import { Skeleton } from "../ui/skeleton";
-import { StatusBadge } from "../ui/status-badge";
 import { cn } from "../app/lib/utils";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
@@ -1021,20 +1020,6 @@ function MeetingDetailPageContent({
   const header = (
     <DetailPageHeader
       title={recording.title}
-      chips={
-        // Recording here, the bar under the title says so with its clock; a
-        // refused upload is said by its notice, and isn't in progress.
-        capturingHere || here === "upload_failed" ? undefined : phase.kind === "transcribing" ||
-          here === "transcribing" ? (
-          <StatusBadge variant="dot" tone="progress" pulse>
-            {msg("meetings.detailPage.transcribing")}
-          </StatusBadge>
-        ) : phase.kind === "uploading" ? (
-          <StatusBadge variant="dot" tone="progress" pulse>
-            {msg("meetings.detailPage.inProgress")}
-          </StatusBadge>
-        ) : undefined
-      }
       meta={
         <DetailMeta>
           {formatAbsoluteTime(recording.startedAt, { text: msg })}
@@ -1136,6 +1121,7 @@ function MeetingDetailPageContent({
                   {versionLine(meeting.versions[0]!, modelName, msg)}
                 </span>
               )}
+              {phase.kind === "failed" ? null : (
               <Button
                 type="button"
                 size="sm"
@@ -1149,6 +1135,7 @@ function MeetingDetailPageContent({
                   ? msg("meetings.detailPage.transcribingAgain")
                   : msg("meetings.detailPage.transcribeAgain")}
               </Button>
+              )}
             </div>
           </DetailAsideItem>
         ) : null}
@@ -1247,7 +1234,7 @@ function MeetingDetailPageContent({
                 <span className="mr-2 inline-flex rounded-full border border-border px-1.5 text-xs leading-4 font-medium text-fg-label">
                   {msg("meetings.detailPage.preview")}
                 </span>
-                {recording.state === "capturing"
+                {recording.state === "capturing" && here !== "transcribing"
                   ? msg("meetings.detailPage.whatSSaidSoFar")
                   : msg("meetings.detailPage.whatWasSaidAsIt")}
               </p>

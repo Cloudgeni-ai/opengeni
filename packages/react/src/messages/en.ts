@@ -2275,7 +2275,6 @@ export const englishMessages = {
   "meetings.detailPage.error": "Error",
   "meetings.detailPage.everyoneInThisWorkspaceCan": "Everyone in the workspace can open it.",
   "meetings.detailPage.failed": "Failed",
-  "meetings.detailPage.inProgress": "In progress",
   "meetings.detailPage.itMayHaveBeenDeleted":
     "It may have been deleted, or only the person who recorded it can open it.",
   "meetings.detailPage.itSStillBeingRecorded":
@@ -2476,6 +2475,7 @@ export const englishMessages = {
   "meetings.recorderPanel.finishing": "Finishing",
   "meetings.recorderPanel.includeATabSAudio": "Include a tab's audio",
   "meetings.recorderPanel.includeComputerAudio": "Include computer audio",
+  "meetings.recorderPanel.recordingOptionsLanguage": "Recording options, {language}",
   "meetings.recorderPanel.listeningWhatSSaidShows": "Listening…",
   "meetings.recorderPanel.liveTextIsnTAvailable":
     "No live text this time.{value} You still get the transcript after you stop.",
@@ -2541,7 +2541,7 @@ export const englishMessages = {
   "meetings.recorderPanel.tabAudio": "Tab audio",
   "meetings.recorderPanel.takeNotes": "Take notes",
   "meetings.recorderPanel.theLiveTranscriptAddsAbout":
-    "The live transcript adds about ${value} per hour of audio.",
+    "About ${value} per hour.",
   "meetings.recorderPanel.theLiveTranscriptionAccountHas":
     "Live transcription is out of credit. Ask an admin to top it up.",
   "meetings.recorderPanel.theLiveTranscriptionProviderIs":
@@ -2549,7 +2549,7 @@ export const englishMessages = {
   "meetings.recorderPanel.theLiveTranscriptionProviderRefused":
     "Live transcription rejected the workspace's key. Ask an admin to check it.",
   "meetings.recorderPanel.theLiveTranscriptUsesExtra":
-    "The live transcript uses extra transcription credit.",
+    "Uses extra transcription credit.",
   "meetings.recorderPanel.theMeetingWasDeletedOr":
     "The meeting was deleted, or you no longer have access to it.",
   "meetings.recorderPanel.theServerRefusedTheAudio": "The server refused the audio.",

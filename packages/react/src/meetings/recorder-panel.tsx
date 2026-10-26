@@ -16,8 +16,10 @@ import {
   type ComponentProps,
 } from "react";
 import {
+  ChevronDownIcon,
   CircleIcon,
   InfoIcon,
+  LanguagesIcon,
   MicIcon,
   NotebookPenIcon,
   PauseIcon,
@@ -28,10 +30,20 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "../ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuNote,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "../ui/dropdown-menu";
 import { Checkbox } from "../ui/field";
 import { Input } from "../ui/input";
 import { Notice } from "../ui/notice";
-import { NativeSelect } from "../ui/select-menu";
 import { cn } from "../app/lib/utils";
 
 import { defaultMeetingTitle, formatClock } from "../recordings";
@@ -570,7 +582,6 @@ function RecorderPanelContent({
   const msg = useOpenGeniText();
   const titleId = useId();
   const tabAudioId = useId();
-  const liveId = useId();
   const [title, setTitle] = useState("");
   const [languageChoice, setLanguage] = useState<string | null>(null);
   const language = languageChoice ?? defaultLanguage ?? DETECT_LANGUAGE;
@@ -729,34 +740,20 @@ function RecorderPanelContent({
               : msg("meetings.recorderPanel.includeATabSAudio")}
           </label>
         ) : null}
-        {liveTranscript ? (
-          <label
-            htmlFor={liveId}
-            className="flex shrink-0 cursor-pointer items-center gap-2 text-sm leading-5 text-fg-label select-none pointer-coarse:min-h-11 max-sm:self-start"
-            title={msg("meetings.recorderPanel.showsWhatSSaidAs")}
-          >
-            <Checkbox
-              id={liveId}
-              checked={liveOn}
-              disabled={starting}
-              onCheckedChange={setLiveChoice}
-            />
-            {msg("meetings.recorderPanel.liveTranscript")}
-          </label>
-        ) : null}
-        <div className="w-40 shrink-0 max-sm:w-full">
-          <NativeSelect
-            aria-label={msg("meetings.recorderPanel.meetingLanguage")}
-            options={meetingLanguageOptions(
-              language,
-              msg("meetings.recorderPanel.detectLanguage"),
-              msg,
-            )}
-            value={language}
-            onValueChange={setLanguage}
-            disabled={starting}
-          />
-        </div>
+        <RecorderOptions
+          language={language}
+          onLanguageChange={setLanguage}
+          live={
+            liveTranscript
+              ? {
+                  on: liveOn,
+                  usdPerHour: liveTranscript.usdPerHour ?? null,
+                  onChange: setLiveChoice,
+                }
+              : null
+          }
+          disabled={starting}
+        />
         <Button
           type="submit"
           disabled={!recorder || starting}
@@ -780,9 +777,79 @@ function RecorderPanelContent({
       {notice ? <p className="px-1 text-sm leading-5 text-fg-label">{notice}</p> : null}
       <p className="px-1 text-xs leading-4.5 text-fg-muted" aria-live="polite">
         {startHint}
-        {liveOn && !starting ? ` ${liveCostHint(liveTranscript?.usdPerHour ?? null, msg)}` : null}
       </p>
     </section>
+  );
+}
+
+/**
+ * The meeting's language and the live transcript: set once in Meetings
+ * settings, so they wait in one small menu beside Start instead of crowding it.
+ */
+export function RecorderOptions({
+  language,
+  onLanguageChange,
+  live,
+  disabled,
+  defaultOpen = false,
+}: {
+  language: string;
+  onLanguageChange: (language: string) => void;
+  live: { on: boolean; usdPerHour: number | null; onChange: (on: boolean) => void } | null;
+  disabled: boolean;
+  /** Tests open it without a pointer. */
+  defaultOpen?: boolean;
+}) {
+  const msg = useOpenGeniText();
+  const options = meetingLanguageOptions(
+    language,
+    msg("meetings.recorderPanel.detectLanguage"),
+    msg,
+  );
+  const current = options.find((option) => option.value === language)?.label ?? language;
+  return (
+    <DropdownMenu defaultOpen={defaultOpen}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={disabled}
+          aria-label={msg("meetings.recorderPanel.recordingOptionsLanguage", { language: current })}
+          className="shrink-0 rounded-[10px] text-fg-label pointer-coarse:h-11 max-sm:-ml-3 max-sm:self-start"
+        >
+          <LanguagesIcon aria-hidden="true" />
+          {current}
+          <ChevronDownIcon aria-hidden="true" className="text-fg-subtle" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        {/* The live transcript first, so it never hides below the languages. */}
+        {live ? (
+          <>
+            <DropdownMenuCheckboxItem
+              checked={live.on}
+              onCheckedChange={(checked) => live.onChange(checked === true)}
+              onSelect={(event) => event.preventDefault()}
+            >
+              {msg("meetings.recorderPanel.liveTranscript")}
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuNote>
+              {msg("meetings.recorderPanel.showsWhatSSaidAs")}{" "}
+              {liveCostHint(live.usdPerHour, msg)}
+            </DropdownMenuNote>
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
+        <DropdownMenuLabel>{msg("meetings.recorderPanel.meetingLanguage")}</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={language} onValueChange={onLanguageChange}>
+          {options.map((option) => (
+            <DropdownMenuRadioItem key={option.value} value={option.value}>
+              {option.label}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
