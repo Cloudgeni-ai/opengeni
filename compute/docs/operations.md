@@ -313,7 +313,9 @@ a reboot: keep them the way the host keeps its other firewall rules.
 `install.sh` checks the bundle against `SHA256SUMS`; installs the packages
 the agent runs (iproute2, nftables, e2fsprogs, xfsprogs); installs the
 release under `/opt/compute/releases/<version>` behind
-`/opt/compute/current`; downloads Firecracker, its jailer and the guest
+`/opt/compute/current`, once its `compute-host` has run on this host (a
+binary that cannot, say one built for another C library, is refused
+before anything switches to it); downloads Firecracker, its jailer and the guest
 kernel that `pins.env` names, checking each SHA-256; formats and mounts the
 state volume at `/var/lib/compute` the first time and records its
 filesystem UUID; builds the base image from `COMPUTE_BASE_IMAGE_REF`; and
@@ -871,6 +873,10 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   configuration stays):
   it installs the release beside the old ones, points
   `/opt/compute/current` at it and restarts the agent; VMs keep running.
+  A release whose binary does not run on the host is refused first, and
+  the running release, guard and agent are left as they are: the guard
+  handed over to a binary that cannot start would let the watchdog reset
+  the host.
   A guard running another binary (of another release, or one replaced
   in this one) is handed over to this one's by restarting its service.
   Opening or closing the watchdog feeds it (it stays armed), so the guard

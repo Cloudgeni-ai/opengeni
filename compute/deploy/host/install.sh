@@ -23,8 +23,9 @@
 #   - checks this bundle against its SHA256SUMS
 #   - installs the packages the agent runs (iproute2, nftables, e2fsprogs,
 #     xfsprogs) and its certificate script needs (curl, jq, openssl)
-#   - installs this release under /opt/compute/releases/<version> and
-#     points /opt/compute/current at it
+#   - installs this release under /opt/compute/releases/<version>, checks
+#     that its agent binary runs on this host, and points
+#     /opt/compute/current at it
 #   - downloads the Firecracker release, jailer and guest kernel that
 #     pins.env names, checking each SHA-256, under /opt/compute; Firecracker
 #     binaries of earlier releases stay, and the agent keeps running memory
@@ -109,6 +110,12 @@ if [ ! -x "$release/compute-host" ] || ! cmp -s "$here/compute-host" "$release/c
   rm -rf "$release"
   mv "$release.part" "$release"
 fi
+# A binary that cannot run here (built for another C library or processor,
+# or damaged) must be refused before anything starts it: the guard handed
+# over to it below would not start, and the watchdog would reset the host,
+# ending every VM on it.
+"$release/compute-host" --help >/dev/null 2>&1 ||
+  fail "$release/compute-host does not run on this host; the running release is left as it is"
 ln -sfn "$release" /opt/compute/current.part
 mv -T /opt/compute/current.part /opt/compute/current
 
