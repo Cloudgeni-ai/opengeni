@@ -59,6 +59,8 @@ import {
   STANDALONE_LINK_PROPERTY,
 } from "./rehype-standalone-links";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { prepareMathMarkdown } from "../markdown-math";
+import { useMathPlugins } from "./markdown-math-loader";
 
 /**
  * The default renderer for chat message bodies in {@link MessageTimeline}.
@@ -778,17 +780,11 @@ function MarkdownImpl({
       : [];
   // The plugins walk the standard hast tree; structural local types keep the
   // modules dependency-free, at the cost of this narrowing cast at the seam.
-  const rehypePluginList = [
+  const rehypePluginList: unknown[] = [
     ...(linkRenderer ? [rehypeStandaloneLinks] : []),
     ...secretRefs,
     ...(revealActive && reveal !== null ? [[rehypeStreamReveal, { reveal, now }]] : []),
   ];
-  const rehypePlugins =
-    rehypePluginList.length > 0
-      ? (rehypePluginList as unknown as NonNullable<
-          Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]
-        >)
-      : undefined;
 
   // Drop tip ink after trailing age windows finish. Same commit crystallizes:
   // ink spans → final plain markdown (soften off) + a short local settle breath.
@@ -838,6 +834,23 @@ function MarkdownImpl({
   // fences don't snap to final GFM one commit before the crystallize morph.
   // Reveal identity still tracks the true source (`children`).
   const parseText = streaming || revealActive ? softenStreamingMarkdown(children) : children;
+  // Math typesets once its renderer has loaded (on the first message that has math);
+  // KaTeX runs last so it reads math text whole, whatever earlier plugins did.
+  const math = useMemo(() => prepareMathMarkdown(parseText), [parseText]);
+  const mathPlugins = useMathPlugins(math.hasMath);
+  if (mathPlugins) {
+    rehypePluginList.push(mathPlugins.rehypeKatexPlugin);
+  }
+  const rehypePlugins =
+    rehypePluginList.length > 0
+      ? (rehypePluginList as unknown as NonNullable<
+          Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]
+        >)
+      : undefined;
+  const baseRemarkPlugins = softLineBreaks ? SOFT_LINE_BREAK_REMARK_PLUGINS : REMARK_PLUGINS;
+  const remarkPlugins = mathPlugins
+    ? ([...baseRemarkPlugins, mathPlugins.remarkMathPlugin] as unknown as RemarkPlugins)
+    : baseRemarkPlugins;
   const linkContext = useMemo(
     () => ({ onSandboxFile, artifactHref, resolveLink, renderLink: linkRenderer }),
     [onSandboxFile, artifactHref, resolveLink, linkRenderer],
@@ -869,12 +882,12 @@ function MarkdownImpl({
             )}
           >
             <ReactMarkdown
-              remarkPlugins={softLineBreaks ? SOFT_LINE_BREAK_REMARK_PLUGINS : REMARK_PLUGINS}
+              remarkPlugins={remarkPlugins}
               rehypePlugins={rehypePlugins}
               components={markdownComponents}
               urlTransform={markdownUrlTransform}
             >
-              {parseText}
+              {mathPlugins ? math.text : parseText}
             </ReactMarkdown>
           </div>
         </TooltipProvider>
