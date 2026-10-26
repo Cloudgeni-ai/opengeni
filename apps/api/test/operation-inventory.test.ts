@@ -21,7 +21,11 @@ import {
   CONNECTED_COMMAND_CLASSIFY_LIMIT,
 } from "@opengeni/db/session-background-commands";
 import type { EventBus } from "@opengeni/events";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { ingestConnectedCommandCompletion } from "../src/sandbox/command-completion";
 import { handleAgentEventPayload } from "../src/sandbox/metrics-ingestion";
 import { decideInventoryPage, type ReportedOperation } from "../src/sandbox/operation-inventory";
@@ -41,6 +45,9 @@ beforeAll(async () => {
   const db = await acquireSharedTestDatabase("operation-inventory");
   if (!db) throw new Error("PostgreSQL required");
   shared = db;
+  // 0984 withholds the re-arm's runtime grant for one release; run as the
+  // runtime will once it is granted.
+  await grantDeferredRuntimeAccess(db.admin);
   client = createDb(db.appUrl);
 }, 180_000);
 

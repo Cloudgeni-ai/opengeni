@@ -1,6 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
   bootstrapWorkspace,
@@ -43,6 +47,9 @@ beforeAll(async () => {
     return;
   }
   admin = shared.admin;
+  // 0984 withholds the re-arm's runtime grant for one release; these tests run
+  // as the runtime will once it is granted (and one checks the meantime).
+  await grantDeferredRuntimeAccess(admin);
   client = createDb(shared.appUrl);
   db = client.db;
 }, 180_000);
@@ -292,6 +299,24 @@ describe("connected-command reconciliation on compute sandboxes", () => {
     const claimed = (await claim()).find((c) => c.commandId === left);
     expect(claimed?.state).toBe("running");
     expect(claimed?.proof).toBeNull();
+    expect(await due()).toBe(false);
+  }, 60_000);
+
+  test("until the re-arm is granted, a report makes nothing due and does not fail", async () => {
+    if (!available) return;
+    const left = await runningCommand("machine", { notified: true });
+    await defer(left);
+    const rearm = "opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text)";
+    await admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${rearm} FROM opengeni_app`);
+    try {
+      expect(await rearmUnansweredConnectedCommands(db, await runnerOf(left))).toBe(0);
+      expect(await outcomeOf(left)).toBe("provider_unanswered");
+      expect(await due()).toBe(false);
+    } finally {
+      await grantDeferredRuntimeAccess(admin);
+    }
+    expect(await rearmUnansweredConnectedCommands(db, await runnerOf(left))).toBe(1);
+    expect((await claim()).find((c) => c.commandId === left)?.state).toBe("running");
     expect(await due()).toBe(false);
   }, 60_000);
 

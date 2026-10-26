@@ -22,6 +22,12 @@
 --
 -- The commands already stuck this way are made due once here. A runner
 -- still offline is recorded unanswered again, once, by the next pass.
+--
+-- The function is created with its runtime EXECUTE withheld for one release:
+-- the previous release does not know it and rejects a runtime grant on an
+-- unknown SECURITY DEFINER routine. Until a later migration grants it, the API
+-- checks the grant first and skips the re-arm, and only the one-time repair
+-- below (which runs as the owner) takes effect.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
@@ -81,9 +87,6 @@ BEGIN
     END $body$;
   $create$, data_schema);
   REVOKE ALL ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid,uuid,text) FROM PUBLIC;
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
-    GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid,uuid,text) TO opengeni_app;
-  END IF;
 END $install$;
 
 DO $heal$

@@ -224,6 +224,11 @@ running commands left to that exact process due again (outcome
 talking: an operation it does not know answers lost and the command settles
 lost, never as a success; one it runs continues as before. A compute runner's
 report does not do this, since its running commands are never polled.
+Migration 0984 creates the database function behind this with its runtime
+grant withheld for one release (see
+[expand/contract migrations](migrations-expand-contract.md)), and makes the
+commands already stuck this way due once while it runs. Until a later
+migration grants it, a report skips the re-arm.
 
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses

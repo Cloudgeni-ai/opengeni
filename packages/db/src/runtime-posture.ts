@@ -48,8 +48,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * trigger dispatcher's identity-only due inventory and intake retention pass
  * (0929), the recording recovery sweep's stalled-work inventory (0930), the
  * MCP Events subscription pump's due inventory (0932), the source feed pump's
- * due inventory (0935), the recording retention sweep's due inventory (0946)
- * and the lookup of whose personal machine a chat runs on (0978). Each is
+ * due inventory (0935), the recording retention sweep's due inventory (0946),
+ * the lookup of whose personal machine a chat runs on (0978) and the re-arm of
+ * the running commands a returning runner did not answer for (0984). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -62,6 +63,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_event_source_feeds_v1(integer)",
   "list_due_recording_retention_v1(integer)",
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+  "rearm_unanswered_connected_commands(uuid, uuid, text)",
 ] as const;
 
 /**
@@ -73,9 +75,12 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * the recording retention inventory and 0950 granted it. 0978 withholds the
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
+ * 0984 withholds the connected-command re-arm the same way; until it is
+ * granted, a runner's inventory report skips it.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+  "rearm_unanswered_connected_commands(uuid, uuid, text)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -101,6 +106,7 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "enrollments",
     "organization_memberships",
   ],
+  "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
