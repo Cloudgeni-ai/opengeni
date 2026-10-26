@@ -275,6 +275,11 @@ service does not interpret an incomplete observation as an empty queue.
 
 ## Admission and FIFO
 
+When the oldest ready PR is control-plane or the Version PR, it runs alone.
+Otherwise ordinary PRs fill the batch up to its cap, skipping control-plane PRs
+in the middle but never crossing a Version PR. A skipped control-plane PR runs
+alone once it is oldest; in-flight Version and preceding-batch gates still apply.
+
 The GitHub-only admission contract is an open, non-draft PR with `queue-ready` or a current native auto-merge request,
 and successful configured required GitHub-hosted checks on its exact current head.
 The admission workflow is fast lint, types and selected units, not the full PR
@@ -496,7 +501,7 @@ slots alone do not increase that runner-budget ceiling. Main complete-unit
 reuse, if independently qualified, would lower the modeled combined cost
 from 519 to 369 job-minutes, not make runner capacity unlimited.
 Failed or changed predecessors invalidate descendants without cancelling their
-runs. Version/control-plane barriers and sequential bisection remain unchanged.
+runs. Version barriers, control-plane singleton isolation and sequential bisection remain unchanged.
 Full-main capacity estimates remain observable rather than reserving runners.
 Before publication, the existing single trusted retry, and landing, the reader scans current
 repository runs and their latest jobs (100 entries per page, paginated through
