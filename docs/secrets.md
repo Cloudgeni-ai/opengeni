@@ -259,7 +259,9 @@ command also gets `OPENGENI_CREDENTIAL_PROFILE_VARS`, the comma-separated names
 few seconds, so a change applies to the next commands without restarting
 anything; a read that takes longer than about two seconds or fails uses the
 last profile read in the attempt, or none, so a slow database never stalls
-commands.
+commands. Only one read runs at a time; once a command stopped waiting for it,
+later commands use that fallback without waiting until it finishes (a stuck
+read is replaced after 30 seconds).
 
 **Lenient.** A profile never fails a command. An entry that cannot be resolved
 (missing secret, policy, waiting for approval, provider unavailable, too large
@@ -267,7 +269,9 @@ or binary) is skipped and the command runs without it; the tool result ends
 with a short note such as `[Note: credential profile skipped AZURE_TENANT_ID
 (secret not found)]`. Each distinct note is shown once per attempt, not on
 every command. A password manager that does not answer within about 15 seconds
-skips its entries the same way. A managed sandbox that cannot receive the env
+skips its entries the same way; that lookup is not cancelled, so it can
+still use an "Allow once" approval and be recorded in the audit trail even
+though the command ran without the value. A managed sandbox that cannot receive the env
 file (for example an OpenSandbox backend, which has no private file writes)
 runs the command without the profile and says so once. An agent with secrets
 turned off runs without the profile and without a note. An entry waiting for

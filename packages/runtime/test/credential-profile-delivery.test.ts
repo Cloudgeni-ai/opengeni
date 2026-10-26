@@ -215,9 +215,11 @@ describe("createCredentialEnvironment", () => {
   test("a slow or failed profile read never stalls a command", async () => {
     let clock = 1_000;
     let mode: "ok" | "hang" | "fail" = "ok";
+    let loads = 0;
     const credentials = createCredentialEnvironment({
       resolver: createStaticSecretResolver(VALUES),
       load: async () => {
+        loads += 1;
         if (mode === "hang") return await new Promise<never>(() => undefined);
         if (mode === "fail") throw new Error("pool exhausted");
         return profile([["GH_TOKEN", ref("Plain")]]);
@@ -231,10 +233,19 @@ describe("createCredentialEnvironment", () => {
     const started = Date.now();
     expect(await credentials.forCommand(SHELL)).toEqual({ env: {}, notes: [] });
     expect(Date.now() - started).toBeLessThan(2_000);
-    // Once a profile was read, a hanging or failing read keeps using it.
+    // Later commands do not wait for the stuck read again, and no second read
+    // starts while it is pending.
     clock += 5_000;
+    const again = Date.now();
+    expect(await credentials.forCommand(SHELL)).toEqual({ env: {}, notes: [] });
+    expect(Date.now() - again).toBeLessThan(1_000);
+    expect(loads).toBe(1);
+    // A stuck read is replaced once it is old enough.
+    clock += 30_000;
     mode = "ok";
     expect((await credentials.forCommand(SHELL)).env.GH_TOKEN).toBe(VALUES.Plain);
+    expect(loads).toBe(2);
+    // Once a profile was read, a hanging or failing read keeps using it.
     for (const next of ["hang", "fail"] as const) {
       clock += 5_000;
       mode = next;

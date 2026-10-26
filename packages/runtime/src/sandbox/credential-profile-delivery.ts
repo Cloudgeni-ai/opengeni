@@ -40,6 +40,11 @@ const DEFAULT_PROFILE_TTL_MS = 5_000;
  * is used and the read finishes in the background.
  */
 const DEFAULT_PROFILE_LOAD_TIMEOUT_MS = 2_000;
+/**
+ * A read that a command gave up on is left to finish; a new one starts only
+ * after this long, so a hung database does not pile up reads.
+ */
+const STUCK_PROFILE_READ_RETRY_MS = 30_000;
 /** How long one command waits for the password manager to resolve the profile. */
 const DEFAULT_PROFILE_RESOLVE_TIMEOUT_MS = 15_000;
 /**
@@ -188,40 +193,57 @@ export function createCredentialEnvironment(
   const loadTimeout = input.loadTimeoutMs ?? DEFAULT_PROFILE_LOAD_TIMEOUT_MS;
   const resolveTimeout = input.resolveTimeoutMs ?? DEFAULT_PROFILE_RESOLVE_TIMEOUT_MS;
   const now = input.now ?? Date.now;
-  let cached: { at: number; profile: Promise<EffectiveCredentialProfile | null> } | null = null;
+  /** The last successful read and when it finished. */
+  let cached: { at: number; profile: EffectiveCredentialProfile | null } | null = null;
   /** The last profile read successfully in this attempt (null: none set). */
   let lastGood: EffectiveCredentialProfile | null = null;
+  /** The read in flight, if any; `stuck` once a command gave up waiting for it. */
+  type InflightRead = {
+    read: Promise<EffectiveCredentialProfile | null>;
+    startedAt: number;
+    stuck: boolean;
+  };
+  let inflight: InflightRead | null = null;
   const sticky = new Map<string, string>();
   /** Notes already shown in this attempt: each one is shown once. */
   const shown = new Set<string>();
 
-  function loadProfile(): Promise<EffectiveCredentialProfile | null> {
+  /**
+   * The effective profile, never waiting longer than the load timeout. A
+   * fresh read is reused for the cache window. A slow or failed read falls
+   * back to the last good profile, silently, so a workspace that never set a
+   * profile sees no difference. Only one read runs at a time, and once a
+   * command gave up on it, later commands use the fallback without waiting
+   * until it settles (or until it is old enough to be replaced).
+   */
+  async function currentProfile(): Promise<EffectiveCredentialProfile | null> {
     const at = now();
-    if (!cached || at - cached.at >= ttl) {
-      const profile = Promise.resolve().then(() => input.load());
-      cached = { at, profile };
-      profile.then(
+    if (cached && at - cached.at < ttl) return cached.profile;
+    if (!inflight || (inflight.stuck && at - inflight.startedAt >= STUCK_PROFILE_READ_RETRY_MS)) {
+      const current: InflightRead = {
+        read: Promise.resolve().then(() => input.load()),
+        startedAt: at,
+        stuck: false,
+      };
+      inflight = current;
+      current.read.then(
         (value) => {
           lastGood = value;
+          cached = { at: now(), profile: value };
+          if (inflight === current) inflight = null;
         },
         () => {
-          // A failed read is not reused.
-          if (cached?.profile === profile) cached = null;
+          // A failed read is not reused; the next command reads again.
+          if (inflight === current) inflight = null;
         },
       );
     }
-    return cached.profile;
-  }
-
-  /**
-   * The effective profile, never waiting longer than the load timeout. A
-   * slow or failed read falls back to the last good profile, silently: a
-   * workspace that never set a profile sees no difference at all.
-   */
-  async function currentProfile(): Promise<EffectiveCredentialProfile | null> {
+    const current = inflight;
+    if (current.stuck) return lastGood;
     try {
-      return await withinTimeout(loadProfile(), loadTimeout);
-    } catch {
+      return await withinTimeout(current.read, loadTimeout);
+    } catch (error) {
+      if (error instanceof ProfileTimeoutError) current.stuck = true;
       return lastGood;
     }
   }
