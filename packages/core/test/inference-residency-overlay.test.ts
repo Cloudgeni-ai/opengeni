@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   createDb,
@@ -18,6 +22,8 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("inference-residency-overlay");
   if (!acquired) throw new Error("EU-only inference tests require PostgreSQL");
   shared = acquired;
+  // The change function is withheld from the runtime until it is granted.
+  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
 }, 180_000);
 
