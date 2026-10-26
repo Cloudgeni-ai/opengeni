@@ -921,21 +921,30 @@ export class GitHubActiveExecutor implements Executor {
     }
     // Bound work per tick. Completed effects are immutable history; blocked
     // effects remain visible without starving candidate planning. Candidate
-    // reruns unblock the batch slot, so they precede a backlog of comments.
-    const effect = Object.values(state.ledger.effects)
-      .sort(
-        (a, b) =>
-          Number(b.kind === "disable-auto-merge") - Number(a.kind === "disable-auto-merge") ||
-          Number(b.kind === "followup") - Number(a.kind === "followup") ||
-          Number(b.kind === "rerun") - Number(a.kind === "rerun") ||
-          Date.parse(a.nextAt) - Date.parse(b.nextAt),
-      )
-      .find(
-        (item) =>
-          !["done", "blocked"].includes(item.status) &&
-          Date.parse(item.nextAt) <= Date.parse(this.now()),
-      );
+    // reruns unblock the batch slot, so they go first; a rerun held by busy main
+    // is due again every tick, so it never uses up the tick's other effect.
+    const due = (ledger: Ledger) =>
+      Object.values(ledger.effects)
+        .sort(
+          (a, b) =>
+            Number(b.kind === "disable-auto-merge") - Number(a.kind === "disable-auto-merge") ||
+            Number(b.kind === "followup") - Number(a.kind === "followup") ||
+            Number(b.kind === "rerun") - Number(a.kind === "rerun") ||
+            Date.parse(a.nextAt) - Date.parse(b.nextAt),
+        )
+        .filter(
+          (item) =>
+            !["done", "blocked"].includes(item.status) &&
+            Date.parse(item.nextAt) <= Date.parse(this.now()),
+        );
+    const effect = due(state.ledger)[0];
     if (effect) messages.push(await this.processEffect(state, effect));
+    if (effect?.kind === "rerun") {
+      state = await this.load();
+      if (!this.available(state)) return messages.join("; ") || null;
+      const next = due(state.ledger).find((item) => item.kind !== "rerun");
+      if (next) messages.push(await this.processEffect(state, next));
+    }
     state = await this.load();
     if (!this.available(state)) return messages.join("; ") || null;
     const entry = Object.entries(state.ledger.landings)

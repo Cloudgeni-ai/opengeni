@@ -1101,8 +1101,37 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await f.executor().maintain();
     const effects = (await f.state()).ledger.effects;
     expect(effects["rerun-due"]?.status).not.toBe("pending");
-    expect(effects["comment-backlog"]?.status).toBe("pending");
-    expect(f.api.comments).toEqual([]);
+    // The rerun went first; the comment still gets this tick's second slot.
+    expect(effects["comment-backlog"]?.status).toBe("done");
+    expect(f.api.comments.filter((body) => body.includes("<!-- backlog -->"))).toHaveLength(1);
+  });
+  test("a rerun held by busy main does not starve the comment backlog", async () => {
+    const f = await fixture();
+    const m = await f.publish();
+    const run = f.verdict(m, "infrastructure");
+    const base = { attempts: 0, checks: 0, lastError: null, status: "pending" as const };
+    await f.seed((l) => {
+      l.effects["comment-backlog"] = {
+        ...base,
+        id: "comment-backlog",
+        kind: "comment",
+        number: 1,
+        body: "Backlog notice\n\n<!-- backlog -->",
+        marker: "<!-- backlog -->",
+        nextAt: "2026-10-21T11:00:00.000Z",
+      };
+      l.effects["rerun-held"] = { ...base, id: "rerun-held", kind: "rerun", run, nextAt: NOW };
+    });
+    f.api.busy = true;
+    for (let tick = 0; tick < 5; tick++) {
+      await f.executor().maintain();
+      f.advance(120);
+    }
+    const effects = (await f.state()).ledger.effects;
+    expect(effects["rerun-held"]?.status).toBe("pending");
+    expect(effects["rerun-held"]?.attempts).toBe(0);
+    expect(effects["comment-backlog"]?.status).toBe("done");
+    expect(f.api.comments.filter((body) => body.includes("<!-- backlog -->"))).toHaveLength(1);
   });
   test("accepted push with lost response reconciles instead of republishing", async () => {
     const f = await fixture();

@@ -265,6 +265,11 @@ starts a child before the previous one has provably exited. It does not bypass
 anything: every write still needs the state-ref compare-and-swap and epoch fence,
 and processes with another owner, including other generations, still wait for
 the lease. Never configure the same ID for concurrently running processes.
+Because a running generation now renews the lease continuously, operator
+`recover-effect` and `recover-missing-run` commands (random owners) are fenced
+until the controller is stopped: STOP first, then run them. The supervisor
+reports the generation's owner as `controllerOwner` in `/status` and in each
+`writer_started` record for attribution.
 App authentication mints a short-lived installation token; in shadow it requests
 only contents/actions/pull_requests/issues **read** permissions. That auth exchange
 does not mutate repository refs, comments, labels, workflows or checks. The
