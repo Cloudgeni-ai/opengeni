@@ -33,10 +33,13 @@ can reach public model providers and external Temporal endpoints. Cloud NAT adds
 provider charges; public-node deployments do not create it. NAT ports are
 allocated dynamically per node (64 up to 65536) because all pods on a node share
 them, and allocation errors are logged.
-If such a stack already has a hand-made Cloud NAT for this subnet, remove it or
-`terraform import` it as `google_compute_router.private_nodes[0]` and
-`google_compute_router_nat.private_nodes[0]` before upgrading; a second NAT
-gateway for the same subnet ranges is rejected.
+If such a stack already has a hand-made Cloud NAT for this subnet, a second NAT
+gateway for the same subnet ranges is rejected. Import it as
+`google_compute_router.private_nodes[0]` and
+`google_compute_router_nat.private_nodes[0]` only when both are named
+`<name_prefix>-private-nodes`; a different name forces replacement and briefly
+cuts egress. Otherwise delete the hand-made NAT in a maintenance window and
+apply right after.
 
 For `network.create_network = false`, the operator must supply internet egress
 for private nodes and pods, through existing Cloud NAT or another routing path.

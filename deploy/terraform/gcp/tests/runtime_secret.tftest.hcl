@@ -29,3 +29,9 @@ run "wildcard_or_resource_name_secret_ids_are_rejected" {
   variables { runtime_readable_secret_ids = ["projects/p/secrets/*"] }
   expect_failures = [var.runtime_readable_secret_ids]
 }
+
+run "the_runtime_secret_is_not_bound_twice" {
+  command = plan
+  variables { runtime_readable_secret_ids = ["opengeni-runtime"] }
+  expect_failures = [var.runtime_readable_secret_ids]
+}

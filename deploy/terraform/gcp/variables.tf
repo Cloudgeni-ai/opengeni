@@ -91,6 +91,11 @@ variable "runtime_readable_secret_ids" {
     condition     = alltrue([for id in var.runtime_readable_secret_ids : can(regex("^[A-Za-z0-9_-]{1,255}$", id))])
     error_message = "runtime_readable_secret_ids entries must be bare Secret Manager secret IDs (letters, digits, - and _), not resource names or wildcards."
   }
+
+  validation {
+    condition     = !contains(var.runtime_readable_secret_ids, "${var.name_prefix}-runtime")
+    error_message = "runtime_readable_secret_ids must not list the runtime secret itself; it is always readable, and a second binding would remove access when the entry is later dropped."
+  }
 }
 
 variable "kubernetes_workload_identity" {
