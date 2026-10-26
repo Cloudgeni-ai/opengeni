@@ -1969,13 +1969,24 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         { total_count: 101, jobs: jobs(...Array(101).fill("completed")) },
         "Incomplete",
       ],
-      ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "Incomplete"],
       ["malformed job page", { total_count: 0 }, "Incomplete"],
     ] as const)("%s holds", async (_name, jobPage, reason) => {
       const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: jobPage }, "1000");
       expect(await r.mainBusy()).toBe(true);
       expect(r.lastHeadroom?.reason).toContain(reason);
       expect(r.lastHeadroom?.allowed).toBe(false);
+    });
+    test("a truncated job page survives one re-read as returned rows with a warning", async () => {
+      // Formerly a hold. Job counts are informational for slot one, so the live
+      // reader uses the rows GitHub returned; extra slots stay closed.
+      const r = reader(
+        [{ id: 2, status: "queued", ...OTHER }],
+        { 2: { total_count: 2, jobs: jobs("queued") } },
+        "1000",
+      );
+      expect(await r.mainBusy()).toBe(false);
+      expect(r.lastHeadroom).toMatchObject({ allowed: true, occupied: 1 });
+      expect(r.lastHeadroom?.reason).toContain("warning: job listing for run(s) 2");
     });
     test("idle run volume is allowed but malformed inventories still hold", async () => {
       const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
@@ -2252,11 +2263,6 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ["unknown job status", page(jobs("waiting", "action_required")), "Unrecognized"],
         ["missing job status", page(jobs("waiting", undefined)), "Unrecognized"],
         [
-          "truncated job page",
-          { total_count: 3, jobs: jobs("waiting", "completed") },
-          "Incomplete",
-        ],
-        [
           "oversized job page",
           { total_count: 101, jobs: jobs("waiting", ...Array(100).fill("completed")) },
           "Incomplete",
@@ -2273,6 +2279,19 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           expect.stringContaining(reason),
         ]);
       }
+      // A truncated job page is used as returned (with a warning) after one
+      // re-read, but a partial listing never proves a run approval-only.
+      nextId = 1;
+      const truncated = reader(
+        [
+          ...approvalMain(40),
+          ...runs(1, "waiting", MAIN, { total_count: 3, jobs: jobs("waiting", "completed") }),
+        ],
+        "1000",
+      );
+      expect(await truncated.github.mainBusy()).toBe(false);
+      expect(truncated.github.lastHeadroom).toMatchObject({ approvalOnlyRuns: 40 });
+      expect(truncated.github.lastHeadroom?.reason).toContain("warning: job listing for run(s)");
       // Provider errors on a job page or a run-list page reject; callers hold.
       // Each failed read makes all five bounded attempts with real backoff.
       nextId = 1;

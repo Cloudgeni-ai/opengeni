@@ -351,6 +351,7 @@ export type RunnerScan =
        * Runs whose latest-job listing still disagreed with GitHub's reported
        * `total_count` after one re-read; their demand uses the rows actually
        * returned. Only with `tolerateJobCountMismatch`; otherwise such a scan holds.
+       * Absent when every listing was complete.
        */
       partialJobRuns?: number[];
       mainDemand: number;
@@ -472,8 +473,9 @@ export async function scanRunnerDemand(input: {
       : second;
   }
   // Lenient reads use the rows actually returned: they stop at the first short
-  // page, skip repeated identities and mark the listing partial. Malformed
-  // pages, invalid identities and the deadline still fail.
+  // page or a page without new identities, skip repeated identities and mark
+  // the listing partial. Malformed or oversized (above per_page) pages, invalid
+  // identities and the deadline still fail.
   async function read(path: string, key: "workflow_runs" | "jobs", lenient: boolean) {
     const items: unknown[] = [];
     const ids = new Set<number>();
@@ -496,8 +498,10 @@ export async function scanRunnerDemand(input: {
       )
         return { error: "incomplete" } as const;
       if (lenient) {
-        if ((total !== undefined && count !== total) || values.length > 100) partial = true;
+        if (values.length > 100) return { error: "incomplete" } as const;
+        if (total !== undefined && count !== total) partial = true;
         total ??= count as number;
+        const before = items.length;
         for (const value of values) {
           const id =
             value !== null && typeof value === "object"
@@ -514,7 +518,7 @@ export async function scanRunnerDemand(input: {
           }
           items.push(value);
         }
-        if (values.length < 100)
+        if (values.length < 100 || items.length === before)
           return { items, partial: partial || items.length !== total } as const;
         continue;
       }
@@ -735,7 +739,7 @@ export async function scanRunnerDemand(input: {
   if (finished - started > deadline) return hold("deadline");
   return {
     ok: true,
-    partialJobRuns: partialJobRuns.sort((a, b) => a - b),
+    ...(partialJobRuns.length ? { partialJobRuns: partialJobRuns.sort((a, b) => a - b) } : {}),
     mainDemand,
     otherDemand,
     scannedRuns,

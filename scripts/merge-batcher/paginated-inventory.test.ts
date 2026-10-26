@@ -97,7 +97,8 @@ test("a transient count/row mismatch is re-read once before it holds", async () 
         data.total_count++;
       return data;
     });
-    expect(result).toMatchObject({ ok: true, scannedRuns: 1, otherDemand: 1, partialJobRuns: [] });
+    expect(result).toMatchObject({ ok: true, scannedRuns: 1, otherDemand: 1 });
+    expect(result).not.toHaveProperty("partialJobRuns");
     expect(skewed).toBeGreaterThan(1);
   }
 });
