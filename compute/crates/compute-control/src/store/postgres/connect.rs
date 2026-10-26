@@ -21,11 +21,12 @@ pub(super) const OPEN_WITHIN: Duration = Duration::from_secs(10);
 const UNACKNOWLEDGED_WITHIN: Duration = Duration::from_secs(15);
 /// After this long without traffic a connection is probed, every
 /// [`KEEPALIVE_EVERY`], and counts as broken once [`KEEPALIVE_PROBES`] go
-/// unanswered, or on Linux once probes have gone unanswered for
-/// [`UNACKNOWLEDGED_WITHIN`], whichever comes first: about 70 s for an
-/// idle connection whose path went away. Well under the idle limit of
-/// cloud NAT gateways and load balancers (four minutes on some); the
-/// library's own default is two hours.
+/// unanswered. On Linux [`UNACKNOWLEDGED_WITHIN`] replaces that count: the
+/// connection counts as broken at the first probe after it has gone
+/// unanswered that long, about 70 s for an idle connection whose path went
+/// away. Well under the idle limit of cloud NAT gateways and load
+/// balancers (four minutes on some); the library's own default is two
+/// hours.
 const KEEPALIVE_AFTER: Duration = Duration::from_secs(60);
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(10);
 const KEEPALIVE_PROBES: u32 = 3;
@@ -37,8 +38,9 @@ const LIBRARY_KEEPALIVE_AFTER: Duration = Duration::from_secs(2 * 60 * 60);
 /// connections are always bounded: a connection string can choose other
 /// values (`connect_timeout`, `tcp_user_timeout`, `keepalives_idle`,
 /// `keepalives_interval`, `keepalives_retries`), but not none at all. A
-/// zero there, which the library reads as unset, and a keepalive idle time
-/// of exactly the library's two hours both get the bound; `keepalives=0`
+/// zero for one of the four durations, which the library reads as unset,
+/// and a keepalive idle time of exactly the library's two hours both get
+/// the bound. `keepalives_retries=0` is kept as given, and `keepalives=0`
 /// still turns keepalives off.
 pub(super) fn bounded(mut config: tokio_postgres::Config) -> tokio_postgres::Config {
     if config.get_connect_timeout().is_none() {

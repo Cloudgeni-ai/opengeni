@@ -75,7 +75,10 @@ enabling it changes no session's backend.
    limit of cloud NAT gateways and load balancers. A connection string
    can choose other values (`connect_timeout`, `tcp_user_timeout`,
    `keepalives_idle`, `keepalives_interval`, `keepalives_retries`) but
-   not turn the bounds off: a zero gets the default bound. A
+   not turn the bounds off: a zero for one of the four durations, and a
+   `keepalives_idle` of exactly 7200 (the library's default, which reads
+   as unset), get the bound. `keepalives=0` still turns keepalives off,
+   and `keepalives_retries=0` is kept as given. A
    replica that has read no hosts from the database for a lease term
    cannot tell which hosts renew: it answers creates and wakes 503
    `unavailable` ("has not read its hosts from the store"), not
