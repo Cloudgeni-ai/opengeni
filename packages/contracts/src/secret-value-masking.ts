@@ -112,6 +112,8 @@ export type SecretValueMaskDiagnostic = {
 
 /** The marker that replaces a credential Opengeni itself put into the attempt. */
 const CREDENTIAL_LABEL_OPEN = "[opengeni credential: ";
+/** How a `[masked <kind>]` marker (a shape value that has no reference) starts. */
+const SHAPE_MARKER_OPEN = "[masked ";
 
 export function secretCredentialMaskLabel(kind: string): string {
   const safe = kind.replace(/[^A-Za-z0-9 ._-]/gu, "").slice(0, 60) || "credential";
@@ -637,6 +639,8 @@ export class SecretValueMemory {
   private readonly values = new Map<string, string>();
   private readonly operations = new Map<string, SecretValueMaskEntry[]>();
   private compiled: CompiledSecretValueMasks | null = null;
+  /** Masks without values that only have a `[masked <kind>]` marker, by version. */
+  private compiledReferenced: { version: number; masks: CompiledSecretValueMasks } | null = null;
   private changes = 0;
   private readonly options: SecretValueMaskOptions;
   private readonly maxEntries: number;
@@ -714,7 +718,7 @@ export class SecretValueMemory {
   remember(value: string, label: string): boolean {
     try {
       if (typeof value !== "string" || typeof label !== "string") return false;
-      if (this.disposed || value.length < this.minChars || this.revealed.has(value)) return false;
+      if (this.disposed || value.length < this.minChars || this.isRevealed(value)) return false;
       const existing = this.values.get(value);
       const keep =
         existing !== undefined &&
@@ -764,13 +768,33 @@ export class SecretValueMemory {
     try {
       if (typeof value !== "string" || value.length === 0) return;
       this.revealed.add(value);
-      if (this.values.delete(value)) {
+      // A value inside the revealed one (the password of a revealed URL) was
+      // handed over with it, so it is released too; Opengeni's own
+      // credentials stay masked.
+      let changed = false;
+      for (const [known, label] of this.values) {
+        if (label.startsWith(CREDENTIAL_LABEL_OPEN) || !value.includes(known)) continue;
+        this.values.delete(known);
+        changed = true;
+      }
+      for (const known of this.shapes.keys()) {
+        if (value.includes(known)) this.shapes.delete(known);
+      }
+      if (changed) {
         this.compiled = null;
         this.changes += 1;
       }
     } catch (error) {
       this.report("reveal", error);
     }
+  }
+
+  /** Whether `value` is, or lies within, a value `secret_get` revealed. */
+  private isRevealed(value: string): boolean {
+    if (this.revealed.size === 0) return false;
+    if (this.revealed.has(value)) return true;
+    for (const revealed of this.revealed) if (revealed.includes(value)) return true;
+    return false;
   }
 
   /**
@@ -786,6 +810,7 @@ export class SecretValueMemory {
     this.shapeCapturer = undefined;
     this.refresher = undefined;
     this.compiled = null;
+    this.compiledReferenced = null;
     this.changes += 1;
   }
 
@@ -843,6 +868,34 @@ export class SecretValueMemory {
     }
   }
 
+  /** `mask` without the values whose label is only a `[masked <kind>]` marker. */
+  private maskReferenced<T>(value: T, stage: string): T {
+    if (this.values.size === 0) return value;
+    let markers = false;
+    for (const label of this.values.values()) {
+      if (label.startsWith(SHAPE_MARKER_OPEN)) {
+        markers = true;
+        break;
+      }
+    }
+    if (!markers) return this.mask(value, stage);
+    try {
+      if (this.compiledReferenced?.version !== this.changes) {
+        this.compiledReferenced = {
+          version: this.changes,
+          masks: compileSecretValueMasks(
+            this.entries().filter((entry) => !entry.label.startsWith(SHAPE_MARKER_OPEN)),
+            this.options,
+          ),
+        };
+      }
+      return maskSecretValues(value, this.compiledReferenced.masks);
+    } catch (error) {
+      this.report(stage, error);
+      return value;
+    }
+  }
+
   /** Mask one text; never throws. */
   maskText(text: string, stage = "mask"): string {
     if (this.values.size === 0 || typeof text !== "string") return text;
@@ -882,7 +935,7 @@ export class SecretValueMemory {
     try {
       if (typeof value !== "string" || typeof label !== "string" || value.length === 0) return;
       // An ended attempt keeps nothing; a value `secret_get` revealed stays readable.
-      if (this.disposed || this.revealed.has(value)) return;
+      if (this.disposed || this.isRevealed(value)) return;
       const existing = this.shapes.get(value);
       if (
         existing === undefined ||
@@ -915,7 +968,10 @@ export class SecretValueMemory {
   async captureShapes(value: unknown, stage = "tool_result", maxWaitMs = 5_000): Promise<void> {
     let pending: SecretShapeMatch[];
     try {
-      const known = this.mask(value, stage);
+      // Known values are masked first (a detected part of a vault secret is
+      // not captured again), except values that only have a marker: those
+      // are detected again, so a failed or skipped capture is retried.
+      const known = this.maskReferenced(value, stage);
       // Values that already have a reference are done; markers are retried.
       pending = collectSecretShapes(known, 256, {
         ...(this.options.skipKey ? { skipKey: this.options.skipKey } : {}),

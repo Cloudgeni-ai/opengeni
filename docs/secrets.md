@@ -259,7 +259,8 @@ ends.
 
 `secret_get` is Opengeni's explicit, audited read of a plaintext value. The
 value it returns is shown as returned and is not masked again for the rest of
-that attempt, since the agent asked for it on purpose. This holds for a
+that attempt, since the agent asked for it on purpose. Known values inside
+it (the password of a revealed database URL) are released with it. This holds for a
 direct call and for a Codemode script's call, and a base64 result (a file
 field) reveals both the encoded and the decoded text. Only Opengeni's own
 `secret_get` reveals; a connector's tool with the same name does not.
@@ -349,23 +350,29 @@ secret part is replaced:
 - `password=` and `pwd=` values in connection strings: written without
   spaces around `=` (plain, quoted or in braces), as a URL query parameter or
   on a line that also has a host, server, database, user, port or SSL key
-  written the same way. Source code such as `const password = config.password;`
-  is not a connection string.
-- Azure `AccountKey=` (also `StorageAccountKey=`), `SharedAccessKey=` and SAS
-  `sig=` values.
+  written the same way. A plain value ends at a comma, bracket or
+  parenthesis. Source code such as `const password = config.password;`,
+  `password=args.password` or `password=os.environ["DB_PW"]` is not a
+  connection string.
+- Azure `AccountKey=` (also `StorageAccountKey=`) and `SharedAccessKey=`
+  values written without spaces around `=` as a base64 key of at least 20
+  characters, and SAS `sig=` values.
 - PEM private key blocks, whole, cut off, or only their end (a later chunk of
-  streamed output). A body needs at least 64 base64 characters.
+  streamed output). A body needs at least 64 base64 characters. A cut-off
+  key needs a line break right after its BEGIN line and covers only base64
+  lines (and `Proc-Type:` and `DEK-Info:` headers) after it.
 - Well-known token formats: GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`,
   `github_pat_`), OpenAI (`sk-proj-`, `sk-svcacct-` and `sk-admin-` keys of 40
   or more characters, and legacy `sk-` keys without hyphens), Anthropic
-  (`sk-ant-`), Slack (`xox?-`), Stripe secret and restricted keys, npm,
+  (`sk-ant-`), Slack (`xoxb-`, `xoxp-` and similar with a numeric id, and
+  `xoxe` rotated tokens), Stripe secret and restricted keys, npm,
   GitLab, Google `AIza`, 1Password service account tokens, Opengeni's own
   bearers (`ogk_` and `ogp_` keys, and the signed `ogd_`, `oge_`, `ogr_` and
   `ogs_` envelopes) and JWTs. URLs are also found inside JSON-escaped text.
 
-Tokens must contain a digit, and placeholders such as `${PASSWORD}`,
-`$(cat file)`, `<password>`, `****`, `your_account_key_here` or the word
-`password` are ignored. There is no generic
+Tokens must contain a digit, and placeholders such as `${PASSWORD}` (or any
+`${…}` template), `$(cat file)`, `<password>`, `%(password)s`, `@Password`,
+`****`, `your_account_key_here` or the word `password` are ignored. There is no generic
 "long random string" rule: UUIDs, git SHAs, base64 data, prose such as
 "password: required" and URLs without a password stay untouched.
 
@@ -393,8 +400,10 @@ The save runs as the agent attempt, with the same Task vault access as
 `secret_save` to Task, and is audited like any other secret write
 (`vault.item.created`, metadata only). A tool result waits at most 5 seconds
 for it. Up to 16 values are saved per result, four at a time; the rest are
-saved from a later result. A root session's Task vault holds at most 200
-captured items. When saving is not possible (the secrets capability is off,
+saved from a later result. A value that got a marker is detected and saved
+again from the next result that contains it. An attempt captures into its root session's Task vault only
+while it holds fewer than 200 captured items (attempts running at the same
+time in one session tree can go slightly over). When saving is not possible (the secrets capability is off,
 the attempt cannot write to the Task vault, the capture or vault limit is
 reached, any error), the value is replaced by a marker such as
 `[masked url password]` and the tool call still succeeds. After three failed
@@ -406,7 +415,8 @@ Shape masking applies only to tool results and their stored copies (tool
 output, command output, Codemode settlements). Messages a person types,
 commands as written and files on disk are not changed. Shapes inside a
 value `secret_get` returned (for example the password of a revealed database
-URL) are neither captured nor masked.
+URL) are neither captured nor masked, and a known value inside it is
+released with it (see What is known).
 
 ### Limits
 

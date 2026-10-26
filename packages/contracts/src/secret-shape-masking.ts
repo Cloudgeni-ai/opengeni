@@ -114,9 +114,17 @@ function isPlaceholder(value: string): boolean {
     PLACEHOLDER.test(value) ||
     PLACEHOLDER_PHRASE.test(value) ||
     value.includes("\u007B\u007Bsecret") ||
-    value.includes("$(")
+    value.includes("$(") ||
+    value.includes("${") ||
+    TEMPLATE_PARAMETER.test(value)
   );
 }
+
+// `%(name)s` (Python format) and `@Name` (SQL or ADO.NET parameter).
+const TEMPLATE_PARAMETER = /^(?:%\([A-Za-z_][A-Za-z0-9_]*\)[sdr]?|@[A-Za-z_][A-Za-z0-9_]*)$/;
+
+/** `args.password`, `config.db.password`, `this.pw`: an expression in source code. */
+const MEMBER_ACCESS = /^[A-Za-z_$][\w$]*(?:\.[\w$]+)+$/;
 
 // Documentation-style stand-ins such as `your_account_key_here` or `my-password`.
 const PLACEHOLDER_PHRASE =
@@ -144,7 +152,7 @@ const CONNECTION_KEY =
  * `const password = config.password;` is not.
  */
 function inConnectionString(text: string, match: RegExpExecArray, value: string): boolean {
-  if (value.length < 4 || value.startsWith("=")) return false;
+  if (value.length < 4 || value.startsWith("=") || MEMBER_ACCESS.test(value)) return false;
   const lead = match[0][0];
   if (lead === "?" || lead === "&") return true;
   const from = Math.max(0, match.index - CONNECTION_STRING_WINDOW);
@@ -185,19 +193,21 @@ const DETECTORS: readonly Detector[] = [
     kind: "connection-string-password",
     // Written tight (`Password=…`), plain, braced or quoted.
     pattern:
-      /(?:^|[;?&\s"'({])(?:password|pwd)=(?:\{([^}\r\n]{1,256})(?=\})|'([^'\r\n]{1,256})(?=')|"([^"\r\n]{1,256})(?=")|([^;&\s"'<>{}()=][^;&\s"'<>]{0,255}))/gim,
+      /(?:^|[;?&\s"'({])(?:password|pwd)=(?:\{([^}\r\n]{1,256})(?=\})|'([^'\r\n]{1,256})(?=')|"([^"\r\n]{1,256})(?=")|([^;&\s"'<>{}()[\],=][^;&\s"'<>()[\],]{0,255}))/gim,
     secret: lastGroup,
     accept: inConnectionString,
   },
   {
     kind: "azure-account-key",
-    // AccountKey=, also StorageAccountKey= and similar.
-    pattern: /(?<![A-Za-z0-9])(?:[A-Za-z]{0,30})AccountKey\s*=\s*([^;\s"'<>]{16,})/gi,
+    // AccountKey=, also StorageAccountKey= and similar. Written tight with a
+    // base64 key, so source code such as `accountKey = process.env.KEY` is not.
+    pattern:
+      /(?<![A-Za-z0-9])(?:[A-Za-z]{0,30})AccountKey=([A-Za-z0-9+/]{20,}={0,2})(?=$|[;\s"'`])/gi,
     secret: (match) => match[1],
   },
   {
     kind: "azure-shared-access-key",
-    pattern: /\bSharedAccessKey\s*=\s*([^;\s"'<>]{16,})/gi,
+    pattern: /\bSharedAccessKey=([A-Za-z0-9+/]{20,}={0,2})(?=$|[;\s"'`])/gi,
     secret: (match) => match[1],
   },
   {
@@ -212,7 +222,12 @@ const DETECTORS: readonly Detector[] = [
     "openai-key",
     "sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{40,255}|sk-[A-Za-z0-9]{32,255}",
   ),
-  tokenDetector("slack-token", "xox[abposre]-[A-Za-z0-9-]{10,255}"),
+  // Bot, user and app tokens start with a numeric team or app id; rotated
+  // tokens and refresh tokens start with `xoxe`. Words such as `xoxo-2024-…` don't.
+  tokenDetector(
+    "slack-token",
+    "xox[abposr]-\\d{6,}-[A-Za-z0-9-]{8,255}|xoxe(?:\\.xox[abp])?-\\d-[A-Za-z0-9-]{20,255}",
+  ),
   tokenDetector("stripe-key", "(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,255}"),
   tokenDetector("npm-token", "npm_[A-Za-z0-9]{30,255}"),
   tokenDetector("gitlab-token", "glpat-[A-Za-z0-9_-]{20,255}"),
@@ -235,8 +250,10 @@ const DETECTORS: readonly Detector[] = [
 const PRIVATE_KEY_BEGIN = /-----BEGIN ((?:[A-Z0-9]+ ){0,3})PRIVATE KEY( BLOCK)?-----/g;
 const PRIVATE_KEY_END = /-----END ((?:[A-Z0-9]+ ){0,3})PRIVATE KEY( BLOCK)?-----/g;
 const PRIVATE_KEY_MAX_CHARS = 32_768;
-/** What a key body may contain when its END line is missing (clipped output). */
-const PRIVATE_KEY_BODY = /^[A-Za-z0-9+/=\s\\:,-]*/;
+/** A body line of a key whose END line is missing (clipped output): base64 only. */
+const PRIVATE_KEY_BODY_LINE = /^[A-Za-z0-9+/=]*$/;
+/** The encryption header lines an old-style PEM key may have. */
+const PRIVATE_KEY_HEADER_LINE = /^(?:Proc-Type|DEK-Info): ?[A-Za-z0-9,._-]+$/;
 /** Base64 characters a real key body has at least (placeholders such as `...` have none). */
 const PRIVATE_KEY_MIN_BODY_CHARS = 64;
 
@@ -246,6 +263,39 @@ function keyBodyChars(text: string, from: number, to: number): number {
     if (/[A-Za-z0-9+/]/.test(text[index]!)) count += 1;
   }
   return count;
+}
+
+/** Length of the line break (real or JSON-escaped) that starts at `at`, or 0. */
+function lineBreakAt(text: string, at: number): number {
+  if (text[at] === "\n") return 1;
+  if (text[at] === "\r" && text[at + 1] === "\n") return 2;
+  if (text[at] === "\\" && text[at + 1] === "n") return 2;
+  if (text[at] === "\\" && text[at + 1] === "r" && text[at + 2] === "\\" && text[at + 3] === "n") {
+    return 4;
+  }
+  return 0;
+}
+
+/**
+ * Where the body of a key without an END line ends: the BEGIN line must be
+ * followed by a line break, and the body runs over the base64 lines (and
+ * encryption header lines) after it. Returns `bodyStart` when there is no body.
+ */
+function clippedKeyBodyEnd(text: string, bodyStart: number, limit: number): number {
+  let position = bodyStart;
+  let end = bodyStart;
+  for (;;) {
+    const lineBreak = lineBreakAt(text, position);
+    if (lineBreak === 0) return end;
+    const lineStart = position + lineBreak;
+    let lineEnd = lineStart;
+    while (lineEnd < limit && lineBreakAt(text, lineEnd) === 0) lineEnd += 1;
+    const line = text.slice(lineStart, lineEnd);
+    if (!PRIVATE_KEY_BODY_LINE.test(line) && !PRIVATE_KEY_HEADER_LINE.test(line)) return end;
+    if (line.length > 0) end = lineEnd;
+    if (lineEnd >= limit) return end;
+    position = lineEnd;
+  }
 }
 
 /** Length of the line break (real or JSON-escaped) that ends just before `at`, or 0. */
@@ -296,10 +346,11 @@ function privateKeyMatches(text: string, out: SecretShapeMatch[]): void {
     if (endAt >= 0 && endAt - start <= PRIVATE_KEY_MAX_CHARS) {
       end = endAt + endMarker.length;
     } else {
-      const body = PRIVATE_KEY_BODY.exec(text.slice(bodyStart, start + PRIVATE_KEY_MAX_CHARS));
-      end = bodyStart + (body?.[0].length ?? 0);
-      // Trailing blank space is not part of a clipped key.
-      while (end > bodyStart && /\s/.test(text[end - 1]!)) end -= 1;
+      end = clippedKeyBodyEnd(
+        text,
+        bodyStart,
+        Math.min(text.length, start + PRIVATE_KEY_MAX_CHARS),
+      );
     }
     if (keyBodyChars(text, bodyStart, end) < PRIVATE_KEY_MIN_BODY_CHARS) continue;
     out.push({ kind: "private-key", start, end, value: text.slice(start, end) });

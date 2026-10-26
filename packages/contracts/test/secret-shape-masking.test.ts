@@ -410,3 +410,113 @@ describe("review regressions", () => {
     expect(memory.maskToolOutput(urls)).not.toContain("[masked");
   });
 });
+
+describe("review regressions, round 2", () => {
+  const fakeBody = (lines: number) =>
+    Array.from({ length: lines }, (_, index) => `FAKEkeyBODY${index}`.padEnd(64, "A")).join("\n");
+
+  test("Azure key names in source code are not keys", () => {
+    const key = `${repeat("FAKEkey0", 4)}==`;
+    for (const line of [
+      "const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;",
+      "storageAccountKey = getStorageKeyFromVault(name)",
+      "sharedAccessKey = settings.ServiceBusSharedAccessKey",
+      "AccountKey=${sa.listKeys().keys[0].value}",
+      `AccountKey = ${key};`,
+      "AccountKey=process.env.KEY;",
+    ]) {
+      expect(kinds(line)).toEqual([]);
+    }
+    expect(kinds(`"AccountKey=${key}"`)).toEqual([["azure-account-key", key]]);
+    expect(kinds(`SharedAccessKey=${key}`)).toEqual([["azure-shared-access-key", key]]);
+  });
+
+  test("connection-string password rule ignores code and templates", () => {
+    for (const line of [
+      "psycopg2.connect(host=args.host, user=args.user, password=args.password)",
+      'host=db user=app password=os.environ["DB_PW"]',
+      "host=%(host)s user=%(user)s password=%(password)s",
+      "`Server=${host};Database=app;User Id=app;Password=${config.password};`",
+      "Password=@Password;Server=db",
+    ]) {
+      expect(kinds(line)).toEqual([]);
+    }
+    // A real password still ends at a comma or parenthesis.
+    expect(kinds("connect(host=db, user=app, password=FAKEpw0000)")).toEqual([
+      ["connection-string-password", "FAKEpw0000"],
+    ]);
+  });
+
+  test("a cut-off key needs a line break after BEGIN and base64 body lines", () => {
+    expect(
+      kinds(
+        `The file starts with -----BEGIN RSA PRIVATE KEY----- and then ${repeat("Abcd0123", 12)} follows`,
+      ),
+    ).toEqual([]);
+    expect(
+      kinds(
+        `-----BEGIN PRIVATE KEY-----\n${repeat("the key body goes here ", 6)}\nand more prose follows here`,
+      ),
+    ).toEqual([]);
+    const encrypted = `-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,0123ABCD0123ABCD\n\n${fakeBody(3)}`;
+    expect(maskSecretShapesInText(`${encrypted}\nnext: done`)).toBe(
+      "[masked private key]\nnext: done",
+    );
+  });
+
+  test("Slack tokens need their numeric id; words do not match", () => {
+    expect(kinds("xoxo-2024-summer-tour-photos and xoxb-not-a-token-at-all")).toEqual([]);
+    const bot = `xoxb-123456789012-${repeat("Ab1", 8)}`;
+    const rotated = `xoxe.xoxp-1-${repeat("Ab1", 10)}`;
+    expect(kinds(`${bot} ${rotated}`)).toEqual([
+      ["slack-token", bot],
+      ["slack-token", rotated],
+    ]);
+  });
+
+  test("a distinctive value whose capture failed is captured from a later result", async () => {
+    const memory = new SecretValueMemory();
+    let calls = 0;
+    memory.setShapeCapturer(async (matches) => {
+      calls += 1;
+      if (calls === 1) throw new Error("vault unavailable");
+      return new Map(matches.map((match) => [match.value, ref("Task/url-password-0/password")]));
+    });
+    const password = "FAKE-Pw-0000-distinct";
+    const url = `postgres://u:${password}@db:5432/app`;
+    await memory.captureShapes(url);
+    expect(memory.maskToolOutput(url)).toBe("postgres://u:[masked url password]@db:5432/app");
+    // Distinctive, so it is also masked as a known value elsewhere.
+    expect(memory.mask(`PGPASSWORD=${password}`)).toBe("PGPASSWORD=[masked url password]");
+    await memory.captureShapes(url);
+    expect(calls).toBe(2);
+    expect(memory.maskToolOutput(url)).toBe(
+      `postgres://u:${ref("Task/url-password-0/password")}@db:5432/app`,
+    );
+    expect(memory.mask(`PGPASSWORD=${password}`)).toBe(
+      `PGPASSWORD=${ref("Task/url-password-0/password")}`,
+    );
+  });
+
+  test("a revealed value releases the known values inside it", async () => {
+    const memory = new SecretValueMemory();
+    memory.setShapeCapturer(
+      async (matches) =>
+        new Map(matches.map((match) => [match.value, ref("Task/url-password-0/password")])),
+    );
+    const password = "FAKE-Pw-0000-distinct";
+    const url = `postgres://u:${password}@db:5432/app`;
+    await memory.captureShapes(url);
+    expect(memory.maskToolOutput(url)).not.toContain(password);
+    memory.reveal(url);
+    expect(memory.maskToolOutput(url)).toBe(url);
+    expect(memory.maskToolOutput(JSON.stringify({ value: url }))).toBe(
+      JSON.stringify({ value: url }),
+    );
+    // Opengeni's own credentials stay masked even inside a revealed value.
+    const bearer = "FAKE-bearer-0000-not-real";
+    memory.remember(bearer, "[opengeni credential: codemode token]");
+    memory.reveal(`Authorization: Bearer ${bearer}`);
+    expect(memory.mask(bearer)).toBe("[opengeni credential: codemode token]");
+  });
+});

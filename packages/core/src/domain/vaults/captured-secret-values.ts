@@ -84,8 +84,12 @@ export function createTaskVaultSecretCapturer(input: {
     input.service ?? createVaultService({ db: input.db, encryptionKey: input.encryptionKey });
   // One capture per value per attempt, even when it is found again.
   const done = new Map<string, Promise<string | null>>();
-  // Captured items already in the task vault, counted once per attempt.
-  let captured: Promise<number> | null = null;
+  // Captured items already in the task vault, counted once per attempt, and
+  // creates in flight. A slot is reserved synchronously before each create,
+  // so parallel captures never pass the limit together.
+  let count: number | null = null;
+  let counting: Promise<void> | null = null;
+  let reserved = 0;
   let failuresInARow = 0;
   const report = (kind: SecretShapeKind, error: string) => {
     try {
@@ -94,36 +98,54 @@ export function createTaskVaultSecretCapturer(input: {
       // Diagnostics never affect capture.
     }
   };
+  const ensureCount = async (): Promise<void> => {
+    if (count !== null) return;
+    counting ??= service
+      .countTaskVaultItemsForAgent(
+        input.principal,
+        isSecretShapeItemName,
+        SECRET_SHAPE_CAPTURED_ITEMS_MAX,
+      )
+      .then((counted) => {
+        count = counted;
+      })
+      .finally(() => {
+        counting = null;
+      });
+    await counting;
+  };
   const captureOne = async (
     kind: SecretShapeKind,
     value: string,
     username: string | undefined,
   ): Promise<string | null> => {
     const info = SECRET_SHAPE_KINDS[kind];
+    let reservation = false;
     try {
-      captured ??= service.countTaskVaultItemsForAgent(
-        input.principal,
-        isSecretShapeItemName,
-        SECRET_SHAPE_CAPTURED_ITEMS_MAX,
-      );
-      const count = await captured;
+      await ensureCount();
+      // No await between the check and the reservation.
+      reservation =
+        (count ?? SECRET_SHAPE_CAPTURED_ITEMS_MAX) + reserved < SECRET_SHAPE_CAPTURED_ITEMS_MAX;
+      if (reservation) reserved += 1;
       const references = await service.captureForAgent(input.principal, {
         item: secretShapeItemName(kind, value, input.encryptionKey),
         type: info.itemType,
         field: info.field,
         value,
         ...(username ? { username } : {}),
-        createAllowed: count < SECRET_SHAPE_CAPTURED_ITEMS_MAX,
+        createAllowed: reservation,
       });
-      if (references.created) captured = Promise.resolve(count + 1);
+      if (references.created && count !== null) count += 1;
       failuresInARow = 0;
       return references.byField[info.field] ?? null;
     } catch (error) {
       failuresInARow += 1;
       // Counted again with the next capture.
-      captured = null;
+      count = null;
       report(kind, errorCode(error));
       return null;
+    } finally {
+      if (reservation) reserved -= 1;
     }
   };
   return async (matches) => {
