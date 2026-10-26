@@ -27,6 +27,15 @@ export type AgentUpdateDeps = {
   settings: Settings;
 };
 
+/** The agent's refusal while its process-global updater already runs another
+ * operation, typically one requested through another enrollment of the same
+ * process, or an earlier operation an older agent still holds. */
+const AGENT_UPDATE_ALREADY_IN_PROGRESS = "update_already_in_progress";
+
+/** Recorded for that refusal. A `update_busy_*` code: the machine is updating,
+ * not failing, and the successor's Hello settles the update. */
+export const UPDATE_POSTPONED_FOR_ANOTHER_UPDATE = "update_busy_updating";
+
 export type AgentUpdateRequestResult =
   | { kind: "accepted"; operationId: string; targetVersion: string }
   | { kind: "refused"; status: 409 | 422 | 502; message: string };
@@ -48,6 +57,9 @@ export async function requestAgentUpdate(
   if (blockedReason) return refused(422, blockedReason);
   const channel = live.agentUpdateChannel ?? "stable";
   const targetVersion = promotedAgentVersion(settings, channel);
+  if (!targetVersion) {
+    return refused(409, `no ${channel} agent release is configured for this deployment`);
+  }
   const reusableRequest =
     live.agentUpdate?.status === "requested" &&
     live.agentUpdate.targetVersion === targetVersion &&
@@ -105,14 +117,21 @@ export async function requestAgentUpdate(
     // A second timeout remains ambiguous: progress/Hello may still prove the
     // operation. Keep it requested rather than racing a false terminal failure.
     if (response.error.code !== ErrorCode.ERROR_CODE_TIMEOUT) {
+      const failureCode = response.error.detail.failure_code;
+      // One process serves every enrollment it is linked to, and its updater
+      // runs one operation at a time. Another operation is already updating
+      // this process: postpone, and let the successor's receipt settle this
+      // enrollment too.
+      const updatingForAnotherOperation = failureCode === AGENT_UPDATE_ALREADY_IN_PROGRESS;
       await advanceEnrollmentAgentUpdate(db, {
         ...fence,
         status: "failed",
-        errorCode:
-          response.error.detail.failure_code ??
-          (response.error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE
-            ? "agent_offline"
-            : "update_dispatch_rejected"),
+        errorCode: updatingForAnotherOperation
+          ? UPDATE_POSTPONED_FOR_ANOTHER_UPDATE
+          : (failureCode ??
+            (response.error.code === ErrorCode.ERROR_CODE_AGENT_OFFLINE
+              ? "agent_offline"
+              : "update_dispatch_rejected")),
         retryable: response.error.retryable,
         rolledBack: false,
       });
@@ -264,7 +283,7 @@ export function createAutomaticAgentUpdater(
   return {
     consider(enrollment) {
       const targetVersion = promotedAgentVersion(settings, enrollment.agentUpdateChannel);
-      if (inFlight.has(enrollment.id)) return;
+      if (!targetVersion || inFlight.has(enrollment.id)) return;
       if (!automaticAgentUpdateDue(enrollment, targetVersion, now())) return;
       inFlight.add(enrollment.id);
       const fields = {

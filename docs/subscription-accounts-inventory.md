@@ -220,7 +220,8 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 
 ##### EP-N01 — Transcription service: provider selection and fallback
 - Consumer: voice input (one-shot and resumable recordings). Providers: Codex, SuperGrok (plus deployment-funded OpenAI/Azure, not subscriptions). No Claude.
-- Refs: `apps/api/src/transcription/service.ts:29` `createTranscriptionService`; `:416` `orderedProviders`; `:434` `firstAvailable`; `:231` exact `providerId` path; `:327-343` fallback on `fallbackSafe`; registry `packages/config/src/index.ts:1909` `resolveVoiceInputProviderRegistry` (allowed ids: `openai`, `azure-openai`, `azure-mai`, `codex-subscription`, `supergrok-subscription`, `:1966-1972`).
+- Update: providers now come from the shared speech-to-text deployment (`packages/core/src/transcription-service/deployment.ts` `createSpeechToTextDeployment`), which meeting recordings also use, so the Codex and SuperGrok providers transcribe meetings too (worker `apps/worker/src/activities/recordings.ts`, one request per speaker span with a `${versionId}:${track}:${index}` request id). Line references below predate that change.
+- Refs: `packages/core/src/transcription-service/service.ts:29` `createTranscriptionService`; `:416` `orderedProviders`; `:434` `firstAvailable`; `:231` exact `providerId` path; `:327-343` fallback on `fallbackSafe`; registry `packages/config/src/index.ts:1909` `resolveVoiceInputProviderRegistry` (allowed ids: `openai`, `azure-openai`, `azure-mai`, `codex-subscription`, `supergrok-subscription`, `:1966-1972`).
 - Authority/pool: none at this layer; each provider's `available(context)` decides (live lookups, see N02/N03).
 - DB subject / private session: passes `workspaceId`, `subjectId`, `accountId` (Opengeni billing account) through; not session-bound.
 - Selection/pin/lease: picks a *provider*, not an account; workspace `voiceInput.preferredProvider` + `fallbackEnabled` order it.
@@ -230,7 +231,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - Gaps: provider order is a workspace setting, not an org-defined fallback order. Bypass: n/a (provider router).
 
 ##### EP-N02 — Codex transcription provider
-- Refs: `apps/api/src/transcription/providers/codex-subscription.ts:13` `workspaceHasActiveCodexAccount`; `:42` `transcribe`; `:53` `buildCodexTokenResolver`; `:89-92` single refresh on 401; URL `chatgpt.com/backend-api/transcribe` (`:11`).
+- Refs: `packages/core/src/transcription-service/providers/codex-subscription.ts:13` `workspaceHasActiveCodexAccount`; `:42` `transcribe`; `:53` `buildCodexTokenResolver`; `:89-92` single refresh on 401; URL `chatgpt.com/backend-api/transcribe` (`:11`).
 - Authority/pool: live `listCodexAccountStatuses(db, workspaceId)` (`packages/db/src/index.ts:29783`), workspace RLS only (`withWorkspaceRls`, no subject).
 - Selection: the row with `isActive && status === "active"` — the workspace/org **active pointer only**. Ignores rotation, allocator eligibility, exhaustion, plan exclusions, session pins. No lease.
 - DB subject: none (workspace scope). The request is not tied to a session.
@@ -239,7 +240,7 @@ Scope: every place outside the chat-turn path (`apps/worker/src/activities/agent
 - Gaps: an exhausted active account is still used; personal/org preference rules are not applied. **Bypasses shared selection** (own active-pointer path).
 
 ##### EP-N03 — SuperGrok transcription provider
-- Refs: `apps/api/src/transcription/providers/xai-subscription.ts:29` `available` (→ `workspaceXaiSubscriptionActive`, `xai-subscription.ts:60`); `:40` `transcribe`; `:52` `buildXaiSubscriptionAuthorization` (`xai-subscription-auth.ts:26`); `:105` refresh on 401 or 403 with `[WKE=unauthenticated:bad-credentials]` (`:125` `isXaiInvalidCredentialResponse`); URL `api.x.ai/v1/stt`.
+- Refs: `packages/core/src/transcription-service/providers/xai-subscription.ts:29` `available` (→ `workspaceXaiSubscriptionActive`, `xai-subscription.ts:60`); `:40` `transcribe`; `:52` `buildXaiSubscriptionAuthorization` (`xai-subscription-auth.ts:26`); `:105` refresh on 401 or 403 with `[WKE=unauthenticated:bad-credentials]` (`:125` `isXaiInvalidCredentialResponse`); URL `api.x.ai/v1/stt`.
 - Authority/pool: **live** acceptance snapshot for the calling subject (`xai-subscription-auth.ts:43-48`) → personal pool wins.
 - Selection: shared `selectXaiCredentialForUse` with `shardKey = requestId` (client correlation id or random UUID; attempt id for recordings). No pin read or written, no lease.
 - DB subject: caller's `subjectId` (subject RLS). Not session-bound.
@@ -699,7 +700,8 @@ Background facts:
 - Portable vs remote_v2 Codex chats: `CodexProviderSwitchRow` (`models/codex-provider-switch-row.tsx:22`), workspace setting `codexCompactionDefault`.
 
 ##### EP-S29 — Web: session account indicator / switcher
-- `CodexAccountIndicator` (`packages/react/src/app/components/session/codex-account-indicator.tsx:101`) rendered only when the session's model is a Codex product model (`apps/web/src/components/rail/rail-shell.tsx:589`, `isCodexProductModel`; component also checks the `codex/` prefix at `:115`). Shows current/waiting account, usage bars, "Retry with" / "Use for next turn" pin menu (`:263-272`).
+- Current: one `SubscriptionAccountIndicator` (`packages/react/src/app/components/session/subscription-account-indicator.tsx`) serves every subscription rail (Codex, Claude, SuperGrok) with the same chip, menu and copy; `subscription-account.ts` holds the shared data shape. The entries below describe the earlier Codex-only control.
+- `CodexAccountIndicator` (removed in #5607) rendered only when the session's model is a Codex product model (`apps/web/src/components/rail/rail-shell.tsx:589`, `isCodexProductModel`; the component also checked the `codex/` prefix). It showed the current/waiting account, usage bars and a "Retry with" / "Use for next turn" pin menu.
 - **Codex-only.** No indicator, switcher or waiting account display for Claude or SuperGrok sessions.
 
 ##### EP-S30 — Web: organization connection access ("Available in")
@@ -767,8 +769,8 @@ Provider-specific:
 | EP-T03, EP-T07 | Claude/SuperGrok turn selection and settlement duplicate the Codex phases rather than sharing them | `agent-turn/xai-capacity.ts:22`, `agent-turn/failure-settlement.ts:1488` |
 | EP-T09 | Claude/SuperGrok recovery is a branch inside the Codex-named activity | `apps/worker/src/activities/codex-capacity.ts:313` |
 | EP-T17, EP-N12 | Video funding on non-SuperGrok turns: live pool, no lease, writes the session pin | `agent-turn/agent-build.ts:429-494` |
-| EP-N02 | Codex transcription: active pointer only | `apps/api/src/transcription/providers/codex-subscription.ts:43` |
-| EP-N03 | SuperGrok transcription: shared selection, no lease, per-request shard | `apps/api/src/transcription/providers/xai-subscription.ts:52` |
+| EP-N02 | Codex transcription: active pointer only | `packages/core/src/transcription-service/providers/codex-subscription.ts:43` |
+| EP-N03 | SuperGrok transcription: shared selection, no lease, per-request shard | `packages/core/src/transcription-service/providers/xai-subscription.ts:52` |
 | EP-N06 | Codex realtime: own pin→active rule, no capacity checks, no lease | `apps/api/src/codex-realtime.ts:268`, `packages/codex/src/realtime.ts:345` |
 | EP-N07 | SuperGrok realtime: caller's live pool, no lease, writes the session pin | `apps/api/src/realtime-websocket.ts:266` (formerly `xai-realtime.ts:64-127`) |
 | EP-N14 | Video recovery: frozen token envelope and direct refresh outside the serialized refresh | `apps/worker/src/activities/video-generation-reconciliation.ts:709` |

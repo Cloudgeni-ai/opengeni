@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
+import { sql as dbSql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import {
   bootstrapWorkspace,
@@ -16,6 +17,7 @@ import {
   getCurrentPreferenceRegistryGovernanceMetadata,
   assertSkillReadAttempt,
   listSkillDescriptors,
+  hasWorkspaceManagedSkill,
   replayPortableSkillInstall,
   createPreferenceRegistryProposal,
   activatePreferenceRegistryRevision,
@@ -33,6 +35,7 @@ import {
   deleteWorkspaceIfQuiescent,
   createWorkspace,
   withWorkspaceRls,
+  withWorkspaceSubjectRls,
   supersedePreferenceRegistry,
   upsertKnowledgeProvider,
   upsertKnowledgeSource,
@@ -336,6 +339,144 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null, personal = 
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  test("presence matches live descriptors across personal, workspace and organization scopes", async () => {
+    if (!client) return;
+    const f = await fixture("automatic");
+    const other = await fixture("automatic");
+    const owner = { ...f.context, subjectId: f.human.actor.subjectId };
+    const sibling = await createWorkspace(client.db, {
+      accountId: f.context.accountId,
+      name: "Sibling Skill scope",
+    });
+    const contexts = [
+      f.context,
+      owner,
+      { ...f.context, subjectId: "another-human" },
+      other.context,
+      { accountId: f.context.accountId, workspaceId: sibling.id },
+    ];
+    const check = async (expected: boolean[]) => {
+      for (const [index, context] of contexts.entries()) {
+        const descriptors = await listSkillDescriptors(client!.db, context);
+        const present = await hasWorkspaceManagedSkill(client!.db, context);
+        expect(present).toBe(
+          descriptors.some((entry) => entry.activationMode === "workspace_managed"),
+        );
+        expect(present).toBe(expected[index]!);
+      }
+    };
+    await check([false, false, false, false, false]);
+    const personal = await saveSkill(client.db, { ...f.input, scope: "user" });
+    await check([false, true, false, false, false]);
+    await removeSkill(client.db, {
+      ...f.human,
+      operationId: crypto.randomUUID(),
+      skillId: personal.skillId,
+      expectedRevisionId: personal.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Presence removal test",
+    });
+    await check([false, false, false, false, false]);
+    for (const scope of ["workspace", "organization"] as const) {
+      const saved = await saveSkill(client.db, {
+        ...f.input,
+        scope,
+        operationId: crypto.randomUUID(),
+        skillId: crypto.randomUUID(),
+        stableKey: `presence-${scope}`,
+      });
+      await check([true, true, true, false, scope === "organization"]);
+      if (scope === "workspace") {
+        await removeSkill(client.db, {
+          ...f.human,
+          operationId: crypto.randomUUID(),
+          skillId: saved.skillId,
+          expectedRevisionId: saved.revisionId,
+          expectedScopeVersion: 1,
+          reason: "Presence removal test",
+        });
+        await check([false, false, false, false, false]);
+      }
+    }
+  });
+
+  test("presence preserves nested scope and missing-workspace refusal", async () => {
+    if (!client) return;
+    const parent = await fixture("automatic");
+    const target = await fixture("automatic");
+    await saveSkill(client.db, target.input);
+    await withWorkspaceSubjectRls(
+      client.db,
+      parent.context.workspaceId,
+      parent.human.actor.subjectId,
+      async (tx) => {
+        const scope = () =>
+          tx.execute(dbSql`SELECT current_setting('opengeni.account_id') AS account,
+        current_setting('opengeni.workspace_id') AS workspace, current_setting('opengeni.subject_id') AS subject`);
+        const before = await scope();
+        expect(await hasWorkspaceManagedSkill(tx, target.context)).toBe(true);
+        expect(await scope()).toEqual(before);
+        const missing = { ...target.context, workspaceId: crypto.randomUUID() };
+        await expect(listSkillDescriptors(tx, missing)).rejects.toThrow();
+        await expect(hasWorkspaceManagedSkill(tx, missing)).rejects.toThrow();
+        expect(await scope()).toEqual(before);
+        const mismatched = { ...target.context, accountId: parent.context.accountId };
+        expect(await listSkillDescriptors(tx, mismatched)).toEqual([]);
+        expect(await hasWorkspaceManagedSkill(tx, mismatched)).toBe(false);
+        expect(await scope()).toEqual(before);
+      },
+    );
+  });
+
+  test("presence excludes session-selected portable Skills and observes activation and uninstall", async () => {
+    if (!client) return;
+    const f = await fixture("automatic");
+    const key = crypto.randomUUID();
+    const content = skillMarkdown("Presence fixture");
+    const digest = createHash("sha256").update(content).digest("hex");
+    const source: InstallPortableSkillInput = {
+      ...f.context,
+      subjectId: f.human.actor.subjectId,
+      skillActor: f.human.actor,
+      capabilityId: `skill:${key}`,
+      pluginKey: `skill/test/${key}`,
+      source: "github",
+      sourceUrl: "https://example.test/skills",
+      repositoryUrl: "https://example.test/repo",
+      sourceCommit: "a".repeat(40),
+      sourcePath: key,
+      name: "presence-skill",
+      description: "Presence fixture",
+      contentSha256: digest,
+      totalBytes: Buffer.byteLength(content),
+      files: [
+        { path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256: digest },
+      ],
+    };
+    await installPortableSkill(client.db, { ...source, activationMode: "session_selected" });
+    expect(await listSkillDescriptors(client.db, f.context)).toHaveLength(1);
+    expect(await hasWorkspaceManagedSkill(client.db, f.context)).toBe(false);
+    const active = await installPortableSkill(client.db, {
+      ...source,
+      capabilityId: `${source.capabilityId}-managed`,
+      pluginKey: `${source.pluginKey}-managed`,
+      activationMode: "workspace_managed",
+    });
+    expect(await hasWorkspaceManagedSkill(client.db, f.context)).toBe(true);
+    await uninstallPortableSkill(client.db, {
+      ...f.context,
+      capabilityId: `${source.capabilityId}-managed`,
+      expectedInstallationVersion: active.installationVersion,
+      skillActor: f.human.actor,
+    });
+    expect(await hasWorkspaceManagedSkill(client.db, f.context)).toBe(false);
+    expect(
+      (await listSkillDescriptors(client.db, f.context)).some(
+        (entry) => entry.activationMode === "workspace_managed",
+      ),
+    ).toBe(false);
+  });
+
   test("persists eightfold Skill folder limits and rejects files beyond them", async () => {
     if (!client) return;
     const f = await fixture("automatic");
@@ -1330,6 +1471,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     const pending = await saveSkill(client.db, { ...f.input, ...f.agent });
     expect(pending.outcome).toBe("pending");
     expect(await listSkillDescriptors(client.db, f.context)).toEqual([]);
+    expect(await hasWorkspaceManagedSkill(client.db, f.context)).toBe(false);
     const record = await readSkill(client.db, f.context, pending.skillId, pending.revisionId);
     await approveSkill(client.db, {
       ...f.human,
@@ -1344,6 +1486,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect(descriptors).toHaveLength(1);
     expect(descriptors[0]).not.toHaveProperty("files");
     expect(descriptors[0]?.id).toBe(pending.skillId);
+    expect(await hasWorkspaceManagedSkill(client.db, f.context)).toBe(true);
   });
 
   test("human bypasses Off, roundtrips files, retries exactly, CAS conflicts and restore creates history", async () => {

@@ -1,34 +1,45 @@
-// "Use this computer" inside the Opengeni desktop app: the app runs the
-// connected-machine agent and the web app shows the shared screens from
-// `@opengeni/react/this-computer`. Outside the desktop app (or where the
-// deployment doesn't offer connected machines) everything here renders nothing.
+// "Computer use" inside the Opengeni desktop app: the app runs the
+// connected-machine agent, and the web app shows one switch for it (see
+// `./computer-use`). Turning it on asks macOS for any missing permission
+// itself, with the app's floating guide beside System Settings. Outside the
+// desktop app (or where the deployment doesn't offer connected machines)
+// everything here renders nothing.
 import {
-  ThisComputerOffer,
-  ThisComputerPanel,
-  ThisComputerSetup,
   defaultThisComputerLabels,
+  thisComputerPermissionSteps,
   useThisComputer,
-  useThisComputerOfferDismissed,
-  useThisComputerSetupOpen,
   type ThisComputerHost,
   type ThisComputerLabels,
   type ThisComputerPlatform,
+  type ThisComputerStatus,
   type UseThisComputerResult,
 } from "../../../this-computer";
 import "../../../../styles/this-computer.css";
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { cn } from "../../../lib/cn";
 
 import { useAppContext } from "../../app-context";
 import { desktopBridge, desktopCapability } from "../../lib/desktop";
+import {
+  useComputerUse,
+  type ComputerUseControl,
+} from "../../../components/this-computer/computer-use";
+import { ComputerUseNotice, ComputerUseRow, type ComputerUseOptions } from "./computer-use";
 
-interface DesktopThisComputer {
+export interface DesktopThisComputer {
   workspaceId: string;
   computer: UseThisComputerResult;
   platform: ThisComputerPlatform;
   productName: string;
   labels: ThisComputerLabels;
-  /** Opens the setup steps: turning it on, or finishing the permissions. */
-  openSetup(): void;
+  /**
+   * Asks for the missing permissions, one after another (the system prompt
+   * the first time, else the System Settings list with the app's guide).
+   * Pass the reading an action just returned, as the shared one may lag.
+   */
+  allowPermissions(status?: ThisComputerStatus | null): void;
+  /** Signs this account in again, when the app has to; null where it can't. */
+  signIn: (() => void) | null;
 }
 
 const Context = createContext<DesktopThisComputer | null>(null);
@@ -62,6 +73,11 @@ function bridgeHost(): ThisComputerHost | null {
 
 const host = typeof window === "undefined" ? null : bridgeHost();
 
+/** The app's own sign-in screen (its add-account welcome), to sign in again. */
+const signIn = desktopBridge?.accounts?.add
+  ? () => void desktopBridge!.accounts.add().catch(() => undefined)
+  : null;
+
 /** Mounted once per workspace shell, around the rail and the pages. */
 export function DesktopThisComputerProvider({
   workspaceId,
@@ -74,7 +90,7 @@ export function DesktopThisComputerProvider({
   const { clientConfig } = useAppContext();
   const offered = clientConfig.connectedMachines !== false ? host : null;
   const computer = useThisComputer(offered, workspaceId);
-  const [open, setOpen] = useThisComputerSetupOpen(computer);
+  useContinueAskingAfterRelaunch(computer);
   const labels = useMemo(() => defaultThisComputerLabels(), []);
   const value = useMemo<DesktopThisComputer | null>(
     () =>
@@ -85,68 +101,89 @@ export function DesktopThisComputerProvider({
             platform: offered.platform,
             productName: offered.productName,
             labels,
-            openSetup: () => setOpen(true),
+            allowPermissions: computer.allowPermissions,
+            signIn,
           }
         : null,
-    [computer, labels, offered, setOpen, workspaceId],
+    [computer, labels, offered, workspaceId],
   );
-  return (
-    <Context.Provider value={value}>
-      {children}
-      {offered ? (
-        <ThisComputerSetup
-          open={open}
-          onOpenChange={setOpen}
-          computer={computer}
-          platform={offered.platform}
-          productName={offered.productName}
-          appIcon="/icon-192.png"
-          labels={labels}
-        />
-      ) : null}
-    </Context.Provider>
-  );
+  return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 
-/** Above the account row: the offer, or what's left to do; nothing once it's ready. */
-export function DesktopThisComputerOffer({ className }: { className?: string | undefined }) {
+/**
+ * macOS quits and reopens the app to apply some grants (Screen Recording).
+ * When the app comes back with turning on unfinished, it goes on asking, once,
+ * for the next missing permission, unless that one was already asked for:
+ * then the person declined it, and it waits for "Open System Settings".
+ */
+function useContinueAskingAfterRelaunch(computer: UseThisComputerResult): void {
+  const done = useRef(false);
+  const status = computer.status;
+  const allowPermissions = computer.allowPermissions;
+  useEffect(() => {
+    if (done.current || !status || status.state === "unavailable") return;
+    if (status.state !== "connected" || !status.setupPending) {
+      // Settled without unfinished setup: nothing to continue in this window.
+      if (!status.busy) done.current = true;
+      return;
+    }
+    done.current = true;
+    const next = thisComputerPermissionSteps(status).find((step) => !step.granted);
+    if (next && !status.requestedPermissions?.includes(next.id)) allowPermissions();
+  }, [allowPermissions, status]);
+}
+
+/**
+ * The computer-use switch's state and actions for this computer, for any page
+ * in the desktop app (e.g. a permissions page around the switch); null
+ * outside the desktop app.
+ */
+export function useDesktopComputerUse(
+  options: ComputerUseOptions = {},
+): (ComputerUseControl & { machineName: string }) | null {
+  const desktop = useDesktopThisComputer();
+  const control = useComputerUse(desktop?.computer ?? null, {
+    onAllowPermissions: options.onAllowPermissions ?? desktop?.allowPermissions,
+    onSignIn: desktop?.signIn ?? undefined,
+  });
+  if (!desktop || control.state.kind === "hidden") return null;
+  return { ...control, machineName: desktop.computer.status?.machineName ?? "" };
+}
+
+/** Above the account row, only while computer use turns on or needs something. */
+export function DesktopThisComputerOffer({
+  className,
+  ...options
+}: ComputerUseOptions & { className?: string | undefined }) {
   const desktop = useDesktopThisComputer();
   if (!desktop) return null;
-  return <DismissibleOffer desktop={desktop} className={className} />;
+  return <ComputerUseNotice desktop={desktop} className={className} {...options} />;
 }
 
-function DismissibleOffer({
-  desktop,
+/** The computer-use switch as a settings row, e.g. on a permissions page or in a dialog. */
+export function DesktopComputerUseRow({
   className,
-}: {
-  desktop: DesktopThisComputer;
-  className?: string | undefined;
-}) {
-  const [dismissed, dismiss] = useThisComputerOfferDismissed(desktop.workspaceId);
-  return (
-    <ThisComputerOffer
-      computer={desktop.computer}
-      labels={desktop.labels}
-      onSetup={desktop.openSetup}
-      dismissed={dismissed}
-      onDismiss={dismiss}
-      className={className}
-    />
-  );
+  ...options
+}: ComputerUseOptions & { className?: string | undefined }) {
+  const desktop = useDesktopThisComputer();
+  if (!desktop) return null;
+  return <ComputerUseRow desktop={desktop} className={className} {...options} />;
 }
 
-/** Turning it on, pausing, resuming and turning it off, e.g. on the Machines page. */
+/**
+ * Computer use on the Machines page: the switch in its own card, drawn like a
+ * `group` Section's card. Not a Section itself: this module is in the session
+ * page's eager graph (the sidebar notice), and Section's chunk is not.
+ */
 export function DesktopThisComputerPanel({ className }: { className?: string | undefined }) {
   const desktop = useDesktopThisComputer();
-  if (!desktop) return null;
+  if (!desktop || !desktop.computer.status || desktop.computer.status.state === "unavailable") {
+    return null;
+  }
   return (
-    <ThisComputerPanel
-      computer={desktop.computer}
-      platform={desktop.platform}
-      labels={desktop.labels}
-      onSetup={desktop.openSetup}
-      className={className}
-    />
+    <div className={cn("min-w-0 rounded-lg border border-border bg-surface px-5 py-1", className)}>
+      <ComputerUseRow desktop={desktop} />
+    </div>
   );
 }
 

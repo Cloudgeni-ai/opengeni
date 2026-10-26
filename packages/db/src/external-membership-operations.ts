@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { organizationAccessPresetPermissions, type Permission } from "@opengeni/contracts";
+import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import {
   ExternalIdentity,
   ExternalIdentityLookup,
@@ -65,12 +66,12 @@ async function requireLiveServiceKey(
       (authority.permissionMode === "legacy" && authority.permissions.includes("workspace:admin"))
     ) ||
     (authority.permissionMode === "explicit" &&
-      (requested.some((permission) => !authority.permissions.includes(permission)) ||
+      (requested.some((permission) => !permissionSetCovers(authority.permissions, permission)) ||
         (requested.includes("workspace:admin") &&
           organizationAccessPresetPermissions("full").some(
             (permission) =>
               !accountOnlyPermissions.has(permission) &&
-              !authority.permissions.includes(permission),
+              !permissionSetCovers(authority.permissions, permission),
           ))))
   ) {
     throw Object.assign(new Error("External membership organization key authority changed"), {
@@ -197,7 +198,7 @@ export async function ensureExternalWorkspaceMemberOnFirstUse(
     if (
       authority.permissionMode === "legacy" &&
       !authority.permissions.includes("workspace:admin") &&
-      permissions.some((permission) => !authority.permissions.includes(permission))
+      permissions.some((permission) => !permissionSetCovers(authority.permissions, permission))
     )
       refuse("External membership exceeds organization key authority");
     const [workspace] = await rawRows<{ account_id: string; external_source: string | null }>(

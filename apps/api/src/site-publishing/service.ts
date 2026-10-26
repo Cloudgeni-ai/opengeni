@@ -919,6 +919,15 @@ export async function siteLimitInputs(
   return { site, workspace: site ? null : await getWorkspaceSiteLimitProfile(deps.db, scope) };
 }
 
+/** A published Site's primary hostname and public URL. */
+export function publishedSiteAddress(
+  label: string,
+  domain: string,
+): { hostname: string; url: string } {
+  const hostname = siteHostname(label, domain);
+  return { hostname, url: `https://${hostname}/` };
+}
+
 /** The publication as the management API returns it. */
 export async function sitePublicationView(
   deps: SitePublishingDeps,
@@ -935,13 +944,13 @@ export async function sitePublicationView(
     }),
     readSitePublicationReadiness(deps, scope, publication),
   ]);
-  const hostname = siteHostname(publication.label, domain);
+  const { hostname, url } = publishedSiteAddress(publication.label, domain);
   return {
     siteId: publication.siteId,
     workspaceId: publication.workspaceId,
     label: publication.label,
     hostname,
-    url: `https://${hostname}/`,
+    url,
     access: publication.access,
     status: publication.status,
     noindex: publication.noindex || deps.settings.sitesForceNoindex,

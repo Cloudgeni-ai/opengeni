@@ -1,4 +1,10 @@
-import { useContext, useId, type ComponentProps, type ReactNode } from "react";
+import {
+  useContext,
+  useId,
+  type ReactNode,
+  forwardRef,
+  type ComponentPropsWithoutRef,
+} from "react";
 
 import { cn } from "../lib/cn";
 
@@ -34,7 +40,7 @@ export {
   type SectionVariant,
 } from "./section-variant";
 
-export interface SectionStackProps extends ComponentProps<"div"> {
+export interface SectionStackProps extends ComponentPropsWithoutRef<"div"> {
   /**
    * Applies to every Section inside unless a Section sets its own. Defaults to
    * the enclosing provider's variant, then `open`.
@@ -48,37 +54,34 @@ export interface SectionStackProps extends ComponentProps<"div"> {
 }
 
 /** A column of sections with the page rhythm between them. */
-export function SectionStack({
-  variant: variantProp,
-  divided,
-  className,
-  children,
-  ...props
-}: SectionStackProps) {
-  const inherited = useContext(SectionVariantContext);
-  const variant = variantProp ?? inherited ?? "open";
-  const hairlines = divided ?? variant === "open";
-  return (
-    <SectionVariantContext.Provider value={variant}>
-      <div
-        data-slot="section-stack"
-        data-variant={variant}
-        className={cn(
-          "flex min-w-0 flex-col",
-          hairlines
-            ? "divide-y divide-border [&>*]:py-6 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0"
-            : "gap-8",
-          className,
-        )}
-        {...props}
-      >
-        {children}
-      </div>
-    </SectionVariantContext.Provider>
-  );
-}
+export const SectionStack = /* @__PURE__ */ forwardRef<HTMLDivElement, SectionStackProps>(
+  function SectionStack({ variant: variantProp, divided, className, children, ...props }, ref) {
+    const inherited = useContext(SectionVariantContext);
+    const variant = variantProp ?? inherited ?? "open";
+    const hairlines = divided ?? variant === "open";
+    return (
+      <SectionVariantContext.Provider value={variant}>
+        <div
+          data-slot="section-stack"
+          data-variant={variant}
+          className={cn(
+            "flex min-w-0 flex-col",
+            hairlines
+              ? "divide-y divide-border [&>*]:py-6 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0"
+              : "gap-8",
+            className,
+          )}
+          ref={ref}
+          {...props}
+        >
+          {children}
+        </div>
+      </SectionVariantContext.Provider>
+    );
+  },
+);
 
-export interface SectionProps extends Omit<ComponentProps<"section">, "title"> {
+export interface SectionProps extends Omit<ComponentPropsWithoutRef<"section">, "title"> {
   /**
    * Omit only for the first rows of a page whose page title already names them
    * (Settings > General: Name, ID). Pass `aria-label` then if the rows need a name.
@@ -112,18 +115,21 @@ const CONTENT_CLASS: Record<SectionVariant, string> = {
     "flex flex-col gap-2 [&>*]:rounded-[14px] [&>*]:border [&>*]:border-border [&>*]:bg-surface [&>*]:px-4 [&>*]:py-1",
 };
 
-export function Section({
-  title,
-  description,
-  action,
-  variant: variantProp,
-  divided,
-  headingLevel = 2,
-  contentClassName,
-  className,
-  children,
-  ...props
-}: SectionProps) {
+export const Section = /* @__PURE__ */ forwardRef<HTMLElement, SectionProps>(function Section(
+  {
+    title,
+    description,
+    action,
+    variant: variantProp,
+    divided,
+    headingLevel = 2,
+    contentClassName,
+    className,
+    children,
+    ...props
+  },
+  ref,
+) {
   const inherited = useContext(SectionVariantContext);
   const variant = variantProp ?? inherited ?? "open";
   const headingId = useId();
@@ -137,6 +143,7 @@ export function Section({
       data-variant={variant}
       aria-labelledby={hasHeader ? headingId : undefined}
       className={cn("min-w-0", className)}
+      ref={ref}
       {...props}
     >
       {/* Title and action share the first line; on narrow widths the description
@@ -195,4 +202,4 @@ export function Section({
       ) : null}
     </section>
   );
-}
+});

@@ -65,6 +65,16 @@ export type StartVideoGenerationWorkflow = (input: {
 /** A separately owned display-metadata operation, never a conversation turn. */
 export type StartSessionTitleWorkflow = StartVideoGenerationWorkflow;
 
+/** Start-or-observe a recording's transcript or deletion workflow. */
+export type StartRecordingWorkflow = (input: {
+  kind: "transcript" | "deletion";
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+  versionId: string | null;
+  ownerSubjectId: string;
+}) => Promise<"started" | "already_running">;
+
 /** Exact activity-owned proof that the hard sandbox/tool fence physically
  * drained. This is delivery evidence only: the workflow still validates the
  * persisted attempt dispatch and commits the authoritative Postgres receipt. */
@@ -113,6 +123,7 @@ export type SharedActivityServices = {
   startSandboxReaperWorkflow?: StartSandboxReaperWorkflow | null;
   startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
   startSessionTitleWorkflow?: StartSessionTitleWorkflow | null;
+  startRecordingWorkflow?: StartRecordingWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to
@@ -497,6 +508,13 @@ export type DispatchScheduledTaskRunInput = {
       credentialRestriction?: never;
     }
   | {
+      /** Events matched the automation's triggers; the run acts with its own authority. */
+      triggerType: Extract<ScheduledTaskTriggerType, "event">;
+      agentRunUsageIdempotencyKey?: never;
+      initiator?: never;
+      credentialRestriction?: never;
+    }
+  | {
       triggerType: Extract<
         ScheduledTaskTriggerType,
         "manual" | "initial" | "provider_event" | "retry" | "repair"
@@ -538,6 +556,7 @@ export type DispatchScheduledTaskRunResult =
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
         | "atlassian_native_retired"
+        | "google_drive_native_retired"
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";

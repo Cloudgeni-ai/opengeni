@@ -37,6 +37,22 @@ type Sample = {
 const samples: Sample[] = [];
 const toolCount = Number(process.env.OPENGENI_BENCH_WORKER_TOOLS ?? "0");
 if (toolCount !== 0 && toolCount !== 5) throw new Error("Worker fixture supports 0 or 5 tools");
+const streamChunks = Number(process.env.OPENGENI_BENCH_STREAM_CHUNKS ?? "0");
+const streamDelayMs = Number(process.env.OPENGENI_BENCH_STREAM_DELAY_MS ?? "0");
+if (
+  !Number.isInteger(streamChunks) ||
+  streamChunks < 0 ||
+  streamChunks > 10_000 ||
+  !Number.isInteger(streamDelayMs) ||
+  streamDelayMs < 0 ||
+  streamDelayMs > 1_000
+)
+  throw new Error("Invalid scripted stream fixture");
+const responseChunks = streamChunks
+  ? Array.from({ length: streamChunks }, (_, index) => `part-${index} `)
+  : ["Hello ", "from ", "a scripted turn."];
+const responseText = responseChunks.join("");
+const streamRows: number[] = [];
 const transactionOrigin = new AsyncLocalStorage<string>();
 const instrumented = new WeakSet<object>();
 function instrumentTransactions(db: Database): void {
@@ -204,8 +220,9 @@ try {
           ]
         : []),
       {
-        outputText: "Hello from a scripted turn.",
-        chunks: ["Hello ", "from ", "a scripted turn."],
+        outputText: responseText,
+        chunks: responseChunks,
+        delayMs: streamDelayMs,
       },
     );
     const priorModelCalls = model.calls;
@@ -248,6 +265,31 @@ try {
         }
       }
     }
+    if (streamChunks) {
+      const rows = await shared.admin<{ text: string }[]>`
+        select payload->>'text' as text from session_events
+        where workspace_id=${grant.workspaceId} and session_id=${session.id}
+          and type='agent.message.delta' order by sequence`;
+      if (rows.map((row) => row.text).join("") !== responseText)
+        throw new Error("Durable streamed text differs from scripted provider output");
+      streamRows.push(rows.length);
+      const history = await getActiveSessionHistoryItemsPaged(
+        client.db,
+        grant.workspaceId,
+        session.id,
+      );
+      const text = history
+        .flatMap(({ item }) =>
+          item.type === "message" && item.role === "assistant"
+            ? item.content.flatMap((content) =>
+                content.type === "output_text" ? [content.text] : [],
+              )
+            : [],
+        )
+        .join("");
+      if (text !== responseText)
+        throw new Error("Durable model history differs from scripted output");
+    }
     for (let idle = 0; idle < 3; idle++) {
       await measure("idle-peek", () =>
         activities.peekSessionWork({
@@ -265,7 +307,14 @@ try {
   }
   const output = {
     generatedAt: new Date().toISOString(),
-    fixture: { toolCount, serviceLifetime: "process", firstTurnIncludesStartup: true },
+    fixture: {
+      toolCount,
+      streamChunks,
+      streamDelayMs,
+      serviceLifetime: "process",
+      firstTurnIncludesStartup: true,
+    },
+    streamRows,
     memory: process.memoryUsage(),
     samples,
   };

@@ -311,6 +311,11 @@ type PendingShellStart = {
 export type TurnToolCancellationFence = {
   cancel(reason?: unknown): void;
   waitForQuiescence(): Promise<void>;
+  /** Content-free snapshot for slow/finalization containment diagnostics. */
+  outstandingWriters?(): Array<{
+    kind: "tool_call" | "shell_session" | "pending_shell_start" | "remote_operation";
+    count: number;
+  }>;
   runSandboxCommand(
     session: TurnSandboxCommandSession,
     args: TurnSandboxCommandArgs,
@@ -1103,6 +1108,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   async waitForQuiescence(): Promise<void> {
     this.cancel(this.reason);
     await this.ensureDrain();
+  }
+
+  outstandingWriters(): ReturnType<NonNullable<TurnToolCancellationFence["outstandingWriters"]>> {
+    return [
+      { kind: "tool_call" as const, count: this.inFlight.size },
+      { kind: "shell_session" as const, count: this.shellSessions.size },
+      { kind: "pending_shell_start" as const, count: this.pendingShellStarts.size },
+      { kind: "remote_operation" as const, count: this.remoteExecs.size },
+    ].filter(({ count }) => count > 0);
   }
 
   setForegroundWaitYield(active: boolean): void {
@@ -2239,6 +2253,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // when an adapter returns a running receipt immediately.
       await delay(Math.min(SHELL_POLL_MS, Math.max(0, remainingMs)));
     }
+    if (this.cancelled) throw cancellationError(this.reason);
+    if (canAdoptInBackground && state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
+      // Returning an unknown observation is still a return-control boundary,
+      // just like a running receipt. Commit the same session ownership before
+      // exposing its UUID; otherwise command_read cannot find it and the turn
+      // finalizer waits forever for proof the observer cannot obtain. Adoption
+      // retains the process holder/admission and does NOT prove physical exit.
+      await state.processSession.adoptRetainedProcessAsBackgroundCommand(
+        state.sessionId,
+        state.command,
+      );
+      this.shellSessions.delete(state.sessionId);
+    }
     if (observationFailure) {
       const commandId = state.processSession?.retainedProcessIdentity?.(state.sessionId)?.id;
       return `${renderDirectToolFault(observationFailure, state.sessionId)}${commandId ? `\nCommand ID: ${commandId}` : ""}\nOutput:\n${output}`;
@@ -2249,15 +2276,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // the turn fence: finalization must stop and settle it. Returning
       // control is not durable background-command adoption.
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
-    }
-    if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
-      // A cancelled turn keeps the process on its fence so the drain stops it.
-      if (this.cancelled) throw cancellationError(this.reason);
-      await state.processSession.adoptRetainedProcessAsBackgroundCommand(
-        state.sessionId,
-        state.command,
-      );
-      this.shellSessions.delete(state.sessionId);
     }
     return runningCommandBanner(
       state.sessionId,

@@ -7,6 +7,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   acquireLease,
+  applySessionTurnSettlement,
   advanceWorkspaceGeneration,
   verifyWorkspaceMutationSettlement,
   SandboxWorkspaceMutationFencedError,
@@ -53,6 +54,9 @@ import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settleTurnFailure } from "../src/activities/agent-turn/failure-settlement";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
+import { createTurnToolCancellationController } from "../../../packages/runtime/src/sandbox/turn-tool-cancellation";
+import { installModalCommandSession } from "../../../packages/runtime/src/sandbox/providers/modal-command-session";
+import { readSessionBackgroundCommandOutput } from "@opengeni/db/session-background-commands";
 
 const { CommandStartOutcomeUnknownError } = createRequire(import.meta.resolve("@opengeni/runtime"))(
   "modal",
@@ -286,6 +290,91 @@ function unknownCommand(instanceId: string) {
     error: new ProviderCommandStartOutcomeUnknownError(command, sdkError),
   };
 }
+
+test("unobservable foreground command commits session ownership before exposing its ID and drains only turn writers", async () => {
+  const fixture = await admittedInternalMutation();
+  const { command } = unknownCommand(fixture.instanceId);
+  let starts = 0;
+  const provider = fixture.sandbox.established.session;
+  Object.assign(provider, {
+    state: { manifest: buildManifest(testSettings(), [], {}) },
+    supportsPty: () => false,
+  });
+  installModalCommandSession(provider as never, {
+    start: async () => {
+      starts++;
+      return command;
+    },
+    read: async () => {
+      throw new ProviderCommandObservationUnavailableError(
+        command,
+        Object.assign(new Error("Exact invocation observation unavailable"), { code: 14 }),
+        false,
+      );
+    },
+    readProbe: async () => {
+      throw new Error("unexpected probe");
+    },
+    write: async () => {
+      throw new Error("must not resend input");
+    },
+  });
+  const routed = routedInternalFixture(fixture).session;
+  const fence = createTurnToolCancellationController();
+  const [exec] = fence.wrapTools([sdkCapabilityFunction(routed, "exec_command", false)], routed);
+  const result = await exec!.invoke(
+    {} as never,
+    JSON.stringify({ cmd: "work", yield_time_ms: 10_000 }),
+  );
+  expect(result).toContain("observation unavailable");
+  const [process] = await shared.admin`select id, provider_command from sandbox_retained_processes
+    where session_id = ${fixture.session.id}`;
+  expect(result).toContain(`Command ID: ${process!.id}`);
+  expect(process!.provider_command).toEqual(command);
+  expect(
+    await readSessionBackgroundCommandOutput(client.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.session.id,
+      commandId: process!.id,
+    }),
+  ).toMatchObject({ state: "running" });
+  expect(
+    await Promise.race([
+      fence.waitForQuiescence().then(() => "drained"),
+      Bun.sleep(1_000).then(() => "stalled"),
+    ]),
+  ).toBe("drained");
+  expect(fence.outstandingWriters?.()).toEqual([]);
+  expect(starts).toBe(1);
+  await fixture.sandbox.release({ workspaceWritersQuiesced: true });
+  await applySessionTurnSettlement(client.db, fixture.workspaceId, {
+    sessionId: fixture.session.id,
+    turnId: fixture.claim.turn.id,
+    triggerEventId: fixture.claim.turn.triggerEventId,
+    attemptId: fixture.attemptId,
+    turnStatus: "completed",
+    sessionStatus: "idle",
+    activeTurnId: null,
+    events: [{ type: "turn.completed", payload: { output: "done" } }],
+  });
+  expect(await peekSessionWork(client.db, fixture.workspaceId, fixture.session.id)).toEqual({
+    kind: "idle",
+  });
+  const [physical] = await shared.admin`select process.state, admission.settled_at,
+      exists(select 1 from sandbox_lease_holders holder where holder.lease_id = process.lease_id
+        and holder.holder_id = process.holder_id) as held
+    from sandbox_retained_processes process join sandbox_workspace_mutation_admissions admission
+      on admission.id = process.parent_admission_id where process.id = ${process!.id}`;
+  expect(physical).toMatchObject({ state: "active", settled_at: null, held: true });
+  // Session adoption releases turn ownership, never the physical capture gate.
+  expect(
+    await readWorkspaceArchiveCapturePreflight(client.db, {
+      ...fixture.captureScope,
+      liveness: "warm",
+    }),
+  ).toBeNull();
+}, 180_000);
 
 test("SDK lazy setup preserves a committed physical outcome when its holder rejects output", async () => {
   const fixture = await admittedInternalMutation();

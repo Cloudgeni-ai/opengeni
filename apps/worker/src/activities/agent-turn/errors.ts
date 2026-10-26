@@ -52,6 +52,7 @@ import {
   findAnthropicRequestSizeError,
   AnthropicSizeRecoveryExhaustedError,
   type AnthropicRequestSize,
+  ToolCallError,
 } from "@opengeni/runtime";
 import {
   mcpTransportRequestFailureDiagnostic,
@@ -1560,12 +1561,34 @@ export function classifyProviderQuotaExhaustionError(
   if (
     isCodexTransportError(error) ||
     isXaiSubscriptionTransportError(error) ||
-    isClaudeSubscriptionTransportError(error)
+    isClaudeSubscriptionTransportError(error) ||
+    isFunctionToolProviderFailure(error)
   )
     return null;
   // The same reader the OpenAI SDK retry veto uses, so the two never disagree.
   return classifyProviderQuotaError(error);
 }
+
+/**
+ * An error a function tool threw out of its own provider call (an image
+ * gateway, a speech API) is evidence about that tool's provider, never about
+ * the chat model's account: its 402 or 429 must not read as the chat model
+ * being out of credits or rate limited. Subscription transports keep their
+ * own semantics, since a subscription tool shares the chat model's account.
+ */
+export function isFunctionToolProviderFailure(error: unknown): boolean {
+  if (
+    isCodexTransportError(error) ||
+    isXaiSubscriptionTransportError(error) ||
+    isClaudeSubscriptionTransportError(error)
+  ) {
+    return false;
+  }
+  const graph = structuredRecoveryCauseGraph(error);
+  return graph !== null && [...graph.keys()].some((node) => node instanceof ToolCallError);
+}
+
+export const TOOL_PROVIDER_REFUSED_CODE = "tool_provider_refused";
 
 /** A refusal raised by a Claude subscription (OAuth) transport, at any wrapper depth. */
 export function isClaudeSubscriptionTransportError(error: unknown): boolean {
@@ -1916,7 +1939,7 @@ function baseAgentRunFailurePayload(
     // connectivity backoff and never continues without the image's pixels.
     return {
       error:
-        "An image attached earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
+        "An image from earlier in this conversation can't be read from storage right now. The same turn will retry after a short delay.",
       code: RETAINED_ATTACHMENT_UNAVAILABLE_CODE,
       retryable: true,
     };
@@ -2014,9 +2037,13 @@ function baseAgentRunFailurePayload(
       ? String((error as { code?: unknown }).code)
       : undefined;
   if (error instanceof ActiveSessionHistoryLimitExceededError) {
+    // Over-guard history normally compacts through the bounded recovery view.
+    // This error remains only when even that view cannot fit (for example, the
+    // newest item alone is larger than the recovery budget), so compaction
+    // cannot help. Clearing deactivates rows without reading them.
     return {
       error:
-        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+        "The session's active context is too large to load safely, even with inline images and older items left out, so it cannot be compacted. Clear the session context (/clear in chat, or the clearSessionContext action) to restart the model from an empty context, then send the next message; earlier messages stay in the timeline. Alternatively, start a new session.",
       code: error.code,
       retryable: false,
       detail: error.message,
@@ -2259,6 +2286,24 @@ function baseAgentRunFailurePayload(
   // the finite same-turn budget can succeed. Fail the turn promptly with a
   // distinct code so the client can offer another model; ordinary short rate
   // limits fall through to the retryable branch below.
+  //
+  // A tool's own provider refusing first: tools return such a refusal as their
+  // own result, so one that still escapes stops the turn without blaming the
+  // chat model, replaying the tool call, or showing provider account text.
+  if (
+    isFunctionToolProviderFailure(error) &&
+    (status === 402 ||
+      status === 429 ||
+      classifyProviderQuotaError(error) !== null ||
+      code === "rate_limit_exceeded" ||
+      /(?:too many requests|rate.?limit)/i.test(message))
+  ) {
+    return {
+      error: "A tool's provider refused its request, so this turn stopped.",
+      code: TOOL_PROVIDER_REFUSED_CODE,
+      retryable: false,
+    };
+  }
   if (status === 402 && code === "anthropic_billing_error") {
     return {
       error: "Claude could not bill this request. Check the account's billing and payment details.",

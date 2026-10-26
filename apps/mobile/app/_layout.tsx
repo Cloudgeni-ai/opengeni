@@ -10,6 +10,8 @@ import { restoreAppearance } from "@/appearance";
 import { CallProvider } from "@/call";
 import { restoreOutsideCallTarget } from "@/call-preferences";
 import { AppLinkRouting } from "@/app-link-routing";
+import { FeedbackHost } from "@/feedback/host";
+import { MeetingRecorderProvider } from "@/meetings";
 import { NotificationRouting } from "@/notifications";
 
 // A link opened from outside lands on its screen with Home underneath, so Back works.
@@ -44,53 +46,62 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <AccountProvider>
           <NativeEnvironment>
-            <CallProvider>
-              {/* oxlint-disable-next-line react/style-prop-object -- expo-status-bar takes a string */}
-              <StatusBar style="auto" />
-              <NotificationRouting />
-              <AppLinkRouting />
-              <Stack screenOptions={{ headerShown: true }}>
-                <Stack.Screen name="index" options={{ title: "Opengeni" }} />
-                {/* The sessions list is the menu behind Home's top-left button, so it
+            <MeetingRecorderProvider>
+              <CallProvider>
+                {/* oxlint-disable-next-line react/style-prop-object -- expo-status-bar takes a string */}
+                <StatusBar style="auto" />
+                <NotificationRouting />
+                <AppLinkRouting />
+                <FeedbackHost />
+                <Stack screenOptions={{ headerShown: true }}>
+                  <Stack.Screen name="index" options={{ title: "Opengeni" }} />
+                  {/* The sessions list is the menu behind Home's top-left button, so it
                     slides in from the left like a side menu and slides back out to the
                     left; a swipe to the left closes it, matching the motion. */}
-                <Stack.Screen
-                  name="sessions"
-                  options={{
-                    title: "Sessions",
-                    animation: "slide_from_left",
-                    animationMatchesGesture: true,
-                    fullScreenGestureEnabled: true,
-                  }}
-                />
-                <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
-                <Stack.Screen name="session/[id]" options={{ title: "" }} />
-                <Stack.Screen name="settings" options={{ title: "Settings" }} />
-                <Stack.Screen
-                  name="workspaces"
-                  options={{
-                    title: "Workspaces",
-                    headerShown: false,
-                    presentation: "formSheet",
-                    sheetAllowedDetents: [0.55, 1],
-                    sheetGrabberVisible: true,
-                  }}
-                />
-                <Stack.Screen
-                  name="add-account"
-                  options={{ headerShown: false, presentation: "modal" }}
-                />
-                <Stack.Screen name="call" options={{ headerShown: false }} />
-                <Stack.Screen
-                  name="open"
-                  options={{
-                    headerShown: false,
-                    animation: "none",
-                    presentation: "transparentModal",
-                  }}
-                />
-              </Stack>
-            </CallProvider>
+                  <Stack.Screen
+                    name="sessions"
+                    options={{
+                      title: "Sessions",
+                      animation: "slide_from_left",
+                      animationMatchesGesture: true,
+                      fullScreenGestureEnabled: true,
+                    }}
+                  />
+                  <Stack.Screen name="inbox" options={{ title: "Inbox" }} />
+                  <Stack.Screen name="meetings" options={{ title: "Meetings" }} />
+                  <Stack.Screen name="meeting/[id]" options={{ title: "" }} />
+                  <Stack.Screen name="session/[id]" options={{ title: "" }} />
+                  <Stack.Screen name="settings" options={{ title: "Settings" }} />
+                  <Stack.Screen
+                    name="workspaces"
+                    options={{
+                      title: "Workspaces",
+                      headerShown: false,
+                      presentation: "formSheet",
+                      sheetAllowedDetents: [0.55, 1],
+                      sheetGrabberVisible: true,
+                    }}
+                  />
+                  <Stack.Screen
+                    name="add-account"
+                    options={{ headerShown: false, presentation: "modal" }}
+                  />
+                  <Stack.Screen name="call" options={{ headerShown: false }} />
+                  <Stack.Screen
+                    name="feedback"
+                    options={{ headerShown: false, presentation: "modal" }}
+                  />
+                  <Stack.Screen
+                    name="open"
+                    options={{
+                      headerShown: false,
+                      animation: "none",
+                      presentation: "transparentModal",
+                    }}
+                  />
+                </Stack>
+              </CallProvider>
+            </MeetingRecorderProvider>
           </NativeEnvironment>
         </AccountProvider>
       </SafeAreaProvider>

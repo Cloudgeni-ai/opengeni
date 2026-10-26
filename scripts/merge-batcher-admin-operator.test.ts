@@ -1,13 +1,28 @@
-import { expect, test } from "bun:test";
+import { expect, test as bunTest } from "bun:test";
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { cli, type Snapshot } from "../docs/merge-batcher-admin/bundle";
+import { createHash } from "node:crypto";
+import { cli, prepare, type Plan, type Snapshot } from "../docs/merge-batcher-admin/bundle";
 import manifest from "../docs/merge-batcher-admin/app-manifest.json";
 import { bindStop, verifyStop } from "../docs/merge-batcher-admin/off";
 
 const directory = resolve(import.meta.dir, "../docs/merge-batcher-admin");
+// The harness() tests drive the real stage.sh/off.ts operator against fake
+// gh/curl/sleep executables: hundreds of short-lived bun/bash/jq processes per
+// test (about 700 for "two activations in one plan"), with no real waits.
+// That is deterministic work whose wall time scales with CPU contention,
+// so it must not rely on bun's implicit 5 s per-test default: the two-activation
+// test takes about 2.3 s idle and about 4.9 s on a contended host, and a timeout
+// kills its in-flight resumeOff child (exit 143), which then surfaces as an
+// unhandled error in a later test. Every test in this file declares the budget
+// CI unit shards already pass with --timeout=30000, so focused local runs
+// behave like CI.
+const FIXTURE_TEST_TIMEOUT_MS = 30_000;
+function test(name: string, body: () => void | Promise<void>) {
+  bunTest(name, body, FIXTURE_TEST_TIMEOUT_MS);
+}
 const stopped = {
   command: "stop",
   disabled: true,
@@ -35,6 +50,69 @@ const deployment = {
   stopProof: { uid: "fixture-uid", stateSha: "a".repeat(40), outcome: "drained-state-observed" },
 };
 
+test("OFF accepts current lineage reconciliation, never an old witness relabeled as current", () => {
+  const lineage = {
+    schema: 1,
+    uid: deployment.uid,
+    generation: "32",
+    revision: "revision32",
+    stateSha: "a".repeat(40),
+    lineageDigest: "f".repeat(64),
+    rootWitness: {
+      uid: deployment.uid,
+      generation: "31",
+      mode: "active",
+      instance: "exited31",
+      controlGeneration: "stop-root",
+    },
+    controlVersion: 29,
+    controls: [
+      { version: 28, generation: "stop-root" },
+      { version: 29, generation: "stop-current" },
+    ],
+    audits: [{ insertId: "audit32", etag: "etag31", timestamp: "2026-10-24T02:48:29Z" }],
+    proof: {
+      outcome: "stable-state-observed",
+      stateSha: "a".repeat(40),
+      mainSha: "b".repeat(40),
+      effects: 0,
+      candidateRefs: [],
+      settledCandidates: true,
+    },
+  };
+  const result = {
+    ...stopped,
+    outcome: "lineage-reconciled-disabled",
+    drainProven: false,
+    idempotent: true,
+    writer: null,
+    lineageReconciliation: lineage,
+  };
+  const receipt = { ...deployment, lineageReconciliation: lineage };
+  expect(() => verifyStop(result, receipt, deployment)).not.toThrow();
+  for (const patch of [
+    { generation: "31" },
+    { uid: "other" },
+    { audits: [] },
+    { controls: [] },
+    { controlVersion: 30 },
+    { controls: [{ version: 28, generation: "start-bad" }] },
+    { proof: { ...lineage.proof, settledCandidates: false } },
+    { proof: { ...lineage.proof, stateSha: "c".repeat(40) } },
+  ]) {
+    const changed = { ...lineage, ...patch };
+    expect(() =>
+      verifyStop(
+        { ...result, lineageReconciliation: changed },
+        { ...receipt, lineageReconciliation: changed },
+        deployment,
+      ),
+    ).toThrow();
+  }
+  expect(() => verifyStop({ ...result, writer: stopped.writer }, receipt, deployment)).toThrow();
+  expect(() => verifyStop({ ...result, drainProven: true }, receipt, deployment)).toThrow();
+});
+
 async function offHarness(h: Awaited<ReturnType<typeof harness>>) {
   const runtime = join(h.root, "runtime");
   await mkdir(runtime);
@@ -44,6 +122,7 @@ async function offHarness(h: Awaited<ReturnType<typeof harness>>) {
     "service-config.ts",
     "service-limits.ts",
     "stopped-reconciliation.ts",
+    "stopped-lineage.ts",
   ])
     await writeFile(join(runtime, file), "export {};\n");
   await writeFile(
@@ -54,13 +133,23 @@ await Bun.write(process.env.FIXTURE_LOG,await Bun.file(process.env.FIXTURE_LOG).
 const result={...${JSON.stringify(stopped)},...JSON.parse(process.env.STOP_OVERRIDE||'{}')};
 console.log(JSON.stringify(result));
 if(process.env.STOP_FAILURE)process.exitCode=2;
+if(process.env.STOP_REPLACE_PLAN)await Bun.write(process.env.STOP_REPLACE_PLAN,'{}');
 `,
   );
   await bindStop(h.root, runtime);
   return {
     runtime,
     async run(extra: Record<string, string> = {}, flag = "--apply-after-go") {
-      const child = Bun.spawn(["bun", join(directory, "off.ts"), "run", h.root, flag], {
+      const args = extra.EXPECTED_PLAN
+        ? [
+            "bun",
+            "-e",
+            `import {off} from ${JSON.stringify(join(directory, "off.ts"))}; await off(process.argv[1], process.argv[2], undefined, process.env.EXPECTED_PLAN);`,
+            h.root,
+            flag,
+          ]
+        : ["bun", join(directory, "off.ts"), "run", h.root, flag];
+      const child = Bun.spawn(args, {
         env: { ...h.fixtureEnv, ...extra },
         stdout: "pipe",
         stderr: "pipe",
@@ -83,6 +172,18 @@ const args = process.argv.slice(2);
 const url = args.find(a => a.startsWith("https://api.github.com/"));
 const endpoint = url ? new URL(url).pathname : args.find(a => a.startsWith("/")) ?? (args.includes("graphql") ? "graphql" : "");
 const method = args.includes("--method") ? args[args.indexOf("--method")+1] : "GET";
+if(process.env.REPLACE_MOUNT_RECEIPTS) {
+ for(const kind of ['guard','namespace']) {
+  const path=process.env.REPLACE_MOUNT_RECEIPTS+'/'+kind+'-receipt.json';
+  const receipt=await Bun.file(path).json();
+  await Bun.write(path,JSON.stringify({...receipt,id:101}));
+ }
+}
+if(process.env.REPLACE_MOUNT_PLAN) {
+ await Bun.write(process.env.REPLACE_MOUNT_PLAN + '/plan.json', '{}');
+ await Bun.write(process.env.REPLACE_MOUNT_PLAN + '/restore.json', '{}');
+ if(method === 'PUT') await Bun.write(process.env.REPLACE_MOUNT_PLAN + '/restore-admission-attempt/request.json', '{}');
+}
 const headerArg = args.includes("--header") ? args[args.indexOf("--header")+1] : args.includes("-H") ? args[args.indexOf("-H")+1] : "";
 const header = headerArg.startsWith("@") ? (await Bun.file(headerArg.slice(1)).text()).trim() : headerArg;
 const event = { endpoint, method, bearer: header === "Authorization: Bearer fixture.jwt.value", jwtInArgv:args.some(a=>a.includes("fixture.jwt.value")), headerMode:headerArg.startsWith("@") ? statSync(headerArg.slice(1)).mode & 0o777 : null, debug:!!process.env.GH_DEBUG };
@@ -109,7 +210,15 @@ if(method !== "GET") {
   if(process.env.FAIL_WRITE === "after") process.exit(1);
   output(result); process.exit(0);
 }
-if(endpoint === "/app") output({id:501,owner:{login:"Cloudgeni-ai"},...JSON.parse(process.env.APP_OVERRIDE || "{}")});
+if(endpoint.startsWith('/repos/Cloudgeni-ai/opengeni/git/')) {
+ if(process.env.GH_TOKEN!=='fixture-admin'||!process.env.FIXTURE_LEDGER)process.exit(3);
+ if(endpoint.includes('/commits/')) output({tree:{sha:'d'.repeat(40)}});
+ else if(endpoint.includes('/trees/')) output({tree:[{path:'state.json',type:'blob',sha:'c'.repeat(40)}]});
+ else if(endpoint.includes('/blobs/')) output({encoding:'base64',content:Buffer.from(process.env.FIXTURE_LEDGER).toString('base64')});
+ else if(endpoint.includes('matching-refs')) output([]);
+ else output({object:{sha:'a'.repeat(40)}});
+}
+else if(endpoint === "/app") output({id:501,owner:{login:"Cloudgeni-ai"},...JSON.parse(process.env.APP_OVERRIDE || "{}")});
 else if(endpoint === "/app/installations/999") output({id:999,app_id:501,account:{login:"Cloudgeni-ai"},repository_selection:"selected",suspended_at:null,permissions:{...JSON.parse(process.env.FIXTURE_PERMISSIONS),metadata:"read"},...JSON.parse(process.env.INSTALLATION_OVERRIDE || "{}")});
 else if(endpoint === "/installation/repositories") output({repositories:[{full_name:"Cloudgeni-ai/opengeni"},...JSON.parse(process.env.EXTRA_REPOS || "[]")]});
 else if(endpoint === "graphql") output(process.env.FAIL_CLASSIC ? {errors:[{message:"inaccessible"}]} : {data:{repository:{branchProtectionRules:state.classic}}});
@@ -140,7 +249,7 @@ if(process.env.DRIFT_ON_SLEEP) {
 }
 `;
 
-async function harness() {
+async function harness(appOnly = false) {
   const root = await mkdtemp(join(tmpdir(), "batcher-admin-operator-"));
   await mkdir(join(root, "bin"));
   const before: Snapshot = {
@@ -174,6 +283,10 @@ async function harness() {
     ],
   };
   const state = join(root, "state.json");
+  if (appOnly)
+    before.rulesets[0]!.bypass_actors = [
+      { actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always" },
+    ];
   const log = join(root, "requests.jsonl");
   await writeFile(state, JSON.stringify(before));
   await writeFile(log, "");
@@ -185,7 +298,7 @@ async function harness() {
     await writeFile(join(root, "bin", name!), body!);
     await chmod(join(root, "bin", name!), 0o700);
   }
-  await cli(["prepare", state, "501", "999", join(root, "plan")]);
+  await cli([appOnly ? "prepare-app-only" : "prepare", state, "501", "999", join(root, "plan")]);
   const fixtureEnv = {
     ...process.env,
     PATH: `${join(root, "bin")}:${process.env.PATH}`,
@@ -302,6 +415,103 @@ test("explicit write opt-in, unknown actions and classic-read failure issue zero
     await h.close();
   }
 });
+test("App-only policy runs existing OFF back to exact saved Manual with administrator bypass", async () => {
+  const h = await harness(true);
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    const operator = await offHarness(h);
+    for (const action of ["create-guard", "create-namespace", "admit"]) {
+      const result = await h.run(action, "--apply-after-go");
+      expect(result.stderr).toBe("");
+      expect(result.code).toBe(0);
+    }
+    const applied = JSON.parse(await readFile(h.state, "utf8"));
+    const protection = applied.rulesets.find((r: { id: number }) => r.id === 101);
+    expect(protection.bypass_actors).toEqual([
+      { actor_id: 501, actor_type: "Integration", bypass_mode: "always" },
+    ]);
+    expect(
+      protection.rules.some((r: { type: string }) => r.type === "required_status_checks"),
+    ).toBe(true);
+    const result = await operator.run();
+    expect(result.stderr).toBe("");
+    expect(result.code).toBe(0);
+    expect((await h.run("check-stable", "original")).code).toBe(0);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+  } finally {
+    await h.close();
+  }
+});
+
+for (const phase of [
+  "legacy-applied",
+  "upgrade-admission",
+  "legacy-namespace",
+  "applied",
+] as const) {
+  test(`v4 OFF restores exact Manual from mocked ${phase} upgrade inventory and retains creation evidence`, async () => {
+    const h = await harness(true);
+    try {
+      const operator = await offHarness(h);
+      for (const action of ["create-guard", "create-namespace", "admit"])
+        expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+      const plan = JSON.parse(await readFile(join(h.root, "plan/plan.json"), "utf8")) as Plan;
+      const legacy = prepare(plan.before, plan.appId, plan.installationId);
+      const snapshot = JSON.parse(await readFile(h.state, "utf8")) as Snapshot;
+      const receiptPath = join(h.root, "plan/namespace-receipt.json");
+      const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+      const retained = JSON.stringify({ ...receipt, ...legacy.namespace });
+      // Mock provider setup only: the new immutable plan is already installed,
+      // while these exact remote inventories model the successive upgrade edges.
+      await writeFile(receiptPath, retained);
+      snapshot.rulesets = snapshot.rulesets.map((rule) => {
+        if (rule.id === plan.admissionId)
+          return {
+            ...rule,
+            ...(phase === "legacy-applied"
+              ? legacy.admission
+              : phase === "legacy-namespace"
+                ? plan.restore
+                : plan.admission),
+          };
+        if (rule.id === receipt.id && phase !== "applied") return { ...rule, ...legacy.namespace };
+        return rule;
+      });
+      await writeFile(h.state, JSON.stringify(snapshot));
+      expect((await h.run("check", phase)).code).toBe(0);
+      const result = await operator.run();
+      expect(result.stderr).toBe("");
+      expect(result.code).toBe(0);
+      expect((await h.run("check-stable", "original")).code).toBe(0);
+      expect(await readFile(receiptPath, "utf8")).toBe(retained);
+    } finally {
+      await h.close();
+    }
+  });
+}
+
+test("v4 OFF refuses an unresolved upgrade write rather than infer finality from a later inventory", async () => {
+  const h = await harness(true);
+  try {
+    const operator = await offHarness(h);
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    await mkdir(join(h.root, "plan/upgrade-admission-attempt"));
+    await writeFile(join(h.root, "plan/upgrade-admission-attempt/intent"), "unresolved");
+    const before = await h.events();
+    const result = await operator.run();
+    expect(result.code).not.toBe(0);
+    expect(
+      (await h.events())
+        .slice(before.length)
+        .filter((e) => e.method !== "GET")
+        .map((e) => e.method),
+    ).toEqual(["STOP"]);
+  } finally {
+    await h.close();
+  }
+});
+
 test("provider omitted update default survives live-shaped receipt, apply and one-command OFF", async () => {
   const h = await harness();
   try {
@@ -507,6 +717,7 @@ test("inherited rules are fetched from their organization and never assumed abse
 test("identity rejects wrong App, installation, selection, suspension, permissions and repositories", async () => {
   const h = await harness();
   try {
+    expect((await h.run("identity")).code).toBe(0);
     for (const invalid of [
       { APP_OVERRIDE: JSON.stringify({ id: 999 }) },
       { APP_OVERRIDE: JSON.stringify({ owner: { login: "foreign" } }) },
@@ -514,6 +725,23 @@ test("identity rejects wrong App, installation, selection, suspension, permissio
       { INSTALLATION_OVERRIDE: JSON.stringify({ id: 888 }) },
       { INSTALLATION_OVERRIDE: JSON.stringify({ repository_selection: "all" }) },
       { INSTALLATION_OVERRIDE: JSON.stringify({ suspended_at: "2026-10-22T00:00:00Z" }) },
+      {
+        INSTALLATION_OVERRIDE: JSON.stringify({
+          permissions: {
+            ...Object.fromEntries(
+              Object.entries(manifest.default_permissions).filter(
+                ([name]) => name !== "administration",
+              ),
+            ),
+            metadata: "read",
+          },
+        }),
+      },
+      {
+        INSTALLATION_OVERRIDE: JSON.stringify({
+          permissions: { ...manifest.default_permissions, metadata: "read", members: "read" },
+        }),
+      },
       {
         INSTALLATION_OVERRIDE: JSON.stringify({
           permissions: {
@@ -762,6 +990,201 @@ test("one-command OFF stops first, reconciles ambiguous admit, restores exact or
     const receipts = (await readdir(h.root)).filter((name) => name.startsWith("off."));
     expect(receipts.length).toBe(2);
     expect(await Bun.file(join(h.root, receipts[0]!, "off-verified.json")).exists()).toBe(true);
+  } finally {
+    await h.close();
+  }
+});
+
+test("two activations in one plan retain the current STOP and resume without replay", async () => {
+  const h = await harness(true);
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const applied = await readFile(h.state, "utf8");
+    const operator = await offHarness(h);
+    const witness = {
+      uid: deployment.uid,
+      generation: "66",
+      mode: "active",
+      instance: "exited",
+      controlGeneration: "stop-bf7e90b5-b757-4e79-a264-3bdf58336178",
+    };
+    const receipt = { ...deployment, drainWitness: witness };
+    const live = {
+      ...deployment,
+      generation: "66",
+      observedGeneration: "66",
+      etag: "same",
+      template: { containers: [{ image: deployment.image }] },
+      scaling: { scalingMode: "MANUAL", manualInstanceCount: 0 },
+      traffic: [{ type: "TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST", percent: 100 }],
+    };
+    const secret = {
+      name: "version55",
+      payload: {
+        data: Buffer.from(
+          JSON.stringify({ state: "stopped", generation: witness.controlGeneration }),
+        ).toString("base64"),
+      },
+    };
+    await writeFile(join(operator.runtime, "deployment-receipt.json"), JSON.stringify(receipt));
+    await writeFile(
+      join(operator.runtime, "cloud-auth.ts"),
+      `export const project='fixture-project',region='fixture-region'; export async function api(url){return url.includes('secretmanager')?${JSON.stringify(secret)}:${JSON.stringify(live)}}`,
+    );
+    await writeFile(
+      join(operator.runtime, "service-config.ts"),
+      `export const serviceId='batcher',controlSecret='control';`,
+    );
+    await rm(join(h.root, "stop-contract.json"));
+    await bindStop(h.root, operator.runtime);
+    const held = {
+      ...stopped,
+      outcome: "unknown",
+      drainWitness: witness,
+      writer: {
+        ...stopped.writer,
+        instance: witness.instance,
+        control: { generation: witness.controlGeneration },
+        uncertainOutcome: true,
+        reconciliationRequired: true,
+      },
+    };
+    expect(
+      (await operator.run({ STOP_FAILURE: "1", STOP_OVERRIDE: JSON.stringify(held) })).code,
+    ).not.toBe(0);
+    const ledger = {
+      schemaVersion: 1,
+      epoch: 1,
+      landed: [],
+      invalidated: [],
+      effects: {
+        old: {
+          kind: "rerun",
+          status: "blocked",
+          attempts: 0,
+          lastError: "Candidate readiness changed before retry; obsolete intent not submitted",
+        },
+      },
+    };
+    const script = `import {resumeOff} from ${JSON.stringify(join(directory, "off.ts"))}; await resumeOff(process.argv[1],'--apply-after-go');`;
+    async function resume() {
+      const child = Bun.spawn(["bun", "-e", script, h.root], {
+        env: { ...h.fixtureEnv, FIXTURE_LEDGER: JSON.stringify(ledger) },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [exit, stderr] = await Promise.all([
+        child.exited,
+        new Response(child.stderr).text(),
+        new Response(child.stdout).text(),
+      ]);
+      expect(stderr).toBe("");
+      expect(exit).toBe(0);
+    }
+    await resume();
+    expect((await h.events()).filter((e) => e.method === "STOP")).toHaveLength(1);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    const pointer = JSON.parse(await readFile(join(h.root, "plan/off-stop-attempt.json"), "utf8"));
+    expect(
+      JSON.parse(await readFile(join(h.root, pointer.name, "stop.stdout"), "utf8")).outcome,
+    ).toBe("unknown");
+    // Simulate a second activation with the SAME plan directory and a new
+    // actual control/generation. Retain all first-attempt receipts unchanged.
+    witness.generation = "68";
+    witness.instance = "second-exited";
+    witness.controlGeneration = "stop-74643aaa-b111-4333-8abc-112233445566";
+    live.generation = "68";
+    live.observedGeneration = "68";
+    held.writer.instance = witness.instance;
+    held.writer.control.generation = witness.controlGeneration;
+    secret.payload.data = Buffer.from(
+      JSON.stringify({ state: "stopped", generation: witness.controlGeneration }),
+    ).toString("base64");
+    await writeFile(h.state, applied);
+    await writeFile(join(operator.runtime, "deployment-receipt.json"), JSON.stringify(receipt));
+    await writeFile(
+      join(operator.runtime, "cloud-auth.ts"),
+      `export const project='fixture-project',region='fixture-region'; export async function api(url){return url.includes('secretmanager')?${JSON.stringify(secret)}:${JSON.stringify(live)}}`,
+    );
+    await rm(join(h.root, "stop-contract.json"));
+    await bindStop(h.root, operator.runtime);
+    expect(
+      (await operator.run({ STOP_FAILURE: "1", STOP_OVERRIDE: JSON.stringify(held) })).code,
+    ).not.toBe(0);
+    const second = JSON.parse(await readFile(join(h.root, "plan/off-stop-attempt.json"), "utf8"));
+    expect(second.name).not.toBe(pointer.name);
+    await resume();
+    expect((await h.events()).filter((e) => e.method === "STOP")).toHaveLength(2);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    expect(
+      JSON.parse(await readFile(join(h.root, pointer.name, "stop.stdout"), "utf8")).drainWitness
+        .generation,
+    ).toBe("66");
+    expect(
+      JSON.parse(await readFile(join(h.root, second.name, "stop.stdout"), "utf8")).drainWitness
+        .generation,
+    ).toBe("68");
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF restoration consumes frozen plan and payload despite mount replacement during readback and PUT", async () => {
+  const h = await harness();
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    const expected = createHash("sha256")
+      .update(await readFile(join(h.root, "plan", "plan.json")))
+      .digest("hex");
+    const result = await operator.run({
+      REPLACE_MOUNT_PLAN: join(h.root, "plan"),
+      EXPECTED_PLAN: expected,
+    });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    expect(await readFile(join(h.root, "plan", "plan.json"), "utf8")).toBe("{}");
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF uses the same frozen receipt for inventory verification and DELETE despite mount races", async () => {
+  const h = await harness();
+  try {
+    const original = JSON.parse(await readFile(h.state, "utf8"));
+    for (const action of ["create-guard", "create-namespace", "admit"])
+      expect((await h.run(action, "--apply-after-go")).code).toBe(0);
+    const operator = await offHarness(h);
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    const result = await operator.run({ REPLACE_MOUNT_RECEIPTS: join(h.root, "plan") });
+    expect(result.code).toBe(0);
+    expect(JSON.parse(await readFile(h.state, "utf8"))).toEqual(original);
+    const deletes = (await h.events()).filter((e) => e.method === "DELETE");
+    expect(deletes).toHaveLength(2);
+    expect(deletes.some((e) => e.endpoint.endsWith("/101"))).toBe(false);
+  } finally {
+    await h.close();
+  }
+});
+
+test("OFF rejects a plan replaced during STOP before any GitHub request", async () => {
+  const h = await harness();
+  try {
+    const operator = await offHarness(h);
+    const path = join(h.root, "plan", "plan.json");
+    const expected = createHash("sha256")
+      .update(await readFile(path))
+      .digest("hex");
+    await writeFile(h.fixtureEnv.FIXTURE_LOG, "");
+    const result = await operator.run({ EXPECTED_PLAN: expected, STOP_REPLACE_PLAN: path });
+    expect(result.code).not.toBe(0);
+    expect(result.stderr).toContain("Pinned OFF plan changed");
+    expect((await h.events()).map((e) => e.method)).toEqual(["STOP"]);
   } finally {
     await h.close();
   }

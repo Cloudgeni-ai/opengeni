@@ -119,13 +119,18 @@ describe("first-party tool input discovery and validation", () => {
         expect((error as Error).message).toContain("everySeconds");
         expect((error as Error).message).not.toContain("knowledge_source_sync");
       }
-      for (const field of ["name", "schedule"] as const) {
-        const { [field]: omitted, ...missingRequired } = args;
-        expect(omitted).toBeDefined();
-        await expect(
-          gateway.callModel({ ...request, arguments: missingRequired }),
-        ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
-      }
+      const { name: omitted, ...missingName } = args;
+      expect(omitted).toBeDefined();
+      await expect(
+        gateway.callModel({ ...request, arguments: missingName }),
+      ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+      // With event triggers the schema leaves schedule optional; the server
+      // still refuses an automation that has neither.
+      expect(tool.inputSchema.required).not.toContain("schedule");
+      const { schedule: _schedule, ...missingSchedule } = args;
+      expect(() =>
+        resolveScheduledTaskCreateInput(missingSchedule, String(grant.metadata!.sessionId)),
+      ).toThrow("Add a schedule, or event triggers");
       await expect(
         gateway.callModel({
           ...request,

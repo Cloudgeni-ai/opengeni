@@ -67,6 +67,36 @@ duplicate entries, release-identity/role/listener overrides and overrides of
 active chart-generated service settings fail rendering. Other workload-specific
 variables follow Kubernetes' normal explicit-env precedence over `envFrom`.
 
+## Additional trust beside compute-control TLS
+
+When `computeControl.enabled` and `computeControl.apiTls.secretName` are set,
+API and both worker roles use the compute authority through `NODE_EXTRA_CA_CERTS`.
+Do not override that variable through `extraEnv` or expect a shared ConfigMap
+value to replace the chart-owned environment entry. To retain another private
+service authority, explicitly name its public PEM bundle:
+
+```yaml
+computeControl:
+  apiTls:
+    additionalCaConfigMaps:
+      - name: telemetry-ca
+        key: ca.crt
+```
+
+The chart composes these same-namespace ConfigMap keys with the existing compute
+`ca.crt` once, before application startup. An init container uses the exact API
+or worker image already selected, no network or runtime credentials, read-only
+source mounts, and a bounded writable `emptyDir`. Missing, empty, malformed,
+non-CA or oversized inputs prevent startup. The completed bundle is read-only in
+the application container; the original compute CA mount is retained. No
+collector authentication or TLS verification is disabled.
+
+The empty default preserves the existing compute-only path without an init
+container. With compute disabled or no API TLS Secret, this optional list is
+inactive; other workload trust configuration remains authoritative. Public CA
+bundle updates require an ordinary pod rollout: Bun reads `NODE_EXTRA_CA_CERTS`
+at process startup, so projected-volume changes alone do not reload trust.
+
 ## Volumes
 
 The chart accepts native Kubernetes volume and volume-mount lists at:
@@ -125,6 +155,22 @@ artifacts` job, where Helm is installed. Rendering proves manifest
 structure, not a live TLS handshake or operational telemetry export. See
 [`docs/deployment.md`](../../../docs/deployment.md) for release and deployment
 guidance.
+
+## Web assets across rollouts
+
+`web.previousAssets` carries the hashed assets of up to `maxImages` (default 2)
+previous web images into each web pod: one init container per image copies
+them into an emptyDir that the server reads when an asset is missing locally.
+`helm upgrade` finds the images with a `lookup` of the live web Deployment and
+its `opengeni.ai/previous-web-images` annotation. Offline renders carry only an
+explicit `web.previousAssets.images` list. `ingress.webAssetsIngress` adds an
+ingress-nginx Ingress for the hashed asset paths that retries a 404 on another
+web pod during the rollout (best effort). Carried images must stay in the
+registry for as long as the Deployment carries them, and `helm rollback`
+restores the earlier revision's chain. Test both with
+`bun test ./deploy/helm/opengeni/test/web-asset-skew.test.ts`. See
+[`docs/deployment.md`](../../../docs/deployment.md#web-assets-across-rollouts).
+
 ## Replicas and autoscaling
 
 When a workload's `autoscaling.enabled` is true (API, web, relay, control
@@ -133,6 +179,17 @@ its live replica count on `helm upgrade` (via `lookup`) and omits `replicas`
 when rendered offline (fresh install, `helm template`, GitOps), so an upgrade
 never scales a Deployment back to `replicaCount` and kills pods with in-flight
 turns. `replicaCount` applies only when autoscaling is off.
+
+Turn pods drain in-flight turns before they exit. The chart surges one
+replacement turn pod before removing an old one, and renders
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS` / `_FORCE_MS` from
+`worker.turns.shutdown.graceSeconds` / `forceSeconds`. Unset, they derive from
+`worker.turns.terminationGracePeriodSeconds` (default
+`worker.terminationGracePeriodSeconds`, 120): 90 seconds of natural completion,
+then the recoverable `WORKER_SHUTDOWN` checkpoint and an SDK force stop at 105
+seconds, with process exit by 115. Rendering fails for explicit values that do
+not fit. See
+[`worker-autoscaling.md`](../../../docs/worker-autoscaling.md#deletion-and-shutdown-limitations).
 
 `worker.turns.autoscaling.queueDemand` is an explicit, default-off schema-v1
 source contract, not a production acceptance flag. It adds Namespace demand,

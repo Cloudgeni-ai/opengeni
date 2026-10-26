@@ -4,6 +4,14 @@ import { prepareRunInput, type OpenGeniRuntime } from "@opengeni/runtime";
 import { turnInput } from "../src/activities/run-input";
 import { acceptedPolicy } from "../../../packages/contracts/test/fixtures/turn-serving-policy";
 
+function activeHistoryRead(items: db.ActiveSessionHistoryRow[]): db.ActiveSessionHistoryRead {
+  return {
+    items,
+    footprint: { jsonBytes: 0, rows: items.length, jsonNodes: 0, jsonProperties: 0 },
+    recovery: null,
+  };
+}
+
 test("SUB-FAIL-08 portable request projection keeps completed tools exactly once and never edits canonical rows", async () => {
   const workspaceId = crypto.randomUUID(),
     sessionId = crypto.randomUUID(),
@@ -54,7 +62,7 @@ test("SUB-FAIL-08 portable request projection keeps completed tools exactly once
       turnId,
       providerApi: "responses" as const,
       fileAuthority: { accountId: crypto.randomUUID(), subjectId: null },
-      loadActiveHistory: async () => rows,
+      loadActiveHistory: async () => activeHistoryRead(rows),
       servingProviderId: "target",
     };
     await turnInput({} as db.Database, runtime, {}, trigger, options);

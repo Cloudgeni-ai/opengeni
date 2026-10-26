@@ -11,6 +11,7 @@ import {
   type ApiKey,
   type OrganizationApiKeyAccess,
 } from "@opengeni/contracts";
+import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
 import {
   createApiKey,
   createOrganizationApiKey as createOrganizationApiKeyRecord,
@@ -317,7 +318,9 @@ function ensureDelegablePermissions(
       message: `cannot delegate missing literal permissions: ${highTrustMissing.join(", ")}`,
     });
   }
-  const missing = requested.filter((permission) => !grantPermissions.includes(permission));
+  const missing = requested.filter(
+    (permission) => !permissionSetCovers(grantPermissions, permission),
+  );
   if (missing.length > 0) {
     throw new HTTPException(403, {
       message: `cannot delegate missing permissions: ${missing.join(", ")}`,
@@ -337,7 +340,9 @@ function ensureOrganizationPolicyDelegable(
   const requested = legacy
     ? Permission.options.filter((permission) => hasPermission(policy.permissions, permission))
     : policy.permissions;
-  if (requested.some((permission) => !source.permissions.includes(permission)))
+  // A source policy stored before `connections:personal` existed covers it
+  // through `connections:write`.
+  if (requested.some((permission) => !permissionSetCovers(source.permissions, permission)))
     throw new HTTPException(403, {
       message: "cannot delegate permissions beyond organization key policy",
     });

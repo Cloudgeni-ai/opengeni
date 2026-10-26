@@ -121,15 +121,18 @@ The descriptor identifies catalog identity, actual complete Connection/host/no
 credential authority, tool-surface class, destinations, and safe-read-only
 replay policy, but grants no authority. Generic static-adapter selection rejects
 ambiguous matches and keeps provider matching out of the catalog importer,
-OAuth client/profiles, and web row/page components. OpenAPI and GraphQL
-Integrations, including Google Drive, keep their existing local MCP adapters and
-do not claim this reviewed static bridge descriptor. Compiler-wide OpenAPI
-destination governance remains separate work. See
+OAuth client/profiles, and web row/page components. Google Drive uses a reviewed
+hybrid descriptor: official remote MCP tools plus
+Opengeni REST extensions under one selected personal Connection. OpenAPI and
+GraphQL Integrations retain their local MCP adapters and do not claim this
+reviewed bridge descriptor. Compiler-wide OpenAPI destination governance remains
+separate work. See
 [`design/first-party-mcp-bridges.md`](design/first-party-mcp-bridges.md).
 
 OpenAPI 3.0/3.1 and GraphQL endpoints use an immutable preview-before-install
-flow. Curated Integration Definitions cover Google Drive/Gmail and Microsoft
-Outlook Mail/Calendar/Contacts/OneDrive; a general OpenAPI URL, GraphQL endpoint,
+flow. Curated Integration Definitions cover Microsoft
+Outlook Mail/Calendar/Contacts/OneDrive; Gmail and Google Drive use catalog MCP
+connections. For other APIs, a general OpenAPI URL, GraphQL endpoint,
 or auto-detected URL creates a workspace Definition through the same contracts. Preview performs
 bounded, pinned source discovery, compiles stable tool identities and safety
 metadata, reports the required authentication without returning credentials,
@@ -175,7 +178,7 @@ remote MCP transport. Duplicate destinations, forbidden transport headers,
 cookie injection, control characters, and oversized values are rejected before
 the request URL or headers are mutated.
 
-Curated Google and Microsoft Definitions use one signed PKCE flow:
+Curated API Definitions use one signed PKCE flow:
 
 - `POST /v1/workspaces/:workspaceId/integrations/oauth/start`
 - `GET /v1/integrations/provider-oauth/callback`
@@ -188,14 +191,17 @@ omitted value is a 422 rather than a silent choice, because defaulting to
 share a newly connected mailbox with the whole workspace. A reconnect keeps the
 existing Connection's ownership. Requesting `personal` requires an authenticated
 human — an API key, the `configured:` key, a service principal, or an agent
-attempt is refused with a 422 rather than owning a personal Connection. Google can reuse the deployment's
-Google Drive OAuth app; Microsoft and alternate Google clients are selected
-from `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL.
-The Google callback keeps the existing registered URI and verifies the signed
-state before dispatching either the legacy read-only Drive connector or a named
-provider instance. A Google Web application client must include its client
+attempt is refused with a 422 rather than owning a personal Connection. Clients
+are selected from
+`OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` by authorization-server URL. The
+retired native Drive source callback cannot establish new connections. Gmail
+and Drive MCP use the separate `/v1/integrations/oauth/callback` flow and
+the Google issuer entry; their scopes require their own applicable verification.
+A Google Web application client must include its client
 secret; a public client may explicitly use `tokenEndpointAuthMethod: "none"`.
-Callbacks consume single-use state, recheck `connections:write`, verify the
+Callbacks consume single-use state, recheck the start's Connect permission
+(`connections:personal` for your own account of a reviewed definition,
+otherwise `connections:write`), verify the
 provider principal, require every Definition scope, preserve an existing refresh
 token when the provider omits a replacement, and CAS-update or duplicate-safe
 create the normal encrypted Connection. Emulator-backed tests are merge proof;
@@ -259,13 +265,12 @@ separately removed.
 
 Provider adapters may also publish immutable generic facet definitions for
 Knowledge Sources, Inbound Triggers, Delivery Destinations, and Identity Links.
-Google Drive and OneDrive expose drive-content Knowledge Sources; Gmail and
+OneDrive exposes a drive-content Knowledge Source; Gmail and
 Outlook expose mail or calendar trigger/delivery facets and connected-account
 identity. In the web app these live in
 `apps/web/src/components/capabilities/integration-facets-panel.tsx`, mounted
 per account entry inside the integration page's **Connected accounts** section
-through the lazy `integration-account-facets.tsx` boundary (which also carries
-the provider-specific Google Drive knowledge-source dialog). The panel is
+through the lazy `integration-account-facets.tsx` boundary. The panel is
 scoped to exactly one `capabilityId`/`instanceKey`/`instanceVersion` and is
 omitted entirely for a definition that publishes no facets. These definitions
 are adapter-owned and cannot be invented or
@@ -285,20 +290,14 @@ Integration definition upgrades migrate same-key facets without losing
 configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
 and reject an upgrade that would silently remove a configured facet.
 
-Google Drive's `drive-content` facet uses a provider-specific editor because
-its required schema contains a bounded array of verified folders/Shared Drives
-plus a bound document destination. Browse and save resolve the exact named
-Integration instance before loading its Connection. Save re-reads every source
-from Google, rejects stale client labels/types/drive identities, binds the
-organization/workspace/personal destination authority, and writes only the
-facet binding. The generic facet `PUT` rejects this provider-owned facet;
-only the provider-specific `/source` route may persist its config, so a
-schema-valid payload cannot bypass Google metadata checks or forge destination
-authority. A sibling Google Drive instance-whether it uses another Google
-account or another ownership scope-is never selected by provider/domain
-fallback and is not mutated. Generic browser editing refuses required object or
-array fields unless a provider-specific flow owns them, so OneDrive and future
-rich schemas cannot be submitted as silently incomplete primitive config.
+Google Drive's previous `drive-content` facet is historical only. Native source
+browse, configuration and resume are retired; stored selections, imported
+records and run history remain available as evidence. New recurring Drive work
+uses an ordinary agent schedule with the personal Drive MCP connection. See
+[Google Drive](google-drive.md) for the replacement and its access limits.
+Generic browser editing refuses required object or array fields unless a
+provider-specific flow owns them, so OneDrive and future rich schemas cannot be
+submitted as silently incomplete primitive config.
 
 The Definition inventory returns only safe public metadata (id, label, provider
 family/domain, protocol, summary, requested scope names, and immutable facet
@@ -338,7 +337,7 @@ and workspace it was requested for, so switching workspaces mid-flight can never
 populate the new workspace with the previous one's connections, definitions, or
 installed instances. Browse renders at most 48 catalog tiles initially and
 advances in bounded windows near the scroll edge. Logos stay lazy, the custom-API
-wizard, the Drive folder picker, and the per-account facets panel are code-split,
+wizard and the per-account facets panel are code-split,
 and filtering/searching remains client-local and deterministic after the single
 catalog projection arrives - including the Custom APIs list, which answers the
 same query as every other connector instead of ignoring it. Browser acceptance
@@ -585,10 +584,11 @@ APIs**, and **Browse** all render *inside* the Connectors `<section>` element,
 and Enabled and Browse are `<h3>`s under it - they are views of Connectors, not
 surfaces of their own.
 
-**Integrations** are built and run by Opengeni: Slack, GitHub, Google Drive,
-Jira & Confluence, Outlook Mail, Outlook Calendar, Outlook Contacts, and
-OneDrive. They receive events, post as Opengeni, and hold their own identity in
-the other product. Every integration's page renders through the same component
+**Integrations** are built and run by Opengeni: Slack, GitHub, Outlook Mail,
+Outlook Calendar, Outlook Contacts, and OneDrive. These integrations receive
+events, post as Opengeni, or hold their own identity in the other product.
+Previous Google Drive and Atlassian connections retain historical cleanup
+surfaces; their native source setup is retired. Every integration's page renders through the same component
 (`apps/web/src/components/capabilities/integration-page.tsx`) fed by one plain view-model
 (`integration-view-model.ts`); one adapter hook per provider
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
@@ -599,9 +599,8 @@ that provider's data onto the view-model and picks the content for the
 viewer's role. There is exactly one row per provider, never one row per
 account and never a separate control center: the shared multi-account layer
 (`use-api-integration-accounts.tsx`) folds every curated `IntegrationDefinition`
-instance a provider has (Outlook Mail/Calendar/Contacts, OneDrive, and extra
-Google Drive accounts beyond the primary knowledge connection) into that one
-row's rolled-up state. The page contains no provider-specific
+instance a provider has (Outlook Mail/Calendar/Contacts and OneDrive) into that
+one row's rolled-up state. The page contains no provider-specific
 branch; every account/provider difference lives in the adapters.
 
 GitHub's Options block includes the attempt-frozen action approval policy for
@@ -619,7 +618,7 @@ it does not mutate connector-policy rows directly.
   available to assistive technology; warnings, pending review, and unavailable
   states remain visible. Type, provenance, and component counts belong in
   details, not in the catalog description. A provider with several modes
-  (Slack bot or personal account; Jira & Confluence sync or agent tools) opens
+  (for example, Slack bot or personal account) opens
   a provider page listing each mode, and each mode opens its own page. Hosts provide explicit health state;
   display labels never determine credential authority.
 - The integration page (`integration-page.tsx`, rendering the same view-model
@@ -634,9 +633,7 @@ it does not mutate connector-policy rows directly.
   per-item actions (`Reconnect` only when that account is unhealthy,
   `Remove` always, confirmed before it destroys anything), and its
   per-instance **Facets** panel (below) expanded in place under the entry.
-  Google Drive's primary knowledge connection is one such entry, and the
-  folders it contributes stay visible as its sub-entries rather than
-  disappearing when a second Drive account exists. A `+ Add account`
+  A `+ Add account`
   edit-link sits in the block header;
   **Settings** holds the options as switches (and, where a setting is a choice, a compact
   select); tool names are a flat, purely informational, monospace list inside
@@ -661,18 +658,16 @@ it does not mutate connector-policy rows directly.
   (installation facts, what Opengeni can see, and install/reconnect/disconnect);
   the reaction shortcut, knowledge destination, and decision publication options
   stay admin-gated on that page. Everyone else sees their own personal
-  Slack account. Nobody is offered both. Deep provider dialogs (the Drive
-  folder picker, the Jira/Confluence source picker, the reaction conversation
-  picker, the Slack decision-publication settings) open from the Access block's
+  Slack account. Nobody is offered both. Deep provider dialogs (the reaction conversation
+  picker and the Slack decision-publication settings) open from the Access block's
   single edit affordance or an option's action link.
-- Adding an account to a multi-account provider (Outlook, OneDrive, extra
-  Google Drive accounts) is a zero-dialog, straight OAuth redirect - every
+- Adding an account to a multi-account provider (Outlook or OneDrive) is a zero-dialog, straight OAuth redirect - every
   curated `IntegrationDefinition` today is oauth2-only and already reviewed,
   so there is no account-naming form first. The one shared
   `quick-connect-dialog.tsx` component exists for the two authKind cases that
   do need a screen (`api_key`: one field, no scope bullet list; unreviewed
   `oauth2`: one line naming the domain), and is reused by account actions.
-  Gmail uses a catalog Connector rather than an API integration definition (see the Gmail section below).
+  Gmail and Google Drive use catalog Connectors rather than API integration definitions.
 
 **Connectors** are MCP servers from the catalog, plus workspace-defined Custom
 APIs (OpenAPI/GraphQL) - there is no third bucket. The existing `authKind`
@@ -681,7 +676,8 @@ behavioral difference the connect flow needs, so Custom API connectors use the
 same single-row setup treatment as any other Connector.
 Connection setup defaults to workspace ownership, with personal defaults for
 mail, calendar, contacts and drive integrations. Both **This workspace** and
-**Only me** remain selectable. The shared setup dialog explains that workspace
+**Only me** remain selectable when the provider supports both. Gmail and
+official Drive MCP connections are personal-only. The shared setup dialog explains that workspace
 sharing uses the account or credentials the human authorizes. It stores
 API-key credentials under each field's **wire header name**, never its human
 label. Connecting does not silently install bundled Skills.
@@ -791,6 +787,53 @@ after the workspace binding exists it lists the shared repositories, and **Use**
 sends an ordinary human message carrying the composer picker's repository
 resource through the same Send endpoint and validation. See [GitHub App workspace bindings](github-app.md#using-a-repository-from-the-conversation-card).
 
+The deployment's reviewed API integrations (Outlook Mail, Outlook Calendar,
+Outlook Contacts, OneDrive and, where the Teams rollout allows it, Microsoft
+Teams) are also search results for agents, as `api:integration:<definition id>`
+entries tagged only with names that mean Microsoft (Outlook, Hotmail, MSN,
+Exchange, OneDrive, Teams), so generic requests such as "send an email" or
+"schedule a meeting" keep finding Gmail or Google Calendar. They are offered
+only when the definition is available in the workspace and the deployment's
+OAuth client and encryption are configured. Their setup state is per person:
+`ready` when one of the person's signed-in accounts has tools in the current
+turn, `unavailable` when it is signed in but its tools load in the next turn
+(or, in a chat with a fixed tool list that does not include it, until the
+person adds it to the chat's tools), otherwise `authorization_required`,
+including when the account's sign-in expired or was revoked. The card
+(`SessionIntegrationCapabilityCard`, the same component in the console and in
+`SessionConversation` / `OpenGeniChat` embeds, including session-proxy embeds)
+always connects the viewer's own personal account, never a workspace account.
+It starts a personal Connect attempt for a new account, or reconnects the
+viewer's expired or revoked account (the most recently used one when there are
+several), opens the provider sign-in in a popup from the same click, and lets
+the shared setup view install the definition's reviewed tools for that
+account. It then selects them for the chat and asks the chat to
+continue (`continueAfterCapabilitySetup`), so the agent resumes the request
+without the person typing anything. The card shows the viewer's own state; in
+a shared chat a teammate connects their own account, and the agent continues
+only for the person whose request it was. When Microsoft reports that an
+administrator must approve the app, the card shows the administrator approval
+link with a copy button and a **Try again** action.
+
+Installing a reviewed definition's tools for your own personal account counts
+as connecting your own account, so it needs only `connections:personal`
+(included in `connections:write`), not `capabilities:manage`: the instance
+resolves credentials for that person alone. The card itself also needs
+`sessions:control` to add the tools to the chat and continue it. A
+workspace-owned account or a custom source needs `connections:write`, and
+binding an instance that is not already bound to the same account still needs
+`capabilities:manage`. Where this client cannot connect a personal account
+(for example a shared service identity), the card says so instead of offering
+Connect.
+
+In `GET /v1/workspaces/:workspaceId/integrations`, `connected` is true only
+while the instance is bound to a connection whose status is active. An
+instance whose account sign-in expired or was revoked reports
+`connected: false` but keeps its `connectionId` and `ownership`, so clients
+can reconnect that account. `connectionLastUsedAt` is when the bound
+connection was last used (null when never used or unbound); clients use it to
+pick which of several disconnected accounts to reconnect.
+
 Reviewed library Skills install for the workspace. Their source/version review
 is available in the setup dialog; personal and conversation-only library
 installation are not supported by this path. Completing setup makes the
@@ -808,6 +851,35 @@ never receives `github:manage`, an installation token, the signed browser state,
 or a repository outside the durable allowlist. On success the browser returns
 to the originating session and subsequent tool calls use the existing
 host-owned GitHub authority.
+
+## Google Drive MCP connection
+
+Google Drive appears as one personal catalog MCP connection. Its reads, search,
+downloads, copies and uploads use Google's official
+`https://drivemcp.googleapis.com/mcp/v1` server. The same selected connection
+also exposes reviewed REST extensions for file metadata updates, binary
+content overwrites, moves, trash/restore/deletion, sharing and change-feed
+checkpoints. It does not expose a separate publishing connection or native
+source-sync toggle. Recurring work uses normal agent schedules.
+
+`drive.readonly` and `drive.file` are required. Writes remain limited to files
+authorized for the app; this is not permission to modify every readable file.
+Native Docs/Sheets editing and ownership transfer are outside the extensions.
+Mutation approval and the current selected-account checks apply to every tool.
+
+Drive setup is off by default behind `OPENGENI_GOOGLE_DRIVE_MCP_ENABLED` until
+Google preview enrollment, API/client configuration, applicable scope verification
+and authenticated acceptance are complete. The common
+`OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED=false` gate pauses new Gmail/Drive
+setup without changing sign-in, existing token refresh or ordinary schedules.
+Gmail review and branding verification do not establish Drive data-access
+approval. Setup verifies an authenticated read as well as tool discovery; the
+public `tools/list` response alone is not evidence of working access.
+
+Previous native Drive connections have a removal surface only. Existing source
+jobs are blocked from new execution, while imported documents and run history
+are retained. See [Google Drive](google-drive.md) for operator setup, supported
+tools, limits and explicit replacement of old source schedules.
 
 ## Gmail MCP bridge
 
@@ -902,6 +974,39 @@ The fixed tool allowlist and approval defaults limit the broader Google grant.
 See Google's [OAuth web-server guide](https://developers.google.com/identity/protocols/oauth2/web-server),
 [Gmail REST reference](https://developers.google.com/workspace/gmail/api/reference/rest),
 and [restricted-scope verification requirements](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification).
+
+## Google Calendar bridge
+
+Google Calendar uses the same reviewed REST-bridge design as Gmail. The catalog
+row's `https://calendarmcp.googleapis.com/mcp/v1` resource (Google's hosted
+Calendar MCP URL) is the connection and consent identity, but setup, tool
+discovery and execution run against Opengeni's bridge over the Calendar v3 REST
+API (`packages/runtime/src/google-calendar-rest-mcp.ts`); the hosted server is
+never contacted. OAuth discovery uses Google's pinned OpenID metadata, the
+deployment's existing Google client, offline consent and no RFC 8707
+`resource` parameter, exactly as for Gmail.
+
+Opengeni requests three scopes and requires all of them to be granted:
+
+- `https://www.googleapis.com/auth/calendar.calendarlist.readonly`
+- `https://www.googleapis.com/auth/calendar.events`
+- `https://www.googleapis.com/auth/calendar.freebusy`
+
+Connections are personal-only; every member connects their own calendar, and
+another participant cannot borrow the selected account. Setup requires a fresh
+refresh token and a successful read of the primary calendar, whose email becomes
+the account label. The broker binding permits only the calendar list, events
+and free/busy paths under `https://www.googleapis.com/calendar/v3/`.
+
+The catalog pins seven tools: `list_calendars`, `list_events`, `get_event` and
+`find_free_busy` are allowed by default; `create_event`, `update_event` and
+`delete_event` ask first. Writes are never replayed after an ambiguous provider
+response, and updates are guarded by the event's ETag. Setup is off by default
+behind `OPENGENI_GOOGLE_CALENDAR_ENABLED` and also respects
+`OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED`. Calendar scopes are sensitive rather
+than restricted, so production use needs Google's sensitive-scope verification
+but no security assessment. See [Google Calendar](google-calendar.md) for the
+tool behavior, time-zone handling and operator setup.
 
 ## integrations.sh Snapshot Imports
 

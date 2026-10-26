@@ -36,6 +36,8 @@ export type ChatComposerMessages = {
   queueTitle?: string | undefined;
   sendAndResumeTitle: string;
   annotationNotesRequired: string;
+  /** Quiet notice when Up tried to recall a prompt the agent already took. */
+  queuedPromptAlreadySent?: string | undefined;
   workspacePaused: string;
   pausedHere: string;
   parentBlocker: string;
@@ -111,6 +113,7 @@ export const defaultChatComposerMessages = (t: OpenGeniText): ChatComposerMessag
   queueTitle: t("composerMessages.queueRunsAfterCurrentWork"),
   sendAndResumeTitle: t("composerMessages.addToQueueEnterSteer"),
   annotationNotesRequired: t("composerMessages.addANoteToEach"),
+  queuedPromptAlreadySent: t("composerMessages.queuedPromptAlreadySent"),
   workspacePaused: t("composerMessages.workspacePaused"),
   pausedHere: t("composerMessages.pausedHere"),
   parentBlocker: "parent",

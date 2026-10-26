@@ -83,6 +83,11 @@ describe("content-fenced E2E planning", () => {
       );
       expect(integrationShardWeights(f.root, profilePath).weights?.get(path)).toBe(25);
       f.write("service-images", "changed");
+      const drifted = integrationShardWeights(f.root, profilePath);
+      expect(drifted.mode).toBe("profile");
+      expect(drifted.weights?.get(path)).toBe(25);
+      expect(drifted.reason).toContain("measured before a service images change");
+      rmSync(join(f.root, "service-images"));
       expect(integrationShardWeights(f.root, profilePath).mode).toBe("source-bytes");
       expect(e2eShardWeights(f.root).mode).toBe("profile");
     } finally {
@@ -179,52 +184,9 @@ describe("content-fenced E2E planning", () => {
       },
     ],
     [
-      "Bun runtime",
+      "missing dependency fence",
       (f) => {
-        f.profile.environment.bunVersion = "other";
-        f.save();
-      },
-    ],
-    [
-      "Bun pin",
-      (f) => {
-        f.write(".bun-version", "other");
-      },
-    ],
-    [
-      "dependency lock",
-      (f) => {
-        f.write("bun.lock", "other");
-      },
-    ],
-    [
-      "browser runner",
-      (f) => {
-        f.write("scripts/run-browser-e2e.ts", "other");
-      },
-    ],
-    [
-      "test content",
-      (f) => {
-        f.write(f.files[0]!, "changed");
-      },
-    ],
-    [
-      "new file",
-      (f) => {
-        f.write("test/e2e/new.e2e.ts", "new");
-      },
-    ],
-    [
-      "removed file",
-      (f) => {
-        rmSync(join(f.root, f.files[0]!));
-      },
-    ],
-    [
-      "missing entry",
-      (f) => {
-        delete f.profile.entries[f.files[0]!];
+        delete (f.profile.environment as { dependencyLockSha256?: string }).dependencyLockSha256;
         f.save();
       },
     ],
@@ -262,6 +224,39 @@ describe("content-fenced E2E planning", () => {
       },
     ],
   ];
+  test("an edited, added or removed test keeps every other file's timing", () => {
+    const f = fixture();
+    try {
+      f.write(f.files[0]!, "edited content");
+      f.write("test/e2e/new.e2e.ts", "x".repeat(34));
+      rmSync(join(f.root, f.files[2]!));
+      const result = e2eShardWeights(f.root);
+      expect(result.mode).toBe("profile");
+      // The edited file keeps its last measured time.
+      expect(result.weights?.get(f.files[0]!)).toBe(400);
+      expect(result.weights?.get(f.files[1]!)).toBe(100);
+      // The new file is estimated from the unchanged file's milliseconds per
+      // byte (100ms for its 17-byte source), so 34 bytes plans as 200ms.
+      expect(result.weights?.get("test/e2e/new.e2e.ts")).toBe(200);
+      expect(result.weights?.has(f.files[2]!)).toBe(false);
+      expect(result.reason).toContain("1 changed file(s)");
+      expect(result.reason).toContain("1 new file(s)");
+    } finally {
+      f.close();
+    }
+  });
+
+  test("a profile with nothing current to estimate from falls back to source bytes", () => {
+    const f = fixture();
+    try {
+      for (const path of f.files) f.write(path, `${path} edited`);
+      f.write("test/e2e/new.e2e.ts", "new");
+      expect(e2eShardWeights(f.root).mode).toBe("source-bytes");
+    } finally {
+      f.close();
+    }
+  });
+
   for (const [name, change] of changes) {
     test(`${name} falls back without changing the selected test set`, () => {
       const f = fixture();
@@ -282,4 +277,29 @@ describe("content-fenced E2E planning", () => {
       }
     });
   }
+
+  test("toolchain, dependency and runner drift keeps the measured timings", () => {
+    const f = fixture();
+    try {
+      f.profile.environment.bunVersion = "other";
+      f.save();
+      f.write(".bun-version", "other");
+      f.write("bun.lock", "other");
+      f.write("scripts/run-browser-e2e.ts", "other");
+      const result = e2eShardWeights(f.root);
+      expect(result.mode).toBe("profile");
+      expect(f.files.map((path) => result.weights?.get(path))).toEqual([400, 100, 100]);
+      expect(result.reason).toContain(
+        "measured before a Bun runtime, Bun pin, dependency lock, browser runner change",
+      );
+      // The slow file still gets a shard of its own instead of sharing one
+      // with whichever file is largest on disk.
+      expect(deterministicShards(f.root, f.files, 2, result.weights ?? undefined)).toEqual([
+        [f.files[0]!],
+        [f.files[1]!, f.files[2]!],
+      ]);
+    } finally {
+      f.close();
+    }
+  });
 });

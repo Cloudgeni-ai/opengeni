@@ -49,7 +49,7 @@ COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/vaults/package.json packages/vaults/package.json
-COPY packages/vaults-bitwarden-bridge/package.json packages/vaults-bitwarden-bridge/package.json
+COPY packages/vaults-bitwarden/package.json packages/vaults-bitwarden/package.json
 COPY packages/vaults-keeper/package.json packages/vaults-keeper/package.json
 COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
 COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.json
@@ -125,6 +125,51 @@ USER bun
 
 # Keep worker before artifact-runtime stages so legacy remote Docker builders
 # do not execute unrelated API/materializer prerequisites when targeting it.
+
+# Our own CPU speaker models for meeting recordings (apps/worker/speakers):
+# the Rust executable, cross-built natively for the target with xx, and the
+# pinned open models it loads (pyannote segmentation 3.0, MIT; 3D-Speaker
+# CAM++ trained on VoxCeleb, Apache-2.0), both as exported by sherpa-onnx.
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS speakers-xx
+FROM --platform=$BUILDPLATFORM rust:1.97.1-trixie AS speakers-build
+COPY --from=speakers-xx / /
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends clang lld \
+  && rm -rf /var/lib/apt/lists/*
+ARG TARGETPLATFORM
+RUN set -eux; \
+  xx-apt-get update; \
+  xx-apt-get install -y --no-install-recommends xx-c-essentials xx-cxx-essentials; \
+  rm -rf /var/lib/apt/lists/*
+WORKDIR /src/speakers
+COPY apps/worker/speakers/Cargo.toml apps/worker/speakers/Cargo.lock ./
+COPY apps/worker/speakers/src ./src
+RUN --mount=type=cache,id=opengeni-speakers-cargo-registry,target=/usr/local/cargo/registry,sharing=shared \
+    --mount=type=cache,id=opengeni-speakers-target-${TARGETPLATFORM},target=/src/speakers/target,sharing=locked \
+    set -eux; \
+    rust_target="$(xx-cargo --print-target-triple)"; \
+    xx-cargo build --locked --release --target-dir /src/speakers/target; \
+    install -D -m 0755 "target/${rust_target}/release/opengeni-speakers" /out/bin/opengeni-speakers; \
+    xx-verify /out/bin/opengeni-speakers
+ADD --checksum=sha256:24615ee884c897d9d2ba09bb4d30da6bb1b15e685065962db5b02e76e4996488 https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2 /tmp/segmentation.tar.bz2
+ADD --checksum=sha256:357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx /tmp/embedding.onnx
+ADD --checksum=sha256:c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 https://raw.githubusercontent.com/modelscope/3D-Speaker/065629c313eaf1a01c65c640c46d77e61e9607b4/LICENSE /tmp/embedding-LICENSE
+# The word aligner: Meta's Omnilingual ASR CTC 300M (Apache-2.0, about 1,600
+# languages) as exported to int8 ONNX by sherpa-onnx, 365 MB.
+ARG ALIGNMENT_MODEL_URL=https://huggingface.co/csukuangfj/sherpa-onnx-omnilingual-asr-1600-languages-300M-ctc-int8-2025-11-12/resolve/6abf1ece20cd2308bdb7d13cd78ec1c44fa4c094
+ADD --checksum=sha256:e7c4e54ee4c4c47829cc6667d5d00ed8ea7bef1dcfeef0fce766f77752a2726c ${ALIGNMENT_MODEL_URL}/model.int8.onnx /tmp/alignment.onnx
+ADD --checksum=sha256:a7a044c52cb29cbe8b0dc1953e92cefd4ca16b0ed968177b6beab21f9a7d0b31 ${ALIGNMENT_MODEL_URL}/tokens.txt /tmp/alignment-tokens.txt
+ADD --checksum=sha256:a70a523bafbb595c2844104feb313d204904dac91c3d186c05f22a10a71c7a94 ${ALIGNMENT_MODEL_URL}/LICENSE /tmp/alignment-LICENSE
+RUN set -eux; \
+  tar -xjf /tmp/segmentation.tar.bz2 -C /tmp; \
+  install -D -m 0444 /tmp/sherpa-onnx-pyannote-segmentation-3-0/model.onnx /out/models/segmentation.onnx; \
+  install -D -m 0444 /tmp/sherpa-onnx-pyannote-segmentation-3-0/LICENSE /out/models/segmentation-LICENSE; \
+  install -D -m 0444 /tmp/embedding.onnx /out/models/embedding.onnx; \
+  install -D -m 0444 /tmp/embedding-LICENSE /out/models/embedding-LICENSE; \
+  install -D -m 0444 /tmp/alignment.onnx /out/models/alignment.onnx; \
+  install -D -m 0444 /tmp/alignment-tokens.txt /out/models/alignment-tokens.txt; \
+  install -D -m 0444 /tmp/alignment-LICENSE /out/models/alignment-LICENSE
+
 FROM source-base AS worker-build
 RUN bun scripts/build-runtime-processes.ts worker \
   && bun scripts/assemble-server-runtime.ts worker
@@ -158,6 +203,10 @@ RUN apt-get update \
   && install -d -o bun -g bun -m 0755 /workspace
 ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3 \
   TESSDATA_PREFIX=/opt/opengeni/tessdata
+COPY --from=speakers-build --chown=root:root /out/ /opt/opengeni/speakers/
+ENV OPENGENI_RECORDING_SPEAKERS_BINARY_PATH=/opt/opengeni/speakers/bin/opengeni-speakers \
+  OPENGENI_RECORDING_SPEAKER_MODELS_DIR=/opt/opengeni/speakers/models \
+  OPENGENI_RECORDING_WORD_ALIGNMENT=true
 COPY --from=worker-build --chown=bun:bun /app/.release/server-runtime/worker/ /app/
 USER bun
 CMD ["bun", "apps/worker/dist/process/index.js"]
@@ -227,8 +276,10 @@ RUN apt-get update \
 COPY --from=api-build --chown=bun:bun /app/.release/server-runtime/api/ /app/
 COPY --from=api-build --chown=root:root /app/artifact-runtime/ /app/artifact-runtime/
 USER bun
+# The worker image aligns text-only models' words, so meetings may use them.
 ENV OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/app/artifact-runtime/installation.json \
-  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs
+  OPENGENI_ARTIFACT_TOOL_ENTRY=/app/artifact-runtime/skill-facade-entry.mjs \
+  OPENGENI_RECORDING_WORD_ALIGNMENT=true
 RUN bun artifact-runtime-doctor.js doctor --json
 # "The agent ships inside the control-plane": the SIGNED per-SHA opengeni-agent
 # Linux musl binaries (+ .sha256/.minisig) are staged into agent/install/baked/ by

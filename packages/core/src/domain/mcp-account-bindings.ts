@@ -21,7 +21,7 @@ export function mcpAccountRouteId(serverId: string, connectionId: string): strin
 function accountLabel(connection: ConnectionMetadata): string {
   const identity = connectionAccountIdentityLabel(
     connection.metadata,
-    `${connection.providerDomain} account ${connection.id.slice(0, 8)}`,
+    `${connection.providerDomain} account`,
   );
   const scope = connection.subjectId === null ? "This workspace" : "Only me";
   return `${identity} · ${scope}`;

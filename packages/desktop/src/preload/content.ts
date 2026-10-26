@@ -13,8 +13,12 @@ import {
   type DesktopAppShotStatus,
   type DesktopBridge,
   type DesktopCommand,
+  type DesktopComputerCapabilities,
+  type DesktopMeetingDetectionStatus,
+  type DesktopMeetingRequest,
   type DesktopMenuAction,
   type DesktopPlatform,
+  type DesktopSystemAudioError,
   type DesktopUpdateState,
   type ThisComputerStatus,
 } from "../contract";
@@ -39,6 +43,7 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const origin = argument("opengeni-origin");
+const systemAudio = process.argv.includes("--opengeni-system-audio");
 
 if (origin && window.location.origin === origin) {
   // Menu commands go to the page's newest listener. A page without one (an
@@ -75,6 +80,14 @@ if (origin && window.location.origin === origin) {
     if (appShotListener) appShotListener(result);
     else waitingAppShot = { result, at: Date.now() };
   });
+  // Likewise a meeting notification's choice, which can arrive as the page loads.
+  let meetingListener: ((request: DesktopMeetingRequest) => void) | null = null;
+  let waitingMeeting: { request: DesktopMeetingRequest; at: number } | null = null;
+  ipcRenderer.on(DESKTOP_IPC.meetingDetectionRequest, (_event, request: DesktopMeetingRequest) => {
+    if (meetingListener) meetingListener(request);
+    else waitingMeeting = { request, at: Date.now() };
+  });
+  const appVersion = argument("opengeni-app-version");
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -88,8 +101,14 @@ if (origin && window.location.origin === origin) {
       "appShots",
       "menuActions",
       "updates",
+      ...(systemAudio ? (["systemAudio"] as const) : []),
+      ...(systemAudio ? (["meetingDetection"] as const) : []),
+      "computerCapabilities",
+      "captureWindow",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
+    ...(appVersion ? { appVersion } : {}),
+    captureWindow: () => ipcRenderer.invoke(DESKTOP_IPC.captureWindow),
     accounts: {
       list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,
       switchTo: (accountId) => ipcRenderer.invoke(DESKTOP_IPC.accountsSwitch, accountId),
@@ -158,6 +177,86 @@ if (origin && window.location.origin === origin) {
       state: () => ipcRenderer.invoke(DESKTOP_IPC.updatesState) as Promise<DesktopUpdateState>,
       install: () => ipcRenderer.invoke(DESKTOP_IPC.updatesInstall),
       onChange: (listener) => subscribe(DESKTOP_IPC.updatesChanged, listener),
+    },
+    ...(systemAudio
+      ? {
+          systemAudio: {
+            start: async () => {
+              const result = (await ipcRenderer.invoke(DESKTOP_IPC.systemAudioStart)) as
+                | { ok: true; captureId: string; sampleRate: number }
+                | { ok: false; error: DesktopSystemAudioError };
+              if (!result.ok) throw result.error;
+              return {
+                captureId: result.captureId,
+                sampleRate: result.sampleRate,
+              };
+            },
+            stop: async (captureId: string) => {
+              await ipcRenderer.invoke(DESKTOP_IPC.systemAudioStop, captureId);
+            },
+            onSamples: (listener: (captureId: string, samples: Float32Array) => void) => {
+              const handler = (_event: IpcRendererEvent, id: string, samples: Float32Array) =>
+                listener(id, samples);
+              ipcRenderer.on(DESKTOP_IPC.systemAudioSamples, handler);
+              return () => {
+                ipcRenderer.removeListener(DESKTOP_IPC.systemAudioSamples, handler);
+              };
+            },
+            onEnded: (
+              listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
+            ) => {
+              const handler = (
+                _event: IpcRendererEvent,
+                id: string,
+                error: DesktopSystemAudioError | null,
+              ) => listener(id, error);
+              ipcRenderer.on(DESKTOP_IPC.systemAudioEnded, handler);
+              return () => {
+                ipcRenderer.removeListener(DESKTOP_IPC.systemAudioEnded, handler);
+              };
+            },
+          },
+          meetingDetection: {
+            status: () =>
+              ipcRenderer.invoke(
+                DESKTOP_IPC.meetingDetectionStatus,
+              ) as Promise<DesktopMeetingDetectionStatus>,
+            update: (change: { enabled?: boolean }) =>
+              ipcRenderer.invoke(
+                DESKTOP_IPC.meetingDetectionUpdate,
+                change,
+              ) as Promise<DesktopMeetingDetectionStatus>,
+            setRecording: (recording: boolean) =>
+              ipcRenderer.send(DESKTOP_IPC.meetingDetectionRecording, recording),
+            onRequest: (listener: (request: DesktopMeetingRequest) => void) => {
+              meetingListener = listener;
+              const waiting = waitingMeeting;
+              waitingMeeting = null;
+              if (waiting && Date.now() - waiting.at < 60_000) {
+                queueMicrotask(() => meetingListener?.(waiting.request));
+              }
+              return () => {
+                if (meetingListener === listener) meetingListener = null;
+              };
+            },
+            onChange: (listener: () => void) =>
+              subscribe(DESKTOP_IPC.meetingDetectionChanged, () => listener()),
+          },
+        }
+      : {}),
+    computerCapabilities: {
+      status: () =>
+        ipcRenderer.invoke(DESKTOP_IPC.capabilitiesStatus) as Promise<DesktopComputerCapabilities>,
+      update: (change) =>
+        ipcRenderer.invoke(
+          DESKTOP_IPC.capabilitiesUpdate,
+          change,
+        ) as Promise<DesktopComputerCapabilities>,
+      requestMicrophone: () =>
+        ipcRenderer.invoke(
+          DESKTOP_IPC.capabilitiesRequestMicrophone,
+        ) as Promise<DesktopComputerCapabilities>,
+      onChange: (listener) => subscribe(DESKTOP_IPC.capabilitiesChanged, () => listener()),
     },
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);

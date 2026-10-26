@@ -14,6 +14,7 @@ import type { RailSession as Session } from "./session-list-entry";
 // session-list model; the rail-only forest, project and browse logic stays here.
 import {
   compareSessionActivity,
+  compareSessionPins,
   hasActiveEffectiveControl,
   isEffectivelyRunning,
   partitionPinnedSessions,
@@ -892,8 +893,9 @@ function siteRowSession(
     createdBy: latest?.createdBy ?? options.creator ?? { kind: "subject", subjectId: "" },
     effectiveControl: { state: "active" },
     inputWait: null,
-    pinned: false,
-    pinnedAt: null,
+    // A pinned Site row carries this person's pin, like a pinned session.
+    pinned: summary?.pinned === true,
+    pinnedAt: summary?.pinned ? (summary.pinnedAt ?? null) : null,
     archived: false,
     archivedAt: null,
     unread: false,
@@ -1258,6 +1260,8 @@ export function buildPinnedRailSections(
     siteGroups?: readonly SiteConversationGroup[] | undefined;
     /** Split Site rows by project (the rail's project view). */
     siteRowsByProject?: boolean | undefined;
+    /** Sites this person just archived from the sidebar: their rows and conversations leave. */
+    archivedSiteIds?: ReadonlySet<string> | undefined;
     workspaceId?: string | undefined;
     creator?: Session["createdBy"] | undefined;
   } = {},
@@ -1282,22 +1286,61 @@ export function buildPinnedRailSections(
     const pruned = prunePinnedSubtrees(completeNode, true);
     return pruned ? [pruned] : [];
   });
-  const ordinaryRoots = roots.flatMap((root) => {
+  const groupSites = options.groupSites !== false;
+  const archivedSiteIds = options.archivedSiteIds ?? new Set<string>();
+  const siteGroups = (options.siteGroups ?? []).filter(
+    (group) => !archivedSiteIds.has(group.siteId),
+  );
+  const pinnedSiteIds = new Set(
+    siteGroups.filter((group) => group.pinned).map((group) => group.siteId),
+  );
+  // A Site conversation follows its Site row: into Pinned with a pinned Site,
+  // and out of the rail with an archived one.
+  const siteMember = (node: SessionTreeNode): string | null =>
+    groupSites && !node.session.parentSessionId
+      ? (sessionSiteOrigin(node.session)?.siteId ?? null)
+      : null;
+  const ordinaryRoots: SessionTreeNode[] = [];
+  const pinnedSiteMembers: SessionTreeNode[] = [];
+  // Archive hides a Site's conversations in every view, flat ones included.
+  const archivedSiteMember = (node: SessionTreeNode): boolean => {
+    const siteId = node.session.parentSessionId
+      ? null
+      : (sessionSiteOrigin(node.session)?.siteId ?? null);
+    return siteId !== null && archivedSiteIds.has(siteId);
+  };
+  for (const root of roots) {
     const pruned = prunePinnedSubtrees(root);
-    return pruned ? [pruned] : [];
-  });
+    if (!pruned || archivedSiteMember(pruned)) continue;
+    const siteId = siteMember(pruned);
+    (siteId && pinnedSiteIds.has(siteId) ? pinnedSiteMembers : ordinaryRoots).push(pruned);
+  }
+  const siteRowOptions = {
+    workspaceId: options.workspaceId,
+    creator: options.creator,
+  };
+  // One pinned row per Site, whichever projects its conversations are in.
+  const pinnedSites =
+    pinnedSiteIds.size > 0
+      ? attachSiteRows(pinnedSiteMembers, {
+          ...siteRowOptions,
+          groups: siteGroups.filter((group) => group.pinned),
+          byProject: false,
+        })
+      : [];
 
   return {
     complete,
-    pinned,
+    pinned: [...pinnedSites, ...pinned.filter((node) => !archivedSiteMember(node))].sort(
+      (left, right) => compareSessionPins(left.session, right.session),
+    ),
     ordinary: categorizeRailRoots(
-      options.groupSites === false
+      !groupSites
         ? groupScheduledRuns(ordinaryRoots)
         : attachSiteRows(groupScheduledRuns(ordinaryRoots), {
-            groups: options.siteGroups,
+            ...siteRowOptions,
+            groups: siteGroups.filter((group) => !group.pinned),
             byProject: options.siteRowsByProject,
-            workspaceId: options.workspaceId,
-            creator: options.creator,
           }),
       now,
     ),

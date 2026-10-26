@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -112,7 +113,7 @@ export type GoogleDriveConnectionLifecycleState = z.infer<
 >;
 
 const GoogleDriveLifecycleObservedAt = /* @__PURE__ */ defineSchema(() =>
-  z.string().datetime({ offset: true }),
+  primitives.string.datetime({ offset: true }),
 );
 export const GoogleDriveConnectionLifecycle = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("state", [
@@ -165,10 +166,10 @@ export const GoogleDriveSelectedSource = /* @__PURE__ */ defineSchema(() =>
     /** @deprecated Missing destinations resolve to the current workspace boundary. */
     targetScope: GoogleDriveTargetScope.optional(),
     syncCadence: GoogleDriveSyncCadence.default("hourly"),
-    syncEnabled: z.boolean().default(false),
-    configGeneration: z.number().int().positive().default(1),
+    syncEnabled: primitives.boolean.default(false),
+    configGeneration: primitives.positiveInteger.default(1),
     readPolicy: GoogleDriveReadPolicy.default("allow"),
-    selectedAt: z.string().datetime({ offset: true }),
+    selectedAt: primitives.string.datetime({ offset: true }),
   }),
 );
 export type GoogleDriveSelectedSource = z.infer<typeof GoogleDriveSelectedSource>;
@@ -180,7 +181,7 @@ export const GoogleDriveOutputDestination = /* @__PURE__ */ defineSchema(() =>
       folderName: z.string().min(1).max(1024),
       driveId: z.string().min(1).max(256).nullable(),
       location: z.enum(["my_drive", "shared_drive"]),
-      selectedAt: z.string().datetime({ offset: true }),
+      selectedAt: primitives.string.datetime({ offset: true }),
     })
     .strict()
     .superRefine((value, context) => {
@@ -206,7 +207,7 @@ export const GoogleDriveConnectionMetadata = /* @__PURE__ */ defineSchema(() =>
       googlePermissionId: z.string().min(1).max(256),
       googleEmail: z.string().email().max(320),
       googleDisplayName: z.string().min(1).max(512).nullable(),
-      verifiedAt: z.string().datetime({ offset: true }),
+      verifiedAt: primitives.string.datetime({ offset: true }),
       accessMode: z.enum(["file_only", "metadata_readonly", "readonly"]),
       lifecycle: GoogleDriveConnectionLifecycle.optional(),
       outputDestination: GoogleDriveOutputDestination.optional(),
@@ -221,7 +222,7 @@ export type GoogleDriveConnectionMetadata = z.infer<typeof GoogleDriveConnection
 
 export const GoogleDriveOAuthStartRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    connectionId: z.string().uuid().optional(),
+    connectionId: primitives.optionalUuid,
     capability: z.enum(["source_read", "publish"]).default("source_read"),
   }),
 );
@@ -230,7 +231,7 @@ export type GoogleDriveOAuthStartRequest = z.infer<typeof GoogleDriveOAuthStartR
 export const GoogleDriveOAuthStartResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     authorizationUrl: z.string().url(),
-    expiresAt: z.string().datetime({ offset: true }),
+    expiresAt: primitives.string.datetime({ offset: true }),
   }),
 );
 export type GoogleDriveOAuthStartResponse = z.infer<typeof GoogleDriveOAuthStartResponse>;
@@ -238,15 +239,15 @@ export type GoogleDriveOAuthStartResponse = z.infer<typeof GoogleDriveOAuthStart
 export const GoogleDriveLifecycleActionRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     action: z.enum(["pause", "resume"]),
-    expectedVersion: z.number().int().positive(),
+    expectedVersion: primitives.positiveInteger,
   }),
 );
 export type GoogleDriveLifecycleActionRequest = z.infer<typeof GoogleDriveLifecycleActionRequest>;
 
 export const GoogleDriveDisconnectRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    expectedVersion: z.number().int().positive(),
-    idempotencyKey: z.string().trim().min(1).max(200),
+    expectedVersion: primitives.positiveInteger,
+    idempotencyKey: primitives.string.trim().min(1).max(200),
   }),
 );
 export type GoogleDriveDisconnectRequest = z.infer<typeof GoogleDriveDisconnectRequest>;
@@ -254,16 +255,16 @@ export type GoogleDriveDisconnectRequest = z.infer<typeof GoogleDriveDisconnectR
 export const GoogleDrivePublicationExportFile = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      fileId: z.string().uuid(),
-      filename: z.string().trim().min(1).max(512),
-      contentType: z.string().trim().min(1).max(256),
-      sizeBytes: z.number().int().positive(),
-      sha256: z.string().regex(/^[0-9a-f]{64}$/u),
-      artifactId: z.string().regex(/^[0-9a-f]{32}$/u),
-      versionId: z.string().regex(/^[0-9a-f]{32}$/u),
-      materializationJobId: z.string().regex(/^[0-9a-f]{32}$/u),
-      sourceHeadSequence: z.number().int().nonnegative(),
-      sourceStateHash: z.string().regex(/^sha256:[0-9a-f]{64}$/u),
+      fileId: primitives.uuid,
+      filename: primitives.string.trim().min(1).max(512),
+      contentType: primitives.string.trim().min(1).max(256),
+      sizeBytes: primitives.positiveInteger,
+      sha256: primitives.string.regex(/^[0-9a-f]{64}$/u),
+      artifactId: primitives.string.regex(/^[0-9a-f]{32}$/u),
+      versionId: primitives.string.regex(/^[0-9a-f]{32}$/u),
+      materializationJobId: primitives.string.regex(/^[0-9a-f]{32}$/u),
+      sourceHeadSequence: primitives.nonnegativeInteger,
+      sourceStateHash: primitives.string.regex(/^sha256:[0-9a-f]{64}$/u),
     })
     .strict(),
 );
@@ -272,10 +273,10 @@ export type GoogleDrivePublicationExportFile = z.infer<typeof GoogleDrivePublica
 export const GoogleDrivePublicationToolInput = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      title: z.string().trim().min(1).max(512),
+      title: primitives.string.trim().min(1).max(512),
       modality: z.enum(["document", "spreadsheet", "presentation"]),
       file: GoogleDrivePublicationExportFile,
-      idempotencyKey: z.string().trim().min(1).max(200),
+      idempotencyKey: primitives.string.trim().min(1).max(200),
     })
     .strict(),
 );
@@ -284,7 +285,7 @@ export type GoogleDrivePublicationToolInput = z.infer<typeof GoogleDrivePublicat
 export const GoogleDrivePublicationReceipt = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      connectionId: z.string().uuid(),
+      connectionId: primitives.uuid,
       providerFileId: z.string().min(1).max(256),
       webViewLink: z.string().url(),
       mimeType: z.enum([
@@ -293,7 +294,7 @@ export const GoogleDrivePublicationReceipt = /* @__PURE__ */ defineSchema(() =>
         "application/vnd.google-apps.presentation",
       ]),
       destination: GoogleDriveOutputDestination,
-      replayed: z.boolean(),
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -306,8 +307,8 @@ export const GoogleDriveBrowseItem = /* @__PURE__ */ defineSchema(() =>
     mimeType: z.string().min(1).max(256),
     kind: z.enum(["folder", "file"]),
     driveId: z.string().min(1).max(256).nullable(),
-    modifiedTime: z.string().datetime({ offset: true }).nullable(),
-    size: z.string().regex(/^\d+$/).nullable(),
+    modifiedTime: primitives.string.datetime({ offset: true }).nullable(),
+    size: primitives.string.regex(/^\d+$/).nullable(),
     webViewLink: z.string().url().nullable(),
   }),
 );
@@ -320,7 +321,7 @@ export const GoogleDriveBrowseResponse = /* @__PURE__ */ defineSchema(() =>
     current: GoogleDriveBrowseItem.nullable(),
     items: z.array(GoogleDriveBrowseItem),
     nextPageToken: z.string().min(1).max(4096).nullable(),
-    incompleteSearch: z.boolean(),
+    incompleteSearch: primitives.boolean,
   }),
 );
 export type GoogleDriveBrowseResponse = z.infer<typeof GoogleDriveBrowseResponse>;
@@ -349,7 +350,7 @@ export const SaveGoogleDriveSourceRequest = /* @__PURE__ */ defineSchema(() =>
       /** @deprecated Legacy requests are accepted but resolve to workspace authority. */
       targetScope: GoogleDriveTargetScope.optional(),
       syncCadence: GoogleDriveSyncCadence.default("hourly"),
-      syncEnabled: z.boolean().default(false),
+      syncEnabled: primitives.boolean.default(false),
       readPolicy: GoogleDriveReadPolicy.default("allow"),
     })
     .refine((request) => request.destination !== undefined || request.targetScope !== undefined, {
@@ -365,7 +366,7 @@ export const GoogleDriveKnowledgeSourceItem = /* @__PURE__ */ defineSchema(() =>
     mimeType: z.string().min(1).max(256),
     driveId: z.string().min(1).max(512).optional(),
     sourceKind: z.enum(["my_drive", "shared_drive", "folder"]),
-    includeDescendants: z.boolean(),
+    includeDescendants: primitives.boolean,
   }),
 );
 export type GoogleDriveKnowledgeSourceItem = z.infer<typeof GoogleDriveKnowledgeSourceItem>;
@@ -401,7 +402,7 @@ export const SaveGoogleDriveIntegrationSourceRequest = /* @__PURE__ */ defineSch
         message: "At least one Google Drive source is required",
       }),
       expectedVersion: z.number().int().positive().optional(),
-      idempotencyKey: z.string().uuid(),
+      idempotencyKey: primitives.uuid,
     }),
   ),
 );

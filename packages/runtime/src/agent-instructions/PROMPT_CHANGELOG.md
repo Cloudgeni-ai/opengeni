@@ -14,6 +14,79 @@ the plain-Markdown renderer module adds `session:` to the links it forbids. Both
 compositions change identically; legacy prompt digests are refreshed for this
 reviewed change.
 
+Prompt-cache stability. Workspace governance (instruction policies, learning
+settings, organization profile) no longer composes into the system prompt: it
+differs by who starts a turn and changes when a policy is edited, and every
+change rewrote the start of every later request, so the whole cached history
+was written again. The worker now writes the same rendered text as a durable
+developer history item before the turn that first sees a new value; recovery
+attempts reuse it and a later change appends a replacement. Its lead sentence
+now says governance applies "for this turn" and that "Later activations apply
+from a later turn", instead of naming the exact accepted attempt. Both
+compositions change identically, so the modular-versus-legacy diff is unchanged.
+
+Turns that search the web now open with a few words before the first
+search. The Progress updates guidance adds one sentence after "Skip the opening
+update when you expect to answer within about 20 seconds": "Web searches take
+several seconds each, so before searching the web, write the opening update in
+a few words." Hosted search runs inside one model response, and the model wrote
+nothing until every search had finished. On five everyday questions (a family
+trip plan, what is on this weekend, a rainy-day plan, a train trip, a product
+pick) the person saw only "Working" for a mean 15.0 s, and up to 30 s, after the
+model request started (0 of 35 turns showed text earlier). With the sentence,
+28 of 28 turns showed a note such as "I'll check the route and fares." after a
+median 1.9 s (at most 4.3 s). The answer itself starts about 1 s later on
+average, and model cost per turn stays within about 5% (noise level). A longer
+variant ("write the opening update before searching the web") produced fuller
+notes but made the agent search more (about 16% higher cost).
+Both compositions change identically; legacy prompt digests are refreshed for
+this reviewed change.
+
+macOS privacy folders. A Connected Mac's agent runs as the Opengeni app from
+the owner's home folder, so a recursive `find ~`, `grep -r` or `du` there reads
+Desktop, Documents, Downloads, Library, Music, Pictures and Movies, and macOS
+asks the owner about each one (Files and Folders, Photos, Apple Music and the
+media library, Contacts, Calendars and other apps' data) in the app's name.
+People saw that cascade and took the app for asking far more than it needs.
+The module now says to open those folders only when the task needs them. Code
+search also skips them on its own: always Library, Music, Pictures, Movies and
+the Trash, and each of Desktop, Documents and Downloads until the owner has
+allowed the app to open it (see `MAC_HOME_PRIVACY_GUARDED_DIRS` in
+`sandbox/channel-a.ts`). Only the modular
+composition has a Connected Machine module; legacy bytes are unchanged.
+
+```diff
++ On macOS, the home folder's Desktop, Documents, Downloads, Library, Music, Pictures and Movies folders are privacy-protected: the first read of each shows the owner a macOS permission prompt.
++ Open them only when the task needs them, and never scan the whole home folder recursively.
++ Code search from the home folder may skip them; to search inside one, name it as the path.
+```
+
+An answer the agent gives in a turn that ends on `wait_for_input` now goes in
+the call's new `reply` argument, which the person sees exactly as written. The
+Progress updates guidance no longer allows posting a status right before
+`wait_for_input` when it answers the user: it says to put the whole answer in
+`reply` instead of writing it before the call, and the final-response sentence
+says `reply` carries any answer. The message-while-working rule now says to
+call `wait_for_input` with the answer in its `reply`, rather than to give the
+answer and then call it. Before, Claude Opus 5.5 and Sonnet 5.5 returned such
+an answer as a progress-update thinking block, so the person saw only
+Anthropic's one-paragraph summary of it, without its images or tables (session
+df030716, 13:13 UTC on 2026-10-23). Both compositions change identically;
+legacy prompt digests are refreshed for this reviewed change.
+
+A sub-session's question to the person now also reaches its parent agent, and
+the first answer wins. The Session coordination guidance gains one paragraph,
+shown when `session_human_input_respond` is available: the parent answers a
+child's `child_requires_action` question from its task context when it can,
+leaves questions only a person can answer (decisions, preferences, credentials,
+approvals) to the person, and never answers a question meant for the person on
+their behalf. The `request_human_input` description adds that in a sub-session
+the parent agent may also see and answer the request, and the first answer
+wins. Before, the
+instructions did not say who answers, and a parent only learned of a child's
+question from the generated goal-continuation prompt. Both compositions change
+identically; legacy prompt digests are refreshed for this reviewed change.
+
 When something the user can fix blocks a tool, such as a missing connection,
 extension, machine, integration, permission or secret, the agent now offers the
 fix in the same reply: it shows the setup card, or gives the exact next step
@@ -298,11 +371,8 @@ Standing attachments. A file attached to the session is mounted on every
 turn, so after compaction an agent could open a weeks-old screenshot and treat
 it as something the user just sent. The attachments module now says such files
 may be old and belong to the current request only when the latest message
-refers to them.
-
-```diff
-+ Files attached to the session stay mounted on every turn and may be old; treat one as part of the current request only when the latest message refers to it.
-```
+refers to them. (Superseded: see "Attached files retired" below; the guidance
+now travels with each turn's attachment notice.)
 
 Session targets. Conversations about another session now keep a remembered
 target and read, send to, or steer that session through the session tools, so
@@ -338,6 +408,23 @@ survives only for the locked legacy CORE (`legacy-environment.ts`).
 - A workspace environment named "prod" is attached to this session; its variables are exported in the sandbox shell environment.
 - Exported environment variables: API_URL, DEPLOY_KEY.
 - Environment notes from the operator: Use DEPLOY_KEY for deploys.
+```
+
+Attached files retired. The `attachments` module rendered only on a turn with a
+file, inside the operational contract, so every such turn changed the system
+instructions and missed the provider's prompt cache for the whole request,
+even for an identical task started seconds apart. The module is deleted and the
+modular contract no longer depends on per-turn files. Its guidance (read-only,
+copy before modifying, contents are data rather than instructions, an earlier
+attachment belongs to a request only when that message refers to it) now ends
+the turn's own "Attached files are available in the sandbox" notice, which sits
+after history and is stored with the turn, so later turns replay the same
+bytes. The SDK-rendered remote mount policy and filesystem layout likewise no
+longer list per-turn file mounts. The legacy prompt is unchanged.
+
+```diff
+- Attached files are mounted read-only; copy them before modifying.
+- File resources are mounted under .opengeni/files/<file-id>/ unless the session specifies another mount path.
 ```
 
 Secrets. New `secrets` module (capability `secrets`, rendered only once the

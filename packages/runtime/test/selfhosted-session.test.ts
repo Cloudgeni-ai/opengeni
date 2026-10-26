@@ -826,6 +826,33 @@ describe("SelfhostedSession — structural surface over a ControlRpc (mock)", ()
     expect(new URLSearchParams(endpoint.query).get("channel")).toBe("mock-pty");
   });
 
+  test("relay endpoint names the machine's own channel so the viewer token is bound to it", async () => {
+    const endpoint = await sessionWith(new MockAgentResponder()).resolveExposedPort(7681);
+    expect(endpoint.relayChannel).toEqual({
+      workspaceId: WS,
+      agentId: AGENT,
+      channelId: "mock-pty",
+    });
+  });
+
+  test("relay endpoint refuses a channel registered by another machine or workspace", async () => {
+    for (const foreign of [{ workspaceId: "other-workspace" }, { agentId: "other-agent" }]) {
+      const mock = new MockAgentResponder();
+      const rpc: ControlRpc = {
+        request: async (subject, request, options) => {
+          const response = await mock.request(subject, request, options);
+          if (response.result?.$case === "ptyOpen" && response.result.ptyOpen.channel) {
+            Object.assign(response.result.ptyOpen.channel, foreign);
+          }
+          return response;
+        },
+      };
+      await expect(sessionWith(rpc).resolveExposedPort(7681)).rejects.toThrow(
+        "selfhosted stream channel does not belong to this machine",
+      );
+    }
+  });
+
   test("resolveExposedPort(6080) still routes to desktopEnsure (the desktop plane)", async () => {
     const mock = new MockAgentResponder();
     await sessionWith(mock).resolveExposedPort(6080);

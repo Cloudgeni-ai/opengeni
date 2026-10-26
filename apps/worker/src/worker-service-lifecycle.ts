@@ -75,18 +75,50 @@ export type WorkerServiceLifecycle = {
   close(): Promise<void>;
 };
 
+/** Host intent survives an SDK finally error that masks its force-stop error.
+ * This is not physical quiescence: the standalone process must still exit. */
+export class WorkerForceStoppedError extends Error {
+  readonly name = "WorkerForceStoppedError";
+  constructor(
+    readonly reason: "cleanup_containment" | "shutdown_deadline",
+    cause: unknown,
+  ) {
+    super(`Worker deliberately force-stopped: ${reason}`, { cause });
+  }
+}
+
 export function createWorkerServiceLifecycle(input: {
   role: "control" | "turn";
   worker: WorkerRunTarget;
   observability: Observability;
   closeOwnedResources: () => Promise<void>;
   onReady?: () => void;
+  onDrainStarted?: () => void;
+  cleanupContainmentRequested?: () => boolean;
+  now?: () => number;
 }): WorkerServiceLifecycle {
+  const now = input.now ?? (() => performance.now());
   let state: WorkerLifecycleState = "starting";
   let runPromise: Promise<void> | undefined;
   let resourcesClosed: Promise<void> | undefined;
+  let drainStartedAt: number | undefined;
+  // Shutdown phase markers. Each says how long after the drain request the
+  // phase ended, so a slow rollout shows whether Temporal (natural drain,
+  // checkpoint, force stop) or resource teardown held the process.
+  const shutdownPhase = (message: string, outcome: string) =>
+    safeLifecycleLog(() =>
+      input.observability.info(message, {
+        surface: "worker_shutdown",
+        outcome,
+        ...(drainStartedAt === undefined
+          ? {}
+          : { durationMs: Math.max(0, Math.round(now() - drainStartedAt)) }),
+      }),
+    );
   const closeOwnedResources = () => {
-    resourcesClosed ??= input.closeOwnedResources();
+    resourcesClosed ??= input
+      .closeOwnedResources()
+      .finally(() => shutdownPhase("Opengeni worker resources closed", "closed"));
     return resourcesClosed;
   };
 
@@ -111,8 +143,21 @@ export function createWorkerServiceLifecycle(input: {
         try {
           await input.worker.run();
           state = "stopped";
+          shutdownPhase("Opengeni worker stopped polling; in-flight activities settled", "stopped");
         } catch (error) {
           state = "failed";
+          const forceStopReason = input.cleanupContainmentRequested?.()
+            ? "cleanup_containment"
+            : error instanceof Error && error.name === "GracefulShutdownPeriodExpiredError"
+              ? "shutdown_deadline"
+              : null;
+          shutdownPhase(
+            "Opengeni worker polling ended before orderly shutdown completed",
+            // The SDK force time expired with activities still running. Their
+            // JavaScript may continue; the host must exit the process.
+            forceStopReason ? "force_stopped" : "failed",
+          );
+          if (forceStopReason) throw new WorkerForceStoppedError(forceStopReason, error);
           throw error;
         } finally {
           await closeOwnedResources();
@@ -125,6 +170,7 @@ export function createWorkerServiceLifecycle(input: {
         return true;
       }
       const previousState = state;
+      drainStartedAt = now();
       safeLifecycleLog(() =>
         input.observability.info("Opengeni worker draining (graceful shutdown)", {
           role: input.role,
@@ -136,9 +182,11 @@ export function createWorkerServiceLifecycle(input: {
       state = "draining";
       try {
         input.worker.shutdown();
+        safeLifecycleLog(() => input.onDrainStarted?.());
         return true;
       } catch {
         state = previousState;
+        drainStartedAt = undefined;
         safeLifecycleLog(() =>
           input.observability.warn("worker shutdown request failed", {
             errorClass: "WorkerLifecycleOperationError",
@@ -186,6 +234,7 @@ export function createWorkerCleanupContainment(input: {
   let finished = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   return {
+    requested: () => requested,
     request() {
       if (requested || finished) return;
       requested = true;
@@ -193,6 +242,9 @@ export function createWorkerCleanupContainment(input: {
         timer = setTimeout(() => {
           safeLifecycleLog(() =>
             input.observability.error("worker cleanup drain exhausted; terminating host", {
+              surface: "worker_shutdown",
+              outcome: "force_stopped",
+              reason: "cleanup_containment",
               errorClass: "WorkerLifecycleOperationError",
               errorCode: "worker_cleanup_drain_exhausted",
               origin: "worker-lifecycle",

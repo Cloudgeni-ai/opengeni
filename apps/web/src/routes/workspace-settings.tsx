@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { resolveWorkspaceBusySend } from "@opengeni/contracts";
 
 import { AgentActivityRow } from "@/components/settings/agent-activity";
+import { MeetingDefaultsSection } from "@/components/meetings/meeting-defaults-section";
 import { VideoGenerationPreferenceRow } from "@/components/video-generation-settings";
 import { ConnectedAppsDefaultRow } from "@/components/workspace-capability-defaults";
 import { DefaultMachineRow } from "@/components/settings/default-machine-row";
@@ -446,6 +447,22 @@ function WorkspaceGeneralSettings({
         <BusySendPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
       </Section>
 
+      <MeetingDefaultsSection
+        workspaceId={workspaceId}
+        personal={personal}
+        canManage={canManageSettings}
+        onConnectModels={
+          canAddAccounts
+            ? () =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/organization",
+                  params: { workspaceId },
+                  search: { section: "models", workspace: workspaceId },
+                })
+            : undefined
+        }
+      />
+
       <Section
         title="New session defaults"
         description="Applied when someone starts a new session in this workspace."
@@ -778,7 +795,7 @@ export function DangerZone(props: {
       title="Delete workspace"
       description={
         disabledReason ??
-        `Deletes ${props.workspaceName} for everyone, with its sessions, schedules, secrets, knowledge, files and API keys.`
+        `Deletes ${props.workspaceName} for everyone, with its sessions, automations, secrets, knowledge, files and API keys.`
       }
       action={
         // When something blocks the delete, the description says what and who
@@ -806,7 +823,7 @@ export function DangerZone(props: {
           variant="type-to-confirm"
           title={`Delete ${props.workspaceName}?`}
           consequences={[
-            `Deletes every session, schedule, secret, knowledge entry, file and API key in ${props.workspaceName}.`,
+            `Deletes every session, automation, secret, knowledge entry, file and API key in ${props.workspaceName}.`,
             "Everyone loses access to it. Their other workspaces aren't affected.",
             "Running sessions, video generations, background commands and live sandboxes must finish first.",
             "This can't be undone.",

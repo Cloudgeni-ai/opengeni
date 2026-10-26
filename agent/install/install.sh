@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=sh
 #
-# Opengeni self-hosted agent installer — Linux + macOS, STRICT POSIX sh.
+# Opengeni Runner installer — Linux + macOS, STRICT POSIX sh.
 # =============================================================================
 #
 #   curl -fsSL https://app.opengeni.ai/install.sh | sh
@@ -85,6 +85,8 @@
 #   2  usage/bad env     4  checksum mismatch
 #   5  signature verify failed   6  no usable verify tool/bootstrap available
 #   7  unsupported OS/arch
+#   8  the downloaded agent cannot run on this machine (an installed agent is kept)
+#   9  the machine could not be connected
 # =============================================================================
 
 set -eu
@@ -220,9 +222,35 @@ should_keep_newer_agent() {
   return 1
 }
 
+# GATE 3: the verified agent must start on THIS machine (`--version`, where it
+# is staged) before it can replace anything, so an agent this host cannot load
+# is refused and an installed agent keeps running.
+assert_agent_starts() {
+  _gate_bin="$1"
+  _gate_status=0
+  _gate_output="$("$_gate_bin" --version 2>&1)" || _gate_status=$?
+  _gate_line="$(printf '%s\n' "$_gate_output" | sed -n 1p)"
+  if [ "$_gate_status" -eq 0 ] \
+    && printf '%s\n' "$_gate_line" | grep -Eq '^opengeni-agent [0-9]+\.[0-9]+\.[0-9]+$'; then
+    log "verified $_gate_line starts on this machine"
+    return 0
+  fi
+  if [ "$_gate_status" -ne 0 ]; then
+    _gate_why="exit status $_gate_status${_gate_line:+: $_gate_line}"
+  else
+    _gate_why="it reported '$_gate_line' instead of an opengeni-agent version"
+  fi
+  die 8 "the downloaded opengeni-agent cannot run on this machine ($_gate_why). Nothing was changed; an installed agent keeps running."
+}
+
 # A temp dir we always clean up, so a failed/partial download never lingers.
 TMPDIR_OG=""
-cleanup() { if [ -n "$TMPDIR_OG" ]; then rm -rf "$TMPDIR_OG" 2>/dev/null || true; fi; }
+# The candidate staged beside the install path until it replaces the agent.
+OPENGENI_STAGED_AGENT=""
+cleanup() {
+  if [ -n "$TMPDIR_OG" ]; then rm -rf "$TMPDIR_OG" 2>/dev/null || true; fi
+  if [ -n "$OPENGENI_STAGED_AGENT" ]; then rm -f "$OPENGENI_STAGED_AGENT" 2>/dev/null || true; fi
+}
 trap cleanup EXIT INT TERM
 
 # --- OS / arch detection → the release asset name ----------------------------
@@ -934,6 +962,7 @@ install_macos_prebuilt_bundle() {
     codesign --verify --deep --strict "$_staged_app" >/dev/null 2>&1 \
       || die 2 "codesign --verify --deep --strict FAILED for the prebuilt bundle; not installing"
   fi
+  assert_agent_starts "$_staged_app/Contents/MacOS/opengeni-agent"
   if should_keep_newer_agent "$_app/Contents/MacOS/opengeni-agent" "$_staged_app/Contents/MacOS/opengeni-agent"; then
     log "kept the newer installed notarized app bundle"
   else
@@ -1008,24 +1037,31 @@ main() {
     # macOS: install the verified binary INSIDE an ad-hoc-signed app bundle and make
     # the CLI a symlink into it, so CLI + background app share ONE code-signing
     # identity (the anchor TCC grants attach to). See install_macos_local_bundle.
+    assert_agent_starts "$bin_tmp"
     _old_mac_version="$(agent_release_version "$HOME/Applications/$OPENGENI_APP_NAME.app/Contents/MacOS/opengeni-agent" 2>/dev/null || true)"
     app_icon="$(stage_macos_app_icon)"
     install_macos_local_bundle "$bin_tmp" "$install_dir" "$interaction_runtime" "$app_icon"
     dest="$install_dir/opengeni-agent"
     mark_upgrade_if_changed "$_old_mac_version" "$dest"
   else
-    # Linux: atomic install — chmod then rename into place so a re-install never
-    # leaves a half-written binary on PATH.
+    # Linux: stage the verified binary beside the install path, where it must
+    # start (GATE 3), then rename it into place so a re-install never leaves a
+    # half-written binary on PATH.
     mkdir -p "$install_dir" 2>/dev/null || die 2 "cannot create install dir $install_dir"
     dest="$install_dir/opengeni-agent"
-    if should_keep_newer_agent "$dest" "$bin_tmp"; then
-      rm -f "$bin_tmp"
+    OPENGENI_STAGED_AGENT="$install_dir/.opengeni-agent.new.$$"
+    mv -f "$bin_tmp" "$OPENGENI_STAGED_AGENT" \
+      || die 2 "cannot write to $install_dir (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
+    assert_agent_starts "$OPENGENI_STAGED_AGENT"
+    if should_keep_newer_agent "$dest" "$OPENGENI_STAGED_AGENT"; then
+      rm -f "$OPENGENI_STAGED_AGENT"
     else
-      mark_upgrade_if_binary_changed "$dest" "$bin_tmp"
-      mv -f "$bin_tmp" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
+      mark_upgrade_if_binary_changed "$dest" "$OPENGENI_STAGED_AGENT"
+      mv -f "$OPENGENI_STAGED_AGENT" "$dest" || die 2 "cannot install to $dest (try OPENGENI_SYSTEM=1 with sudo, or set OPENGENI_INSTALL_DIR)"
       log "installed verified binary to $dest"
       install_interaction_companions "$interaction_runtime" "$install_dir"
     fi
+    OPENGENI_STAGED_AGENT=""
   fi
 
   path_hint "$install_dir"
@@ -1050,17 +1086,28 @@ start_background_agent() {
     log "background service skipped (OPENGENI_NO_SERVICE=1); start with: $_service_bin run"
     return 0
   fi
+  _start_status=0
   if [ "$OPENGENI_AGENT_WAS_UPGRADED" = "1" ]; then
-    if "$_service_bin" start --restart; then
+    "$_service_bin" start --restart || _start_status=$?
+    if [ "$_start_status" -eq 0 ]; then
       log "connected and running in the background (upgraded service activated)"
       return 0
     fi
-  elif "$_service_bin" start; then
-    log "connected and running in the background"
-    return 0
+  else
+    "$_service_bin" start || _start_status=$?
+    if [ "$_start_status" -eq 0 ]; then
+      log "connected and running in the background"
+      return 0
+    fi
   fi
-  log "could not install a background service on this host; connection is saved"
-  log "start the foreground agent with: $_service_bin run"
+  log "could not start the background agent (exit status $_start_status); connection is saved"
+  log "run Opengeni Runner in the foreground with: $_service_bin run"
+}
+
+# A failed connection leaves the background agent as it was: one that was
+# running keeps running.
+connection_failed() {
+  die 9 "machine connection failed (opengeni-agent connect exited with status $1); the background agent was not changed"
 }
 
 # Connect and leave the machine online in the background.
@@ -1077,9 +1124,10 @@ finish() {
     # is an explicit request for this connection. The multi-connection store
     # upserts only this deployment/workspace and preserves every other link.
     if [ -n "${OPENGENI_API_URL:-}" ]; then
-      "$_bin" --api-url "$OPENGENI_API_URL" connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+      "$_bin" --api-url "$OPENGENI_API_URL" connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive \
+        || connection_failed $?
     else
-      "$_bin" connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive
+      "$_bin" connect --token "$OPENGENI_ENROLL_TOKEN" --non-interactive || connection_failed $?
     fi
     start_background_agent "$_bin"
     return 0
@@ -1111,15 +1159,16 @@ finish() {
   # and polls while the user approves it in the browser.
   if [ -n "${OPENGENI_WORKSPACE_ID:-}" ]; then
     if [ -n "${OPENGENI_API_URL:-}" ]; then
-      "$_bin" --api-url "$OPENGENI_API_URL" connect --workspace-id "$OPENGENI_WORKSPACE_ID"
+      "$_bin" --api-url "$OPENGENI_API_URL" connect --workspace-id "$OPENGENI_WORKSPACE_ID" \
+        || connection_failed $?
     else
-      "$_bin" connect --workspace-id "$OPENGENI_WORKSPACE_ID"
+      "$_bin" connect --workspace-id "$OPENGENI_WORKSPACE_ID" || connection_failed $?
     fi
     start_background_agent "$_bin"
     return 0
   fi
 
-  printf '%s\n' "opengeni-agent installed."
+  printf '%s\n' "Opengeni Runner installed."
   if [ -n "$_enroll_env" ]; then
     printf '%s\n' "Next: $_enroll_env $_bin connect && $_bin start"
   else

@@ -9,7 +9,7 @@ import type { ApiIntegrationRuntime } from "@opengeni/db";
 const ACCOUNT_SCOPE_SUFFIX = / · (?:Only me|This workspace)$/u;
 
 /** "alice@example.com · Only me" → "alice@example.com". */
-function accountIdentity(binding: McpConnectionAccountBinding): string {
+export function accountIdentity(binding: McpConnectionAccountBinding): string {
   return binding.accountLabel.replace(ACCOUNT_SCOPE_SUFFIX, "") || binding.accountLabel;
 }
 

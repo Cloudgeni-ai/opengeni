@@ -180,13 +180,12 @@ separately. Pass `conversationProps` for message rendering and tool renderers,
 
 Live voice is opt-in, because a call spends your credits and asks the browser
 for the microphone. Turn it on with `realtimeVoice={true}` (via `OpenGeniChat`'s
-`conversationProps` too) or `createSessionProxyHandler({ realtimeVoice: true })`.
+`conversationProps` too).
 The composer then shows a voice button when the workspace offers an available
 voice model (for example hosted GPT Live with credits): the user talks, the
 voice model answers and hands work to the agent in the same chat, and the
-transcript lands in the timeline. It stays hidden when no model is available,
-when the proxy sets `realtimeVoice: false`, or when you pass
-`realtimeVoice={false}`. The voice code loads lazily on first display.
+transcript lands in the timeline. It stays hidden when no model is available
+or when you pass `realtimeVoice={false}`. The voice code loads lazily on first display.
 The voice button never names the voice model (the model menu does, when
 shown), and neither does the React Native call screen. To name the action
 after your assistant, set its text through `messages`: on the web,
@@ -197,9 +196,9 @@ idle hint; on React Native, `"native.timeline.messages.startACall"`.
 
 The working indicator before the first reply says "Thinking…". Pass
 `genieLoading` (`phrases`, `messages`, `orb`, or a whole `render`) to use your
-own copy or visual. File attachments follow the proxy: it reports them off when
-`files: false`, and for anonymous visitors (`visitor: true` from `resolve`)
-unless it sets `visitorUploads: true`.
+own copy or visual. File attachments follow the client config: a session proxy
+reports them off for anonymous visitors (`visitor: true` from `resolve`) unless
+it sets `visitorUploads: true`, and `attachments={false}` hides them.
 
 `SessionConversation` and `OpenGeniChat` are built to look native inside
 someone else's product with zero styling:
@@ -224,9 +223,8 @@ someone else's product with zero styling:
 Attachments appear when the deployment enables uploads (`attachments={false}`
 opts out), the microphone appears when it reports voice input available
 (`voiceInput={false}` opts out), generated images, video, published files and
-screenshots display through the conversation's session scope, actions a
-session proxy reports unavailable (`sessionCreation`, `archive`, `artifacts`)
-are hidden, the session goal shows with Pause/Resume/Clear, sub-agent cards
+screenshots display through the conversation's session scope, Site previews
+are hidden when the client config reports `artifacts: false`, the session goal shows with Pause/Resume/Clear, sub-agent cards
 open the child through `onOpenSession` (`OpenGeniChat` opens it in place),
 pending tool approvals render Approve/Reject, a yes/no question
 renders as two buttons, a failed load offers Try again, and `toolRegistry`
@@ -553,21 +551,34 @@ follows the host's own `dark` variant (Tailwind's default is the operating
 system's color scheme), not `data-og-theme`.
 
 The original Tailwind v4 bridge remains available for hosts that intentionally
-want Opengeni utilities compiled into their own Tailwind entry:
+want Opengeni utilities compiled into their own Tailwind entry. It renders the
+components the same as `compiled.css` when the entry imports the same
+stylesheets:
 
 ```css
 @import "tailwindcss";
 @import "@opengeni/react/styles.css";
 @import "@opengeni/react/responsive.css";
+@import "@opengeni/react/app.css";
 @source "../node_modules/@opengeni/react/src";
 ```
 
 `@source` lets the host compiler discover utilities used inside the components.
+`styles.css` maps the `--og-*` tokens into Tailwind utility names and carries
+the scoped base for `.og-root` subtrees, layered so call-site utilities win.
 `responsive.css` is the small opt-in layout layer for
 `responsiveBasis="container"`; omit it when every composer keeps the historical
-viewport basis. `compiled.css` already contains that layer. Do not import both
-`compiled.css` and `styles.css`. Consuming only the tokens?
-Import `@opengeni/react/tokens.css` and use the `--og-*` variables directly.
+viewport basis. `app.css` is the session app's design system (its token bridge,
+base rules, glows, markdown and motion): `SessionApp` needs it, and without it
+the app renders without its design system. Unlike `compiled.css`, which scopes
+it to `.og-root`, the bridge applies its base rules to the whole page: subtle
+scrollbars, the selection colour, the keyboard focus ring, pointer cursors and
+reduced motion, plus a `dark` variant that follows a `.dark` class. `compiled.css`
+already contains both layers. Stylesheets the components import themselves
+(connect and setup cards, This computer) reach the page through the host's
+bundler in either path. Do not import both `compiled.css` and `styles.css`.
+Consuming only the tokens? Import `@opengeni/react/tokens.css` and use the
+`--og-*` variables directly.
 
 ### Product-compatible theming and density
 
@@ -983,6 +994,11 @@ input through its ref. Chrome calls it after a successful checkout and
 `composer.applyDraft`, including confirmed draft replacement; failed checkout
 and pending/cancelled replacement do not request focus. The host retains
 ownership of the input and no DOM selector or global focus event is needed.
+
+Pass `wait={{ reason, deadlineAt }}` while an idle session waits for input
+(for example `session.inputWait`). Chrome shows it as the first chip of its
+row, with the reason and the next check time; tapping it opens the full reason.
+Leave it unset otherwise.
 
 When sharing `useSessionEvents().events` with `useGoal`, the hook still fetches
 the authoritative goal on mount and target changes, even when the supplied log

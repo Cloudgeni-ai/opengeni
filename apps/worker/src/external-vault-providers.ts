@@ -4,23 +4,30 @@ import type {
   ExternalVaultProviderFactory,
   StoredVaultProviderCredentials,
 } from "@opengeni/core";
-import { pinnedFetch, type PinnedFetchOptions } from "@opengeni/network";
+import {
+  DestinationPolicyError,
+  isLocalTestEnvironment,
+  pinnedFetch,
+  type PinnedFetchOptions,
+} from "@opengeni/network";
 import { VaultProviderError } from "@opengeni/vaults";
+import type { BitwardenRuntimeOptions } from "@opengeni/vaults-bitwarden";
 import type { KeeperRuntimeOptions } from "@opengeni/vaults-keeper";
 import type { ProtonPassProviderPool } from "@opengeni/vaults-protonpass";
 
 /** Test seams only; production passes nothing. */
 export type NativeExternalVaultOptions = {
   keeper?: Pick<KeeperRuntimeOptions, "queryFunction" | "fetchFile" | "sdk">;
+  bitwarden?: Partial<Pick<BitwardenRuntimeOptions, "fetch" | "allowHttp">>;
   /** Applies when this call creates the pool for its CLI path. */
   protonpass?: { stateRoot?: string; hostEnv?: Readonly<Record<string, string | undefined>> };
 };
 
 /**
  * Native external vault adapters that run inside this server: Keeper Secrets
- * Manager always, Proton Pass only when the operator installed `pass-cli`
- * (`OPENGENI_PROTON_PASS_CLI_PATH`). Both packages load through `import()`
- * on first use (packages/vaults-keeper/test/import-guard.test.ts). Keep this
+ * Manager and Bitwarden always, Proton Pass only when the operator installed
+ * `pass-cli` (`OPENGENI_PROTON_PASS_CLI_PATH`). Each package loads through
+ * `import()` on first use (packages/vaults-keeper/test/import-guard.test.ts). Keep this
  * file identical to apps/api/src/integrations/external-vault-providers.ts.
  */
 export function createNativeExternalVaultFactories(
@@ -29,6 +36,7 @@ export function createNativeExternalVaultFactories(
 ): ExternalVaultProviderFactories {
   const factories: ExternalVaultProviderFactories = {
     keeper: keeperFactory(settings, options.keeper ?? {}),
+    bitwarden: bitwardenFactory(settings, options.bitwarden ?? {}),
   };
   const cliPath = settings.protonPassCliPath;
   if (cliPath) factories.protonpass = protonPassFactory(cliPath, options.protonpass ?? {});
@@ -103,6 +111,63 @@ function keeperFactory(
       configuration: opened.configuration,
     };
     return { provider: opened.provider, credentials: stored };
+  };
+}
+
+/**
+ * The fetch every Bitwarden request and attachment download uses: DNS-pinned
+ * and policy-checked like Keeper's. A self-hosted server on a private network
+ * needs `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS`.
+ */
+export function nativeBitwardenFetch(
+  settings: Settings,
+  pinned: Pick<PinnedFetchOptions, "dnsLookup" | "fetchImpl" | "agentFactory"> = {},
+) {
+  return async (input: string, init: RequestInit) => {
+    try {
+      return await pinnedFetch(input, init, settings, {
+        ...pinned,
+        label: "Bitwarden server",
+        requireHttpsOutsideLocalTest: true,
+      });
+    } catch (error) {
+      if (error instanceof DestinationPolicyError)
+        throw new VaultProviderError("provider_unavailable", error.message);
+      throw error;
+    }
+  };
+}
+
+function bitwardenFactory(
+  settings: Settings,
+  seams: NonNullable<NativeExternalVaultOptions["bitwarden"]>,
+): ExternalVaultProviderFactory {
+  const fetch = seams.fetch ?? nativeBitwardenFetch(settings);
+  const allowHttp = seams.allowHttp ?? isLocalTestEnvironment(settings.environment);
+  return async (input) => {
+    const credentials = input.credentials;
+    if (credentials.provider !== "bitwarden") mismatch();
+    const { connectBitwarden, createBitwardenVaultProvider } =
+      await import("@opengeni/vaults-bitwarden");
+    // Setup spends the master password on the account's user key; only the
+    // key, API key and server addresses are stored.
+    const stored =
+      "masterPassword" in credentials
+        ? (
+            await connectBitwarden(credentials, {
+              fetch,
+              allowHttp,
+              ...(input.signal ? { signal: input.signal } : {}),
+            })
+          ).credentials
+        : credentials;
+    const provider = createBitwardenVaultProvider({
+      credentials: stored,
+      fetch,
+      allowHttp,
+      ...(input.operations ? { operations: input.operations } : {}),
+    });
+    return { provider, credentials: { provider: "bitwarden", ...stored } };
   };
 }
 

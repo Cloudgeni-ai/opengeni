@@ -61,3 +61,38 @@ test("same-origin JSON admission is preserved", async () => {
   });
   expect(response.status).toBe(200);
 });
+
+test("a trusted second hostname of the same deployment is admitted", async () => {
+  const secondOrigin = "https://agents.example.org";
+  const twoHosts = {
+    settings: {
+      publicBaseUrl: origin,
+      betterAuthTrustedOrigins: secondOrigin,
+      managedAuthSessionSetMode: "legacy",
+    },
+  } as ApiRouteDeps;
+  const app = new Hono();
+  app.onError((_error, c) => c.json({ rejected: true }, 403));
+  app.post("/", async (c) => {
+    await admitManagedSignInMutation(c, twoHosts);
+    return c.json({ admitted: true });
+  });
+  const admitted = await app.request(secondOrigin, {
+    method: "POST",
+    headers: {
+      origin: secondOrigin,
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+  });
+  expect(admitted.status).toBe(200);
+  const untrusted = await app.request(secondOrigin, {
+    method: "POST",
+    headers: {
+      origin: "https://other.example.com",
+      "sec-fetch-site": "same-origin",
+      "content-type": "application/json",
+    },
+  });
+  expect(untrusted.status).toBe(403);
+});

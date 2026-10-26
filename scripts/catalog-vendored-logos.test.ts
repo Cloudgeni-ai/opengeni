@@ -502,12 +502,14 @@ describe("vendored logo manifest document", () => {
       const asset = await readVendoredLogoAsset(entry!, VENDORED_LOGO_DIRECTORY);
       expect(asset.ok, `${entry!.file}: ${asset.ok ? "" : asset.reason}`).toBe(true);
     }
-    // Gmail and Mobbin publish no reusable logo licence; the overlay keeps the
-    // monogram and no asset may be vendored for them.
+    // Gmail, Google Drive, Google Calendar and Mobbin publish no reusable logo
+    // licence; the overlay keeps the monogram and no asset may be vendored for them.
     for (const { capabilityId } of suppressed) {
       expect(committed.has(capabilityId)).toBe(false);
     }
     expect(suppressed.map((entry) => entry.domain).sort()).toEqual([
+      "calendarmcp.googleapis.com",
+      "drivemcp.googleapis.com",
       "gmailmcp.googleapis.com",
       "mobbin.com",
     ]);
@@ -569,6 +571,8 @@ describe("vendor-catalog-logos script", () => {
       ["slack.com", "invalid_content_type:text/html"],
     ]);
     expect(result.suppressed.map((s) => s.domain).sort()).toEqual([
+      "calendarmcp.googleapis.com",
+      "drivemcp.googleapis.com",
       "gmailmcp.googleapis.com",
       "mobbin.com",
     ]);

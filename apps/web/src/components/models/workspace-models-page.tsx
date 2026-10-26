@@ -214,6 +214,7 @@ export function useOrganizationModelAccounts({
     organizationId: orgId,
     providerKind: ORGANIZATION_KIND[id],
     enabled: enabled && on,
+    azureDeploymentIdentity: clientConfig.azureOpenAIDeploymentIdentity === true,
   });
   const orgGateways: Record<GatewayId, ProviderConnection> = {
     vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
@@ -1588,7 +1589,7 @@ function ModelsList({
   workspaceId: string;
   /** "Design", or "your Personal workspace". */
   workspaceName: string;
-  /** The default sharing rules, when this person can read them. */
+  /** The default subscription rules, when this person can read them. */
   defaultRules?: ModelAccountSettingValues | undefined;
   accountRules: WorkspaceModelAccountSettingsState;
   organizationId: string | undefined;

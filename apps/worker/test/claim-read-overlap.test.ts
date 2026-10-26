@@ -58,7 +58,8 @@ function productionReads() {
     "deploymentCatalogSettings",
     `return (async () => {
     const observability = {};
-    const { requireSession, settingsWithEnabledCapabilityMcpServers, credentialSubjectIdForTurnInitiator, measureTurnStartupPhase, afterReads } = ports;
+    const claimedPolicy = ports.claimedPolicy ?? { kind: "absent" };
+    const { requireSession, settingsWithEnabledCapabilityMcpServers, credentialSubjectIdForTurnInitiator, measureTurnStartupPhase, afterReads, getSessionEvent, installOrReadTurnExecutionPolicyForAttempt } = ports;
     ${code}
     await afterReads();
     return { session, mcpSettings, installedApiIntegrations, credentialSubjectId, fileAuthoritySubjectId };
@@ -107,6 +108,7 @@ function fixture(subject: string | null) {
     afterReads: () => {
       continuations++;
     },
+    getSessionEvent: async () => null,
   };
   const running = productionReads()(ports, db, input, turn, settings);
   void running.catch(() => undefined);
@@ -170,9 +172,9 @@ for (const failed of [0, 1]) {
     try {
       expect(f.calls).toHaveLength(2);
       f.reads[failed]!.reject(failure);
-      await expect(f.running).rejects.toBe(failure);
       expect(f.continuations()).toBe(0);
       f.reads[1 - failed]!.resolve("late");
+      await expect(f.running).rejects.toBe(failure);
       await Promise.resolve();
       await Promise.resolve();
       expect(f.continuations()).toBe(0);
@@ -257,6 +259,7 @@ function actualClaimFixture() {
       calls.push("session");
       return (await reads[0]!.promise) as Awaited<ReturnType<typeof dbPorts.requireSession>>;
     }),
+    spyOn(dbPorts, "getSessionEvent").mockResolvedValue(null),
     spyOn(capabilities, "settingsWithEnabledCapabilityMcpServers").mockImplementation(async () => {
       expect(context.attempt.turnId).toBe(turn.id);
       calls.push("capabilities");
@@ -336,8 +339,8 @@ for (const failed of [0, 1]) {
       await flush();
       expect(f.calls).toEqual(["session", "capabilities"]);
       f.reads[failed]!.reject(failure);
-      await expect(f.running).rejects.toBe(failure);
       f.reads[1 - failed]!.resolve(failed ? {} : f.settings);
+      await expect(f.running).rejects.toBe(failure);
       await flush();
       expect(f.calls).not.toContain("credential_gate");
     } finally {
@@ -345,3 +348,75 @@ for (const failed of [0, 1]) {
     }
   });
 }
+
+test("accepted-policy fence and trigger overlap both reads; every scope joins on failure", async () => {
+  const reads = Array.from({ length: 4 }, deferred);
+  const calls: string[] = [];
+  const policy = { marker: "immutable accepted policy" };
+  const turn = {
+    id: "turn",
+    executionGeneration: 4,
+    triggerEventId: "trigger",
+    sandboxBackend: "none",
+  };
+  const input = {
+    accountId: "account",
+    workspaceId: "workspace",
+    sessionId: "session",
+    attemptId: "attempt",
+  };
+  const db = {};
+  let continued = false;
+  let settled = false;
+  const ports = {
+    measureTurnStartupPhase,
+    claimedPolicy: { kind: "valid", policy },
+    credentialSubjectIdForTurnInitiator: () => "human",
+    requireSession: () => {
+      calls.push("session");
+      return reads[0]!.promise;
+    },
+    settingsWithEnabledCapabilityMcpServers: () => {
+      calls.push("capabilities");
+      return reads[1]!.promise;
+    },
+    installOrReadTurnExecutionPolicyForAttempt: (actualDb: unknown, actual: unknown) => {
+      expect(actualDb).toBe(db);
+      expect(actual).toEqual({
+        ...input,
+        turnId: turn.id,
+        executionGeneration: 4,
+        policyForAbsent: policy,
+      });
+      calls.push("policy");
+      return reads[2]!.promise;
+    },
+    getSessionEvent: (actualDb: unknown, workspaceId: string, eventId: string) => {
+      expect([actualDb, workspaceId, eventId]).toEqual([db, input.workspaceId, "trigger"]);
+      calls.push("trigger");
+      return reads[3]!.promise;
+    },
+    afterReads: () => {
+      continued = true;
+    },
+  };
+  const failure = new Error("capability read failed");
+  const running = productionReads()(ports, db, input, turn, {}).catch((error) => {
+    settled = true;
+    return error;
+  });
+  try {
+    expect(calls).toEqual(["session", "capabilities", "policy", "trigger"]);
+    reads[0]!.resolve({});
+    reads[1]!.reject(failure);
+    reads[3]!.resolve({});
+    await flush();
+    expect(settled).toBe(false);
+    reads[2]!.resolve({ accepted: true, policy });
+    expect(await running).toBe(failure);
+    expect(continued).toBe(false);
+  } finally {
+    for (const read of reads) read.resolve({});
+    await running;
+  }
+});

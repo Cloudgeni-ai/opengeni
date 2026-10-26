@@ -597,6 +597,11 @@ export const browserSessions = pgTable(
     sandboxGroupId: uuid("sandbox_group_id"),
     connectedSandboxId: uuid("connected_sandbox_id"),
     deviceId: uuid("device_id"),
+    /** Workspace of the Chrome profile row, which is where its machine is
+     *  enrolled; another workspace when the machine is shared beyond it.
+     *  NULL on an attached session means this session's own workspace
+     *  (rows from before migration 0919). */
+    deviceWorkspaceId: uuid("device_workspace_id"),
     externalProviderId: text("external_provider_id"),
     externalPlacementId: text("external_placement_id"),
     /** Sandbox group hosting browserd when the logical browser itself lives
@@ -664,6 +669,13 @@ export const browserSessions = pgTable(
       table.workspaceId,
       table.networkRouteId,
       table.lifecycle,
+    ),
+    deviceWorkspace: index("browser_sessions_device_workspace_idx")
+      .on(table.deviceWorkspaceId, table.deviceId, table.lifecycle)
+      .where(sql`${table.deviceId} is not null`),
+    deviceWorkspaceValid: check(
+      "browser_sessions_device_workspace_check",
+      sql`${table.deviceWorkspaceId} is null or ${table.deviceId} is not null`,
     ),
     // Migration 0705: saved browsers still bound to a controller (cleanup
     // pending), scanned by list_orphaned_idle_browser_checkpoints.
@@ -862,6 +874,8 @@ export const computerSessions = pgTable(
     sandboxGroupId: uuid("sandbox_group_id"),
     connectedSandboxId: uuid("connected_sandbox_id"),
     deviceId: uuid("device_id"),
+    /** Workspace of the Chrome profile row; see browserSessions. */
+    deviceWorkspaceId: uuid("device_workspace_id"),
     externalProviderId: text("external_provider_id"),
     externalPlacementId: text("external_placement_id"),
     controllerId: text("controller_id"),
@@ -902,6 +916,13 @@ export const computerSessions = pgTable(
       table.workspaceId,
       table.sandboxGroupId,
       table.lifecycle,
+    ),
+    deviceWorkspace: index("computer_sessions_device_workspace_idx")
+      .on(table.deviceWorkspaceId, table.deviceId, table.lifecycle)
+      .where(sql`${table.deviceId} is not null`),
+    deviceWorkspaceValid: check(
+      "computer_sessions_device_workspace_check",
+      sql`${table.deviceWorkspaceId} is null or ${table.deviceId} is not null`,
     ),
     valuesValid: check(
       "computer_sessions_values_check",

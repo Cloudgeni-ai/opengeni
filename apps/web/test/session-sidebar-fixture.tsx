@@ -105,6 +105,7 @@ function MainArea() {
           workspaceId={workspaceId}
           siteId={siteId}
           conversation={siteViewSearch(location.search).conversation}
+          startNew={siteViewSearch(location.search).new === true}
         />
       </section>
     );

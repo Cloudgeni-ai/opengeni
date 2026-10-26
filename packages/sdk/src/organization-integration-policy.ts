@@ -3,12 +3,21 @@ import type { OpenGeniClient } from "./client";
 export type OrganizationIntegrationPolicy = {
   mode: "unrestricted" | "restricted";
   allowedIntegrationKeys: string[];
+  /**
+   * Who may turn on a reviewed OAuth integration for personal accounts:
+   * `members` (anyone with `connections:personal`, which `connections:write`
+   * includes; the default) or only integration `admins`. Each person still
+   * connects their own account; admins are unaffected.
+   */
+  personalIntegrationSetup: "members" | "admins";
   revision: number;
 };
 
 export type UpdateOrganizationIntegrationPolicyRequest = {
   mode: "unrestricted" | "restricted";
   allowedIntegrationKeys: string[];
+  /** Omitted keeps the current setting. */
+  personalIntegrationSetup?: "members" | "admins" | undefined;
   expectedRevision: number;
   operationId: string;
 };

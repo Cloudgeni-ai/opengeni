@@ -1025,7 +1025,7 @@ export function useSessionEvents(
           if (isTransientRequestError(cause)) {
             const now = Date.now();
             const current = streak ?? { since: now, attempts: 0, surfaced: false };
-            const step = transientReadRetryStep(current, now, DEFAULT_TRANSIENT_READ_RETRY);
+            const step = transientReadRetryStep(current, now, DEFAULT_TRANSIENT_READ_RETRY, cause);
             if (step.quiet) {
               scheduleTransientRetry(step.delayMs, () => reconcileAfterOpen(initialOpen, current));
               return;
@@ -1287,7 +1287,7 @@ export function useSessionEvents(
               attempts: 0,
               surfaced: false,
             });
-            const step = transientReadRetryStep(streak, now, DEFAULT_TRANSIENT_READ_RETRY);
+            const step = transientReadRetryStep(streak, now, DEFAULT_TRANSIENT_READ_RETRY, cause);
             scheduleTransientRetry(step.delayMs, () => setStreamEpoch((epoch) => epoch + 1));
             if (step.quiet) {
               setConnectionState("connecting");

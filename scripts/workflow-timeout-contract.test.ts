@@ -23,6 +23,21 @@ type Job = Readonly<{
 }>;
 type Workflow = Readonly<{ jobs?: Readonly<Record<string, Job>> }>;
 
+function validJobCap(file: string, jobName: string, job: Job): boolean {
+  const cap = numericCap(job["timeout-minutes"]);
+  if (cap === null) return false;
+  const priorityLane = new Map([["ci.yml:automation-admission", "pr"]]).get(`${file}:${jobName}`);
+  if (!priorityLane) return cap <= MAX_JOB_TIMEOUT_MINUTES;
+  // Five-hour bounded admission wait plus twenty minutes for setup/planning.
+  // This is not a wider cap for test/build jobs or arbitrary added workflows.
+  return (
+    cap === 320 &&
+    (job.steps ?? []).filter(
+      (step) => step.run === `bun scripts/ci/github-pr-ci.ts priority ${priorityLane}`,
+    ).length === 1
+  );
+}
+
 const EXPECTED_CAPS = [
   [
     "agent-ci.yml",
@@ -229,6 +244,28 @@ function numericCap(value: unknown): number | null {
 }
 
 describe("workflow timeout contract", () => {
+  test("extended admission caps require exact job, lane and bounded timeout", () => {
+    const job: Job = {
+      "timeout-minutes": 320,
+      steps: [{ run: "bun scripts/ci/github-pr-ci.ts priority pr" }],
+    };
+    expect(validJobCap("ci.yml", "automation-admission", job)).toBe(true);
+    expect(validJobCap("pr-ci.yml", "plan", job)).toBe(false);
+    expect(validJobCap("ci.yml", "unit-shards", job)).toBe(false);
+    expect(validJobCap("ci.yml", "automation-admission", { ...job, "timeout-minutes": 321 })).toBe(
+      false,
+    );
+    expect(validJobCap("ci.yml", "automation-admission", { ...job, steps: [] })).toBe(false);
+    expect(validJobCap("batch-ci.yml", "plan", job)).toBe(false);
+    expect(
+      validJobCap("batch-ci.yml", "plan", {
+        ...job,
+        steps: [{ run: "bun scripts/ci/github-pr-ci.ts priority batch" }],
+      }),
+    ).toBe(false);
+    expect(validJobCap("batch-ci.yml", "plan", { "timeout-minutes": 20, steps: [] })).toBe(true);
+    expect(validJobCap("other.yml", "plan", job)).toBe(false);
+  });
   test("all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
@@ -239,7 +276,7 @@ describe("workflow timeout contract", () => {
       for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
         if (job.uses) continue;
         const jobCap = numericCap(job["timeout-minutes"]);
-        if (jobCap === null || jobCap > MAX_JOB_TIMEOUT_MINUTES) {
+        if (jobCap === null || !validJobCap(file, jobName, job)) {
           violations.push(`${file}:${jobName} has an invalid job cap`);
           continue;
         }
@@ -285,10 +322,13 @@ describe("workflow timeout contract", () => {
           .map((step) => ({ file, job, step })),
       ),
     );
-    expect(callers).toHaveLength(5);
+    expect(callers).toHaveLength(6);
     expect(callers.find(({ job }) => job === "browser-acceptance")?.step.with?.browsers).toBe(
       "${{ matrix.lane == 'workbench' && 'chromium firefox webkit' || matrix.lane == 'accounts' && matrix.engine || 'chromium' }}",
     );
+    expect(
+      callers.find(({ file }) => file === "compact-session-view.yml")?.step.with?.browsers,
+    ).toBe("chromium");
 
     const action = Bun.YAML.parse(await readFile(playwrightActionPath, "utf8")) as {
       inputs: Record<string, { default?: unknown }>;

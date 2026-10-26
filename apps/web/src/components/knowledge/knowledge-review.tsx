@@ -847,14 +847,14 @@ function BodySkeleton() {
   );
 }
 
-/** "From chat <Migrate billing…>" with the chat or schedule as a link. */
+/** "From chat <Migrate billing…>" with the chat or automation as a link. */
 function OriginLink({ workspaceId, origin }: { workspaceId: string; origin: Origin }) {
   const navigate = useNavigate();
   if (origin.kind === "none") return null;
   const href =
     origin.kind === "chat"
       ? `/workspaces/${workspaceId}/sessions/${origin.sessionId}`
-      : `/workspaces/${workspaceId}/schedules?taskId=${origin.taskId}`;
+      : `/workspaces/${workspaceId}/automations?taskId=${origin.taskId}`;
   const unnamed = origin.kind === "chat" && origin.unnamed;
   const link = (
     <a
@@ -867,7 +867,7 @@ function OriginLink({ workspaceId, origin }: { workspaceId: string; origin: Orig
   );
   return (
     <span>
-      {unnamed ? "From " : origin.kind === "chat" ? "From chat " : "From schedule "}
+      {unnamed ? "From " : origin.kind === "chat" ? "From chat " : "From automation "}
       {link}
     </span>
   );
@@ -1168,7 +1168,7 @@ function ReviewDetail({
     item.origin.kind === "chat"
       ? " from this chat"
       : item.origin.kind === "schedule"
-        ? " from this schedule"
+        ? " from this automation"
         : "";
   const menuItems =
     record || batch.length > 1 ? (

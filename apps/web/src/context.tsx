@@ -1,3 +1,4 @@
+import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
   createSlackLinkPrepareController,
@@ -33,7 +34,7 @@ import {
   signUpEmail,
   startManagedSocialSignIn,
 } from "@/api";
-import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/common";
+import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@opengeni/react/ui/button";
@@ -233,6 +234,17 @@ export function RootRouteComponent() {
     <Outlet />
   ) : !clientConfig && !configError ? (
     <LoadingPanel />
+  ) : configError?.recovering ? (
+    // An update or dropped connection: startup continues by itself.
+    <WaitingPanel
+      title={configError.title}
+      description={configError.description}
+      action={
+        <Button type="button" variant="ghost" size="sm" onClick={retryClientConfig}>
+          Try again
+        </Button>
+      }
+    />
   ) : configError ? (
     <ProblemPanel
       title={configError.title}
@@ -327,6 +339,16 @@ export function RootRouteComponent() {
         <Outlet />
       </PersonalSecurityProvider>
     )
+  ) : accessError?.recovering ? (
+    <WaitingPanel
+      title={accessError.title}
+      description={accessError.description}
+      action={
+        <Button type="button" variant="ghost" size="sm" onClick={retryAccess}>
+          Try again
+        </Button>
+      }
+    />
   ) : accessError && !accessLoading ? (
     <ProblemPanel
       title={accessError.title}
@@ -408,15 +430,17 @@ export function RootRouteComponent() {
     </Suspense>
   ) : (
     <AppContext.Provider value={appContext}>
-      <Outlet />
-      <CreditRequiredGate
-        creditRequired={creditRequired}
-        setCreditRequired={setCreditRequired}
-        accessContext={accessContext}
-      />
-      {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
-        <TanStackRouterDevtools position="bottom-right" />
-      ) : null}
+      <ArchiveConfirmationProvider>
+        <Outlet />
+        <CreditRequiredGate
+          creditRequired={creditRequired}
+          setCreditRequired={setCreditRequired}
+          accessContext={accessContext}
+        />
+        {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
+          <TanStackRouterDevtools position="bottom-right" />
+        ) : null}
+      </ArchiveConfirmationProvider>
     </AppContext.Provider>
   );
 
@@ -463,7 +487,9 @@ export function RootRouteComponent() {
             analyticsAccountId={
               routedWorkspace?.accountId ?? accessContext?.defaultAccountId ?? null
             }
-            analyticsAccountResolved={accessContext !== null || accessError !== null}
+            analyticsAccountResolved={
+              accessContext !== null || (accessError !== null && !accessError.recovering)
+            }
             analyticsUserId={authSession?.user.id ?? null}
             config={clientConfig.analytics}
             hasSearchParameters={hasSearchParameters}

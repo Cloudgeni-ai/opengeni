@@ -84,6 +84,10 @@ impl<S: Store> Store for Leased<S> {
         self.store.fetch_image(image, path).await
     }
 
+    async fn put_image(&self, path: &Path) -> Result<Option<ImageId>, EngineError> {
+        self.store.put_image(path).await
+    }
+
     fn chunks(&self) -> Option<(&ChunkStore, &Arc<Lanes>)> {
         self.store.chunks()
     }

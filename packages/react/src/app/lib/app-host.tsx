@@ -9,14 +9,31 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
+import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
 import type { MessageContextPill, MessageContextStore } from "./message-context";
 import type { NavigationHost } from "./navigation";
+
+/** The open chat as its page holds it, for a host that reacts to its progress. */
+export type SessionViewState = Readonly<{
+  sessionId: string;
+  /** The latest status in the chat's event log; null before one is loaded. */
+  status: SessionStatus | null;
+  /**
+   * The events the page holds, ordered by sequence: its own window of the
+   * chat's history, with a turn's steps while the turn is live. Not the full
+   * history of a long chat.
+   */
+  events: readonly SessionEvent[];
+  /** True until the first page of history has loaded. */
+  initialLoading: boolean;
+}>;
 
 export type AppHost = Readonly<{
   navigation: NavigationHost;
@@ -30,6 +47,11 @@ export type AppHost = Readonly<{
    * instructions.
    */
   messageContext?: MessageContextStore | undefined;
+  /**
+   * Receives the open chat's state each time it changes, read from the
+   * page's own event stream (no second connection).
+   */
+  onSessionState?: ((state: SessionViewState) => void) | undefined;
 }>;
 
 const AppHostContext = createContext<AppHost | null>(null);
@@ -60,6 +82,15 @@ export function useAppHost(): Partial<AppHost> {
 /** Whether this app is embedded in a page it does not own. */
 export function useEmbedded(): boolean {
   return useContext(AppHostContext) !== null;
+}
+
+/** Tells the host the open chat's state each time it changes. */
+export function useReportSessionState(state: SessionViewState): void {
+  const report = useAppHost().onSessionState;
+  const { sessionId, status, events, initialLoading } = state;
+  useEffect(() => {
+    report?.({ sessionId, status, events, initialLoading });
+  }, [events, initialLoading, report, sessionId, status]);
 }
 
 /** Reads the host's per-message model context at send time, if it supplies one. */

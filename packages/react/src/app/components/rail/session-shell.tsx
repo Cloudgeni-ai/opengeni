@@ -1,3 +1,4 @@
+import { requestSessionArchive, useArchiveConfirmation } from "../../lib/archive-session";
 // The session shell every session surface renders: the left rail (fixed and
 // resizable on desktop, an overlay drawer on phones), the canvas top strip with
 // the session header on session routes, and the canvas itself. Surface-owned
@@ -51,8 +52,8 @@ import {
   SessionComputeIndicator,
   sessionSupportsFleetSwitching,
 } from "../session/sandbox-switcher";
-import { CodexAccountIndicator } from "../session/codex-account-indicator";
-import { ModelAccountIndicator } from "../session/model-account-indicator";
+import { SubscriptionAccountIndicator } from "../session/subscription-account-indicator";
+import { subscriptionAccountProvider } from "../session/subscription-account";
 import { PrivateSessionIndicator } from "../session/private-session-indicator";
 import { Button } from "../../../ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from "../../../ui/sheet";
@@ -61,7 +62,6 @@ import { Link, useNavigate, useRouterState } from "../../lib/navigation";
 import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog";
 import { useAppContext } from "../../app-context";
 import { isPersonalWorkspace } from "../../lib/managed-self-context";
-import { isCodexProductModel } from "../../lib/session-model";
 import { isIntelligenceEffort } from "../../lib/session-tools";
 import { useSessionRepliesMute } from "../../lib/inbox";
 import { useSessionAdminAccess } from "../session/session-admin-access";
@@ -467,7 +467,7 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   // sandbox switcher and codex indicator flow in as slots so the header stays a
   // pure, screenshot-testable component.
   if (showSessionActions && context.session) {
-    // Both schedule facts come from one read, so a newer lineage never pairs
+    // The automation facts come from one read, so a newer lineage never pairs
     // with an older session read (an older server sends no upcoming flag).
     const lineageSchedules = lineage.lineage?.sessionHasSchedules;
     return (
@@ -480,6 +480,8 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
                 hasSchedules: lineageSchedules,
                 hasUpcomingSchedules:
                   lineage.lineage?.sessionHasUpcomingSchedules ?? lineageSchedules,
+                waitingForEvents: lineage.lineage?.sessionWaitingForEvents ?? false,
+                automationWait: lineage.lineage?.sessionAutomationWait,
               }),
         }}
         ancestors={ancestors}
@@ -548,13 +550,15 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
-  const credentialSource = selectedRow?.catalog.credentialSource;
-  const subscriptionProvider =
-    credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
+  const accountProvider = subscriptionAccountProvider(
+    displayModelId,
+    selectedRow?.catalog.credentialSource,
+  );
   const repliesMute = useSessionRepliesMute(session);
   const sessionAdminAccess = useSessionAdminAccess(session);
   const adminAccess = useSessionUiFeature("adminAccess") ? sessionAdminAccess : null;
   const dock = useSessionUiFeature("dock");
+  const confirmArchive = useArchiveConfirmation();
   const archiveInFlight = useRef(false);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
@@ -563,10 +567,8 @@ function SessionRouteHeader({
       if (!accepted) return;
       archiveInFlight.current = true;
       try {
-        const updated = await context.client.updateSessionArchive(target.workspaceId, target.id, {
-          archived,
-          expectedVersion: target.archiveVersion ?? 0,
-        });
+        const updated = await requestSessionArchive(context, target, archived, confirmArchive);
+        if (!updated) return;
         if (!context.ownsWorkspaceInvocation(target.workspaceId, accepted)) return;
         context.setSession((current) =>
           current?.id === updated.id && current.workspaceId === updated.workspaceId
@@ -588,18 +590,18 @@ function SessionRouteHeader({
         archiveInFlight.current = false;
       }
     },
-    [context],
+    [context, confirmArchive],
   );
 
   return (
     <SessionHeader
       session={session}
       ancestors={ancestors}
-      onOpenSchedule={
+      onOpenAutomations={
         session.hasSchedules
           ? () =>
               void navigate({
-                to: "/workspaces/$workspaceId/schedules",
+                to: "/workspaces/$workspaceId/automations",
                 params: { workspaceId: session.workspaceId },
                 search: { targetSessionId: session.id },
               })
@@ -660,24 +662,16 @@ function SessionRouteHeader({
           <SessionComputeIndicator sessionId={session.id} sandboxBackend={session.sandboxBackend} />
         ) : null
       }
-      codexSlot={
-        policyReady && isCodexProductModel(displayModelId) ? (
-          <CodexAccountIndicator
-            workspaceId={session.workspaceId}
-            sessionId={session.id}
-            model={displayModelId}
-            modelReady={policyReady}
-            events={events}
-          />
-        ) : policyReady && subscriptionProvider ? (
-          <ModelAccountIndicator
+      accountSlot={
+        policyReady && accountProvider ? (
+          <SubscriptionAccountIndicator
             workspaceId={session.workspaceId}
             sessionId={session.id}
             organizationId={
               context.workspaces.find((candidate) => candidate.id === session.workspaceId)
                 ?.accountId ?? null
             }
-            provider={subscriptionProvider}
+            provider={accountProvider}
             servingTurnId={lastStarted.policy?.turnId}
             events={events}
           />

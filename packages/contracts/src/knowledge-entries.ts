@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { AgentLearningMode } from "./agent-learning";
@@ -66,7 +67,7 @@ export const KnowledgeEntrySource = /* @__PURE__ */ defineSchema(() =>
       uri: z.string().min(1).max(8192).optional(),
       externalId: z.string().min(1).max(2048).optional(),
       version: z.string().min(1).max(2048).optional(),
-      capturedAt: z.string().datetime({ offset: true }).optional(),
+      capturedAt: primitives.string.datetime({ offset: true }).optional(),
       retention: z.enum(["full_text", "passages", "reference"]).optional(),
       /** Supporting evidence stays retrievable by ID without entering default discovery. */
       purpose: z.enum(["evidence", "reference"]).optional(),
@@ -88,11 +89,11 @@ export type KnowledgeEntryRelationship = z.infer<typeof KnowledgeEntryRelationsh
 export const KnowledgeEntryContent = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      title: z.string().min(1),
+      title: primitives.nonEmptyString,
       kind: KnowledgeEntryKind,
       // Exact accepted content. Request admission and paginated reads own size;
       // source text is not truncated to the former 4,000-character Memory cap.
-      content: z.string(),
+      content: primitives.string,
       source: KnowledgeEntrySource.optional(),
       evidence: z.array(KnowledgeEntryEvidence).max(256).default([]),
       groupIds: z.array(z.uuid()).max(256).default([]),
@@ -153,7 +154,7 @@ export const KnowledgeEntrySaveRequest = /* @__PURE__ */ defineSchema(() =>
     .object({
       operationId: z.uuid(),
       entryId: KnowledgeWriteEntryId,
-      expectedVersion: z.number().int().nonnegative(),
+      expectedVersion: primitives.nonnegativeInteger,
       scope: KnowledgeEntryScope.optional(),
       entry: KnowledgeEntryContent.safeExtend({ title: z.string().min(1).max(1024) }),
     })
@@ -182,7 +183,7 @@ export const KnowledgeEntryReviewRequest = /* @__PURE__ */ defineSchema(() =>
       operationId: z.uuid(),
       entryId: z.uuid(),
       revisionId: z.uuid(),
-      expectedVersion: z.number().int().positive(),
+      expectedVersion: primitives.positiveInteger,
       decision: z.enum(["approve", "reject"]),
       entry: KnowledgeEntryContent.safeExtend({ title: z.string().min(1).max(1024) }).optional(),
     })
@@ -213,7 +214,7 @@ export const KnowledgeEntryRestoreRequest = /* @__PURE__ */ defineSchema(() =>
       operationId: z.uuid(),
       entryId: z.uuid(),
       revisionId: z.uuid(),
-      expectedVersion: z.number().int().positive(),
+      expectedVersion: primitives.positiveInteger,
     })
     .strict(),
 );
@@ -225,10 +226,10 @@ export const KnowledgeEntryWriteReceipt = /* @__PURE__ */ defineSchema(() =>
       operationId: z.uuid(),
       entryId: z.uuid(),
       revisionId: z.uuid(),
-      version: z.number().int().positive(),
+      version: primitives.positiveInteger,
       outcome: z.enum(["published", "pending", "rejected", "archived"]),
       reviewBatchId: z.uuid().nullable(),
-      replayed: z.boolean(),
+      replayed: primitives.boolean,
     })
     .strict(),
 );
@@ -240,7 +241,7 @@ export const KnowledgeFilePreparationResult = /* @__PURE__ */ defineSchema(() =>
       .object({
         status: z.literal("retained"),
         fileId: z.uuid(),
-        filename: z.string(),
+        filename: primitives.string,
         receipt: KnowledgeEntryWriteReceipt,
       })
       .strict(),
@@ -254,12 +255,12 @@ export const KnowledgeEntryRevision = /* @__PURE__ */ defineSchema(() =>
     .object({
       id: z.uuid(),
       entryId: z.uuid(),
-      number: z.number().int().positive(),
+      number: primitives.positiveInteger,
       change: z.enum(["upsert", "archive"]),
       entry: StoredKnowledgeEntryContent,
       previousRevisionId: z.uuid().nullable(),
       restoredFromRevisionId: z.uuid().nullable(),
-      createdAt: z.string().datetime({ offset: true }),
+      createdAt: primitives.string.datetime({ offset: true }),
       createdBySessionId: z.uuid().nullable(),
       reviewBatchId: z.uuid().nullable(),
       outcome: z.enum(["published", "pending", "rejected", "superseded"]),
@@ -288,13 +289,13 @@ export const KnowledgeEntryRecord = /* @__PURE__ */ defineSchema(() =>
     .object({
       id: z.uuid(),
       scope: KnowledgeEntryScope,
-      version: z.number().int().positive(),
+      version: primitives.positiveInteger,
       publishedRevisionId: z.uuid().nullable(),
       latestRevisionId: z.uuid(),
       revision: KnowledgeEntryRevision,
-      archived: z.boolean(),
-      createdAt: z.string().datetime({ offset: true }),
-      updatedAt: z.string().datetime({ offset: true }),
+      archived: primitives.boolean,
+      createdAt: primitives.string.datetime({ offset: true }),
+      updatedAt: primitives.string.datetime({ offset: true }),
       indexStatus: KnowledgeIndexStatus.optional(),
     })
     .strict(),
@@ -309,13 +310,13 @@ export const KnowledgeEntryListRequest = /* @__PURE__ */ defineSchema(() =>
       scope: KnowledgeEntryScope.optional(),
       groupId: z.uuid().optional(),
       /** Top-level entries with no visible collection in the selected scope. */
-      rootOnly: z.boolean().optional(),
+      rootOnly: primitives.optionalBoolean,
       fileId: z.uuid().optional(),
       /** Include supporting sources in published discovery; never changes access. */
-      includeEvidence: z.boolean().optional(),
+      includeEvidence: primitives.optionalBoolean,
       kind: KnowledgeEntryKind.optional(),
       /** Inclusive original entry creation time; revisions and updates do not reset it. */
-      createdSince: z.string().datetime({ offset: true }).optional(),
+      createdSince: primitives.string.datetime({ offset: true }).optional(),
       view: z.enum(["published", "needs_review", "archived", "rejected"]).default("published"),
       sessionId: z.uuid().optional(),
       reviewBatchId: z.uuid().optional(),
@@ -329,9 +330,8 @@ export type KnowledgeEntryListRequest = z.input<typeof KnowledgeEntryListRequest
 /** MCP discovery stays small; validation is identical to the HTTP UUID/date fields. */
 export const KnowledgeSearchToolRequest = /* @__PURE__ */ defineSchema(() => {
   const uuid = z.uuid();
-  const date = z.string().datetime({ offset: true });
-  const compactUuid = z
-    .string()
+  const date = primitives.string.datetime({ offset: true });
+  const compactUuid = primitives.string
     .refine((value) => uuid.safeParse(value).success, "Invalid UUID")
     .meta({ format: "uuid" });
   return KnowledgeEntryListRequest.omit({
@@ -341,8 +341,7 @@ export const KnowledgeSearchToolRequest = /* @__PURE__ */ defineSchema(() => {
   }).extend({
     groupId: compactUuid.optional(),
     fileId: compactUuid.optional(),
-    createdSince: z
-      .string()
+    createdSince: primitives.string
       .refine((value) => date.safeParse(value).success, "Invalid datetime")
       .meta({ format: "date-time" })
       .optional(),
@@ -359,16 +358,16 @@ export const KnowledgeEntrySummary = /* @__PURE__ */ defineSchema(() =>
       .array(
         z.object({
           field: z.enum(["title", "content"]),
-          start: z.number().int().nonnegative(),
-          end: z.number().int().nonnegative(),
-          text: z.string(),
+          start: primitives.nonnegativeInteger,
+          end: primitives.nonnegativeInteger,
+          text: primitives.string,
         }),
       )
       .default([]),
     revision: KnowledgeEntryRevision.omit({ entry: true }).extend({
-      title: z.string(),
+      title: primitives.string,
       kind: KnowledgeEntryKind,
-      preview: z.string(),
+      preview: primitives.string,
       groupIds: z.array(z.uuid()),
       sourceKind: KnowledgeEntrySource.shape.kind.nullable(),
     }),
@@ -379,7 +378,7 @@ export type KnowledgeEntrySummary = z.infer<typeof KnowledgeEntrySummary>;
 export const KnowledgeEntryListResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     entries: z.array(KnowledgeEntrySummary),
-    nextCursor: z.string().nullable(),
+    nextCursor: primitives.nullableString,
     searchMode: z.enum(["keyword", "hybrid", "vector"]).optional(),
     fallbackReason: z
       .enum([
@@ -400,10 +399,10 @@ export const KnowledgeReviewBatch = /* @__PURE__ */ defineSchema(() =>
     sessionId: z.uuid().nullable(),
     scheduledTaskId: z.uuid().nullable(),
     scheduledTaskRunId: z.uuid().nullable(),
-    title: z.string().nullable(),
+    title: primitives.nullableString,
     scope: KnowledgeEntryScope,
-    pendingCount: z.number().int().nonnegative(),
-    createdAt: z.string().datetime({ offset: true }),
+    pendingCount: primitives.nonnegativeInteger,
+    createdAt: primitives.string.datetime({ offset: true }),
   }),
 );
 export type KnowledgeReviewBatch = z.infer<typeof KnowledgeReviewBatch>;
@@ -421,7 +420,7 @@ export type KnowledgeReviewBatchListRequest = z.input<typeof KnowledgeReviewBatc
 export const KnowledgeReviewBatchListResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     batches: z.array(KnowledgeReviewBatch),
-    nextCursor: z.string().nullable(),
+    nextCursor: primitives.nullableString,
   }),
 );
 export type KnowledgeReviewBatchListResponse = z.infer<typeof KnowledgeReviewBatchListResponse>;
@@ -442,11 +441,11 @@ export const KnowledgeOriginalFileDownload = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       url: z.string().url(),
-      expiresAt: z.string(),
+      expiresAt: primitives.string,
       fileId: z.uuid(),
-      filename: z.string(),
-      contentType: z.string(),
-      sizeBytes: z.number().int().nonnegative(),
+      filename: primitives.string,
+      contentType: primitives.string,
+      sizeBytes: primitives.nonnegativeInteger,
     })
     .strict(),
 );

@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -163,8 +164,7 @@ export function siteHostnameLabelProblem(label: string): SiteHostnameLabelProble
 }
 
 export const SiteHostnameLabel = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
+  primitives.string
     .superRefine((label, ctx) => {
       const problem = siteHostnameLabelProblem(label);
       if (problem)
@@ -278,14 +278,12 @@ export const SiteLimits = /* @__PURE__ */ defineSchema(() =>
       "Site runtime requests per viewer per minute (flood brake; members too).",
     ),
     guestWritesPerMinute: NullableLimit("Data writes per guest visitor per minute."),
-    agentsEnabled: z
-      .boolean()
-      .describe(
-        "People outside the workspace may use the Site's embedded agent. Members always may when the agent is on.",
-      ),
-    guestAgentsEnabled: z
-      .boolean()
-      .describe("Anonymous guests may use the embedded agent too (public Sites)."),
+    agentsEnabled: primitives.boolean.describe(
+      "People outside the workspace may use the Site's embedded agent. Members always may when the agent is on.",
+    ),
+    guestAgentsEnabled: primitives.boolean.describe(
+      "Anonymous guests may use the embedded agent too (public Sites).",
+    ),
     conversationsPerVisitorPerDay: NullableLimit(
       "Bot guard for anonymous guests: new conversations per visitor per UTC day.",
     ),
@@ -365,7 +363,7 @@ export type SiteLimitProfile = z.infer<typeof SiteLimitProfile>;
 
 export const SiteEmbeddedAgent = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    enabled: z.boolean(),
+    enabled: primitives.boolean,
     /** Model for new conversations; must be allowed by the effective limits. */
     model: z.string().min(1).max(200).nullable().default(null),
     /** Author instructions; member chats receive these without a Site restriction profile. */
@@ -382,7 +380,7 @@ export const SiteEmbeddedAgent = /* @__PURE__ */ defineSchema(() =>
      * (Site Data, Site SQL and its named queries) and the page. Accepted and
      * ignored on input for compatibility.
      */
-    guestTools: z.boolean().default(false),
+    guestTools: primitives.boolean.default(false),
   }),
 );
 export type SiteEmbeddedAgent = z.infer<typeof SiteEmbeddedAgent>;
@@ -390,12 +388,12 @@ export type SiteEmbeddedAgent = z.infer<typeof SiteEmbeddedAgent>;
 /** Changes to the embedded agent; omitted fields keep their current value. */
 export const SiteEmbeddedAgentChanges = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    enabled: z.boolean().optional(),
+    enabled: primitives.optionalBoolean,
     model: z.string().min(1).max(200).nullable().optional(),
     instructions: z.string().max(8000).nullable().optional(),
     tools: z.array(z.string().min(1).max(300)).max(100).nullable().optional(),
     /** Retired: accepted and ignored (people outside the workspace never get workspace tools). */
-    guestTools: z.boolean().optional(),
+    guestTools: primitives.optionalBoolean,
   }),
 );
 export type SiteEmbeddedAgentChanges = z.infer<typeof SiteEmbeddedAgentChanges>;
@@ -430,7 +428,16 @@ export const SITE_PUBLISH_WARNING_CODES = [
   "agent_model_outside_unavailable",
   /** The page was too large to read, so what it uses was not checked. */
   "page_not_checked",
+  /**
+   * A public Site on a login-only deployment: every visitor signs in to
+   * Opengeni first. A notice about the deployment, with nothing to fix.
+   */
+  "public_sign_in_required",
 ] as const;
+
+/** Warnings that only inform: nothing on the Site can or needs to change. */
+export const SITE_PUBLISH_NOTICE_CODES: ReadonlySet<(typeof SITE_PUBLISH_WARNING_CODES)[number]> =
+  /* @__PURE__ */ new Set(["public_sign_in_required"]);
 
 /**
  * Something the published version uses that its audience may not do. Found
@@ -452,15 +459,15 @@ export type SitePublishWarning = z.infer<typeof SitePublishWarning>;
 
 export const SitePublication = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    siteId: z.string().uuid(),
-    workspaceId: z.string().uuid(),
-    label: z.string(),
-    hostname: z.string(),
+    siteId: primitives.uuid,
+    workspaceId: primitives.uuid,
+    label: primitives.string,
+    hostname: primitives.string,
     url: z.string().url(),
     access: SiteAccessMode,
     status: SitePublicationStatus,
     /** True when search engines are asked not to index (always on staging). */
-    noindex: z.boolean(),
+    noindex: primitives.boolean,
     agent: SiteEmbeddedAgent,
     limitProfile: SiteLimitProfile,
     /**
@@ -470,17 +477,17 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
     effectiveLimits: SiteLimits,
     invitedEmails: z.array(z.string().email()).max(500),
     moderation: z.object({
-      openReports: z.number().int().nonnegative(),
-      suspendedAt: z.string().nullable(),
+      openReports: primitives.nonnegativeInteger,
+      suspendedAt: primitives.nullableString,
       suspendedBy: z.enum(["owner", "admin", "platform"]).nullable(),
       suspendedReason: z.string().max(2000).nullable(),
     }),
     usage: z.object({
       /** Spend of people outside the workspace this UTC month (members never count). */
-      agentMicrosThisMonth: z.number().int().nonnegative(),
+      agentMicrosThisMonth: primitives.nonnegativeInteger,
       /** The same, this UTC day. */
-      agentMicrosToday: z.number().int().nonnegative().default(0),
-      conversationsToday: z.number().int().nonnegative(),
+      agentMicrosToday: primitives.nonnegativeInteger.default(0),
+      conversationsToday: primitives.nonnegativeInteger,
     }),
     /**
      * What won't work for the audience (invited or public Sites): the
@@ -492,12 +499,29 @@ export const SitePublication = /* @__PURE__ */ defineSchema(() =>
      * subscription model (they never use subscriptions); null when they use
      * the agent's model or no credit-billed model exists (then they are refused).
      */
-    outsideAgentModel: z.string().nullable().default(null),
-    createdAt: z.string(),
-    updatedAt: z.string(),
+    outsideAgentModel: primitives.nullableString.default(null),
+    createdAt: primitives.string,
+    updatedAt: primitives.string,
   }),
 );
 export type SitePublication = z.infer<typeof SitePublication>;
+
+/**
+ * GET /v1/workspaces/:ws/published-artifacts/:siteId/publication/link
+ *
+ * Where a published Site lives, for anyone who can open the Site in the app:
+ * its primary public URL and whether it is on the web now. Managing the
+ * publication (access, limits, moderation) stays with `SitePublication`.
+ */
+export const SitePublicationLink = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    siteId: z.string().uuid(),
+    hostname: z.string(),
+    url: z.string().url(),
+    status: SitePublicationStatus,
+  }),
+);
+export type SitePublicationLink = z.infer<typeof SitePublicationLink>;
 
 /** PUT /v1/workspaces/:ws/published-artifacts/:siteId/publication */
 export const UpsertSitePublicationRequest = /* @__PURE__ */ defineSchema(() =>
@@ -505,7 +529,7 @@ export const UpsertSitePublicationRequest = /* @__PURE__ */ defineSchema(() =>
     label: SiteHostnameLabel.optional().describe("Omit to keep the current or a suggested label."),
     access: SiteAccessMode.optional(),
     status: z.enum(["active", "unpublished"]).optional(),
-    noindex: z.boolean().optional(),
+    noindex: primitives.optionalBoolean,
     agent: SiteEmbeddedAgentChanges.optional(),
     limitProfile: SiteLimitProfile.optional(),
     invitedEmails: z.array(z.string().email()).max(500).optional(),
@@ -521,18 +545,18 @@ export type SiteHostnameAvailabilityProblem = z.infer<typeof SiteHostnameAvailab
 /** GET /v1/workspaces/:ws/site-hostnames/:label */
 export const SiteHostnameAvailability = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    label: z.string(),
-    hostname: z.string().nullable(),
-    available: z.boolean(),
+    label: primitives.string,
+    hostname: primitives.nullableString,
+    available: primitives.boolean,
     problem: SiteHostnameAvailabilityProblem.nullable(),
-    message: z.string().nullable(),
+    message: primitives.nullableString,
   }),
 );
 export type SiteHostnameAvailability = z.infer<typeof SiteHostnameAvailability>;
 
 /** POST .../publication/takedown (owner, workspace admin) and the platform admin route. */
 export const SiteTakedownRequest = /* @__PURE__ */ defineSchema(() =>
-  z.object({ reason: z.string().trim().min(1).max(2000) }),
+  z.object({ reason: primitives.string.trim().min(1).max(2000) }),
 );
 export type SiteTakedownRequest = z.infer<typeof SiteTakedownRequest>;
 
@@ -545,7 +569,7 @@ export type SiteAbuseCategory = z.infer<typeof SiteAbuseCategory>;
 export const SiteAbuseReportRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     category: SiteAbuseCategory,
-    message: z.string().trim().max(4000).default(""),
+    message: primitives.string.trim().max(4000).default(""),
     contactEmail: z.string().email().max(320).nullable().default(null),
   }),
 );
@@ -553,14 +577,14 @@ export type SiteAbuseReportRequest = z.infer<typeof SiteAbuseReportRequest>;
 
 export const SiteAbuseReport = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
-    siteId: z.string().uuid(),
-    hostname: z.string(),
+    id: primitives.uuid,
+    siteId: primitives.uuid,
+    hostname: primitives.string,
     category: SiteAbuseCategory,
-    message: z.string(),
-    contactEmail: z.string().nullable(),
+    message: primitives.string,
+    contactEmail: primitives.nullableString,
     status: z.enum(["open", "dismissed", "actioned"]),
-    createdAt: z.string(),
+    createdAt: primitives.string,
   }),
 );
 export type SiteAbuseReport = z.infer<typeof SiteAbuseReport>;
@@ -579,9 +603,9 @@ export const SiteViewer = /* @__PURE__ */ defineSchema(() =>
   z.object({
     kind: z.enum(["member", "invited", "user", "guest"]),
     id: z.string().min(1).max(300),
-    name: z.string().nullable(),
-    email: z.string().nullable(),
-    signedIn: z.boolean(),
+    name: primitives.nullableString,
+    email: primitives.nullableString,
+    signedIn: primitives.boolean,
   }),
 );
 export type SiteViewer = z.infer<typeof SiteViewer>;
@@ -601,9 +625,9 @@ export const SITE_VIEW_AS_QUERY = "og_view_as";
 export const SiteViewerCapabilities = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** The viewer may talk to the Site's embedded agent. */
-    agent: z.boolean(),
+    agent: primitives.boolean,
     /** The page may use its declared workspace tools as this member, independently of the agent. */
-    workspaceTools: z.boolean(),
+    workspaceTools: primitives.boolean,
     /** Site Data rules that apply: the collection's access mode, or its guest access. */
     siteData: z.enum(["viewer", "guest"]),
     /** Named Site SQL query audiences this viewer may call. */
@@ -620,16 +644,16 @@ export const SITE_NOT_AVAILABLE_FOR_VIEWER_ERROR_CODE = "not_available_for_viewe
 /** GET /_og/api/site/config (gateway shell and `site.viewer`). */
 export const SiteRuntimeConfig = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    siteId: z.string().uuid(),
-    title: z.string(),
-    hostname: z.string(),
-    versionId: z.string().uuid(),
+    siteId: primitives.uuid,
+    title: primitives.string,
+    hostname: primitives.string,
+    versionId: primitives.uuid,
     access: SiteAccessMode,
     viewer: SiteViewer,
     capabilities: SiteViewerCapabilities,
-    agent: z.object({ enabled: z.boolean(), model: z.string().nullable() }),
-    siteData: z.boolean(),
-    noindex: z.boolean(),
+    agent: z.object({ enabled: primitives.boolean, model: primitives.nullableString }),
+    siteData: primitives.boolean,
+    noindex: primitives.boolean,
     abuseEmail: z.string().email().nullable(),
   }),
 );
@@ -648,7 +672,7 @@ export const SiteAuthAuthorizeRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     host: z.string().min(1).max(253),
     state: z.string().min(16).max(256),
-    codeChallenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
+    codeChallenge: primitives.string.regex(/^[A-Za-z0-9_-]{43}$/u),
     codeChallengeMethod: z.literal("S256"),
     redirectUri: z.string().url(),
   }),
@@ -658,7 +682,7 @@ export type SiteAuthAuthorizeRequest = z.infer<typeof SiteAuthAuthorizeRequest>;
 export const SiteAuthAuthorizeResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     redirectTo: z.string().url().describe("redirectUri with code and state appended."),
-    site: z.object({ title: z.string(), hostname: z.string() }),
+    site: z.object({ title: primitives.string, hostname: primitives.string }),
   }),
 );
 export type SiteAuthAuthorizeResponse = z.infer<typeof SiteAuthAuthorizeResponse>;
@@ -677,7 +701,7 @@ export const SiteAuthExchangeResponse = /* @__PURE__ */ defineSchema(() =>
   z.object({
     /** Opaque; valid only for site-runtime on this one Site host. The API keeps only its hash. */
     sessionToken: z.string().min(32),
-    expiresAt: z.string(),
+    expiresAt: primitives.string,
     viewer: SiteViewer,
   }),
 );
@@ -766,17 +790,17 @@ export function siteGatewayCanonicalString(fields: SiteGatewaySignedFields): str
 export const SiteHostMapRecord = /* @__PURE__ */ defineSchema(() =>
   z.object({
     v: z.literal(1),
-    hostname: z.string(),
-    siteId: z.string().uuid(),
+    hostname: primitives.string,
+    siteId: primitives.uuid,
     status: SitePublicationStatus,
     access: SiteAccessMode,
     /** The version served at `/`; immutable HTML at /_og/v/<versionId>. */
-    versionId: z.string().uuid().nullable(),
-    title: z.string(),
-    noindex: z.boolean(),
+    versionId: primitives.nullableUuid,
+    title: primitives.string,
+    noindex: primitives.boolean,
     /** Monotonic per hostname; a writer never replaces a newer generation. */
-    generation: z.number().int().nonnegative(),
-    updatedAt: z.string(),
+    generation: primitives.nonnegativeInteger,
+    updatedAt: primitives.string,
   }),
 );
 export type SiteHostMapRecord = z.infer<typeof SiteHostMapRecord>;
@@ -809,16 +833,16 @@ export const SitePlatformMeterUsage = /* @__PURE__ */ defineSchema(() =>
   z.object({
     meter: SitePlatformMeter,
     /** This UTC month (storage: the current level). */
-    used: z.number().int().nonnegative(),
+    used: primitives.nonnegativeInteger,
     /** The highest storage level this month (equals `used` for other meters). */
-    peak: z.number().int().nonnegative(),
+    peak: primitives.nonnegativeInteger,
     /** Included every month before credits are charged (only shadow and credits modes charge). */
-    allowance: z.number().int().nonnegative(),
+    allowance: primitives.nonnegativeInteger,
     /** Price in micro-USD per `priceUnit` units (storage: per GB-month, GB = 10^9 bytes). */
-    priceMicros: z.number().int().nonnegative(),
-    priceUnit: z.number().int().positive(),
+    priceMicros: primitives.nonnegativeInteger,
+    priceUnit: primitives.positiveInteger,
     /** Estimated cost of all usage this month, micro-USD, before the allowance. */
-    estimatedMicros: z.number().int().nonnegative(),
+    estimatedMicros: primitives.nonnegativeInteger,
   }),
 );
 export type SitePlatformMeterUsage = z.infer<typeof SitePlatformMeterUsage>;
@@ -826,8 +850,8 @@ export type SitePlatformMeterUsage = z.infer<typeof SitePlatformMeterUsage>;
 /** The Opengeni-wide brake on Site platform usage (see docs/published-sites.md). */
 export const SitePlatformBrakeState = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    engaged: z.boolean(),
-    engagedAt: z.string().nullable(),
+    engaged: primitives.boolean,
+    engagedAt: primitives.nullableString,
   }),
 );
 export type SitePlatformBrakeState = z.infer<typeof SitePlatformBrakeState>;
@@ -835,17 +859,17 @@ export type SitePlatformBrakeState = z.infer<typeof SitePlatformBrakeState>;
 /** GET /v1/workspaces/:ws/site-platform-usage */
 export const SitePlatformUsage = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    workspaceId: z.string().uuid(),
+    workspaceId: primitives.uuid,
     /** First day of the UTC month, YYYY-MM-DD. */
-    periodStart: z.string(),
+    periodStart: primitives.string,
     billingMode: SitePlatformBillingMode,
     meters: z.array(SitePlatformMeterUsage),
     /** Estimated cost of this month's usage, micro-USD, before the allowance. */
-    estimatedMicros: z.number().int().nonnegative(),
+    estimatedMicros: primitives.nonnegativeInteger,
     /** Credits charged this month (credits mode). */
-    chargedMicros: z.number().int().nonnegative(),
+    chargedMicros: primitives.nonnegativeInteger,
     /** What credits mode would have charged this month (shadow mode). */
-    shadowMicros: z.number().int().nonnegative(),
+    shadowMicros: primitives.nonnegativeInteger,
     brake: SitePlatformBrakeState,
   }),
 );

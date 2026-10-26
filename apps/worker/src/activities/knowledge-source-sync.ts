@@ -1,4 +1,8 @@
 import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+  isRetiredNativeGoogleDriveSource,
+} from "@opengeni/contracts/google-drive-native-retirement";
+import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
   isRetiredNativeAtlassianSource,
 } from "@opengeni/contracts/atlassian-native-retirement";
@@ -247,6 +251,12 @@ export function createKnowledgeSourceSyncActivities(
       ) {
         return { action: "failed", bufferedWake: false };
       }
+      if (isRetiredNativeGoogleDriveSource(action))
+        return {
+          action: "failed",
+          bufferedWake: false,
+          errorCode: GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+        };
       if (isRetiredNativeAtlassianSource(action))
         return {
           action: "failed",

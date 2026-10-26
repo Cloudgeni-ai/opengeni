@@ -3,11 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 import { projectPickerRows, sortPickerRows } from "@opengeni/react";
-import {
-  scheduledRunErrorText,
-  SCHEDULED_RUN_MODEL_UNAVAILABLE_MESSAGE,
-  SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE,
-} from "./scheduled-run-error";
+import { scheduledRunErrorText } from "./scheduled-run-error";
 import {
   sessionModelMissingFromCatalog,
   unavailableModelName,
@@ -225,7 +221,9 @@ describe("scheduledRunErrorText", () => {
       "Turn execution policy model is not present in the configured catalog",
       "Turn execution policy model is retired from new selection",
     ]) {
-      expect(scheduledRunErrorText(error)).toBe(SCHEDULED_RUN_MODEL_UNAVAILABLE_MESSAGE);
+      expect(scheduledRunErrorText(error)).toBe(
+        "Its model is no longer available. Edit the automation and choose another model.",
+      );
     }
   });
 
@@ -236,9 +234,8 @@ describe("scheduledRunErrorText", () => {
   });
 
   test("a run skipped at the task's usage limit says how it resumes, without credits", () => {
-    expect(scheduledRunErrorText("session_usage_limit")).toBe(
-      SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE,
-    );
-    expect(SCHEDULED_RUN_SESSION_USAGE_LIMIT_MESSAGE).not.toMatch(/credit|budget|month/i);
+    const text = scheduledRunErrorText("session_usage_limit");
+    expect(text).toContain("Raise or remove the limit");
+    expect(text).not.toMatch(/credit|budget|month/i);
   });
 });

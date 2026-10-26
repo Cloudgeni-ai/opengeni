@@ -1,4 +1,4 @@
-import type { ActionCatalogEntry } from "./action-catalog-types";
+import type { ActionCatalogEntry } from "@opengeni/contracts/app-actions";
 
 /*
  * Plain-language descriptions for catalog actions, so an agent searching the
@@ -26,6 +26,12 @@ const PROVIDERS: Record<string, string> = {
 const RULES: Rule[] = [
   {
     method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/sessions$/,
+    text: () =>
+      'List chats. For browsing or scanning, send query {"view":"page","projection":"summary","limit":50}: compact session records without repeated effectiveTools or full agent configuration. Continue with the returned nextCursor as query.cursor, keeping the same filters. Use getSession for one chat\'s full details; omit projection only when you need full session records for the whole page.',
+  },
+  {
+    method: "GET",
     pattern: /\/vault-providers\/connections$/,
     text: () =>
       "List connected password managers and deployment availability: 1Password, Proton Pass, Keeper, Bitwarden and external vaults. Returns connection metadata and setup status, not secret values; does not contact providers.",
@@ -34,7 +40,7 @@ const RULES: Rule[] = [
     method: "POST",
     pattern: /\/vault-providers\/connections$/,
     text: () =>
-      "Connect Proton Pass, Keeper Secrets Manager, a customer-controlled Bitwarden bridge or an external vault. Set ownership and provider-specific credentials. Saved-but-pending setup returns a connection ID; register it with a remote host if needed, then verify using the saved credentials.",
+      "Connect Proton Pass, Keeper Secrets Manager, Bitwarden (including Vaultwarden) or an external vault. Set ownership and provider-specific credentials; Bitwarden takes the server address, the account's personal API key and its master password, which is used once and not stored. Saved-but-pending setup returns a connection ID; register it with a remote host if needed, then verify using the saved credentials.",
   },
   {
     method: "PUT",

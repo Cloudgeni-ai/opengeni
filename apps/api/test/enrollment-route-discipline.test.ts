@@ -12,9 +12,9 @@ import { fileURLToPath } from "node:url";
 //       requireAccessGrant; the AGENT routes (start / poll) DO NOT (user-
 //       unauthenticated) but ARE rate-limited.
 //   (3) AUTH-BEFORE-PARSE on the user routes: requireAccessGrant precedes any
-//       safeParse (a parse must never run for an unauthorized caller).
-//   (4) EXPLICIT 400 ON PARSE FAIL: the mutating handlers use safeParse + an
-//       explicit HTTPException(400), never a raw ZodError → 500.
+//       request parse (a parse must never run for an unauthorized caller).
+//   (4) EXPLICIT 400 ON PARSE FAIL: the mutating handlers use parseRequestBody
+//       with an explicit 400, never a raw ZodError → 500.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const routesSrc = readFileSync(resolve(here, "..", "src", "routes", "enrollments.ts"), "utf8");
@@ -93,7 +93,7 @@ describe("M5 enrollment route discipline", () => {
       const grantAt = body.indexOf("requireAccessGrant");
       expect(grantAt, `${route.path} must call requireAccessGrant`).toBeGreaterThanOrEqual(0);
       const parseAt = Math.min(
-        ...[".parse(", ".safeParse("]
+        ...[".parse(", ".safeParse(", "parseRequestBody(", "parseRequestJson("]
           .map((p) => body.indexOf(p))
           .filter((i) => i >= 0)
           .concat([Number.MAX_SAFE_INTEGER]),
@@ -121,11 +121,11 @@ describe("M5 enrollment route discipline", () => {
     expect(revoke).toContain('"enrollments:manage"');
   });
 
-  test("the mutating agent + approve handlers use safeParse + explicit HTTPException(400)", () => {
+  test("the mutating agent + approve handlers validate with parseRequestBody and an explicit 400", () => {
     for (const route of [AGENT_ROUTES[0]!, AGENT_ROUTES[1]!, USER_ROUTES[0]!]) {
       const body = handlerBody(routesSrc, route.method, route.path);
-      expect(body).toContain(".safeParse(");
-      expect(body).toContain("HTTPException(400");
+      expect(body).toContain("parseRequestBody(");
+      expect(body).toContain("status: 400");
     }
   });
 
@@ -164,8 +164,8 @@ describe("M5 enrollment route discipline", () => {
     // (unlike the standard user routes) the grant check follows the lookup.
     expect(body).toContain("requireAccessGrant(");
     expect(body).toContain('"enrollments:read"');
-    expect(body).toContain(".safeParse(");
-    expect(body).toContain("HTTPException(400");
+    expect(body).toContain("parseRequestBody(");
+    expect(body).toContain("status: 400");
   });
 
   test("exchange is UNAUTHENTICATED (the token is the auth) + rate-limited", () => {
@@ -175,7 +175,7 @@ describe("M5 enrollment route discipline", () => {
     // No user authentication — the `oget_` token verification inside the service is
     // the auth. The CALL form must be absent.
     expect(body.includes("requireAccessGrant("), "exchange must NOT user-authenticate").toBe(false);
-    expect(body).toContain(".safeParse(");
-    expect(body).toContain("HTTPException(400");
+    expect(body).toContain("parseRequestBody(");
+    expect(body).toContain("status: 400");
   });
 });

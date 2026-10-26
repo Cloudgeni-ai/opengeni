@@ -1,6 +1,7 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import postgres from "postgres";
+import * as network from "@opengeni/network";
 import {
   beginConnectAttempt,
   createConnection,
@@ -13,6 +14,7 @@ import {
   configureIntegrationFacet,
   encryptEnvironmentValue,
   getConnectionMetadata,
+  listIntegrationInstanceFacets,
 } from "@opengeni/db";
 import { updateOrganizationIntegrationPolicy } from "@opengeni/db/organization-integration-policy";
 import { FIKEN_CREDENTIAL_ROLE, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
@@ -57,7 +59,11 @@ import {
 import { startPersonalGitHubOAuth } from "../src/integrations/personal-github";
 import { startApiIntegrationProviderOAuth } from "../src/integrations/provider-oauth";
 import { startSocialOAuth } from "../src/integrations/social-oauth";
-import { OFFICIAL_GMAIL_MCP_URL, OFFICIAL_SLACK_MCP_URL } from "../src/integrations/oauth-profiles";
+import {
+  OFFICIAL_GMAIL_MCP_URL,
+  OFFICIAL_SLACK_MCP_URL,
+  OFFICIAL_DRIVE_MCP_URL,
+} from "../src/integrations/oauth-profiles";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -121,6 +127,7 @@ function deps(): ApiRouteDeps {
     },
     settings: testSettings({
       integrationsEnabled: true,
+      googleDriveMcpEnabled: true,
       integrationsStateSecret: "oauth-policy-fixture-state",
       environmentsEncryptionKey: randomBytes(32).toString("base64"),
       publicBaseUrl: "https://api.example.test",
@@ -135,12 +142,11 @@ function deps(): ApiRouteDeps {
   } as ApiRouteDeps;
 }
 
-test("all OAuth starts and Fiken token preparation deny before provider discovery or effects", async () => {
+test("active OAuth starts and Fiken token preparation deny before provider discovery or effects", async () => {
   await allow([]);
   const api = deps();
   const input = { ...scope, requestUrl: "https://api.example.test/start", payload: {} };
   const starts = [
-    () => startGoogleDriveOAuth(api, { ...input, payload: { capability: "source_read" } }),
     () => startFikenOAuth(api, input),
     () =>
       prepareFikenTokenInstall(api, scope, { apiToken: "fixture-token-never-sent-to-provider" }),
@@ -178,9 +184,35 @@ test("all OAuth starts and Fiken token preparation deny before provider discover
     await expect(start()).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
 });
 
+test("retired native Drive OAuth refuses both read and publishing acquisition under every organization policy", async () => {
+  const api = deps();
+  let providerCalls = 0;
+  api.googleDriveFetch = async () => {
+    providerCalls++;
+    throw new Error("Unexpected retired provider request");
+  };
+  const before = await listConnectionsMetadata(client.db, scope.workspaceId, scope.subjectId);
+  for (const keys of [[], ["google-drive"]]) {
+    await allow(keys);
+    for (const capability of ["source_read", "publish"] as const) {
+      await expect(
+        startGoogleDriveOAuth(api, {
+          ...scope,
+          requestUrl: "https://api.example.test/start",
+          payload: { capability },
+        }),
+      ).rejects.toMatchObject({ status: 410 });
+    }
+  }
+  expect(providerCalls).toBe(0);
+  expect(await listConnectionsMetadata(client.db, scope.workspaceId, scope.subjectId)).toEqual(
+    before,
+  );
+});
+
 test("curated-looking MCP URLs are still custom without a trusted adapter identity", async () => {
-  await allow(["gmail", "slack-personal"]);
-  for (const mcpUrl of [OFFICIAL_GMAIL_MCP_URL, OFFICIAL_SLACK_MCP_URL]) {
+  await allow(["gmail", "slack-personal", "google-drive"]);
+  for (const mcpUrl of [OFFICIAL_GMAIL_MCP_URL, OFFICIAL_SLACK_MCP_URL, OFFICIAL_DRIVE_MCP_URL]) {
     await expect(
       startMcpOAuth(deps(), {
         ...scope,
@@ -199,6 +231,59 @@ test("curated-looking MCP URLs are still custom without a trusted adapter identi
         payload: {},
       }),
     ).rejects.toMatchObject({ status: 410 });
+  }
+});
+
+test("trusted Drive OAuth uses its dedicated organization policy key while an identical raw URL remains custom", async () => {
+  const api = deps();
+  api.settings.integrationsOauthClientsJson = JSON.stringify({
+    "https://accounts.google.com": {
+      clientId: "drive-fixture-client",
+      clientSecret: "drive-fixture-secret",
+      tokenEndpointAuthMethod: "client_secret_post",
+    },
+  });
+  const requests: string[] = [];
+  const transport = spyOn(network, "pinnedFetch").mockImplementation(async (input) => {
+    const url = String(input);
+    requests.push(url);
+    if (url !== "https://accounts.google.com/.well-known/openid-configuration")
+      throw new Error(`Unexpected OAuth destination ${url}`);
+    return Response.json({
+      issuer: "https://accounts.google.com",
+      authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+      token_endpoint: "https://oauth2.googleapis.com/token",
+      response_types_supported: ["code"],
+      code_challenge_methods_supported: ["S256"],
+      token_endpoint_auth_methods_supported: ["client_secret_post"],
+    });
+  });
+  const input = {
+    ...scope,
+    requestUrl: "https://api.example.test/start",
+    personalOwnershipAllowed: true,
+    payload: {
+      mcpUrl: OFFICIAL_DRIVE_MCP_URL,
+      ownership: "personal" as const,
+      requestedScopes: [],
+    },
+  };
+  try {
+    await allow([]);
+    await expect(
+      startMcpOAuth(api, { ...input, integrationKey: "google-drive" }),
+    ).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
+    expect(requests).toHaveLength(0);
+    await allow(["google-drive"]);
+    const started = await startMcpOAuth(api, { ...input, integrationKey: "google-drive" });
+    expect(new URL(started.authorizationUrl).origin).toBe("https://accounts.google.com");
+    expect(requests).toEqual(["https://accounts.google.com/.well-known/openid-configuration"]);
+    await expect(startMcpOAuth(api, input)).rejects.toBeInstanceOf(
+      OrganizationIntegrationDeniedError,
+    );
+    expect(requests).toHaveLength(1);
+  } finally {
+    transport.mockRestore();
   }
 });
 
@@ -536,46 +621,56 @@ async function sourceConnection(
   });
 }
 
-test("provider resume gates paused acquisition, preserving already-active convergence and pause", async () => {
+test("retired provider resume cannot acquire authority, while pause remains available under restriction", async () => {
   for (const provider of ["google-drive", "atlassian"] as const) {
     const api = deps();
     const transition =
       provider === "google-drive" ? transitionGoogleDriveLifecycle : transitionAtlassianLifecycle;
-    const connection = await sourceConnection(provider, "paused");
-    const input = {
-      workspaceId: scope.workspaceId,
-      subjectId: scope.subjectId,
-      connectionId: connection.id,
-      payload: { action: "resume" as const, expectedVersion: connection.version },
-    };
-    if (provider === "atlassian") {
-      await expect(transition(api, input)).rejects.toMatchObject({ status: 410 });
+    for (const state of ["paused", "active"] as const) {
+      const connection = await sourceConnection(provider, state);
+      const input = {
+        workspaceId: scope.workspaceId,
+        subjectId: scope.subjectId,
+        connectionId: connection.id,
+        payload: { action: "resume" as const, expectedVersion: connection.version },
+      };
+      for (const keys of [[], [provider]]) {
+        await allow(keys);
+        await expect(transition(api, input)).rejects.toMatchObject({ status: 410 });
+        const retained = await getConnectionMetadata(
+          client.db,
+          scope.workspaceId,
+          connection.id,
+          scope.subjectId,
+        );
+        expect(retained?.version).toBe(connection.version);
+        expect(retained?.metadata.lifecycle).toMatchObject({ state });
+      }
+      await allow([]);
       const paused = await transition(api, {
         ...input,
         payload: { action: "pause", expectedVersion: connection.version },
       });
       expect(paused.metadata.lifecycle).toMatchObject({ state: "paused" });
-      continue;
+      if (provider === "google-drive") {
+        const repeated = await transition(api, {
+          ...input,
+          payload: { action: "pause", expectedVersion: connection.version },
+        });
+        expect(repeated.version).toBe(paused.version);
+      } else {
+        await expect(
+          transition(api, {
+            ...input,
+            payload: { action: "pause", expectedVersion: connection.version },
+          }),
+        ).rejects.toMatchObject({ status: 409 });
+      }
     }
-    await allow([]);
-    await expect(transition(api, input)).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
-    await allow([provider]);
-    const resumed = await transition(api, input);
-    await allow([]);
-    const nochange = await transition(api, {
-      ...input,
-      payload: { action: "resume", expectedVersion: resumed.version },
-    });
-    expect(nochange.metadata.lifecycle).toMatchObject({ state: "active" });
-    const paused = await transition(api, {
-      ...input,
-      payload: { action: "pause", expectedVersion: nochange.version },
-    });
-    expect(paused.metadata.lifecycle).toMatchObject({ state: "paused" });
   }
 });
 
-test("legacy provider source additions deny before provider use while empty selection remains available", async () => {
+test("retired source additions and empty selections refuse before provider use and preserve historical connections", async () => {
   await allow([]);
   const api = deps();
   let providerCalls = 0;
@@ -621,21 +716,26 @@ test("legacy provider source additions deny before provider use while empty sele
         readPolicy: "allow",
       },
     };
-    if (provider === "atlassian") {
+    for (const keys of [[], [provider]]) {
+      await allow(keys);
       await expect(save(api, input)).rejects.toMatchObject({ status: 410 });
       await expect(
         save(api, { ...input, payload: { ...input.payload, sources: [] } }),
       ).rejects.toMatchObject({ status: 410 });
-      continue;
     }
-    await expect(save(api, input)).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
-    const cleared = await save(api, { ...input, payload: { ...input.payload, sources: [] } });
-    expect(cleared.metadata.selectedSources).toEqual([]);
+    const retained = await getConnectionMetadata(
+      client.db,
+      scope.workspaceId,
+      connection.id,
+      scope.subjectId,
+    );
+    expect(retained?.version).toBe(connection.version);
+    expect(retained?.metadata.selectedSources).toEqual([]);
   }
   expect(providerCalls).toBe(0);
 });
 
-test("Drive source facet preserves receipts/nochange/reduction and cannot forge curated provenance", async () => {
+test("retired Drive facets reject replay, nochange, reduction and additions without changing historical bindings", async () => {
   await allow(["custom:openapi"]);
   const api = deps();
   api.googleDriveFetch = async () => {
@@ -743,38 +843,47 @@ test("Drive source facet preserves receipts/nochange/reduction and cannot forge 
       idempotencyKey,
     },
   };
-  await allow([]);
-  const replayed = await saveGoogleDriveFacetSource(api, input);
-  expect(replayed.binding?.id).toBe(seeded.binding?.id);
-  const unchanged = await saveGoogleDriveFacetSource(api, {
-    ...input,
-    payload: { ...input.payload, idempotencyKey: crypto.randomUUID() },
-  });
-  expect(unchanged.binding?.id).toBe(seeded.binding?.id);
-  const reduced = await saveGoogleDriveFacetSource(api, {
-    ...input,
-    payload: {
-      ...input.payload,
-      sources: sources.slice(0, 1),
-      expectedVersion: unchanged.binding!.version,
-      idempotencyKey: crypto.randomUUID(),
-    },
-  });
-  expect(reduced.binding?.config.sources).toHaveLength(1);
-  await allow(["google-drive"]);
-  await expect(
-    saveGoogleDriveFacetSource(api, {
-      ...input,
-      payload: {
+  const before = await listIntegrationInstanceFacets(
+    client.db,
+    scope.workspaceId,
+    scope.subjectId,
+    capabilityId,
+    installed.instanceKey,
+  );
+  for (const keys of [[], ["google-drive"], ["custom:openapi"]]) {
+    await allow(keys);
+    for (const payload of [
+      input.payload,
+      { ...input.payload, idempotencyKey: crypto.randomUUID() },
+      {
         ...input.payload,
-        expectedVersion: reduced.binding!.version,
+        sources: sources.slice(0, 1),
+        expectedVersion: seeded.binding!.version,
         idempotencyKey: crypto.randomUUID(),
       },
-    }),
-  ).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
+      {
+        ...input.payload,
+        sources: [...sources, { ...sources[0]!, id: "folder-three" }],
+        expectedVersion: seeded.binding!.version,
+        idempotencyKey: crypto.randomUUID(),
+      },
+    ])
+      await expect(saveGoogleDriveFacetSource(api, { ...input, payload })).rejects.toMatchObject({
+        status: 410,
+      });
+    expect(
+      await listIntegrationInstanceFacets(
+        client.db,
+        scope.workspaceId,
+        scope.subjectId,
+        capabilityId,
+        installed.instanceKey,
+      ),
+    ).toEqual(before);
+  }
 });
 
-test("Drive source verification stays outside the policy transaction and late restriction prevents selection persistence", async () => {
+test("retired Drive source selection refuses before verification even with a valid credential and allowed policy", async () => {
   await allow(["google-drive"]);
   const api = deps();
   await shared.admin`insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role, permissions)
@@ -817,8 +926,8 @@ test("Drive source verification stays outside the policy transaction and late re
         readPolicy: "allow",
       },
     }),
-  ).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
-  expect(providerCalls).toBe(1);
+  ).rejects.toMatchObject({ status: 410 });
+  expect(providerCalls).toBe(0);
   const retained = await getConnectionMetadata(
     client.db,
     scope.workspaceId,

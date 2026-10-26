@@ -1,5 +1,5 @@
 import { afterEach, expect, jest, test } from "bun:test";
-import { readBootstrap } from "./bootstrap-read";
+import { BOOTSTRAP_RECONNECT_DELAYS_MS, readBootstrap } from "./bootstrap-read";
 
 afterEach(() => jest.useRealTimers());
 const flush = async () => {
@@ -108,7 +108,6 @@ test.each([
   { status: 422 },
   { status: 429 },
   { status: 501 },
-  { status: 503, body: '{"error":"maintenance"}' },
   new SyntaxError("Invalid JSON"),
   new TypeError("Cannot read properties of undefined"),
   new DOMException("Aborted", "AbortError"),
@@ -167,4 +166,128 @@ test.each([true, false])("discards stale in-flight success=%s", async (success) 
   if (success) resolve("old principal");
   else reject({ status: 503 });
   expect((await result).name).toBe("AbortError");
+});
+
+const parked = () => ({ status: 503, code: "maintenance", body: '{"error":"maintenance"}' });
+
+test("the maintenance marker is retried like any transient failure", async () => {
+  jest.useFakeTimers();
+  let calls = 0;
+  const result = readBootstrap({
+    context: "client_configuration",
+    signal: new AbortController().signal,
+    request: async () => {
+      if (++calls === 1) throw parked();
+      return "ready";
+    },
+  });
+  await flush();
+  jest.advanceTimersByTime(500);
+  expect(await result).toBe("ready");
+  expect(calls).toBe(2);
+});
+
+test("without waiting, a maintenance window still ends after three attempts", async () => {
+  jest.useFakeTimers();
+  let calls = 0;
+  const error = parked();
+  const result = readBootstrap({
+    context: "client_configuration",
+    signal: new AbortController().signal,
+    request: async () => {
+      calls++;
+      throw error;
+    },
+  }).catch((failure) => failure);
+  await flush();
+  jest.advanceTimersByTime(500);
+  await flush();
+  jest.advanceTimersByTime(1_500);
+  expect(await result).toBe(error);
+  jest.advanceTimersByTime(60_000);
+  expect(calls).toBe(3);
+});
+
+test("with waiting, a long update is ridden out and startup continues by itself", async () => {
+  jest.useFakeTimers();
+  let calls = 0;
+  let open = false;
+  const waits: Array<{ error: unknown; elapsedMs: number }> = [];
+  const result = readBootstrap({
+    context: "client_configuration",
+    signal: new AbortController().signal,
+    waiting: { onWaiting: (error, elapsedMs) => waits.push({ error, elapsedMs }) },
+    request: async () => {
+      calls++;
+      if (!open) throw parked();
+      return "ready";
+    },
+  });
+  // Quick retries first, then calm reconnects for as long as the park lasts.
+  await flush();
+  jest.advanceTimersByTime(500);
+  await flush();
+  jest.advanceTimersByTime(1_500);
+  await flush();
+  expect(calls).toBe(3);
+  expect(waits).toHaveLength(1);
+  for (let minute = 0; minute < 10; minute++) {
+    for (let step = 0; step < 6; step++) {
+      jest.advanceTimersByTime(10_000 * 1.2);
+      await flush();
+    }
+  }
+  // Ten minutes of reconnects, never faster than the first reconnect delay
+  // and never slower than the cap (with jitter).
+  expect(calls).toBeGreaterThan(3 + (10 * 60_000) / (10_000 * 1.2) - 2);
+  expect(calls).toBeLessThan(3 + (10 * 60_000) / (BOOTSTRAP_RECONNECT_DELAYS_MS[0]! * 0.8));
+  expect(waits.length).toBe(calls - 2);
+  expect(waits.at(-1)!.elapsedMs).toBeGreaterThan(9 * 60_000);
+  open = true;
+  jest.advanceTimersByTime(10_000 * 1.2);
+  expect(await result).toBe("ready");
+});
+
+test("with waiting, a definitive failure still stops at once", async () => {
+  let calls = 0;
+  const denied = { status: 403 };
+  const waits: unknown[] = [];
+  const result = readBootstrap({
+    context: "workspace_access",
+    signal: new AbortController().signal,
+    waiting: { onWaiting: (error) => waits.push(error) },
+    request: async () => {
+      calls++;
+      throw denied;
+    },
+  }).catch((failure) => failure);
+  expect(await result).toBe(denied);
+  expect(calls).toBe(1);
+  expect(waits).toEqual([]);
+});
+
+test("with waiting, abort ends the reconnect loop", async () => {
+  jest.useFakeTimers();
+  const controller = new AbortController();
+  let calls = 0;
+  const result = readBootstrap({
+    context: "client_configuration",
+    signal: controller.signal,
+    waiting: { onWaiting: () => undefined },
+    request: async () => {
+      calls++;
+      throw new TypeError("Failed to fetch");
+    },
+  }).catch((failure) => failure);
+  await flush();
+  jest.advanceTimersByTime(500);
+  await flush();
+  jest.advanceTimersByTime(1_500);
+  await flush();
+  expect(calls).toBe(3);
+  controller.abort();
+  expect((await result).name).toBe("AbortError");
+  jest.advanceTimersByTime(120_000);
+  await flush();
+  expect(calls).toBe(3);
 });

@@ -21,6 +21,7 @@ import { LoadingPanel, ProblemPanel } from "@opengeni/react/app/components/commo
 import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
 import { ActionsProvider } from "@opengeni/react/app/lib/actions/actions-provider";
 import { DesktopThisComputerProvider } from "@opengeni/react/app/components/desktop/this-computer";
+import { ConsoleMeetingRecorderProvider } from "@/components/meetings/recorder-provider";
 import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-shots";
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
@@ -527,22 +528,26 @@ function AuthorizedWorkspaceShell({
           sessions" returns to the main rail. */}
           {/* The rail state and the action system (⌘K, shortcuts, the desktop
           menu bar) span both shells, so keys work in settings too. */}
-          <RailProvider workspaceId={workspaceId}>
-            <ActionsProvider>
-              {managementLocation ? (
-                <WorkspaceManagementShell
-                  workspaceId={workspaceId}
-                  workspaceName={activeWorkspace?.name}
-                  organizationName={organizationName}
-                  location={managementLocation}
-                >
-                  {children}
-                </WorkspaceManagementShell>
-              ) : (
-                <RailShell>{children}</RailShell>
-              )}
-            </ActionsProvider>
-          </RailProvider>
+          {/* A meeting being recorded keeps going while the person moves
+          between pages, so the recorder lives above both shells. */}
+          <ConsoleMeetingRecorderProvider workspaceId={workspaceId}>
+            <RailProvider workspaceId={workspaceId}>
+              <ActionsProvider>
+                {managementLocation ? (
+                  <WorkspaceManagementShell
+                    workspaceId={workspaceId}
+                    workspaceName={activeWorkspace?.name}
+                    organizationName={organizationName}
+                    location={managementLocation}
+                  >
+                    {children}
+                  </WorkspaceManagementShell>
+                ) : (
+                  <RailShell>{children}</RailShell>
+                )}
+              </ActionsProvider>
+            </RailProvider>
+          </ConsoleMeetingRecorderProvider>
         </DesktopThisComputerProvider>
       </SecretsUiProvider>
     </OpenGeniProvider>

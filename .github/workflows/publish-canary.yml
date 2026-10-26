@@ -1,4 +1,5 @@
 name: Publish canary packages
+run-name: publish-canary:${{ inputs.source_sha }}
 
 # Lockstep {next-patch}-canary.N to dist-tag canary. Does not consume
 # changeset files, does not commit, never moves latest.

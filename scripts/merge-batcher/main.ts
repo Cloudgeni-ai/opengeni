@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { observeCycle, observationDeferred, OBSERVATION_DEFERRED_EXIT } from "./cycle-outcome";
+import { errorDiagnostic, markFailurePhase } from "./diagnostics";
 import { parseArgs } from "node:util";
 import { Controller, LiveReader, type StepResult } from "./controller";
 import { AtomicGitWriter, GitStore } from "./git";
@@ -185,7 +187,7 @@ export async function runService(
   try {
     for (;;) {
       try {
-        const result = await controller.step();
+        const result = await observeCycle(() => controller.step());
         ready = true;
         lastSuccess = Date.now();
         failures = 0;
@@ -207,7 +209,7 @@ export async function runService(
           error instanceof ProviderError ? error.retryAfterSeconds : 0,
         );
         // Provider bodies, URLs and arbitrary Git stderr are deliberately absent.
-        if (once) throw error;
+        if (once) throw markFailurePhase(error, "controller-step");
         console.error(
           JSON.stringify({
             status: "observation_failed",
@@ -238,7 +240,9 @@ export async function runService(
 }
 if (import.meta.main)
   main(process.argv.slice(2)).catch((error) => {
-    // Errors originating in adapters have sanitized messages. Avoid dumping stacks/env.
-    console.error(error instanceof Error ? error.message : "Batcher failed");
-    process.exitCode = 1;
+    // Retain bounded diagnostic text only after credential redaction.
+    console.error(JSON.stringify(errorDiagnostic(error)));
+    // Exit 75 means only that this cycle has no unresolved attempted write.
+    // Supervisors must retain pre-existing unknown outcomes independently.
+    process.exitCode = observationDeferred(error) ? OBSERVATION_DEFERRED_EXIT : 1;
   });

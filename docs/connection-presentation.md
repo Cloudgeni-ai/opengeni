@@ -51,6 +51,20 @@ does not delegate account access. No separate conversation consent is required.
 Completion derives from live credentials and tool selection, never a browser
 success flag.
 
+Once a chat card's setup is verified (in-card connect or API key, an existing
+connection used here, a personal account allowed here, or the OAuth return
+handled by `finishMcpCapabilityOAuthReturn` and
+`completeSessionCapabilityOAuth`), the client calls
+`continueAfterCapabilitySetup`. The API checks that the agent's latest card for
+that capability is in this chat, that the capability is now usable here, that
+nobody has written since the card, and that the caller is the person whose
+request it was. It then records one `capability_setup_completed` internal
+update, deduplicated on the card event, which wakes the agent to continue
+without the person having to say they are done. Failed or cancelled setup
+never calls it, and its result never affects the setup the person finished.
+Hosts with their own card flows call `client.continueAfterCapabilitySetup` after
+verified setup; older servers answer 404, which the shared helper ignores.
+
 Tool selection lives in `packages/react/src/session-capability-policy.ts`.
 `sessionAuthRecommendation` matches recovery notices by exact native server or
 connection identity; `SessionConnectionRequest` exposes it to embeds. Missing or
@@ -74,3 +88,29 @@ shared. Host translations are message overrides, not a separate locale subsystem
 Mount it only in the open activity drawer. It accepts the hook's explicit
 client/workspace override and does not fetch history. Keep command and connection
 setup implementations outside the initial session bundle.
+## Duplicate OAuth accounts
+
+All MCP OAuth callbacks use the shared owner/resource policy in
+`apps/api/src/integrations/oauth-account-identity.ts`. Connect never implicitly
+selects the first credential for a provider domain. Explicit reconnect binds the
+exact connection and MCP URL. Callbacks serialize the workspace, owner and exact
+resource bucket before inspecting or writing connections.
+
+Authenticated verification adapters declare their identity metadata tuple
+(including a tenant when identities are tenant-scoped); display names are never
+identity. A repeated Connect for an active verified account returns its existing
+ID without rotating credentials, resetting approvals or rewriting accepted work.
+Changed permissions or an inactive account require explicit reconnect. A known
+identity cannot change during reconnect.
+
+OAuth and MCP do not require an account-identity endpoint. Without verified
+identity, the shared policy permits one live connection per owner and exact
+resource and refuses additional Connect attempts with reconnect guidance. It
+never treats opaque tokens, decoded JWTs or missing identity as proof that two
+accounts are the same. A reviewed verification adapter can enable distinct
+accounts without changing the persistence policy.
+
+Existing duplicate records are not deleted or rebound by this flow. Their
+accepted session/schedule references and approval policies remain intact.
+Account lists and pickers show available provider names, workspace names and
+emails; internal IDs and hashes are not account labels.

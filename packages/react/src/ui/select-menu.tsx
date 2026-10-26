@@ -27,6 +27,7 @@ import {
   MENU_SURFACE_CLASS,
 } from "./menu-styles";
 import { cn } from "../lib/cn";
+import { inertProps } from "../lib/inert";
 import { containedPortal } from "./portal-container";
 
 const PopoverContainedPortal = containedPortal(Popover.Portal);
@@ -466,7 +467,7 @@ export function SelectMenuPanel<V extends string>({
     <div
       data-slot="select-menu-panel"
       aria-hidden={preview || undefined}
-      inert={preview || undefined}
+      {...inertProps(preview)}
       className={cn(
         "flex min-h-0 min-w-0 flex-col",
         preview && cn(MENU_SURFACE_CLASS, "p-0"),
@@ -731,6 +732,8 @@ export function MenuSelect<V extends string>({
         </Popover.Anchor>
         <PopoverContainedPortal>
           <Popover.Content
+            // The trigger is a combobox whose popup is the listbox inside, not a dialog.
+            role="presentation"
             align={align}
             side="bottom"
             sideOffset={6}

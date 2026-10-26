@@ -1,6 +1,6 @@
 // Checks and captures Sites without conversations in the real sidebar: a Site
-// a chat made is a row in that chat's project, and opening a Site moves its
-// row up. Light and dark. Start the server first:
+// a chat made is a row in that chat's project, and opening a Site keeps its
+// place. Light and dark. Start the server first:
 //   bunx vite --config test/session-sidebar-preview.vite.config.ts --port 4292
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -60,15 +60,11 @@ try {
     await capture(page, `site-rows-untouched-${theme}`);
 
     await siteRow(page, "Launch checklist").click();
-    await page.waitForFunction(() => {
-      const folder = document.querySelector('[role="group"][aria-label="Default"]');
-      return (
-        folder
-          ?.querySelector("a[data-session-row], [data-site-row] a")
-          ?.textContent?.includes("Launch checklist") === true
-      );
-    });
-    await page.getByRole("complementary", { name: "Conversations" }).waitFor();
+    await page.getByRole("complementary", { name: "Chat", exact: true }).waitFor();
+    check(
+      !(await firstInDefault(page)).includes("Launch checklist"),
+      "opening a Site moved its row",
+    );
     await capture(page, `site-rows-opened-${theme}`);
     await page.close();
   }

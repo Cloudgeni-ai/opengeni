@@ -180,9 +180,10 @@ for (const mode of [
           },
         };
         const receipt = await controller.run(command);
-        const rejected = mode === "single input rejects multiple";
-        const uncertain =
-          mode === "no chooser" || mode === "dialog" || mode === "navigated" || mode === "covered";
+        // A covered control is refused before any input or scroll, as a
+        // covered click is, so nothing happened and the refusal is definite.
+        const rejected = mode === "single input rejects multiple" || mode === "covered";
+        const uncertain = mode === "no chooser" || mode === "dialog" || mode === "navigated";
         expect(receipt.state).toBe(
           rejected ? "failed" : uncertain ? "outcome_unknown" : "completed",
         );
@@ -191,7 +192,7 @@ for (const mode of [
         );
         expect(await controller.run(command)).toEqual(receipt);
         if (mode === "covered") {
-          // The wrapped receipt must still say why the action failed.
+          // The receipt says why the action was refused.
           expect(receipt.error?.message).toContain("covered by div at its center");
         }
         if (mode === "dialog") {
@@ -239,7 +240,11 @@ for (const mode of [
           changes: rejected || uncertain ? 0 : 1,
           uploaded: rejected || uncertain ? [] : multiple ? ["one.txt", "two.txt"] : ["one.txt"],
         });
-        expect(interceptions).toEqual(mode === "direct" || rejected ? [] : [true, false]);
+        // A covered control is refused after the chooser interception was set
+        // up, and the interception is still undone.
+        expect(interceptions).toEqual(
+          mode === "direct" || mode === "single input rejects multiple" ? [] : [true, false],
+        );
         expect((await driver.observe(page.target.id)).target.targetGeneration).toBe(
           page.target.targetGeneration,
         );

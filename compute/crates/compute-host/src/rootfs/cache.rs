@@ -4,6 +4,7 @@
 //! <root>/rootfs/
 //!   <id>.ext4                   an image, whole and checked against its id
 //!   <id>.ext4.fetching.<n>      one being fetched; removed on start
+//!   used/<id>                   modified when a create last used the image
 //! ```
 //!
 //! A create that names an image the host does not have fetches it from the
@@ -25,9 +26,14 @@
 //! is checked against its id the first time a create wants it, and removed
 //! (then fetched again) if it does not match.
 //!
-//! A file's modified time is when a create last used it. An image no
-//! create used for as long as a template may go unused, that no template
-//! is being built or kept from, is removed. Every create or template build
+//! An image's file is never written once it is in place, not even its
+//! times: fetching a disk over it trusts chunk hashes of the file taken
+//! once per version of its metadata (see `crate::chunked`). When a create
+//! last used the image is the modified time of its use mark instead; an
+//! image without one (an earlier agent's) was last used when its own file
+//! was last modified. An image no create used for as long as a template may
+//! go unused, that no template is being built or kept from, is removed with
+//! its mark. Every create or template build
 //! shares the image's file lock from the check until its copy is made, so
 //! any number copy one image at once, and never wait for each other's
 //! copies. Only a removal takes that lock alone, and it does not wait for
@@ -53,6 +59,8 @@ use crate::store::Store;
 
 const SUFFIX: &str = ".ext4";
 const FETCHING: &str = ".ext4.fetching";
+/// The directory of the use marks.
+const USED: &str = "used";
 
 /// Why an image could not be had.
 #[derive(Debug, thiserror::Error)]
@@ -103,7 +111,8 @@ pub(crate) struct Cache {
 
 impl Cache {
     /// The images under `dir`, for the owner of the state root that
-    /// `owner` shares. Removes what fetches an earlier agent left. Blocks.
+    /// `owner` shares. Removes what fetches an earlier agent left, and use
+    /// marks of images it no longer has. Blocks.
     pub fn open(dir: PathBuf, unused_after: Duration, owner: Ownership) -> io::Result<Self> {
         fs::create_dir_all(&dir)?;
         let mut recovered = HashSet::new();
@@ -119,6 +128,23 @@ impl Cache {
             {
                 recovered.insert(image);
             }
+        }
+        match fs::read_dir(dir.join(USED)) {
+            Ok(marks) => {
+                for entry in marks {
+                    let entry = entry?;
+                    let kept = entry
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.parse::<ImageId>().ok())
+                        .is_some_and(|image| recovered.contains(&image));
+                    if !kept {
+                        remove_if_present(&entry.path())?;
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
         Ok(Self {
             dir,
@@ -210,6 +236,11 @@ impl Cache {
     /// Where the image `image` is kept.
     pub fn path(&self, image: ImageId) -> PathBuf {
         self.dir.join(format!("{image}{SUFFIX}"))
+    }
+
+    /// The use mark of `image`.
+    fn mark(&self, image: ImageId) -> PathBuf {
+        self.dir.join(USED).join(image.to_string())
     }
 
     /// Whether the host has `image`, checked, without waiting for
@@ -308,15 +339,25 @@ impl Cache {
     /// Marks the image at `path` used now and holds it with `lock`.
     async fn used(&self, image: ImageId, path: PathBuf, lock: OwnedRwLockReadGuard<()>) -> Held {
         // Only the retirement clock depends on it.
+        let marks = self.dir.join(USED);
+        let mark = self.mark(image);
         let marked = self
-            .blocking({
-                let path = path.clone();
-                move || {
+            .blocking(move || {
+                let open = || {
                     fs::File::options()
+                        .create(true)
+                        .truncate(false)
                         .write(true)
-                        .open(&path)?
-                        .set_modified(SystemTime::now())
-                }
+                        .open(&mark)
+                };
+                let file = match open() {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        fs::create_dir_all(&marks)?;
+                        open()?
+                    }
+                    opened => opened?,
+                };
+                file.set_modified(SystemTime::now())
             })
             .await;
         if let Err(error) = marked {
@@ -347,10 +388,18 @@ impl Cache {
                 continue;
             };
             let path = self.path(image);
+            let mark = self.mark(image);
             let used = self
                 .blocking({
                     let path = path.clone();
-                    move || fs::metadata(&path)?.modified()
+                    let mark = mark.clone();
+                    move || match fs::metadata(&mark) {
+                        Ok(marked) => marked.modified(),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            fs::metadata(&path)?.modified()
+                        }
+                        Err(error) => Err(error),
+                    }
                 })
                 .await;
             let unused = used.is_ok_and(|used| {
@@ -368,7 +417,15 @@ impl Cache {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .remove(&image);
-            match self.blocking(move || remove_if_present(&path)).await {
+            // A mark left behind if this stops between the two is removed
+            // when the next agent opens the cache.
+            match self
+                .blocking(move || {
+                    remove_if_present(&path)?;
+                    remove_if_present(&mark)
+                })
+                .await
+            {
                 Ok(()) => {
                     tracing::info!(%image, "image unused for long; removed");
                     removed.push(image);

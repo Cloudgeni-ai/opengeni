@@ -80,6 +80,7 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../lib/cn";
+import { inertProps } from "../lib/inert";
 import {
   MessageSenderContext,
   MessageSenderSlot,
@@ -87,13 +88,13 @@ import {
 } from "../timeline/message-sender";
 import { formatClockTime, formatRelativeTime, truncate } from "../lib/format";
 import { prefersReducedMotion } from "../lib/motion";
+import { copySelectionWithoutPageStyles } from "../lib/selection-clipboard";
 import {
   invokeOlderHistoryLoaderWithReceiptCapture,
   type OlderHistoryLoadReceipt,
   type OlderHistoryLoader,
 } from "../older-history";
-import { Markdown, type MarkdownProps } from "./markdown";
-import { linkifyText } from "./linkified-text";
+import { InlineMarkdown, Markdown, type MarkdownProps } from "./markdown";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
 import {
   TimelineBeforeLayout,
@@ -153,6 +154,7 @@ import {
   type UserMessageItem,
   type FoldRestingState,
   type WorkerCompletionItem,
+  ActivityDisclosure,
   FoldMemoryProvider,
   inheritFoldRestingState,
   TurnSummary,
@@ -162,6 +164,10 @@ import {
 import { CopyHoverFrame } from "./copy-button";
 import { SecretAnswerChip } from "./secret-ref-chip";
 import { secretAnswerLabel } from "../human-input-model";
+import {
+  agentWorkHumanInputSummary,
+  isAgentWorkHumanInput,
+} from "../timeline/agent-work-human-input";
 import { TimelineAnnotationSourceRootContext } from "./timeline-annotation-reveal-context";
 import { GeneratedVideoPlayer } from "./generated-video-player";
 import {
@@ -2632,6 +2638,11 @@ export function MessageTimeline({
                           tabIndex={-1}
                           onScroll={onScroll}
                           onWheel={onWheel}
+                          // Copy selected text without the timeline's colours and
+                          // backgrounds; the browser would otherwise paste them along.
+                          onCopy={(event) =>
+                            copySelectionWithoutPageStyles(event, event.currentTarget)
+                          }
                           onTouchStart={(event) => {
                             stopSettlement();
                             const touch = event.touches.length === 1 ? event.touches[0] : undefined;
@@ -3347,7 +3358,7 @@ const TimelineGroupEntry = memo(function TimelineGroupEntry({
           noteFolded !== undefined && group.kind === "item" ? group.item.id : undefined
         }
         aria-hidden={noteFolded || undefined}
-        inert={noteFolded || undefined}
+        {...inertProps(noteFolded)}
         className={
           noteFolded ? "-mt-5 h-0 overflow-hidden opacity-0 [overflow-anchor:none]" : undefined
         }
@@ -3584,6 +3595,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
               )}
               outcome={group.outcome}
               failureText={group.failureText}
+              failureDetail={group.failureDetail}
               foldKey={group.id}
               defaultOpen={readableWorkDefaultOpen(group)}
               unloadedSteps={!!group.work.steps && group.work.steps.state !== "complete"}
@@ -3739,6 +3751,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={group.items}
           outcome={group.outcome}
           failureText={group.failureText}
+          failureDetail={group.failureDetail}
           defaultOpen={
             group.outcome === "failed" ||
             containsPresentedImage ||
@@ -3813,6 +3826,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
           items={activityItems}
           outcome={group.outcome}
           failureText={insideTurn ? undefined : group.failureText}
+          failureDetail={insideTurn ? undefined : group.failureDetail}
           durationMs={durationMs}
           defaultOpen={turnDefaultOpen ? true : undefined}
           bare={insideTurn}
@@ -3891,6 +3905,13 @@ function NestedSearchReveal({ group, children }: { group: TimelineGroup; childre
   );
 }
 
+/** Rows in a turn's work details that stack like tool steps, without a gap. */
+function isWorkRow(group: TimelineGroup | undefined): boolean {
+  return (
+    group?.kind === "activity" || (group?.kind === "item" && isAgentWorkHumanInput(group.item))
+  );
+}
+
 function renderFoldedGroups(
   groups: readonly TimelineGroup[],
   behavior: FoldedGroupBehavior,
@@ -3922,9 +3943,7 @@ function renderFoldedGroups(
       {readableWork ? (
         <div
           className={
-            index > 0 && (child.kind !== "activity" || groups[index - 1]?.kind !== "activity")
-              ? "mt-3"
-              : undefined
+            index > 0 && !(isWorkRow(child) && isWorkRow(groups[index - 1])) ? "mt-3" : undefined
           }
         >
           <NestedSearchReveal group={child}>
@@ -4187,7 +4206,11 @@ export function TimelineRow({
         />
       );
     case "human-input":
-      return <HumanInputConversationRow item={item} />;
+      return isAgentWorkHumanInput(item) ? (
+        <AgentWorkHumanInputRow item={item} />
+      ) : (
+        <HumanInputConversationRow item={item} />
+      );
     case "agent-message":
       return (
         <AgentMessageRow
@@ -4527,7 +4550,7 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
                       <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
                     ) : null}
                     {!question.label && multipleQuestions ? " " : null}
-                    {linkifyText(question.prompt)}
+                    <InlineMarkdown>{question.prompt}</InlineMarkdown>
                   </p>
                 </div>
               ))
@@ -4588,6 +4611,84 @@ function HumanInputConversationRow({ item }: { item: HumanInputItem }) {
           </div>
         </CopyHoverFrame>
       </div>
+    </div>
+  );
+}
+
+/**
+ * A question an agent (such as a sub-session's parent) answered or skipped: one
+ * quiet work row, "Asked  Target branch → main", that opens to the full
+ * question and answer. Nothing sits on the person's side.
+ */
+function AgentWorkHumanInputRow({ item }: { item: HumanInputItem }) {
+  const t = useOpenGeniText();
+  const multipleQuestions = Math.max(item.questions.length, item.answers.length) > 1;
+  const questionNumberById = new Map(
+    item.questions.map((question, index) => [question.id, index + 1]),
+  );
+  const skipped = item.response.outcome === "skipped";
+  const byLine = skipped ? t("messageTimeline.agentSkipped") : t("messageTimeline.agentAnswered");
+  const summary = agentWorkHumanInputSummary(item, {
+    answered: t("messageTimeline.answered"),
+    skipped: t("messageTimeline.skipped"),
+    secretSaved: (secret) => secretAnswerLabel(t, secret),
+  });
+  return (
+    <div data-human-input-history={item.requestId} data-og-agent-answered="">
+      <ActivityDisclosure
+        icon={<MessageCircleQuestionIcon className="size-3.5" />}
+        title={t("messageTimeline.asked")}
+        preview={summary}
+      >
+        <div className="flex flex-col gap-3 text-og-sm leading-6">
+          {item.questions.map((question, index) => (
+            <div key={question.id} className="min-w-0">
+              {question.label ? (
+                <p className="font-medium text-og-fg [overflow-wrap:anywhere]">
+                  {multipleQuestions ? (
+                    <span className="mr-1.5 tabular-nums text-og-fg-muted">{index + 1}.</span>
+                  ) : null}
+                  {question.label}
+                </p>
+              ) : null}
+              <p className="text-og-fg-muted [overflow-wrap:anywhere]">
+                {!question.label && multipleQuestions ? (
+                  <span className="mr-1.5 tabular-nums">{index + 1}.</span>
+                ) : null}
+                <InlineMarkdown>{question.prompt}</InlineMarkdown>
+              </p>
+            </div>
+          ))}
+          <div className="min-w-0">
+            <p className="text-og-xs font-medium text-og-fg-subtle">{byLine}</p>
+            {item.response.outcome === "answered" ? (
+              <div className="mt-1 space-y-1.5 text-og-fg">
+                {item.answers.length > 0 ? (
+                  item.answers.map((answer, answerIndex) => (
+                    <div key={answer.questionId} className="min-w-0 [overflow-wrap:anywhere]">
+                      {multipleQuestions ? (
+                        <span className="mr-1.5 tabular-nums text-og-fg-muted">
+                          {questionNumberById.get(answer.questionId) ?? answerIndex + 1}.
+                        </span>
+                      ) : null}
+                      {answer.secret ? (
+                        <SecretAnswerChip
+                          result={answer.secret}
+                          label={secretAnswerLabel(t, answer.secret)}
+                        />
+                      ) : (
+                        answer.values.join(", ") || t("messageTimeline.answered")
+                      )}
+                    </div>
+                  ))
+                ) : (
+                  <p>{t("messageTimeline.answered")}</p>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </ActivityDisclosure>
     </div>
   );
 }
@@ -5341,14 +5442,17 @@ function withSlot(text: string, node: ReactNode): ReactNode {
  * without it, a pre-minted authorization link is offered, or the card stays
  * informative. Recovery never claims to resume/replay the failed tool call.
  */
-function AuthNeededRow({
+export function AuthNeededRow({
   item,
   onReconnect,
   resolveProviderLogo,
+  setupUnavailable = false,
 }: {
   item: AuthNeededItem;
   onReconnect?: ((item: AuthNeededItem) => void | Promise<void>) | undefined;
   resolveProviderLogo?: ((providerDomain: string) => string | null | undefined) | undefined;
+  /** This person cannot set the capability up from here; say so instead of offering a review. */
+  setupUnavailable?: boolean | undefined;
 }) {
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
@@ -5481,13 +5585,15 @@ function AuthNeededRow({
       </div>
       {!unavailable ? (
         <p className="px-1 text-og-xs text-og-fg-subtle">
-          {recommendation
-            ? t("messageTimeline.noAccessHasBeenGranted")
-            : t(
-                missing
-                  ? "messageTimeline.toolCallNotReplayedAfterConnecting"
-                  : "messageTimeline.toolCallNotReplayedAfterReconnecting",
-              )}
+          {recommendation && setupUnavailable
+            ? t("messageTimeline.setupUnavailableHere", { provider })
+            : recommendation
+              ? t("messageTimeline.noAccessHasBeenGranted")
+              : t(
+                  missing
+                    ? "messageTimeline.toolCallNotReplayedAfterConnecting"
+                    : "messageTimeline.toolCallNotReplayedAfterReconnecting",
+                )}
         </p>
       ) : null}
       {failed ? (

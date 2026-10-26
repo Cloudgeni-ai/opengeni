@@ -1,5 +1,265 @@
 # @opengeni/react-native
 
+## 5.3.1
+
+### Minor Changes
+
+- 31bca3c: Composer dictation is now a recording with `purpose: "dictation"`, recorded, uploaded and kept by the same local-first pipeline as meetings, so a closed tab, a killed phone app, a dropped connection or a failed transcription never loses what was said. A dictation has one microphone track, is always private, is transcribed and billed as voice input, sends no webhook events, never appears with meetings, and is deleted a day after it is heard. `GET …/recordings?purpose=dictation` (and `listRecordings({ purpose })`) lists the caller's own kept dictations, so the next composer offers text an earlier page left behind.
+
+  `useVoiceInput` records through the recordings API when the client can and the deployment advertises `voiceInput.resumable`, inserts the text once (taking it deletes the dictation first, so two tabs never insert it twice), keeps anything longer than three seconds on Cancel or Escape, and hears a failed dictation again on Retry. It is also exported from `@opengeni/react/recordings`, and `useNativeDictation` in `@opengeni/react-native/recordings` brings the same dictation to phones on the native recorder. A client with only `transcribeAudio` records in memory and sends one request, as before. `ComposerTranscriptionControl` accepts `recordings` and `platform`; `createRecordingStore` and `createOwnerId` are deprecated and ignored.
+
+  The `transcription-recordings` routes and their SDK methods are deprecated, answer with `Deprecation` and `Sunset` headers, and are kept until January 26, 2027. See https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings.
+
+- 1cac78f: Record meetings on phones. `@opengeni/react-native` adds native microphone capture for iOS and Android that keeps recording in the background and writes AAC chunks to the device before they are uploaded, an on-device chunk store, and an Expo config plugin for the microphone permission and background audio. `useRecorder` from `@opengeni/react/recordings` takes a `platform`, so the same hook drives the browser and the phone recorder; the meeting list and transcript view models are shared from `@opengeni/react/recordings`.
+
+  The SDK's `RecordingUploader` no longer leaves a recording that captured no audio stuck uploading: it removes it, on the server and on the device, and reports `discarded`. Stopping a recording while a chunk is still being uploaded can no longer be lost. The worker accepts AAC tracks and remuxes them before transcription.
+
+  Speakers nobody named now read the same on the server and in every client: `defaultRecordingSpeakerName` from `@opengeni/contracts` gives "Speaker 2" for a diarized `speaker_1` and "Microphone" or "Shared audio" for a whole-track label, and the API's speaker `name` uses it. A speaker counts as named only when it has an assignment (`source` is set). Transcript versions report BCP 47 language tags, so ElevenLabs' `eng` is now `en`.
+
+  An upload refused with 401, 408, 425 or 429 is retried with backoff instead of failing, since a sign-in that loads late or is refreshed, a timeout or rate limiting doesn't make the recording bad. `useRecorder` sends its uploads through the latest client it was given, so a recorder created before the app's sign-in token loaded no longer uploads without it, and only the current recording updates what the hook shows.
+
+  `RecordingUploadStatus.created` says when the server has a new recording, so a list can refresh then and show it while it is still being recorded. `languageName` names ISO 639-2 codes such as `eng` on engines that don't canonicalize them, like Hermes.
+
+- 9efd19f: The phone app shows and manages a session's full access like the web header does. `SessionHeaderTitle` takes `fullAccess` and then shows a small shield and "Full access" on its status line. The new `@opengeni/react/session-admin-access-model` entry point shares the offered time limits (`ADMIN_ACCESS_DURATIONS`, `adminAccessDurationHours`), `endsText`, `adminAccessGrantedByText` and the grant description between web and native.
+- 021130f: Phones show the live transcript too. With `liveTranscript: true`, the native recorder streams the microphone to the workspace's live speech model and fills `snapshot.live`, as the browser recorder does. The native capture module sends a 16 kHz copy of the audio (`onPcm`) only while it is asked for (`setLivePcm`); paused audio is not sent, and an app build without the new module records as before with no live text. The live text helpers `groupLiveTurns`, `tidyLiveText` and `tidyPartialText` are now in `@opengeni/react/recordings`, so a phone and a web page join live text the same way.
+
+### Patch Changes
+
+- 58cb43d: Build the `./recordings` entry so the published package ships `dist/recordings/index.js`.
+- 314522c: A meeting can be renamed while it records. `Recorder.rename(title)` (and `rename` from `useRecorder`) stores the title with the recording on the device: before the server has the recording it goes out with its creation, after that with the next upload pass, so a dropped connection only delays it; once the recording is finalized it goes straight to the server. The recorder snapshot now has the `title`. `RecordingTransport` may include `updateRecording`, which renaming needs once the server has the recording. The web recorder shows the meeting's name while recording, with Rename.
+- Updated dependencies [c8ddf55]
+- Updated dependencies [de7e142]
+- Updated dependencies [1988e97]
+- Updated dependencies [0676499]
+- Updated dependencies [e7f5d38]
+- Updated dependencies [c5974ea]
+- Updated dependencies [15b4701]
+- Updated dependencies [b4acabd]
+- Updated dependencies [adeb323]
+- Updated dependencies [7ae955f]
+- Updated dependencies [e3782bb]
+- Updated dependencies [e1838ff]
+- Updated dependencies [5a256f4]
+- Updated dependencies [3046e82]
+- Updated dependencies [7e88548]
+- Updated dependencies [8e20038]
+- Updated dependencies [eb30cb4]
+- Updated dependencies [ce72530]
+- Updated dependencies [4c6bf32]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [45cddc7]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [d806f0f]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [8da1f14]
+- Updated dependencies [8b34e6d]
+- Updated dependencies [cccd692]
+- Updated dependencies [3fa5c6e]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [dca33ef]
+- Updated dependencies [392db50]
+- Updated dependencies [3b9f0e5]
+- Updated dependencies [dcbe25d]
+- Updated dependencies [31bca3c]
+- Updated dependencies [1d5bc4e]
+- Updated dependencies [6acfbd3]
+- Updated dependencies [21e7ecf]
+- Updated dependencies [fb90446]
+- Updated dependencies [0826dfd]
+- Updated dependencies [627b2f1]
+- Updated dependencies [6168cfe]
+- Updated dependencies [bd57ea7]
+- Updated dependencies [c307566]
+- Updated dependencies [a97c71b]
+- Updated dependencies [90e52dc]
+- Updated dependencies [8bd2c99]
+- Updated dependencies [406d1b9]
+- Updated dependencies [2806e31]
+- Updated dependencies [2c34440]
+- Updated dependencies [c992791]
+- Updated dependencies [87d1b8a]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [78ff3e6]
+- Updated dependencies [9efd19f]
+- Updated dependencies [1477b70]
+- Updated dependencies [4695d41]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [021130f]
+- Updated dependencies [68b195d]
+- Updated dependencies [e0f94c2]
+- Updated dependencies [9be821d]
+- Updated dependencies [fcb58f9]
+- Updated dependencies [ca88f26]
+- Updated dependencies [f9f0607]
+- Updated dependencies [75348a5]
+- Updated dependencies [cc319f3]
+- Updated dependencies [314522c]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [ee4df07]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [a9809ee]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [198d6f5]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [b7a14bd]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+- Updated dependencies [1b99a18]
+- Updated dependencies [0383280]
+- Updated dependencies [1534f12]
+- Updated dependencies [7c02dbd]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/react@5.3.0
+  - @opengeni/sdk@5.3.0
+
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [fb72b9d]
+- Updated dependencies [b3a641c]
+- Updated dependencies [2d6484c]
+- Updated dependencies [c4d18a1]
+  - @opengeni/react@5.2.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/sdk@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [5d377a7]
+- Updated dependencies [9c72069]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/react@5.1.0
+  - @opengeni/contracts@5.1.0
+
+## 5.0.2
+
+### Patch Changes
+
+- Updated dependencies [ca3f931]
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [1320d6c]
+- Updated dependencies [929ca26]
+- Updated dependencies [217ed52]
+- Updated dependencies [ce7f5f3]
+- Updated dependencies [f7dfe7a]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/react@5.0.0
+  - @opengeni/contracts@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- fd953dc: A sub-session question that an agent (such as the parent) answered or skipped is now shown as agent work instead of conversation: one quiet "Asked Target branch → main" row inside the turn's "Worked for" details, which opens to the question, who answered, and the answer. Nothing appears on the person's side any more. Questions a person answered, system skips (a scheduled run's unanswered question), and expired, cancelled or still pending questions look as before. `@opengeni/react/timeline-model` exports `isAgentWorkHumanInput` and `agentWorkHumanInputSummary` so custom renderers make the same decision. React Native: `NativeTimelineMessages.humanInputOutcome` and `OpenGeniNativeLabels.humanInputOutcome` gain an optional `agentSkipped` (defaults to `skipped`), and host overrides of `agentAnswered` still apply to the new row. `OpenGeniNativeSessionView`, which has no turn work details, shows the question as a compact step.
+- Updated dependencies [fd953dc]
+- Updated dependencies [3089aaf]
+- Updated dependencies [bcce117]
+- Updated dependencies [e2a641c]
+- Updated dependencies [85fb89e]
+  - @opengeni/react@4.8.0
+  - @opengeni/sdk@4.8.0
+  - @opengeni/contracts@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- 8301382: A sub-session's question can now be answered by the person or by the parent agent, and the first answer wins. The parent's `child_requires_action` notice now carries each question's id, kind, prompt and option ids and labels (never secret specs), so the parent can answer with `session_human_input_respond` without reading the sub-session's history. The notice now also wakes an idle parent that has no goal. An agent whose answer arrives after someone else's gets `outcome: "unchanged"` with `alreadyAnswered: true`, who answered, and a warning not to answer again; before, it got a success-looking `replayed` result. The `user.humanInputResponse` event records whether a person, API key, agent or the system answered. The agent instructions and the `request_human_input` and `session_human_input_respond` descriptions now say that a parent answers when it can from its task context, leaves questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answers on the person's behalf. The conversation now says "Agent answered" instead of "You answered" when an agent gave the answer.
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+- Updated dependencies [e423d8f]
+- Updated dependencies [b3fc68b]
+- Updated dependencies [ee5020c]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/sdk@4.7.2
+  - @opengeni/react@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/contracts@4.7.1
+- @opengeni/react@4.7.1
+- @opengeni/sdk@4.7.1
+
+## 4.7.0
+
+### Patch Changes
+
+- Updated dependencies [f6d388d]
+- Updated dependencies [28a7a33]
+- Updated dependencies [31095f1]
+- Updated dependencies [c09c85e]
+- Updated dependencies [0b378e8]
+- Updated dependencies [a0a7916]
+  - @opengeni/react@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/sdk@4.7.0
+
+## 4.6.1
+
+### Minor Changes
+
+- d0eb91c: A session's sub-agents now come back newest first at each level, and the 200-agent cap keeps direct agents and newer ones before deeper or older ones (it used to keep an arbitrary subset ordered by id). `sessionAgentAttention` and `formatWaitingSince` in `@opengeni/react/session-agents-model` give the word a manager must act on (Needs you · 10h, Failed, Stuck, Paused) for web and native. The phone's agents sheet shows that word in place of the time, and folds each agent's own agents behind a count.
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+- Updated dependencies [d0eb91c]
+  - @opengeni/sdk@4.6.0
+  - @opengeni/react@4.6.0
+  - @opengeni/contracts@4.6.0
+
+## 4.5.0
+
+### Minor Changes
+
+- 1d65f48: The mobile app can search chats across all of a person's workspaces, like ⌘K on the web. A search button on the home screen opens the chat search, which matches chat titles in the current workspace first and in the person's other workspaces after, labelling each chat from another workspace with its workspace's name. Matching workspaces appear too, so a search can also switch workspace. Opening a chat from another workspace switches to that workspace. `SessionRow` accepts an optional `workspaceName`, and `@opengeni/react` exports the chat-title ranking helpers `rankLabel`, `foldForSearch` and `LOOSE_MATCH_BELOW`.
+
+### Patch Changes
+
+- 7e5e08f: Every first-party tool step in the timeline now draws an icon that matches its words (a globe for the browser, a monitor for the screen, a spreadsheet for Excel, an hourglass for waiting, and so on) instead of the generic wrench. The mapping lives in one shared table keyed by tool step, so the web app, React Native and embedded chats all get the same icons; a new step without an icon fails to compile. Connector and custom tools keep their family icon or the wrench.
+- c64be29: A link the host draws as a block card now spans the message width when it is alone in its paragraph, instead of sizing to its content. A list item whose only content is such a card drops its bullet or number and indent, so it lines up with the same card on its own line.
+- Updated dependencies [f838cb7]
+- Updated dependencies [6f9b6f5]
+- Updated dependencies [7e5e08f]
+- Updated dependencies [1d65f48]
+- Updated dependencies [debd64e]
+- Updated dependencies [0910456]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [e22eeca]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+- Updated dependencies [0b3b079]
+- Updated dependencies [d8179be]
+  - @opengeni/contracts@4.5.0
+  - @opengeni/sdk@4.5.0
+  - @opengeni/react@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes

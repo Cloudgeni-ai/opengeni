@@ -76,6 +76,41 @@ function offsetPage<T>(
 }
 
 describe("provider mirror planning", () => {
+  test("keeps only bounded username hints without copying provider field values", () => {
+    for (const username of [
+      undefined,
+      null,
+      "",
+      "alice@example.com",
+      "u".repeat(VAULT_LIMITS.usernameMaxChars),
+      "u".repeat(VAULT_LIMITS.usernameMaxChars + 1),
+    ]) {
+      const plan = planProviderMirror(
+        [
+          meta(1, {
+            username,
+            fields: [
+              {
+                externalFieldId: "password",
+                name: "password",
+                kind: "concealed",
+                value: "must-not-leak",
+              } as ProviderItemMeta["fields"][number],
+            ],
+          }),
+        ],
+        "1",
+      );
+      expect(plan.items[0]!.username).toBe(
+        typeof username === "string" &&
+          username.length > 0 &&
+          username.length <= VAULT_LIMITS.usernameMaxChars
+          ? username
+          : null,
+      );
+      expect(JSON.stringify(plan)).not.toContain("must-not-leak");
+    }
+  });
   test("sanitizes and de-duplicates item names deterministically", () => {
     const field = { externalFieldId: "p", name: "password", kind: "concealed" as const };
     const items = [

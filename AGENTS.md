@@ -386,7 +386,7 @@ Three principles here are load-bearing and easy to break by accident:
 - **One tool gateway, several protocol adapters.** `@opengeni/tool-gateway` owns canonical `{serverId, toolName}` identity, catalog digesting, schemas, validation, approval classification, authorization, and execution. Runtime assembles enabled first-party and integration MCP servers once; model tools, exact-attempt Codemode, current-human MCP, and workspace HTTP/SDK calls project that same provider set and invoke the same executor closures. Permission/resource filtering happens before provider construction, credential resolution, or `tools/list`. Codemode adds only its frozen attempt scope, durable operation journal, active-attempt fencing, sandbox delivery, and recovery; a deterministic submission conflict is never adopted, an ambiguous submission may reconcile only to an exact scope/catalog/identity/arguments match, and concurrent first submissions of one operation id converge to one creation plus one replay. Current-human approval capabilities additionally bind a private provider-authority digest; connection-backed approval preflight may not refresh credentials or record provider usage, and an approval-required adapter without that seam stays out of the current-human catalog. Browser `client.tools` and opaque-origin Sites must not rediscover providers or create provider-specific wrappers. Sites retain one self-contained HTML runtime plus editable source and exact requested tool identities; the parent filters the live gateway over one exact iframe `MessagePort`, keeps all credentials/workspace routing outside publisher-controlled code, and executes calls directly when the active immutable Site version requested that identity and the current viewer still has live authority. Site calls do not show per-invocation approval prompts or use approval capabilities, including for tools whose ordinary current-human policy is `human`. Archived Sites receive no bridge. Archive/restore is recoverable publication state; never add hard delete, a second Site host/domain, or Site compute. See `docs/mcp-surfaces.md` and `docs/design/workspace-html-sites-2026-09-01.md`.
 - **Codex history is canonical; credentials are not compatibility identities.** Subscription/model changes never mutate, filter, reclassify, or rewrite `session_history_items` or `agent_run_states`. Responses requests use canonical protocol items with narrow request-local compatibility projections; a Chat request may build one request-local transcript view for record types that Chat Completions cannot represent. Included hosted-search evidence is a portable exception on every API: `packages/runtime/src/hosted-search-evidence.ts` projects only returned URLs/titles/snippets into one bounded, untrusted assistant historical-fact message before model/portable-compaction accounting, never rewriting the hosted record or depending on a stored provider ID. Absent legacy evidence cannot be reconstructed. Historical `tool_search` calls/outputs are facts: never rerun, compare with today's tools, or change their execution mode. `remote_v2` compaction is Codex-only; `portable` history may cross supported provider routes through the request adapter. New history rows omit Responses output-only item `status` at persist (`canonicalizePersistedHistoryItem` / `omitOutputOnlyHistoryItemFields` in `packages/codex/src/model-output-truncation.ts`) — pairing is `call_id`, and Codex's input schema 400s that field on function/message items. Hosted web/file search, code interpreter and image-generation calls instead preserve their actual status at persistence and when replayed natively because it is required replay data (`packages/codex/src/hosted-call-status.ts`); the search-evidence projection carries its known status as a historical fact. The Codex Responses normalizer (`packages/codex/src/normalize.ts`) still strips item `id`s and leftover output-only `status` request-locally for already-stored SuperGrok rows and mid-turn SDK items. Never rewrite stored history on a subscription/model switch or invent missing historical status. See `docs/web-search.md` and `docs/run-lifecycle.md`.
 - **Generated pixels are artifacts, not prompt history.** Native image base64 must be retained and replaced by the closed `generated_image` receipt before durable history/events/RunState; adapter tools return that same receipt. Later native items become a deterministic request-local artifact fact, while adapter history keeps its provider-neutral tool call and compact receipt. The browser and sandbox resolve bytes through the authenticated file/artifact authority. Never put base64, object keys, signed URLs, or provider identities into the durable/model-facing prefix, and never replay an adapter provider call after its durable started fence. See `docs/image-generation.md`.
-- **Model-visible tool results stay at or below 1 MiB.** Overflow is a successful tool: exact bytes become a workspace File plus a current-turn `tool-results/<operationId>.json` copy (virtual `/workspace/tool-results/...` for rematerialization; the model-visible `sandboxPath` is cwd-relative). History/events keep the compact `tool_result_spilled` receipt (`sandboxPath`, `fileId`, `byteSize`, `mediaType`). Later turns do not rematerialize. Spill write failure is bounded `result_too_large` and never puts the huge payload in history. Codemode skips the 1 MiB cap; the 16 MiB Codemode journal cap is unchanged. Model-only projections, such as the compact `knowledge_search`/`knowledge_prepare_save` copy, live at that same per-caller seam, never in the API tool, so Codemode keeps the exact contract. See `docs/run-lifecycle.md`.
+- **Model-visible tool results stay at or below 1 MiB.** Overflow is a successful tool: exact bytes become a workspace File plus a current-turn `tool-results/<operationId>.json` copy (virtual `/workspace/tool-results/...` for rematerialization; the model-visible `sandboxPath` is cwd-relative and is given only once the copy is in the sandbox: a spill before the turn's lazy sandbox starts joins it, so the receipt never promises a later copy; it is `null` without a sandbox route or when the start or copy fails). History/events keep the compact `tool_result_spilled` receipt (`sandboxPath`, `fileId`, `byteSize`, `mediaType`). Later turns do not rematerialize. Spill write failure is bounded `result_too_large` and never puts the huge payload in history. Codemode skips the 1 MiB cap; the 16 MiB Codemode journal cap is unchanged. Model-only projections, such as the compact `knowledge_search`/`knowledge_prepare_save` copy and a local MCP bridge's own `projectModelToolResult` (compact Gmail mail cards), live at that same per-caller seam, never in the API tool, so Codemode keeps the exact contract. See `docs/run-lifecycle.md`.
 - **Codex opaque-artifact rejection preserves durable truth.** Only the recognized HTTP-400 encrypted-content rejection family may invalidate provider artifacts. Under the canonical attempt locks, identify the exact active opaque history-row IDs and latest current-turn RunState receipt that participated in the rejected request, mark only those candidates provider-invalid, preserve their durable content/provenance, and recover the same logical turn through a temporary view that removes unusable opaque identities (and omits unusable remote-compaction blobs). If that exact candidate set invalidates nothing, fail instead of retrying an equivalent request. The family is the exact `invalid_encrypted_content` code or the recognized decrypt/parse sentence, and it applies to the remote-compaction request exactly as to an ordinary request: `shouldRecoverCompactionProviderFailure` routes it to the same invalidation settlement instead of a terminal `context_compaction_failed`. Every other definitive compaction rejection (HTTP 400/413/422) stays terminal but persists a closed `providerRejection` record (status, error type/code, `param` path, provider request id, never the message) on `turn.failed` and the `compaction.skipped` landmark, and the timeline names the rejected field instead of promising a retry. Never delete history, hot-swap credentials, or classify a generic 400 into this path.
 - **Codex plan entitlement is re-checked, model-scoped, and plan-bound.** An empty-body HTTP 400, an explicit plan refusal, or `usage_not_included` on the Codex transport (including the remote compaction request) is evidence, not a definitive refusal: failure settlement re-reads the serving account's current plan under the exact lease holder before deciding. The empty-400 decision uses the persisted plan change record (`plan_previous_type`), which observers of an unchanged plan never overwrite, so an earlier usage read or token refresh cannot consume the evidence. A proven loss writes a `plan_entitlement` exclusion for that model only (never status, cooldown, or user model policy), bounded by a 24-hour TTL, and walks the pool through the ordinary checkpointed failover; an unexplained rejection stays terminal as `codex_request_rejected`. Never retry the rejected request, keep the encrypted-content 400 and quota 429 paths ahead of it, let any later observation of a different plan retire the exclusion, and never put the account email in failure copy. See `docs/codex-subscription-rotation.md`.
 - **Codex Apps authority is separate from inference.** The deployment flag only enables the feature. Execution additionally requires exactly one explicit workspace designation; null means no Apps tools and there is no active/pinned/allocator/static-credential fallback. The Apps credential is independent of inference model, billing subscription, quota, cooldown, leases, pins, capacity, and rotation. Only its current human owner with `connections:write` (or admin-equivalent scope) may designate it; any managed human with that scope may clear it. Recheck the exact designation, active connection, owner membership, and owner scope immediately before every Apps request. Reconnect never transfers ownership, and disconnect clears the designation atomically. See `docs/mcp-surfaces.md`.
@@ -790,27 +790,23 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
 and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
-Run the full relevant suites
-on the VM (not only the fast queue checks), with bounded workers and isolated
-services. Obtain an independent agent review of the exact candidate head. Post
-one PR evidence comment containing that head SHA, commands/results, reviewer
-session and any limitations. Recheck the evidence after substantive head changes.
+Admission uses GitHub: an open, non-draft PR with native auto-merge requested
+(`gh pr merge --auto --squash`) **or** `queue-ready`, and the configured
+required fast GitHub-hosted checks (lint, types and selected unit tests) passing
+on its exact current head, not the full PR suite. Agent comments,
+VM attestations and reviewer session UUIDs are not admission requirements.
+Approval requirements come from the existing repository protection policy;
+the batcher adds no separate human or agent approval gate. Follow the repository's
+development validation guidance and report failures honestly, but do not invent
+an attestation requirement for queue intake. A changed head needs its own required
+checks; old-head success does not transfer. Version PRs remain singletons.
 
-Admission is ordered: complete the relevant full VM suites, obtain genuine
-independent review of that exact head, then post the real evidence and apply
-`queue-ready` only when the rollout owner has enabled intake. Never fabricate a
-test/reviewer receipt, copy evidence from another head, or treat a green provider
-check as independent review. A changed head revokes the old admission; repeat
-tests/review for the new head before signalling readiness again. Version PRs
-need the same human-readable exact-head evidence, not a bot exemption.
-
-Bendik selected the in-house batcher on October 21, 2026. GitHub native queue
-enforcement and vendor installation stay off. The batcher starts in read-only
-shadow mode; only the rollout owner's explicit go permits activation.
+GitHub native queue enforcement and vendor installation stay off. Only the
+rollout owner's explicit go permits activation of the reviewed controller and rules.
 Candidate-only CI shadow permission is not permission to control main or change
 rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
-does not activate anything; keep main control inactive until the release hold is
-cleared and the rollout owner gives a separate explicit go.
+does not activate anything; keep main control inactive until the rollout owner
+gives a separate explicit go with the matching core/workflow implementation.
 Merge mode follows **readable current GitHub rules**, not an owner-local receipt
 or whether a controller happens to be running. Read
 `gh api repos/Cloudgeni-ai/opengeni/rules/branches/main` and the paginated ruleset
@@ -822,7 +818,7 @@ belong to the activation operator, not ordinary agents selecting a merge path.
 Before activation or after a complete verified OFF restoration, the original
 squash-only PR admission plus non-FF/deletion protection, with no batcher writer
 restriction or partial guard transition, means normal reviewed squash after the
-same local-test and independent-review evidence. A private receipt is not a
+required GitHub checks and existing protection policy. A private receipt is not a
 prerequisite for that read-only determination. A partial transition, inaccessible
 effective-policy readback or unknown mode is **hold**: do not merge. Once the
 readable effective policy shows the complete intended main writer restriction
@@ -834,7 +830,7 @@ Explicit true, empty/null parameters, nonboolean values, extra fields or duplica
 rules are not that equivalence; unknown or mixed policy remains hold. The batcher
 is the **only normal path to main**; this queue-only instruction takes effect with
 that activation without waiting for another source edit. Submit the documented
-ready signal (`queue-ready`, or auto-merge only when the rollout enables it) and
+ready signal (`gh pr merge --auto --squash` **or** `queue-ready`; either suffices) and
 observe the **Batch ready** result and exact landed SHA. Do not directly squash or
 merge a PR to main, use `--admin`, call a direct merge API, or push main. Do not
 create/update/delete queue or batcher-state refs or manually rerun/cancel Batch CI.
@@ -843,17 +839,33 @@ authorized operator's one-command OFF must prove writer stop and restore the exa
 prior rules, then publish its verified manual-mode receipt for the audit. Agents
 independently confirm restoration through the same readable GitHub rules; the
 owner's local receipt is not their only source. A ruleset name alone is never
-proof of mode, identity or bypass scope. Organization-admin
-policy changes are emergency/turn-off operations, never routine queue bypass;
-there is no standing admin writer bypass on active main. Do not rebase merely
+proof of mode, identity or bypass scope. Organization administrators have an
+emergency bypass on writer/admission restrictions, not on the separate immutable
+non-FF/deletion guard. GitHub does not enforce the word "emergency": this is an
+operator policy, never permission for routine queue bypass. Do not rebase merely
 because main advanced: the batcher tests the
-combined tree. Any head change invalidates earlier evidence and requires a new
+combined tree. Any head change invalidates earlier check results and requires a new
 candidate. Version PRs always occupy their own batch.
 
 Queue-green is not release-green. Releases require full main CI on the exact
 released tip, with verified Version ancestry and matching image provenance.
+The required batch suite is plan/source/impact-selected units/Batch ready on the
+exact stacked candidate tree. Its verified latest-attempt success may land even
+when full-main CI is red or unknown; full main CI remains an independent backstop,
+not a candidate admission gate. Development validation is not a comment-based
+admission gate. The controller may retry a failed candidate's entire Batch CI once,
+using exact-attempt evidence classified as trusted code failure, verified
+infrastructure failure, provider cancellation, no-job-logs, or positive
+failed/timed-out job evidence.
+After a trusted second code failure, split the cohort and durably park failing
+singleton heads without blame or ejection,
+while other ready heads proceed. A new ready event or main advancement does not
+retry a parked head; a changed head may re-enter. Comparable base evidence remains
+unavailable, and full-main CI success is not a substitute. Current receipts lack
+trusted failure fingerprints, so no same-way suspected-base landing hold is claimed.
 Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
-the controller owns the single unchanged-input flaky retry. Do not stack manual
+the controller owns the single unchanged-input retry; unknown evidence never
+authorizes it, and a second unknown/infrastructure outcome remains held. Do not stack manual
 or in-job retries on it, or silently resubmit an ejected unchanged head.
 Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
 the plan and task receipts are deliberately bound to one run attempt.
@@ -865,8 +877,8 @@ the batcher or its CI control files require an isolated batch and explicit
 independent review of those control-plane changes.
 
 Budget/threshold increases, newly skipped tests and reduced coverage must be
-explicit in the PR and evidence comment, independently confirmed by the reviewer,
-and labelled `test-policy-change`. Never conceal a failing check by weakening it.
+explicit in the PR description, labelled `test-policy-change`, and confirmed in
+independent review. Never conceal a failing check by weakening it.
 The documented `hotfix/*` → `production` incident lane stays separate; ordinary
 main changes never bypass the queue. See the incident and rollback steps in the
 queue runbook before any exceptional main action.

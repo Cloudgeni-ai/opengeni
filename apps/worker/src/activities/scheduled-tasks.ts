@@ -1,3 +1,7 @@
+import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+  isRetiredNativeGoogleDriveTask,
+} from "@opengeni/contracts/google-drive-native-retirement";
 import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -32,6 +36,9 @@ import {
   type ScheduledTaskDegradedAccount,
   type ScheduledTaskRun,
   type ResolvedAgentConfig,
+  type SessionSystemUpdatePayload,
+  type ToolRef,
+  type TurnInitiator,
 } from "@opengeni/contracts";
 import {
   openGeniSlackBotMetadata,
@@ -56,11 +63,13 @@ import {
   resolveSessionAgentConfigForCreate,
   recordSessionCreated,
   recordUserMessageAccepted,
+  scheduledOccurrenceEvents,
   type ProductUsageMetricsSink,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
   addSessionSystemUpdateWithSourceMutation,
+  getEventOccurrenceForScheduledTaskRun,
   bindScheduledTaskRunSessionInTransaction,
   checkSessionUsageLimitAdmission,
   createScheduledTaskRun,
@@ -154,13 +163,64 @@ type ScheduledTemporalActivityIdentity = {
   activityId: string;
 };
 
+/**
+ * A run someone or something asked for explicitly, carrying its own charging
+ * identity and initiator. Schedule and event runs act with the automation's
+ * own authority instead.
+ */
+export function isManualScheduledTaskTrigger(
+  input: DispatchScheduledTaskRunInput,
+): input is Extract<DispatchScheduledTaskRunInput, { initiator: TurnInitiator }> {
+  return input.triggerType !== "scheduled" && input.triggerType !== "event";
+}
+
+/** A run's chat update. An event run also carries the events that caused it. */
+async function scheduledOccurrencePayloadForRun(
+  db: Database,
+  input: {
+    task: ScheduledTask;
+    run: Pick<ScheduledTaskRun, "id" | "workspaceId" | "triggerType">;
+    tools: ToolRef[];
+    degradedAccounts: readonly { serverId: string }[];
+  },
+): Promise<Extract<SessionSystemUpdatePayload, { type: "scheduled_occurrence" }>> {
+  const payload = scheduledUserMessagePayload(
+    input.task.agentConfig.prompt,
+    input.task.agentConfig.resources,
+    input.tools,
+    input.task.id,
+    input.run.id,
+    input.degradedAccounts,
+  );
+  if (input.run.triggerType !== "event") return payload;
+  const occurrence = await getEventOccurrenceForScheduledTaskRun(
+    db,
+    input.run.workspaceId,
+    input.run.id,
+  );
+  if (!occurrence) return payload;
+  const used = Buffer.byteLength(JSON.stringify(payload), "utf8");
+  return {
+    ...payload,
+    events: scheduledOccurrenceEvents({
+      occurrenceId: occurrence.id,
+      eventCount: occurrence.eventCount,
+      gapBefore: occurrence.gapBefore,
+      summaries: occurrence.summaries,
+      events: occurrence.events,
+      // Room left under the internal-update bound, less the key and some slack.
+      budgetBytes: SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES - used - 512,
+    }),
+  };
+}
+
 export function scheduledTaskRunExecutionPolicy(
   policy: TurnExecutionPolicyV1,
   input: DispatchScheduledTaskRunInput,
   creatorRestriction?: "developer_setup",
 ): TurnExecutionPolicyV1 {
   return creatorRestriction === "developer_setup" ||
-    (input.triggerType !== "scheduled" && input.credentialRestriction === "developer_setup")
+    (isManualScheduledTaskTrigger(input) && input.credentialRestriction === "developer_setup")
     ? { ...policy, credentialRestriction: "developer_setup" }
     : policy;
 }
@@ -183,7 +243,7 @@ export function scheduledTaskRunProducerKey(
   suppliedActivityIdentity?: ScheduledTemporalActivityIdentity,
 ): string {
   if (input.producerKey) return input.producerKey;
-  if (input.triggerType !== "scheduled") return input.agentRunUsageIdempotencyKey;
+  if (isManualScheduledTaskTrigger(input)) return input.agentRunUsageIdempotencyKey;
 
   let info = suppliedActivityIdentity;
   if (!info) {
@@ -327,7 +387,7 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       // Histories created before the manual-initiator workflow patch already
       // contain this activity command. Reject their incomplete wire input here
       // so replay consumes the recorded command and the retry loop settles.
-      if (input.triggerType !== "scheduled" && !input.initiator) {
+      if (isManualScheduledTaskTrigger(input) && !input.initiator) {
         return { action: "blocked", reason: "malformed_manual_trigger" };
       }
       const { db, bus, wakeSessionWorkflow } = baseService;
@@ -367,6 +427,18 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
             return scheduledRunTerminalResult(priorRun.error);
           }
           throw new Error("scheduled agent run is missing accepted execution truth");
+        }
+        if (
+          priorRun.status === "queued" &&
+          isRetiredNativeGoogleDriveTask(acceptedExecution.task)
+        ) {
+          await markScheduledTaskRunFailedIfQueued(
+            db,
+            priorRun.workspaceId,
+            priorRun.id,
+            GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+          );
+          return scheduledRunTerminalResult(GOOGLE_DRIVE_NATIVE_RETIRED_REASON);
         }
         if (priorRun.status === "queued" && isRetiredNativeAtlassianTask(acceptedExecution.task)) {
           await markScheduledTaskRunFailedIfQueued(
@@ -445,6 +517,8 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       if (!task) {
         return { action: "deleted" };
       }
+      if (isRetiredNativeGoogleDriveTask(task))
+        return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
       if (isRetiredNativeAtlassianTask(task))
         return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
       if (task.action.kind !== "agent_turn") {
@@ -1925,14 +1999,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 sourceId: run.id,
                 dedupeKey: `scheduled-task-run:${run.id}`,
                 summary: task.agentConfig.prompt,
-                payload: scheduledUserMessagePayload(
-                  task.agentConfig.prompt,
-                  task.agentConfig.resources,
-                  taskTools,
-                  task.id,
-                  run.id,
+                payload: await scheduledOccurrencePayloadForRun(dispatchDb, {
+                  task,
+                  run,
+                  tools: taskTools,
                   degradedAccounts,
-                ),
+                }),
                 lineage: {
                   scheduledTaskId: task.id,
                   scheduledTaskRunId: run.id,
@@ -2065,14 +2137,12 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 sourceId: run.id,
                 dedupeKey: `scheduled-task-run:${run.id}`,
                 summary: task.agentConfig.prompt,
-                payload: scheduledUserMessagePayload(
-                  task.agentConfig.prompt,
-                  task.agentConfig.resources,
-                  taskTools,
-                  task.id,
-                  run.id,
+                payload: await scheduledOccurrencePayloadForRun(dispatchDb, {
+                  task,
+                  run,
+                  tools: taskTools,
                   degradedAccounts,
-                ),
+                }),
                 lineage: {
                   scheduledTaskId: task.id,
                   scheduledTaskRunId: run.id,
@@ -2424,6 +2494,8 @@ function scheduledAdmissionRefusalResult(
 function scheduledRunTerminalResult(
   error: string | null,
 ): Extract<DispatchScheduledTaskRunResult, { action: "blocked" }> {
+  if (error === GOOGLE_DRIVE_NATIVE_RETIRED_REASON)
+    return { action: "blocked", reason: GOOGLE_DRIVE_NATIVE_RETIRED_REASON };
   if (error === ATLASSIAN_NATIVE_RETIRED_REASON)
     return { action: "blocked", reason: ATLASSIAN_NATIVE_RETIRED_REASON };
   if (error === "scheduled_authority_exhausted") {
@@ -3130,14 +3202,12 @@ async function recoverBoundScheduledTaskDispatch(input: {
       sourceId: input.run.id,
       dedupeKey: `scheduled-task-run:${input.run.id}`,
       summary: task.agentConfig.prompt,
-      payload: scheduledUserMessagePayload(
-        task.agentConfig.prompt,
-        task.agentConfig.resources,
-        input.acceptedExecution.resolvedTools,
-        task.id,
-        input.run.id,
-        input.acceptedExecution.degradedAccounts ?? [],
-      ),
+      payload: await scheduledOccurrencePayloadForRun(input.db, {
+        task,
+        run: input.run,
+        tools: input.acceptedExecution.resolvedTools,
+        degradedAccounts: input.acceptedExecution.degradedAccounts ?? [],
+      }),
       lineage: {
         scheduledTaskId: task.id,
         scheduledTaskRunId: input.run.id,

@@ -56,6 +56,25 @@ can be built and tested.
   clocks are compared;
   each needs only to run at a rate within a stated bound of true time
   (below).
+- **Lapsed is when giving up is safe, not when it is worth it.** A host
+  whose renewals stopped has frozen its VMs (below), but one cut off only
+  by the network, as when the link between two clouds drops for half a
+  minute, still holds them, and thaws them once it renews again. Giving
+  up on it costs every sandbox it holds its running programs and what it
+  wrote since its last archive, and resets the whole machine. So while a
+  lapsed host holds sandboxes (by its last report) the leader waits for
+  it, up to `give_up_after` (two minutes by default) from its last
+  renewal, before it fences it and gives up. A host of a cloud group
+  whose instance the cloud reports stopped or gone holds nothing to wait
+  for and goes at once, and so does a host that holds no sandbox. The
+  leader asks the cloud about a waited-for instance at most every five
+  seconds, apart from its own rounds so a slow answer holds up no other
+  host, and a failed read counts as still running. Meanwhile the host's
+  sandboxes stay its own: a wake retries until its own deadline. New
+  sandboxes go to other hosts, since every replica's placement passes
+  over a host it has read no renewal from for T. The wait trades a truly hung
+  host's recovery time (up to two minutes, not T plus margin) for keeping
+  every program on a host that was only out of reach.
 - **A cut-off host stops its VMs, with or without its agent.** The host's
   deadline is the boot-clock time it sent its last accepted renewal, plus
   T; a failed or unanswered renewal never extends it. A guard process, one
@@ -64,8 +83,15 @@ can be built and tested.
   what an earlier step asked for: from a second before the deadline it
   asks for the cgroup that holds every VM to freeze until `cgroup.events`
   reports `frozen 1`; from the deadline, until the VMs are frozen or gone
-  (`populated 0`), it writes `cgroup.kill` on every step; while the
-  deadline is further off it thaws a freeze it finds. So a guard that
+  (`populated 0`), it writes `cgroup.kill` on every step into each VM's
+  own group that is neither, and leaves the frozen ones frozen (a VM
+  ending while frozen, deleted or killed, reads `frozen 0` until its
+  memory is released, which is long enough for a step to see; killing
+  every VM for it would end every program on a host whose lease is only
+  late); while the deadline is further off it thaws a freeze it finds. A
+  frozen VMM cannot answer, so time its group spends frozen does not
+  count toward a request's deadline, and a step under way when the
+  freeze came finishes after the thaw instead of failing. So a guard that
   restarts after one that froze the VMs and died thaws them once the
   lease is renewed, and goes on freezing if it is not. The guard also
   holds the kernel watchdog (`softdog` with `nowayout`, W = 3 s), and feeds
@@ -261,7 +287,17 @@ can be built and tested.
   write checks the owner host's state in the same statement, under a
   share lock on its row, so it is refused (`owner lost`) if the leader
   marked the host lost after the view placed on it, and the service
-  places the sandbox again elsewhere.
+  places the sandbox again elsewhere. A write naming a host the store
+  does not have is refused the same way, so a host given up on is
+  forgotten a day later (its row deleted; replicas' views drop it at
+  their next full read) without anything coming to name it again; a
+  machine that comes back under a forgotten name registers as a new host.
+  The database enforces the same (a sandbox's owner is a foreign key to
+  its host, checked when the write's transaction commits, so a
+  registration may give a new host what it holds before writing the host
+  itself), so a replica of an older build still running during a
+  rollout, whose check lets a missing host pass, has such a write refused
+  too, and rolling back keeps working: older builds never forget hosts.
 - **Recovery.** When the leader marks a host lost (so a late renewal fails
   and the host must register again), it raises the owner epoch of each of
   its sandboxes and clears their owner. Each comes back on its next wake,
@@ -370,7 +406,10 @@ can be built and tested.
     whether or not this upload succeeded; a failed upload is retried
     after the usual backoff from a fresh bundle, never from the old one.
     From the snapshot until the image is made the VM's base is unknown,
-    so a merge that fails makes its next save a full one.
+    so a merge that fails makes its next save a full one, and so does
+    an agent restart meanwhile: the record of the base an agent
+    restarted beside the VM goes by is withdrawn before the snapshot
+    ([ADR 6](0006-memory-images-and-disks.md)).
   - *Ordered by the step.* The step runs in the sandbox's single step
     slot and reserves its save number there, so no later save,
     retirement or forgetting can touch the bundle while it uploads, and a
@@ -395,7 +434,18 @@ can be built and tested.
 - **Moves while asleep.** To drain or rebalance a host, the service sends
   `hand_off` for its sleeping sandboxes and clears their owner with a raised
   epoch once the host answers; the next wake adopts each elsewhere. Live
-  migration stays out of scope.
+  migration stays out of scope. Some sandboxes never sleep (a desktop kept
+  open, a program that never stops), and a drain that waits for them never
+  ends, so the host could only be deleted, losing their programs. Asked
+  to, a drain or move sends `hand_off` with `awake`: the host ends every
+  hold on the sandbox and any wake asked of it (whoever waits for that
+  wake asks again and finds it on its new host), refuses new ones as it
+  refuses wakes, and pauses, saves and archives it where it stands,
+  memory and all, so it carries on after a pause on the host that adopts
+  it, its open connections ended. A sandbox whose VM cannot be saved
+  (its disk may have lost writes) keeps its programs only while that VM
+  lives, so its hand-off fails and it stays. A host that predates
+  `awake` ignores it and refuses as before.
 - **Autoscaling.** The leader compares the fleet's spare memory (free
   above each host's buffer, per memory profile) with a target, the larger
   of a fraction of the fleet and room for a few of the largest shapes, and
@@ -430,9 +480,13 @@ can be built and tested.
 ## Consequences
 
 - A service and a database to run. A host without them works as before.
-- A host cut off for longer than T has its VMs frozen; their programs are
-  lost once their sandboxes are handed elsewhere. One whose guard cannot
+- A host cut off for longer than T has its VMs frozen until it renews
+  again. Their programs are lost only if their sandboxes are handed
+  elsewhere, which waits up to `give_up_after` while the host holds
+  sandboxes and its instance may still run them. One whose guard cannot
   stop them reboots.
+- A host that truly hangs while it holds sandboxes is recovered after
+  `give_up_after`, not after T plus margin.
 - Every host needs the `softdog` module (or a hardware watchdog) and
   cgroup v2 with `cgroup.kill` (Linux 5.14 or later).
 - Losing a host costs what changed since each sandbox's last archive.

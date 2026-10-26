@@ -11,6 +11,7 @@ import {
   coalesceSessionEventDeltasWithCoverage,
   formatSessionEventSse,
   reasoningDeltaSeparator,
+  canMergeReasoningDelta,
 } from "../src/index";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -38,6 +39,47 @@ function event(
 }
 
 describe("coalesceSessionEventDeltas", () => {
+  test("reasoning merges preserve the join for every preceding marker state", () => {
+    const join = (left: string, right: string) =>
+      left + reasoningDeltaSeparator(left, right) + right;
+    const strings = [""];
+    for (let length = 1; length <= 4; length++) {
+      for (const prefix of strings.filter((value) => value.length === length - 1)) {
+        for (const character of ["*", "a", "\n"]) strings.push(prefix + character);
+      }
+    }
+    for (const left of strings)
+      for (const right of strings) {
+        if (!canMergeReasoningDelta(left, right)) continue;
+        for (const prefix of ["", "*", "**", "text*", "text**"]) {
+          expect(join(prefix, join(left, right))).toBe(join(join(prefix, left), right));
+        }
+      }
+  });
+
+  test("split reasoning markers preserve rendered text across every page partition", () => {
+    const parts = ["", "*", "**", "***", "**b", "a*", "a**", "\n"];
+    const render = (fragments: string[]) =>
+      fragments.reduce((text, next) => text + reasoningDeltaSeparator(text, next) + next, "");
+    for (const first of parts)
+      for (const second of parts)
+        for (const third of parts) {
+          const raw = [first, second, third];
+          const events = raw.map((text, index) =>
+            event(index + 1, "agent.reasoning.delta", { text }),
+          );
+          for (let split = 0; split <= events.length; split++) {
+            const merged = [
+              ...coalesceSessionEventDeltas(events.slice(0, split)),
+              ...coalesceSessionEventDeltas(events.slice(split)),
+            ];
+            expect(render(merged.map((row) => (row.payload as { text: string }).text))).toBe(
+              render(raw),
+            );
+          }
+        }
+  });
+
   test("keeps reasoning summary parts as separate paragraphs, the same as a fragment reader", () => {
     const parts = ["**One**", "**Two**", " detail", "**Three**"];
     const result = coalesceSessionEventDeltas(
@@ -56,7 +98,10 @@ describe("coalesceSessionEventDeltas", () => {
   test("preserves message identities and never coalesces across their boundary", () => {
     const result = coalesceSessionEventDeltas([
       event(1, "agent.message.delta", { text: "calc", messageId: "message-a" }),
-      event(2, "agent.message.delta", { text: "ulation", messageId: "message-a" }),
+      event(2, "agent.message.delta", {
+        text: "ulation",
+        messageId: "message-a",
+      }),
       event(3, "agent.message.delta", { text: "next", messageId: "message-b" }),
     ]);
     expect(result.map((item) => item.payload)).toEqual([
@@ -66,8 +111,16 @@ describe("coalesceSessionEventDeltas", () => {
   });
   test("keeps the declared message phase on coalesced deltas", () => {
     const result = coalesceSessionEventDeltas([
-      event(1, "agent.message.delta", { text: "Check", messageId: "note", phase: "commentary" }),
-      event(2, "agent.message.delta", { text: "ing.", messageId: "note", phase: "commentary" }),
+      event(1, "agent.message.delta", {
+        text: "Check",
+        messageId: "note",
+        phase: "commentary",
+      }),
+      event(2, "agent.message.delta", {
+        text: "ing.",
+        messageId: "note",
+        phase: "commentary",
+      }),
       event(3, "agent.message.delta", {
         text: "Done.",
         messageId: "answer",
@@ -75,8 +128,18 @@ describe("coalesceSessionEventDeltas", () => {
       }),
     ]);
     expect(result.map((item) => item.payload)).toEqual([
-      { text: "Checking.", messageId: "note", phase: "commentary", coalescedUntil: 2 },
-      { text: "Done.", messageId: "answer", phase: "final_answer", coalescedUntil: 3 },
+      {
+        text: "Checking.",
+        messageId: "note",
+        phase: "commentary",
+        coalescedUntil: 2,
+      },
+      {
+        text: "Done.",
+        messageId: "answer",
+        phase: "final_answer",
+        coalescedUntil: 3,
+      },
     ]);
   });
   test("leaves empty and no-delta inputs untouched", () => {
@@ -285,7 +348,10 @@ describe("coalesceSessionEventDeltas", () => {
       while (replayed.length < compact.events.length) {
         const page = boundSessionEventHttpPage(
           compact.events.filter((item) => item.sequence > cursor),
-          { direction: "after", coveredThroughBySequence: compact.coveredThroughBySequence },
+          {
+            direction: "after",
+            coveredThroughBySequence: compact.coveredThroughBySequence,
+          },
         );
         expect(page.events.length).toBeGreaterThan(0);
         expect(page.nextSequence!).toBeGreaterThan(cursor);

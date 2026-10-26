@@ -12,7 +12,11 @@ import type { CapabilityCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { useConnect } from "../hooks/use-connect";
-import { attachSessionCapability, sessionCapabilityTools } from "../session-capability-policy";
+import {
+  attachSessionCapability,
+  continueAfterCapabilitySetup,
+  sessionCapabilityTools,
+} from "../session-capability-policy";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import { matchingActiveMcpConnections } from "../mcp-connection-status";
 import { useOpenGeniText } from "../messages/runtime";
@@ -27,6 +31,12 @@ export type SessionMcpCapabilityCardProps = {
   /** Exact host route; no console-specific routing is assumed. */
   returnUrl: string;
   onConfigured?: (() => void | Promise<void>) | undefined;
+  /**
+   * Offer only a personal connection: the provider only ever connects
+   * someone's own account (official Gmail, Slack's hosted MCP), or the person
+   * may only connect their own account. No ownership choice.
+   */
+  personalOnly?: boolean;
 };
 
 export type McpConnectionCardProps = Omit<SessionMcpCapabilityCardProps, "sessionId"> & {
@@ -34,11 +44,6 @@ export type McpConnectionCardProps = Omit<SessionMcpCapabilityCardProps, "sessio
   sessionId?: string;
   dialogOnly?: boolean;
   onClose?: (() => void) | undefined;
-  /**
-   * The provider only ever connects someone's own account (official Gmail,
-   * Slack's hosted MCP): no ownership choice, always personal.
-   */
-  personalOnly?: boolean;
   /** The connect button's words, "Connect Gmail". Defaults to "Continue to <name>". */
   connectLabel?: string;
   /** The line under the dialog title. Defaults to the kind and provider domain. */
@@ -83,7 +88,7 @@ function ScopedCard({
   onConfigured,
   dialogOnly = false,
   onClose,
-  personalOnly = false,
+  personalOnly: configuredPersonalOnly = false,
   connectLabel,
   dialogSubtitle,
   description: hostDescription,
@@ -96,6 +101,9 @@ function ScopedCard({
   );
   const view = useConnect(controller);
   const [item, setItem] = useState<CapabilityCatalogItem | null>(null);
+  const personalOnly =
+    configuredPersonalOnly ||
+    (item?.mcpUrl ?? item?.endpointUrl) === "https://drivemcp.googleapis.com/mcp/v1";
   const [logo, setLogo] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(dialogOnly);
   const [complete, setComplete] = useState(false);
@@ -151,7 +159,9 @@ function ScopedCard({
       setOwnership(resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace");
     else if (
       !item &&
-      (personalOnly || resolved.metadata?.defaultConnectionOwnership === "personal")
+      (personalOnly ||
+        (resolved.mcpUrl ?? resolved.endpointUrl) === "https://drivemcp.googleapis.com/mcp/v1" ||
+        resolved.metadata?.defaultConnectionOwnership === "personal")
     )
       setOwnership("personal");
     let accountReady = false;
@@ -299,18 +309,30 @@ function ScopedCard({
       previous.connectionId !== connection.id
     )
       throw new Error(t("sessionMcpCapabilityCard.thisIntegrationSSelectedAccount"));
-    await client.enableCapability(workspaceId, capabilityId, {
-      connectionRef:
-        attempt.ownership === "personal"
-          ? { providerDomain: connection.providerDomain, kind: "oauth2", subjectScope: "subject" }
-          : {
-              providerDomain: connection.providerDomain,
-              kind: "oauth2",
-              subjectScope: "workspace",
-              connectionId: connection.id,
-            },
-    });
-    if (!active()) return;
+    // Enabling is a workspace installation change. When the capability is
+    // already enabled with exactly this binding (each person's own account,
+    // or this shared account), connecting an account needs no installation
+    // change, and no permission to make one.
+    const alreadyBound =
+      resolved.enabled &&
+      previous?.providerDomain === connection.providerDomain &&
+      (attempt.ownership === "personal"
+        ? previous.subjectScope === "subject"
+        : previous.subjectScope !== "subject" && previous.connectionId === connection.id);
+    if (!alreadyBound) {
+      await client.enableCapability(workspaceId, capabilityId, {
+        connectionRef:
+          attempt.ownership === "personal"
+            ? { providerDomain: connection.providerDomain, kind: "oauth2", subjectScope: "subject" }
+            : {
+                providerDomain: connection.providerDomain,
+                kind: "oauth2",
+                subjectScope: "workspace",
+                connectionId: connection.id,
+              },
+      });
+      if (!active()) return;
+    }
     const enabled = await load(active);
     if (enabled && active()) {
       await finishConnection(enabled, active);
@@ -399,7 +421,8 @@ function ScopedCard({
         }
         startInput.current = input;
         let attempt = await controller.begin({
-          providerId: "mcp-oauth",
+          providerId:
+            mcpUrl === "https://drivemcp.googleapis.com/mcp/v1" ? "google-drive" : "mcp-oauth",
           ownership,
           returnUrl,
           idempotencyKey: startKey.current,
@@ -409,7 +432,10 @@ function ScopedCard({
         remember(attempt.id);
         if (attempt.state === "credential_input")
           attempt = await controller.advance(
-            { type: "credentials", values: { mcpUrl } },
+            {
+              type: "credentials",
+              values: mcpUrl === "https://drivemcp.googleapis.com/mcp/v1" ? {} : { mcpUrl },
+            },
             advanceKey.current,
           );
         if (!active()) return;
@@ -502,6 +528,7 @@ function ScopedCard({
     if (!active()) return;
     await onConfigured?.();
     if (!active()) return;
+    continueAfterCapabilitySetup(client, workspaceId, sessionId, capability.id);
     setComplete(true);
     setExpanded(false);
   }

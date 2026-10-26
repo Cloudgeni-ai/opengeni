@@ -7,6 +7,7 @@ import {
   savedMessageMachineChoices,
   sessionAdmissionNeedsDifferentMachine,
   sessionAdmissionReason,
+  sessionWaitingWorkExplainsBlock,
   type SessionAdmissionReason,
 } from "../session-admission-model";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
@@ -25,6 +26,12 @@ export type UseSessionStartOptions = EmbeddedSessionClientOverride & {
    * host proxy without them still gets the explanation, without choices.
    */
   machinesClient?: MachinesClientLike | undefined;
+  /**
+   * Whether this viewer may read the workspace machines (`GET /machines`,
+   * permission `enrollments:read`). Defaults to true. Pass false for a viewer
+   * without it: nothing is requested and the notice offers no machine choice.
+   */
+  machinesEnabled?: boolean | undefined;
 };
 
 export type UseSessionStartResult = {
@@ -46,6 +53,12 @@ export type UseSessionStartResult = {
   machineChoiceError: string | null;
   /** One fenced Resume, then fresh reads. Throws when it could not be confirmed. */
   recheck: () => Promise<void>;
+  /**
+   * As the machine's owner, let the agent continue with other people's
+   * waiting updates, then recheck a blocked chat (or just re-read). Absent
+   * when the session client cannot. Throws when it could not be confirmed.
+   */
+  continueWaitingWork: (() => Promise<void>) | undefined;
 };
 
 /**
@@ -59,6 +72,7 @@ export function useSessionStart({
   session,
   onSessionChanged,
   machinesClient,
+  machinesEnabled = true,
   ...override
 }: UseSessionStartOptions): UseSessionStartResult {
   const t = useOpenGeniText();
@@ -74,7 +88,7 @@ export function useSessionStart({
     workspaceId,
     ...(machines ? { machinesClient: machines } : {}),
     sessionId: session.id,
-    enabled: machines !== undefined && session.activeSandboxId != null,
+    enabled: machinesEnabled && machines !== undefined && session.activeSandboxId != null,
     pollIntervalMs: reason ? BLOCKED_MACHINE_POLL_MS : undefined,
   });
   const machineAccess = currentSessionMachineAccess(
@@ -107,6 +121,38 @@ export function useSessionStart({
       }),
     [client, control, onSessionChanged, refreshMachines, sessionId, workspaceId],
   );
+  const continueClient = client as Partial<{
+    continueSessionWaitingWork: (workspaceId: string, sessionId: string) => Promise<unknown>;
+  }>;
+  const canContinue = typeof continueClient.continueSessionWaitingWork === "function";
+  const blocked = reason !== null;
+  const continueWaitingWork = useCallback(async () => {
+    await continueClient.continueSessionWaitingWork!(workspaceId, sessionId);
+    // Session first, then machines: the notice clears once nothing waits, and
+    // a still-blocked session read in between would flash the refusal.
+    if (blocked && control.state !== "paused")
+      await recheckSessionAdmission({
+        control,
+        refreshOnly: false,
+        resume: (fence) =>
+          client.resumeSession(workspaceId, sessionId, {
+            clientEventId: globalThis.crypto.randomUUID(),
+            expectedControlEtag: fence.controlEtag,
+          }),
+        refresh: [onSessionChanged],
+      });
+    else await onSessionChanged();
+    await refreshMachines();
+  }, [
+    blocked,
+    client,
+    continueClient,
+    control,
+    onSessionChanged,
+    refreshMachines,
+    sessionId,
+    workspaceId,
+  ]);
   const machineChoices = useMemo(
     () => savedMessageMachineChoices(fleet.machines),
     [fleet.machines],
@@ -115,11 +161,20 @@ export function useSessionStart({
     reason,
     machineAccess,
     needsDifferentMachine: sessionAdmissionNeedsDifferentMachine(reason, machineAccess),
-    warnBeforeSending: reason === null && machineAccess !== null && !machineAccess.isOwner,
+    // Others' waiting updates keep the composer's machine notice beside them:
+    // it is where they choose a machine or ask the owner.
+    warnBeforeSending:
+      machineAccess !== null &&
+      !machineAccess.isOwner &&
+      (reason === null ||
+        ((machineAccess.waitingWork?.length ?? 0) > 0 &&
+          !sessionAdmissionNeedsDifferentMachine(reason, machineAccess) &&
+          sessionWaitingWorkExplainsBlock(reason))),
     machineChoices,
     canChooseMachine: fleet.canAttach,
     chooseMachine,
     machineChoiceError: fleet.mutationError?.message ?? null,
     recheck,
+    continueWaitingWork: canContinue ? continueWaitingWork : undefined,
   };
 }

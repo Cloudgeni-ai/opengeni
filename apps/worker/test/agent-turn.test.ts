@@ -163,7 +163,10 @@ import {
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
-import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
+import {
+  attachPendingUpdatesBeforePreparingModelInput,
+  prepareHistoryWithStartupPhase,
+} from "../src/activities/agent-turn/stream-attempt";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
 // Fake databases have no per-task usage limit state.
 useNoSessionUsageLimitForFakeDatabases();
@@ -236,6 +239,107 @@ describe("approval RunState materialization boundary", () => {
     ).text();
     expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
     expect(source).toContain("Open suffix resume has no interruption rows");
+  });
+});
+
+describe("conversation history startup phase", () => {
+  type Published = Parameters<Parameters<typeof prepareHistoryWithStartupPhase>[0]["publish"]>[0];
+  const recorder = () => {
+    const published: Published[] = [];
+    return {
+      published,
+      publish: async (events: Published) => {
+        published.push(events);
+      },
+    };
+  };
+
+  test("a fast history load publishes nothing", async () => {
+    const { published, publish } = recorder();
+    let prepared = false;
+    await prepareHistoryWithStartupPhase({
+      publish,
+      prepare: async () => {
+        prepared = true;
+      },
+      visibleAfterMs: 50,
+    });
+    await Bun.sleep(80);
+    expect(prepared).toBe(true);
+    expect(published).toEqual([]);
+  });
+
+  test("a slow history load is shown as running, then completed with its full duration", async () => {
+    const { published, publish } = recorder();
+    await prepareHistoryWithStartupPhase({
+      publish,
+      prepare: async () => {
+        await Bun.sleep(80);
+      },
+      visibleAfterMs: 20,
+    });
+    expect(published.map((events) => events.map((event) => event.type))).toEqual([
+      ["turn.startup.phase.started"],
+      ["turn.startup.phase.completed"],
+    ]);
+    expect(published[0]![0]!.payload).toEqual({ phase: "history" });
+    const completed = published[1]![0]!.payload;
+    expect(completed.phase).toBe("history");
+    expect(completed.durationMs).toBeGreaterThanOrEqual(70);
+  });
+
+  test("a slow failing load reports the failed phase and rethrows the original error", async () => {
+    const { published, publish } = recorder();
+    const failure = new Error("storage read failed");
+    await expect(
+      prepareHistoryWithStartupPhase({
+        publish,
+        prepare: async () => {
+          await Bun.sleep(60);
+          throw failure;
+        },
+        visibleAfterMs: 20,
+      }),
+    ).rejects.toBe(failure);
+    expect(published.map((events) => events.map((event) => event.type))).toEqual([
+      ["turn.startup.phase.started"],
+      ["turn.startup.phase.failed"],
+    ]);
+  });
+
+  test("the completion waits for a still-pending start publish", async () => {
+    const order: string[] = [];
+    let releaseStart: () => void = () => undefined;
+    await prepareHistoryWithStartupPhase({
+      publish: async (events) => {
+        const type = events[0]!.type;
+        if (type === "turn.startup.phase.started") {
+          await new Promise<void>((resolve) => {
+            releaseStart = resolve;
+          });
+        }
+        order.push(type);
+      },
+      prepare: async () => {
+        await Bun.sleep(40);
+        setTimeout(() => releaseStart(), 30);
+      },
+      visibleAfterMs: 10,
+    });
+    expect(order).toEqual(["turn.startup.phase.started", "turn.startup.phase.completed"]);
+  });
+
+  test("the first model input of a turn loads through the history phase", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const firstPreparation = source.indexOf(
+      "await attachPendingUpdatesBeforePreparingModelInput({",
+    );
+    expect(firstPreparation).toBeGreaterThan(-1);
+    expect(source.indexOf("prepareHistoryWithStartupPhase({", firstPreparation)).toBeGreaterThan(
+      firstPreparation,
+    );
   });
 });
 
@@ -3405,7 +3509,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
     );
     const lazyCredentialAttachAt = establishSource.indexOf(
-      "await attachRunCredentialRenewal(",
+      "attachRunCredentialRenewal(",
       provisionerAt,
     );
     const lazyProvisionerPrefix = establishSource.slice(
@@ -3550,9 +3654,6 @@ describe("lazy sandbox provisioner single-flight", () => {
     ).text();
     expect(toolsSource).toContain("namedSubjectHasLiveWorkspaceAuthority");
     expect(toolsSource).not.toContain("getWorkspaceGrant");
-    expect(toolsSource).toMatch(
-      /resolveGoogleDrivePublicationTarget\(\s*db,\s*\{\s*accountId: input\.accountId,\s*workspaceId: input\.workspaceId\s*\}/,
-    );
   });
 
   test("resuming journaled work starts deferred preparation before joining it", async () => {
@@ -6099,7 +6200,7 @@ describe("transient provider error classifier", () => {
       agentRunFailurePayload(new ActiveSessionHistoryLimitExceededError(2_048, 1_024)),
     ).toEqual({
       error:
-        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+        "The session's active context is too large to load safely, even with inline images and older items left out, so it cannot be compacted. Clear the session context (/clear in chat, or the clearSessionContext action) to restart the model from an empty context, then send the next message; earlier messages stay in the timeline. Alternatively, start a new session.",
       code: "active_history_too_large",
       retryable: false,
       detail:

@@ -1,3 +1,5 @@
+import type { z } from "zod";
+import { parseRequestBody } from "../http/request-body";
 import { attachedBrowserViewer } from "../attached-browser-viewer";
 import { createHash, randomUUID } from "node:crypto";
 import sharp from "sharp";
@@ -49,6 +51,7 @@ import {
   getComputerSessionControlRecord,
   getLiveEnrollmentConnection,
   getSession,
+  interactionControllerGone,
   listComputerSessions,
   prepareComputerSessionCreate,
   prepareComputerSessionEnd,
@@ -106,10 +109,17 @@ import {
   deriveComputerViewGrantToken,
 } from "../browser-controller-authority";
 import {
+  recordSourcePlacementMove,
   retireFormerPlacementControllers,
   retireSourceFormerPlacements,
 } from "../former-placement-retirement";
 import { connectedMachineComputerAccessError } from "../connected-machine-computer-access";
+import {
+  captureZoomedComputerFrame,
+  parseComputerFrameRegionQuery,
+  parseComputerFrameSizeQuery,
+  translateZoomedComputerAction,
+} from "../computer-frame-zoom";
 import {
   controllerCacheAllowsHostFetch,
   controllerCachedUrlIsUsable,
@@ -123,8 +133,10 @@ import {
 } from "../interaction-agent-access";
 import { withInteractionHolderHeartbeat } from "../interaction-holder-heartbeat";
 import { validateInteractionRequestOrigin } from "../http/cors";
+import { withoutRequestIdleTimeout } from "../http/request-idle-timeout";
 import { ApiHttpError } from "../http/api-error";
 import {
+  interactionActionDeadlineApiError,
   interactionControlApiError,
   legacyInteractionCapacityError,
 } from "../http/interaction-control-error";
@@ -145,6 +157,7 @@ import {
 } from "../sandbox/channel-a";
 import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 import {
+  activeRouteUnavailableError,
   wrongInteractionPlacementMessage,
   wrongPlacementInsteadOfOffline,
 } from "./interaction-placement-message";
@@ -162,6 +175,9 @@ type ComputerPlacement = {
   lease: LeaseSnapshot | null;
   /** Current placement consent, separate from passive viewing authority. */
   screenControlAllowed?: boolean;
+  /** Where an attached device's Chrome profile is stored: its machine's
+   *  enrollment workspace, which can be another workspace. */
+  attachedDeviceWorkspaceId?: string;
 };
 
 type ActiveComputerControllerCallback<T> = (input: {
@@ -356,6 +372,7 @@ export function registerComputerSessionRoutes(
         sourceSession,
         grant,
         existing?.session.placement ?? request.placement ?? null,
+        existing?.deviceWorkspaceId ?? null,
         existing?.session.controller?.placementInstanceId ?? null,
         "computer.create",
         context.req.raw.signal,
@@ -363,7 +380,13 @@ export function registerComputerSessionRoutes(
           if (!prepared) {
             prepared = await prepareComputerSessionCreate(
               deps.db,
-              computerCreateInput(grant, workspaceId, request, placement.placement),
+              computerCreateInput(
+                grant,
+                workspaceId,
+                request,
+                placement.placement,
+                placement.attachedDeviceWorkspaceId,
+              ),
             );
           }
           if (isTerminalOperation(prepared.operation.state)) return prepared;
@@ -605,6 +628,10 @@ export function registerComputerSessionRoutes(
         "sessions:read",
       );
       const targetId = requireOpaqueParam(context, "targetId");
+      const region = parseComputerFrameRegionQuery(context.req.query("region"));
+      const regionFrame = region
+        ? parseComputerFrameSizeQuery(context.req.query("regionFrame"))
+        : null;
       const frame = await withActiveComputerController(
         context,
         grant,
@@ -613,12 +640,22 @@ export function registerComputerSessionRoutes(
         "session.read",
         "computer.read",
         async ({ sessionClient, binding }) => {
+          const expected = {
+            computerSessionId,
+            controllerGeneration: binding.controllerGeneration,
+            targetId,
+          };
           try {
-            return await captureModelComputerFrame(sessionClient, {
-              computerSessionId,
-              controllerGeneration: binding.controllerGeneration,
-              targetId,
-            });
+            return region
+              ? await captureZoomedComputerFrame(
+                  sessionClient,
+                  targetId,
+                  region,
+                  regionFrame,
+                  MODEL_COMPUTER_FRAME_MAX_BYTES,
+                  (captured) => validateComputerFrameForApi(captured, expected),
+                )
+              : await captureModelComputerFrame(sessionClient, expected);
           } catch (error) {
             if (error instanceof ComputerFrameEvidenceMismatchError) {
               observeComputerFrameEvidenceMismatch(deps.observability, error.reason);
@@ -722,53 +759,69 @@ export function registerComputerSessionRoutes(
       );
       const request = await parseJsonBody(context, ComputerActionRequest);
       const startedAtMs = performance.now();
-      const result = await withActiveComputerController(
+      // The response waits for the whole batch, which may outlast the
+      // server's idle timeout.
+      const result = await withoutRequestIdleTimeout(
         context,
-        grant,
-        workspaceId,
-        computerSessionId,
-        "session.control",
-        "computer.action",
-        async ({ sessionClient, binding, record }) => {
-          if (
-            record.session.placement.kind === "sandbox_group" &&
-            deps.settings.sandboxDesktopInteractive === false &&
-            grant.principalKind !== "agent_attempt"
-          ) {
-            throw new HTTPException(403, { message: "Human desktop input is disabled" });
-          }
-          const commandFields = {
-            protocolVersion: INTERACTION_PROTOCOL_VERSION,
-            operationId: request.operationId,
-            computerSessionId,
-            controllerGeneration: binding.controllerGeneration,
-            targetId: request.targetId,
-            expectedTargetGeneration: request.expectedTargetGeneration,
-            expectedObservationId: request.expectedObservationId,
-            expectedFrameId: request.expectedFrameId,
-            actor: interactionActorForGrant(grant),
-            action: request.action,
-          };
-          ComputerActionCommand.parse(commandFields);
-          const secretValues = await resolveInteractionSecretValues({
-            port: interactionSecrets,
+        async () =>
+          await withActiveComputerController(
+            context,
             grant,
-            texts: computerActionSecretTexts(request.action),
-            use: { surface: "desktop", toolName: "computer_act", operationId: request.operationId },
-            beforeResolve: requirePlacementAcceptsSecretValues(
-              deps.db,
-              grant,
-              workspaceId,
-              record.session.placement,
-            ),
-          });
-          return await sessionClient.action(
-            ComputerActionCommand.parse({
-              ...commandFields,
-              ...(secretValues === undefined ? {} : { secretValues }),
-            }),
-          );
-        },
+            workspaceId,
+            computerSessionId,
+            "session.control",
+            "computer.action",
+            async ({ sessionClient, binding, record }) => {
+              if (
+                record.session.placement.kind === "sandbox_group" &&
+                deps.settings.sandboxDesktopInteractive === false &&
+                grant.principalKind !== "agent_attempt"
+              ) {
+                throw new HTTPException(403, { message: "Human desktop input is disabled" });
+              }
+              // A pointer action on a zoomed frame acts on the native frame
+              // the zoom was cut from, in that frame's pixels.
+              const translated = translateZoomedComputerAction({
+                expectedFrameId: request.expectedFrameId,
+                action: request.action,
+              });
+              const commandFields = {
+                protocolVersion: INTERACTION_PROTOCOL_VERSION,
+                operationId: request.operationId,
+                computerSessionId,
+                controllerGeneration: binding.controllerGeneration,
+                targetId: request.targetId,
+                expectedTargetGeneration: request.expectedTargetGeneration,
+                expectedObservationId: request.expectedObservationId,
+                expectedFrameId: translated.expectedFrameId,
+                actor: interactionActorForGrant(grant),
+                action: translated.action,
+              };
+              ComputerActionCommand.parse(commandFields);
+              const secretValues = await resolveInteractionSecretValues({
+                port: interactionSecrets,
+                grant,
+                texts: computerActionSecretTexts(request.action),
+                use: {
+                  surface: "desktop",
+                  toolName: "computer_act",
+                  operationId: request.operationId,
+                },
+                beforeResolve: requirePlacementAcceptsSecretValues(
+                  deps.db,
+                  grant,
+                  workspaceId,
+                  record.session.placement,
+                ),
+              });
+              return await sessionClient.action(
+                ComputerActionCommand.parse({
+                  ...commandFields,
+                  ...(secretValues === undefined ? {} : { secretValues }),
+                }),
+              );
+            },
+          ),
       );
       observeComputerActionResult(deps.observability, startedAtMs, request, result);
       return context.json(result);
@@ -902,8 +955,15 @@ export function registerComputerSessionRoutes(
                     "stream authority is unavailable for this session",
                   );
                 }
+                // The machine may be enrolled in another workspace than this
+                // chat; the token is for its exact relay channel.
                 const relayToken = await mintStreamToken(relaySecret!, {
                   workspaceId,
+                  relayChannel: {
+                    workspaceId: relayed.channel.workspaceId,
+                    agentId: relayed.channel.agentId,
+                    channelId: relayed.channel.channelId,
+                  },
                   sessionId: record.sourceSessionId,
                   viewerId: grantId,
                   leaseEpoch: record.tokenGeneration,
@@ -1049,12 +1109,30 @@ export function registerComputerSessionRoutes(
       const startedAtMs = performance.now();
       const origin = requestOrigin(context, deps.settings);
       try {
-        const before = await getComputerSessionControlRecord(deps.db, {
+        let before = await getComputerSessionControlRecord(deps.db, {
           accountId: grant.accountId,
           workspaceId,
           computerSessionId,
         });
         await authorizeSourceSession(deps, grant, before.sourceSessionId, "session.control");
+        // Still live on a machine its task has since moved away from: record
+        // the move now, so the retirement below ends it there in this call.
+        if (
+          before.session.lifecycle !== "lost" &&
+          before.session.controller &&
+          before.session.placement.kind === "connected_machine" &&
+          (await recordSourcePlacementMove(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            connectedSandboxId: before.session.placement.sandboxId,
+          }))
+        ) {
+          before = await getComputerSessionControlRecord(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            computerSessionId,
+          });
+        }
         if (
           before.session.lifecycle === "lost" &&
           before.session.failureCode === "source_placement_changed" &&
@@ -1078,6 +1156,13 @@ export function registerComputerSessionRoutes(
               "This computer session still runs on the Connected Machine its task moved away from, and that machine could not stop it now. Try again when the machine is online.",
             );
           }
+          // The machine is reachable again: end anything else this task left
+          // on it too, without making this request wait.
+          void retireSourceFormerPlacements(channelServices, {
+            grant,
+            sourceSessionId: before.sourceSessionId,
+            origin: null,
+          });
         }
         if (before.session.controller) controllerAuthorityRoot(deps);
         const prepared = await prepareComputerSessionEnd(deps.db, {
@@ -1108,13 +1193,28 @@ export function registerComputerSessionRoutes(
           operationId: request.operationId,
         });
         const binding = record.session.controller;
-        if (!binding) {
+        // A computer with no controller, or in a Chrome profile that can never
+        // be reached again, ends here; completing under the bound generation
+        // fences that controller off.
+        if (
+          !binding ||
+          (record.session.placement?.kind === "attached_device" &&
+            (await interactionControllerGone(
+              deps.db,
+              await attachedBrowserViewer(deps, grant, workspaceId),
+              {
+                ...record.session.placement,
+                deviceWorkspaceId: record.deviceWorkspaceId,
+                placementInstanceId: binding.placementInstanceId,
+              },
+            )))
+        ) {
           const completed = await completeComputerSessionEnd(deps.db, {
             accountId: grant.accountId,
             workspaceId,
             operationId: request.operationId,
             computerSessionId,
-            expectedControllerGeneration: null,
+            expectedControllerGeneration: binding?.controllerGeneration ?? null,
           });
           await releaseInteractionHolder(
             grant,
@@ -1132,6 +1232,7 @@ export function registerComputerSessionRoutes(
           sourceSession,
           grant,
           record.session.placement,
+          record.deviceWorkspaceId,
           binding.placementInstanceId,
           "computer.end",
           context.req.raw.signal,
@@ -1238,6 +1339,9 @@ export function registerComputerSessionRoutes(
     sourceSession: Session,
     grant: AccessGrant,
     expectedPlacement: InteractionPlacement | null,
+    /** An existing session's attached profile workspace, which pins the
+     *  profile copy its controller check uses. */
+    expectedDeviceWorkspaceId: string | null,
     expectedPlacementInstanceId: string | null,
     operation: ChannelAOperation,
     waitSignal: AbortSignal,
@@ -1255,6 +1359,7 @@ export function registerComputerSessionRoutes(
       const device = await getAttachedBrowserDevice(deps.db, {
         ...viewer,
         deviceId: expectedPlacement.deviceId,
+        deviceWorkspaceId: expectedDeviceWorkspaceId,
       });
       if (device.state !== "connected") {
         throw new ComputerSessionStateError("Attached browser machine is disconnected");
@@ -1269,7 +1374,7 @@ export function registerComputerSessionRoutes(
         );
       }
       if (operation !== "computer.end") {
-        assertConnectedMachineComputerAccess(enrollment, operation);
+        await assertConnectedMachineComputerAccess(enrollment, operation);
       }
       const placementInstanceId = attachedEndPlacementInstanceId(
         operation,
@@ -1321,6 +1426,7 @@ export function registerComputerSessionRoutes(
         session: built.session as unknown as BrowserControlPlacementSession,
         lease: null,
         screenControlAllowed: enrollment.allowScreenControl === true,
+        attachedDeviceWorkspaceId: device.workspaceId,
       });
     }
     const runWithChannelA =
@@ -1402,7 +1508,19 @@ export function registerComputerSessionRoutes(
             if (!enrollment?.connectionInstanceId) {
               throw new ComputerSessionStateError("Connected Machine is unavailable");
             }
-            assertConnectedMachineComputerAccess(enrollment, operation);
+            await assertConnectedMachineComputerAccess(enrollment, operation, async () => {
+              const sandbox = await getChannelAMachineSandbox(
+                deps.db,
+                {
+                  accountId: grant.accountId,
+                  workspaceId: sourceSession.workspaceId,
+                  sessionId: sourceSession.id,
+                },
+                await handle.machineAuthority(),
+                resolved.sandboxId!,
+              );
+              return sandbox?.name ?? null;
+            });
             screenControlAllowed = enrollment.allowScreenControl === true;
           }
           if (expectedPlacement?.kind === "connected_machine") {
@@ -1752,6 +1870,7 @@ export function registerComputerSessionRoutes(
         sourceSession,
         grant,
         record.session.placement,
+        record.deviceWorkspaceId,
         binding.placementInstanceId,
         channelOperation,
         context.req.raw.signal,
@@ -2002,6 +2121,7 @@ function computerCreateInput(
   workspaceId: string,
   request: CreateComputerSessionRequestValue,
   placement: InteractionPlacement,
+  attachedDeviceWorkspaceId?: string,
 ) {
   return {
     accountId: grant.accountId,
@@ -2011,6 +2131,7 @@ function computerCreateInput(
     actorSubjectId: grant.subjectId,
     name: request.name ?? "Computer",
     placement,
+    attachedDeviceWorkspaceId: attachedDeviceWorkspaceId ?? null,
   };
 }
 
@@ -2128,16 +2249,14 @@ async function authorizeSourceSession(
   }
 }
 
-async function parseJsonBody<T>(
+async function parseJsonBody<Schema extends z.ZodType>(
   context: Context,
-  schema: {
-    safeParse(value: unknown): { success: true; data: T } | { success: false };
-  },
-): Promise<T> {
-  const value = await context.req.json().catch(() => undefined);
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new HTTPException(400, { message: "invalid request body" });
-  return parsed.data;
+  schema: Schema,
+): Promise<z.output<Schema>> {
+  return parseRequestBody(schema, await context.req.json().catch(() => undefined), {
+    status: 400,
+    message: "invalid request body",
+  });
 }
 
 async function parseEmptyJsonBody(context: Context): Promise<void> {
@@ -2213,18 +2332,21 @@ function attachedEndPlacementInstanceId(
   return liveGeneration;
 }
 
-function assertConnectedMachineComputerAccess(
+async function assertConnectedMachineComputerAccess(
   enrollment: {
     hasDisplay: boolean;
     desktopUnavailableReason: string | null;
     allowScreenControl: boolean;
+    os?: string | null;
   },
   operation: ChannelAOperation,
-): void {
-  const error = connectedMachineComputerAccessError(
-    enrollment,
-    operation === "computer.action" || operation === "computer.control",
-  );
+  /** The checked machine's name, read only when access fails. */
+  machineName: () => Promise<string | null> = async () => null,
+): Promise<void> {
+  const requiresControl = operation === "computer.action" || operation === "computer.control";
+  if (!connectedMachineComputerAccessError(enrollment, requiresControl)) return;
+  const name = await machineName().catch(() => null);
+  const error = connectedMachineComputerAccessError(enrollment, requiresControl, name);
   if (!error) return;
   if (error.status === 403) {
     throw new HTTPException(403, { message: error.message });
@@ -2276,8 +2398,12 @@ function interactionFailure(error: unknown) {
 }
 
 function computerRouteError(error: unknown): HTTPException {
+  const actionDeadline = interactionActionDeadlineApiError(error);
+  if (actionDeadline) return actionDeadline;
   const connectedMachineError = interactionControlApiError(error, "computer");
   if (connectedMachineError) return connectedMachineError;
+  const routeUnavailable = activeRouteUnavailableError(error);
+  if (routeUnavailable) return routeUnavailable;
   if (error instanceof HTTPException) return error;
   if (error instanceof SandboxPaidComputeAdmissionError)
     return new HTTPException(402, { message: error.message, cause: error });

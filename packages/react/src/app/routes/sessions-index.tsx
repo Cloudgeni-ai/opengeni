@@ -261,6 +261,9 @@ function SessionsIndexRouteContent({
   const api = useAppApi();
   const page = usePage();
   const starters = useSessionUiFeature("starters");
+  // Without the chat list, the new-chat page shows no other chats either: no
+  // recent chats and no project picker that files the chat among them.
+  const chatList = useSessionUiFeature("chatList");
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -1946,13 +1949,15 @@ function SessionsIndexRouteContent({
               </>
             }
             header={
-              <SessionSetupStrip
-                disabled={busy || newSessionDraft.loading}
-                channels={channelsQuery.channels}
-                selectedChannelId={selectedChannelId}
-                onChannelChange={selectProject}
-                onCreateProject={() => setProjectDialogOpen(true)}
-              />
+              chatList ? (
+                <SessionSetupStrip
+                  disabled={busy || newSessionDraft.loading}
+                  channels={channelsQuery.channels}
+                  selectedChannelId={selectedChannelId}
+                  onChannelChange={selectProject}
+                  onCreateProject={() => setProjectDialogOpen(true)}
+                />
+              ) : undefined
             }
           />
 
@@ -2021,7 +2026,7 @@ function SessionsIndexRouteContent({
           />
         </div>
 
-        <RecentSessions workspaceId={workspaceId} />
+        {chatList ? <RecentSessions workspaceId={workspaceId} /> : null}
         {starters ? (
           <NewSessionStarters
             workspaceId={workspaceId}
@@ -2228,6 +2233,7 @@ function SessionModelControl({
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
       connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
+      claudeSubscriptionAvailable={context.clientConfig.claudeSubscriptionEnabled === true}
       onModelChange={(model) => {
         onPolicyChosen();
         context.setModel(model);

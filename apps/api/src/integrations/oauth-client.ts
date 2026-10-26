@@ -1,3 +1,4 @@
+import { assertGoogleConnectorSetupEnabled } from "./google-connector-availability";
 import { sql } from "drizzle-orm";
 import { safeReturnPath } from "./oauth-return-path";
 import { assertOrganizationIntegrationAllowed, stableJson } from "@opengeni/contracts";
@@ -12,7 +13,6 @@ import {
 } from "@opengeni/config";
 import {
   OAuthStartResponse,
-  selectCanonicalPersonalSlackConnection,
   type ConnectionOwnership,
   type OAuthStartRequest,
 } from "@opengeni/contracts";
@@ -75,10 +75,12 @@ import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "./connect-authority";
 import {
   DEFAULT_OAUTH_PROFILE,
   OFFICIAL_GMAIL_MCP_URL,
+  OFFICIAL_DRIVE_MCP_URL,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
   DEPLOYMENT_MANAGED_CLIENTS,
   builtInOAuthProfileByKey,
   assertAuthorizationServerNotReserved,
@@ -92,6 +94,7 @@ import {
   type PinnableAuthorizationServer,
 } from "./oauth-profiles";
 import { canonicalProviderDomain } from "./provider-domain";
+import { decideOAuthAccountConnection, oauthAccountFailureMessage } from "./oauth-account-identity";
 
 export const oauthStateTtlMs = 10 * 60 * 1000;
 
@@ -169,7 +172,7 @@ type OAuthClientDeps = {
 
 export type OAuthStartContext = {
   /** Server-selected dedicated adapter identity; never copied from request metadata. */
-  integrationKey?: "gmail" | "slack-personal";
+  integrationKey?: "gmail" | "google-drive" | "google-calendar" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   accountId: string;
@@ -205,7 +208,7 @@ type OAuthClientRegistration = {
 };
 
 type OAuthStatePayload = {
-  integrationKey?: "gmail" | "slack-personal";
+  integrationKey?: "gmail" | "google-drive" | "google-calendar" | "slack-personal";
   connectAttemptId?: string;
   externalContinuation?: ExternalActorContinuation;
   returnUrl?: string;
@@ -468,6 +471,19 @@ export async function startMcpOAuth(
   deps: OAuthClientDeps,
   context: OAuthStartContext,
 ): Promise<OAuthStartResponse> {
+  const startTarget = canonicalMcpResource(context.payload.mcpUrl ?? context.payload.resource);
+  if (
+    context.integrationKey === "google-drive" &&
+    (startTarget !== OFFICIAL_DRIVE_MCP_URL || context.payload.ownership !== "personal")
+  ) {
+    throw new HTTPException(422, {
+      message: "Google Drive setup requires its exact MCP endpoint and personal ownership",
+    });
+  }
+  assertGoogleMcpSetupEnabled(
+    deps.settings,
+    builtInOAuthProfileFor({ mcpUrl: startTarget }) ?? DEFAULT_OAUTH_PROFILE,
+  );
   await withOrganizationIntegrationAcquisition(
     deps.db,
     context,
@@ -557,12 +573,9 @@ async function startMcpOAuthWithinDeadline(
       subjectId: context.subjectId,
       providerDomain,
       mcpUrl,
-      connectionSelection: profile.connectionSelection,
-      exactMcpBinding: profile.exactMcpBinding,
       connectionId: context.payload.connectionId,
       newAccount: context.payload.newAccount === true,
       requestedOwnership: context.payload.ownership,
-      newConnectionOwnership: requestedOwnership,
     }),
   );
   if (context.payload.connectionId && !existing) {
@@ -619,7 +632,7 @@ async function startMcpOAuthWithinDeadline(
       "configuration_missing",
       new HTTPException(503, {
         message:
-          "Gmail OAuth requires a registered Google Web application client with a secret and supported token authentication",
+          "Google connector OAuth requires a registered Google Web application client with a secret and supported token authentication",
       }),
     );
   }
@@ -719,6 +732,28 @@ export function isHostedSlackMcpTarget(providerDomain: string, mcpUrl: string): 
   return builtInOAuthProfileFor({ mcpUrl, providerDomain })?.key === "hosted-slack-mcp";
 }
 
+function assertGoogleMcpSetupEnabled(settings: Settings, profile: OAuthProviderProfile): void {
+  if (
+    profile.key === "official-gmail" ||
+    profile.key === "official-drive" ||
+    profile.key === "official-google-calendar"
+  ) {
+    assertGoogleConnectorSetupEnabled(settings);
+  }
+  if (profile.key === "official-drive" && !settings.googleDriveMcpEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "Google Drive MCP is unavailable until this deployment has completed Google's preview and OAuth setup.",
+    });
+  }
+  if (profile.key === "official-google-calendar" && !settings.googleCalendarEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "Google Calendar is unavailable until this deployment adds the Calendar scopes to its Google OAuth app.",
+    });
+  }
+}
+
 /** Start-time payload fences declared by the resolved profile. */
 function assertOAuthStartProfile(
   settings: Settings,
@@ -726,6 +761,7 @@ function assertOAuthStartProfile(
   mcpUrl: string,
   profile: OAuthProviderProfile,
 ): void {
+  assertGoogleMcpSetupEnabled(settings, profile);
   if (profile.rejectCallerOAuthClient && payload.oauthClient) {
     throw new HTTPException(422, { message: profile.rejectCallerOAuthClient.message });
   }
@@ -811,6 +847,12 @@ async function completeMcpOAuthCallbackWithinDeadline(
   let state: OAuthStatePayload | null = null;
   let integrationKey: string | null = "custom:mcp";
   let connectOperation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
+  // A personal sign-in started with `connections:personal` finishes with it too.
+  let ownerPermission: ReturnType<typeof connectSetupPermission> = "connections:write";
+  // Set once the signed state is bound to its stored attempt, and once this
+  // callback holds the attempt's operation. Failures after the match settle it.
+  let attemptMatched = false;
+  let operationClaimed = false;
   if (!input.state) {
     const error = new OAuthCallbackStageError(
       "state_verify",
@@ -830,27 +872,44 @@ async function completeMcpOAuthCallbackWithinDeadline(
     integrationKey = state.integrationKey ?? "custom:mcp";
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
-      // Native Gmail setup uses its own provider id, but shares this callback.
-      // Bind that id to the exact reviewed Gmail destination before
-      // claiming an operation (including receipt replay), not to arbitrary MCP.
+      // Dedicated Google setup shares this callback. Bind each trusted provider
+      // id to its exact reviewed endpoint before claiming an operation or replay.
       const gmailAttemptMatches =
         stored.attempt.providerId === "gmail" &&
         state.mcpUrl === OFFICIAL_GMAIL_MCP_URL &&
         state.providerDomain === "gmailmcp.googleapis.com" &&
         builtInOAuthProfileFor(state)?.key === "official-gmail" &&
         personalOwnerStateAccepted(state);
+      const driveAttemptMatches =
+        stored.attempt.providerId === "google-drive" &&
+        state.integrationKey === "google-drive" &&
+        state.mcpUrl === OFFICIAL_DRIVE_MCP_URL &&
+        state.providerDomain === "drivemcp.googleapis.com" &&
+        builtInOAuthProfileFor(state)?.key === "official-drive" &&
+        personalOwnerStateAccepted(state);
+      const calendarAttemptMatches =
+        stored.attempt.providerId === "google-calendar" &&
+        state.integrationKey === "google-calendar" &&
+        state.mcpUrl === OFFICIAL_GOOGLE_CALENDAR_MCP_URL &&
+        state.providerDomain === "calendarmcp.googleapis.com" &&
+        builtInOAuthProfileFor(state)?.key === "official-google-calendar" &&
+        personalOwnerStateAccepted(state);
       if (
         (!["mcp-oauth", "slack-personal"].includes(stored.attempt.providerId) &&
-          !gmailAttemptMatches) ||
+          !gmailAttemptMatches &&
+          !driveAttemptMatches &&
+          !calendarAttemptMatches) ||
         stored.attempt.ownership !== state.ownership ||
         stored.returnUrl !== state.returnUrl
       )
         throw new HTTPException(403, { message: "OAuth attempt mismatch" });
+      ownerPermission = connectSetupPermission(stored.attempt);
       connectOperation = {
         attemptId: state.connectAttemptId,
         operationId: `oauth:${state.nonce}`,
         inputDigest: createHash("sha256").update(input.state).digest("hex"),
       };
+      attemptMatched = true;
       integrationKey = integrationKeyForConnectProvider(stored.attempt.providerId);
       const claim = await claimOAuthAcquisition(
         db,
@@ -859,12 +918,13 @@ async function completeMcpOAuthCallbackWithinDeadline(
           ...connectOperation,
           expectedRevision: stored.attempt.revision,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
         },
         integrationKey,
         Boolean(input.code),
       );
       if (claim.status === "replayed") return { redirectTo: stored.returnUrl, exactReturn: true };
+      operationClaimed = true;
     }
     // The callback enforces the signed start-time principal decision.
     // Workspace ownership requires no personal-owner claim.
@@ -884,7 +944,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         await finishConnectOperation(db, state, {
           ...connectOperation,
           authorize: (tx, _attempt, origin) =>
-            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+            requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
           commit: async (_tx, current) => ({
             ...current,
             revision: current.revision + 1,
@@ -912,7 +972,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       "state_verify",
       db,
       async (scopedDb) => {
-        await requireOAuthCallbackGrant(scopedDb, state!);
+        await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
         return await consumeIntegrationOAuthStateNonce(scopedDb, {
           accountId: state!.accountId,
           workspaceId: state!.workspaceId,
@@ -945,6 +1005,15 @@ async function completeMcpOAuthCallbackWithinDeadline(
         }),
       };
     }
+    if (connectOperation && attemptMatched) {
+      // The attempt is known, so the card must not keep waiting on it.
+      await settleFailedConnectAttempt(deps, state, connectOperation, {
+        claimed: operationClaimed,
+        stage: staged,
+        message:
+          "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+      });
+    }
     return callbackStateResult(state, "error", {
       stage: staged.stage,
       reason: staged.reason,
@@ -953,6 +1022,14 @@ async function completeMcpOAuthCallbackWithinDeadline(
 
   const ownerSubjectId = state.ownership === "personal" ? state.subjectId : null;
   try {
+    // A gate can change while the human is at Google. Claim the validated
+    // Connect operation first so this refusal has a durable terminal receipt,
+    // while still stopping before client lookup or any provider request.
+    try {
+      assertGoogleMcpSetupEnabled(settings, builtInOAuthProfileFor(state) ?? DEFAULT_OAUTH_PROFILE);
+    } catch (error) {
+      throw new OAuthCallbackStageError("client_lookup", "setup_unavailable", error);
+    }
     const baseUrl = integrationBaseUrl(settings.publicBaseUrl, input.requestUrl);
     const redirectUri = `${baseUrl}/v1/integrations/oauth/callback`;
     const key = requireEnvironmentEncryption(settings);
@@ -967,7 +1044,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       throw new OAuthCallbackStageError(
         "client_lookup",
         "invalid_client",
-        new Error("Gmail OAuth client is unavailable"),
+        new Error("Google connector OAuth client is unavailable"),
       );
     }
     const token = await deadline.run("token_exchange", (signal) =>
@@ -989,7 +1066,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       throw new OAuthCallbackStageError(
         "token_exchange",
         "offline_access_unavailable",
-        new Error("Google did not grant offline access. Start a new Gmail connection attempt."),
+        new Error("Google did not grant offline access. Start a new connector connection attempt."),
       );
     }
     const scopes = grantedScopes(token.scopeText, state.authorizeScopes, profile);
@@ -1000,7 +1077,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
       throw new OAuthCallbackStageError(
         "token_exchange",
         "insufficient_scope",
-        new Error("Google did not grant the reviewed Gmail permissions."),
+        new Error("Google did not grant the requested connector permissions."),
       );
     }
     const verification = await verifyMcpToolsListNonFatal(
@@ -1037,67 +1114,39 @@ async function completeMcpOAuthCallbackWithinDeadline(
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
     const persist = async (scopedDb: Database) => {
-      await requireOAuthCallbackGrant(scopedDb, state!);
-      if (profile?.connectionSelection === "canonical_personal") {
-        const identity = slackOAuthIdentity(metadata);
-        if (identity) {
-          // Serialize callbacks for one exact provider identity, including two
-          // simultaneous Add requests. Different Slack workspaces remain independent.
-          const identityLockKey = JSON.stringify([
-            state.accountId,
-            state.workspaceId,
-            ownerSubjectId,
-            state.mcpUrl,
-            identity,
-          ]);
-          await scopedDb.execute(
-            sql`select pg_advisory_xact_lock(hashtextextended(${`oauth-identity:${identityLockKey}`}, 0))`,
-          );
-        }
-        if (state!.connectionId) {
-          const existing = await getConnectionMetadata(
-            scopedDb,
-            state.workspaceId,
-            state.connectionId!,
-            state.subjectId,
-          );
-          const expected = existing ? slackOAuthIdentity(existing.metadata) : null;
-          if (expected && identity !== expected) {
-            throw new OAuthCallbackStageError(
-              "persist",
-              "account_mismatch",
-              new Error(
-                "Sign in to the same Slack account and workspace to reconnect. Use Add account for a different identity.",
-              ),
-            );
-          }
-        } else if (identity) {
-          const existing = await listConnectionsMetadata(
-            scopedDb,
-            state.workspaceId,
-            state.subjectId,
-          );
-          if (
-            existing.some(
-              (connection) =>
-                connection.subjectId === ownerSubjectId &&
-                connection.providerDomain === state.providerDomain &&
-                connection.kind === "oauth2" &&
-                connection.status !== "revoked" &&
-                connection.metadata.mcpUrl === state.mcpUrl &&
-                slackOAuthIdentity(connection.metadata) === identity,
-            )
-          ) {
-            throw new OAuthCallbackStageError(
-              "persist",
-              "account_already_connected",
-              new Error(
-                "This Slack account is already connected. Reconnect the existing account instead.",
-              ),
-            );
-          }
-        }
+      await requireOAuthCallbackGrant(scopedDb, state!, ownerPermission);
+      // Serialize the entire owner/resource bucket, including providers with no
+      // identity proof. Locking only a known identity lets unknown callbacks race it.
+      const bucket = JSON.stringify([
+        state.accountId,
+        state.workspaceId,
+        ownerSubjectId,
+        state.mcpUrl,
+      ]);
+      await scopedDb.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`oauth-account:${bucket}`}, 0))`,
+      );
+      const accounts = await listConnectionsMetadata(scopedDb, state.workspaceId, state.subjectId);
+      const decision = decideOAuthAccountConnection({
+        accounts,
+        ownerSubjectId,
+        providerDomain: state.providerDomain,
+        mcpUrl: state.mcpUrl,
+        metadata,
+        grantedScopes: scopes,
+        identityKeys: profile?.accountIdentityMetadataKeys,
+        requestedConnectionId: state.connectionId,
+      });
+      if (decision.kind === "reject") {
+        throw new OAuthCallbackStageError(
+          "persist",
+          decision.reason,
+          new Error(oauthAccountFailureMessage(decision.reason)),
+        );
       }
+      // A repeated Add is a successful no-op. Do not rotate credentials, reset
+      // approvals or invalidate accepted work just because OAuth ran again.
+      if (decision.kind === "reuse") return decision.connection;
       return state!.connectionId
         ? await updateConnection(scopedDb, {
             workspaceId: state.workspaceId,
@@ -1136,7 +1185,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
           {
             ...connectOperation!,
             authorize: (tx, _attempt, origin) =>
-              requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+              requireConnectOwnerAuthority(tx, state!, ownerPermission, origin),
             commit: async (tx, current) => {
               const connection = await persist(tx);
               if (!connection)
@@ -1193,46 +1242,85 @@ async function completeMcpOAuthCallbackWithinDeadline(
     if (connectOperation) {
       // The external return URL stays exact. Its caller reads the durable
       // attempt result, which must not remain in flight after a rejected grant.
-      try {
-        await withDatabaseStatementTimeout(db, OAUTH_CALLBACK_DB_STATEMENT_TIMEOUT_MS, (tx) =>
-          finishConnectOperation(tx, state!, {
-            ...connectOperation!,
-            authorize: (locked, _attempt, origin) =>
-              requireConnectOwnerAuthority(locked, state!, "connections:write", origin),
-            commit: async (_locked, current) => ({
-              ...current,
-              revision: current.revision + 1,
-              state: "failed",
-              nextAction: { type: "none" },
-              error: {
-                code: staged.reason,
-                message:
-                  staged.reason === "account_mismatch"
-                    ? "Sign in to the same Slack account and workspace to reconnect. Use Add account for a different identity."
-                    : staged.reason === "account_already_connected"
-                      ? "This Slack account is already connected. Reconnect the existing account instead."
-                      : staged.reason === "offline_access_unavailable"
-                        ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Gmail connection attempt."
-                        : staged.reason === "insufficient_scope"
-                          ? "Google did not grant all required Gmail permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
-                          : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
-                retryable: true,
-              },
-            }),
-          }),
-        );
-      } catch (settlementError) {
-        logOAuthCallbackFailure(
-          observability,
-          new OAuthCallbackStageError("persist", "persist_failed", settlementError),
-          state,
-        );
-      }
+      await settleFailedConnectAttempt(deps, state, connectOperation, {
+        claimed: true,
+        stage: staged,
+        message:
+          staged.reason === "setup_unavailable"
+            ? "Google connector setup is currently unavailable. Your previous connection is unchanged. Try a new connection attempt after setup is enabled."
+            : staged.reason === "account_mismatch"
+              ? oauthAccountFailureMessage("account_mismatch")
+              : staged.reason === "account_already_connected"
+                ? oauthAccountFailureMessage("account_already_connected")
+                : staged.reason === "account_identity_unavailable"
+                  ? oauthAccountFailureMessage("account_identity_unavailable")
+                  : staged.reason === "offline_access_unavailable"
+                    ? "Google did not grant offline access. Your previous connection is unchanged. Start a new Google connection attempt."
+                    : staged.reason === "insufficient_scope"
+                      ? "Google did not grant all required Google connector permissions. Your previous connection is unchanged. Start a new connection attempt and approve the requested permissions."
+                      : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
+      });
     }
     return callbackStateResult(state, "error", {
       stage: staged.stage,
       reason: staged.reason,
     });
+  }
+}
+
+/**
+ * Settle a known connect attempt as failed after its callback could not finish.
+ *
+ * This deliberately skips the owner-authority check: a failure commits no
+ * credential or installation and only touches the signed state's own attempt,
+ * within its actor scope. Requiring the grant here would leave the attempt in
+ * flight exactly when the grant itself was the reason the callback failed.
+ * When this callback did not claim the operation, it claims it first, which
+ * refuses to take over another callback's in-flight operation.
+ */
+async function settleFailedConnectAttempt(
+  deps: OAuthClientDeps,
+  state: OAuthStatePayload,
+  operation: { attemptId: string; operationId: string; inputDigest: string },
+  input: { claimed: boolean; stage: OAuthCallbackStageError; message: string },
+): Promise<void> {
+  try {
+    await withDatabaseStatementTimeout(
+      deps.db,
+      OAUTH_CALLBACK_DB_STATEMENT_TIMEOUT_MS,
+      async (tx) => {
+        if (!input.claimed) {
+          const stored = await getConnectAttempt(tx, state, operation.attemptId);
+          if (
+            ["complete", "cancelled", "expired", "failed", "uncertain"].includes(
+              stored.attempt.state,
+            )
+          )
+            return;
+          const claim = await claimConnectOperation(tx, state, {
+            ...operation,
+            expectedRevision: stored.attempt.revision,
+          });
+          if (claim.status === "replayed") return;
+        }
+        await finishConnectOperation(tx, state, {
+          ...operation,
+          commit: async (_locked, current) => ({
+            ...current,
+            revision: current.revision + 1,
+            state: "failed",
+            nextAction: { type: "none" },
+            error: { code: input.stage.reason, message: input.message, retryable: true },
+          }),
+        });
+      },
+    );
+  } catch (settlementError) {
+    logOAuthCallbackFailure(
+      deps.observability,
+      new OAuthCallbackStageError(input.stage.stage, "persist_failed", settlementError),
+      state,
+    );
   }
 }
 
@@ -1280,8 +1368,12 @@ export function requireIntegrationsStateSecret(settings: Settings): string {
   return secret;
 }
 
-async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload): Promise<void> {
-  await requireConnectOwnerAuthority(db, state);
+async function requireOAuthCallbackGrant(
+  db: Database,
+  state: OAuthStatePayload,
+  permission: ReturnType<typeof connectSetupPermission>,
+): Promise<void> {
+  await requireConnectOwnerAuthority(db, state, permission);
 }
 
 /** The hosted-Slack profile's origin pins, kept exported for its tests. */
@@ -1903,6 +1995,7 @@ function operatorClientEntryFor(
 
 /** Secret-free readiness for the exact registered client used by Gmail setup. */
 export function gmailOAuthClientConfigured(settings: Settings): boolean {
+  if (!settings.googleConnectorSetupEnabled) return false;
   const entry = operatorClientEntryFor(settings, ["https://accounts.google.com"]);
   return Boolean(
     entry &&
@@ -1914,6 +2007,16 @@ export function gmailOAuthClientConfigured(settings: Settings): boolean {
       ),
     }),
   );
+}
+
+/** Drive also requires preview readiness; sharing an issuer client is not verification. */
+export function googleDriveOAuthClientConfigured(settings: Settings): boolean {
+  return settings.googleDriveMcpEnabled && gmailOAuthClientConfigured(settings);
+}
+
+/** Calendar shares the Google client once the deployment has added the Calendar scopes to it. */
+export function googleCalendarOAuthClientConfigured(settings: Settings): boolean {
+  return settings.googleCalendarEnabled && gmailOAuthClientConfigured(settings);
 }
 
 function isConfidentialOAuthClient(client: {
@@ -1989,16 +2092,6 @@ async function dynamicClientRegistration(
   };
 }
 
-/** Slack user IDs are scoped to the Slack workspace, not globally unique. */
-function slackOAuthIdentity(metadata: Record<string, unknown>): string | null {
-  return typeof metadata.slackTeamId === "string" &&
-    metadata.slackTeamId &&
-    typeof metadata.slackUserId === "string" &&
-    metadata.slackUserId
-    ? JSON.stringify([metadata.slackTeamId, metadata.slackUserId])
-    : null;
-}
-
 async function existingOAuthConnectionForStart(
   db: Database,
   input: {
@@ -2006,17 +2099,14 @@ async function existingOAuthConnectionForStart(
     subjectId: string;
     providerDomain: string;
     mcpUrl: string;
-    connectionSelection: OAuthProviderProfile["connectionSelection"];
-    exactMcpBinding: boolean;
     connectionId?: string | undefined;
     newAccount?: boolean;
     requestedOwnership?: ConnectionOwnership | undefined;
-    newConnectionOwnership: ConnectionOwnership;
   },
 ) {
   if (input.newAccount) {
-    // A further account always mints its own row; it never refreshes (and so
-    // never replaces) an account the caller already holds for this provider.
+    // Resolve account identity after authorization; never choose credentials
+    // based only on the provider before we know who signed in.
     return null;
   }
   if (input.connectionId) {
@@ -2036,31 +2126,13 @@ async function existingOAuthConnectionForStart(
       });
     }
     return connection.providerDomain === input.providerDomain &&
-      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl)
+      connection.metadata.mcpUrl === input.mcpUrl
       ? connection
       : null;
   }
-  const visible = await listConnectionsMetadata(db, input.workspaceId, input.subjectId);
-  const ownerSubjectId = input.newConnectionOwnership === "personal" ? input.subjectId : null;
-  const matching = visible.filter(
-    (connection) =>
-      connection.subjectId === ownerSubjectId &&
-      connection.kind === "oauth2" &&
-      connection.providerDomain === input.providerDomain &&
-      (!input.exactMcpBinding || connection.metadata.mcpUrl === input.mcpUrl),
-  );
-  if (input.connectionSelection === "canonical_personal") {
-    const identities = new Set(
-      matching.map((connection) => slackOAuthIdentity(connection.metadata) ?? connection.id),
-    );
-    if (identities.size > 1) {
-      throw new HTTPException(409, {
-        message: "Choose the Slack account to reconnect, or add a new account",
-      });
-    }
-    return selectCanonicalPersonalSlackConnection(matching);
-  }
-  return matching.find((connection) => connection.status === "active") ?? null;
+  // Only explicit Reconnect may replace a credential. Plain Connect and Add
+  // resolve the returned identity through the same atomic persistence policy.
+  return null;
 }
 
 function ownershipForConnection(
@@ -2160,6 +2232,8 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   if (
     payload.integrationKey !== undefined &&
     payload.integrationKey !== "gmail" &&
+    payload.integrationKey !== "google-drive" &&
+    payload.integrationKey !== "google-calendar" &&
     payload.integrationKey !== "slack-personal"
   ) {
     throw new HTTPException(400, { message: "invalid OAuth integration identity" });
@@ -2225,7 +2299,13 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     // Absent on a legacy state, which therefore cannot land a personal owner.
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
     ...(payload.integrationKey
-      ? { integrationKey: payload.integrationKey as "gmail" | "slack-personal" }
+      ? {
+          integrationKey: payload.integrationKey as
+            | "gmail"
+            | "google-drive"
+            | "google-calendar"
+            | "slack-personal",
+        }
       : {}),
     providerDomain: requiredString(payload.providerDomain, "state.providerDomain"),
     mcpUrl: stringValue(payload.mcpUrl) ?? resource,
@@ -2287,6 +2367,28 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
   const connectionId = stringValue(payload.connectionId);
   const connectionVersion = numberValue(payload.connectionVersion);
   assertProfileOwnership(builtInOAuthProfileFor(parsed), parsed.ownership);
+  if (
+    parsed.integrationKey === "google-drive" &&
+    (parsed.mcpUrl !== OFFICIAL_DRIVE_MCP_URL ||
+      parsed.resource !== OFFICIAL_DRIVE_MCP_URL ||
+      parsed.providerDomain !== "drivemcp.googleapis.com" ||
+      parsed.ownership !== "personal" ||
+      builtInOAuthProfileFor(parsed)?.key !== "official-drive")
+  ) {
+    throw new HTTPException(400, { message: "invalid Google Drive OAuth integration identity" });
+  }
+  if (
+    parsed.integrationKey === "google-calendar" &&
+    (parsed.mcpUrl !== OFFICIAL_GOOGLE_CALENDAR_MCP_URL ||
+      parsed.resource !== OFFICIAL_GOOGLE_CALENDAR_MCP_URL ||
+      parsed.providerDomain !== "calendarmcp.googleapis.com" ||
+      parsed.ownership !== "personal" ||
+      builtInOAuthProfileFor(parsed)?.key !== "official-google-calendar")
+  ) {
+    throw new HTTPException(400, {
+      message: "invalid Google Calendar OAuth integration identity",
+    });
+  }
   if (Boolean(connectionId) !== Boolean(connectionVersion)) {
     throw new HTTPException(400, { message: "invalid OAuth reconnect state" });
   }
@@ -2720,6 +2822,7 @@ async function verifyMcpToolsList(
   resource: string,
   token: TokenResponse,
   signal: AbortSignal,
+  verification?: OAuthProviderProfile["remoteToolVerification"],
 ): Promise<Array<{ name: string; description?: string }>> {
   const listed = await withMcpStreamableHttpClient(
     {
@@ -2738,15 +2841,24 @@ async function verifyMcpToolsList(
           signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         }),
     },
-    (client) =>
-      client
-        .listTools(undefined, {
-          timeout: 10_000,
-          maxTotalTimeout: 10_000,
-        })
+    async (client) => {
+      const toolsResult = await client
+        .listTools(undefined, { timeout: 10_000, maxTotalTimeout: 10_000 })
         .catch((error: unknown) => {
           throw legacyMcpClientError(error);
-        }),
+        });
+      if (verification) {
+        if (!toolsResult.tools.some((tool) => tool.name === verification.toolName))
+          throw new Error("Required connector verification tool is unavailable");
+        const result = await client.callTool(
+          { name: verification.toolName, arguments: verification.arguments },
+          { timeout: 10_000, maxTotalTimeout: 10_000 },
+        );
+        if (result.isError) throw new Error("Authenticated connector verification failed");
+        // Discard file metadata. Setup retains only the successful proof and tool descriptors.
+      }
+      return toolsResult;
+    },
   );
   return listed.tools.map((tool) => ({
     name: tool.name,
@@ -2775,7 +2887,13 @@ async function verifyMcpToolsListNonFatal(
     let providerIdentity: Record<string, string> | undefined;
     const tools = await deadline.run("tools_list", async (signal) => {
       if (!local || state.mcpUrl !== profile?.requireExactMcpUrl?.url) {
-        return verifyMcpToolsList(settings, state.mcpUrl, token, signal);
+        return verifyMcpToolsList(
+          settings,
+          state.mcpUrl,
+          token,
+          signal,
+          profile?.remoteToolVerification,
+        );
       }
       const response = await fetchOAuth(local.url, settings, {
         method: local.method ?? "POST",
@@ -2821,7 +2939,8 @@ async function verifyMcpToolsListNonFatal(
     if (staged.reason === "timeout" && deadline.signal.aborted) {
       throw staged;
     }
-    if (builtInOAuthProfileFor(state)?.localToolVerification?.required) throw staged;
+    const profile = builtInOAuthProfileFor(state);
+    if (profile?.localToolVerification?.required || profile?.remoteToolVerification) throw staged;
     logOAuthVerificationWarning(observability, staged, state);
     return {
       metadata: {

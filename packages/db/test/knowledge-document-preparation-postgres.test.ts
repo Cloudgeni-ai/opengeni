@@ -8,7 +8,6 @@ import {
   createScheduledTask,
   createConnection,
   ensureKnowledgeSourceSyncState,
-  recordGoogleDriveObjectAclEvidence,
   listScheduledTaskRuns,
   claimSessionWorkForAttempt,
   freezeAgentLearningPolicy,
@@ -167,6 +166,8 @@ test.each(["contract-system", "google-drive"])(
   async (providerKey) => {
     const f = await fixture();
     const { accountId, workspaceId, documentId } = f.identity;
+    const connectionDomain =
+      providerKey === "google-drive" ? "googleapis.com" : "contracts.example.test";
     const sourceContext = {
       accountId,
       workspaceId,
@@ -231,7 +232,7 @@ test.each(["contract-system", "google-drive"])(
       accountId,
       workspaceId,
       subjectId: "user:reader",
-      providerDomain: "googleapis.com",
+      providerDomain: connectionDomain,
       kind: "oauth2",
       credentialEncrypted: "test-only-credential",
       grantedScopes: ["https://www.googleapis.com/auth/drive.readonly"],
@@ -271,7 +272,7 @@ test.each(["contract-system", "google-drive"])(
           connection: {
             connectionId: connection.id,
             connectionVersion: connection.version,
-            providerDomain: "googleapis.com",
+            providerDomain: connectionDomain,
             kind: "oauth2",
             ownerSubjectId: "user:reader",
           },
@@ -312,6 +313,11 @@ test.each(["contract-system", "google-drive"])(
       triggerType: "scheduled",
       producerKey: `import:${documentId}`,
     });
+    if (providerKey === "google-drive") {
+      // Native Drive sync retired: its scheduled source runs never start.
+      expect(dispatched).toEqual({ action: "blocked", reason: "google_drive_native_retired" });
+      return;
+    }
     if (dispatched.action !== "start") throw new Error(JSON.stringify(dispatched));
     const [run] = await listScheduledTaskRuns(client.db, workspaceId, task.id);
     if (!run) throw new Error("Expected ordinary source run");
@@ -338,13 +344,12 @@ test.each(["contract-system", "google-drive"])(
     };
     await freezeAgentLearningPolicy(client.db, agent);
     await ensureKnowledgeSourceSyncState(client.db, task);
-    const [obligation] =
-      await shared.admin`INSERT INTO knowledge_source_sync_index_obligations(account_id,workspace_id,scheduled_task_run_id,
+    await shared.admin`INSERT INTO knowledge_source_sync_index_obligations(account_id,workspace_id,scheduled_task_run_id,
     source_id,source_sync_generation,initiating_subject_id,external_object_id,knowledge_source_object_id,
     knowledge_document_version_id,document_id,source_config_generation,source_lifecycle_generation,object_lifecycle_generation,
     object_version_generation,citation_locator,acl_eligibility)
     VALUES(${accountId},${workspaceId},${run.id},${source.id},${source.syncGeneration},'user:reader','acme-contract',${object.id},${version.id},
-    ${documentId},1,1,1,1,'{}','eligible') RETURNING id`;
+    ${documentId},1,1,1,1,'{}','eligible')`;
     await saveAgentLearningSettings(client.db, f.context, {
       scope: "workspace",
       source: { kind: "scheduled_task", id: task.id },
@@ -372,97 +377,46 @@ test.each(["contract-system", "google-drive"])(
         revisionId: result.receipt.revisionId,
         decision: "approve",
       });
-    if (providerKey === "google-drive") {
-      expect((await readScheduledKnowledgeSource(client.db, agent, {})).items).toEqual([]);
-      await expect(approval()).rejects.toBeDefined();
-      // Content preparation and human review cannot fabricate missing Drive ACL
-      // evidence. Neither retrieval nor embedding may use this source yet.
-      expect(await getKnowledgeEntry(client.db, f.context, claim.entryId)).toBeNull();
-      const jobs = await claimKnowledgeIndexJobs(client.db, {
-        model: "test",
-        dimensions: 3,
-        limit: 20,
-      });
-      const job = jobs.find((item) => item.revisionId === result.receipt.revisionId);
-      if (!job) throw new Error("Expected queued projection");
-      expect(await readKnowledgeIndexSource(client.db, job)).toBeNull();
-      await shared.admin`UPDATE knowledge_source_sync_index_obligations SET status='indexed'
-        WHERE id=${obligation!.id}`;
-      await recordGoogleDriveObjectAclEvidence(client.db, {
-        accountId,
-        workspaceId,
-        obligationId: obligation!.id,
-        connectionId: connection.id,
-        connectionVersion: connection.version,
-        sourceGooglePermissionId: "source-owner",
-        sourceSyncGeneration: source.syncGeneration,
-        sourceConfigGeneration: 1,
-        sourceLifecycleGeneration: 1,
-        objectLifecycleGeneration: 1,
-        objectVersionGeneration: 1,
-        providerRevision: "v1",
-        driveId: null,
-        aclRevision: "verified-source-owner",
-        eligibility: "eligible",
-        observedAt: new Date(Date.now() - 1000).toISOString(),
-        expiresAt: new Date(Date.now() + 3600000).toISOString(),
-        citationLocator: {},
-        operationId: "verify-acl",
-        principals: [],
-      });
-      await approval();
-      expect(
-        (await getKnowledgeEntry(client.db, agent, claim.entryId))?.revision.entry.content,
-      ).toBe(f.input.content);
-      const approvedJob = (
-        await claimKnowledgeIndexJobs(client.db, { model: "test", dimensions: 3, limit: 20 })
-      ).find((item) => item.revisionId === result.receipt.revisionId);
-      if (!approvedJob) throw new Error("Expected approved source projection");
-      expect((await readKnowledgeIndexSource(client.db, approvedJob))?.entry.content).toBe(
-        f.input.content,
-      );
-    } else {
-      const sourcePage = await readScheduledKnowledgeSource(client.db, agent, {});
-      expect(sourcePage.items).toHaveLength(1);
-      expect(sourcePage.items[0]).toMatchObject({
-        entryId: claim.entryId,
-        revisionId: result.receipt.revisionId,
-        pending: true,
-      });
-      const sourceText = await readScheduledKnowledgeSource(client.db, agent, {
-        entryId: claim.entryId,
-      });
-      expect(sourceText.items[0]).toMatchObject({ content: f.input.content });
-      expect(await getKnowledgeEntry(client.db, agent, claim.entryId)).toBeNull();
-      await approval();
-      expect(
-        (await getKnowledgeEntry(client.db, f.context, claim.entryId))?.revision.entry.content,
-      ).toBe(f.input.content);
-      const jobs = await claimKnowledgeIndexJobs(client.db, {
-        model: "test",
-        dimensions: 3,
-        limit: 20,
-      });
-      const job = jobs.find((item) => item.revisionId === result.receipt.revisionId);
-      if (!job) throw new Error("Expected approved source projection");
-      expect((await readKnowledgeIndexSource(client.db, job))?.entry.content).toBe(f.input.content);
-      await deferKnowledgeIndexJob(client.db, job);
-      expect(
-        (
-          await claimKnowledgeIndexJobs(client.db, { model: "test", dimensions: 3, limit: 20 })
-        ).some((item) => item.revisionId === result.receipt.revisionId),
-      ).toBe(false);
-      // Completing the source adapter's external access observation wakes the
-      // existing deferred projection; it must not wait for its retry deadline.
-      await shared.admin`UPDATE knowledge_source_sync_index_obligations SET status='indexed',acl_eligibility='eligible'
-        WHERE account_id=${accountId} AND document_id=${documentId} AND scheduled_task_run_id=${run.id}`;
-      const awakened = (
-        await claimKnowledgeIndexJobs(client.db, { model: "test", dimensions: 3, limit: 20 })
-      ).find((item) => item.revisionId === result.receipt.revisionId);
-      if (!awakened) throw new Error("Expected source completion to wake projection");
-      expect((await readKnowledgeIndexSource(client.db, awakened))?.entry.content).toBe(
-        f.input.content,
-      );
-    }
+    const sourcePage = await readScheduledKnowledgeSource(client.db, agent, {});
+    expect(sourcePage.items).toHaveLength(1);
+    expect(sourcePage.items[0]).toMatchObject({
+      entryId: claim.entryId,
+      revisionId: result.receipt.revisionId,
+      pending: true,
+    });
+    const sourceText = await readScheduledKnowledgeSource(client.db, agent, {
+      entryId: claim.entryId,
+    });
+    expect(sourceText.items[0]).toMatchObject({ content: f.input.content });
+    expect(await getKnowledgeEntry(client.db, agent, claim.entryId)).toBeNull();
+    await approval();
+    expect(
+      (await getKnowledgeEntry(client.db, f.context, claim.entryId))?.revision.entry.content,
+    ).toBe(f.input.content);
+    const jobs = await claimKnowledgeIndexJobs(client.db, {
+      model: "test",
+      dimensions: 3,
+      limit: 20,
+    });
+    const job = jobs.find((item) => item.revisionId === result.receipt.revisionId);
+    if (!job) throw new Error("Expected approved source projection");
+    expect((await readKnowledgeIndexSource(client.db, job))?.entry.content).toBe(f.input.content);
+    await deferKnowledgeIndexJob(client.db, job);
+    expect(
+      (await claimKnowledgeIndexJobs(client.db, { model: "test", dimensions: 3, limit: 20 })).some(
+        (item) => item.revisionId === result.receipt.revisionId,
+      ),
+    ).toBe(false);
+    // Completing the source adapter's external access observation wakes the
+    // existing deferred projection; it must not wait for its retry deadline.
+    await shared.admin`UPDATE knowledge_source_sync_index_obligations SET status='indexed',acl_eligibility='eligible'
+      WHERE account_id=${accountId} AND document_id=${documentId} AND scheduled_task_run_id=${run.id}`;
+    const awakened = (
+      await claimKnowledgeIndexJobs(client.db, { model: "test", dimensions: 3, limit: 20 })
+    ).find((item) => item.revisionId === result.receipt.revisionId);
+    if (!awakened) throw new Error("Expected source completion to wake projection");
+    expect((await readKnowledgeIndexSource(client.db, awakened))?.entry.content).toBe(
+      f.input.content,
+    );
   },
 );

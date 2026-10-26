@@ -27,7 +27,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { completeSocialOAuthCallback, startSocialOAuth } from "../integrations/social-oauth";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestBody, parseRequestJson } from "../http/request-body";
 
 export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, settings, observability } = deps;
@@ -107,13 +107,11 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
   // callback is unauthenticated (browser redirect) but bound by signed state.
   app.post("/v1/workspaces/:workspaceId/social/oauth/start", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const parsed = SocialOAuthStartRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: parsed.error.issues[0]?.message ?? "invalid social OAuth start request",
-      });
-    }
-    const payload = parsed.data;
+    const parsed = parseRequestBody(SocialOAuthStartRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid social OAuth start request",
+    });
+    const payload = parsed;
     const access = await requireAccessGrantAuthorization(
       c,
       deps,

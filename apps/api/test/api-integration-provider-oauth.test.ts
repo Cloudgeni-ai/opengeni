@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 
 import {
-  GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+  MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+  MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
 } from "@opengeni/capabilities";
@@ -12,6 +13,7 @@ import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   signDelegatedAccessToken,
+  type Permission,
 } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
@@ -35,9 +37,8 @@ import { requireWorkspaceToolGatewayAuthorization } from "../src/workspace-tool-
 const DELEGATION_SECRET = "api-integration-provider-oauth-delegation";
 const STATE_SECRET = "api-integration-provider-oauth-state";
 const EDGE_ACCESS_KEY = "api-integration-provider-oauth-edge";
-const GOOGLE_CLIENT_ID = "google-provider-client.apps.googleusercontent.com";
-const GOOGLE_CLIENT_SECRET = "google-provider-client-secret";
 const MICROSOFT_CLIENT_ID = "microsoft-provider-client";
+const MICROSOFT_CLIENT_SECRET = "microsoft-provider-client-secret";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -81,12 +82,11 @@ beforeAll(async () => {
     integrationsStateSecret: STATE_SECRET,
     publicBaseUrl: "http://127.0.0.1:8000",
     webBaseUrl: "http://127.0.0.1:3000",
-    googleDriveClientId: GOOGLE_CLIENT_ID,
-    googleDriveClientSecret: GOOGLE_CLIENT_SECRET,
     integrationsOauthClientsJson: JSON.stringify({
       "https://login.microsoftonline.com/common/v2.0": {
         clientId: MICROSOFT_CLIENT_ID,
-        tokenEndpointAuthMethod: "none",
+        clientSecret: MICROSOFT_CLIENT_SECRET,
+        tokenEndpointAuthMethod: "client_secret_post",
       },
     }),
   }) as Settings;
@@ -119,12 +119,13 @@ async function freshWorkspace() {
 async function bearer(
   workspace: Awaited<ReturnType<typeof freshWorkspace>>,
   principalKind: "human_session" | "service" = "human_session",
+  permissions: Permission[] = ["connections:read", "connections:write", "workspace:read"],
 ): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: workspace.accountId,
     workspaceId: workspace.workspaceId,
     subjectId: workspace.subjectId,
-    permissions: ["connections:read", "connections:write", "workspace:read"],
+    permissions,
     principalKind,
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
@@ -136,16 +137,14 @@ type TokenPlan = {
 };
 
 function providerFixture() {
-  let sourceTitle = "Drive fixture";
-  let beforeGoogleTokenReply: (() => Promise<void>) | undefined;
-  const googlePlans: TokenPlan[] = [];
+  let sourceTitle = "OneDrive fixture";
+  let beforeTokenReply: (() => Promise<void>) | undefined;
   const microsoftPlans: TokenPlan[] = [];
   const tokenRequests: Array<{
-    family: "google" | "microsoft";
+    family: "microsoft";
     body: URLSearchParams;
     authorization: string | null;
   }> = [];
-  let googlePrincipalId = "google-principal-1";
   let microsoftPrincipalId = "microsoft-principal-1";
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
@@ -160,64 +159,32 @@ function providerFixture() {
           },
         },
       });
-    if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.source.url) {
+    if (url.href === MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.source.url) {
       return Response.json({
-        name: "drive",
-        version: "v3",
-        title: sourceTitle,
-        rootUrl: "https://www.googleapis.com/",
-        servicePath: "drive/v3/",
-        resources: {
-          files: {
-            methods: {
-              list: {
-                id: "drive.files.list",
-                path: "files",
-                httpMethod: "GET",
-                description: "List files",
-                response: { $ref: "FileList" },
-              },
-              get: {
-                id: "drive.files.get",
-                path: "files/{fileId}",
-                httpMethod: "GET",
-                description: "Get file",
-                parameters: { fileId: { type: "string", required: true, location: "path" } },
-                response: { $ref: "File" },
-              },
+        openapi: "3.0.3",
+        info: { title: sourceTitle, version: "1" },
+        servers: [{ url: "https://graph.microsoft.com/v1.0" }],
+        paths: {
+          "/me/drive/root/children": {
+            get: { operationId: "listFiles", responses: { "200": { description: "Files" } } },
+          },
+          "/me/drive/items/{itemId}": {
+            get: {
+              operationId: "getFile",
+              parameters: [
+                { name: "itemId", in: "path", required: true, schema: { type: "string" } },
+              ],
+              responses: { "200": { description: "File" } },
             },
           },
         },
-        schemas: {
-          File: { type: "object", properties: { id: { type: "string" } } },
-          FileList: {
-            type: "object",
-            properties: { files: { type: "array", items: { $ref: "File" } } },
-          },
-        },
       });
     }
-    if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl) {
-      await beforeGoogleTokenReply?.();
-      const body = requestBody(init?.body);
-      tokenRequests.push({
-        family: "google",
-        body,
-        authorization: new Headers(init?.headers).get("authorization"),
-      });
-      const plan = googlePlans.shift() ?? {
-        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-        refreshToken: "google-refresh-token",
-      };
-      return Response.json({
-        access_token: `google-access-${tokenRequests.length}`,
-        ...(plan.refreshToken ? { refresh_token: plan.refreshToken } : {}),
-        token_type: "Bearer",
-        expires_in: 3600,
-        scope: plan.scopes.join(" "),
-      });
-    }
-    if (url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl) {
+    if (
+      url.href === MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.tokenUrl ||
+      url.href === MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.tokenUrl
+    ) {
+      await beforeTokenReply?.();
       const body = requestBody(init?.body);
       tokenRequests.push({
         family: "microsoft",
@@ -225,7 +192,7 @@ function providerFixture() {
         authorization: new Headers(init?.headers).get("authorization"),
       });
       const plan = microsoftPlans.shift() ?? {
-        scopes: [...MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.authentication.scopes],
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
         refreshToken: "microsoft-refresh-token",
       };
       return Response.json({
@@ -234,13 +201,6 @@ function providerFixture() {
         token_type: "Bearer",
         expires_in: 3600,
         scope: plan.scopes.join(" "),
-      });
-    }
-    if (url.href === "https://openidconnect.googleapis.com/v1/userinfo") {
-      return Response.json({
-        sub: googlePrincipalId,
-        email: "google.user@example.com",
-        name: "Google User",
       });
     }
     if (url.origin === "https://graph.microsoft.com" && url.pathname === "/v1.0/me") {
@@ -258,15 +218,11 @@ function providerFixture() {
     setSourceTitle(value: string) {
       sourceTitle = value;
     },
-    setBeforeGoogleTokenReply(hook: (() => Promise<void>) | undefined) {
-      beforeGoogleTokenReply = hook;
+    setBeforeTokenReply(hook: (() => Promise<void>) | undefined) {
+      beforeTokenReply = hook;
     },
-    googlePlans,
     microsoftPlans,
     tokenRequests,
-    setGooglePrincipalId(value: string) {
-      googlePrincipalId = value;
-    },
     setMicrosoftPrincipalId(value: string) {
       microsoftPrincipalId = value;
     },
@@ -349,6 +305,99 @@ async function callback(
 }
 
 describe("API Integration provider OAuth", () => {
+  test("Teams OAuth and generic Connect honor the exact workspace rollout before consent and callback", async () => {
+    if (!available) throw new Error("Teams rollout acceptance requires PostgreSQL");
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const previousEnabled = settings.microsoftTeamsToolsEnabled;
+    const previousWorkspaces = settings.microsoftTeamsAllowedWorkspaceIds;
+    try {
+      settings.microsoftTeamsToolsEnabled = false;
+      settings.microsoftTeamsAllowedWorkspaceIds = [];
+      expect(
+        (
+          await start(fixture, workspace, {
+            definitionId: "microsoft-teams",
+            ownership: "workspace",
+          })
+        ).response.status,
+      ).toBe(404);
+      const generic = await testApp(fixture).request(
+        `/v1/workspaces/${workspace.workspaceId}/connect/attempts`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace),
+            "content-type": "application/json",
+            "x-opengeni-access-key": EDGE_ACCESS_KEY,
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          },
+          body: JSON.stringify({
+            providerId: "microsoft-teams",
+            ownership: "workspace",
+            returnUrl: `http://127.0.0.1:3000/workspaces/${workspace.workspaceId}/plugins`,
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
+      expect(generic.status).toBe(404);
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      const enabled = await start(fixture, workspace, {
+        definitionId: "microsoft-teams",
+        ownership: "workspace",
+      });
+      expect(enabled.response.status).toBe(200);
+      const url = new URL(enabled.authorizationUrl);
+      expect(url.pathname).toBe("/organizations/oauth2/v2.0/authorize");
+      expect(url.searchParams.get("scope")).toContain("ChatMessage.Send");
+      settings.microsoftTeamsAllowedWorkspaceIds = [];
+      const settled = await callback(fixture, url.searchParams.get("state")!);
+      expect(settled.status).toBe(302);
+      expect(settled.headers.get("location")).toContain("state_invalid");
+      expect(fixture.tokenRequests).toHaveLength(0);
+      expect(await listConnectionsMetadata(client.db, workspace.workspaceId, null)).toHaveLength(0);
+      // A new, enabled consent completes through the organizational token endpoint
+      // and persists only the Teams workload grant under the normal broker role.
+      settings.microsoftTeamsAllowedWorkspaceIds = [workspace.workspaceId];
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "teams-fixture-refresh",
+      });
+      const retry = await start(fixture, workspace, {
+        definitionId: "microsoft-teams",
+        ownership: "workspace",
+      });
+      expect(retry.response.status).toBe(200);
+      const completed = await callback(
+        fixture,
+        new URL(retry.authorizationUrl).searchParams.get("state")!,
+      );
+      expect(completed.status).toBe(302);
+      expect(
+        new URL(completed.headers.get("location")!).searchParams.get("integration_oauth"),
+      ).toBe("success");
+      const connections = await listConnectionsMetadata(client.db, workspace.workspaceId, null);
+      expect(connections).toHaveLength(1);
+      expect(connections[0]).toMatchObject({
+        subjectId: null,
+        providerDomain: "graph.microsoft.com",
+        kind: "oauth2",
+        status: "active",
+        metadata: {
+          credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
+          authorizedDefinitionIds: ["microsoft-teams"],
+        },
+      });
+      expect([...connections[0]!.grantedScopes].sort()).toEqual(
+        [...MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes].sort(),
+      );
+      expect(fixture.tokenRequests).toHaveLength(1);
+    } finally {
+      settings.microsoftTeamsToolsEnabled = previousEnabled;
+      settings.microsoftTeamsAllowedWorkspaceIds = previousWorkspaces;
+    }
+  });
+
   test("external curated OAuth encrypts actor context and refuses key revocation during exchange", async () => {
     if (!available) throw new Error("External OAuth acceptance requires PostgreSQL");
     const workspace = await freshWorkspace();
@@ -421,7 +470,7 @@ describe("API Integration provider OAuth", () => {
           method: "POST",
           headers,
           body: JSON.stringify({
-            definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+            definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
             ownership: "workspace",
           }),
         },
@@ -444,7 +493,7 @@ describe("API Integration provider OAuth", () => {
     expect(catalogResponse.status).toBe(200);
     expect(
       (await catalogResponse.json()).find(
-        (provider: { id: string }) => provider.id === GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        (provider: { id: string }) => provider.id === MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ),
     ).toMatchObject({ readiness: "available", setup: ["oauth"] });
     const serviceCatalog = await app.request(
@@ -481,7 +530,7 @@ describe("API Integration provider OAuth", () => {
     const signed = readSignedState(firstState, STATE_SECRET) as Record<string, unknown>;
     expect(typeof signed.encryptedExternalContinuation).toBe("string");
     expect(JSON.stringify(signed)).not.toContain(reference.externalId);
-    fixture.setBeforeGoogleTokenReply(async () => {
+    fixture.setBeforeTokenReply(async () => {
       await shared!.admin`update api_keys set revoked_at = now() where id = ${key.id}`;
     });
     const denied = await callback(fixture, firstState);
@@ -491,7 +540,7 @@ describe("API Integration provider OAuth", () => {
     expect(
       await listConnectionsMetadata(client.db, workspace.workspaceId, external.subjectId),
     ).toEqual([]);
-    fixture.setBeforeGoogleTokenReply(undefined);
+    fixture.setBeforeTokenReply(undefined);
     await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
     const returnUrl = "https://HOST.example:443/finish?opaque=%2f&literal=%2520#unchanged";
     const customBase = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
@@ -551,7 +600,7 @@ describe("API Integration provider OAuth", () => {
     });
     expect(await (await customAdvance(installCustom)).json()).toEqual(customInstalled);
     const beginPayload = {
-      providerId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "workspace",
       returnUrl,
       idempotencyKey: crypto.randomUUID(),
@@ -616,7 +665,7 @@ describe("API Integration provider OAuth", () => {
       action: { ...installInput.action, operationIds: ["not-reviewed"] },
     });
     expect(invalidSelection.status).toBe(409);
-    fixture.setSourceTitle("Updated Drive fixture");
+    fixture.setSourceTitle("Updated OneDrive fixture");
     const changedResponse = await advance(installInput);
     expect(changedResponse.status).toBe(200);
     const changed = await changedResponse.json();
@@ -671,7 +720,7 @@ describe("API Integration provider OAuth", () => {
     const accounts = await accountsResponse.json();
     expect(accounts).toHaveLength(1);
     expect(accounts[0]).toMatchObject({
-      providerId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "workspace",
       status: "connected",
     });
@@ -704,47 +753,44 @@ describe("API Integration provider OAuth", () => {
       version: accounts[0].version,
     });
   });
-  test("connects a Google definition with signed PKCE state and no callback perimeter credential", async () => {
+  test("connects a OneDrive definition with signed PKCE state and no callback perimeter credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push({
-      scopes: [
-        "openid",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile",
-        "https://www.googleapis.com/auth/drive",
-      ],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
     const started = await start(fixture, workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     expect(started.response.status).toBe(200);
     const authorizationUrl = new URL(started.authorizationUrl);
-    expect(authorizationUrl.origin).toBe("https://accounts.google.com");
+    expect(authorizationUrl.origin).toBe("https://login.microsoftonline.com");
     expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual(
-      GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes,
+      MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes,
     );
-    expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
-    expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
+    expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toContain("offline_access");
+    expect(authorizationUrl.searchParams.get("prompt")).toBe("select_account");
     expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
     expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
-      "http://127.0.0.1:8000/v1/integrations/oauth/callback",
+      "http://127.0.0.1:8000/v1/integrations/provider-oauth/callback",
     );
     const state = authorizationUrl.searchParams.get("state")!;
     const connected = await callback(
       fixture,
       state,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(connected.status).toBe(302);
     const location = new URL(connected.headers.get("location")!);
     expect(location.origin).toBe("http://127.0.0.1:3000");
     expect(location.searchParams.get("integration_oauth")).toBe("success");
-    expect(location.searchParams.get("definitionId")).toBe(GOOGLE_DRIVE_INTEGRATION_DEFINITION.id);
+    expect(location.searchParams.get("definitionId")).toBe(
+      MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+    );
 
     const connections = await listConnectionsMetadata(
       client.db,
@@ -755,25 +801,20 @@ describe("API Integration provider OAuth", () => {
     const connection = connections[0]!;
     expect(connection).toMatchObject({
       subjectId: workspace.subjectId,
-      providerDomain: "www.googleapis.com",
+      providerDomain: "graph.microsoft.com",
       kind: "oauth2",
       status: "active",
-      grantedScopes: [
-        "openid",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile",
-        "https://www.googleapis.com/auth/drive",
-      ],
+      grantedScopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
       metadata: {
         credentialRole: API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
-        providerFamily: "google",
-        providerPrincipalId: "google-principal-1",
-        providerEmail: "google.user@example.com",
-        authorizedDefinitionIds: [GOOGLE_DRIVE_INTEGRATION_DEFINITION.id],
+        providerFamily: "microsoft",
+        providerPrincipalId: "microsoft-principal-1",
+        providerEmail: "microsoft.user@example.com",
+        authorizedDefinitionIds: [MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id],
       },
     });
-    expect(JSON.stringify(connection)).not.toContain("google-access");
-    expect(JSON.stringify(connection)).not.toContain("google-refresh-token");
+    expect(JSON.stringify(connection)).not.toContain("microsoft-access");
+    expect(JSON.stringify(connection)).not.toContain("microsoft-refresh-token");
     const credential = await loadConnectionCredentialForBroker(client.db, settings, {
       workspaceId: workspace.workspaceId,
       connectionId: connection.id,
@@ -783,12 +824,12 @@ describe("API Integration provider OAuth", () => {
       allowSubjectOwned: true,
     });
     expect(credential?.credential).toMatchObject({
-      refresh_token: "google-refresh-token",
-      client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET,
-      token_endpoint: GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl,
+      refresh_token: "microsoft-refresh-token",
+      client_id: MICROSOFT_CLIENT_ID,
+      client_secret: MICROSOFT_CLIENT_SECRET,
+      token_endpoint: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl,
     });
-    expect(fixture.tokenRequests[0]?.body.get("client_secret")).toBe(GOOGLE_CLIENT_SECRET);
+    expect(fixture.tokenRequests[0]?.body.get("client_secret")).toBe(MICROSOFT_CLIENT_SECRET);
 
     const genericPatch = await testApp(fixture).request(
       `/v1/workspaces/${workspace.workspaceId}/connections/${connection.id}`,
@@ -938,23 +979,23 @@ describe("API Integration provider OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push(
+    fixture.microsoftPlans.push(
       {
-        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-        refreshToken: "google-refresh-a",
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-a",
       },
       {
-        scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-        refreshToken: "google-refresh-b",
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-b",
       },
     );
     const [left, right] = await Promise.all([
       start(fixture, workspace, {
-        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
         ownership: "personal",
       }),
       start(fixture, workspace, {
-        definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+        definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
         ownership: "personal",
       }),
     ]);
@@ -969,17 +1010,17 @@ describe("API Integration provider OAuth", () => {
     ).toEqual(["success", "success"]);
     const connections = (
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
-    ).filter((connection) => connection.providerDomain === "www.googleapis.com");
+    ).filter((connection) => connection.providerDomain === "graph.microsoft.com");
     expect(connections).toHaveLength(1);
 
     const insufficientWorkspace = await freshWorkspace();
     const insufficient = providerFixture();
-    insufficient.googlePlans.push({
+    insufficient.microsoftPlans.push({
       scopes: ["openid", "email", "profile"],
       refreshToken: "must-not-persist",
     });
     const insufficientStart = await start(insufficient, insufficientWorkspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     const denied = await callback(
@@ -1006,7 +1047,7 @@ describe("API Integration provider OAuth", () => {
     // workspace-shared. Both Definitions are exercised, because the Microsoft
     // family is where the widening would actually hurt.
     for (const definition of [
-      GOOGLE_DRIVE_INTEGRATION_DEFINITION,
+      MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
       MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
     ]) {
       const workspace = await freshWorkspace();
@@ -1024,12 +1065,12 @@ describe("API Integration provider OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push({
-      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
     const started = await start(fixture, workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "workspace",
     });
     expect(started.response.status).toBe(200);
@@ -1037,14 +1078,14 @@ describe("API Integration provider OAuth", () => {
       fixture,
       new URL(started.authorizationUrl).searchParams.get("state")!,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     const location = new URL(connected.headers.get("location")!);
     expect(location.searchParams.get("integration_oauth")).toBe("success");
     expect(location.searchParams.get("ownership")).toBe("workspace");
     const connections = (
       await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId)
-    ).filter((connection) => connection.providerDomain === "www.googleapis.com");
+    ).filter((connection) => connection.providerDomain === "graph.microsoft.com");
     expect(connections).toHaveLength(1);
     expect(connections[0]!.subjectId).toBeNull();
   }, 60_000);
@@ -1053,23 +1094,23 @@ describe("API Integration provider OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push({
-      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
     // Mint the exact state an older deployment would have signed: personal
     // ownership with no `personalOwnerVerified` claim. This is the rolling-
     // deploy window the callback fence exists to close - the start route is
     // already fenced, so nothing else can produce this shape.
     const legacyState = await legacyProviderOAuthState(workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     const refused = await callback(
       fixture,
       legacyState,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     const location = new URL(refused.headers.get("location")!);
     expect(location.searchParams.get("integration_oauth")).toBe("error");
@@ -1081,7 +1122,7 @@ describe("API Integration provider OAuth", () => {
     // The same state shape with the claim present is accepted, so the fence is
     // the claim and not some unrelated rejection of a hand-minted state.
     const verifiedState = await legacyProviderOAuthState(workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
       personalOwnerVerified: true,
     });
@@ -1089,7 +1130,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       verifiedState,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(accepted.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
       "success",
@@ -1107,16 +1148,16 @@ describe("API Integration provider OAuth", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const fixture = providerFixture();
-    fixture.googlePlans.push({
-      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
 
     // FORGERY: splice the claim into the base64 payload of a legacy state
     // without re-signing. The claim rides inside the HMAC-signed payload, so
     // this invalidates the signature rather than granting personal ownership.
     const legacyState = await legacyProviderOAuthState(workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
     });
     const [encoded, signature] = legacyState.split(".", 2);
@@ -1130,7 +1171,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       forged,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(forgedResult.headers.get("location")!).searchParams.get("reason")).toBe(
       "state_invalid",
@@ -1142,7 +1183,7 @@ describe("API Integration provider OAuth", () => {
     // fully consistent state; this proves the callback's mismatch check, not
     // isolation from a signing-secret holder.
     const verified = await legacyProviderOAuthState(workspace, {
-      definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
       ownership: "personal",
       personalOwnerVerified: true,
     });
@@ -1155,7 +1196,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       swapped,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(swappedResult.headers.get("location")!).searchParams.get("reason")).toBe(
       "state_invalid",
@@ -1167,7 +1208,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       verified,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(accepted.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
       "success",
@@ -1176,7 +1217,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       verified,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(replayed.headers.get("location")!).searchParams.get("reason")).toBe(
       "state_replayed",
@@ -1186,6 +1227,133 @@ describe("API Integration provider OAuth", () => {
     ).toHaveLength(1);
   }, 60_000);
 
+  test("a person installs a reviewed definition for their own account without integration management", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const app = testApp(fixture);
+    // A person who may connect their own accounts, but not manage integrations.
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const connectAndPreview = async (
+      input: Record<string, unknown>,
+      requestHeaders: Record<string, string> = headers,
+    ) => {
+      fixture.microsoftPlans.push({
+        scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+        refreshToken: "microsoft-refresh-token",
+      });
+      const begun = await app.request(base, {
+        method: "POST",
+        headers: requestHeaders,
+        body: JSON.stringify({
+          providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+          returnUrl: "https://host.example/chat",
+          idempotencyKey: crypto.randomUUID(),
+          ...input,
+        }),
+      });
+      if (begun.status !== 200) throw new Error(`begin failed: ${await begun.text()}`);
+      const attempt = await begun.json();
+      const state = new URL(attempt.nextAction.url).searchParams.get("state")!;
+      await callback(fixture, state);
+      const advance = (body: unknown) =>
+        app.request(`${base}/${attempt.id}/advance`, {
+          method: "POST",
+          headers: requestHeaders,
+          body: JSON.stringify(body),
+        });
+      const preview = await (
+        await advance({
+          expectedRevision: 2,
+          idempotencyKey: crypto.randomUUID(),
+          action: { type: "retry" },
+        })
+      ).json();
+      if (preview.state !== "preview")
+        throw new Error(`preview failed: ${JSON.stringify(preview)}`);
+      return {
+        attempt,
+        install: () =>
+          advance({
+            expectedRevision: preview.revision,
+            idempotencyKey: crypto.randomUUID(),
+            action: {
+              type: "install",
+              previewId: preview.nextAction.previewId,
+              contentHash: preview.nextAction.contentHash,
+              operationIds: preview.nextAction.operations.map(
+                (operation: { id: string }) => operation.id,
+              ),
+            },
+          }),
+      };
+    };
+
+    // Their own account, in a fresh instance named after the attempt.
+    const own = await connectAndPreview({ ownership: "personal" });
+    expect(own.attempt.installationTarget).toEqual({
+      instanceKey: `account-${own.attempt.id}`,
+      displayName: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.name,
+    });
+    const installed = await own.install();
+    expect(installed.status).toBe(200);
+    expect(await installed.json()).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
+    });
+
+    // The narrow "connect my own account" permission alone is enough too
+    // (the per-user embed default: no connections:read or connections:write).
+    const narrowHeaders = {
+      ...headers,
+      authorization: await bearer(workspace, "human_session", [
+        "connections:personal",
+        "workspace:read",
+      ]),
+    };
+    const narrow = await connectAndPreview({ ownership: "personal" }, narrowHeaders);
+    const narrowInstalled = await narrow.install();
+    expect(narrowInstalled.status).toBe(200);
+    expect(await narrowInstalled.json()).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
+    });
+    // ...but never a workspace account.
+    fixture.microsoftPlans.length = 0;
+    const narrowShared = await app.request(base, {
+      method: "POST",
+      headers: narrowHeaders,
+      body: JSON.stringify({
+        providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
+        ownership: "workspace",
+        returnUrl: "https://host.example/chat",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(narrowShared.status).toBe(403);
+
+    // A workspace account is integration management.
+    const workspaceOwned = await connectAndPreview({ ownership: "workspace" });
+    const sharedInstall = await workspaceOwned.install();
+    expect(sharedInstall.status).toBe(403);
+    expect(await sharedInstall.text()).toContain("capabilities:manage");
+
+    // So is binding an instance this account is not already bound to.
+    const other = await connectAndPreview({
+      ownership: "personal",
+      installationTarget: { instanceKey: "account-someone-else", displayName: "OneDrive" },
+    });
+    const otherInstall = await other.install();
+    expect(otherInstall.status).toBe(403);
+    expect(await otherInstall.text()).toContain("capabilities:manage");
+  }, 60_000);
+
   test("a non-human principal cannot request personal ownership", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -1193,7 +1361,7 @@ describe("API Integration provider OAuth", () => {
     const refused = await start(
       fixture,
       workspace,
-      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership: "personal" },
+      { definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id, ownership: "personal" },
       "service",
     );
     expect(refused.response.status).toBe(422);
@@ -1206,14 +1374,14 @@ describe("API Integration provider OAuth", () => {
 
     // The same principal may still create the documented workspace-owned
     // Connection, so this narrows rather than blocking the flow outright.
-    fixture.googlePlans.push({
-      scopes: [...GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.scopes],
-      refreshToken: "google-refresh-token",
+    fixture.microsoftPlans.push({
+      scopes: [...MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.authentication.scopes],
+      refreshToken: "microsoft-refresh-token",
     });
     const allowed = await start(
       fixture,
       workspace,
-      { definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id, ownership: "workspace" },
+      { definitionId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id, ownership: "workspace" },
       "service",
     );
     expect(allowed.response.status).toBe(200);
@@ -1221,7 +1389,7 @@ describe("API Integration provider OAuth", () => {
       fixture,
       new URL(allowed.authorizationUrl).searchParams.get("state")!,
       "fixture-code",
-      "/v1/integrations/oauth/callback",
+      "/v1/integrations/provider-oauth/callback",
     );
     expect(new URL(connected.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
       "success",

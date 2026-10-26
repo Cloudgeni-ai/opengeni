@@ -31,7 +31,7 @@ import {
   totpParamsFor,
 } from "./mapping";
 import { safeSecretName } from "./naming";
-import { restrictToOperations } from "./operations";
+import { restrictToOperations } from "@opengeni/vaults";
 import {
   type CapturedConsole,
   KEEPER_REQUEST_TIMEOUT_MS,
@@ -51,7 +51,7 @@ export const KEEPER_VALUE_CACHE_MS = VAULT_LIMITS.providerValueCacheMs;
 
 /** What KSM 17.6.0 can do for an application (see README for the evidence). */
 export const KEEPER_OPERATIONS: VaultProviderOperations = {
-  createItemTypes: ["login", "note"],
+  createItemTypes: ["login", "note", "api_key", "card", "identity", "ssh_key"],
   updateItem: true,
   removeField: true,
   archiveItem: false,

@@ -118,7 +118,9 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     // The current event adapter projects 0810's nullable key and 0889's tool
     // name. Only stage the reader columns for seeding; the real migrations must
     // create them.
-    await owner`alter table session_events add column usage_source_key text, add column tool_name text`;
+    await owner`alter table session_events add column usage_source_key text, add column tool_name text, add column tool_call_id text`;
+    // ...and 0917's nullable continue-waiting-work columns, read by the claim adapter.
+    await owner`alter table session_system_updates add column continued_by_subject_id text, add column continued_at timestamptz`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -249,7 +251,8 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     await owner`alter table scheduled_tasks drop column vault_policy`;
     await dropConnectionAccountIntentColumns(owned.ownerUrl);
     await dropSiteSessionAudienceColumns(owned.ownerUrl);
-    await owner`alter table session_events drop column usage_source_key, drop column tool_name`;
+    await owner`alter table session_events drop column usage_source_key, drop column tool_name, drop column tool_call_id`;
+    await owner`alter table session_system_updates drop column continued_by_subject_id, drop column continued_at`;
     expect(
       await owner`select column_name from information_schema.columns
       where table_schema=current_schema() and table_name='session_events'
@@ -290,8 +293,12 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
       preinstalledVector: true,
     });
     const afterRequests = [
-      ...(await owned.admin`select to_jsonb(r) - 'review_arguments' - 'review_context' as row from connector_action_requests r order by id`),
+      ...(await owned.admin`select to_jsonb(r) - 'review_arguments' - 'review_context' - 'decision_by_kind' - 'decision_by_signed_in_person' as row from connector_action_requests r order by id`),
     ];
+    // 0971 adds who decided a request; upgraded rows keep its defaults.
+    expect([
+      ...(await owned.admin`select distinct decision_by_kind, decision_by_signed_in_person from connector_action_requests`),
+    ]).toEqual([{ decision_by_kind: null, decision_by_signed_in_person: false }]);
     expect([
       ...(await owner`select data_type from information_schema.columns
       where table_schema=current_schema() and table_name='session_events'

@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -18,7 +19,7 @@ export const ClaudeUsageWindow = /* @__PURE__ */ defineSchema(() =>
       usedPercent: z.number().finite().nonnegative().nullable(),
       resetsAt: z.string().datetime().nullable(),
       status: z.enum(["allowed", "allowed_warning", "rejected"]).nullable(),
-      observedAt: z.string().datetime(),
+      observedAt: primitives.dateTime,
       source: z.enum(["response_headers", "provider"]).optional(),
     })
     .strict(),
@@ -35,7 +36,7 @@ export const ClaudeUsageRequestStatus = /* @__PURE__ */ defineSchema(() =>
       overageStatus: z.enum(["allowed", "allowed_warning", "rejected"]).nullable(),
       overageResetsAt: z.string().datetime().nullable(),
       upstreamModelId: z.string().min(1).max(256).nullable(),
-      observedAt: z.string().datetime(),
+      observedAt: primitives.dateTime,
       source: z.enum(["response_headers", "provider"]).optional(),
     })
     .strict(),
@@ -46,7 +47,7 @@ export type ClaudeUsageRequestStatus = z.infer<typeof ClaudeUsageRequestStatus>;
 export const ClaudeSubscriptionUsage = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      connected: z.boolean(),
+      connected: primitives.boolean,
       credentialVersion: z.number().int().positive().nullable(),
       windows: z.array(ClaudeUsageWindow).max(6),
       observedAt: z.string().datetime().nullable(),

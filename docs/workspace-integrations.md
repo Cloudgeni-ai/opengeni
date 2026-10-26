@@ -339,8 +339,13 @@ secret and a subset of:
 | `session.requiresAction` | The agent waits for a tool approval |
 | `session.humanInput.requested` | The agent asks the user a structured question |
 | `usage.threshold_reached` / `usage.exhausted` / `usage.period_reset` | Allowance lifecycle signals; see [usage allowances](usage-allowances.md#errors-and-event-handling) |
+| `recording.started` / `recording.finished` | A meeting recording began, or stopped with all its audio uploaded; see [recordings](recordings.md#events) |
+| `recording.transcript.ready` / `recording.transcript.failed` | A transcript version finished or failed, including re-runs |
+| `recording.transcript.current_changed` / `recording.speakers.updated` | Someone switched the shown transcript version, or named, moved or edited speakers and text |
+| `recording.notes.updated` | Someone, or an agent, saved a meeting's written-up notes |
+| `recording.deleted` | A recording and its audio, transcripts and speaker matches were deleted |
 
-Organization webhooks accept session events only. A create or update that names
+Organization webhooks accept session and recording events. A create or update that names
 `usage.*` returns HTTP 422 with guidance to register a workspace webhook instead;
 the shared public event-type vocabulary remains unchanged.
 

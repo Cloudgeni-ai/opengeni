@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Opengeni self-hosted agent installer — Windows (PowerShell 5.1+ / 7+).
+  Opengeni Runner installer — Windows (PowerShell 5.1+ / 7+).
 
 .DESCRIPTION
   irm https://app.opengeni.ai/install.ps1 | iex
@@ -12,6 +12,12 @@
   command to connect and keeps the machine online in the background when the
   service backend is available. It contains NO secrets. The pinned public key travels WITH this audited script, so
   a compromised CDN cannot serve a binary that verifies.
+
+  A verified binary must also START on this machine (it runs `--version` from
+  the download folder) before it may replace anything, so an agent this Windows
+  cannot load (for example one needing a DLL the machine lacks) is refused and
+  the installed agent keeps running. An upgrade whose new agent then fails to
+  start in the background is rolled back to the previous agent.
 
   Run model: the normal install is an always-on background agent; `run` remains
   the explicit foreground mode. This script is rename-running-exe
@@ -35,7 +41,9 @@
   https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v<ver>/<asset>.
 
   Exit codes mirror install.sh: 0 ok, 2 usage, 3 download, 4 checksum, 5 signature,
-  6 no-verify-tool, 7 unsupported-arch.
+  6 no-verify-tool, 7 unsupported-arch, 8 the downloaded agent cannot run on this
+  machine (any installed agent is kept or restored), 9 the machine could not be
+  connected.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -63,28 +71,106 @@ $Version = Get-EnvOr 'OPENGENI_AGENT_VERSION' 'latest'
 $OpengeniApiDefaultUrl = 'https://app.opengeni.ai'
 $script:ApiUrl = Get-EnvOr 'OPENGENI_API_URL' $OpengeniApiDefaultUrl
 $script:AgentWasUpgraded = $false
+# The agent that was installed AND running in the background before an upgrade,
+# kept beside the new one until the new one runs, so a failed start can put it back.
+$script:PreviousAgent = $null
+$script:PreviousAgentVersion = $null
 
 function Log($msg)  { Write-Host "opengeni-install: $msg" }
 function Fail($code, $msg) { Write-Host "opengeni-install: ERROR: $msg" -ForegroundColor Red; exit $code }
 
-function Get-AgentReleaseVersion($path) {
-  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+# Describes a process exit code as Windows reports it (decimal, plus the NTSTATUS
+# hex of a crash or loader failure), naming the loader failures a stock machine
+# can hit.
+function Format-ExitCode($code) {
+  if ($null -eq $code) { return 'no exit code' }
+  if ([int]$code -ge 0 -and [int]$code -le 255) { return "exit code $code" }
+  $hex = '0x{0:X8}' -f ([int]$code)
+  $text = "exit code $code ($hex)"
+  switch ($hex) {
+    '0xC0000135' { $text += ', STATUS_DLL_NOT_FOUND: Windows could not find a DLL it needs, such as the Microsoft Visual C++ runtime older agent builds required' }
+    '0xC0000139' { $text += ', STATUS_ENTRYPOINT_NOT_FOUND: this Windows version lacks a function it needs' }
+    '0xC000007B' { $text += ', STATUS_INVALID_IMAGE_FORMAT: it is built for another processor or is damaged' }
+  }
+  return $text
+}
+
+# Runs one agent command, showing its output, and returns its exit code or the
+# reason Windows could not launch it at all. Never throws, whatever the binary does.
+function Invoke-Agent($bin, [string[]]$arguments) {
+  $ErrorActionPreference = 'Continue'
   try {
-    $line = @(& $path --version 2>$null)[0]
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($line)) { return $null }
-    $match = [regex]::Match([string]$line, '^opengeni-agent ([0-9]+\.[0-9]+\.[0-9]+)$')
-    if (-not $match.Success) { return $null }
-    return [version]$match.Groups[1].Value
+    & $bin @arguments | Out-Host
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; LaunchError = $null }
   } catch {
-    return $null
+    return [pscustomobject]@{ ExitCode = $null; LaunchError = $_.Exception.Message }
   }
 }
 
-function Test-KeepNewerAgent($installed, $candidate) {
+function Format-AgentResult($result) {
+  if ($null -ne $result.LaunchError) { return "Windows could not start it: $($result.LaunchError)" }
+  return Format-ExitCode $result.ExitCode
+}
+
+# Runs `<agent> --version`: whether it starts here, and the release it reports.
+function Get-AgentVersionProbe($path) {
+  $ErrorActionPreference = 'Continue'
+  $probe = [pscustomobject]@{ ExitCode = $null; LaunchError = $null; Line = ''; Version = $null }
+  try {
+    $lines = @(& $path --version 2>$null)
+    $probe.ExitCode = $LASTEXITCODE
+    if ($lines.Count -gt 0) { $probe.Line = ([string]$lines[0]).Trim() }
+  } catch {
+    $probe.LaunchError = $_.Exception.Message
+    return $probe
+  }
+  $match = [regex]::Match($probe.Line, '^opengeni-agent ([0-9]+\.[0-9]+\.[0-9]+)$')
+  if ($probe.ExitCode -eq 0 -and $match.Success) { $probe.Version = [version]$match.Groups[1].Value }
+  return $probe
+}
+
+function Get-AgentReleaseVersion($path) {
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+  return (Get-AgentVersionProbe $path).Version
+}
+
+# GATE 3: the verified agent, staged in the folder it will run from, must start
+# on THIS machine before it can replace anything. Returns the release it reports;
+# otherwise removes the staged copy and stops.
+function Assert-AgentStarts($staged) {
+  $probe = Get-AgentVersionProbe $staged
+  if ($null -ne $probe.Version) {
+    Log "verified opengeni-agent $($probe.Version) starts on this machine"
+    return $probe.Version
+  }
+  Remove-Item -Force -LiteralPath $staged -ErrorAction SilentlyContinue
+  $why = if ($null -ne $probe.LaunchError -or $probe.ExitCode -ne 0) {
+    Format-AgentResult $probe
+  } else {
+    "it reported '$($probe.Line)' instead of an opengeni-agent version"
+  }
+  Fail 8 "the downloaded opengeni-agent cannot run on this machine ($why). Nothing was changed; an installed agent keeps running."
+}
+
+# Whether the installed agent runs in the background right now. Unknown counts
+# as not running.
+function Test-AgentRunning($bin) {
+  if (-not (Test-Path -LiteralPath $bin -PathType Leaf)) { return $false }
+  $ErrorActionPreference = 'Continue'
+  try {
+    $lines = @(& $bin status 2>$null)
+    return ($LASTEXITCODE -eq 0) -and ($lines -contains 'opengeni-agent background task: running')
+  } catch {
+    return $false
+  }
+}
+
+function Test-KeepNewerAgent($installed, $candidateVersion) {
   if ((Get-EnvOr 'OPENGENI_ALLOW_DOWNGRADE' '0') -eq '1') { return $false }
   $installedVersion = Get-AgentReleaseVersion $installed
-  $candidateVersion = Get-AgentReleaseVersion $candidate
-  if ($null -eq $installedVersion -or $null -eq $candidateVersion) { return $false }
+  # An installed binary that cannot report its version cannot be preserved;
+  # the verified candidate, which just started, repairs it.
+  if ($null -eq $installedVersion) { return $false }
   if ($installedVersion -gt $candidateVersion) {
     Log "keeping installed opengeni-agent $installedVersion; verified candidate $candidateVersion is older (set OPENGENI_ALLOW_DOWNGRADE=1 to override)"
     return $true
@@ -505,6 +591,7 @@ function Add-UserPath($dir) {
 function Main {
   $asset = Get-Asset
   $tmp = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("og-install-" + [guid]::NewGuid())) -Force
+  $staged = $null
   try {
     Log "installing $asset (version: $Version) from $BaseUrl"
     $binUrl = Get-AssetUrl $asset
@@ -531,20 +618,35 @@ function Main {
     $installDir = Get-InstallDir
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
     $dest = Join-Path $installDir 'opengeni-agent.exe'
-    if (Test-KeepNewerAgent $dest $binTmp) {
-      Remove-Item -Force $binTmp -ErrorAction SilentlyContinue
+    # GATE 3: the verified agent must start from the install folder before it
+    # replaces anything there.
+    $staged = Join-Path $installDir 'opengeni-agent.new.exe'
+    Remove-Item -Force -LiteralPath $staged -ErrorAction SilentlyContinue
+    Move-Item -Force -LiteralPath $binTmp -Destination $staged
+    $candidateVersion = Assert-AgentStarts $staged
+    if (Test-KeepNewerAgent $dest $candidateVersion) {
+      Remove-Item -Force -LiteralPath $staged -ErrorAction SilentlyContinue
     } else {
-      $oldVersion = Get-AgentReleaseVersion $dest
-      $newVersion = Get-AgentReleaseVersion $binTmp
-      if ($null -ne $oldVersion -and $null -ne $newVersion -and $oldVersion -ne $newVersion) {
+      # Different verified bytes are an upgrade, even at the same version: two
+      # builds can share a version number and still differ.
+      $hadAgent = Test-Path -LiteralPath $dest -PathType Leaf
+      if ($hadAgent -and (Get-Sha256 $dest) -ne (Get-Sha256 $staged)) {
         $script:AgentWasUpgraded = $true
       }
-      if (Test-Path $dest) {
+      $wasRunning = $script:AgentWasUpgraded -and (Test-AgentRunning $dest)
+      $previousVersion = Get-AgentReleaseVersion $dest
+      if ($hadAgent) {
         $aside = "$dest.old"
         Remove-Item -Force $aside -ErrorAction SilentlyContinue
-        try { Move-Item -Force $dest $aside } catch { } # locked-running: rename aside
+        try {
+          Move-Item -Force $dest $aside # locked-running: rename aside
+          if ($wasRunning -and $null -ne $previousVersion) {
+            $script:PreviousAgent = $aside
+            $script:PreviousAgentVersion = $previousVersion
+          }
+        } catch { }
       }
-      Move-Item -Force $binTmp $dest
+      Move-Item -Force -LiteralPath $staged -Destination $dest
       Log "installed verified binary to $dest"
       Install-VerifiedInteractionRuntime $asset $tmp $installDir
     }
@@ -552,6 +654,7 @@ function Main {
 
     Complete-Install $dest
   } finally {
+    if ($null -ne $staged) { Remove-Item -Force -LiteralPath $staged -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
   }
 }
@@ -563,15 +666,44 @@ function Start-BackgroundAgent($bin) {
   }
   $startArgs = @('start')
   if ($script:AgentWasUpgraded) { $startArgs += '--restart' }
+  $started = Invoke-Agent $bin $startArgs
+  if ($started.ExitCode -eq 0) {
+    Log "connected and running in the background"
+    return
+  }
+  if ($null -ne $script:PreviousAgent) {
+    Restore-PreviousAgent $bin $started
+  }
+  Log "could not start the background agent ($(Format-AgentResult $started)); connection is saved"
+  Log "run Opengeni Runner in the foreground with: $bin run"
+}
+
+# The upgraded agent did not start, and the previous one was running before the
+# install: put the previous binary back and start it again, so the machine ends
+# up where it was. Exits 8 either way: the new agent cannot run here.
+function Restore-PreviousAgent($bin, $newResult) {
+  $newVersion = Get-AgentReleaseVersion $bin
+  Log "opengeni-agent $newVersion did not start in the background ($(Format-AgentResult $newResult)); restoring opengeni-agent $($script:PreviousAgentVersion)"
+  $failed = "$bin.failed"
+  Remove-Item -Force $failed -ErrorAction SilentlyContinue
   try {
-    & $bin @startArgs
-    if ($LASTEXITCODE -eq 0) {
-      Log "connected and running in the background"
-      return
-    }
-  } catch { }
-  Log "could not install a background service on this host; connection is saved"
-  Log "start the foreground agent with: $bin run"
+    Move-Item -Force $bin $failed
+    Move-Item -Force $script:PreviousAgent $bin
+  } catch {
+    Fail 8 "opengeni-agent $newVersion cannot run in the background here, and the previous agent could not be put back: $($_.Exception.Message). The previous binary is $($script:PreviousAgent)."
+  }
+  $restarted = Invoke-Agent $bin @('start', '--restart')
+  if ($restarted.ExitCode -eq 0) {
+    Remove-Item -Force $failed -ErrorAction SilentlyContinue
+    Fail 8 "opengeni-agent $newVersion cannot run in the background on this machine ($(Format-AgentResult $newResult)). Restored opengeni-agent $($script:PreviousAgentVersion), which is running again."
+  }
+  Fail 8 "opengeni-agent $newVersion cannot run in the background on this machine ($(Format-AgentResult $newResult)), and the restored opengeni-agent $($script:PreviousAgentVersion) did not start either ($(Format-AgentResult $restarted)). Run '$bin run' to see why."
+}
+
+# A failed connection leaves the background agent as it was: one that was
+# running keeps running.
+function Stop-ConnectionFailed($result) {
+  Fail 9 "machine connection failed (opengeni-agent connect: $(Format-AgentResult $result)); the background agent was not changed"
 }
 
 function Complete-Install($bin) {
@@ -581,16 +713,16 @@ function Complete-Install($bin) {
     Log "non-interactive connection (OPENGENI_ENROLL_TOKEN set)"
     # This upserts only the token's deployment/workspace connection; unrelated
     # Opengeni connections remain configured and online.
-    & $bin --api-url $script:ApiUrl connect --token $enrollToken --non-interactive
-    if ($LASTEXITCODE -ne 0) { Fail 7 "machine connection failed; background service was not changed" }
+    $connected = Invoke-Agent $bin @('--api-url', $script:ApiUrl, 'connect', '--token', $enrollToken, '--non-interactive')
+    if ($connected.ExitCode -ne 0) { Stop-ConnectionFailed $connected }
     Start-BackgroundAgent $bin
     return
   }
 
   $workspaceId = [Environment]::GetEnvironmentVariable('OPENGENI_WORKSPACE_ID')
   if (-not [string]::IsNullOrEmpty($workspaceId)) {
-    & $bin --api-url $script:ApiUrl connect --workspace-id $workspaceId
-    if ($LASTEXITCODE -ne 0) { Fail 7 "machine connection failed; background service was not changed" }
+    $connected = Invoke-Agent $bin @('--api-url', $script:ApiUrl, 'connect', '--workspace-id', $workspaceId)
+    if ($connected.ExitCode -ne 0) { Stop-ConnectionFailed $connected }
     Start-BackgroundAgent $bin
     return
   }
@@ -600,7 +732,7 @@ function Complete-Install($bin) {
   # paths/origins containing PowerShell's single-quote character.
   $quotedBin = ([string]$bin).Replace("'", "''")
   $quotedApiUrl = ([string]$script:ApiUrl).Replace("'", "''")
-  Write-Host "opengeni-agent installed at: $bin"
+  Write-Host "Opengeni Runner installed at: $bin"
   Write-Host ""
   Write-Host "Next: & '$quotedBin' --api-url '$quotedApiUrl' connect; if (`$?) { & '$quotedBin' start }"
   Write-Host "Use '$bin run' only when you explicitly want foreground mode."

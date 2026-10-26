@@ -361,7 +361,8 @@ export class ComputerSupervisor {
   }
 
   async heartbeat(reference: ComputerSessionReference): Promise<void> {
-    await this.requireActive(reference).driver.listTargets();
+    // A locked screen leaves the computer itself alive.
+    await this.requireActive(reference).driver.listTargets().catch(unlessMachineLocked);
   }
 
   async endSession(
@@ -595,7 +596,9 @@ export class ComputerSupervisor {
       seatId: runtime.environmentLease.seatId,
       displayId: runtime.environmentLease.displayId,
       capabilities: runtime.capabilities,
-      targets: await runtime.driver.listTargets(),
+      // A computer opened while its screen is locked stays open with no
+      // targets; listing them says why.
+      targets: (await runtime.driver.listTargets().catch(unlessMachineLocked)) ?? [],
     };
   }
 
@@ -675,6 +678,14 @@ export class ComputerSupervisor {
       throw new InteractionControllerError("resource_unavailable", "computer supervisor is closed");
     }
   }
+}
+
+/** Swallows only the error of a computer whose screen is locked or shows
+ * another user's session; the computer and its helper are still fine. */
+function unlessMachineLocked(error: unknown): undefined {
+  if (error instanceof InteractionControllerError && error.code === "machine_locked")
+    return undefined;
+  throw error;
 }
 
 function binding(runtime: Runtime): ComputerSessionReference {

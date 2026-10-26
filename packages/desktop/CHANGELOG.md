@@ -1,5 +1,170 @@
 # @opengeni/desktop
 
+## 5.3.1
+
+### Minor Changes
+
+- 3b9f0e5: The desktop app notices calls. When Zoom, Teams, Slack, Webex, FaceTime, Discord or a meeting in a browser starts using the microphone, a notification offers to record it; when the recorded call ends, another offers to stop. The bundled audio helper reports which processes use a microphone (`--watch-microphone`) on macOS 14 and later, Windows and Linux with PipeWire or PulseAudio, without asking for any permission. Pages get the new `meetingDetection` capability: `status()`, `update({ enabled })`, `setRecording()`, `onRequest()` and `onChange()`. The switch is on by default and stored per computer.
+- c992791: Record other apps' audio in desktop meeting recordings. The desktop app ships a small native helper that captures what the computer plays, apart from the app's own sounds: a Core Audio process tap on macOS 14.2 and later, WASAPI process loopback on Windows 10 2004 and later, and the PulseAudio or PipeWire default monitor on Linux. `@opengeni/desktop` runs it per page and streams its samples over the new `systemAudio` bridge capability, and stops it when the page navigates away, closes or the app quits.
+
+  `@opengeni/sdk` adds `desktopSystemAudioSource`, which turns those samples into a `MediaStreamTrack` the recorder records as its own track, `displaySystemAudioSource` for the browser's shared tab or screen audio, and `defaultSystemAudioSource`, which picks the desktop helper when the app offers it. `RecorderOptions.systemAudioSource` overrides the choice, `RecorderPlatform.systemAudioKind` says which one a recorder uses, and capture failures are reported as the exported `RecorderCaptureError`. `useRecorder` from `@opengeni/react/recordings` exposes `systemAudioKind`.
+
+- c194abb: The desktop app has a Settings → Computer use page that shows, in one place, what Opengeni may do on the computer. The Computer use switch comes first; under it are control the screen (with Screen Recording, Accessibility and Input Monitoring), Google Chrome through the Opengeni Browser extension, the Desktop, Documents and Downloads folders and the Excel add-in, then App-shots and the microphone. Each row has one switch or one action. Turning a switch on asks the system for its permissions in the same step, one after another as each is allowed, or opens the exact System Settings pane when macOS needs the person to change it there, and the row shows Allowed when they come back. A permission the person hasn't allowed is a calm line naming what's missing, not an error, with one Open System Settings action for the page (on the Computer use row, or the row's own for the microphone); red is only for real failures. Turning one off is enforced: with screen control off the app restarts its agent with `OPENGENI_AGENT_SCREEN_CONTROL=off`, and the agent then offers no desktop, reports no screen consent or macOS permission states, starts its browser controllers without a computer backend, asks for no grants, captures nothing and injects no input whatever the connection's consent says; with Chrome off the agent releases its Chrome native-messaging host and starts no attached-browser bridge; with the microphone off the app refuses every microphone request. The switches are on by default and persist in the app's data folder; a settings file that can't be read counts as everything off until a save replaces it (a damaged one is also copied to `.corrupt`). A save or restart that fails shows on its row. The desktop bridge gains `computerCapabilities`, and this-computer status gains `folders`. App-shots settings move from Settings → Machines to this page, which Machines now points to. The agent's `permissions` answer says it honours the screen-control switch; with an older agent the switch shows as unavailable. The `computer-use` page joins the client page list.
+- 1534f12: Send feedback on web and in the desktop app attaches screenshots and context, like the phone app. The form offers **Take screenshot** (the desktop app takes a still of its own page without asking, and attaches one as the form opens; browsers use tab capture), **Add image** and paste, up to three images, each removable. `FeedbackDialog` takes `screenshots` and `reportContext`; `webFeedbackContext` (in `@opengeni/react/app/lib/feedback-capture`) reports web or desktop, versions, the page, browser, language, time zone, connection and the last error toasts, which `recordErrorToasts` (in `@opengeni/react/app/lib/recent-errors`) remembers. The desktop bridge gains the `captureWindow` capability and `appVersion`.
+
+### Patch Changes
+
+- dcbe25d: In the desktop app, the computer you're on is now **Computer use**: one on/off switch in Settings > Machines (and at the top of **Connect a machine**) instead of Turn on, Pause, Turn off and the old "Connecting …" card. It shows one state at a time: off (the same whether never set up, turned off, or removed from Machines), turning on, on, a calm "allow Opengeni in System Settings" line with **Open System Settings** while a macOS permission is still missing (not an error: files and commands work meanwhile), or a real problem in red with exactly one fix (**Sign in**, or **Try again** with the server's own message). Before, a computer removed from Machines kept saying "Connecting …" forever with "Couldn't reach the server" although the server had answered; now removal is detected and shows as off, and turning it on registers the computer again. Only a server that really can't be reached says so (new `ThisComputerErrorCode` values `removed` and `signed_out`; failed reads are classified by kind, and `ThisComputerDeps.readMachine` resolves null only when the server answered without the enrollment).
+
+  Off is pause, so it survives restarts and keeps the registration. Turning on is the whole step: it resumes, re-registers or starts the agent as needed, then asks macOS for each missing permission in turn (the system prompt, or the exact System Settings list with the floating guide) and finishes by itself once they are granted; if the person comes back without allowing one, it stops asking until they choose **Open System Settings**. An agent already registered to the workspace from the web app's install command is adopted and shows as on with nothing to do; on macOS the app then runs that same agent as its own helper (same registration, its service turned off) when the app already holds the service's screen permissions or when a missing one is asked for, so one set of permissions, Opengeni's, covers app-shots and computer use. The service runs it again if the helper doesn't stay up, when the app quits, or at the next launch if the helper's program is gone, so the computer never has two agents or none. The sidebar shows a small notice only while computer use turns on, needs a permission, or has a problem. Inside the app, **Connect a machine** no longer offers downloads or **Open app and connect** for this computer; in a browser it is unchanged. `useThisComputer` gains `turnOn`, `turnOff`, `pending`, `asking` and `allowPermissions`; `ThisComputerStatus` gains `requestedPermissions`; `ThisComputerDeps` gains `hostServiceAgent` and `ThisComputer.summary()` gains `handsBackOnQuit`; `@opengeni/react/this-computer` exports `computerUseState`, `computerUsePermissionText` and `useComputerUse`, and the desktop app exports `DesktopComputerUseRow` and `useDesktopComputerUse`.
+
+- 3a96b87: The page keeps keyboard focus when the window becomes active again. On macOS, after the app was hidden or the display slept, the page's first keystrokes were lost, so the first Control+Tab jumped straight to the next chat instead of showing the chat switcher.
+- 3fcd8d9: Zoom In now works with ⌘+ (Ctrl++ on Windows and Linux) on keyboards with their own + key, such as Nordic and German ones. It used to answer only to ⌘=, which those keyboards type with Shift. ⌘= still works.
+- 8bd2c99: macOS asks about fewer privacy permissions. The desktop window grants the microphone (dictation, voice chats and meeting recordings) but no longer the camera, refuses USB, serial, HID and Bluetooth devices, and turns off Web Bluetooth; the app's own local pages get no permissions. On a Connected Mac whose agent works from the home folder, code search skips Library, Music, Pictures, Movies and the Trash unless a path names them, and each of Desktop, Documents and Downloads until the owner has allowed the app to open it. Repository discovery does the same as a safeguard. The Connected Machine instructions tell the agent not to scan those folders unasked.
+- Updated dependencies [1988e97]
+- Updated dependencies [c5974ea]
+- Updated dependencies [15b4701]
+- Updated dependencies [e3782bb]
+- Updated dependencies [eb30cb4]
+- Updated dependencies [4c6bf32]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [6f6c356]
+- Updated dependencies [cccd692]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [dca33ef]
+- Updated dependencies [3b9f0e5]
+- Updated dependencies [dcbe25d]
+- Updated dependencies [31bca3c]
+- Updated dependencies [1d5bc4e]
+- Updated dependencies [6acfbd3]
+- Updated dependencies [21e7ecf]
+- Updated dependencies [fb90446]
+- Updated dependencies [0826dfd]
+- Updated dependencies [bd57ea7]
+- Updated dependencies [c307566]
+- Updated dependencies [a97c71b]
+- Updated dependencies [8bd2c99]
+- Updated dependencies [406d1b9]
+- Updated dependencies [2c34440]
+- Updated dependencies [c992791]
+- Updated dependencies [87d1b8a]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [4695d41]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [68b195d]
+- Updated dependencies [f9f0607]
+- Updated dependencies [75348a5]
+- Updated dependencies [cc319f3]
+- Updated dependencies [314522c]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [ee4df07]
+- Updated dependencies [7d419e2]
+- Updated dependencies [83682c3]
+- Updated dependencies [a9809ee]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [b7a14bd]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+- Updated dependencies [0383280]
+- Updated dependencies [1534f12]
+  - @opengeni/sdk@5.3.0
+  - @opengeni/agent-host@5.3.0
+
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [2d6484c]
+  - @opengeni/sdk@5.2.0
+  - @opengeni/agent-host@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [5d377a7]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/agent-host@5.1.0
+
+## 5.0.2
+
+### Patch Changes
+
+- Updated dependencies [ca3f931]
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [217ed52]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/agent-host@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [3089aaf]
+- Updated dependencies [e2a641c]
+  - @opengeni/sdk@4.8.0
+  - @opengeni/agent-host@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+  - @opengeni/sdk@4.7.2
+  - @opengeni/agent-host@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/agent-host@4.7.1
+- @opengeni/sdk@4.7.1
+
+## 4.7.0
+
+### Patch Changes
+
+- @opengeni/sdk@4.7.0
+- @opengeni/agent-host@4.7.0
+
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+  - @opengeni/sdk@4.6.0
+  - @opengeni/agent-host@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- Updated dependencies [f838cb7]
+- Updated dependencies [debd64e]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [e22eeca]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+  - @opengeni/sdk@4.5.0
+  - @opengeni/agent-host@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes

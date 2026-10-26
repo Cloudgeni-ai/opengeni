@@ -445,8 +445,8 @@ export function LearningSettings({
           title={`Shared chats in ${workspaceName}`}
           description={
             canManageWorkspace
-              ? "Everyone's shared chats and schedules here."
-              : "Everyone's shared chats and schedules here. Only workspace admins can change this."
+              ? "Everyone's shared chats and automations here."
+              : "Everyone's shared chats and automations here. Only workspace admins can change this."
           }
         >
           <GroupRows

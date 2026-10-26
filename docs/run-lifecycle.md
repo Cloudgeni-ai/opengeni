@@ -124,14 +124,17 @@ containment deadline, including normally completed turns. This is not a
 run-length limit. Heartbeats report `finalizing` and the current bounded
 `finalizationStage`; slow and containment logs carry the same hashed attempt
 `correlationId` as worker execution, never raw session or attempt IDs or metric labels.
+Tool-writer logs also sample the fence's closed `writerKinds` set (tool call,
+shell session, pending shell start, remote operation) and registration count;
+command text, numeric handles and provider locators are never logged.
 Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
 A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other
 live turns checkpoint and resume the same logical turn on a healthy worker,
 without spending their unexpected-worker-death redispatch allowance. The
-standalone host arms a 100-second exit backstop alongside Temporal's existing
-shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
+standalone host arms its existing role-specific process-exit backstop alongside
+Temporal's shutdown ceiling for a writer that cannot quiesce; heartbeat recovery and durable
 retained-process proofs still govern its admission. Temporal force shutdown only
 rejects `Worker.run()` and cannot stop JavaScript activity promises. Embedded
 service hosts own their fatality policy through `terminateWorker` or an equivalent
@@ -140,6 +143,10 @@ never exit the shared process. The deadline resets only when cleanup advances
 to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
+Host containment intent survives a Temporal finalization exception that masks
+its force-timeout error. The lifecycle reports `force_stopped`, keeps the SDK
+exception as the cause, and the standalone entry point labels its nonzero exit
+as a force stop, not an unexplained fatal crash. No shutdown timing changes.
 Closed attempts with unsettled workspace mutations or active, unadopted retained
 processes also block admission, even when their logical outcome is `completed`.
 The work peeker exposes the existing previous-attempt wait, and the final writer's
@@ -727,8 +734,10 @@ worker construction, and live retained-memory growth contracts new slot
 availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
 active transcript above any of four materialization limits: 15 MiB UTF-8 JSON,
 8,192 rows, 131,072 decoded JSON nodes, or 65,536 object properties. It never
-silently trims conversation truth; normal proactive compaction keeps long
-sessions under the boundary. Pause stores only the open-suffix sentinel; the
+silently trims conversation truth for inference: proactive compaction runs when
+stored history reaches 60% of any of these limits, and a history already over
+them is only read as a bounded, payload-elided view for checkpointing (see
+[`context-compaction.md`](context-compaction.md)). Pause stores only the open-suffix sentinel; the
 approval/run-state serving envelope still rejects leftover SDK heaps above 3 MiB,
 65,536 nodes, or 32,768 properties so they cannot enter a serving worker. A missing or malformed Temporal task-queue stats
 object is a failed read and makes the capacity sample stale; it is never
@@ -949,15 +958,20 @@ artifact API requests instead authorize from their ordinary authenticated access
 grant. Within governance, service-initiated goal continuations and compactions
 use the frozen causal human as the personal-preference subject while retaining
 their service initiator; pure service work has no personal-preference scope.
-Runtime composition is deterministic: core safety,
-organization/workspace/user preference descriptors plus organization/global,
-workspace, and role policy, then durable session instructions, tool/repository/
-skill substrate, and memory. Optional application `modelContext` is not part of
+Runtime composition is deterministic: core safety, durable session
+instructions, tool/repository/skill substrate, and memory form the system
+prompt. The rendered governance (organization/workspace/user preference
+descriptors plus organization/global, workspace, and role policy) is not part
+of the system prompt: it differs by initiator and changes between turns, so it
+is a durable developer history item written before the first turn that sees a
+new value, frozen for every attempt of that turn, and replaced by appending a
+newer item (see `docs/context-compaction.md`, "Prompt-cache stability").
+Optional application `modelContext` is not part of
 that prefix: claim stores it as a separate leading `input_text` part of the
 exact chronological user message. Standard timeline rendering omits it, while
 full audit data retains it. Documents and RAG evidence never become policy,
 and full preference bodies require explicit retrieval. When no structured
-governance applies, the legacy prompt bytes remain unchanged.
+governance applies, no governance item is written.
 
 Turn acceptance freezes Agent learning policy in `agent_learning_snapshots`:
 the owner layer, effective Knowledge/instruction/Skill modes, and the accepted
@@ -1123,6 +1137,27 @@ waiter-local. Supervised cancellation preserves durable intent and its original
 writer; a bounded helper observation failure keeps the same helper UUID, cursor
 and partial response for a later drain. Rejection never proves quiescence or
 permits numeric-PID fallback or another possibly dispatched helper Start.
+
+When a model-facing foreground wait returns an unavailable observation for a
+durably adoptable command, it commits the ordinary session background-command
+handoff **before** exposing its command UUID, just as it does for a running
+receipt. Only then does the turn fence remove its shell registration. Failed
+adoption, cancelled waits and worker-local handles keep their existing ownership
+rules. Setup/lifecycle calls still throw; nothing replays a Start or claims exit.
+The process holder and parent admission stay active and continue to block
+non-point-in-time capture until exact provider proof or the existing idle/deadline
+containment settles them. This prevents an unavailable observer from owning both
+an unfindable command ID and an unfinishable turn cleanup loop.
+
+An exact Modal router `FAILED_PRECONDITION` / `exec not found` response means
+observation state is unavailable, not that a process group has stopped. It is
+typed non-retryable read uncertainty, never Start replay or physical-loss proof.
+The reaper records `process_observation_unavailable` rather than generic
+`provider_error`; protected failure diagnostics retain the source/cause chain
+and numeric gRPC statuses, while public logs contain only the lookup key and
+bounded probe stage. Forgotten output cannot be reconstructed. The existing
+idle-command window, explicit disable switch and provider deadline remain
+unchanged; a successful containment still captures before stopping the box.
 
 Fresh progressive-disclosure attempts complete only session-marked eager MCP
 connection and schema admission before inference, plus the first-party
@@ -1460,6 +1495,25 @@ never replays historical work or changes the accepted account selection of a
 capacity-waiting turn. A capacity waiter pinned to an allocator-disabled account
 requires an authorized account change; time or a deploy cannot override it.
 
+Personal sidebar Archive composes native Pause and the member's archive row in
+one transaction, taking the personal-state fence before the control/workspace/
+session prefix. It pauses idle chats too; active work anywhere in the tree
+requires explicit confirmation under the control lock. `sessions:control` governs
+Pause regardless of the chat creator; `hide_for_me` explicitly changes only the
+caller's sidebar visibility. Shared Pause affects everyone. Restore changes only
+personal visibility and never resumes. A stable `clientEventId` replays an archive
+intent without undoing a later explicit Resume; use a new ID for a new intent.
+Native Pause interrupts descendant work and requests background-command
+cancellation through the existing durable settlement protocol. Completion of the
+HTTP request does not mean every external command has already stopped.
+
+Archive does not rewrite schedule ownership or enabled flags. Existing-session
+and reusable-session schedules cannot admit work into an effectively paused chat
+or descendant. Their definitions remain visible and enabled for their owners;
+only an explicit Resume can make the chat executable again. Independent
+new-chat-per-run schedules are not schedules *in* the archived chat and remain
+unaffected. Personal hiding alone makes no execution guarantee.
+
 Scheduled admission refuses an effectively paused session under every overlap
 policy (`refusePaused`), not only skip: an occurrence queued behind a Pause
 could neither run nor settle. Under the same session lock it distinguishes a
@@ -1607,6 +1661,14 @@ Interactive pages select bounded candidates, then size only the payload prefix
 needed for the page. They retain the exact full event and durable cursor; one
 oversized event is delivered alone. Explicit continuation determines completion;
 a short page never substitutes for that durable read result.
+Larger and explicitly batched full reads also size only the needed prefix,
+including its first byte-overflow row, while retaining their separate metadata
+and payload statements. Candidate discovery still examines the ordinary filter
+range; this does not make sparse filtering constant-time or provide a coherent
+multi-statement snapshot. Compare exact-base results and local timings with
+`bun scripts/operator/bench-event-metadata.ts <exact-base-commit>` using the
+disposable PostgreSQL test environment. Keyed prefix planning adds overhead for
+small payloads; the intended saving is avoiding unnecessary large-payload sizing.
 The downstream one-frame queue cannot substitute for this upstream read bound.
 
 Generic OpenAI-compatible model streams (the built-in OpenAI/Azure client and
@@ -4133,6 +4195,27 @@ settling activity completed last is the reply; an activity that resumed the
 turn after an approval, a human-input answer or a recovery and completed none
 reads the turn's newest current durable `agent.message.completed` instead.
 
+`wait_for_input` also takes an optional `reply` argument: the agent's complete
+message for the person, exactly as written. Text a model writes just before a
+tool call is not always delivered verbatim (Claude Opus 5.5 and Sonnet 5.5
+return a longer note there as a progress-update thinking block whose readable
+text is only Anthropic's summary, see [model providers](./model-providers.md)),
+but a tool argument always is. When the accepted wait carries a `reply`,
+the worker publishes it durably before the first tool result it records after
+the wait was accepted (after that response's own text), as an
+`agent.message.completed` with `phase` `final_answer` and `messageId`
+`wait_for_input:reply:<attempt id>`, whoever started the turn, unless it equals the turn's
+latest message. An approval pause or a retried activity therefore does not lose
+it (the agents SDK streams an executed tool's output item on an approval
+interruption too), and settlement publishes it only if that did not happen. For a turn that a
+human or API message started, it is also
+`turn.completed.payload.reply`, ahead of the latest message; a resumed
+activity finds it as the turn's newest durable message. The first accepted
+wait's reply in an attempt wins; a resumed attempt that accepts another wait
+publishes its reply as a separate message. The API tool itself ignores `reply`: only the turn worker's
+model tool path shows it, so a `wait_for_input` a Code Mode script calls does
+not show its `reply`.
+
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace
 deletion takes a separate transaction-scoped background-command advisory prefix
@@ -4283,9 +4366,12 @@ writers first. A live `opengeni_app` session rejects activation with SQLSTATE
 old writer is permitted only before activation; after activation no old writer
 may restart, because there is no mixed-version or down-migration path.
 
-**Worker restarts are survivable.** A graceful worker shutdown (a deploy or
-rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
-reason `WORKER_SHUTDOWN`) checkpoints conversation truth and the sandbox
+**Worker restarts are survivable.** A draining turn worker (a deploy or
+rollout restart delivers SIGTERM) stops polling at once and lets in-flight
+turns finish naturally for its shutdown grace (default 90 seconds,
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS`); those turns complete normally. For a
+turn that outlasts the grace, Temporal cancels the activity with reason
+`WORKER_SHUTDOWN`; the activity checkpoints conversation truth and the sandbox
 envelope, closes the exact attempt as recoverable, and leaves the same logical
 turn in `recovering`. It never creates a human queue row or synthetic user
 message. Any in-flight side-effecting tool call is durably closed with an
@@ -4593,13 +4679,24 @@ recovery replays the stored bytes. The instructions never contain a clock.
    provider identity, signed URLs, object keys, or base64. See
    [`image-generation.md`](image-generation.md).
    Model-visible tool results stay at or below 1 MiB. Overflow is a successful
-   tool: exact serialized bytes become a workspace File, a current-turn copy
-   lands at `tool-results/<operationId>.json` relative to the shell cwd (the
-   durable rematerialization path remains the virtual
-   `/workspace/tool-results/<operationId>.json`), and history/events keep the
-   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt whose
-   `sandboxPath` is that cwd-relative shell path. Later turns do not
-   rematerialize; retrieve old bytes through Files MCP plus shell. Spill write
+   tool: exact serialized bytes become a workspace File and a current-turn copy
+   lands at `tool-results/<operationId>.json` under the placement's workspace
+   root (the durable rematerialization path remains the virtual
+   `/workspace/tool-results/<operationId>.json`). History/events keep the
+   compact `{ sandboxPath, fileId, byteSize, mediaType }` receipt, followed by
+   one text block telling the model how to read it. `sandboxPath` is the
+   absolute path of the copy in the placement it was written to (a Connected
+   Machine's host-native root or a box's root), so the shell opens it from any
+   working directory; a root that is not an absolute POSIX path keeps the
+   cwd-relative form. The path is given only once the copy is in the sandbox:
+   a spill that finds the turn's lazy sandbox not started yet joins it (as a
+   shell command would; the start copies the attempt's spilled files before
+   releasing its first operation, and the spill retries a failed copy once), so
+   the receipt never promises a later copy. It is `null` without a sandbox
+   route, when the sandbox cannot start or the copy fails, and on the SDK-owned
+   path before its session exists. The text names the Files download tool
+   (`files__files_get_download_url` with the `fileId`) for a missing copy, as
+   attachment receipts do; later turns do not rematerialize. Spill write
    failure is a bounded `result_too_large` error and never puts the huge payload
    in history.
    Codemode callers skip the 1 MiB cap; the existing 16 MiB journal cap on
@@ -4616,12 +4713,21 @@ recovery replays the stored bytes. The instructions never contain a clock.
    item and event record that copy, while Codemode receives the exact executor
    result. See
    [model-visible discovery results](knowledge.md#model-visible-discovery-results).
+   A local MCP bridge may also supply its own model-visible copy through
+   `LocalMcpBridgeServer.projectModelToolResult` (the Gmail bridge's compact
+   mail cards, see [Gmail](gmail.md#model-visible-results)); it runs before
+   the 1 MiB check, Codemode and the spill file keep the exact result, and a
+   projection that throws leaves the exact result in place.
    User attachment rows store stable file references, not inline bytes. Active
    messages reconstruct the same authorized receipt and supported image content
    across turns and before compaction. File metadata is batch-authorized once
    per turn and bytes are memoized; object reads have bounded concurrency.
    Historical images do not cause sandbox remounts. Each image retains the
    existing inline admission limit; adding an image does not evict older images.
+   Inline delivery needs the file's sha256: upload completion computes it from
+   the stored bytes when the client sent none (files up to
+   `MAX_INLINE_MODEL_ATTACHMENT_BYTES`), so a plain REST upload is inlined like
+   an SDK upload; a client digest is never replaced.
    Before blob reads, a 64 MiB raw-image transport limit bounds both accumulated
    per-turn bytes and repeated images in each request. Exceeding it fails the
    turn explicitly without altering history; compaction cannot bypass it.
@@ -4943,8 +5049,8 @@ The user-visible startup critical path is also durable and phase-specific. The
 existing `turn.queued`/`turn.started`, `sandbox.operation.*`, `rig.setup.*`, and
 `agent.model.request` events reconstruct queueing, box establishment, sandbox environment,
 repository/file work, and provider first byte. Compact
-`turn.startup.phase.started|completed|failed` checkpoints fill the two gaps for
-tool connection and model-request preparation; terminal payloads contain only a
+`turn.startup.phase.started|completed|failed` checkpoints cover
+tool connection, model-request preparation, and post-provision preparation; terminal payloads contain only a
 closed phase name and non-negative `durationMs`. In particular, lazy
 `sandbox.provision` completes as soon as the box is established, before owned
 sandbox environment/repository/file setup, so “Starting sandbox” never absorbs unrelated work.
@@ -4953,6 +5059,44 @@ the runtime and ends at the provider transport boundary, so it may include the
 sandbox, sandbox environment, repository, and other setup rows whose starts appear below it.
 The timeline labels that overlap explicitly instead of presenting the parent as
 an additional sequential wait.
+
+Managed eager and lazy setup also records completion-only startup receipts and
+the existing startup histogram/spans for `credential_resolution` (host material),
+`credential_mint` (Git/Codemode credentials, including a prefetched mint's remaining
+wait), `credential_materialization` (renewal handoff and the fenced initial write
+or clear), `client_publication` (release asset load, storage publication and fresh
+download URL), and `client_readiness` (in-box verification/install, including the
+editor fallback). `credential_seed`, `credential_hooks`, and `artifact_runtime`
+cover the other turn-private hooks. Resolver binding has its own
+`run_credential_binding` metric/span. Inapplicable hooks emit nothing; no-op
+prerequisite branches can record near-zero time. Publication can complete without
+a URL when storage is unavailable: readiness then includes staging the same
+release bytes through the provider editor. No credential, URL, hook output, or
+error text enters these receipts. Completion timestamps are captured before
+event delivery. Receipts are batched once per preparation boundary rather than
+adding a database round trip per hook; observation failures preserve the
+operation's result. `startup_phase_delivery` measures that batch delivery, and
+`sandbox_provision_receipt` measures the existing provisioning-completion write.
+`run_git_credential_mint` measures the full prefetched mint, distinct from the
+remaining wait in the visible `credential_mint` row. Shared rig claim/join time
+remains covered by the existing shared-preparation metric.
+
+After lazy box establishment, credential mint/join, client publication, and run
+credential materialization overlap. They share no inputs that require serial
+execution. All started operations settle before any error is propagated or setup
+ownership is released, with the previous serial error precedence. Rig and
+repository setup still wait for credentials; existing hook dependencies and
+renewal registration order stay intact. A fresh download URL is signed at use,
+not reused from a potentially old agent-build URL. The recorded intervals overlap
+one another as well as model preparation. These are diagnostic events only:
+model input, tool schemas, credential scope and selected release bytes do not change.
+
+`bun scripts/bench-post-provision-startup.ts [source-ref]` executes the production
+lazy prerequisite block (optionally read from a Git revision) with real local
+credential writes, token signing, and client installation. It reports local and
+controlled 100 ms transport-delay cases, with cold and warm publication caches.
+It never calls a model or cloud provider; injected Git/storage/command latency
+is not a measurement of a particular provider.
 
 Eager owned-box platform setup (rig setup, credential hooks and repository
 clones) needs nothing from file delivery or the model input, so the worker
@@ -5197,6 +5341,22 @@ directory. Resolving or renaming live file metadata does not rewrite that text,
 and losing it does so only as described below. Active image bytes still require
 current authorized metadata and checksum-valid content; compacted attachment
 catalogs remain receipt-only.
+
+Per-turn file attachments never change the system instructions. The modular
+contract has no attachment module, and the SDK-rendered remote mount policy and
+filesystem layout come from the agent's instruction manifest
+(`manifestWithoutFileResourceEntries`), which drops file resource entries,
+including files a resumed sandbox's manifest state still holds from earlier
+turns; the session still materializes the full manifest. Everything the model
+needs about the turn's files (paths, sizes, read-only handling, contents are
+data, an earlier attachment belongs to a request only when that message refers
+to it) is in the turn's "Attached files are available in the sandbox" notice,
+which follows history and is persisted with the turn. A turn with a file
+therefore shares the cached prefix of a turn without one and only the
+attachment tail is uncached.
+The notice lists every file mounted for the turn, including files supplied as
+session or API resources rather than attached to the message, each once; a
+mounted file the requester cannot read is left out without failing the turn.
 The receipt-format change incurs a one-time prefix change for existing histories.
 One exception: when this turn's file-authority lookup does not return an active
 reference (another participant's file in a shared session, or a file that is no

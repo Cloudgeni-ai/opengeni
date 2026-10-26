@@ -1,7 +1,16 @@
 import { openGeniConsolePath, type OpenGeniLinkTarget } from "@opengeni/sdk";
-import { useCallback } from "react";
-import type { OpenGeniLinkResolver } from "../../components/open-geni-links";
-import { useNavigate } from "./navigation";
+import { useMemo } from "react";
+
+import {
+  chainLinkResolvers,
+  useOpenGeniLinkResolver,
+  type OpenGeniLinkResolver,
+} from "../../components/open-geni-links";
+// The host's page, read from the app host rather than `./navigation`, which
+// many tests replace with a partial module mock.
+import { useAppHost } from "./app-host";
+import { useSessionUiFeature } from "./session-ui-features";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const EDITABLE_ID = /^[0-9a-f]{32}$/iu;
 
@@ -45,28 +54,65 @@ export function consoleLinkResolver(target: OpenGeniLinkTarget): { href: string 
 }
 
 /**
- * Agent `session:<id>` references to chats in this workspace. The link points
- * at the chat's console route, so ⌘/Ctrl-click and the context menu treat it
- * as an ordinary page (a new tab, or the browser from the desktop app), and a
- * plain click opens the chat here without reloading the app.
+ * The app's resolver for object links in agent Markdown: the host's own
+ * resolver (an `OpenGeniLinkProvider` around an embed) first, then the web
+ * app's page for the object. In an embed that page is on the web app's
+ * origin, not the host page's: with the dock on, the link carries the
+ * absolute URL so the dock still intercepts it; with the dock off, it opens
+ * that page beside the host through the embed's `openUrl`.
  */
-export function useSessionReferenceResolver(workspaceId: string): OpenGeniLinkResolver {
-  const navigate = useNavigate();
-  return useCallback(
-    (target: OpenGeniLinkTarget) => {
-      if (target.kind !== "session") return null;
-      const workspace = target.workspaceId ?? workspaceId;
-      const href = openGeniConsolePath(target, workspace);
-      if (!href) return null;
-      return {
-        href,
-        open: () =>
-          void navigate({
-            to: "/workspaces/$workspaceId/sessions/$sessionId",
-            params: { workspaceId: workspace, sessionId: target.sessionId },
-          }),
-      };
-    },
-    [navigate, workspaceId],
+export function useAppLinkResolver(): OpenGeniLinkResolver {
+  const host = useOpenGeniLinkResolver();
+  const page = useAppHost().navigation?.page;
+  const dock = useSessionUiFeature("dock");
+  return useMemo(() => {
+    const console: OpenGeniLinkResolver = !page?.opensBeside
+      ? consoleLinkResolver
+      : (target) => {
+          const resolved = consoleLinkResolver(target);
+          if (!resolved) return null;
+          if (dock) return { href: new URL(resolved.href, page.origin()).toString() };
+          return { open: () => page.open(resolved.href) };
+        };
+    return chainLinkResolvers(host, console) ?? console;
+  }, [dock, host, page]);
+}
+
+/**
+ * {@link useAppLinkResolver} inside one workspace's session: a workspace-less
+ * `artifact:` file link or `session:` chat link belongs to that workspace, as
+ * it does in the agent's chat replies, so links in its questions and other
+ * session text resolve the same way. The host's resolver still sees the link
+ * first. With `openSession`, a plain click on a chat link opens the chat here
+ * without reloading the app, while the link keeps the chat's page as its href,
+ * so ⌘/Ctrl-click and the context menu treat it as an ordinary page (a new
+ * tab, or the browser from the desktop app). An embed opens it beside the host.
+ */
+export function useWorkspaceAppLinkResolver(
+  workspaceId: string,
+  openSession?: (workspaceId: string, sessionId: string) => void,
+): OpenGeniLinkResolver {
+  const host = useOpenGeniLinkResolver();
+  const app = useAppLinkResolver();
+  const opensBeside = useAppHost().navigation?.page?.opensBeside === true;
+  return useMemo(
+    () =>
+      chainLinkResolvers(
+        host,
+        openSession && !opensBeside
+          ? (target) => {
+              if (target.kind !== "session") return null;
+              const workspace = target.workspaceId ?? workspaceId;
+              const href = openGeniConsolePath(target, workspace);
+              return href ? { href, open: () => openSession(workspace, target.sessionId) } : null;
+            }
+          : null,
+        app,
+        (target) =>
+          (target.kind === "file" || target.kind === "session") && target.workspaceId === null
+            ? app({ ...target, workspaceId })
+            : null,
+      ) ?? app,
+    [app, host, opensBeside, openSession, workspaceId],
   );
 }

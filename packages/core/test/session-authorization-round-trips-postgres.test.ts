@@ -5,6 +5,8 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getSessionAuthorizationFactsBatch,
+  withWorkspaceRls,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
   type Database,
@@ -16,6 +18,7 @@ import postgres from "postgres";
 import {
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
+  requireSessionAuthorizations,
   SessionAuthorizationDeniedError,
   withSessionAuthorizationReadReuse,
 } from "../src/session-authorization";
@@ -144,6 +147,105 @@ async function fixture() {
 }
 
 describe("session authorization round trips", () => {
+  test("batch host callbacks do not overlap nested transaction scopes", async () => {
+    const scope = await fixture();
+    await db.transaction(async (tx) => {
+      let active = 0;
+      let peak = 0;
+      const decisions = await requireSessionAuthorizations(
+        {
+          db: tx,
+          sessionAuthorization: {
+            authorizeSession: async () => {
+              active++;
+              peak = Math.max(peak, active);
+              await withWorkspaceRls(tx, scope.grant.workspaceId!, async () => {
+                await new Promise((resolve) => setTimeout(resolve, 5));
+              });
+              active--;
+              return { allowed: true };
+            },
+          },
+        },
+        scope.humanGrant,
+        {
+          sessionIds: [scope.caller.id, scope.other.id],
+          operation: "session.read",
+          surface: "http",
+        },
+      );
+      expect(decisions.map((decision) => decision.status)).toEqual(["fulfilled", "fulfilled"]);
+      expect(peak).toBe(1);
+    });
+  });
+
+  test("a response window reads distinct targets and missing rows in one scope", async () => {
+    const scope = await fixture();
+    const missing = crypto.randomUUID();
+    const ids = [scope.caller.id, scope.other.id, missing, scope.caller.id.toUpperCase()];
+    const { value: facts, count } = await counted(() =>
+      getSessionAuthorizationFactsBatch(db, {
+        accountId: scope.grant.accountId,
+        workspaceId: scope.grant.workspaceId!,
+        sessionIds: ids,
+      }),
+    );
+    expect(count).toBe(4);
+    expect([...facts.keys()].sort()).toEqual([...ids].sort());
+    expect(facts.get(missing)).toEqual({ target: null, caller: null });
+    expect(facts.get(scope.caller.id.toUpperCase())).toEqual(facts.get(scope.caller.id));
+    const { value: decisions, count: decisionCount } = await counted(() =>
+      requireSessionAuthorizations({ db, sessionAuthorization: undefined }, scope.humanGrant, {
+        sessionIds: ids,
+        operation: "session.read",
+        surface: "http",
+      }),
+    );
+    expect(decisionCount).toBe(4);
+    expect(decisions.map((decision) => decision.status)).toEqual([
+      "fulfilled",
+      "fulfilled",
+      "rejected",
+      "fulfilled",
+    ]);
+    const absent = decisions[2]!;
+    if (absent.status !== "rejected") throw new Error("Missing source was accepted");
+    expect(absent.reason).toBeInstanceOf(SessionAuthorizationDeniedError);
+    expect(absent.reason.reason).toBe("not_found");
+  });
+
+  test("batch decisions retain per-target host denials and attempt freshness", async () => {
+    const scope = await fixture();
+    const seen: string[] = [];
+    const deps = {
+      db,
+      sessionAuthorization: {
+        authorizeSession: async (input: { target: { sessionId: string } }) => {
+          seen.push(input.target.sessionId);
+          return input.target.sessionId === scope.caller.id
+            ? { allowed: true as const }
+            : { allowed: false as const, reason: "forbidden" as const };
+        },
+      },
+    };
+    const input = {
+      sessionIds: [scope.caller.id, scope.other.id],
+      operation: "session.read" as const,
+      surface: "http" as const,
+    };
+    const decisions = await requireSessionAuthorizations(deps, scope.agentGrant(), input);
+    expect(seen.sort()).toEqual([...input.sessionIds].sort());
+    expect(decisions.map((decision) => decision.status)).toEqual(["fulfilled", "rejected"]);
+    seen.length = 0;
+    const stale = await requireSessionAuthorizations(
+      deps,
+      scope.agentGrant({ executionGeneration: scope.live.generation + 1 }),
+      input,
+    );
+    expect(stale.map((decision) => decision.status)).toEqual(["rejected", "rejected"]);
+    expect(seen).toEqual([]);
+  });
+
   test("an agent attempt authorizes its own session in one scoped read", async () => {
     const scope = await fixture();
     const deps = { db, sessionAuthorization: undefined };

@@ -73,6 +73,8 @@ const WifiContent = z.object({
 });
 const CreditCardContent = z.object({
   cardholder_name: OptionalString,
+  /** A brand such as "Visa"; "Unspecified" when Proton does not know it. */
+  card_type: z.unknown().optional(),
   number: OptionalString,
   verification_number: OptionalString,
   expiration_date: OptionalString,

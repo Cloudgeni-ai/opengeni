@@ -8,15 +8,24 @@ or the 720-second E2E deadline.
 `e2e-shard-profile.json` records completed CI file durations. Its evidence names
 the exact source and jobs; a duration includes every browser engine and child
 startup/teardown. Do not use a killed file's partial time as its full cost. The
-initial startup weight comes from an earlier successful job with identical test
-content, not the later aggregate timeout. These are planning observations, not
-performance guarantees or cross-source efficacy claims.
+current weights pool every successful shard job on main with identical file
+content, dependency lock, Bun pin and browser runner; each file's weight is its
+lower-median observed interval, and `fileSources` names the job that observed
+it. These are planning observations, not performance guarantees or
+cross-source efficacy claims.
 
-The profile is used only when its complete discovered file set, per-file hashes,
-platform/architecture, Bun runtime/pin, dependency lock and browser runner match.
-A missing, malformed or stale profile falls back to deterministic source-byte
-weights and reports the reason. Integration retains its existing service-image
-fence. Neither profile is execution or release authority.
+The profile is used only when its schema, tier, units and platform/architecture
+match; a missing or malformed profile falls back to deterministic source-byte
+weights and reports the reason. A Bun runtime/pin, dependency lock, browser
+runner or service-image change keeps the measured times and reports what
+drifted: those changes shift file times a little, while source-byte weights put
+the slowest suites together and overrun the shard deadline. Test files are
+fenced one by one: a file whose content changed keeps its last measured time,
+a new file is estimated from its size at
+the profile's median milliseconds per byte, and a removed file is ignored, so
+ordinary test edits never discard every other file's timing. Refresh the
+profile when many files or the toolchain have drifted. Neither profile is
+execution or release authority.
 
 To refresh, retain the CI file profiles (or timestamped job logs), record only
 successful complete file intervals from file start through the next start or

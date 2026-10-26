@@ -70,6 +70,7 @@ export {
   coalesceSessionEventDeltas,
   coalesceSessionEventDeltasWithCoverage,
   reasoningDeltaSeparator,
+  canMergeReasoningDelta,
   type CoalescedSessionEventPage,
 } from "./coalesce";
 
@@ -1384,6 +1385,16 @@ export function formatWorkspaceControlEventSse(event: WorkspaceControlEvent): st
     );
   }
   return formatted;
+}
+
+/**
+ * Cursor-only control frame. A reader that may not see some session-scope
+ * control events (another person's private chat) still needs to advance past
+ * them, or a finite batch made only of hidden events would be re-read forever.
+ * It carries no session, action or actor.
+ */
+export function formatWorkspaceControlCursorSse(workspaceId: string, sequence: number): string {
+  return formatSse({ type: "workspace.control.cursor", workspaceId, sequence });
 }
 
 /** Serialize exact durable content; the SSE queue backpressures whole frames. */

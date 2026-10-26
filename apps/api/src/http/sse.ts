@@ -15,6 +15,7 @@ import {
 import {
   coalesceSessionEventDeltasWithCoverage,
   formatSessionEventSse,
+  formatWorkspaceControlCursorSse,
   formatWorkspaceControlEventSse,
   requireSessionEventDurableFanoutCapability,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
@@ -572,28 +573,53 @@ export async function replaySessionEvents(
   }
 }
 
+/**
+ * Session-scope control events belong to one chat. A reader only receives
+ * those for chats it can read; workspace-scope events go to every reader.
+ */
+export type WorkspaceControlEventVisibility = (
+  events: readonly WorkspaceControlEvent[],
+) => Promise<WorkspaceControlEvent[]>;
+
+export type WorkspaceControlSseOptions = SseDeliveryOptions & {
+  visibleControlEvents: WorkspaceControlEventVisibility;
+};
+
+/**
+ * One finite page of control frames for a reader. When the page ends in
+ * events the reader cannot see, a cursor-only frame moves its cursor past them.
+ */
+async function workspaceControlBatchFrames(
+  db: Database,
+  workspaceId: string,
+  after: number,
+  visibleControlEvents: WorkspaceControlEventVisibility,
+): Promise<string[]> {
+  const events = (
+    await listWorkspaceControlEvents(db, workspaceId, after, WORKSPACE_CONTROL_REPLAY_PAGE_SIZE)
+  ).sort((left, right) => left.sequence - right.sequence);
+  const visible = await visibleControlEvents(events);
+  const frames = visible.map(formatWorkspaceControlEventSse);
+  const scannedThrough = events.at(-1)?.sequence;
+  if (scannedThrough !== undefined && scannedThrough > (visible.at(-1)?.sequence ?? after)) {
+    frames.push(formatWorkspaceControlCursorSse(workspaceId, scannedThrough));
+  }
+  return frames;
+}
+
 export async function sseWorkspaceControlStream(
   db: Database,
   bus: EventBus,
   workspaceId: string,
   after: number,
   signal: AbortSignal,
-  options: SseDeliveryOptions = {},
+  options: WorkspaceControlSseOptions,
 ): Promise<Response> {
+  const { visibleControlEvents } = options;
   if (isHttp1BrowserBatch(options)) {
-    const events = await listWorkspaceControlEvents(
-      db,
-      workspaceId,
-      after,
-      WORKSPACE_CONTROL_REPLAY_PAGE_SIZE,
-    );
+    const frames = await workspaceControlBatchFrames(db, workspaceId, after, visibleControlEvents);
     await options.reauthorize?.();
-    return finiteSseBatchResponse(
-      events
-        .sort((left, right) => left.sequence - right.sequence)
-        .map(formatWorkspaceControlEventSse),
-      options,
-    );
+    return finiteSseBatchResponse(frames, options);
   }
   const heartbeatIntervalMs = resolveHeartbeatInterval(options.heartbeatIntervalMs);
   let lastSent = after;
@@ -660,17 +686,17 @@ export async function sseWorkspaceControlStream(
           WORKSPACE_CONTROL_REPLAY_PAGE_SIZE,
           Math.max(1, event.sequence - lastSent),
         );
-        const missing = await listWorkspaceControlEvents(db, workspaceId, lastSent, limit);
-        let reachedIncoming = false;
-        for (const missed of missing.sort((a, b) => a.sequence - b.sequence)) {
-          if (missed.sequence >= event.sequence) {
-            reachedIncoming = true;
-            break;
-          }
-          if (missed.sequence > lastSent) {
-            await writeFrame(formatWorkspaceControlEventSse(missed));
-            lastSent = missed.sequence;
-          }
+        const missing = (await listWorkspaceControlEvents(db, workspaceId, lastSent, limit)).sort(
+          (a, b) => a.sequence - b.sequence,
+        );
+        const reachedIncoming = missing.some((missed) => missed.sequence >= event.sequence);
+        const gap = missing.filter(
+          (missed) => missed.sequence > lastSent && missed.sequence < event.sequence,
+        );
+        const visibleIds = new Set((await visibleControlEvents(gap)).map((missed) => missed.id));
+        for (const missed of gap) {
+          if (visibleIds.has(missed.id)) await writeFrame(formatWorkspaceControlEventSse(missed));
+          lastSent = missed.sequence;
         }
         if (reachedIncoming || missing.length < limit) break;
         if (lastSent === previousLastSent) {
@@ -682,7 +708,8 @@ export async function sseWorkspaceControlStream(
     }
     // The bus is workspace-wide, not an authorization projection. Re-read the
     // exact durable row under this stream's actor before delivering live data.
-    const visible = await getWorkspaceControlEvent(db, workspaceId, event.id);
+    const durable = await getWorkspaceControlEvent(db, workspaceId, event.id);
+    const [visible] = durable ? await visibleControlEvents([durable]) : [];
     if (visible) await writeFrame(formatWorkspaceControlEventSse(visible));
     lastSent = event.sequence;
   };
@@ -764,11 +791,11 @@ export async function sseWorkspaceLiveStream(
   controlAfter: number,
   interactionAfter: number,
   signal: AbortSignal,
-  options: WorkspaceInteractionSseOptions = {},
+  options: WorkspaceInteractionSseOptions & WorkspaceControlSseOptions,
 ): Promise<Response> {
   if (isHttp1BrowserBatch(options)) {
-    const [controlEvents, interactionState] = await Promise.all([
-      listWorkspaceControlEvents(db, workspaceId, controlAfter, WORKSPACE_CONTROL_REPLAY_PAGE_SIZE),
+    const [controlFrames, interactionState] = await Promise.all([
+      workspaceControlBatchFrames(db, workspaceId, controlAfter, options.visibleControlEvents),
       getWorkspaceInteractionRevisionState(db, { accountId, workspaceId }),
     ]);
     await options.reauthorize?.();
@@ -786,11 +813,7 @@ export async function sseWorkspaceLiveStream(
         ),
       );
     }
-    frames.push(
-      ...controlEvents
-        .sort((left, right) => left.sequence - right.sequence)
-        .map(formatWorkspaceControlEventSse),
-    );
+    frames.push(...controlFrames);
     return finiteSseBatchResponse(frames, options);
   }
   const upstream = new AbortController();
@@ -816,7 +839,7 @@ export async function sseWorkspaceLiveStream(
   else signal.addEventListener("abort", abort, { once: true });
   stopReauthorization = startSseReauthorization(options, channel.stopped, channel.close);
 
-  const upstreamOptions: WorkspaceInteractionSseOptions = {
+  const upstreamOptions: WorkspaceInteractionSseOptions & WorkspaceControlSseOptions = {
     ...options,
     connectionLifetimeMs: undefined,
     finiteResponseMaxBytes: undefined,

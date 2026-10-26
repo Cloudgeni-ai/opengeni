@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { HumanInputQuestion, HumanInputSecretSpec } from "@opengeni/sdk";
+import {
+  openGeniConsolePath,
+  type HumanInputQuestion,
+  type HumanInputSecretSpec,
+} from "@opengeni/sdk";
+import type { ReactNode } from "react";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
 registerDom();
 
-const { HumanInputForm } = await import("../src");
-const { linkifySegments } = await import("../src/components/linkified-text");
+const { HumanInputForm, OpenGeniLinkProvider } = await import("../src");
 
 const SIGN_IN_URL =
   "https://example.com/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fexample.com%2Foauth%2Fcode%2Fcallback&scope=user%3Ainference+user%3Aprofile&state=abc";
@@ -51,41 +55,18 @@ function links(container: HTMLElement): HTMLAnchorElement[] {
   return [...container.querySelectorAll<HTMLAnchorElement>("a")];
 }
 
+function form(questions: HumanInputQuestion[], wrap?: (node: ReactNode) => ReactNode) {
+  const node = (
+    <HumanInputForm
+      request={{ id: "request", allowSkip: false, expiresAt: null, questions }}
+      autoFocus={false}
+      onSubmit={() => {}}
+    />
+  );
+  return renderComponent(<>{wrap ? wrap(node) : node}</>);
+}
+
 describe("links in human-input questions", () => {
-  test("splits bare URLs from surrounding text and sentence punctuation", () => {
-    expect(linkifySegments(`Open ${SIGN_IN_URL}. Then paste the code.`)).toEqual([
-      { kind: "text", value: "Open " },
-      { kind: "link", value: SIGN_IN_URL },
-      { kind: "text", value: ". Then paste the code." },
-    ]);
-    expect(linkifySegments("(see https://example.com/a_(b))")).toEqual([
-      { kind: "text", value: "(see " },
-      { kind: "link", value: "https://example.com/a_(b)" },
-      { kind: "text", value: ")" },
-    ]);
-    expect(linkifySegments("no links here, ftp://x or javascript:alert(1)")).toEqual([
-      { kind: "text", value: "no links here, ftp://x or javascript:alert(1)" },
-    ]);
-  });
-
-  test("Markdown links render their label and keep the full URL as href", () => {
-    expect(linkifySegments(`[Open authorization](${SIGN_IN_URL}) Then paste the code.`)).toEqual([
-      { kind: "link", value: SIGN_IN_URL, label: "Open authorization" },
-      { kind: "text", value: " Then paste the code." },
-    ]);
-    expect(linkifySegments("See [docs](https://example.com/a_(b)), or https://x.dev.")).toEqual([
-      { kind: "text", value: "See " },
-      { kind: "link", value: "https://example.com/a_(b)", label: "docs" },
-      { kind: "text", value: ", or " },
-      { kind: "link", value: "https://x.dev" },
-      { kind: "text", value: "." },
-    ]);
-    // Unsafe or malformed targets stay plain text; no javascript: links.
-    expect(linkifySegments("[x](javascript:alert(1)) [y] (z) [w](no spaces allowed)")).toEqual([
-      { kind: "text", value: "[x](javascript:alert(1)) [y] (z) [w](no spaces allowed)" },
-    ]);
-  });
-
   test("help text Markdown links show the label, not raw syntax", async () => {
     mounted = await renderComponent(
       <HumanInputForm
@@ -196,5 +177,143 @@ describe("links in human-input questions", () => {
       "https://example.com/two",
       "https://example.com/three",
     ]);
+  });
+
+  test("bare URLs drop sentence punctuation and keep balanced parentheses", async () => {
+    mounted = await form([
+      question({
+        prompt: `Open ${SIGN_IN_URL}. Then see https://example.com/a_(b)).`,
+        helpText: "Not links: ftp://x or javascript:alert(1)",
+      }),
+    ]);
+    expect(links(mounted.container).map((anchor) => anchor.getAttribute("href"))).toEqual([
+      SIGN_IN_URL,
+      "https://example.com/a_(b)",
+    ]);
+    expect(mounted.container.textContent).toContain("Not links: ftp://x or javascript:alert(1)");
+  });
+
+  test("prompt, help text and option descriptions render bold, italics, code and links", async () => {
+    mounted = await form([
+      question({
+        id: "recipe",
+        kind: "single_select",
+        label: "Recipe",
+        prompt: "Which **recipe** do you want, *really*?",
+        helpText: "Run `make dinner` or read [the guide](https://example.com/guide).",
+        options: [
+          {
+            id: "soup",
+            label: "Soup",
+            description: "**Warm** and [quick](https://example.com/soup), uses `stock`",
+          },
+          { id: "salad", label: "Salad", description: null },
+        ],
+      }),
+    ]);
+    const root = mounted.container;
+    expect([...root.querySelectorAll("strong")].map((node) => node.textContent)).toEqual([
+      "recipe",
+      "Warm",
+    ]);
+    expect(root.querySelector("em")?.textContent).toBe("really");
+    expect([...root.querySelectorAll("code")].map((node) => node.textContent)).toEqual([
+      "make dinner",
+      "stock",
+    ]);
+    expect(links(root).map((anchor) => [anchor.textContent, anchor.getAttribute("href")])).toEqual([
+      ["the guide", "https://example.com/guide"],
+      ["quick", "https://example.com/soup"],
+    ]);
+    expect(root.textContent).not.toContain("**");
+    expect(root.textContent).not.toContain("`");
+    expect(root.textContent).not.toContain("](");
+    // Inline runs only: the card's own paragraphs and labels hold no blocks.
+    expect(root.querySelector("p p, label p, h2 p, label div, h2 div")).toBeNull();
+  });
+
+  test("an app-relative workspace link in help text is a clickable label", async () => {
+    const path = "/workspaces/ws-1/artifacts/4f0c6c1e-2b7a-4d1e-9c3a-8e5f6a7b8c9d";
+    const questions = [
+      question({
+        label: "Recipes",
+        prompt: "Which one should I cook?",
+        helpText: `[Open the cookbook](${path}). It has all three recipes.`,
+      }),
+    ];
+    // As in the app: console paths resolve through the host's link resolver.
+    mounted = await form(questions, (node) => (
+      <OpenGeniLinkProvider
+        resolveLink={(target) => {
+          const href = openGeniConsolePath(target, "ws-1");
+          return href ? { href } : null;
+        }}
+      >
+        {node}
+      </OpenGeniLinkProvider>
+    ));
+    const anchor = links(mounted.container).find((a) => a.textContent === "Open the cookbook");
+    expect(anchor?.getAttribute("href")).toBe(path);
+    expect(mounted.container.textContent).toContain("Open the cookbook. It has all three recipes.");
+    expect(mounted.container.textContent).not.toContain(path);
+    await mounted.unmount();
+
+    // Without a resolver it never navigates on the host origin, still no raw syntax.
+    mounted = await form(questions);
+    expect(links(mounted.container)).toHaveLength(0);
+    expect(mounted.container.textContent).toContain("Open the cookbook");
+    expect(mounted.container.textContent).not.toContain(path);
+  });
+
+  test("artifact: links resolve through the nearest link provider, as in chat", async () => {
+    const fileId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    mounted = await form(
+      [question({ prompt: `Is [the report](artifact:${fileId}) right?` })],
+      (node) => (
+        <OpenGeniLinkProvider
+          resolveLink={(target) =>
+            target.kind === "file" ? { href: `/files/${target.fileId}` } : null
+          }
+        >
+          {node}
+        </OpenGeniLinkProvider>
+      ),
+    );
+    const anchor = links(mounted.container).find((a) => a.textContent === "the report");
+    expect(anchor?.getAttribute("href")).toBe(`/files/${fileId}`);
+  });
+
+  test("unsafe link targets stay inert text, like in chat", async () => {
+    mounted = await form([
+      question({
+        label: "Danger",
+        prompt: "[Click me](javascript:alert(1)) please",
+        helpText: "[Data](data:text/html,<b>x</b>) and [vb](vbscript:msgbox)",
+        options: [],
+      }),
+    ]);
+    const root = mounted.container;
+    expect(links(root)).toHaveLength(0);
+    expect(root.querySelector('[href^="javascript:"], [href^="data:"], [href^="vbscript:"]')).toBe(
+      null,
+    );
+    expect(root.textContent).toContain("Click me");
+    expect(root.textContent).not.toContain("javascript:");
+  });
+
+  test("paragraphs and lists flow into line breaks inside the card text", async () => {
+    mounted = await form([
+      question({
+        label: "Plan",
+        prompt: "First paragraph.\n\n- one\n- two\n\nLast line\nnext line",
+      }),
+    ]);
+    const text = mounted.container.textContent ?? "";
+    expect(text).toContain("First paragraph.");
+    expect(text).toContain("• one");
+    expect(text).toContain("• two");
+    expect(mounted.container.querySelector("ul, li, p p")).toBeNull();
+    // Paragraph, two list items and one soft line break.
+    expect(mounted.container.querySelectorAll("br")).toHaveLength(4);
   });
 });

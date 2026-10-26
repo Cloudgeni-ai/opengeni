@@ -11,9 +11,12 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   buildOpenGeniAgent,
   CompactionNeededError,
+  InputWaitYield,
   modelResponseHasVisibleText,
   prepareAgentTools,
   runAgentStream,
+  waitForInputReply,
+  type InputWaitRequest,
 } from "../src/index";
 import { normalizeSdkEvent } from "../src/run-events";
 import { instrumentedModelFetch } from "../src/model-provider-client";
@@ -39,7 +42,7 @@ async function fixture(
     deferred?: boolean;
     siblingIsError?: boolean;
     beforeWaitResult?: () => Promise<void>;
-    inputWaitReplyGuard?: () => Promise<string | null>;
+    inputWaitReplyGuard?: (request: InputWaitRequest) => Promise<string | null>;
   } = {},
 ) {
   const calls: string[] = [];
@@ -81,7 +84,14 @@ async function fixture(
           result = {
             tools: ["wait_for_input", "sibling"].map((name) => ({
               name,
-              inputSchema: { type: "object", properties: {}, additionalProperties: false },
+              inputSchema: {
+                type: "object",
+                properties:
+                  name === "wait_for_input"
+                    ? { reason: { type: "string" }, reply: { type: "string" } }
+                    : {},
+                additionalProperties: false,
+              },
             })),
           };
           break;
@@ -1203,6 +1213,61 @@ describe("trusted input wait runtime yield", () => {
     } finally {
       await f.prepared.close();
     }
+  });
+
+  test("the wait's reply argument reaches the guard and is kept verbatim once accepted", async () => {
+    const reply =
+      "Here are the pictures:\n\n![Before, A and B](artifact:cf247ccc-42a0-4a55-9ac8-7ab85c31cd54)\n\n| | A | B |\n|---|---|---|";
+    const seen: InputWaitRequest[] = [];
+    const f = await fixture({
+      inputWaitReplyGuard: async (request) => {
+        seen.push(request);
+        return request.reply ? null : "pass your reply";
+      },
+    });
+    try {
+      const model = new ScriptedModel([
+        { output: [functionCall("opengeni__wait_for_input", { reason: "Waiting." }, "w1")] },
+        {
+          output: [functionCall("opengeni__wait_for_input", { reason: "Waiting.", reply }, "w2")],
+        },
+        { error: new Error("an accepted wait must never request another model step") },
+      ]);
+      const agent = buildOpenGeniAgent(f.settings, [], {
+        model,
+        mcpServers: f.prepared.mcpServers,
+        inputWaitYield: f.prepared.inputWaitYield,
+      });
+      const stream = await runAgentStream(agent, "Where are the images?", f.settings);
+      await consumeStream(stream);
+      expect(stream.error).toBeNull();
+      expect(model.calls).toBe(2);
+      expect(seen).toEqual([{ reply: null }, { reply }]);
+      expect(f.calls).toEqual(["wait_for_input"]);
+      expect(f.prepared.inputWaitYield?.yielded).toBe(true);
+      expect(f.prepared.inputWaitYield?.reply).toBe(reply);
+    } finally {
+      await f.prepared.close();
+    }
+  });
+
+  test("a refused or failed wait keeps no reply", async () => {
+    const gate = new InputWaitYield();
+    gate.beginStream();
+    gate.beginWait({ reply: "Not sent." })(false);
+    expect(gate.reply).toBeNull();
+    const complete = gate.beginWait({ reply: "Sent." });
+    complete(true);
+    expect(gate.reply).toBe("Sent.");
+    // A later accepted wait in the same attempt cannot replace it.
+    gate.beginWait({ reply: "Later." })(true);
+    expect(gate.reply).toBe("Sent.");
+  });
+
+  test("only a non-empty string is a wait reply", () => {
+    expect(waitForInputReply({ reply: "Done.\n\n| a |" })).toBe("Done.\n\n| a |");
+    for (const args of [{}, { reply: "" }, { reply: "  \n" }, { reply: 3 }, null, "x", []])
+      expect(waitForInputReply(args)).toBeNull();
   });
 
   test("unrelated trusted tool cannot yield by returning a wait-shaped result", async () => {

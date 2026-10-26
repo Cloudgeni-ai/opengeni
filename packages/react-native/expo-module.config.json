@@ -1,10 +1,18 @@
 {
   "platforms": ["apple", "android"],
   "apple": {
-    "modules": ["OpenGeniCallModule", "OpenGeniPasteModule", "OpenGeniTextSelectionModule"],
+    "modules": [
+      "OpenGeniCallModule",
+      "OpenGeniPasteModule",
+      "OpenGeniTextSelectionModule",
+      "OpenGeniAudioCaptureModule"
+    ],
     "appDelegateSubscribers": ["OpenGeniCallAppDelegateSubscriber"]
   },
   "android": {
-    "modules": ["dev.opengeni.textselection.OpenGeniTextSelectionModule"]
+    "modules": [
+      "dev.opengeni.textselection.OpenGeniTextSelectionModule",
+      "dev.opengeni.audiocapture.OpenGeniAudioCaptureModule"
+    ]
   }
 }

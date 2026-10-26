@@ -29,10 +29,12 @@ import {
   verifyManagedAuthPassword,
 } from "../auth/managed-auth";
 import { ApiHttpError } from "../http/api-error";
+import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
 import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
 import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
 import { managedAuthSelectedProofHeaders } from "../auth/managed-auth-session-adapter";
 import { scrubManagedAuthProviderResponse } from "./managed-auth-session-sets";
+import { parseRequestBody } from "../http/request-body";
 
 const ConnectState = z.object({
   opengeniSignInMethod: z.object({
@@ -71,10 +73,11 @@ async function identity(context: Context, deps: ApiRouteDeps) {
 }
 
 export async function admitManagedSignInMutation(context: Context, deps: ApiRouteDeps) {
-  const origin = deps.settings.publicBaseUrl ? new URL(deps.settings.publicBaseUrl).origin : null;
+  const origins = deps.settings.publicBaseUrl ? trustedBrowserOrigins(deps.settings) : [];
+  const origin = context.req.header("origin");
   if (
     !origin ||
-    context.req.header("origin") !== origin ||
+    !origins.includes(origin) ||
     context.req.header("sec-fetch-site") !== "same-origin" ||
     context.req.header("content-type")?.split(";", 1)[0] !== "application/json"
   ) {
@@ -96,7 +99,7 @@ export async function admitManagedSignInMutation(context: Context, deps: ApiRout
     try {
       requireManagedAuthMutationAdmission({
         request: context.req.raw,
-        allowedOrigins: [origin],
+        allowedOrigins: origins,
         authority,
         signingSecret: deps.settings.betterAuthSecret!,
         expectedGeneration: snapshot.projection.generation,
@@ -202,10 +205,11 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
         throw new HTTPException(409, { message: "Managed actor fence required" });
       const schema =
         kind === "password" ? ManagedSignInPasswordMutation : ManagedSignInProviderMutation;
-      const parsed = schema.safeParse(await context.req.json().catch(() => null));
-      if (!parsed.success)
-        throw new HTTPException(422, { message: "Invalid sign-in method request" });
-      const body = parsed.data;
+      const parsed = parseRequestBody(schema, await context.req.json().catch(() => null), {
+        status: 422,
+        message: "Invalid sign-in method request",
+      });
+      const body = parsed;
       const currentIdentity = await getCanonicalHumanIdentityProjection(deps.db, actor.authUserId);
       if (currentIdentity.activeIdentity.id !== body.expectedIdentityId)
         return context.json(

@@ -129,6 +129,7 @@ export type {
   SessionChromeProps,
   SessionChromeSignalId,
   SessionChromeSignalTone,
+  SessionChromeWait,
 } from "./components/session-chrome";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";

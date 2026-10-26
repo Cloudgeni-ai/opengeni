@@ -1,9 +1,15 @@
-# `opengeni-agent` — the Connected Machine agent (Rust workspace)
+# Opengeni Runner (`opengeni-agent`, Rust workspace)
 
-The Rust agent that turns a user's own machine into a **Connected Machine** — a
+Opengeni Runner is the Rust program that turns a user's own machine into a **Connected Machine** — a
 first-class, co-equal PRIMARY Opengeni compute target (the `selfhosted` backend,
 internally). This is a standalone Cargo workspace — it is **not** part of the bun
 monorepo (the bun workspaces glob excludes it, and Cargo build output is gitignored).
+
+The product name is Opengeni Runner, so it is not confused with the AI agents
+that use the machine. The command, crates, service names, macOS bundle
+identifier and wire protocol keep their `opengeni-agent` / `agent` identifiers,
+which installed machines and release tooling depend on. Older text in this
+directory that says "the agent" means the Runner.
 
 **How the control plane treats a Connected Machine** (canonical:
 [`../docs/architecture.md`](../docs/architecture.md) §3.8 and [`../AGENTS.md`](../AGENTS.md)):
@@ -261,9 +267,26 @@ contract is `compute/docs/agent-link.md`.
   captured at a fixed rate whether or not anything changed. A browser
   controller that is merely running does not count: each use of it is a
   request, and requests keep the sandbox awake on the host's side.
-- Enrollment, credential renewal, self-update (the image pins the agent) and
-  service installation do not happen in this mode; requests for them are
-  refused with `renewal_unsupported` and `update_unsupported`.
+- Enrollment, credential renewal and service installation do not happen in
+  this mode; a renewal request is refused with `renewal_unsupported`.
+- The agent does update itself, through the same signed self-update as a
+  connected machine: a sandbox keeps its disk for as long as it lives, so the
+  agent its image carried would otherwise run for good. The verified release
+  replaces `/usr/local/bin/opengeni-agent` on the sandbox's disk, and the
+  process execs it with its commands handed over, so the guest init that
+  supervises it sees the same process carry on, under the same connection
+  instance. The download and the swap count as work in the activity file, so
+  the sandbox does not sleep in the middle of them; waiting for idle does not.
+  A checkpoint or a guest reboot can still come at any moment, so the release
+  passes its startup check beside the installed binary before it replaces it:
+  any copy of the disk holds either the old agent or a checked new one. The
+  reconnect signal the guest init sends stays blocked across the exec, so one
+  that arrives while the new image starts reconnects it instead of ending it;
+  the new image catches it from the start of its `main` and unblocks it
+  before it starts any thread, so the commands it runs do not inherit the
+  block.
+  A sandbox heartbeats only while it runs, so Opengeni asks one that sleeps
+  when it next wakes. Agents from before this refuse with `update_unsupported`.
 
 ## Wire protocol — single source of truth
 

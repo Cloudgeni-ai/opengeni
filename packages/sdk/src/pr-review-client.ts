@@ -12,7 +12,14 @@ import type {
 
 export type OpenGeniPrReviewTransport = Pick<OpenGeniCoreClient, "requestJson" | "requestVoid">;
 
-/** Optional Opengeni Review Bot API surface, isolated from the eager core client graph. */
+/**
+ * Optional Opengeni Review Bot API surface, isolated from the eager core client graph.
+ *
+ * @deprecated Pull-request review is an automation now: a scheduled task with a
+ * GitHub `pull_request.*` event trigger (`createScheduledTask` with `events`).
+ * These routes answer until their Sunset date and are removed in the next major.
+ * See https://docs.opengeni.ai/integrate/background-agents#moving-from-the-first-automation-api
+ */
 export class OpenGeniPrReviewClient {
   constructor(private readonly client: OpenGeniPrReviewTransport) {}
 

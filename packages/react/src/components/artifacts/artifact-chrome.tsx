@@ -18,8 +18,8 @@ import {
   forwardRef,
   useContext,
   useMemo,
-  type ComponentProps,
   type ReactNode,
+  type ComponentPropsWithoutRef,
 } from "react";
 
 import { cn } from "../../lib/cn";
@@ -47,57 +47,63 @@ const BUTTON_SIZE = {
   "icon-sm": "size-8",
 } as const;
 
-export function ArtifactButton({
-  variant = "ghost",
-  size = "sm",
-  className,
-  type = "button",
-  ...props
-}: ComponentProps<"button"> & {
-  variant?: keyof typeof BUTTON_VARIANT;
-  size?: keyof typeof BUTTON_SIZE;
-}) {
+export const ArtifactButton = /* @__PURE__ */ forwardRef<
+  HTMLButtonElement,
+  ComponentPropsWithoutRef<"button"> & {
+    variant?: keyof typeof BUTTON_VARIANT;
+    size?: keyof typeof BUTTON_SIZE;
+  }
+>(function ArtifactButton(
+  { variant = "ghost", size = "sm", className, type = "button", ...props },
+  ref,
+) {
   return (
     <button
       type={type}
       className={cn(BUTTON_BASE, BUTTON_VARIANT[variant], BUTTON_SIZE[size], className)}
+      ref={ref}
       {...props}
     />
   );
-}
+});
 
-export function ArtifactBadge({ className, ...props }: ComponentProps<"span">) {
+export const ArtifactBadge = /* @__PURE__ */ forwardRef<
+  HTMLSpanElement,
+  ComponentPropsWithoutRef<"span">
+>(function ArtifactBadge({ className, ...props }, ref) {
   return (
     <span
       className={cn(
         "inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-full border border-border px-2 py-0.5 text-xs font-medium whitespace-nowrap text-foreground [&>svg]:pointer-events-none [&>svg]:size-3",
         className,
       )}
+      ref={ref}
       {...props}
     />
   );
-}
+});
 
-export const ArtifactSelect = forwardRef<HTMLSelectElement, ComponentProps<"select">>(
-  ({ className, children, ...props }, ref) => (
-    <span className="relative inline-block max-w-full">
-      <select
-        ref={ref}
-        className={cn(
-          "peer h-9 w-full appearance-none rounded-md border border-border bg-bg px-2.5 pr-8 text-sm text-fg transition-colors hover:border-border-strong focus-visible:border-ring focus-visible:outline-hidden disabled:cursor-not-allowed disabled:opacity-50",
-          className,
-        )}
-        {...props}
-      >
-        {children}
-      </select>
-      <ChevronDownIcon
-        aria-hidden="true"
-        className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-subtle"
-      />
-    </span>
-  ),
-);
+export const ArtifactSelect = /* @__PURE__ */ forwardRef<
+  HTMLSelectElement,
+  ComponentPropsWithoutRef<"select">
+>(({ className, children, ...props }, ref) => (
+  <span className="relative inline-block max-w-full">
+    <select
+      ref={ref}
+      className={cn(
+        "peer h-9 w-full appearance-none rounded-md border border-border bg-bg px-2.5 pr-8 text-sm text-fg transition-colors hover:border-border-strong focus-visible:border-ring focus-visible:outline-hidden disabled:cursor-not-allowed disabled:opacity-50",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </select>
+    <ChevronDownIcon
+      aria-hidden="true"
+      className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-subtle"
+    />
+  </span>
+));
 ArtifactSelect.displayName = "ArtifactSelect";
 
 export function artifactKindIcon(kind: ArtifactKind): ReactNode {
@@ -144,6 +150,10 @@ export type ArtifactLabels = Readonly<{
   startingEditor: string;
   kindSubtitle: (kind: ArtifactKind) => string;
   live: string;
+  /** The Live label while a newer version of the Site loads. */
+  liveUpdating: string;
+  /** The Live label while new versions can't be checked for. */
+  liveReconnecting: string;
   reloadSite: string;
   openFullScreen: string;
   editWithAgent: string;
@@ -181,6 +191,8 @@ export const DEFAULT_ARTIFACT_LABELS = (t: OpenGeniText): ArtifactLabels =>
     startingEditor: t("artifacts.artifactChrome.startingTheSecureEditingSession"),
     kindSubtitle: (kind: ArtifactKind) => artifactKindSubtitle(t, kind),
     live: t("artifacts.artifactChrome.live"),
+    liveUpdating: t("artifacts.artifactChrome.liveUpdating"),
+    liveReconnecting: t("artifacts.artifactChrome.liveReconnecting"),
     reloadSite: t("artifacts.artifactChrome.reloadSite"),
     openFullScreen: t("artifacts.artifactChrome.openSiteFullScreen"),
     editWithAgent: t("artifacts.artifactChrome.editWithOpengeni"),

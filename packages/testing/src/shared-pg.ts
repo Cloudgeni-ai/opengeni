@@ -850,6 +850,22 @@ export async function acquireSharedTestDatabase(
 }
 
 /**
+ * Grant the runtime role what a migration withholds until the previous
+ * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): EXECUTE
+ * on the personal-machine owner lookup (0978). Tests that exercise it run as
+ * they will once it is granted.
+ */
+export async function grantDeferredRuntimeAccess(
+  admin: postgres.Sql,
+  role = "opengeni_app",
+): Promise<void> {
+  await admin.unsafe(`
+    GRANT EXECUTE ON FUNCTION opengeni_private.session_machine_owner_subject_v1(uuid, uuid, uuid)
+      TO "${role.replaceAll('"', '""')}";
+  `);
+}
+
+/**
  * Acquire a fresh, PRISTINE (un-migrated, no app role grants) database in the
  * shared container. For tests that drive the migration chain themselves (e.g.
  * applying individual .sql files to assert a single migration's behaviour). The

@@ -47,6 +47,7 @@ import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
+  eventRouteSecret,
   githubAppActionPolicyActor,
   hasPermission,
   listGitHubActionPolicyActors,
@@ -98,7 +99,7 @@ import {
   completeGitHubAppConnect,
   isGitHubAppConnectState,
 } from "../integrations/github-app-connect";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery } from "../http/request-body";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -418,7 +419,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (installationId === null || repositoryId === null) {
         throw new HTTPException(400, { message: "invalid GitHub repository identity" });
       }
-      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      const query = parseRequestQuery(ListGitHubRepositoryBranchesQuery, c.req.query());
       try {
         return c.json(
           await listWorkspaceGitHubRepositoryBranches(deps, {
@@ -446,6 +447,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       installationId,
+      eventRouteSecret: eventRouteSecret(settings),
     });
     return c.body(null, 204);
   });
@@ -799,6 +801,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
             authorityExpiresAt: expiresAt,
             authorityNonce: statePayload.nonce,
             repositoryIds,
+            eventRouteSecret: eventRouteSecret(settings),
           });
         },
       );

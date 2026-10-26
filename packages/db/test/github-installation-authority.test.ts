@@ -223,6 +223,7 @@ describe("GitHub installation owner-authority persistence", () => {
       accountType: "User",
       linkedBySubjectId: "legacy-subject",
       repositoryIds: [7601],
+      eventRouteSecret: null,
     });
     const [legacy] = await listGitHubInstallationAccessForWorkspace(db, workspace.workspaceId);
     expect(hasAuditableGitHubInstallationAuthority(legacy!)).toBe(false);
@@ -253,6 +254,7 @@ describe("GitHub installation owner-authority persistence", () => {
         accountType: "User",
         linkedBySubjectId: "legacy-subject",
         repositoryIds: [7603],
+        eventRouteSecret: null,
       }),
     ).rejects.toThrow("Failed to bind GitHub installation");
     expect(
@@ -313,6 +315,7 @@ function authorityInput(
     authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
     authorityNonce: `authority-${crypto.randomUUID()}`,
     repositoryIds: [7001],
+    eventRouteSecret: null,
     ...patch,
   };
 }

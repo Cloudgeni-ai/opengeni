@@ -39,9 +39,12 @@ import {
   getSlackBotUserLink,
   getSessionForSubject,
   getWorkspaceGrant,
+  postSecretUseApprovalCard,
+  requestSecretUseApproval,
   createWorkspace,
   getSlackChannelRoute,
   grantWorkspaceAccess,
+  listInboundEvents,
   upsertSlackChannelRoute,
   saveSlackBotUserLink,
   setWorkspaceAllowance,
@@ -54,6 +57,7 @@ import {
 } from "@opengeni/db";
 import {
   acceptSessionUserMessage,
+  createSlackEventSource,
   createSessionForRequest,
   updateSessionTitle,
   type ApiRouteDeps,
@@ -739,6 +743,8 @@ async function fixture(
     slackWorkspaceRouting?: boolean;
     /** Create a second workspace in the same organization the owner can use. */
     routedWorkspaceName?: string;
+    /** `OPENGENI_EVENT_TRIGGERS_ENABLED`. */
+    eventTriggers?: boolean;
   } = {},
 ) {
   const suffix = crypto.randomUUID();
@@ -786,6 +792,7 @@ async function fixture(
     slackSigningSecret: signingMaterial,
     slackCommand: options.slackCommand ?? "/opengeni",
     ...(options.slackWorkspaceRouting ? { slackWorkspaceRoutingEnabled: true } : {}),
+    ...(options.eventTriggers ? { eventTriggersEnabled: true } : {}),
     publicBaseUrl: "https://app.example.test",
     webBaseUrl: "https://app.example.test",
     sandboxBackend: "none",
@@ -1280,6 +1287,7 @@ async function bindExampleGitHubInstallation(
     authorityExpiresAt: new Date(checkedAt.getTime() + 600000),
     authorityNonce: crypto.randomUUID(),
     repositoryIds,
+    eventRouteSecret: null,
   });
 }
 
@@ -1540,6 +1548,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
         authorityExpiresAt: new Date(checkedAt.getTime() + 600000),
         authorityNonce: crypto.randomUUID(),
         repositoryIds: [42, 43, 44, 45, 46, 47, 48],
+        eventRouteSecret: null,
       });
       // The workspace GitHub App catalog. Every bound repository is offered;
       // 99 is visible to the App but was never granted to this workspace.
@@ -5043,6 +5052,113 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     expect(refusal.text).not.toContain(pasted);
   }, 60_000);
 
+  test("Opengeni's secret approval card links to Opengeni, has no buttons and leaves the thread open", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const rootTimestamp = "1712700000.000001";
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_DM_APPROVAL_ROOT_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            channel_type: "im",
+            user: value.ownerSlackUserId,
+            channel: "D_APPROVAL_REPLY",
+            ts: rootTimestamp,
+            text: "Deploy with the production key",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [interaction] = await interactions(value.owner.workspaceId);
+    if (!interaction) throw new Error("Slack route was not created");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, value.owner.workspaceId, {
+      sessionId: interaction.session_id,
+      workflowId: `session-${interaction.session_id}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`not claimable: ${claimed.reason}`);
+    // A blocked use: the resolver records the request and posts the card.
+    const approval = await requestSecretUseApproval(
+      client.db,
+      { accountId: value.owner.accountId, workspaceId: value.owner.workspaceId },
+      {
+        sessionId: interaction.session_id,
+        approverSubjectId: value.owner.subjectId,
+        targets: [
+          {
+            vaultId: crypto.randomUUID(),
+            itemId: crypto.randomUUID(),
+            fieldKey: "token",
+            vaultName: "Workspace",
+            itemName: "Deploy key",
+            fieldName: "token",
+          },
+        ],
+        surface: "shell",
+        toolName: "exec_command",
+        destination: null,
+      },
+    );
+    const posted = await postSecretUseApprovalCard(client.db, {
+      workspaceId: value.owner.workspaceId,
+      sessionId: interaction.session_id,
+      turnId: claimed.turn.id,
+      attemptId,
+      executionGeneration: claimed.turn.executionGeneration,
+      approval,
+    });
+    expect(posted.asked).toBe(true);
+    const requestId = posted.requestId!;
+    await drainAll(value.deps);
+    const card = value.slack.postAttempts.find((post) =>
+      post.text.includes("Deploy key › token in a shell command"),
+    );
+    expect(card?.text).toContain("Opengeni needs your approval");
+    expect(card?.text).toContain("Answer in Opengeni");
+    expect(card?.text).not.toContain("Reply in this thread");
+    expect(card?.blocks?.some((block) => (block as { type: string }).type === "actions")).not.toBe(
+      true,
+    );
+
+    expect(
+      (
+        await postEvent(value.app, {
+          teamId: value.teamId,
+          eventId: `E_DM_APPROVAL_REPLY_${crypto.randomUUID()}`,
+          event: {
+            type: "message",
+            user: value.ownerSlackUserId,
+            channel: "D_APPROVAL_REPLY",
+            ts: "1712700000.000002",
+            thread_ts: rootTimestamp,
+            text: "Allow once",
+          },
+        })
+      ).status,
+    ).toBe(200);
+    await drainAll(value.deps);
+    const [request] = await shared!.admin<Array<{ status: string }>>`
+      select status from session_human_input_requests where id = ${requestId}`;
+    expect(request?.status).toBe("pending");
+    const [stored] = await shared!.admin<Array<{ status: string }>>`
+      select status from secret_use_approvals where id = ${approval.id}::uuid`;
+    expect(stored?.status).toBe("pending");
+    // The thread reply is an ordinary message to the agent, not an answer.
+    const replies = await shared!.admin<Array<{ text: string }>>`
+      select payload ->> 'text' as text from session_events
+      where session_id = ${interaction.session_id}::uuid and type = 'user.message'
+        and payload ->> 'text' = 'Allow once'`;
+    expect(replies).toHaveLength(1);
+  }, 60_000);
+
   test("ordinary Slack triggers retain sessions:create-only authorization", async () => {
     if (!available) return;
     const value = await fixture({
@@ -7411,7 +7527,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     const [route] = await interactions(value.owner.workspaceId);
     expect(acknowledgement.text).toContain("Opengeni task status:");
     expect(acknowledgement.text).toContain(
-      `<https://app.example.test/workspaces/${value.owner.workspaceId}/schedules?sourceSessionId=${route!.session_id}|Make recurring>`,
+      `<https://app.example.test/workspaces/${value.owner.workspaceId}/automations?sourceSessionId=${route!.session_id}|Make recurring>`,
     );
   }, 60_000);
 
@@ -7494,7 +7610,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     // New Slack tasks get the scheduling tool by default, and this requester
     // may use it, so both routes are named. No Status button is.
     expect(scheduledBody.text).toContain(
-      `• *Repeat a task on a schedule:* ask Opengeni in its thread, or open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/schedules|Schedules>.`,
+      `• *Repeat a task on a schedule:* ask Opengeni in its thread, or open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/automations|Automations>.`,
     );
     expect(scheduledBody.text).not.toContain("Make recurring");
 
@@ -7523,7 +7639,7 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
     );
     const withoutToolBody = (await withoutTool.json()) as { text: string };
     expect(withoutToolBody.text).toContain(
-      `• *Repeat a task on a schedule:* open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/schedules|Schedules>.`,
+      `• *Repeat a task on a schedule:* open <https://app.example.test/workspaces/${withSchedules.owner.workspaceId}/automations|Automations>.`,
     );
     expect(withoutToolBody.text).not.toContain("ask Opengeni in its thread");
   }, 60_000);
@@ -10567,3 +10683,94 @@ for (const audience of ["private", "shared"] as const) {
     expect(upgraded!.delivery_retry_at).toBeNull();
   }, 90_000);
 }
+
+describe("Slack event source", () => {
+  test("records channel activity for automations and keeps direct messages private", async () => {
+    if (!available) return;
+    const value = await fixture({ eventTriggers: true });
+    const source = await createSlackEventSource({
+      db: client.db,
+      accountId: value.owner.accountId,
+      workspaceId: value.owner.workspaceId,
+      createdBySubjectId: value.owner.subjectId,
+    });
+    expect(source).toMatchObject({ kind: "slack", ownerSubjectId: null, visibility: "workspace" });
+    const post = async (eventId: string, event: Record<string, unknown>) =>
+      await value.app.request(
+        signedRequest(
+          "/v1/integrations/slack/events",
+          JSON.stringify({
+            type: "event_callback",
+            team_id: value.teamId,
+            api_app_id: "A_OPENGENI",
+            event_id: eventId,
+            event_time: 1_761_200_000,
+            authorizations: [{ team_id: value.teamId, user_id: value.botUserId, is_bot: true }],
+            event,
+          }),
+          "application/json",
+        ),
+      );
+    const message = {
+      type: "message",
+      channel: "C_SUPPORT",
+      channel_type: "channel",
+      user: value.otherSlackUserId,
+      text: "The export is broken again",
+      ts: "1761200000.000100",
+    };
+    expect((await post("Ev_message", message)).status).toBe(200);
+    // Slack retrying the same callback is recorded once.
+    expect((await post("Ev_message", message)).status).toBe(200);
+    const direct = await post("Ev_direct", {
+      type: "message",
+      channel: "D_OWNER",
+      channel_type: "im",
+      user: value.ownerSlackUserId,
+      text: "Something private",
+      ts: "1761200001.000100",
+    });
+    expect(direct.status).toBe(200);
+    await post("Ev_own", {
+      type: "message",
+      channel: "C_SUPPORT",
+      channel_type: "channel",
+      user: value.botUserId,
+      bot_id: "B_OPENGENI",
+      bot_profile: { app_id: "A_OPENGENI" },
+      text: "Looking into it",
+      ts: "1761200002.000100",
+      thread_ts: "1761200000.000100",
+    });
+    await post("Ev_reaction", {
+      type: "reaction_added",
+      user: value.ownerSlackUserId,
+      reaction: "ticket",
+      item_user: value.otherSlackUserId,
+      item: { type: "message", channel: "C_SUPPORT", ts: "1761200000.000100" },
+      event_ts: "1761200003.000100",
+    });
+
+    const { events } = await listInboundEvents(client.db, value.owner.workspaceId, {
+      sourceIds: [source.id],
+      limit: 10,
+    });
+    expect(events.map((event) => [event.type, event.actor.kind])).toEqual([
+      ["reaction.added", "person"],
+      ["message.posted", "opengeni"],
+      ["message.posted", "person"],
+    ]);
+    expect(events[2]).toMatchObject({
+      subject: "C_SUPPORT:1761200000.000100",
+      summary: "Message in channel C_SUPPORT: The export is broken again",
+      data: { channel: { id: "C_SUPPORT", type: "public" }, in_thread: false },
+    });
+    expect(events[1]!.data).toMatchObject({ in_thread: true });
+    const [stored] = await shared!.admin`select count(*)::int as count,
+      sum(duplicate_count)::int as duplicates from event_deliveries where source_id = ${source.id}`;
+    expect(stored).toMatchObject({ count: 3, duplicates: 1 });
+    const [private_] = await shared!.admin`select count(*)::int as count from event_deliveries
+      where source_id = ${source.id} and convert_from(body, 'UTF8') like '%Something private%'`;
+    expect(private_!.count).toBe(0);
+  }, 90_000);
+});

@@ -1,5 +1,321 @@
 # @opengeni/db
 
+## 5.3.1
+
+### Minor Changes
+
+- 1988e97: A person can now have the agent do in the chat what they would otherwise do in settings: switch this chat's model, invite someone or share the chat, check their plan, credits and usage, or change a workspace preference. In a chat a person started, `admin_actions_search`, `admin_action_describe` and `admin_action_call` are listed by default and run as the person who sent the message, never with more than that message itself could do: what it may do is frozen with its turn when it is accepted, capped to the chat's workspace. Reads run at once; every change first shows that person a plain confirmation card in the chat ("Invite anna@example.com to your organization as an admin?", one line of the key values, Allow and Cancel, the raw call behind Details), and the API refuses a change that person did not confirm. Only someone signed in to the app itself can confirm changes; with any delegated sign-in (an embed's host-issued token, an external user, another integration's person token) the route only reads unless the deployment sets `OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES=true`, which applies to all of them. An Allow given through an API key, a Slack button or a delegated sign-in that isn't turned on never confirms: approvals now record who decided (`decision_by_kind`) and whether they were signed in to the app (`decision_by_signed_in_person`), both fixed with the decision. Calls that create, show, copy or rotate keys, passwords, tokens or other secrets, or carry one in their body, are left to the app unless the session has full access. Contract schemas mark secret fields with the new `secretValue(...)` helper (registry `secretValues`); the catalog generator records them, plus secret-sounding field names, as `secretFields` on catalog entries. Codex and SuperGrok device sign-in starts now have a response schema (`SubscriptionDeviceSignInStart`). A session with full access behaves as before. Scheduled, goal and other unattended turns, API-key and service turns, child sessions and service sessions gain nothing.
+
+  This is on by default for every organization, including existing ones: migration `0971` adds `chatActionsAllowed` (default true) to the agent admin-access setting. Owners and admins turn it off under Security & data > Agents, or with `PATCH /v1/organizations/:organizationId/agent-admin-access` (which now accepts either field). Embedding hosts that draw approvals with `ApprovalSurface` get the same card, with `approvalSurface.allow` and `approvalSurface.cancel` messages to translate; a host can leave the route off by not selecting these tools. The app-action catalog moved to `@opengeni/contracts/app-actions`. `SESSION_ADMIN_ACCESS_TOOL_NAMES` and `SESSION_ADMIN_ACCESS_TOOL_NAME_SET` are deprecated aliases of `SESSION_APP_ACTION_TOOL_NAMES` and `SESSION_APP_ACTION_TOOL_NAME_SET`. `toolReviewFields` takes an optional tool name.
+
+- e3782bb: Automation templates and a "This workspace" event source.
+
+  - **Templates.** A template is where a new automation starts: its message, a schedule without a time zone, and event triggers that name a kind of source. Using one opens the ordinary form filled in; nothing is created until the person saves. `@opengeni/react/automations` ships built-in templates (`builtinAutomationTemplates(t)`, including "Meeting notes"), and `AutomationsPanel` takes `templates` (the host's own), `workspaceTemplates` (offer and save the workspace's saved templates, on by default) and `workspaceEvents` (offer this workspace's own events as a source, off by default). The new-automation view offers "Start from scratch", the host's templates and the saved ones; an automation's menu has "Save as template". `useEventSourceStandIns`, `AutomationTemplateList`, `AutomationTemplateTile` and `AutomationTemplateDialog` are exported for hosts that build their own.
+  - **Saved templates.** Workspaces keep the templates their people save: `GET`/`POST /v1/workspaces/:workspaceId/automation-templates` and `PATCH`/`DELETE …/:templateId`, with `listAutomationTemplates`, `createAutomationTemplate`, `updateAutomationTemplate` and `deleteAutomationTemplate` in the SDK. Reading needs `scheduled_tasks:run`, saving needs `scheduled_tasks:manage`; whoever saved a template and workspace admins can rename or delete it (`viewerAccess`). A workspace keeps up to 200; saving more returns 409.
+  - **"This workspace" source.** `createEventSource({ kind: "workspace" })` creates the caller's own source for the workspace's recording events (`recording.started`, `recording.finished`, `recording.transcript.ready` and the rest). It reads under the owner's row security, so a trigger only sees the meetings its owner may open.
+
+- 31bca3c: Composer dictation is now a recording with `purpose: "dictation"`, recorded, uploaded and kept by the same local-first pipeline as meetings, so a closed tab, a killed phone app, a dropped connection or a failed transcription never loses what was said. A dictation has one microphone track, is always private, is transcribed and billed as voice input, sends no webhook events, never appears with meetings, and is deleted a day after it is heard. `GET …/recordings?purpose=dictation` (and `listRecordings({ purpose })`) lists the caller's own kept dictations, so the next composer offers text an earlier page left behind.
+
+  `useVoiceInput` records through the recordings API when the client can and the deployment advertises `voiceInput.resumable`, inserts the text once (taking it deletes the dictation first, so two tabs never insert it twice), keeps anything longer than three seconds on Cancel or Escape, and hears a failed dictation again on Retry. It is also exported from `@opengeni/react/recordings`, and `useNativeDictation` in `@opengeni/react-native/recordings` brings the same dictation to phones on the native recorder. A client with only `transcribeAudio` records in memory and sends one request, as before. `ComposerTranscriptionControl` accepts `recordings` and `platform`; `createRecordingStore` and `createOwnerId` are deprecated and ignored.
+
+  The `transcription-recordings` routes and their SDK methods are deprecated, answer with `Deprecation` and `Sunset` headers, and are kept until January 26, 2027. See https://docs.opengeni.ai/integrate/meetings#moving-from-transcription-recordings.
+
+- 6acfbd3: Event sources and triggers now say why they are blocked or off as a code clients can word in their own language. `EventSource` and `EventTrigger` gain `statusReasonCode` and `statusReasonDetail`, and `EventTypeDescriptor` gains `unavailableReasonCode` and `unavailableReasonDetail`, next to the existing English sentence (codes are listed in `EVENT_STATUS_REASON_CODES`). `@opengeni/react/automations` adds `eventStatusReasonText`, which words a known code from the host's message catalog (`automations.statusReason.*`) and shows the server's sentence for a code it doesn't know; source and trigger badges, the event source picker and the event type picker use it.
+- 21e7ecf: Feedback can now carry where it came from and what the person saw. `createFeedback` accepts an optional `context` (source, how it was opened, app version and build, OS, device model, the screen in view, locale, time zone and up to ten recent errors) and up to three JPEG or PNG `screenshots` of at most 3 MiB each. Screenshots are stored in object storage under create-only, content-addressed keys, so an identical retry stores nothing new, and returned feedback lists each one's index, type, size and SHA-256. The author can read an image with `GET /v1/workspaces/:workspaceId/feedback/:feedbackId/screenshots/:index`. In the phone app, shaking the phone opens Send feedback with a screenshot of the current screen (removable before sending); reports wait on the phone and retry until the server accepts them, and Settings has a Send feedback row and a Shake to send feedback toggle.
+- cc319f3: Meetings get notes. Each recording now has a `notepad` (what people jot down while it is recorded) and `notes` (the written-up summary, decisions and action items, by a person or an agent afterwards), both Markdown. `GET /v1/workspaces/:workspaceId/recordings/:recordingId/notes` reads them and `PUT …/notes/:kind` replaces one, with an optional `expectedRevision` that turns a lost update into a 409 `notes_changed`. Anyone who can see the meeting can read and save them, and they are deleted with it. Saving the notes sends the new `recording.notes.updated` webhook event, which carries the revision and the chat whose agent saved them but never the text. The SDK adds `listRecordingNotes` and `saveRecordingNote`.
+- a9809ee: A blocked "ask before each use" secret use now reaches the person through Opengeni itself instead of depending on the agent to relay a card. The resolver posts Opengeni's own approval card as a human-input request with the new `origin: "secret_use_approval"`, so it appears in the chat, the inbox, a phone notification (without an inline answer) and the Slack thread; an identical blocked use while the request is pending reuses it and never notifies again. The card outlives the turn that hit it. When the signed-in person answers, the grant or denial is recorded and the agent receives the new immediate `secret_use_approval_decided` update telling it to retry the call, or not to, which wakes an idle chat. `SessionHumanInputRequest` gains optional `origin`, `SessionSystemUpdateKind` gains `secret_use_approval_decided`, and `SecretReferenceError` carries `approval: { approvalId, asked }` instead of `approvalCard`; the `approval_required` tool output no longer includes a card and its hint says the person was asked. `request_human_input` refuses `secret-approval:` questions, and agent-relayed approval questions no longer carry authority. Migration 0961 (rolling) adds the request `origin` column and the new update kind, and keeps pending approval cards open in the inbox when a turn ends.
+- f3d19a2: Vault items, or single fields of them, can be marked "ask me each time". Agents still see and reference a marked item, but a use that no approval covers stops before any value is read and fails with the new `approval_required` code, and Opengeni asks the person with its own card describing the blocked use (item and field, surface, tool and destination). Only the person the run acts for can answer it, and the answer becomes a grant: allow once, allow in this chat, allow for an hour across the person's chats in the workspace, or deny. The check runs in the shared resolver, so hosted and connected vaults and every surface behave the same. New routes `GET`/`PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval` and `POST …/approval/grants/:grantId/revoke` (people only for changes), SDK methods `getItemApproval`, `setItemApproval` and `revokeItemGrant`, an "Ask before each use" section on the item page, and migration 0952 (rolling) adding the `secret_approval_rules` and `secret_use_approvals` tables. `SecretUseContext` gains optional `destination` and `lookupDestination`, and secret-use audit rows list the approvals a use relied on.
+- e509f04: Show Pin and Archive on every sidebar row, including spawned chats and Site rows, on hover or keyboard focus with tooltips, and in the right-click and touch menus. Site rows can be pinned and archived as personal sidebar state (`updateSiteSidebarState`); archiving a Site only hides it from your own sidebar and never unpublishes it. Archive on a spawned chat archives its workstream.
+
+  Session lists for a signed-in person that include or group Site conversations (`siteConversations: "include"` or `"group"`) now leave out conversations of Sites that person archived; a Site's own conversation list is unchanged.
+
+- 119f33d: Add independently gated Microsoft Teams agent tools and linked Teams conversations, with durable admission and delivery, private-message authority checks, and workspace setup APIs. Both integrations remain disabled by default.
+
+### Patch Changes
+
+- de7e142: A Connected Machine whose agent process serves several workspaces no longer shows a failed agent update in the workspaces that did not start it. While one workspace's update runs, the others record a postponement (`update_busy_updating`, retried on the busy backoff and shown as waiting) instead of a failure, and once the restarted agent proves through its update receipt that it runs exactly the target build, every workspace's pending, postponed or failed update for that build is marked succeeded.
+- e0b3ccf: API request traces can now be followed across service boundaries and show where a request spends its time. A request's W3C `traceparent` header is no longer ignored: by default the request span keeps its own trace and links to the caller's span, and a deployment whose callers are all trusted can set `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` to make the request span a child in the caller's trace. Request spans are now SERVER spans with child spans for each database statement and transaction, each outbound HTTP call, and each object storage and workflow client call, within a budget of 256 per request. Span attributes carry only the statement's operation and table or routine name, row counts, SQLSTATE codes, HTTP methods and statuses: never SQL text, parameters, URLs or messages. Telemetry export no longer runs inside the trace it exports. New observability exports: `startChildSpan`, `childSpanRecordingActive`, `withoutTraceContext`, `traceFetch` and `traceClientCalls`, plus `kind` and `childSpanLimit` options on `startSpan`.
+- 0676499: Archiving a chat with Pause now removes the one-time waits that continue it or its sub-chats: a run-once event automation that has not run yet, and a one-time scheduled run still ahead. They go in the same transaction as the pause, so an archived chat is never woken by a "wake me when" it was waiting on, and Restore does not bring them back. Repeating automations stay, and Hide for me changes nothing. The archive confirmation says so.
+- e7f5d38: A new chat that starts with a file attached now reuses the cached prompt of a chat without one. Before, a turn with a file added an "Attached files" section to the system instructions and the sandbox's mount policy and filesystem layout listed the file, so the whole request missed the provider's prompt cache. The instructions no longer depend on the turn's files; that guidance now ends the turn's attachment notice, after history. Uploads completed without a client sha256 now get one computed from the stored bytes (files up to 20 MiB), so an image uploaded through the plain REST flow reaches the model inline like an SDK upload instead of only as a mounted file.
+- e1838ff: A chat's "waiting on" status names every app its automations wait on, not only the first. `SessionAutomationWaitSummary` gains `events`: one entry per source with all the event types its active triggers wait for, in the order the automations were made. The header chip reads "Waiting on GitHub and Gmail" (two names, then "and 2 more"), and its tooltip, the sidebar mark and the hover card list each source's events. With servers that only send `event`, the words are as before.
+- 4c6bf32: An organization's Azure OpenAI connection can now sign in with Microsoft Entra ID instead of an API key, so Azure resources that turn key authentication off can run agent turns. Admins choose the sign-in method when connecting: an API key (unchanged), the organization's own Entra app registration with a client secret, or, when the operator sets `OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED=true` and configures the standard `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_FEDERATED_TOKEN_FILE` or `AZURE_CLIENT_SECRET` variables, the deployment's own workload identity. Tokens for the `https://cognitiveservices.azure.com/.default` scope are cached per credential and renewed before they expire. The upsert request accepts `authentication` in place of `apiKey`, connection responses report `authMethod`, and the client config reports `azureOpenAIDeploymentIdentity`. `@opengeni/network/azure-entra` exports the shared token source.
+- 2dc5e41: An agent's browser recording is now a recording, so it is stored, owned, shared and deleted like any other. Saving one makes a recording whose purpose is `browser`, with one video track from the browser tab whose chunk is the frame bundle the browser host uploads. The worker encodes the MP4 and its action log in the background instead of the API encoding it inside the save request, then the save copies both into the chat's files and publishes the video as before. While the video is being made, the save answers 202 with `state: "encoding"`, and the SDK keeps repeating it as it does while uploading. The recording follows the chat: a private chat's recording is its owner's and private; a shared chat's belongs to the person the agent acts for. Meeting lists show meetings only, and browser recordings have no transcripts. A recording's tracks now say their `kind` (`audio` or `video`) and, for a video, its size and frame count; a recording says its `purpose` and, if its video failed, an `errorCode`. Migration 0945 adds the columns.
+- 6f6c356: A chat that an automation will post into now says what it is waiting for. Sessions and session list entries carry `automationWait` (`nextRunAt`, the `event` with its `source` and `eventTypes`, and how many `automations` wait), and the lineage read carries `sessionAutomationWait`, for readers who may see schedules. Only automations the reader can see count, and a source that is private to someone else stays unnamed. `sessionAutomationWaitWords(t, session, { now })` from `@opengeni/react/automations` turns it into a sentence ("Waiting for deploy.finished from Deploys. Next run: Tomorrow, 09:00") and a chip label ("Waiting on Deploys"), and falls back to the plain "Waiting for an event" or "On a schedule" for servers without the details. The sidebar mark, hover card, command menu and chat header use it.
+- 226bb1d: A turn whose history holds retained screenshots starts faster: the session's screenshot rows load in one query and the images are read from storage concurrently, each once, so one slow read no longer holds up every image after it. `getSessionRetainedScreenshotArtifacts` returns a session's own retained screenshots for a set of ids.
+- 3fa5c6e: Show connected-vault usernames in secret search and vault summaries using an
+  optional, bounded provider display hint. Encrypt the hint separately from
+  provider-resolved fields without fetching additional secret values. Existing
+  mirrors receive the hint on their next item sync; force a refresh to populate
+  unchanged inventories immediately.
+- d6c7c4a: The agent now continues on its own after a person finishes setting up a capability from the agent's connect or add-credentials card, instead of waiting for them to say they are done. After setup is verified, the shared chat cards (and the OAuth return handlers) call the new `POST /v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations` endpoint (`client.continueAfterCapabilitySetup`). The API records one immediate `capability_setup_completed` internal update per card, and only when the capability is now usable in that chat, nobody has written since the card, and the caller is the person whose request it was. The agent sees one short internal update saying the setup is finished and its tools are available. Failed or cancelled setup sends nothing.
+
+  `SessionConversation` and `OpenGeniChat` now render the shared connect card for the agent's OAuth capability requests with no host code, when the person's grant allows every setup step; otherwise the card says the integration can't be connected from here instead of showing a dead end. The session proxy reports a new `chatConnections` client-config field (`false` when its `createSession` hook owns chat tools), and `timelineProps.renderAuthNeeded` still takes precedence.
+
+- bbc8f6d: Turns funded by Opengeni credits can now generate and edit images. When no turn-native, subscription or workspace Gateway route applies, the agent gets `generate_image` through the deployment's Vercel AI Gateway key and `imageGenerationModel`, priced per image (`OPENGENI_IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE`, or the built-in price for `openai/gpt-image-2`). It is on by default once the key and a price exist; `OPENGENI_IMAGE_GENERATION_OPENGENI_CREDITS_ENABLED=false` turns it off, and workspaces with Opengeni credits turned off are not offered it.
+
+  Before any provider request, each image must fit the workspace and member allowance and the spendable balance, which includes plan and trial grants covering the turn's chat model, minus images of the workspace still in flight. A refusal is returned to the agent as a plain rejected result instead of failing the turn. The image is debited once, in the same transaction that makes it ready. Migrations 0968 to 0970 (rolling) add the price, credit state and usage model to `image_generation_operations`, plus an index for in-flight images. The workspace Gateway image route now finds the workspace key by provider id.
+
+- f6f3ed1: Keep a rolling release safe for the previous binary: migration 0937 withholds the runtime role's EXECUTE on the new event trigger, recording recovery, MCP Events and event source feed `SECURITY DEFINER` routines, and its DML on `event_ingress_routes`, until a later release grants them. Readiness knows all five routines with their own checks and accepts the grants withheld or made. Stalled-recording recovery and event intake retention skip their pass while EXECUTE is withheld: until then, a recording stuck in transcription or deletion is not restarted, and a stuck deletion keeps its audio longer.
+- 41bff65: Event source routing keeps no provider identity. The route table has no tenant RLS, so a GitHub route is now keyed by an HMAC of the installation under a secret derived from the deployment's encryption key, and Slack and Gmail sources need no route at all: Slack callbacks already arrive resolved to their workspace and Gmail is read, not delivered. Migration 0941 removes the old plain routes; adding a GitHub source again recomputes its routes. The GitHub binding writers take the route secret as `eventRouteSecret` (`eventRouteSecret(settings)` from `@opengeni/core`). A deployment without `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` can't add a GitHub source.
+- 627b2f1: Google Calendar can now be connected from the chat or the Capabilities page, like Gmail: each person connects their own calendar with the deployment's existing Google sign-in app, and the agent can list events in a time range, read one event, check free/busy times, and create, move or delete events. Changes ask first by default, guests are emailed only when asked, and every answer uses the calendar's own time zone. Operators enable it with `OPENGENI_GOOGLE_CALENDAR_ENABLED=true` after enabling the Google Calendar API and adding the `calendar.calendarlist.readonly`, `calendar.events` and `calendar.freebusy` scopes to their Google consent screen.
+- 0854838: Migration 0947 grants the runtime role EXECUTE on the event trigger, recording recovery, MCP Events and event source feed `SECURITY DEFINER` routines, and DML on `event_ingress_routes`, which 0937 withheld for one release. Readiness and provisioning now require them, so stalled-recording recovery and event intake retention run again instead of being denied. The recording retention inventory from 0946 stays withheld until its own follow-up release.
+- 2c34440: Migration 0950 grants the runtime role EXECUTE on the recording retention inventory that 0946 withheld for one release. Readiness and provisioning now require it, so workspaces' recording retention periods are applied instead of the sweep skipping its pass.
+- 826b002: Agents can find and read recorded meetings with two new first-party tools. `meetings_search` finds the meetings the person can see by words said or in the title, a named speaker, a start-time range or a product's reference, newest first, with each meeting's speakers and the transcript lines that matched. `meeting_read` reads one meeting's details and its transcript as speaker-named, timestamped lines with names and corrections applied, in parts or for a stretch such as 12:00 to 15:00, and reads the live preview while a meeting is still being recorded. Both are searchable (deferred) tools in the knowledge group and need `sessions:read`. The recordings list in the API and SDK also gains `person`, `startedFrom` and `startedTo` filters.
+- baf128f: Searching meetings (`query` on the recordings list) now finds transcript words while they're still being typed: every word of the query matches as the start of a word, in any order, so "onboard" finds "onboarding". A corrected segment is found by its corrected words and no longer by the ones it replaced. Titles still match any part of the title.
+- 1ac6e9d: Pipeline independent event-fence reads in their existing transaction order, reducing sequential network waits while retaining separate SQL statements and cursor validation barriers.
+- d6c7c4a: New `connections:personal` permission: connect your own accounts and use them in your own chats without administering the workspace. It allows creating, listing and removing only the caller's own (personal) connections, signing in to one's own account through Connect, and turning a reviewed catalog OAuth integration on for personal accounts when it is not on yet (create-only, subject-scoped, no credentials or config, within the organization integration policy). It never covers custom MCP servers, shared or workspace connections, other people's connections, or disabling or reconfiguring integrations. `connections:write` includes it, so existing roles, keys and organization key policies keep their meaning, and workspace Members can now turn such an integration on for their own accounts. Once on, the integration is visible to the workspace's other members as optional; each must connect their own account.
+
+  Organizations can reserve this for admins with the new `personalIntegrationSetup` integration policy setting (`members` by default, `admins`), also in Organization settings → Integrations (migration 0974).
+
+  Embeds: per-user workspaces now get `connections:personal` by default, and the new `identities` option (`"per_user"` or `"shared"`) on the `Opengeni` facade and `createWorkspaceIdResolver` decides it for tenant workspaces: `per_user` adds signed-in tenant users with it, `shared` keeps it off everywhere. `memberPermissions` still overrides both. The shared connect card and the stock conversation's in-chat connect decision use the new `personalIntegrationSetupAccess` helper from `@opengeni/contracts/personal-integration-setup`, offering only a personal connection when that is all the person may do.
+
+- fa00bb2: Migration 0948 lets a turn that an agent moved to another of its owner's personal machines continue in a replacement attempt. The new attempt re-proves the same turn's earlier machine authorization against the current owner, machine and grant, instead of failing admission on a missing snapshot row. A machine the turn was never authorized for, or whose grant was revoked, now refuses with the typed grant-required cause instead of an unmapped database error.
+- a42a3b5: Meeting transcripts and live previews now count toward usage allowances that opt into `unbilledUsage: "list_price"`, like model calls that spend no credits. Each completed transcript version counts its recorded provider cost once against the workspace and the person who asked for it, and a live preview counts its cost against the recording's owner as it grows. When the allowance is used up, creating a recording, re-running a transcript and starting a live preview are refused with `402 allowance_exhausted`. Dictations are not counted twice: they are paid for with credits, and that debit already counts.
+- 3b1d8c1: A workspace can now say how long it keeps meetings. `settings.recordings.retention` takes `transcriptDays`, after which a meeting is deleted with its audio and transcript, and `audioDays`, after which only its audio is deleted (0 deletes it as soon as the transcript is ready). Both count from when the meeting was recorded and apply to meetings recorded earlier too; audio can't be kept longer than the meeting. The worker applies them every few minutes. A meeting whose audio was deleted says when in `audioDeletedAt`, keeps its transcript and speakers, and can't be played or transcribed again (409 `audio_deleted`). The web settings have Keep meetings and Keep audio, with a confirmation before a change deletes anything sooner. Migration 0946 adds the column and the sweep's inventory, whose runtime EXECUTE grant follows in a later release.
+- 83682c3: Meetings can recognize people by voice. It is off by default. When a workspace turns on `settings.recordings.voiceprints`, each diarized speaker's voice vector is kept with the transcript. People who agreed to be remembered get a voiceprint learned from the speakers named as them, and new transcripts suggest them by name with a confidence. The new routes are `PUT` and `DELETE /v1/workspaces/:workspaceId/recording-people/:personId/voice`. A member agrees with `self` consent, and someone from outside the workspace with `attested` consent. Turning the setting off forgets every voice. `PATCH …/speakers` takes `rejectSuggestions` to turn a suggestion down. The SDK adds `rememberRecordingPersonVoice` and `forgetRecordingPersonVoice`, `useRecordingPeople` adds `rememberVoice` and `forgetVoice`, and `useTranscript` adds `rejectSuggestion`.
+- efd5e62: Repeating event triggers keep an automation running after its schedule's last run: a spent one-time date or an ended interval no longer pauses an automation that still listens for events (migration 0951). A blocked run's owner notice now says whether more runs follow from the automation's triggers too, so a finished run-once automation no longer claims it keeps trying. Blocker review facts carry the automation's event policy as `task.events`.
+- 2b72f7c: Reuse preparation of the recursive Knowledge visibility statement while preserving the original per-member checks, query structure, and fresh authority evaluation.
+- a5e68e4: Use scoped projected and legacy-fallback indexes for exact tool-call event pages, preserving existing ID equality, type filters and page boundaries without loading unrelated event payloads.
+- eafdd84: Migration 0953 (rolling) adds the restrictive session visibility policy to `secret_use_approvals`, so an approval request is readable only by someone who can see the chat it came from, like every other chat-linked row. Grants still cover the acting person's own chats.
+- 34f54fe: Opening a Site no longer moves its sidebar row, just as opening a chat doesn't. A Site row's time is the latest of its conversations, its newest published version, and the chats that published it (the one that created it and any used to edit it), as far as you can see them. Opening a Site still lists it in your sidebar.
+- 7c9904b: Read only the control fields needed by session-work observations, avoiding unused frozen prompts and configuration payloads without changing query order or admission decisions.
+- 19d9791: Avoid sizing payloads beyond a full event page's byte/count prefix while preserving page contents, continuation cursors, and separate payload reads.
+- c665cd4: Index exact tool-name event pages while preserving legacy and oversized names, database collation, filtering and pagination.
+- 0383280: User messages can now carry the sender's IANA time zone (`timeZone`) on `user.message` events, steer requests, composer submits and the initial message of a new session. The server validates the name, freezes it with the accepted turn, and the agent sees the sender's local time first, for example `[Message sent Sunday 2026-10-25 09:08 Europe/Oslo (08:08 UTC) by Ada]`. Messages without a zone render exactly as before. The zone is not part of a message's idempotency identity, so a retry that names another zone (or none) replays the original message. Published Sites forward their viewer's zone the same way.
+
+  The SDK client fills the zone automatically on a person's device (browser, desktop app, React Native) from `Intl.DateTimeFormat().resolvedOptions().timeZone` when the caller did not pass one. Server-side callers never attach their own zone. Pass `messageTimeZone: false` in the client options to opt out. When an older server rejects the field, the client retries the message once without it.
+
+  Schedules an agent creates or edits without a `timeZone` now use the zone of the message that asked for them instead of UTC (or, in a turn no person's message started, the chat's latest message that had a zone); an edited schedule keeps its current zone, and UTC applies only when there is neither. The create and update receipts report the zone that was used (`facts.scheduleTimeZone`). Requests from people and schedules that name a zone are unchanged.
+
+- Updated dependencies [c8ddf55]
+- Updated dependencies [e0b3ccf]
+- Updated dependencies [1988e97]
+- Updated dependencies [e7f5d38]
+- Updated dependencies [e3782bb]
+- Updated dependencies [e1838ff]
+- Updated dependencies [ce72530]
+- Updated dependencies [4c6bf32]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [cccd692]
+- Updated dependencies [3fa5c6e]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [bbc8f6d]
+- Updated dependencies [392db50]
+- Updated dependencies [31bca3c]
+- Updated dependencies [6acfbd3]
+- Updated dependencies [21e7ecf]
+- Updated dependencies [627b2f1]
+- Updated dependencies [c307566]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [4695d41]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [f9f0607]
+- Updated dependencies [cc319f3]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [3c486ea]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [a9809ee]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+- Updated dependencies [0383280]
+- Updated dependencies [286058a]
+- Updated dependencies [7c02dbd]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/observability@5.3.0
+  - @opengeni/config@5.3.0
+  - @opengeni/network@5.3.0
+  - @opengeni/codemode@5.3.0
+  - @opengeni/codex@5.3.0
+  - @opengeni/xai-subscription@5.3.0
+  - @opengeni/subscriptions@5.3.0
+
+## 5.2.1
+
+### Minor Changes
+
+- fb72b9d: Any member can now give a session they started their own access, not only organization owners and admins. The app calls it full access. Its agent can do exactly what that person can do in the app and nothing more, and the access ends when the person leaves the session's workspace. The organization's on/off switch is unchanged.
+
+### Patch Changes
+
+- 9413acc: Read a scoped Skill-presence boolean for session effective-tool metadata instead of loading every active Skill descriptor. Preserve live visibility and activation rules; full Skill catalog reads remain unchanged.
+- Updated dependencies [e1126c2]
+- Updated dependencies [fb72b9d]
+  - @opengeni/codex@5.2.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/config@5.2.0
+  - @opengeni/codemode@5.2.0
+  - @opengeni/observability@5.2.0
+  - @opengeni/network@5.2.0
+  - @opengeni/subscriptions@5.2.0
+  - @opengeni/xai-subscription@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- 4e1a73f: Read workspace control state and kind within one fresh scoped transaction, preserving hidden-workspace handling and nested scope restoration.
+  - @opengeni/codemode@5.1.0
+  - @opengeni/codex@5.1.0
+  - @opengeni/config@5.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/network@5.1.0
+  - @opengeni/observability@5.1.0
+  - @opengeni/subscriptions@5.1.0
+  - @opengeni/xai-subscription@5.1.0
+
+## 5.0.2
+
+### Minor Changes
+
+- 487bd43: External users have an inbox. A product's own users (external actors resolved through its organization key) now receive their sessions' questions, approvals, paused goals and agent notifications in an Opengeni inbox, as members do, and `notify_user` delivers to them instead of reporting `no_human_recipient`. `createSessionProxyHandler` relays the user's own inbox: `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to the resolved workspace, and `GET`/`PUT /v1/inbox/settings`, so the stock app shows it behind a product's sign-in. `PATCH /v1/inbox/items/{id}` accepts `workspaceId` to act only on an item in that workspace. Phone pushes still need an Opengeni native-app sign-in.
+
+### Patch Changes
+
+- 93bd89d: Chrome profiles on a personal or organization-wide Connected Machine now appear and open in every workspace where that machine can be used, not only the workspace it was enrolled in. Browser and computer sessions record which workspace their profile is stored in, keep using that exact profile, and end when its Chrome restarts. Deleting the workspace a profile is stored in is never blocked by sessions elsewhere that used it. Ending a browser or computer session in a Chrome profile always succeeds: when the profile is disconnected, has restarted, is gone or can no longer be reached from the session's workspace, the end completes in the control plane instead of failing with not found.
+- 3f6fd05: Fix a database deadlock between an external user's request and a turn starting in one of their chats. Resolving an external identity, changing a chat's visibility and forking a chat no longer take a lock on the person's organization membership that blocks foreign-key checks, so a turn that updates its chat twice can no longer deadlock with them. Lifecycle changes to the membership are still excluded until those requests commit.
+- a9d20b3: Pause chat work atomically before personal archiving, require confirmation for active shared work, and retain explicit hide-only behavior for read-only and embedded proxy clients. Restore does not resume work. Keep sidebar survivors stable across archive completion and overlap independent session response reads without changing transaction or authorization boundaries.
+- 2ffad67: Read the Personal workspaces setting inside the managed access projection read instead of a separate query.
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/contracts@5.0.0
+  - @opengeni/codemode@5.0.0
+  - @opengeni/codex@5.0.0
+  - @opengeni/config@5.0.0
+  - @opengeni/observability@5.0.0
+  - @opengeni/network@5.0.0
+  - @opengeni/subscriptions@5.0.0
+  - @opengeni/xai-subscription@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- b0d752d: Batch artifact-list source-session authorization reads within existing response windows, while preserving per-source host authorization and a separate post-host visibility check.
+- e4712be: Add a scope-aligned ordered history index so prepared receipt-page reads avoid intersecting a full-session index with the current turn. History, authorization and cursor behavior are unchanged.
+- 238c599: A Site stays in its chat's project when people use it. New Site conversations started from the console are now filed in the Site's project: the API's "no project" (`null`) used to skip that rule and file them in Default. And a Site keeps its row in its own project even when its conversations sit in another one.
+- Updated dependencies [85fb89e]
+  - @opengeni/contracts@4.8.0
+  - @opengeni/codemode@4.8.0
+  - @opengeni/codex@4.8.0
+  - @opengeni/config@4.8.0
+  - @opengeni/observability@4.8.0
+  - @opengeni/network@4.8.0
+  - @opengeni/subscriptions@4.8.0
+  - @opengeni/xai-subscription@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- c6499fc: An agent asked to use the person's own Chrome without naming a profile now opens a connected profile on the computer the agent's session runs on, when there is one, instead of the most recently active profile on any computer. The opened profile and the other connected profiles now say which computer each is on, and mark the one the session runs on, so an agent can tell when it landed on another machine and pick a different profile. Discovering attached Chrome profiles shows the same. The attached-browser list gives each bridge's `sandboxId` and `machineName`.
+- 106b430: Avoid cloning retained Knowledge content and checking unused relationships when projecting collection IDs. Full entry projection, collection visibility, ranking and pagination are unchanged.
+- 8301382: A sub-session's question can now be answered by the person or by the parent agent, and the first answer wins. The parent's `child_requires_action` notice now carries each question's id, kind, prompt and option ids and labels (never secret specs), so the parent can answer with `session_human_input_respond` without reading the sub-session's history. The notice now also wakes an idle parent that has no goal. An agent whose answer arrives after someone else's gets `outcome: "unchanged"` with `alreadyAnswered: true`, who answered, and a warning not to answer again; before, it got a success-looking `replayed` result. The `user.humanInputResponse` event records whether a person, API key, agent or the system answered. The agent instructions and the `request_human_input` and `session_human_input_respond` descriptions now say that a parent answers when it can from its task context, leaves questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answers on the person's behalf. The conversation now says "Agent answered" instead of "You answered" when an agent gave the answer.
+- 61ec823: Read public workspace model metadata in one short tenant scope instead of three.
+  Keep default selection, fresh admission, subscription discovery and execution
+  credential resolution separate; no catalog or authorization cache is introduced.
+- b3fc68b: Site rows in the sidebar sort only by real activity: their conversations, a new published version, and your own opens. Archiving, restoring or rolling back a Site no longer lifts it for everyone. The console records one open per page that shows a Site: not again when its client is replaced, and not again when a reload, restored tab or Back shows a page where it was already recorded. A page that loads hidden counts once it is shown.
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/codemode@4.7.2
+  - @opengeni/codex@4.7.2
+  - @opengeni/config@4.7.2
+  - @opengeni/observability@4.7.2
+  - @opengeni/network@4.7.2
+  - @opengeni/subscriptions@4.7.2
+  - @opengeni/xai-subscription@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- 2138bba: Renew sandbox agent links in one locked SQL statement instead of separate row, clock and update queries. Preserve the database-clock lease, refusal precedence and longer heartbeat extensions while removing two database round trips per successful renewal.
+  - @opengeni/codemode@4.7.1
+  - @opengeni/codex@4.7.1
+  - @opengeni/config@4.7.1
+  - @opengeni/contracts@4.7.1
+  - @opengeni/network@4.7.1
+  - @opengeni/observability@4.7.1
+  - @opengeni/subscriptions@4.7.1
+  - @opengeni/xai-subscription@4.7.1
+
+## 4.7.0
+
+### Patch Changes
+
+- 31ef5b7: Database pools close idle connections after 30 seconds again, instead of five minutes, and recycle every connection after at most ten minutes (450 to 600 seconds, jittered per connection). Each PostgreSQL backend keeps its catalog cache and prepared plans until its connection closes, so long-lived idle and busy connections grew to 65-95 MB each and ran a 32 GiB staging server out of memory. Set `OPENGENI_DATABASE_POOL_IDLE_TIMEOUT_SECONDS` and `OPENGENI_DATABASE_POOL_MAX_LIFETIME_SECONDS` to tune this for the API, worker and editable-artifact service pools; `0` turns a timer off, and values above 2,147,483 seconds are rejected. `createDb` takes the same values as `idleTimeoutSeconds` and `maxLifetimeSeconds`.
+- 5e3fb3c: Avoid reading skipped tool arguments and outputs during exact call-ID event filtering. A rolling migration extends the existing tool metadata trigger; historical rows retain the payload fallback, with unchanged authorization, codec handling, and pagination.
+- afb32f5: Session message search no longer fails on large histories. One database statement used to check every remaining message, so on a large real workspace it ran past the request's 5 second statement timeout and the search failed. Each statement now reads at most 2,000 messages in order, and a request keeps reading further windows for up to about 1.5 seconds before returning a cursor. Measured on a production workspace with about 240,000 messages, one window takes about 25 ms. A search with no hits still covers the whole history across a few requests, and common terms return at once. Matching, ordering, offsets, snippets, grouping and cursors are unchanged.
+- 1ea2039: Session message search now uses a trigram index, so a search reads only the messages that can contain the text instead of walking the whole history. Row-level security used to stop PostgreSQL from using any text index for this search. Message text now also lives in a separate table whose row-security policy is the search pattern, which lets the index serve it under the same workspace and visibility rules. A trigger fills it for new messages with the writer's own rights (no new SECURITY DEFINER routine, so the previous release keeps passing its database posture check during a rolling deploy), and a batched migration copies existing history. On a copy of a 234,000-message workspace, one window takes about 2 ms for a rare word and 15 to 50 ms for common ones. `scannedMessages` now counts only the candidate messages read. Migrations install the `pg_trgm` and `btree_gin` extensions; managed PostgreSQL services with an extension allowlist (such as Azure's `azure.extensions`) must allow them first.
+- b8452ee: Listing workspaces inside an existing transaction no longer fails when the caller has several workspaces. Each workspace's details are read in its own row-security scope, and inside a transaction those scopes were opened concurrently on one connection, where they overwrote each other's tenant settings. External actors calling `GET /v1/workspaces` hit this as a 500 with `SAVEPOINT can only be used in transaction blocks` in the database log. The scopes now run one after another inside a transaction and stay concurrent otherwise.
+- Updated dependencies [31ef5b7]
+- Updated dependencies [31095f1]
+- Updated dependencies [7308de5]
+  - @opengeni/config@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/codemode@4.7.0
+  - @opengeni/codex@4.7.0
+  - @opengeni/observability@4.7.0
+  - @opengeni/network@4.7.0
+  - @opengeni/subscriptions@4.7.0
+  - @opengeni/xai-subscription@4.7.0
+
+## 4.6.1
+
+### Patch Changes
+
+- d0eb91c: A session's sub-agents now come back newest first at each level, and the 200-agent cap keeps direct agents and newer ones before deeper or older ones (it used to keep an arbitrary subset ordered by id). `sessionAgentAttention` and `formatWaitingSince` in `@opengeni/react/session-agents-model` give the word a manager must act on (Needs you · 10h, Failed, Stuck, Paused) for web and native. The phone's agents sheet shows that word in place of the time, and folds each agent's own agents behind a count.
+  - @opengeni/codemode@4.6.0
+  - @opengeni/codex@4.6.0
+  - @opengeni/config@4.6.0
+  - @opengeni/contracts@4.6.0
+  - @opengeni/network@4.6.0
+  - @opengeni/observability@4.6.0
+  - @opengeni/subscriptions@4.6.0
+  - @opengeni/xai-subscription@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- cfefee3: Let organization administrators inspect usage on independent subscription connections concurrently. Keep the organization membership fence shared for these reads, while lifecycle writers and each connection's credential custody retain their exclusive locks. Demotion still waits for in-flight provider reads and prevents subsequent reads and quota recording.
+- 1b8ca50: Read only tool identity fields when proving durable call/result pairs, instead of transferring full history payloads. Preserve row order, codec handling, identity precedence, authorization, and canonical model history.
+- acbf24e: Withhold pooled subscription capacity while an account's other main limit is exhausted, and report the next usable reset when the pool is already exhausted.
+- bce44cc: Session message search checks message text in the database. A search over a large workspace used to read about 33 messages per request, and once the database step took longer than the request's time budget it advanced by a single message per request, so searching a long history never finished. One request now checks every remaining message and reads only the ones that contain the text, so a search with no hits over about 240,000 messages finishes in one request of about 1.5 seconds. Grouped (per-chat) search returns up to a full batch of chats per request instead of one. Matching is unchanged: literal, Unicode case-insensitive, with the same offsets, snippets and cursors.
+- 51d84b7: Migration 0907 (one owner per subscription account) now finishes in seconds on large databases instead of timing out, and is now a maintenance migration: releases park database clients while it runs, because it locks the subscription tables for the whole fold (about six seconds at 30,000 accounts and 100,000 workspaces). It waits at most five seconds to take each set of locks; that bounds only the wait, not how long it then holds them. A disconnected account that a workspace still managed while it reached other workspaces no longer stops the migration; it becomes the organization's. The end state is otherwise unchanged.
+- Updated dependencies [6c7b552]
+- Updated dependencies [f838cb7]
+- Updated dependencies [acbf24e]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/codemode@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/subscriptions@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/network@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
 ## 4.4.1
 
 ### Minor Changes

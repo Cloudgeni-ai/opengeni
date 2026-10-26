@@ -108,6 +108,12 @@ async function buildApi(): Promise<void> {
     ],
   });
   await copyDirectory(join(repositoryRoot, "agent/install"), join(outdir, "assets/agent-install"));
+  // The agent release of this source tree, served by /agent/latest when no
+  // stable version is configured (apps/api/src/sandbox/agent-release.ts).
+  await copyDirectory(
+    join(repositoryRoot, "agent/Cargo.toml"),
+    join(outdir, "assets/agent/Cargo.toml"),
+  );
   await copyDirectory(
     join(repositoryRoot, "apps/desktop/install"),
     join(outdir, "assets/desktop-install"),

@@ -861,14 +861,29 @@ impl AtspiComputerAdapter {
         let target = records
             .into_iter()
             .find(|record| record.target.id == target_id)
-            .ok_or_else(|| {
-                NativeAdapterError::definite(
-                    NativeAdapterErrorCode::TargetNotFound,
-                    "AT-SPI target no longer exists",
-                    true,
-                )
-            })?;
+            .ok_or_else(|| self.missing_target())?;
         Ok((target, items))
+    }
+
+    /// A target that is gone. When the desktop's login session is no longer
+    /// the one on the screen, its screen and windows are gone for that
+    /// reason, which is the one worth saying.
+    fn missing_target(&self) -> NativeAdapterError {
+        if let Some(reason) = self
+            .desktop
+            .as_ref()
+            .and_then(LinuxDesktop::session_unavailable_reason)
+        {
+            return NativeAdapterError::unavailable(
+                format!("this Linux desktop cannot be seen or controlled: {reason}"),
+                true,
+            );
+        }
+        NativeAdapterError::definite(
+            NativeAdapterErrorCode::TargetNotFound,
+            "AT-SPI target no longer exists",
+            true,
+        )
     }
 
     /// Refresh one previously resolved target from its coherent application

@@ -5,12 +5,20 @@ import {
   ThisComputerCard,
   ThisComputerOffer,
   ThisComputerPanel,
+  computerUseFix,
+  computerUsePermissionText,
+  computerUseNoticeText,
+  computerUseProblemText,
+  computerUseState,
   defaultThisComputerLabels,
   hostErrorText,
   ENGLISH_MAC_SYSTEM_NAMES,
   macSystemNames,
   thisComputerPermissionSteps,
   thisComputerView,
+  type ComputerUseProblem,
+  type ComputerUseState,
+  type ThisComputerErrorCode,
   type ThisComputerStatus,
   type UseThisComputerResult,
 } from "../src/this-computer";
@@ -26,8 +34,13 @@ function computer(value: ThisComputerStatus | null): UseThisComputerResult {
     acting: false,
     actionError: null,
     canDisconnect: true,
+    pending: null,
+    asking: null,
+    allowPermissions: () => undefined,
     refresh: () => undefined,
     connect: async () => value,
+    turnOn: async () => value,
+    turnOff: nothing,
     pause: nothing,
     resume: nothing,
     disconnect: nothing,
@@ -41,9 +54,6 @@ const missing = [
 ];
 
 test("existing service setup explains preservation and app-independent lifetime", () => {
-  const offered = computer(status({ management: "service" }));
-  const card = renderToStaticMarkup(<ThisComputerCard computer={offered} productName="Acme" />);
-  expect(card).toContain("installation and permissions stay in place");
   const panel = renderToStaticMarkup(
     <ThisComputerPanel
       computer={computer(status({ state: "connected", management: "service" }))}
@@ -205,4 +215,171 @@ test("the words come from the host's message catalog, English otherwise", () => 
   expect(defaultThisComputerLabels().done("Ada's Mac", "macos")).toBe(
     "Agents can now use Ada's Mac. Pause any time from the menu bar.",
   );
+});
+
+const removed = status({
+  errorCode: "removed",
+  error: "This computer is no longer in this workspace.",
+  management: "service",
+});
+
+test("a computer removed on the server is simply off", () => {
+  expect(thisComputerView(removed)).toBe("off");
+  expect(thisComputerView({ ...removed, busy: true })).toBe("setting_up");
+  expect(computerUseState(computer(removed))).toEqual({ kind: "off" });
+  const never = computer(status({ management: "service" }));
+  const panel = (value: UseThisComputerResult) =>
+    renderToStaticMarkup(
+      <ThisComputerPanel computer={value} platform="macos" onSetup={() => undefined} />,
+    );
+  const card = (value: UseThisComputerResult) =>
+    renderToStaticMarkup(<ThisComputerCard computer={value} productName="Acme" />);
+  // Exactly what a computer that was never set up shows.
+  expect(panel(computer(removed))).toBe(panel(never));
+  expect(card(computer(removed))).toBe(card(never));
+  for (const html of [panel(computer(removed)), card(computer(removed))]) {
+    expect(html).not.toContain("removed");
+    expect(html).not.toContain("Reconnect");
+    expect(html).not.toContain("Connecting");
+    expect(html).not.toContain('role="alert"');
+  }
+});
+
+const problem = (
+  problemKind: ComputerUseProblem,
+  code: ThisComputerErrorCode | null,
+  detail: string | null,
+): ComputerUseState => ({ kind: "problem", problem: problemKind, code, detail });
+
+test("computer use shows one state at a time", () => {
+  const use = (value: ThisComputerStatus | null, extra: Partial<UseThisComputerResult> = {}) =>
+    computerUseState({ ...computer(value), ...extra });
+  expect(use(null)).toEqual({ kind: "hidden" });
+  expect(use(status({ state: "unavailable" }))).toEqual({ kind: "hidden" });
+  // Off looks the same however it got there.
+  for (const off of [
+    status({}),
+    status({ state: "not_installed" }),
+    status({ state: "paused" }),
+    removed,
+  ]) {
+    expect(use(off)).toEqual({ kind: "off" });
+  }
+  expect(use(status({}), { pending: "on" })).toEqual({
+    kind: "turning_on",
+    progress: null,
+    asking: null,
+  });
+  expect(use(status({ busy: true, setupProgress: 0.4 }))).toEqual({
+    kind: "turning_on",
+    progress: 0.4,
+    asking: null,
+  });
+  expect(use(status({ state: "connected", reconnecting: true }))).toEqual({
+    kind: "turning_on",
+    progress: null,
+    asking: null,
+  });
+  expect(use(status({ state: "connected" }))).toEqual({ kind: "on" });
+  // Turning it off shows off at once; pausing elsewhere doesn't flash "turning on".
+  expect(use(status({ state: "connected" }), { pending: "off" })).toEqual({ kind: "off" });
+  expect(use(status({ state: "connected", busy: true }))).toEqual({ kind: "on" });
+  // Asking the system for a permission is still turning on, one state.
+  expect(
+    use(status({ state: "connected", permissions: missing }), { asking: "accessibility" }),
+  ).toEqual({
+    kind: "turning_on",
+    progress: null,
+    asking: "accessibility",
+  });
+  // Not given (yet): calm, never a problem; it names the app the grant goes to.
+  expect(use(status({ state: "connected", permissions: missing }))).toEqual({
+    kind: "needs_permission",
+    appName: null,
+  });
+  expect(
+    use(status({ state: "connected", permissions: missing, permissionAppName: "Opengeni Agent" })),
+  ).toEqual({ kind: "needs_permission", appName: "Opengeni Agent" });
+  // A real failure still wins over a missing permission.
+  expect(
+    use(status({ state: "connected", permissions: missing, errorCode: "offline", error: "x" })),
+  ).toEqual(problem("offline", "offline", "x"));
+});
+
+test("each problem keeps its meaning, and only an unreachable server is offline", () => {
+  const use = (patch: Partial<ThisComputerStatus>) =>
+    computerUseState(computer(status({ state: "connected", reconnecting: true, ...patch })));
+  expect(use({ errorCode: "offline", error: "fetch failed" })).toEqual(
+    problem("offline", "offline", "fetch failed"),
+  );
+  expect(use({ errorCode: "signed_out", error: "Sign in again." })).toEqual(
+    problem("signed_out", "signed_out", "Sign in again."),
+  );
+  const server = use({ errorCode: "unknown", error: "API 503: unavailable" });
+  expect(server).toEqual(problem("error", "unknown", "API 503: unavailable"));
+  const failedConnect = computerUseState(
+    computer(status({ errorCode: "connect_failed", error: "Couldn't let agents use it: denied" })),
+  );
+  expect(failedConnect).toEqual(
+    problem("error", "connect_failed", "Couldn't let agents use it: denied"),
+  );
+  // A failed action without the host's reason is still a problem, not off.
+  expect(computerUseState({ ...computer(status({})), actionError: "boom" })).toEqual(
+    problem("error", null, "boom"),
+  );
+
+  const t = createOpenGeniText();
+  const labels = defaultThisComputerLabels();
+  const text = (state: ReturnType<typeof computerUseState>) =>
+    computerUseProblemText(state as never, "Kari's Mac", t, labels);
+  expect(text(server)).toBe("API 503: unavailable");
+  expect(text(server)).not.toContain("internet");
+  expect(text(use({ errorCode: "offline", error: "x" }))).toContain("Couldn't reach the server");
+  expect(text(use({ errorCode: "signed_out", error: "x" }))).toBe(
+    "Sign in again to let agents use Kari's Mac.",
+  );
+  expect(text(problem("error", null, null) as never)).toBe("Computer use couldn't turn on.");
+  expect(computerUseNoticeText({ kind: "turning_on", progress: null, asking: null }, t)).toBe(
+    "Turning on computer use…",
+  );
+  expect(computerUseNoticeText({ kind: "needs_permission", appName: null }, t)).toBe(
+    "Allow screen access for computer use",
+  );
+  expect(computerUsePermissionText("Opengeni", t)).toBe(
+    "To let agents see and control the screen, allow Opengeni in System Settings.",
+  );
+  expect(computerUseNoticeText(server as never, t)).toBe("Computer use isn't working");
+  // One fix each.
+  expect(computerUseFix("permission")).toBe("open_settings");
+  expect(computerUseFix("signed_out")).toBe("sign_in");
+  expect(computerUseFix("offline")).toBe("try_again");
+  expect(computerUseFix("error")).toBe("try_again");
+});
+
+test("a connection the app can't verify says why, and only a network failure says offline", () => {
+  const labels = defaultThisComputerLabels();
+  expect(labels.error("offline", "x")).toContain("Couldn't reach the server");
+  expect(labels.error("removed", "x")).toBe("This computer is no longer in this workspace.");
+  expect(labels.error("signed_out", "x")).toContain("Sign in again");
+  expect(labels.error("unknown", "Couldn't check this computer's connection: API 503")).toBe(
+    "Couldn't check this computer's connection: API 503",
+  );
+  const signedOut = renderToStaticMarkup(
+    <ThisComputerPanel
+      computer={computer(
+        status({
+          state: "connected",
+          management: "service",
+          reconnecting: true,
+          errorCode: "signed_out",
+          error: "Sign in again to check this computer's connection.",
+        }),
+      )}
+      platform="macos"
+      onSetup={() => undefined}
+    />,
+  );
+  expect(signedOut).toContain("Turning on Kari&#x27;s Mac");
+  expect(signedOut).toContain("Sign in again");
+  expect(signedOut).not.toContain("Couldn&#x27;t reach");
 });

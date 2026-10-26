@@ -632,11 +632,9 @@ describe("release image workflow contract", () => {
       "github.event_name == 'push' && 'release-version-latest-main' || format('release-publish-{0}', inputs.source_sha)",
     );
     expect(release).toContain("cancel-in-progress: ${{ github.event_name == 'push' }}");
+    expect(ci).toContain("format('ci-{0}-{1}', github.run_id, github.run_attempt)");
     expect(ci).toContain(
-      "github.event_name == 'workflow_dispatch' && format('ci-automation-{0}', inputs.automation_pr_number)",
-    );
-    expect(ci).toContain(
-      "cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}",
+      "cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
     );
     expect(ci).not.toContain(
       "format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha)",
@@ -949,18 +947,20 @@ describe("release image workflow contract", () => {
     ]) {
       expect(parsed.jobs[jobName]?.needs).toEqual(["automation-admission", "plan"]);
     }
-    for (const jobName of [
-      "api-image",
-      "artifact-materializer-image",
-      "sandbox-image",
-      "desktop-image",
-    ]) {
+    for (const jobName of ["artifact-materializer-image", "sandbox-image", "desktop-image"]) {
       expect(parsed.jobs[jobName]?.needs).toEqual([
         "automation-admission",
         "plan",
         "artifact-runtime",
       ]);
     }
+    // The protected API image additionally waits for pre-image validation.
+    expect(parsed.jobs["api-image"]?.needs).toEqual([
+      "automation-admission",
+      "plan",
+      "artifact-runtime",
+      "release-image-validation",
+    ]);
     expect(parsed.jobs.images?.name).toBe("Workload image builds");
     expect(parsed.jobs.images?.needs).toEqual([
       "automation-admission",
@@ -974,14 +974,17 @@ describe("release image workflow contract", () => {
       "sandbox-image",
       "desktop-image",
     ]);
-    for (const jobName of [
-      "api-image",
-      "artifact-materializer-image",
-      "sandbox-image",
-      "desktop-image",
-    ]) {
-      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["api-image"]?.if);
+    for (const jobName of ["artifact-materializer-image", "sandbox-image", "desktop-image"]) {
+      expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["artifact-materializer-image"]?.if);
     }
+    // Same selection as its peers, plus: a main push requests public-release
+    // approval only after every non-image lane succeeded.
+    expect(parsed.jobs["api-image"]?.if).toBe(
+      parsed.jobs["artifact-materializer-image"]!.if!.replace(
+        / \}\}$/u,
+        " && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}",
+      ),
+    );
     for (const jobName of [
       "worker-image",
       "web-image",

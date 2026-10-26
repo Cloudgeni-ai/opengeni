@@ -82,6 +82,10 @@ import {
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
 import { reconcileScreenControlOnHello } from "./screen-control";
 import { ingestConnectedCommandCompletion } from "./command-completion";
+import {
+  createConnectedCommandCompletionLocator,
+  type ConnectedCommandCompletionLocator,
+} from "./completion-locator";
 import { answerOperationInventory } from "./operation-inventory";
 
 /** The wildcard subject the agent event plane publishes heartbeats on. */
@@ -555,6 +559,7 @@ export async function handleAgentEventPayload(
   subject: string,
   bus?: EventBus,
   agentUpdates?: AutomaticAgentUpdater | null,
+  completionLocator?: ConnectedCommandCompletionLocator,
 ): Promise<void> {
   const ids = parseAgentEventSubject(subject);
   if (!ids) {
@@ -572,7 +577,15 @@ export async function handleAgentEventPayload(
   }
   if (event.event?.$case === "operationCompleted") {
     try {
-      await ingestConnectedCommandCompletion(db, ids, event.event.operationCompleted, bus);
+      await ingestConnectedCommandCompletion(
+        db,
+        ids,
+        event.event.operationCompleted,
+        bus,
+        undefined,
+        undefined,
+        completionLocator,
+      );
     } catch (error) {
       observability?.warn?.("Failed to settle a Connected Machine completion event", {
         subject,
@@ -762,8 +775,12 @@ export async function handleAgentEventPayload(
   }
   // A live machine behind its promoted build is asked to update; the decision
   // reads only this enrollment, and a request never blocks heartbeat ingestion.
-  // A compute sandbox's agent is pinned by its image and never self-updates.
-  if (enrollment.kind !== "sandbox") agentUpdates?.consider(enrollment);
+  // A compute sandbox is one too: it keeps its disk for as long as it lives, so
+  // the agent its image carried would otherwise run for good. A sandbox only
+  // heartbeats while it runs, so one that sleeps updates when next woken. An
+  // agent from before compute self-update refuses with a non-retryable
+  // `update_unsupported`, asked once per promoted version.
+  agentUpdates?.consider(enrollment);
   if (heartbeat.attachedBrowserInventory) {
     try {
       await ingestAttachedBrowserInventory(db, {
@@ -842,6 +859,7 @@ export function startMetricsIngestion(deps: {
   observability?: Observability;
   agentUpdates?: AutomaticAgentUpdater | null;
 }): (() => void) & { whenIdle: () => Promise<void> } {
+  const completionLocator = createConnectedCommandCompletionLocator(deps.db);
   const scheduler = createAgentEventIngestionScheduler(
     (payload, subject) =>
       handleAgentEventPayload(
@@ -851,6 +869,7 @@ export function startMetricsIngestion(deps: {
         subject,
         deps.bus,
         deps.agentUpdates,
+        completionLocator,
       ),
     {
       onHeartbeatCoalesced: () =>

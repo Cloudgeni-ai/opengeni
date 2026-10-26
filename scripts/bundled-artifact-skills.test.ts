@@ -104,15 +104,21 @@ describe("bundled editable-artifact skills", () => {
 
   test("teaches Sites to respect viewer authority and normal tool approvals", async () => {
     for (const name of SITE_SKILL_NAMES) {
-      const skill = await readFile(
-        join(repoRoot, "packages/runtime/src/bundled_site_skills", name, "SKILL.md"),
-        "utf8",
+      const directory = join(repoRoot, "packages/runtime/src/bundled_site_skills", name);
+      const main = await readFile(join(directory, "SKILL.md"), "utf8");
+      expect(main).toStartWith("---\nname:");
+      expect(main).toContain("opengeni__artifacts_create");
+      expect(main).toContain("opengeni__artifacts_get_source");
+      expect(main).toContain("opengeni__artifacts_publish");
+      // App guidance lives in references the main file names.
+      const references = await Promise.all(
+        (await readdir(join(directory, "references"))).map(async (file) => {
+          expect(main).toContain(`references/${file}`);
+          return await readFile(join(directory, "references", file), "utf8");
+        }),
       );
-      expect(skill).toStartWith("---\nname:");
+      const skill = [main, ...references].join("\n");
       expect(skill).toContain('from "@opengeni/sdk/site"');
-      expect(skill).toContain("opengeni__artifacts_create");
-      expect(skill).toContain("opengeni__artifacts_get_source");
-      expect(skill).toContain("opengeni__artifacts_publish");
       expect(skill).toContain("publishing it grants\n   no tool authority");
       expect(skill).toContain("normal tool approval rules");
       expect(skill).toContain("viewer's\n   live workspace, permission, and connection authority");

@@ -243,7 +243,12 @@ export class SessionCommandIdempotencyError extends Error {
 
 export class AgentCommandAuthorityError extends Error {
   constructor(
-    readonly code: "CALLER_STALE" | "CALLER_INTERRUPTED" | "TARGET_NOT_VERTICAL" | "SELF_STEER",
+    readonly code:
+      | "CALLER_STALE"
+      | "CALLER_INTERRUPTED"
+      | "TARGET_NOT_VERTICAL"
+      | "SELF_STEER"
+      | "PERSONAL_MACHINE_OWNER_REQUIRED",
     message: string,
   ) {
     super(message);
@@ -824,22 +829,22 @@ export async function lockSessionEventWriteRows(
 
   const eventOnly = input.rowProjection === "event";
   const sessionColumns = eventOnly ? eventSessionColumns : getTableColumns(schema.sessions);
-  let workspace: SessionEventWriteFenceLocks["workspace"] = null;
-  if ((input.workspaceLock ?? "key_share") === "key_share") {
-    const [lockedWorkspace] = await db
-      .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
-      .from(schema.workspaces)
-      .where(eq(schema.workspaces.id, input.workspaceId))
-      .for("key share")
-      .limit(1);
-    workspace = lockedWorkspace ?? null;
-  }
-
   const sessionIds = [...new Set(input.sessionIds ?? [])].sort();
   const sessionLock = input.sessionLock ?? "no_key_update";
-  let sessions =
+  // Submit in canonical lock order on the transaction-pinned connection. The
+  // server still executes separate statements with fresh READ COMMITTED
+  // snapshots; only the client waits overlap. Cursor-dependent work stays below.
+  const [workspaces, lockedSessions] = await Promise.all([
+    (input.workspaceLock ?? "key_share") === "key_share"
+      ? db
+          .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
+          .from(schema.workspaces)
+          .where(eq(schema.workspaces.id, input.workspaceId))
+          .for("key share")
+          .limit(1)
+      : [],
     sessionIds.length > 0
-      ? await db
+      ? db
           .select(sessionColumns)
           .from(schema.sessions)
           .where(
@@ -850,7 +855,10 @@ export async function lockSessionEventWriteRows(
           )
           .orderBy(schema.sessions.id)
           .for(sessionLock === "key_share" ? "key share" : "no key update")
-      : [];
+      : [],
+  ]);
+  const workspace = workspaces[0] ?? null;
+  let sessions = lockedSessions;
 
   const cursors =
     sessions.length > 0
@@ -917,9 +925,10 @@ export async function lockSessionEventWriteRows(
   });
 
   const turnIds = [...new Set(input.turnIds ?? [])].sort();
-  const turns =
+  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
+  const [turns, attempts] = await Promise.all([
     turnIds.length > 0
-      ? await db
+      ? db
           .select(eventOnly ? eventTurnColumns : getTableColumns(schema.sessionTurns))
           .from(schema.sessionTurns)
           .where(
@@ -930,12 +939,9 @@ export async function lockSessionEventWriteRows(
           )
           .orderBy(schema.sessionTurns.id)
           .for("update")
-      : [];
-
-  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
-  const attempts =
+      : [],
     attemptIds.length > 0
-      ? await db
+      ? db
           .select(eventOnly ? eventAttemptColumns : getTableColumns(schema.sessionTurnAttempts))
           .from(schema.sessionTurnAttempts)
           .where(
@@ -946,7 +952,8 @@ export async function lockSessionEventWriteRows(
           )
           .orderBy(schema.sessionTurnAttempts.id)
           .for("update")
-      : [];
+      : [],
+  ]);
 
   return { control, workspace, sessions: canonicalSessions, cursors, turns, attempts };
 }
@@ -3491,6 +3498,7 @@ async function cancelSessionSubtreeInTransaction(
           eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
           inArray(schema.sessionHumanInputRequests.turnId, immediatelyCancelledTurnIds),
           eq(schema.sessionHumanInputRequests.status, "pending"),
+          eq(schema.sessionHumanInputRequests.origin, "tool_call"),
         ),
       )
       .returning({
@@ -3718,6 +3726,14 @@ async function cancelSessionSubtreeInTransaction(
   };
 }
 
+/** Archive must never silently interrupt work that started after the UI's idle snapshot. */
+export class SessionArchiveConfirmationRequiredError extends Error {
+  readonly code = "session_archive_confirmation_required";
+  constructor() {
+    super("This chat has active work. Confirm Pause and archive to stop it for everyone.");
+  }
+}
+
 export async function mutateSessionControlInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -3731,6 +3747,8 @@ export async function mutateSessionControlInTransaction(
     expectedControlEtag?: string | null;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
+    /** Personal archive only: verify idle under the same control fence as Pause. */
+    requireIdleForArchive?: boolean;
   },
 ): Promise<SessionControlMutationResult> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
@@ -3846,6 +3864,29 @@ export async function mutateSessionControlInTransaction(
       outcome: "replayed",
       replay: true,
     };
+  }
+  if (input.requireIdleForArchive && input.action === "pause") {
+    {
+      const [activity] = await db.execute<{ active: boolean }>(sql`
+        select exists (
+          select 1 from ${schema.sessions} session
+          where session.workspace_id = ${input.workspaceId}
+            and (session.id = ${input.sessionId} or session.root_session_id = ${input.sessionId})
+            and (
+              session.status in ('queued', 'running', 'requires_action', 'recovering', 'waiting_capacity')
+              or session.active_turn_id is not null
+              or session.input_wait_turn_id is not null
+              or exists (select 1 from ${schema.sessionGoals} goal
+                where goal.workspace_id = session.workspace_id and goal.session_id = session.id
+                  and goal.status = 'active')
+              or exists (select 1 from ${schema.sessionBackgroundCommands} command
+                where command.workspace_id = session.workspace_id and command.session_id = session.id
+                  and command.state in ('running', 'stopping'))
+            )
+        ) as active
+      `);
+      if (activity?.active) throw new SessionArchiveConfirmationRequiredError();
+    }
   }
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {

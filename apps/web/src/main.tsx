@@ -23,6 +23,7 @@ import {
 } from "@opengeni/react/app/lib/client-signals";
 import { retainIdentityLinkContinuation } from "./lib/identity-link-continuation";
 import { setAnalyticsConsentDecisionSender } from "@opengeni/react/app/lib/analytics-consent";
+import { recordErrorToasts } from "@opengeni/react/app/lib/recent-errors";
 import { ANALYTICS_CONSENT_PATH } from "@opengeni/contracts/analytics-consent-report";
 import {
   availableSessionStorage,
@@ -30,8 +31,11 @@ import {
   installVitePreloadRecovery,
 } from "./lib/vite-preload-recovery";
 import "./styles.css";
+import { toast } from "sonner";
 
 retainIdentityLinkContinuation(window);
+// Errors the person was shown go with their next feedback report.
+recordErrorToasts(toast);
 // Before the first paint: slim scrollbars where the platform draws classic ones.
 markClassicScrollbars(document);
 // Error counter and diagnostics (scrubbed, bounded error text); see

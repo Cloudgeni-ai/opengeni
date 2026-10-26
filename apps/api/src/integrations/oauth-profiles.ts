@@ -12,6 +12,12 @@ import {
   gmailToolAvailableOnDeployment,
   gmailToolSupportsScopes,
 } from "@opengeni/runtime/gmail-rest-mcp";
+import {
+  GOOGLE_CALENDAR_REQUESTED_SCOPES,
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL as RUNTIME_GOOGLE_CALENDAR_MCP_URL,
+  googleCalendarToolSupportsScopes,
+} from "@opengeni/runtime/google-calendar-rest-mcp";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
@@ -42,6 +48,20 @@ export const OFFICIAL_GMAIL_MCP_SCOPES = [
   "https://www.googleapis.com/auth/gmail.compose",
   "https://www.googleapis.com/auth/gmail.modify",
 ] as const;
+
+export const OFFICIAL_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
+export const OFFICIAL_DRIVE_MCP_SCOPES = [
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+] as const;
+
+/** Identity of the hosted Calendar MCP; it only selects the local REST bridge. */
+export const OFFICIAL_GOOGLE_CALENDAR_MCP_URL = RUNTIME_GOOGLE_CALENDAR_MCP_URL;
+/** Calendar list (read), events (read and write) and free/busy; never the broad `calendar` scope. */
+export const OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES: readonly string[] =
+  GOOGLE_CALENDAR_REQUESTED_SCOPES;
+
+const GOOGLE_OAUTH_ONLY_FOR = `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}, ${OFFICIAL_DRIVE_MCP_URL} or ${OFFICIAL_GOOGLE_CALENDAR_MCP_URL}`;
 
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
@@ -94,10 +114,9 @@ export type OAuthProviderProfile = {
   defaultOwnership?: ConnectionOwnership;
   /** Built-in-only ownership restriction, including old reconnect/callback state. */
   requiredOwnership?: { ownership: ConnectionOwnership; message: string };
-  /** Bind reconnect/dedupe to the exact mcpUrl, not just the provider domain. */
-  exactMcpBinding: boolean;
-  /** How an existing connection is chosen for reconnect coalescing. */
-  connectionSelection: "canonical_personal" | "first_active";
+  /** Verified metadata tuple identifying an account, including tenant when applicable.
+   * Produced only by the authenticated verification adapter, never display names. */
+  accountIdentityMetadataKeys?: readonly string[];
   /** Post-discovery authorization-server origin pins. */
   authorizationServer?: AuthorizationServerPins;
   /**
@@ -128,6 +147,8 @@ export type OAuthProviderProfile = {
   confidentialClientRequired?: boolean;
   /** Built-in API bridge discovery; catalog metadata cannot redirect this seam. */
   providerOAuthDiscovery?: { issuer: string; metadataUrl: string };
+  /** Built-in read-only remote proof; discovery alone may be publicly accessible. */
+  remoteToolVerification?: { toolName: string; arguments: Record<string, unknown> };
   localToolVerification?: {
     url: string;
     method?: "GET" | "POST";
@@ -146,13 +167,12 @@ export type OAuthProviderProfile = {
 export const DEFAULT_OAUTH_PROFILE: OAuthProviderProfile = {
   key: "default",
   match: {},
-  exactMcpBinding: false,
-  connectionSelection: "first_active",
   sendResourceParameter: true,
 };
 
 const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
   key: "hosted-slack-mcp",
+  accountIdentityMetadataKeys: ["slackTeamId", "slackUserId"],
   match: { mcpUrls: [OFFICIAL_SLACK_MCP_URL], providerDomains: ["slack.com"] },
   canonicalProviderDomain: "slack.com",
   rejectCallerOAuthClient: {
@@ -170,8 +190,6 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
     key: "slack",
     message: "Slack MCP OAuth requires OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET",
   },
-  exactMcpBinding: true,
-  connectionSelection: "canonical_personal",
   authorizationServer: {
     issuerOrigins: [SLACK_OAUTH_ORIGIN, SLACK_MCP_ORIGIN],
     authorizationEndpointOrigins: [SLACK_OAUTH_ORIGIN],
@@ -218,6 +236,7 @@ const HOSTED_SLACK_PROFILE: OAuthProviderProfile = {
 
 const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   key: "official-gmail",
+  accountIdentityMetadataKeys: ["gmailEmail"],
   match: { mcpUrls: [OFFICIAL_GMAIL_MCP_URL] },
   requireExactMcpUrl: {
     url: OFFICIAL_GMAIL_MCP_URL,
@@ -225,8 +244,6 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
   defaultOwnership: "personal",
   requiredOwnership: { ownership: "personal", message: "Gmail connections must be personal-owned" },
-  exactMcpBinding: true,
-  connectionSelection: "first_active",
   authorizationServer: {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
     authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
@@ -236,7 +253,7 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
   postDiscoveryProviderDomain: {
     domain: "gmailmcp.googleapis.com",
-    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}`,
+    message: GOOGLE_OAUTH_ONLY_FOR,
   },
   // Google's OAuth endpoints do not implement RFC 8707's `resource` parameter.
   sendResourceParameter: false,
@@ -284,9 +301,114 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
 };
 
+/** Remote discovery remains authoritative; no synthetic Drive tool verification. */
+const OFFICIAL_DRIVE_PROFILE: OAuthProviderProfile = {
+  key: "official-drive",
+  match: { mcpUrls: [OFFICIAL_DRIVE_MCP_URL] },
+  canonicalProviderDomain: "drivemcp.googleapis.com",
+  requireExactMcpUrl: {
+    url: OFFICIAL_DRIVE_MCP_URL,
+    message: `Google Drive OAuth must use ${OFFICIAL_DRIVE_MCP_URL}`,
+  },
+  defaultOwnership: "personal",
+  requiredOwnership: {
+    ownership: "personal",
+    message: "Google Drive connections must be personal-owned",
+  },
+  authorizationServer: {
+    issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    tokenEndpointOrigins: [GOOGLE_TOKEN_ORIGIN],
+    message: "Google Drive MCP authorization metadata did not remain bound to Google",
+    skipInLocalTest: false,
+  },
+  postDiscoveryProviderDomain: {
+    domain: "drivemcp.googleapis.com",
+    message: `Google Drive OAuth must use ${OFFICIAL_DRIVE_MCP_URL}`,
+  },
+  sendResourceParameter: false,
+  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  requestedScopes: OFFICIAL_DRIVE_MCP_SCOPES,
+  reportedScopesRequired: true,
+  freshRefreshTokenRequired: true,
+  fullRequestedScopesRequired: true,
+  confidentialClientRequired: true,
+  remoteToolVerification: {
+    toolName: "list_recent_files",
+    arguments: { pageSize: 1, excludeContentSnippets: true },
+  },
+  providerOAuthDiscovery: {
+    issuer: GOOGLE_OAUTH_ISSUER_ORIGIN,
+    metadataUrl: `${GOOGLE_OAUTH_ISSUER_ORIGIN}/.well-known/openid-configuration`,
+  },
+};
+
+/**
+ * Google Calendar runs through Opengeni's reviewed Calendar REST bridge, like
+ * Gmail: discovery reads Google's OAuth metadata directly and never contacts
+ * the hosted Calendar MCP identity. The grant is requested without
+ * `include_granted_scopes`, so a Calendar token never carries Gmail or Drive
+ * access the same person granted to this client earlier.
+ */
+const OFFICIAL_GOOGLE_CALENDAR_PROFILE: OAuthProviderProfile = {
+  key: "official-google-calendar",
+  accountIdentityMetadataKeys: ["googleCalendarEmail"],
+  match: { mcpUrls: [OFFICIAL_GOOGLE_CALENDAR_MCP_URL] },
+  canonicalProviderDomain: "calendarmcp.googleapis.com",
+  requireExactMcpUrl: {
+    url: OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+    message: `Google Calendar OAuth must use ${OFFICIAL_GOOGLE_CALENDAR_MCP_URL}`,
+  },
+  defaultOwnership: "personal",
+  requiredOwnership: {
+    ownership: "personal",
+    message: "Google Calendar connections must be personal-owned",
+  },
+  authorizationServer: {
+    issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    authorizationEndpointOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
+    tokenEndpointOrigins: [GOOGLE_TOKEN_ORIGIN],
+    message: "Google Calendar authorization metadata did not remain bound to Google",
+    skipInLocalTest: false,
+  },
+  postDiscoveryProviderDomain: {
+    domain: "calendarmcp.googleapis.com",
+    message: GOOGLE_OAUTH_ONLY_FOR,
+  },
+  sendResourceParameter: false,
+  extraAuthorizeParams: { access_type: "offline", prompt: "consent" },
+  requestedScopes: OFFICIAL_GOOGLE_CALENDAR_MCP_SCOPES,
+  reportedScopesRequired: true,
+  freshRefreshTokenRequired: true,
+  fullRequestedScopesRequired: true,
+  confidentialClientRequired: true,
+  providerOAuthDiscovery: {
+    issuer: GOOGLE_OAUTH_ISSUER_ORIGIN,
+    metadataUrl: `${GOOGLE_OAUTH_ISSUER_ORIGIN}/.well-known/openid-configuration`,
+  },
+  localToolVerification: {
+    url: "https://www.googleapis.com/calendar/v3/users/me/calendarList/primary",
+    method: "GET",
+    required: true,
+    validateIdentity: (payload) => {
+      // The primary calendar's ID is the account's email address.
+      if (typeof payload.id !== "string" || !/^[^\s@]+@[^\s@]+$/u.test(payload.id)) {
+        throw new Error("Google Calendar account verification failed");
+      }
+      return { googleCalendarEmail: payload.id };
+    },
+    toolsForScopes: (scopes) =>
+      GOOGLE_CALENDAR_REST_MCP_TOOLS.filter((tool) =>
+        googleCalendarToolSupportsScopes(tool.name, scopes),
+      ).map(({ name, description }) => ({ name, ...(description ? { description } : {}) })),
+  },
+};
+
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   HOSTED_SLACK_PROFILE,
   OFFICIAL_GMAIL_PROFILE,
+  OFFICIAL_DRIVE_PROFILE,
+  OFFICIAL_GOOGLE_CALENDAR_PROFILE,
 ];
 
 /** Exact built-in profile by its stable key; throws on an unknown key. */
@@ -299,18 +421,22 @@ export function builtInOAuthProfileByKey(key: string): OAuthProviderProfile {
 }
 
 /**
- * Authorization servers reserved for exactly one profile: discovering one of
+ * Authorization servers reserved for explicitly reviewed profiles: discovering one of
  * these identities on any other flow is rejected before registration.
  */
 const RESERVED_AUTHORIZATION_SERVERS: readonly {
   issuerOrigins: readonly string[];
-  allowedProfileKey: string;
+  allowedProfileKeys: readonly string[];
   message: string;
 }[] = [
   {
     issuerOrigins: [GOOGLE_OAUTH_ISSUER_ORIGIN],
-    allowedProfileKey: OFFICIAL_GMAIL_PROFILE.key,
-    message: `Google OAuth is allowed only for ${OFFICIAL_GMAIL_MCP_URL}`,
+    allowedProfileKeys: [
+      OFFICIAL_GMAIL_PROFILE.key,
+      OFFICIAL_DRIVE_PROFILE.key,
+      OFFICIAL_GOOGLE_CALENDAR_PROFILE.key,
+    ],
+    message: GOOGLE_OAUTH_ONLY_FOR,
   },
   {
     // A URL variant that dodges the hosted-Slack profile match (for example a
@@ -318,7 +444,7 @@ const RESERVED_AUTHORIZATION_SERVERS: readonly {
     // Slack's authorization server as a default-profile flow: that would mint
     // a workspace-ownable Slack identity with the deployment client.
     issuerOrigins: [SLACK_OAUTH_ORIGIN, SLACK_MCP_ORIGIN],
-    allowedProfileKey: HOSTED_SLACK_PROFILE.key,
+    allowedProfileKeys: [HOSTED_SLACK_PROFILE.key],
     message: `Slack OAuth is allowed only for ${OFFICIAL_SLACK_MCP_URL}`,
   },
 ];
@@ -415,7 +541,7 @@ export function assertAuthorizationServerNotReserved(
 ): void {
   const identities = [as.issuer, as.authorizationServer].map((value) => new URL(value).origin);
   for (const guard of RESERVED_AUTHORIZATION_SERVERS) {
-    if (profile.key === guard.allowedProfileKey) {
+    if (guard.allowedProfileKeys.includes(profile.key)) {
       continue;
     }
     if (identities.some((origin) => guard.issuerOrigins.includes(origin))) {
@@ -529,7 +655,6 @@ export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProv
     key: `catalog:${mcpUrl}`,
     match: { mcpUrls: [mcpUrl] },
     ...(data.defaultOwnership ? { defaultOwnership: data.defaultOwnership } : {}),
-    exactMcpBinding: Boolean(data.exactMcpUrl),
     ...(data.exactMcpUrl
       ? {
           requireExactMcpUrl: {
@@ -538,7 +663,6 @@ export function oauthProfileFromCatalog(mcpUrl: string, raw: unknown): OAuthProv
           },
         }
       : {}),
-    connectionSelection: "first_active",
     ...(pins ? { authorizationServer: pins } : {}),
     ...(data.clientSource ? { clientSource: data.clientSource } : {}),
     sendResourceParameter: data.sendResourceParameter ?? true,

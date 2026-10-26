@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`996d99a85841845d0b5032a1f7b1dddce676383c`: upstream `cua-driver-rs-v0.37.0`
+`737e200fca49cbf6b0116f8acf7f52525aa45cef`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -18,12 +18,88 @@ again, in the background. On macOS it also focuses an element on its own (a
 Its macOS waits wake on time (a kqueue timed wait instead of `nanosleep`, which
 woke a 25 ms poll up to 150 ms late on a busy Mac), and a batch of background
 presses on one window makes that window key once instead of before every press.
+A press that puts the caret in a text field reports a confirmed effect when the
+field then holds the keyboard focus, instead of an unconfirmed click.
+On macOS `set_value` writes a text field's value as text even when it reads as
+a number (Chrome accepts a number written to a web text field and ignores it).
+In web content it writes any number as text: Chrome empties a number field
+(`<input type=number>`, an AXIncrementor) given a CFNumber. A number field a
+write leaves empty gets its previous value back, and the write is refused as
+not applied. A control that takes a value write but keeps its value (a web
+range input) is stepped to the value with its increment and decrement actions;
+a value outside the range it reports is refused before any step, and a run
+that stops short fails with `value_not_reached` and what it reads now.
+`write_not_applied` always means the control holds what it held before (a
+number field a value emptied reports `write_cleared`), so Opengeni maps it to
+a definite failure.
+These refusals never repeat the value given, since it may be a secret such as a
+PIN in a number field.
+On macOS an element of a bubble or popover that a window lists as its own (Chrome's
+Save password?, translate, site permission and download bubbles are separate
+windows whose content the browser window lists among its accessibility
+children) takes accessibility actions (a press, `set_value`) through that
+window. Pointer and key input to it is refused with
+`element_in_attached_window` before anything is sent, since it would land on
+the window under the bubble, and a coordinate click over a bubble never
+presses it. An element of an unrelated window of the app is still refused, now
+naming the window it belongs to. An element scroll proves the pointer route
+before scrolling the element into view, and a wheel refused after that reveal
+reports a partial effect.
+A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
+control a moment after the write.
+A `run_steps` lookup or check may set `exact: true`, so its name must be the
+element's whole label rather than the start of a word in it.
+A `run_steps` lookup or presence check for a button or link that finds nothing
+of that role uses the one element of the other of the two with that exact name
+(button and link are pressed alike, and on the web models often confuse them),
+and its step report and `role_note` say which element it used and to name its
+role next time. It never does so for a pick by position, a text write or a
+drag, nor for a toggle button or anything with a pressed or checked state, and
+a true match in any window wins. It takes the stand-in only from a complete
+reading of the window (never one cut at the 2,000-element cap) whose content
+has stayed the same for 1.5 s, so a button an earlier step brings up wins over
+a link of its name. Several such elements never hold a wait or a lookup: once
+the window's content has stayed the same for 1.5 s the step fails as
+`ambiguous`, naming them. A window that never settles before the step's
+deadline fails as it did before, and a name shown only on an element of an
+unrelated role waits its whole time.
+On macOS a window's accessibility reading asks the app for each element's
+attributes in one request (`AXUIElementCopyMultipleAttributeValues`) instead of
+one request per attribute, and bounds each request by what is left of the
+read's `timeout_ms`, so a slow app costs a few requests per element instead of
+about fifteen and cannot hold a read past its budget. An element whose request
+fails for another reason is read one attribute at a time, as before; the
+reading is the same. The first `get_window_state` of a process after an action
+on it (outside a `run_steps` batch) waits only while the read window is
+changing: an action returns when the app has taken it, not when its result is
+on screen, and a read at once showed the screen before it or one half way. With
+no accessibility notification for the read window within 100 ms of the action's
+end, the read goes ahead at once. Otherwise it waits until the window's
+notifications (layout
+changes, created elements, focus and selection changes, row counts, new windows
+and sheets, opened menus) have stopped for 200 ms, counted from the last one,
+and goes ahead 1 s after the action at the latest. Value and title changes do
+not count, so a window that keeps updating numbers or text (a clock, a progress
+bar, a terminal, a process monitor) does not hold the read. A window whose
+notifications show it changed while it was read (an app can pause in the middle
+of a change) is read again once quiet, at most three reads in all and not past
+that 1 s. Notifications of the process's other windows do not count (the iOS
+Simulator shows every booted device in one process). The read reports what it
+waited for as `settle`, with the number of reads.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
 A `computer_act` batch runs as one `run_steps` call only where the worker offers
 `refind_stale`, so every step stays bound to the observation the batch was
-checked against; on Windows a batch's actions are sent one at a time. CUA is the
+checked against. The exception is a later action whose role, label or text
+locator the observation does not show (an earlier action brings it up): it is
+sent by role and name, and CUA finds it when the step runs after waiting up to
+10 s for it to appear and enable. So is a first action that names a button or
+link the observation does not show when it shows an element of the other of the
+two with that name: CUA's stand-in above decides whether it is the one meant.
+Every element-targeted action after it is
+then found by name too, because CUA's lookup re-reads the window and retires the
+observation's tokens. On Windows a batch's actions are sent one at a time. CUA is the
 default on macOS, on Windows and for explicitly selected isolated Linux
 desktops. Linux host desktops retain the native default.
 
@@ -125,7 +201,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/996d99a85841845d0b5032a1f7b1dddce676383c/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/737e200fca49cbf6b0116f8acf7f52525aa45cef/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
@@ -141,7 +217,10 @@ workflow tools; lifecycle, escalation, configuration, updates and browser tools
 stay outside this interface. macOS, Linux and Windows each have a generated
 catalog, produced by running the script on that platform after every CUA pin
 change; macOS defines the admitted set, and a platform whose driver lacks a tool
-omits it. Agent schemas preserve the union of the native
+omits it. Each catalog records the CUA version it was generated from, and a
+browserd test fails unless every catalog names the `@trycua/cua-driver` version
+browserd pins, so a catalog left on an older CUA release shows up before its
+runtime refuses calls. Agent schemas preserve the union of the native
 variants, and the selected runtime checks its exact platform schema.
 Each admitted tool's input/output schemas are checked against the running worker.
 

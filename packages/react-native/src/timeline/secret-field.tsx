@@ -6,6 +6,7 @@ import { Icon } from "./icon";
 import { Selector } from "./selector";
 import {
   SECRET_SAVE_TO_OPTIONS,
+  secretCanGenerate,
   secretInputTraits,
   secretPatternMismatch,
   secretUsernameTraits,
@@ -175,7 +176,7 @@ export function SecretQuestionField({
         </Text>
       ) : null}
 
-      {spec?.looksLike || mismatch || (spec?.allowGenerate && !draft.generate) ? (
+      {spec?.looksLike || mismatch || (secretCanGenerate(spec) && !draft.generate) ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
           <View style={{ flex: 1, gap: 2 }}>
             {spec?.looksLike && !draft.generate ? (
@@ -194,7 +195,7 @@ export function SecretQuestionField({
               </View>
             ) : null}
           </View>
-          {spec?.allowGenerate && !draft.generate ? (
+          {secretCanGenerate(spec) && !draft.generate ? (
             <Button
               icon="sparkles"
               label={messages.generate}

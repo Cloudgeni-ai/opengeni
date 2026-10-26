@@ -526,19 +526,29 @@ export async function verifyHistoricalSourceAdmission(options = {}) {
     api(`/repos/${CONTRACT.repository}/compare/${input.baseSha}...${input.headSha}`),
     listPullRequestFiles(api, input.number),
   ]);
-  const baseTreeSha = assertCommit(baseCommit, input.baseSha, "historical base commit");
+  const providerBaseTreeSha = assertCommit(baseCommit, input.baseSha, "historical base commit");
   const headTreeSha = assertCommit(headCommit, input.headSha, "historical head commit");
-  assertComparison(comparison, input.baseSha, input.headSha);
+  // GitHub's merged PR base can include unrelated main commits. Its file list
+  // describes the merge-base-to-head patch, just as in live source admission.
+  const patchBaseSha = assertComparison(comparison, input.baseSha, input.headSha);
+  const baseTreeSha =
+    patchBaseSha === input.baseSha
+      ? providerBaseTreeSha
+      : assertCommit(
+          await api(`/repos/${CONTRACT.repository}/git/commits/${patchBaseSha}`),
+          patchBaseSha,
+          "historical merge-base commit",
+        );
 
   const [baseTree, headTree] = await Promise.all([
     api(`/repos/${CONTRACT.repository}/git/trees/${baseTreeSha}?recursive=1`),
     api(`/repos/${CONTRACT.repository}/git/trees/${headTreeSha}?recursive=1`),
   ]);
   const manifest = directTreeManifest(
-    canonicalLeafMap(baseTree, baseTreeSha, "historical base tree"),
+    canonicalLeafMap(baseTree, baseTreeSha, "historical merge-base tree"),
     canonicalLeafMap(headTree, headTreeSha, "historical head tree"),
   );
-  invariant(manifest.length > 0, "historical head tree does not differ from its base");
+  invariant(manifest.length > 0, "historical head tree does not differ from its merge base");
   assertFileProjection(files, manifest, initialPull.changed_files);
 
   const terminalPull = await api(`/repos/${CONTRACT.repository}/pulls/${input.number}`);
@@ -550,12 +560,14 @@ export async function verifyHistoricalSourceAdmission(options = {}) {
   const manifestText = `${manifest.map(({ line }) => line).join("\n")}\n`;
   const manifestSha256 = createHash("sha256").update(manifestText).digest("hex");
   logger.log(
-    `Historical source admission verified ${input.headSha} on base ${input.baseSha}: ` +
+    `Historical source admission verified ${input.headSha} on base ${input.baseSha} ` +
+      `at patch merge base ${patchBaseSha}: ` +
       `${manifest.length} direct tree paths, manifest sha256 ${manifestSha256}.`,
   );
   return {
     baseSha: input.baseSha,
     headSha: input.headSha,
+    patchBaseSha,
     baseTreeSha,
     headTreeSha,
     manifest,

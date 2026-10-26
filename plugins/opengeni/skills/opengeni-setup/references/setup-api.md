@@ -276,51 +276,45 @@ After verification and requested activation: `POST .../:taskId/resume` /
 `triggerScheduledTask`; verify `GET .../:taskId/runs` / `listScheduledTaskRuns`.
 Do not manually trigger an unrequested real business write.
 
-For inbound events, use `@opengeni/sdk/automations`'s
-`OpenGeniAutomationsClient`, not outbound workspace webhooks:
+For inbound product events, give a schedule event triggers on an event source,
+not outbound workspace webhooks. They need `eventTriggers.enabled` in
+`GET /v1/config/client`. If the product's installed MCP server offers MCP
+Events, the source is `{"kind":"mcp","serverId":"<installed serverId>"}` and
+Opengeni subscribes while an automation listens. Otherwise the product's backend
+sends Standard Webhooks:
 
 ```json
-{"name":"Acme product events","adapterId":"signed-json.v1","webhookSecret":"<locally generated secret, at least 16 characters>","configuration":{}}
+{"kind":"webhook","adapter":"standard","name":"Acme product events","visibility":"workspace"}
 ```
 
 ```bash
-ogcurl GET "/v1/workspaces/$WORKSPACE_ID/automations/sources"
-ogcurl POST "/v1/workspaces/$WORKSPACE_ID/automations/sources" .opengeni-setup/source.json .opengeni-setup/source-result.json
-ogcurl GET "/v1/workspaces/$WORKSPACE_ID/automations/sources"
+ogcurl GET "/v1/workspaces/$WORKSPACE_ID/event-sources"
+ogcurl POST "/v1/workspaces/$WORKSPACE_ID/event-sources" .opengeni-setup/source.json .opengeni-setup/source-result.json
+ogcurl GET "/v1/workspaces/$WORKSPACE_ID/event-sources/$SOURCE_ID"
 ```
 
-SDK: `listSources(workspaceId)`, `createSource(workspaceId, body)`. Reconcile
-the saved source id/name; creation has no idempotency key. Save the returned
-`webhookPath` rather than inventing an ingress URL. Create a paused trigger:
+SDK: `listEventSources(workspaceId)`, `createEventSource(workspaceId, body)`.
+Reconcile the saved source id/name first; creation has no idempotency key. A
+webhook source's `signingSecret` is returned once: store it in the product's
+config before anything else. Save the returned `source.webhookUrl` rather than
+inventing an ingress URL. The product signs each POST with the `webhook-id`,
+`webhook-timestamp` and `webhook-signature` headers (any Standard Webhooks
+library) and sends `{"type":"report.changed","timestamp":"<ISO time>","data":{...}}`.
+
+Create the schedule paused, with `events` naming the source:
 
 ```json
-{"sourceId":"00000000-0000-4000-8000-000000000004","name":"Acme report changed","eventTypes":["report.changed"],"status":"paused","configuration":{},"parameters":{},"sessionTemplate":{"prompt":"Summarize the changed report.","agent":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none"},"sandboxBackend":"none","tools":[{"kind":"mcp","id":"<installed serverId>"}]}}
+{"name":"Acme report changed","schedule":{"type":"manual"},"status":"paused","runMode":"new_session_per_run","agentConfig":{"prompt":"Summarize the changed report.","agent":{"identity":"You are Acme's product assistant. Be brief and factual.","capabilities":"none"},"sandboxBackend":"none","tools":[{"kind":"mcp","id":"<installed serverId>"}]},"events":{"triggers":[{"sourceId":"<saved source id>","eventTypes":["report.changed"]}]},"metadata":{"developerSetupKey":"acme-product:report-changed"}}
 ```
 
-Automation templates default omitted `firstPartyMcpTools` and
-`firstPartyMcpPermissions` to `[]`, so a product-only automation inherits no
-Opengeni tools or permissions without listing them. Startup skips remote
-Opengeni-delegated MCP preparation without minting a token or calling its
-endpoint. Requested first-party tools or dedicated `files`/`docs` remain
-unavailable with an `insufficient_scope` advisory. Do not pad the grant with
-`sessions:read`. The installed product server keeps its separately authorized
-connection or host credentials; external-host servers and already-authorized
-native runtime mechanics are not disabled by this ceiling. See
-`docs/automations.md` for the exact boundary.
-
-```bash
-ogcurl GET "/v1/workspaces/$WORKSPACE_ID/automations/triggers"
-ogcurl POST "/v1/workspaces/$WORKSPACE_ID/automations/triggers" .opengeni-setup/trigger.json
-ogcurl GET "/v1/workspaces/$WORKSPACE_ID/automations/triggers"
-```
-
-SDK: `listTriggers`, `createTrigger`; authorized activation uses
-`updateTrigger(workspaceId, triggerId, { expectedRevision, status: "active" })`
-and `PATCH .../automations/triggers/:triggerId`, then list/verify again.
-Use the read revision. Test the signed product ingress per
-`docs/automations.md`, or `triggerManually` / `POST .../sources/:sourceId/events`
-with a stable `occurrenceKey` for a safe test, then `listRuns` /
-`GET .../automations/runs`. Registration alone is not an ingress test.
+It uses the scheduled-task routes above; `schedule: manual` means it runs only
+on events. Each run gets the events that started it, and the agent treats event
+data as untrusted input. After verification and requested activation, test
+ingress with a signed POST from the product, or `POST .../event-sources/:sourceId/test`
+/ `sendTestEvent(workspaceId, sourceId, { type: "report.changed", data })`,
+whose `matchedAutomationIds` must include the schedule. Then verify
+`GET .../event-sources/:sourceId/deliveries` / `listEventDeliveries` and
+`listScheduledTaskRuns`. Registration alone is not an ingress test.
 
 ## 6. Outbound webhook and per-run credential provider
 
@@ -445,21 +439,17 @@ by the authenticated administrator, without widening this setup key.
 | Callback/private URL refusal | The hosted control plane cannot use localhost/private endpoints. Use the product's existing public HTTPS route or an authorized tunnel. |
 
 Clean up **only disposable staging resources this run created**.
-Pause/remove schedules, disable automation triggers/sources, delete webhooks and
-provider, uninstall the exact API Integration instance, delete its disposable
-Connection, cancel/remove the smoke session, then delete the throwaway workspace.
-Never delete reused resources. Automation DELETE calls disable, not delete:
-verify the saved ids remain with `status === "disabled"` in
-`GET .../automations/triggers` / `listTriggers` and
-`GET .../automations/sources` / `listSources`. Disabled records remain listed.
-For resources actually deleted, verify inventory absence and, where an exact
-GET is supported, 404.
+Pause/remove schedules, then delete their event sources, webhooks and provider,
+uninstall the exact API Integration instance, delete its disposable Connection,
+cancel/remove the smoke session, then delete the throwaway workspace. Never
+delete reused resources. An event source refuses deletion with 409 while a
+schedule still listens to it, so delete the schedule first. Verify inventory
+absence and, where an exact GET is supported, 404.
 
 REST → SDK cleanup calls:
 
 - `DELETE .../scheduled-tasks/:taskId` → `deleteScheduledTask`.
-- `DELETE .../automations/triggers/:id?expectedRevision=<read revision>` and
-  `DELETE .../automations/sources/:id` → `disableTrigger`, `disableSource`.
+- `DELETE .../event-sources/:sourceId` → `deleteEventSource`.
 - `DELETE .../webhooks/:id`, `DELETE .../credential-provider` →
   `deleteWorkspaceWebhook`, `deleteWorkspaceCredentialProvider`.
 - `GET .../integrations/:capabilityId/instances/:instanceKey/uninstall-preview`,

@@ -63,6 +63,8 @@ function renderAction(
 export function NativeMenu(props: {
   actions: MenuAction[];
   onPressAction?: MenuComponentProps["onPressAction"];
+  /** Not fired: SwiftUI menus expose no open hook. */
+  onOpenMenu?: () => void;
   children: ReactNode;
 }) {
   const scheme = useColorScheme() === "dark" ? "dark" : "light";

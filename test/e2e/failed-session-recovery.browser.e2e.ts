@@ -339,6 +339,75 @@ test("a failure without a retained logical turn never offers Retry", async () =>
   }
 }, 60_000);
 
+// Operator text recorded on a sandbox that never started, as a compute host
+// reports an image whose agent predates the running release.
+const SANDBOX_START_DIAGNOSTIC =
+  "This compute sandbox's agent is too old: it does not support releasing command output (capabilities.op_release). Rebuild the sandbox image with the agent from this Opengeni release or later.";
+const SANDBOX_START_FAILURE_EVENTS = [
+  { type: "turn.started", payload: {} },
+  { type: "sandbox.operation.started", payload: { name: "sandbox.provision", provisionId: "p1" } },
+  {
+    type: "sandbox.operation.failed",
+    payload: {
+      name: "sandbox.provision",
+      provisionId: "p1",
+      error: SANDBOX_START_DIAGNOSTIC,
+      internalAttempts: 1,
+      failureCategory: "unknown",
+      failureStage: "unknown",
+      failureCode: "unknown",
+      expectedTransition: false,
+      retryable: false,
+    },
+  },
+  { type: "turn.failed", payload: { error: SANDBOX_START_DIAGNOSTIC } },
+];
+
+for (const [size, viewport] of [
+  ["desktop", { width: 1440, height: 960 }],
+  ["mobile", { width: 390, height: 844 }],
+] as const) {
+  test(`a sandbox that didn't start reads as plain copy with its diagnostic behind Details (${size})`, async () => {
+    const page = await browser.newPage({ viewport });
+    try {
+      await installApi(page, false, [], true, true, null, undefined, SANDBOX_START_FAILURE_EVENTS);
+      await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+      const banner = page.getByTestId("failed-session-banner");
+      await banner.waitFor({ timeout: 45_000 });
+      await page.getByText("Review the implementation and verify the tests.").waitFor();
+      const main = page.locator("main");
+      // The person reads plain outcomes; the operator text is nowhere visible.
+      expect(await banner.locator("span").first().textContent()).toBe("The sandbox didn’t start.");
+      const chip = main.locator(`[title=${JSON.stringify(SANDBOX_START_DIAGNOSTIC)}]`);
+      expect(await chip.textContent()).toBe(" · Sandbox didn’t start");
+      expect(await main.innerText()).not.toContain("capabilities.op_release");
+      await banner.getByRole("button", { name: "Retry", exact: true }).waitFor();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+      if (evidenceDir)
+        await page.screenshot({ path: `${evidenceDir}/sandbox-start-${size}.png`, fullPage: true });
+
+      // Operators and admins still reach the exact text behind Details: on the
+      // failed startup step and on the banner.
+      const step = main.locator('[role="button"][data-status="failed"]');
+      expect(await step.getAttribute("aria-expanded")).toBe("false");
+      await step.click();
+      await main.getByText(SANDBOX_START_DIAGNOSTIC, { exact: true }).first().waitFor();
+      const details = banner.locator("details");
+      expect(await details.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+      await details.locator("summary").click();
+      expect(await details.locator("p").textContent()).toBe(SANDBOX_START_DIAGNOSTIC);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+      if (evidenceDir)
+        await page.screenshot({
+          path: `${evidenceDir}/sandbox-start-${size}-details.png`,
+          fullPage: true,
+        });
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+}
+
 test("permission-disabled model picker never receives recovery guidance", async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   try {
@@ -370,6 +439,8 @@ async function installApi(
   canControl = true,
   automaticLane: "checkpoint" | "fresh_workspace" | null = null,
   failurePayload?: { code: string; error: string; retryable: boolean },
+  /** The failed turn's own events after its message; the last one is its `turn.failed`. */
+  turnEvents: Array<{ type: string; payload: Record<string, unknown> }> = [],
 ) {
   const workspace = {
     id: workspaceId,
@@ -440,7 +511,7 @@ async function installApi(
     queueHeadPosition: 0,
     queueTailPosition: 0,
     effectiveControl,
-    lastSequence: 2,
+    lastSequence: 2 + turnEvents.length,
     codexCompactionMode: "portable",
     createdAt: now,
     updatedAt: now,
@@ -448,9 +519,9 @@ async function installApi(
     failureDiagnostics: {
       eventId: failureId,
       turnId: retainedTurn ? turnId : null,
-      sequence: 2,
+      sequence: turnEvents.length > 0 ? 1 + turnEvents.length : 2,
       occurredAt: now,
-      payload: {
+      payload: turnEvents.at(-1)?.payload ?? {
         error: unsupported
           ? "The model `example` is not supported with this account."
           : automaticLane
@@ -473,6 +544,22 @@ async function installApi(
     payload: { text: session.initialMessage, resources: [] },
     occurredAt: now,
   };
+  const events = [
+    event,
+    ...turnEvents.map((entry, index) => ({
+      id:
+        index === turnEvents.length - 1
+          ? failureId
+          : `99999999-9999-4999-8999-${String(index).padStart(12, "0")}`,
+      workspaceId,
+      sessionId,
+      turnId,
+      sequence: index + 2,
+      type: entry.type,
+      payload: entry.payload,
+      occurredAt: new Date(Date.parse(now) + (index + 1) * 1_000).toISOString(),
+    })),
+  ];
   await page.route(`${baseUrl}/v1/**`, async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -629,7 +716,7 @@ async function installApi(
     }
     if (path.endsWith("/events/stream"))
       return route.fulfill({ contentType: "text/event-stream", body: ": fixture\n\n" });
-    if (path.endsWith("/events")) return json([event]);
+    if (path.endsWith("/events")) return json(events);
     if (path.endsWith("/retry")) {
       retries.push(request.postDataJSON());
       return retries.length === 1

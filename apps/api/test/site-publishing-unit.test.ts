@@ -4,8 +4,10 @@ import {
   SITE_GATEWAY_BODY_SHA256_HEADER,
   SITE_GATEWAY_SIGNATURE_HEADER,
   SITE_GATEWAY_TIMESTAMP_HEADER,
+  SITE_PUBLISH_NOTICE_CODES,
   UNLIMITED_SITE_FLOOD_BRAKES,
   type SiteHostMapRecord,
+  type SitePublication,
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
@@ -29,6 +31,7 @@ import {
   siteViewerLimits,
   standardSiteLimits,
 } from "../src/site-publishing/limits";
+import { publicationAnswer } from "../src/mcp/site-publication-tools";
 import { scanSitePageUsage, siteReadinessWarnings } from "../src/site-publishing/readiness";
 import { siteClientAddressKey } from "../src/site-publishing/runtime";
 import { siteAccessNarrowed } from "../src/site-publishing/service";
@@ -434,6 +437,51 @@ describe("readiness", () => {
     ]);
     expect(invited[0]!.message).toContain("invited people");
     expect(siteReadinessWarnings({ ...base, access: "members" })).toEqual([]);
+  });
+
+  test("a public Site on a login-only deployment says visitors sign in first", () => {
+    const plain = { ...base, page: null, agent: { enabled: false, tools: null } };
+    const loginOnly = siteReadinessWarnings({ ...plain, guestsAllowed: false });
+    expect(loginOnly).toEqual([
+      {
+        code: "public_sign_in_required",
+        message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+        suggestion:
+          "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the Site or its link.",
+        fix: null,
+      },
+    ]);
+    expect(SITE_PUBLISH_NOTICE_CODES.has(loginOnly[0]!.code)).toBe(true);
+    // It comes first, ahead of anything the page needs changed.
+    expect(siteReadinessWarnings({ ...base, guestsAllowed: false })[0]!.code).toBe(
+      "public_sign_in_required",
+    );
+    expect(siteReadinessWarnings(plain)).toEqual([]);
+    expect(
+      siteReadinessWarnings({ ...plain, access: "invited", guestsAllowed: false }).map(
+        (warning) => warning.code,
+      ),
+    ).not.toContain("public_sign_in_required");
+    // The agent's answer says the sign-in page is expected, not something to fix.
+    const view = { warnings: loginOnly } as unknown as SitePublication;
+    expect(publicationAnswer(view).nextStep).toStartWith("Nothing to fix.");
+    expect(publicationAnswer(view).nextStep).toContain("not a broken link");
+    const both = { warnings: siteReadinessWarnings({ ...base, guestsAllowed: false }) };
+    expect(publicationAnswer(both as unknown as SitePublication).nextStep).toStartWith(
+      "Fix these readiness warnings",
+    );
+    // The sign-in line stays when there is also something to fix.
+    expect(publicationAnswer(both as unknown as SitePublication).nextStep).toContain(
+      "\nVisitors sign in to Opengeni before the Site opens",
+    );
+    expect(
+      publicationAnswer({
+        warnings: siteReadinessWarnings(base),
+      } as unknown as SitePublication).nextStep,
+    ).not.toContain("not a broken link");
+    expect(
+      publicationAnswer({ warnings: [] } as unknown as SitePublication).nextStep,
+    ).toBeUndefined();
   });
 
   test("a page too large to read says it was not checked", () => {

@@ -1,10 +1,8 @@
-import { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
 import { SESSION_SCOPE_HEADER } from "./message-links";
 import type { WorkspaceIdOptions, WorkspaceIdTarget } from "./tenant-workspaces";
-import { proxySessionEventStream } from "./proxy";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 import type {
   AccessGrant,
@@ -13,35 +11,35 @@ import type {
   FileResourceRef,
   LatencyMode,
   ReasoningEffort,
-  RetainedArtifactContent,
   SessionMcpCredentialUpdateInput,
 } from "./types";
 import { mintToolToken, resolveToolTokenSecret } from "./tool-auth";
-import {
-  downloadSessionProxySiteHtml,
-  getSessionProxyArtifactAssociation,
-  getSessionProxyWorkspaceGrant,
-  SESSION_PROXY_SITE_HTML_MAX_BYTES,
-  SessionProxySiteHtmlTooLargeError,
-} from "./session-proxy-client";
+import { getSessionProxyWorkspaceGrant } from "./session-proxy-client";
+import { normalizeMessageTimeZone } from "@opengeni/contracts/message-time-zone";
 export {
-  downloadSessionProxySiteHtml,
   getSessionProxyArtifactAssociation,
   getSessionProxyWorkspaceGrant,
-  SESSION_PROXY_SITE_HTML_MAX_BYTES,
-  SessionProxySiteHtmlTooLargeError,
 } from "./session-proxy-client";
 
 /**
- * Packaged same-origin backend for the React conversation surfaces.
+ * The product relay: Opengeni's API, served from the product's own origin to
+ * the product's signed-in users.
  *
  * Mount the handler at a catch-all route (for example `/api/opengeni/*`) and
- * point an unmodified browser `OpenGeniClient({ baseUrl: "/api/opengeni" })`
- * at it. Every request is authenticated by the host's `resolve` hook, pinned
- * to the resolved workspace, executed as the resolved external user through
- * `asUser` (never the organization key's own service authority), and limited
- * to the exact native routes `SessionConversation` and its hooks use. It is
- * an explicit dispatcher, not an arbitrary upstream proxy.
+ * point an unmodified browser `OpenGeniClient({ baseUrl: "/api/opengeni" })`,
+ * or any packaged Opengeni UI, at it. On every request the host's `resolve`
+ * hook names the user; the relay pins the request to that user's workspace and
+ * forwards it to Opengeni as that user (`asUser`), never with the organization
+ * key's own authority. Opengeni's permissions for that user decide what the
+ * request may do, exactly as they do in Opengeni's own app; the organization
+ * key's permissions cap them for every user of the product.
+ *
+ * What the relay adds is only what the product's server owns: who the user is
+ * and which workspace they use (`resolve`, `chats`), how chats are set up when
+ * the server builds them (`createSession`, `toolServer`), what the server adds
+ * to each message and admits before work starts (`beforeForwardMessage`),
+ * which chats a user may open (`authorizeSession`), any routes it keeps closed
+ * (`refuse`), and what it records once Opengeni has answered (`afterForward`).
  */
 
 type ProxyClient = OpenGeniEmbeddingClient;
@@ -59,8 +57,9 @@ type ProxyFacade = {
  * it from the request body or path. `{ user, tenant }`: one workspace per
  * tenant. `{ user }`: one workspace per user. `{ user, workspaceId }`: your
  * own workspace. Tenant and per-user mapping require the `Opengeni` facade
- * from `@opengeni/sdk/chat`; workspaces are created on first use and Opengeni
- * adds the user on their first request.
+ * from `@opengeni/sdk/chat`; workspaces are created on first use. A tenant
+ * workspace's signed-in user is added with the facade's `memberPermissions`
+ * when those are set, else by Opengeni on their first request.
  */
 export type SessionProxyResolution = (
   | { workspaceId: string; tenant?: undefined }
@@ -74,8 +73,8 @@ export type SessionProxyResolution = (
   /**
    * The user is an anonymous visitor your product has not signed in, for
    * example a website visitor keyed by a cookie. Visitors cannot upload
-   * composer file attachments unless the handler sets `visitorUploads: true`;
-   * everything else is unchanged.
+   * files unless the handler sets `visitorUploads: true`; everything else is
+   * unchanged.
    */
   visitor?: boolean | undefined;
 };
@@ -90,26 +89,50 @@ export type SessionProxyContext = {
   workspaceId: string;
   user: string;
   source: string;
-  /** The `asUser` client the proxy uses for this request. */
+  /** The `asUser` client the relay uses for this request. */
   client: ProxyClient;
+  /**
+   * The Opengeni route in the resolved workspace this request acts on. Absent
+   * only for the bootstrap reads outside the workspace (`GET /v1/workspaces`,
+   * `GET /v1/access/me`, `GET /v1/config/client`) and the user's inbox.
+   */
+  route?: SessionProxyRoute | undefined;
 };
 
 /**
- * The only fields a browser may send when creating a session through the proxy.
- * After the `createSession` hook returns, the proxy adds the attached files to
- * the created request (deduplicated by file id) and, when `modelSelection` is
- * not `false`, applies the browser's explicit model choices over the hook's,
- * exactly as follow-up messages carry them. Return a `Response` from the hook
- * to refuse an input.
+ * One Opengeni route in the resolved workspace that the relay is about to
+ * forward, for {@link SessionProxyHandlerOptions.refuse}.
+ */
+export type SessionProxyRoute = {
+  method: string;
+  /**
+   * Path segments after `/v1/workspaces/{workspaceId}`, decoded: `[]` for the
+   * workspace itself, `["sessions", "<id>", "archive"]` for a chat's archive.
+   */
+  segments: readonly string[];
+  /** The chat a `sessions/{id}/...` route acts on, else the chat named in `x-opengeni-session-id`. */
+  sessionId?: string | undefined;
+};
+
+/**
+ * What the browser supplies when creating a chat while the server owns chat
+ * setup (`createSession` is set), besides `modelContext`: as for follow-up
+ * messages, `beforeForwardMessage` receives it as `browserContext`, and the
+ * relay appends it (or what that hook returns in its place) after the
+ * server's context. After the hook returns, the relay adds the
+ * attached files to the created request (deduplicated by file id) and, when
+ * `modelSelection` is not `false`, applies the browser's explicit model
+ * choices over the hook's, exactly as follow-up messages carry them. Return a
+ * `Response` from the hook to refuse an input.
  */
 export type SessionProxyCreateInput = {
   /** Empty for a voice-first session; no initial user message is fabricated. */
   initialMessage: string;
-  /** Available only while the proxy permits realtime voice. */
+  /** A voice-first chat that starts in live voice. */
   startMode?: "realtime" | undefined;
   /** Browser retry key; replay is scoped to the acting user by the API. */
   idempotencyKey?: string | undefined;
-  /** Files attached to the first message (uploaded through this proxy). */
+  /** Files attached to the first message (uploaded through this relay). */
   resources?: FileResourceRef[] | undefined;
   /** The user's model choice; only when `modelSelection` is not `false`. */
   model?: string | undefined;
@@ -119,18 +142,56 @@ export type SessionProxyCreateInput = {
   latencyMode?: LatencyMode | undefined;
 };
 
-/** Which browser action is about to forward a user message or response. */
+/**
+ * Which browser action is about to forward a user message or response, or to
+ * start the agent working again without one.
+ */
 export type SessionProxyMessageInput = {
   /** Absent for `create`. */
   sessionId?: string | undefined;
   /** An empty voice-first session shell, not an initial model-producing turn. */
   startMode?: "realtime" | undefined;
   /**
+   * - `create`, `send`, `steer` and `submit` (a saved composer draft, sent or
+   *   steered) carry a new message: `modelContext` applies.
+   * - `approval` and `answer` are the person's decision on a tool call and
+   *   their reply to the agent's question.
+   * - `resume` (a paused chat), `retry` (a failed turn) and `queue-steer` (a
+   *   queued message moved into the running turn) start work without new text.
    * `realtime` is live voice: once when a call starts (refuse it, or rotate
-   * MCP credentials), and before each batch of finalized transcripts and spoken
-   * requests is saved (refuse it, or add `modelContext`).
+   * MCP credentials), and once for each finalized transcript or spoken request
+   * before its batch is saved (refuse the batch, or decide the entry's
+   * context; `realtimeKind` names the entry).
    */
-  delivery: "create" | "send" | "steer" | "submit" | "realtime";
+  delivery:
+    | "create"
+    | "send"
+    | "steer"
+    | "submit"
+    | "approval"
+    | "answer"
+    | "resume"
+    | "retry"
+    | "queue-steer"
+    | "realtime";
+  /**
+   * The browser's key for this action (`clientEventId`, or `idempotencyKey`
+   * for `create`). Opengeni accepts an action once per key, so a retry carries
+   * the same key: use it to make your own bookkeeping (billing, context)
+   * idempotent. For a voice entry, the entry's `operationId`. Absent when the
+   * browser sent none.
+   */
+  clientEventId?: string | undefined;
+  /**
+   * The model context the browser attached to this message or voice entry
+   * (for example the page, record or selection it was sent from). It is the
+   * browser's claim, unverified. The relay forwards it after your own
+   * `modelContext` unless you return `browserContext`. Absent when the
+   * browser sent none.
+   */
+  browserContext?: string | undefined;
+  /** For a live voice entry, which kind of entry is about to be saved. */
+  realtimeKind?: "user_transcript" | "assistant_transcript" | "delegation_call" | undefined;
 };
 
 /** Server-side additions the host attaches to one forwarded user message or response. */
@@ -144,6 +205,14 @@ export type SessionProxyMessageExtras = {
    */
   modelContext?: string | undefined;
   /**
+   * What the model gets in place of the browser's `browserContext`: omit it
+   * to keep the browser's context as sent, return a string to replace it (for
+   * example the validated, normalized form your product accepts), or `null`
+   * to drop it. Return a `Response` instead to refuse a malformed claim. Keep
+   * it the same for a retry with the same `clientEventId`.
+   */
+  browserContext?: string | null | undefined;
+  /**
    * Header-only credential rotation for MCP servers already attached to the
    * session (for example a fresh short-lived per-user bearer), applied
    * atomically as the message or response is accepted. Ignored for `create`,
@@ -153,7 +222,7 @@ export type SessionProxyMessageExtras = {
 };
 
 /**
- * Your product's own MCP tool server, attached to every session this proxy
+ * Your product's own MCP tool server, attached to every chat this relay
  * creates with a per-user bearer token. Verify it on every MCP request with
  * `verifyToolRequest` from `@opengeni/sdk/tool-auth`. Tools always act as the
  * chat's creator: in a shared chat, other members' messages do not change it.
@@ -190,29 +259,39 @@ export type SessionProxyHandlerOptions = {
   /**
    * Private (default) uses personal Knowledge and session-only reach; shared uses
    * workspace Knowledge and reach. Isolated also gives each user their own tenant workspace.
+   * With `createSession` these are the server's choice for every chat; without
+   * it they fill in what the browser's create request leaves out.
    */
   chats?: Chats | undefined;
   /** Mandatory host auth hook, called on every request. */
   resolve: SessionProxyResolve;
   /**
-   * Host CSRF/session policy for non-GET requests. Without it the proxy only
-   * rejects `Sec-Fetch-Site: cross-site` mutations and requires JSON bodies;
-   * cookie-authenticated hosts should supply their existing CSRF check.
+   * Host CSRF/session policy for non-GET requests. Without it the relay
+   * rejects `Sec-Fetch-Site: cross-site` requests and the content types a
+   * cross-site HTML form can send (`text/plain`,
+   * `application/x-www-form-urlencoded`). Cookie-authenticated hosts should
+   * supply their existing CSRF check.
    */
   authorizeMutation?: ((request: Request) => boolean | Promise<boolean>) | undefined;
   /**
-   * Optional product-level session check (for example "this ticket's session
-   * belongs to this user"). Opengeni still enforces membership and private
-   * visibility on every call.
+   * Optional product-level chat check (for example "this ticket's chat belongs
+   * to this user"), run for every `sessions/{id}/...` route and for requests
+   * that name a chat in `x-opengeni-session-id`. Opengeni still enforces
+   * membership and private visibility on every call.
    */
   authorizeSession?:
     | ((sessionId: string, context: SessionProxyContext) => boolean | Promise<boolean>)
     | undefined;
   /**
-   * Server-controlled session creation. The browser supplies only
+   * Server-owned chat setup. When set, the browser supplies only
    * {@link SessionProxyCreateInput}; this hook returns the complete create
-   * request (agent, tools, MCP servers, Skills, instructions, model policy). Omit it
-   * to disable browser-initiated creation entirely.
+   * request (agent, tools, MCP servers, Skills, instructions, model policy), and
+   * the relay refuses the routes that would change that setup afterwards: a
+   * chat's agent, tool policy, Skills, variable sets, usage limit, visibility,
+   * active sandbox and Codex account, forks, and `chat/completions`.
+   *
+   * Without it, the browser creates chats with Opengeni's own create request,
+   * limited by the user's permissions.
    */
   createSession?:
     | ((
@@ -222,10 +301,15 @@ export type SessionProxyHandlerOptions = {
     | undefined;
   /**
    * Called before every forwarded user message (send, steer, composer submit,
-   * and browser-started create), approval decision, human-input response, and
-   * live voice start and transcript save (`delivery: "realtime"`).
-   * Return server-owned `modelContext` (messages and voice transcripts only)
-   * and MCP credential rotations, or a `Response` to reject the action.
+   * and browser-started create), approval decision, human-input answer, every
+   * request that starts the agent working again without a message (resume,
+   * retry, queue steer), and live voice start and transcript save
+   * (`delivery: "realtime"`): every browser action that starts model work.
+   * Return server-owned `modelContext` and what replaces the browser's own
+   * context (`browserContext`; both for messages and voice transcripts only),
+   * MCP credential rotations, or a `Response` to reject the action. For
+   * actions without a message body, the relay applies the rotations before
+   * forwarding.
    */
   beforeForwardMessage?:
     | ((
@@ -238,137 +322,52 @@ export type SessionProxyHandlerOptions = {
         | Promise<SessionProxyMessageExtras | Response | undefined>)
     | undefined;
   /**
-   * Attach your product's MCP tool server to every session the `createSession`
-   * hook creates, authenticated as the resolved user. The proxy mints the
-   * token, adds the `mcpServers` entry (with its `eager` tools, or every tool
-   * when the hook lists explicit `tools`), and rotates the token on every send,
-   * steer, submit, approval decision, and human-input answer.
+   * Keep routes closed that Opengeni would let this user reach. Return `true`
+   * to answer 404 `route_not_allowed`, or your own `Response`. Prefer narrowing
+   * the organization key's permissions or the members' roles: those apply to
+   * every client, this only to the relay.
+   */
+  refuse?:
+    | ((
+        route: SessionProxyRoute,
+        context: SessionProxyContext,
+      ) => boolean | Response | undefined | Promise<boolean | Response | undefined>)
+    | undefined;
+  /**
+   * Called with Opengeni's answer to every request the relay forwarded in the
+   * resolved workspace, before the browser gets it: record what the product
+   * keeps beside Opengeni (a file's owner from an upload's answer, a new chat's
+   * id, a chat's last activity). Return a `Response` to answer the browser
+   * instead, or nothing to pass Opengeni's answer on. Opengeni has already
+   * acted: refusing here does not undo it. The response may be an event
+   * stream; read only bodies of routes you recognize, from `response.clone()`.
+   */
+  afterForward?:
+    | ((
+        route: SessionProxyRoute,
+        response: Response,
+        context: SessionProxyContext,
+      ) => Response | undefined | Promise<Response | undefined>)
+    | undefined;
+  /**
+   * Attach your product's MCP tool server to every chat this relay creates,
+   * authenticated as the resolved user. The relay mints the token, adds the
+   * `mcpServers` entry (with its `eager` tools, or every tool when the request
+   * lists explicit `tools`), and rotates the token on every send, steer,
+   * submit, approval decision, and human-input answer by the chat's creator.
    */
   toolServer?: SessionProxyToolServer | undefined;
   /** Mount prefix, e.g. `/api/opengeni`. Defaults to everything before the first `/v1/`. */
   basePath?: string | undefined;
-  /** Maximum JSON request body. Defaults to 1 MiB. */
+  /** Maximum JSON body for the requests the relay reads (create and messages). Defaults to 1 MiB. */
   maxBodyBytes?: number | undefined;
   /**
-   * Expose composer file attachments (upload begin/complete, download URL) and
-   * the media agents produce in a session: generated images, browser and
-   * computer screenshots, published sandbox files, and generated video
-   * playback. Workspace-level artifact reads must name their session in the
-   * `x-opengeni-session-id` header (`SessionConversation` does this); the proxy
-   * runs `authorizeSession` and only forwards an artifact Opengeni proves that
-   * session produced. Defaults to true.
-   */
-  files?: boolean | undefined;
-  /**
-   * Let anonymous visitors (`resolve` returned `visitor: true`) upload composer
-   * file attachments. Defaults to false: for a visitor the client config reports
-   * file uploads off, so stock UIs hide the attach button, and the upload routes
-   * are refused. Agent-produced media stays readable under `files`. Signed-in
-   * users follow `files` alone.
+   * Let anonymous visitors (`resolve` returned `visitor: true`) upload files.
+   * Defaults to false: for a visitor the client config reports file uploads
+   * off, so stock UIs hide the attach button, and the upload routes are
+   * refused.
    */
   visitorUploads?: boolean | undefined;
-  /**
-   * Forward composer voice input (`POST .../transcriptions`, one recording per
-   * request) as the resolved user; Opengeni still requires that user's
-   * `sessions:create` permission and the workspace's voice-input setting.
-   * `false` reports voice input unavailable in the client config so stock UIs
-   * hide the microphone. Defaults to true.
-   */
-  voiceInput?: boolean | undefined;
-  /**
-   * Forward live speech-to-speech voice for existing chats as the resolved
-   * user: the voice model catalog and the call lifecycle routes under
-   * `.../sessions/{id}/realtime`. Opengeni still requires that user's
-   * `sessions:control` permission, binds the call to that user and browser,
-   * runs spoken requests as ordinary steers of the chat, and meters
-   * deployment-funded voice against the organization's credits. Defaults to
-   * true. The stock conversation's voice button is opt-in: explicit `true`
-   * reports `realtimeVoice: true` in the client config so `SessionConversation`
-   * and `OpenGeniChat` show it (when a voice model is available), as does their
-   * own `realtimeVoice` prop. `false` reports `realtimeVoice: false` so stock
-   * UIs hide it, and refuses the routes.
-   */
-  realtimeVoice?: boolean | undefined;
-  /**
-   * Let the browser read a file from the session's sandbox (`POST .../fs/read`)
-   * so `sandbox:` links in agent replies can be downloaded. Only `path`,
-   * `encoding`, and `maxBytes` are forwarded; Opengeni still requires the
-   * user's `files:read` permission on that session. Explicit opt-in, default
-   * false. Reads are confined to its working directory, including on Connected
-   * Machines; symlinked paths are refused.
-   */
-  sandboxFiles?: boolean | undefined;
-  /**
-   * Serve the embedded artifact viewer and inline Site previews: reads of the
-   * editable artifacts and Sites a session produced, and live-ticket minting
-   * for the editor. Explicit opt-in, default false.
-   *
-   * Every request must name its session in the `x-opengeni-session-id` header
-   * (`SessionArtifactViewer` and `SessionConversation` do this). The proxy
-   * runs `authorizeSession`, then only forwards an artifact Opengeni associates with
-   * that session, so the browser cannot open other workspace artifacts through
-   * it. Editing still requires the user's own `artifacts:publish` grant. Site
-   * tool calls are not proxied.
-   *
-   * The editor's live socket is ticket-authenticated and connects to Opengeni
-   * directly; the ticket binds the source session and the API revalidates its
-   * authority while connected. `editableLiveUrl` overrides the derived URL.
-   * Site HTML streams with backpressure and cancellation, with a 25 MiB
-   * actual-byte ceiling (`SESSION_PROXY_SITE_HTML_MAX_BYTES`). Oversize streams
-   * fail with `SessionProxySiteHtmlTooLargeError` / `site_html_too_large`;
-   * headers cannot be replaced once streaming has begun.
-   */
-  artifacts?: boolean | { editableLiveUrl?: string | undefined } | undefined;
-  /**
-   * Read the workspace's Sites without naming a session: list, detail,
-   * content and HTML of published artifacts the signed-in user may read, for
-   * pages that belong to the workspace rather than to one chat (for example a
-   * page several sessions keep up to date, shown with `SiteDetail`). Read-only:
-   * publishing, rollback and status changes stay closed. Requests that send
-   * `x-opengeni-session-id` keep the session-scoped `artifacts` checks.
-   * Explicit opt-in, default false.
-   */
-  sites?: boolean | undefined;
-  /**
-   * Let the product's Excel add-in connect the open workbook for the signed-in
-   * user: `POST /v1/workspaces/{ws}/office/workbook-tickets` and
-   * `GET /v1/workspaces/{ws}/office/workbooks`. The workbook belongs to that
-   * user in the resolved workspace; agents working for them there reach it with
-   * `excel_run`. The ticket authenticates the add-in's WebSocket to
-   * `/v1/office/workbooks/live`, which the host passes through to the Opengeni
-   * API itself (see `@opengeni/sdk/office` and docs/excel-addin.md).
-   * Explicit opt-in, default false.
-   */
-  office?: boolean | undefined;
-  /**
-   * Serve the packaged session app (`SessionApp` from
-   * `@opengeni/react/session-app`, with `apiBaseUrl` set to this proxy) besides
-   * the conversation components. Explicit opt-in, default false.
-   *
-   * Every route above keeps its rules (this proxy's `createSession` hook, the
-   * message hooks, the model, upload, voice, artifact and file switches). On
-   * top of them:
-   *
-   * - `GET /v1/access/me` and `GET /v1/workspaces` answer with the resolved
-   *   user's access to the resolved workspace only.
-   * - Other `GET` routes in the resolved workspace, and in a chat the user may
-   *   open (`authorizeSession`), are read as the resolved user, so Opengeni's
-   *   permissions for that user decide what they see.
-   * - A short list of the app's own writes passes as the resolved user:
-   *   pinning a chat, moving it to a project, managing projects and a chat's
-   *   tool approval settings. Every other write is refused.
-   * - Catalog logos are served from the Opengeni API.
-   */
-  sessionApp?: boolean | undefined;
-  /**
-   * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
-   * `"mine"` (default) lists sessions the resolved user created; `"visible"`
-   * lists every session Opengeni lets that user read in the workspace (shared
-   * chats included); `false` disables listing.
-   */
-  sessionList?: "mine" | "visible" | false | undefined;
-  /** Let the user archive or restore their own chats. Defaults to true. */
-  archive?: boolean | undefined;
   /**
    * Let the browser choose model, reasoning effort, and latency per message,
    * draft, or new chat (still limited by the workspace model catalog). When
@@ -377,39 +376,115 @@ export type SessionProxyHandlerOptions = {
    * server-owned draft policy (initially the session defaults). Submit must repeat
    * the saved policy unchanged as an integrity fence, not a new selection: the
    * API atomically checks the saved revision/content or replays the original
-   * receipt. Hide the composer's model picker to match. Defaults to true.
+   * receipt. Defaults to true.
    * Pass `true` explicitly to also show end users the stock model picker
-   * (`SessionConversation`/`OpenGeniChat` hide it unless asked). The picker
-   * lists the workspace's model catalog, so the workspace's allowed-model
-   * settings decide which models end users see.
+   * (`SessionConversation`/`OpenGeniChat` hide it unless asked).
    */
   modelSelection?: boolean | undefined;
   /**
-   * SSE heartbeat interval. Defaults to 5 seconds, under Bun.serve's default
-   * 10-second `idleTimeout`, which otherwise closes a quiet event stream.
+   * The editable-artifact live socket URL the browser connects to directly,
+   * when it differs from the relay client's own API URL (for example an
+   * internal service address). Ticket-authenticated; never relayed.
+   */
+  editableLiveUrl?: string | undefined;
+  /**
+   * Event-stream heartbeat interval. Defaults to 5 seconds, under Bun.serve's
+   * default 10-second `idleTimeout`, which otherwise closes a quiet stream.
    */
   heartbeatMs?: number | undefined;
 };
 
 /**
- * Default SSE heartbeat. Bun.serve closes a connection that sends nothing for
- * 10 seconds by default, so a quiet stream (a long tool call, an idle chat)
- * would drop and reconnect every 10 seconds through a Bun or Hono-on-Bun host.
+ * Default event-stream heartbeat. Bun.serve closes a connection that sends
+ * nothing for 10 seconds by default, and Opengeni's own heartbeat is slower.
  */
 const SESSION_PROXY_DEFAULT_HEARTBEAT_MS = 5_000;
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const QUEUE_OPERATIONS: ReadonlySet<string> = new Set(["move", "edit", "steer", "delete"]);
+/**
+ * A decoded path segment the relay forwards: Opengeni paths carry ids, keys and
+ * subject ids (`user:…`), so any text is allowed except empty, dot, separator
+ * and control-character segments. Forwarded segments are re-encoded.
+ */
+const MAX_SEGMENT_LENGTH = 512;
+function relayableSegment(decoded: string): boolean {
+  return (
+    decoded.length > 0 &&
+    decoded.length <= MAX_SEGMENT_LENGTH &&
+    decoded !== "." &&
+    decoded !== ".." &&
+    !/[/\\\u0000-\u001f\u007f]/u.test(decoded)
+  );
+}
 const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "initialMessage",
   "idempotencyKey",
   "resources",
   "startMode",
+  "modelContext",
+  // The person's own time zone, so the agent sees their local time.
+  "timeZone",
+  // Packaged-app bookkeeping; see `browserCreateFields`.
+  "visibility",
+  "clientEventId",
+  "connectionAccounts",
+  "expectedNewSessionDraftRevision",
 ]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
-/** The API's single-recording ceiling (25 MiB) plus multipart framing. */
-const MAX_TRANSCRIPTION_BODY_BYTES = 25 * 1024 * 1024 + 64 * 1024;
+
+/** Methods the relay forwards. */
+const PROXY_METHODS: readonly string[] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
+
+/**
+ * Request headers the browser's own request may carry to Opengeni: content
+ * negotiation, stream resume, ranges, conditional reads, and Opengeni's own
+ * request metadata (chat scope, correlation, voice chunk facts). Never cookies,
+ * credentials or attribution: the relay alone decides who is acting.
+ */
+const FORWARDED_REQUEST_HEADERS = [
+  "accept",
+  "content-type",
+  "last-event-id",
+  "range",
+  "if-none-match",
+  "if-match",
+  "if-modified-since",
+  "x-opengeni-session-id",
+  "x-opengeni-correlation-id",
+  "x-opengeni-chunk-sha256",
+  "x-opengeni-chunk-start-milliseconds",
+  "x-opengeni-chunk-duration-milliseconds",
+] as const;
+
+/** Response headers relayed besides Opengeni's own `x-opengeni-*` metadata. */
+const RELAYED_RESPONSE_HEADERS = [
+  "content-type",
+  "content-length",
+  "content-disposition",
+  "content-range",
+  "accept-ranges",
+  "etag",
+  "last-modified",
+  "retry-after",
+  "cross-origin-resource-policy",
+] as const;
+
+/**
+ * Chat setup the server owns when `createSession` is set, as
+ * `${method} ${route after sessions/{id}}`, or the workspace route.
+ */
+const SERVER_OWNED_SESSION_ROUTES: ReadonlySet<string> = new Set([
+  "PUT agent",
+  "PUT tool-policy",
+  "PUT skills",
+  "PUT variable-sets",
+  "PUT usage-limit",
+  "PUT visibility",
+  "POST active-sandbox",
+  "POST codex-account",
+  "POST forks",
+]);
 
 class ProxyRejection extends Error {
   constructor(
@@ -440,12 +515,14 @@ function errorJson(status: number, code: string, message: string): Response {
   return json({ error: { code, message } }, status);
 }
 
+const notAllowed = () => errorJson(404, "route_not_allowed", "Not found.");
+
 function isFacade(target: ProxyClient | ProxyFacade): target is ProxyFacade {
   return !("asUser" in target) && "client" in target;
 }
 
 /**
- * Create the packaged session proxy. Returns a web-standard
+ * Create the product relay. Returns a web-standard
  * `(Request) => Promise<Response>` for Next.js route handlers, Hono, Bun.serve,
  * Cloudflare Workers, and similar hosts.
  */
@@ -458,30 +535,21 @@ export function createSessionProxyHandler(
   // One rejected-key notice per handler (each handler holds one server key).
   const rejectedKeyNotice = { sent: false };
   const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
-  const filesEnabled = options.files ?? true;
-  const voiceInputEnabled = options.voiceInput ?? true;
-  const realtimeVoiceEnabled = options.realtimeVoice ?? true;
-  const sandboxFilesEnabled = options.sandboxFiles === true;
-  const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
-  const sitesEnabled = options.sites === true;
-  const officeEnabled = options.office === true;
-  const sessionAppEnabled = options.sessionApp === true;
-  const editableLiveUrl = artifactsEnabled
-    ? liveSocketUrl(
-        (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
-          service.apiUrl(EDITABLE_ARTIFACT_LIVE_PATH),
-      )
-    : null;
+  // Null when the relay client has no absolute API URL and none is given:
+  // the artifact viewer is then off.
+  const editableLiveUrl = optionalLiveSocketUrl(
+    options.editableLiveUrl ?? service.apiUrl(EDITABLE_ARTIFACT_LIVE_PATH),
+    options.editableLiveUrl !== undefined,
+  );
   const modelSelection = options.modelSelection ?? true;
   const heartbeatMs = options.heartbeatMs ?? SESSION_PROXY_DEFAULT_HEARTBEAT_MS;
-  const sessionList = options.sessionList ?? "mine";
-  const archiveEnabled = options.archive ?? true;
+  const serverOwnsSetup = options.createSession !== undefined;
   const chats = options.chats ?? "private";
   const defaults = chatDefaults(chats);
   const toolServer = options.toolServer ? normalizeToolServer(options.toolServer) : undefined;
-  // Whether a session carries this proxy's tool server (attachments are immutable).
+  // Whether a session carries this relay's tool server (attachments are immutable).
   const toolSessions = new Map<string, Promise<string | null>>();
-  // Canonical subject per external user, for the "mine" list filter.
+  // Canonical subject per external user, for the tool server's creator check.
   const subjects = new Map<string, Promise<string>>();
   const subjectOf = (client: ProxyClient, key: string): Promise<string> => {
     let subject = subjects.get(key);
@@ -510,77 +578,38 @@ export function createSessionProxyHandler(
         return errorJson(401, "user_required", "Authentication required.");
       }
       const url = new URL(request.url);
-      if (sessionAppEnabled && method === "GET") {
-        // Catalog logos the session app shows beside connectors and tools.
+      const reading = method === "GET" || method === "HEAD";
+      if (reading) {
+        // Catalog logos beside connectors and tools; not user data.
         const asset = catalogAssetPath(url.pathname, options.basePath);
         if (asset) {
           try {
             const blob = await service.downloadCatalogAsset(asset, { signal: request.signal });
             return new Response(blob, {
-              headers: { "Content-Type": blob.type, "Cache-Control": "public, max-age=3600" },
+              headers: {
+                "Content-Type": blob.type,
+                "Cache-Control": "public, max-age=3600",
+                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                "X-Content-Type-Options": "nosniff",
+              },
             });
           } catch {
             // Missing, malformed or not an image: the app shows its fallback mark.
-            return errorJson(404, "route_not_allowed", "Not found.");
+            return notAllowed();
           }
         }
       }
       const segments = routeSegments(url.pathname, options.basePath);
-      if (!segments) return errorJson(404, "route_not_allowed", "Not found.");
+      if (!segments) return notAllowed();
 
-      if (method !== "GET") {
+      if (!reading) {
         const allowed = options.authorizeMutation
           ? await options.authorizeMutation(request)
-          : request.headers.get("sec-fetch-site") !== "cross-site";
+          : defaultMutationPolicy(request);
         if (!allowed) return errorJson(403, "mutation_denied", "Request denied.");
       }
       const source = resolved.source ?? defaultSource;
-      let workspaceId: string;
-      // A tenant/workspaceId key that resolves to nothing must never fall
-      // through to the per-user workspace: that is a host auth bug, not a choice.
-      if (
-        ("workspaceId" in resolved && !resolved.workspaceId && !resolved.tenant) ||
-        ("tenant" in resolved && !resolved.tenant && !resolved.workspaceId) ||
-        resolved.workspaceId === "" ||
-        resolved.tenant === ""
-      ) {
-        throw new TypeError(
-          "resolve returned an empty tenant or workspaceId. Return a non-empty id, or omit the key for one workspace per user.",
-        );
-      }
-      if (chats === "isolated") {
-        if (resolved.workspaceId || !isFacade(target) || !target.workspaceIdFor) {
-          throw new TypeError(
-            'chats: "isolated" requires the Opengeni facade and a tenant or user resolution.',
-          );
-        }
-        workspaceId = await target.workspaceIdFor(
-          { tenant: resolved.tenant, user: resolved.user, source },
-          { isolation: "user" },
-        );
-      } else if (resolved.workspaceId) {
-        workspaceId = resolved.workspaceId;
-      } else if (resolved.tenant && isFacade(target)) {
-        workspaceId = await target.workspaceId({ tenant: resolved.tenant });
-      } else if (
-        !("tenant" in resolved) &&
-        !("workspaceId" in resolved) &&
-        isFacade(target) &&
-        target.workspaceIdFor
-      ) {
-        // A user alone: their own workspace, keyed by the identity source.
-        workspaceId = await target.workspaceIdFor(
-          { user: resolved.user, source },
-          { isolation: "user" },
-        );
-      } else {
-        throw new TypeError(
-          "resolve must return a workspaceId (or a tenant or a user alone when given the Opengeni facade).",
-        );
-      }
-      // Visitors upload only when the host opts them in; reads stay under `files`.
-      const uploadsEnabled =
-        filesEnabled && (resolved.visitor !== true || options.visitorUploads === true);
+      const workspaceId = await resolveWorkspace(target, resolved, source, chats);
       const client = service.asUser(resolved.user, { source });
       const context: SessionProxyContext = {
         request,
@@ -589,8 +618,159 @@ export function createSessionProxyHandler(
         source,
         client,
       };
-
       const call = { signal: request.signal };
+      const query = Object.fromEntries(url.searchParams);
+      const uploadsEnabled = resolved.visitor !== true || options.visitorUploads === true;
+
+      const [root, ...rest] = segments;
+      if (root === "inbox") {
+        // The user's own inbox, as the user: its items in this workspace only,
+        // and their inbox settings (`authorizeMutation` can keep those read-only).
+        const listing = rest.length === 0 && reading;
+        const item =
+          rest.length === 2 && rest[0] === "items" && SEGMENT.test(rest[1]!) && method === "PATCH";
+        const settings =
+          rest.length === 1 && rest[0] === "settings" && (reading || method === "PUT");
+        if (!listing && !item && !settings) return notAllowed();
+        const inboxUrl = new URL(
+          client.apiUrl(`/v1/${segments.map(encodeURIComponent).join("/")}`),
+        );
+        if (listing || item) inboxUrl.searchParams.set("workspaceId", workspaceId);
+        return relayResponse(
+          await client.fetchApi(inboxUrl.toString(), {
+            method,
+            headers: forwardedHeaders(request, false),
+            ...(reading || request.body === null ? {} : { body: request.body, duplex: "half" }),
+            signal: request.signal,
+          } as RequestInit),
+          heartbeatMs,
+          rejectedKeyNotice,
+        );
+      }
+      if (root !== "workspaces" || rest.length === 0) {
+        // Outside the workspace, only the app's bootstrap reads, answered for
+        // the resolved workspace alone, never the user's other workspaces or
+        // the key's own authority.
+        if (!reading) return notAllowed();
+        if (root === "workspaces") {
+          // One read of the resolved workspace as the user, not a list of all of theirs.
+          try {
+            return json([await client.getWorkspace(workspaceId)]);
+          } catch (error) {
+            const notReadable =
+              error instanceof OpenGeniApiError && (error.status === 403 || error.status === 404);
+            if (notReadable) return json([]);
+            throw error;
+          }
+        }
+        if (root === "access" && rest.length === 1 && rest[0] === "me") {
+          // An external actor's access inventory is empty: its authority for
+          // this workspace is the effective grant, so the app gets exactly that.
+          const [access, grant] = await Promise.all([
+            client.getAccessContext(),
+            getSessionProxyWorkspaceGrant(client, workspaceId, call),
+          ]);
+          return json(scopedAccessContext(access, grant));
+        }
+        if (root === "config" && rest.length === 1 && rest[0] === "client") {
+          return json(
+            await clientConfig({
+              client,
+              workspaceId,
+              source,
+              query,
+              editableLiveUrl,
+              uploadsEnabled,
+              modelSelection: options.modelSelection,
+              chatConnections: !serverOwnsSetup,
+              call,
+            }),
+          );
+        }
+        return notAllowed();
+      }
+
+      const [pathWorkspaceId, ...route] = rest as [string, ...string[]];
+      if (pathWorkspaceId !== workspaceId) {
+        return errorJson(403, "workspace_not_allowed", "This workspace is not available.");
+      }
+      const inSession = route[0] === "sessions" && route.length >= 2;
+      // Chat ids are opaque tokens; `authorizeSession` never sees other text.
+      if (inSession && !SEGMENT.test(route[1]!)) return notAllowed();
+      let sessionId = inSession ? route[1] : undefined;
+      if (!sessionId) {
+        const named = request.headers.get(SESSION_SCOPE_HEADER)?.trim();
+        if (named) {
+          if (!SEGMENT.test(named)) {
+            reject(400, "session_scope_invalid", "x-opengeni-session-id is invalid.");
+          }
+          sessionId = named;
+        }
+      }
+      const routeInfo: SessionProxyRoute = { method, segments: route, sessionId };
+      context.route = routeInfo;
+      if (
+        sessionId &&
+        options.authorizeSession &&
+        !(await options.authorizeSession(sessionId, context))
+      ) {
+        return errorJson(404, "session_not_found", "Session not found.");
+      }
+      const op = inSession ? `${method} ${route.slice(2).join("/")}` : "";
+      if (serverOwnsSetup && (SERVER_OWNED_SESSION_ROUTES.has(op) || isChatCompletions(route))) {
+        return notAllowed();
+      }
+      // MCP credentials are the server's (`beforeForwardMessage`, `toolServer`).
+      if (op === "POST mcp-credentials/rotate") return notAllowed();
+      // Imported history is written as genuine transcript: only the product's
+      // server can vouch for it (`@opengeni/sdk/session-history-import`).
+      if (route[0] === "session-imports") return notAllowed();
+      if (!uploadsEnabled && route[0] === "files" && route[1] === "uploads") {
+        return notAllowed();
+      }
+      if (options.refuse) {
+        const refused = await options.refuse(routeInfo, context);
+        if (refused instanceof Response) return refused;
+        if (refused) return notAllowed();
+      }
+
+      const path = `/v1/workspaces/${encodeURIComponent(workspaceId)}${
+        route.length > 0 ? `/${route.map(encodeURIComponent).join("/")}` : ""
+      }`;
+      const forward = async (body?: Record<string, unknown>): Promise<Response> => {
+        const send = async () =>
+          await client.fetchApi(client.apiUrl(`${path}${url.search}`), {
+            method,
+            headers: forwardedHeaders(request, body !== undefined),
+            ...(body !== undefined
+              ? { body: JSON.stringify(body) }
+              : reading || request.body === null
+                ? {}
+                : { body: request.body, duplex: "half" }),
+            signal: request.signal,
+          } as RequestInit);
+        // Opengeni accepts a keyed action once and answers a repeat with the
+        // first outcome, so when this hop cannot tell whether the first attempt
+        // landed (the connection failed, or Opengeni answered 408 or 5xx) the
+        // relay sends it once more instead of losing or doubling it.
+        const retryable = body !== undefined && actionKey(body) !== undefined;
+        let upstream: Response;
+        try {
+          upstream = await send();
+        } catch (error) {
+          if (!retryable || request.signal.aborted) throw error;
+          upstream = await send();
+        }
+        if (retryable && outcomeUnknown(upstream.status) && !request.signal.aborted) {
+          await upstream.body?.cancel().catch(() => undefined);
+          upstream = await send();
+        }
+        const relayed = relayResponse(upstream, heartbeatMs, rejectedKeyNotice);
+        return (await options.afterForward?.(routeInfo, relayed, context)) ?? relayed;
+      };
+
+      // --- Server-owned additions: the few routes whose body the relay reads.
+
       const toolToken = async () =>
         await mintToolToken({
           audience: toolServer!.url,
@@ -602,12 +782,12 @@ export function createSessionProxyHandler(
           ttlSeconds: toolServer!.ttlSeconds,
         });
       /** The creator's subject when the session carries this tool server, else null. */
-      const toolServerOwner = (sessionId: string): Promise<string | null> => {
-        const key = `${workspaceId}\u0000${sessionId}`;
+      const toolServerOwner = (id: string): Promise<string | null> => {
+        const key = `${workspaceId}\u0000${id}`;
         let attached = toolSessions.get(key);
         if (!attached) {
           attached = client
-            .getSession(workspaceId, sessionId, call)
+            .getSession(workspaceId, id, call)
             .then((session) =>
               (session.mcpServers ?? []).some(
                 (server) => server.id === toolServer!.id && server.url === toolServer!.url,
@@ -648,53 +828,24 @@ export function createSessionProxyHandler(
           ],
         };
       };
-      /**
-       * Best-effort standalone rotation before a voice call. Opengeni refuses
-       * it while a turn is running; that turn's message already refreshed them.
-       */
-      const refreshRealtimeCredentials = async (
-        sessionId: string,
-        updates: SessionMcpCredentialUpdateInput[],
-      ): Promise<void> => {
-        if (updates.length === 0) return;
-        try {
-          const servers = (await client.getSession(workspaceId, sessionId, call)).mcpServers ?? [];
-          const rotations = updates.flatMap((update) => {
-            const server = servers.find((candidate) => candidate.id === update.id);
-            return server
-              ? [
-                  {
-                    id: update.id,
-                    expectedCredentialVersion: server.credentialVersion,
-                    expectedServerUrl: server.url,
-                    headers: update.headers,
-                  },
-                ]
-              : [];
-          });
-          if (rotations.length === 0) return;
-          await client.rotateSessionMcpCredentials(workspaceId, sessionId, {
-            operationKey: crypto.randomUUID(),
-            updates: rotations,
-          });
-        } catch (error) {
-          if (!(error instanceof OpenGeniApiError)) throw error;
-        }
-      };
-      /** Browser input sanitized, then server-owned extras merged in. */
-      const forwardMessage = async (
+      /** A browser message sanitized, then server-owned extras merged in, or the hook's refusal. */
+      const userMessage = async (
         value: unknown,
         input: SessionProxyMessageInput,
       ): Promise<Record<string, unknown> | Response> => {
         // Submit repeats the saved policy as a mandatory integrity fence. Never
         // replace it with a newer draft's policy: outcome-unknown retries must
         // retain the original receipt hash. The API rejects any new selection.
-        const message = sanitizeMessage(value, modelSelection || input.delivery === "submit");
-        const extras = await messageExtras(input);
+        const { modelContext: sent, ...message } = sanitizeMessage(
+          value,
+          modelSelection || input.delivery === "submit",
+        );
+        const browser = withBrowserContext(sent);
+        const extras = await messageExtras({ ...input, ...browser });
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(
           extras?.modelContext,
-          typeof message.modelContext === "string" ? message.modelContext : undefined,
+          decidedBrowserContext(extras, browser.browserContext),
         );
         return {
           ...message,
@@ -704,792 +855,517 @@ export function createSessionProxyHandler(
             : {}),
         };
       };
-      /** Responses reuse send hooks unchanged; only credentials are added. */
-      const forwardResponse = async (
-        value: unknown,
-        input: SessionProxyMessageInput,
-      ): Promise<Record<string, unknown> | Response> => {
-        const payload = browserPayload(value);
+      const forwardMessage = async (value: unknown, input: SessionProxyMessageInput) => {
+        const message = await userMessage(value, input);
+        return message instanceof Response ? message : await forward(message);
+      };
+      /**
+       * An action that starts work without a message (resume, retry, queue
+       * steer): the host admits it, and its credential rotations are applied
+       * before the agent continues.
+       */
+      const forwardRestart = async (
+        body: Record<string, unknown>,
+        input: SessionProxyMessageInput & { sessionId: string },
+      ) => {
         const extras = await messageExtras(input);
         if (extras instanceof Response) return extras;
-        return {
-          ...payload,
-          ...(extras?.mcpCredentialUpdates?.length
-            ? { mcpCredentialUpdates: extras.mcpCredentialUpdates }
-            : {}),
-        };
-      };
-      // Unknown additive query parameters on allowlisted reads pass through, so a
-      // newer browser SDK keeps working; the route and method allowlist is exact.
-      const query = Object.fromEntries(url.searchParams);
-      const read = async (path: string) => {
-        const body = await client.requestJson("GET", path, undefined, query, call);
-        // Keep the projection's read-consistency sequence for the browser hooks.
-        const sequence = observedSessionSequence(body);
-        return json(
-          body,
-          200,
-          sequence === undefined ? {} : { [SESSION_SEQUENCE_HEADER]: String(sequence) },
+        await refreshSessionCredentials(
+          client,
+          workspaceId,
+          input.sessionId,
+          extras?.mcpCredentialUpdates ?? [],
+          call,
         );
+        return await forward(body);
       };
-      const [root, ...rest] = segments;
-      // Session app reads and its listed writes, as the resolved user. The
-      // response passes through unread: JSON, an event stream or a file.
-      const passThrough = async (path: string, body?: Record<string, unknown>) => {
-        const search = new URLSearchParams(query).toString();
-        const upstream = await client.fetchApi(client.apiUrl(search ? `${path}?${search}` : path), {
-          method,
-          headers: {
-            Accept: request.headers.get("accept") ?? "application/json",
-            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-          },
-          ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-          signal: request.signal,
-        });
-        // Opengeni's own answer, errors included, with only neutral headers.
-        const headers = new Headers({ "Cache-Control": "no-store" });
-        for (const name of PASS_THROUGH_HEADERS) {
-          const value = upstream.headers.get(name);
-          if (value !== null) headers.set(name, value);
-        }
-        return new Response(upstream.body as BodyInit | null, {
-          status: upstream.status,
-          headers,
-        });
-      };
-      // The app's bootstrap: only the resolved workspace, never the user's
-      // other workspaces or the key's own authority.
-      if (sessionAppEnabled && method === "GET" && root === "workspaces" && rest.length === 0) {
-        const workspaces = await client.listWorkspaces();
-        return json(workspaces.filter((workspace) => workspace.id === workspaceId));
-      }
-      if (
-        sessionAppEnabled &&
-        method === "GET" &&
-        root === "access" &&
-        rest.length === 1 &&
-        rest[0] === "me"
-      ) {
-        // An external actor's access inventory is empty: its authority for this
-        // workspace is the effective grant, so the app gets exactly that grant.
-        const [access, grant] = await Promise.all([
-          client.getAccessContext(),
-          getSessionProxyWorkspaceGrant(client, workspaceId, call),
-        ]);
-        return json(scopedAccessContext(access, grant));
-      }
-      if (root === "config") {
-        if (rest.length === 1 && rest[0] === "client" && method === "GET") {
-          // The browser speaks this proxy's contract, not the upstream deployment's:
-          // report the server SDK's revision so an Opengeni deploy never makes the
-          // embedded page look stale (and never triggers a host reload).
-          const config = await client.requestJson<Record<string, unknown>>(
-            "GET",
-            "/v1/config/client",
-            undefined,
-            { ...query, workspaceId },
-            call,
+
+      if (route.length === 1 && route[0] === "sessions" && method === "POST") {
+        const body = (await readJsonBody(request, maxBodyBytes))!;
+        if (!options.createSession) {
+          // Opengeni's own create request, as the user, with the server's additions.
+          const { modelContext: sent, ...created } = browserPayload(body) as CreateSessionRequest;
+          if (!modelSelection) for (const field of MODEL_FIELDS) delete created[field];
+          const browser = withBrowserContext(sent);
+          const extras = await messageExtras({
+            delivery: "create",
+            ...(created.startMode === "realtime" ? { startMode: "realtime" as const } : {}),
+            ...keyed(actionKey(created)),
+            ...browser,
+          });
+          if (extras instanceof Response) return extras;
+          const modelContext = joinContext(
+            extras?.modelContext,
+            decidedBrowserContext(extras, browser.browserContext),
           );
-          let artifacts: Awaited<ReturnType<typeof artifactViewerCapability>> | null = null;
-          if (editableLiveUrl) {
-            try {
-              // Successful effective-grant resolution negotiates the viewer's
-              // narrow API support. Older APIs do not have this endpoint: that
-              // 404 disables only artifacts, not ordinary conversation config.
-              artifacts = {
-                editableLiveUrl,
-                cachePartition: await cachePartition(
-                  await getSessionProxyWorkspaceGrant(client, workspaceId, call),
-                  workspaceId,
-                  source,
-                ),
-              };
-            } catch (error) {
-              if (!(error instanceof OpenGeniApiError) || error.status !== 404) throw error;
-            }
-          }
-          // Upstream proxy capabilities never authorize this host's routes.
-          // Task usage limits are set by this host's server, never through the
-          // browser boundary, so the producer capability is not forwarded.
-          const {
-            artifacts: _upstreamArtifacts,
-            sessionUsageLimits: _upstreamUsageLimits,
-            ...conversationConfig
-          } = config;
-          const upstreamVoice = config.voiceInput;
-          if (upstreamVoice && typeof upstreamVoice === "object") {
-            // Only one-shot recordings are forwarded, never resumable chunk uploads.
-            const { resumable: _resumable, ...voice } = upstreamVoice as Record<string, unknown>;
-            conversationConfig.voiceInput = voiceInputEnabled
-              ? voice
-              : { ...voice, available: false };
-          }
-          const upstreamUploads = config.fileUploads;
-          if (!uploadsEnabled) {
-            // The browser cannot upload through this proxy: stock UIs hide the attach control.
-            conversationConfig.fileUploads = {
-              ...(upstreamUploads && typeof upstreamUploads === "object" ? upstreamUploads : {}),
-              enabled: false,
-            };
-          }
-          return json({
-            ...conversationConfig,
-            apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
-            // The resolved workspace: a browser given only the proxy's baseUrl
-            // reads it here instead of knowing any Opengeni id.
-            workspaceId,
-            sandboxFiles: sandboxFilesEnabled,
-            // Stock UIs show Site previews and the artifact viewer only when
-            // this proxy serves them; `false` keeps them from failing on click.
-            artifacts: artifacts ?? false,
-            // Whether the stock "New chat" and "Archive" actions can succeed.
-            sessionCreation: options.createSession !== undefined,
-            archive: archiveEnabled,
-            // Explicit true also tells stock UIs to show the voice button, which
-            // is otherwise opt-in on the embedded conversation.
-            ...(realtimeVoiceEnabled
-              ? options.realtimeVoice === true
-                ? { realtimeVoice: true }
-                : {}
-              : { realtimeVoice: false }),
-            // Explicit true also tells stock UIs to offer end users the model picker.
-            ...(modelSelection
-              ? options.modelSelection === true
-                ? { modelSelection: true }
-                : {}
-              : { modelSelection: false }),
+          return await forward({
+            ...defaults,
+            ...(toolServer
+              ? withToolServer(created, toolServer, await toolToken(), "browser")
+              : created),
+            ...(modelContext ? { modelContext } : {}),
           });
         }
-        return errorJson(404, "route_not_allowed", "Not found.");
-      }
-      if (root !== "workspaces" || rest.length < 1) {
-        return errorJson(404, "route_not_allowed", "Not found.");
-      }
-      const [pathWorkspaceId, area, ...tail] = rest as [string, string | undefined, ...string[]];
-      if (pathWorkspaceId !== workspaceId) {
-        return errorJson(403, "workspace_not_allowed", "This workspace is not available.");
-      }
-      const base = `/v1/workspaces/${workspaceId}`;
-
-      // Only the resolved user's own usage. No full roster, allowance config,
-      // member selectors, or controls can pass through this browser boundary.
-      if (area === "usage" && tail.length === 1 && tail[0] === "me" && method === "GET") {
-        if (Object.keys(query).some((key) => key !== "period")) {
-          return errorJson(400, "invalid_usage_query", "Only period is accepted for own usage.");
-        }
-        return await read(`${base}/usage/me`);
-      }
-
-      // Workspace reads and the live control stream used by <OpenGeniProvider>.
-      if (area === undefined && method === "GET") return await read(base);
-      if (area === "model-catalog" && tail.length === 0 && method === "GET") {
-        return await read(`${base}/model-catalog`);
-      }
-      if (area === "realtime-model-catalog" && tail.length === 0 && method === "GET") {
-        if (!realtimeVoiceEnabled) return errorJson(404, "route_not_allowed", "Not found.");
-        return await read(`${base}/realtime-model-catalog`);
-      }
-      if (area === "live-events" && tail.length === 1 && tail[0] === "stream" && method === "GET") {
-        // Surface authorization failures as HTTP status before streaming.
-        await client.requestJson("GET", base, undefined, {}, call);
-        return workspaceLiveStream(client, workspaceId, url.searchParams, request, heartbeatMs);
-      }
-      if (area === "inference-control" && tail.length === 0 && method === "POST") {
-        // The conversation's paused-state UI only offers workspace Resume.
-        const body = await readJsonBody(request, maxBodyBytes);
-        if (body?.action !== "resume") {
-          reject(403, "control_not_allowed", "Only workspace resume is available.");
-        }
-        return json(await client.requestJson("POST", `${base}/inference-control`, body));
-      }
-
-      if (area === "office" && officeEnabled && tail.length === 1) {
-        if (tail[0] === "workbook-tickets" && method === "POST") {
-          return json(await client.requestJson("POST", `${base}/office/workbook-tickets`, {}));
-        }
-        if (tail[0] === "workbooks" && method === "GET") {
-          return await read(`${base}/office/workbooks`);
-        }
-        return errorJson(404, "route_not_allowed", "Not found.");
-      }
-
-      if (area === "files" && filesEnabled && method === "POST") {
-        if (tail[0] === "uploads" && !uploadsEnabled) {
-          return errorJson(404, "route_not_allowed", "Not found.");
-        }
-        if (tail.length === 1 && tail[0] === "uploads") {
-          const body = await readJsonBody(request, maxBodyBytes);
-          return json(
-            await client.requestJson("POST", `${base}/files/uploads`, pick(body, UPLOAD_FIELDS)),
-          );
-        }
-        if (tail.length === 3 && tail[0] === "uploads" && tail[2] === "complete") {
-          return json(
-            await client.requestJson("POST", `${base}/files/uploads/${tail[1]}/complete`),
-          );
-        }
-        if (tail.length === 2 && tail[1] === "download-url") {
-          return json(
-            await client.requestJson(
-              "POST",
-              `${base}/files/${tail[0]}/download-url`,
-              undefined,
-              query,
-              call,
-            ),
-          );
-        }
-        return errorJson(404, "route_not_allowed", "Not found.");
-      }
-
-      if (area === "artifacts") {
-        // Retained media a session produced: only an artifact Opengeni proves
-        // that session produced, never an arbitrary workspace artifact.
-        const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
-        const route = `${method} ${artifactOp.join("/")}`;
-        if (
-          !filesEnabled ||
-          !artifactId ||
-          !SEGMENT.test(artifactId) ||
-          (route !== "GET content" && route !== "POST playback-source")
-        ) {
-          return errorJson(404, "route_not_allowed", "Not found.");
-        }
-        const sessionId = request.headers.get(SESSION_SCOPE_HEADER)?.trim() ?? "";
-        if (!SEGMENT.test(sessionId)) {
-          reject(400, "session_scope_required", "Artifact reads must name their session.");
-        }
-        if (options.authorizeSession && !(await options.authorizeSession(sessionId, context))) {
-          return errorJson(404, "session_not_found", "Session not found.");
-        }
-        await getSessionProxyArtifactAssociation(
-          client,
-          workspaceId,
-          sessionId,
-          "retained",
-          artifactId,
-          call,
-        );
-        if (route === "POST playback-source") {
-          return json(
-            await client.requestJson(
-              "POST",
-              `${base}/artifacts/${artifactId}/playback-source`,
-              undefined,
-              {},
-              call,
-            ),
-          );
-        }
-        return retainedContent(
-          await client.getRetainedArtifactContent(workspaceId, artifactId, {
-            ...retainedRange(request),
-            signal: request.signal,
-          }),
-        );
-      }
-
-      if (area === "transcriptions" && tail.length === 0 && method === "POST") {
-        if (!voiceInputEnabled) return errorJson(404, "route_not_allowed", "Not found.");
-        return json(await client.transcribeAudio(workspaceId, await transcriptionInput(request)));
-      }
-
-      if (area === "editable-artifacts" || area === "published-artifacts") {
-        if (
-          area === "published-artifacts" &&
-          sitesEnabled &&
-          !request.headers.get(SESSION_SCOPE_HEADER)
-        ) {
-          // Workspace Sites under Opengeni's own read authorization for this user.
-          const [siteId, ...siteOp] = tail as [string | undefined, ...string[]];
-          const op = siteOp.join("/");
-          if (method !== "GET") return errorJson(404, "route_not_allowed", "Not found.");
-          if (siteId === undefined) {
-            return json(
-              await client.requestJson(
-                "GET",
-                `${base}/published-artifacts`,
-                undefined,
-                pick(query, SITE_LIST_FIELDS) as Record<string, string>,
-                call,
-              ),
-            );
-          }
-          if (!SEGMENT.test(siteId) || (op !== "" && op !== "content" && op !== "html")) {
-            return errorJson(404, "route_not_allowed", "Not found.");
-          }
-          const versionId = query.versionId;
-          if (
-            versionId !== undefined &&
-            (typeof versionId !== "string" || !SEGMENT.test(versionId))
-          ) {
-            reject(400, "version_invalid", "versionId is invalid.");
-          }
-          if (op === "html") {
-            if (typeof versionId !== "string") {
-              reject(400, "version_required", "versionId is required.");
-            }
-            const html = await downloadSessionProxySiteHtml(client, workspaceId, siteId, {
-              versionId: versionId as string,
-              signal: request.signal,
-            });
-            return new Response(boundedSiteHtml(html.body, request.signal), {
-              headers: SITE_HTML_HEADERS,
-            });
-          }
-          const item = `${base}/published-artifacts/${siteId}`;
-          return json(
-            await client.requestJson(
-              "GET",
-              op === "content" ? `${item}/content` : item,
-              undefined,
-              op === "content" && typeof versionId === "string" ? { versionId } : {},
-              call,
-            ),
-          );
-        }
-        if (!artifactsEnabled) return errorJson(404, "route_not_allowed", "Not found.");
-        const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
-        const route = `${method} ${artifactOp.join("/")}`;
-        const editable = area === "editable-artifacts";
-        const allowed = editable
-          ? route === "GET " || route === "POST live-ticket"
-          : route === "GET " || route === "GET html";
-        if (!artifactId || !SEGMENT.test(artifactId) || !allowed) {
-          return errorJson(404, "route_not_allowed", "Not found.");
-        }
-        const sessionId = request.headers.get(SESSION_SCOPE_HEADER)?.trim() ?? "";
-        if (!SEGMENT.test(sessionId)) {
-          reject(400, "session_scope_required", "Artifact reads must name their session.");
-        }
-        if (options.authorizeSession && !(await options.authorizeSession(sessionId, context))) {
-          return errorJson(404, "session_not_found", "Session not found.");
-        }
-        // No positive authorization cache: revocation must take effect even
-        // between detail, HTML and ticket requests for the same artifact.
-        await getSessionProxyArtifactAssociation(
-          client,
-          workspaceId,
-          sessionId,
-          editable ? "editable" : "site",
-          artifactId,
-          call,
-        );
-        const item = `${base}/${area}/${artifactId}`;
-        if (route === "GET ") {
-          const replicaId = editable ? query.replicaId : undefined;
-          return json(
-            await client.requestJson(
-              "GET",
-              item,
-              undefined,
-              typeof replicaId === "string" ? { replicaId } : {},
-              call,
-            ),
-          );
-        }
-        if (route === "POST live-ticket") {
-          const body = await readJsonBody(request, maxBodyBytes);
-          return json(
-            await client.requestJson("POST", `${item}/live-ticket`, {
-              ...pick(body, TICKET_FIELDS),
-              sourceSessionId: sessionId,
-            }),
-            201,
-          );
-        }
-        const versionId = query.versionId;
-        if (typeof versionId !== "string" || !SEGMENT.test(versionId)) {
-          reject(400, "version_required", "versionId is required.");
-        }
-        const html = await downloadSessionProxySiteHtml(client, workspaceId, artifactId, {
-          versionId,
-          signal: request.signal,
-        });
-        return new Response(boundedSiteHtml(html.body, request.signal), {
-          headers: SITE_HTML_HEADERS,
-        });
-      }
-
-      if (area !== "sessions") {
-        if (sessionAppEnabled && area !== undefined && !PROXY_WORKSPACE_AREAS.has(area)) {
-          const route = `${method} ${[area, ...tail].join("/")}`;
-          const path = `${base}/${[area, ...tail].join("/")}`;
-          if (method === "GET") return await passThrough(path);
-          if (SESSION_APP_WORKSPACE_WRITES.some((pattern) => pattern.test(route))) {
-            return await passThrough(path, await readJsonBody(request, maxBodyBytes, true));
-          }
-        }
-        return errorJson(404, "route_not_allowed", "Not found.");
-      }
-
-      if (tail.length === 0 && method === "GET") {
-        if (!sessionList) return errorJson(404, "route_not_allowed", "Not found.");
-        if (query.view !== "page") {
-          reject(400, "page_view_required", "List sessions with listSessionPage.");
-        }
-        const listQuery: Record<string, string> = { ...query };
-        if (sessionList === "mine") {
-          // Server-enforced creator filter; the browser cannot widen it.
-          listQuery.createdByKind = "subject";
-          listQuery.createdBySubjectId = await subjectOf(client, `${source}\u0000${resolved.user}`);
-        }
-        const page = await client.requestJson<Record<string, unknown>>(
-          "GET",
-          `${base}/sessions`,
-          undefined,
-          listQuery,
-          call,
-        );
-        // Pins are a separate personal projection this proxy does not manage.
-        return json(sessionList === "mine" ? { ...page, pinned: [] } : page);
-      }
-      if (tail.length === 0) {
-        if (method !== "POST" || !options.createSession) {
-          return errorJson(404, "route_not_allowed", "Not found.");
-        }
-        const input = createInput(await readJsonBody(request, maxBodyBytes), modelSelection);
-        if (input.startMode === "realtime" && !realtimeVoiceEnabled) {
-          return errorJson(404, "route_not_allowed", "Not found.");
-        }
+        const input = createInput(body, modelSelection);
+        const browser = browserCreateFields(body);
         const hooked = await options.createSession(input, context);
         if (hooked instanceof Response) return hooked;
         const created = withBrowserCreateChoices(
-          toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked,
+          toolServer
+            ? withToolServer(hooked, toolServer, await toolToken(), "createSession")
+            : hooked,
           input,
+          browser,
         );
         const extras = await messageExtras({
           delivery: "create",
           ...(input.startMode ? { startMode: input.startMode } : {}),
+          ...keyed(input.idempotencyKey),
+          ...withBrowserContext(browser.modelContext),
         });
         if (extras instanceof Response) return extras;
-        const modelContext = joinContext(extras?.modelContext, created.modelContext);
-        return json(
-          await client.createSession(workspaceId, {
-            ...created,
-            visibility: created.visibility ?? defaults.visibility,
-            agentAccess: created.agentAccess ?? defaults.agentAccess,
-            memoryScope: created.memoryScope ?? defaults.memoryScope,
-            ...(modelContext ? { modelContext } : {}),
-          }),
+        const modelContext = joinContext(
+          extras?.modelContext,
+          created.modelContext,
+          decidedBrowserContext(extras, browser.modelContext),
         );
-      }
-
-      const [sessionId, ...op] = tail as [string, ...string[]];
-      if (options.authorizeSession && !(await options.authorizeSession(sessionId, context))) {
-        return errorJson(404, "session_not_found", "Session not found.");
-      }
-      const session = `${base}/sessions/${sessionId}`;
-      const route = `${method} ${op.join("/")}`;
-      const body = method === "GET" ? undefined : await readJsonBody(request, maxBodyBytes, true);
-      const sanitize = (value: unknown) => sanitizeMessage(value, modelSelection);
-      const saveDraftPolicy = async (message: Record<string, unknown>) => {
-        if (modelSelection) return message;
-        // Save requires explicit policy fields. Use this actor's durable draft,
-        // not browser choices. The API's expectedRevision fence rejects races.
-        const draft = await client.getComposerDraft(workspaceId, sessionId, call);
-        return {
-          ...message,
-          model: draft.model,
-          reasoningEffort: draft.reasoningEffort,
-          latencyMode: draft.latencyMode,
-        };
-      };
-      const forward = async (path: string, payload: Record<string, unknown> | Response) =>
-        payload instanceof Response
-          ? payload
-          : json(await client.requestJson("POST", path, payload));
-
-      if (op[0] === "realtime") {
-        if (!realtimeVoiceEnabled) return errorJson(404, "route_not_allowed", "Not found.");
-        const realtime = realtimeRoute(method, op.slice(1));
-        if (!realtime) return errorJson(404, "route_not_allowed", "Not found.");
-        if (!body) reject(400, "invalid_body", "A JSON object body is required.");
-        const path = `${session}/${op.join("/")}`;
-        if (realtime === "begin") {
-          // The host may refuse a call; MCP credentials (including the tool
-          // server's per-user token) are refreshed before voice can delegate.
-          const extras = await messageExtras({
-            sessionId,
-            delivery: "realtime",
-          });
-          if (extras instanceof Response) return extras;
-          await refreshRealtimeCredentials(sessionId, extras?.mcpCredentialUpdates ?? []);
-        }
-        let payload: Record<string, unknown> = body;
-        if (realtime === "sync" && options.beforeForwardMessage && hasRealtimeMessages(body)) {
-          const extras = await options.beforeForwardMessage(
-            { sessionId, delivery: "realtime" },
-            context,
-          );
-          if (extras instanceof Response) return extras;
-          payload = withRealtimeContext(body, extras?.modelContext);
-        }
-        return json(await client.requestJson(method, path, payload));
-      }
-
-      switch (route) {
-        case "GET ":
-          return await read(session);
-        case "PUT archive": {
-          if (!archiveEnabled) return errorJson(404, "route_not_allowed", "Not found.");
-          const archived = body?.archived;
-          const expectedVersion = body?.expectedVersion;
-          if (typeof archived !== "boolean") reject(400, "invalid_body", "archived is required.");
-          return json(
-            await client.requestJson("PUT", `${session}/archive`, {
-              archived,
-              ...(typeof expectedVersion === "number" ? { expectedVersion } : {}),
-            }),
+        const response = await forward({
+          ...created,
+          visibility: created.visibility ?? defaults.visibility,
+          agentAccess: created.agentAccess ?? defaults.agentAccess,
+          memoryScope: created.memoryScope ?? defaults.memoryScope,
+          ...(modelContext ? { modelContext } : {}),
+        });
+        if (
+          response.ok &&
+          browser.expectedNewSessionDraftRevision !== undefined &&
+          input.startMode !== "realtime"
+        ) {
+          await clearSentNewSessionDraft(
+            client,
+            workspaceId,
+            browser.expectedNewSessionDraftRevision,
           );
         }
-        case "PATCH ": {
-          const title = body?.title;
-          if (typeof title !== "string" || Object.keys(body ?? {}).length !== 1) {
-            reject(400, "invalid_body", "Only { title } may be updated.");
+        return response;
+      }
+
+      if (inSession && sessionId) {
+        switch (op) {
+          case "POST events": {
+            const body = await readJsonBody(request, maxBodyBytes);
+            const event = body as Record<string, unknown>;
+            if (event.type === "user.message") {
+              const sent = await userMessage(event.payload, {
+                sessionId,
+                delivery: "send",
+                ...keyed(actionKey(event)),
+              });
+              return sent instanceof Response ? sent : await forward({ ...event, payload: sent });
+            }
+            if (
+              event.type === "user.approvalDecision" ||
+              event.type === "user.humanInputResponse"
+            ) {
+              // Responses carry no new text; only credentials are added.
+              const payload = browserPayload(event.payload);
+              const extras = await messageExtras({
+                sessionId,
+                delivery: event.type === "user.approvalDecision" ? "approval" : "answer",
+                ...keyed(actionKey(event)),
+              });
+              if (extras instanceof Response) return extras;
+              return await forward({
+                ...event,
+                payload: {
+                  ...payload,
+                  ...(extras?.mcpCredentialUpdates?.length
+                    ? { mcpCredentialUpdates: extras.mcpCredentialUpdates }
+                    : {}),
+                },
+              });
+            }
+            return await forward(event);
           }
-          return json(await client.requestJson("PATCH", session, { title }));
-        }
-        case "PUT attention": {
-          // Only "I have read this", for the resolved user's own read state:
-          // an open conversation acknowledges replies the person watched.
-          const through = body?.acknowledgedThroughSequence;
-          const keys = Object.keys(body ?? {});
-          if (
-            body?.unread !== false ||
-            keys.some((key) => key !== "unread" && key !== "acknowledgedThroughSequence") ||
-            (through !== undefined &&
-              (typeof through !== "number" || !Number.isSafeInteger(through) || through < 0))
-          ) {
-            reject(
-              400,
-              "invalid_body",
-              "Only { unread: false, acknowledgedThroughSequence? } may be set.",
+          case "POST steer": {
+            const body = await readJsonBody(request, maxBodyBytes);
+            return await forwardMessage(body, {
+              sessionId,
+              delivery: "steer",
+              ...keyed(actionKey(body)),
+            });
+          }
+          case "POST composer-draft/submit": {
+            const body = await readJsonBody(request, maxBodyBytes);
+            return await forwardMessage(body, {
+              sessionId,
+              delivery: "submit",
+              ...keyed(actionKey(body)),
+            });
+          }
+          case "POST control": {
+            const body = (await readJsonBody(request, maxBodyBytes))!;
+            if (body.action !== "resume") return await forward(body);
+            return await forwardRestart(body, {
+              sessionId,
+              delivery: "resume",
+              ...keyed(actionKey(body)),
+            });
+          }
+          case "POST retry": {
+            // A retried turn may pick its model, like a new message.
+            const body = browserPayload(await readJsonBody(request, maxBodyBytes));
+            if (!modelSelection) for (const field of MODEL_FIELDS) delete body[field];
+            return await forwardRestart(body, {
+              sessionId,
+              delivery: "retry",
+              ...keyed(actionKey(body)),
+            });
+          }
+          case "PUT composer-draft": {
+            const message = sanitizeMessage(
+              await readJsonBody(request, maxBodyBytes),
+              modelSelection,
             );
+            if (modelSelection) return await forward(message);
+            // Save requires explicit policy fields. Use this actor's durable draft,
+            // not browser choices. The API's expectedRevision fence rejects races.
+            const draft = await client.getComposerDraft(workspaceId, sessionId, call);
+            return await forward({
+              ...message,
+              model: draft.model,
+              reasoningEffort: draft.reasoningEffort,
+              latencyMode: draft.latencyMode,
+            });
           }
-          return json(
-            await client.requestJson("PUT", `${session}/attention`, {
-              unread: false,
-              ...(through !== undefined ? { acknowledgedThroughSequence: through } : {}),
-            }),
-          );
-        }
-        case "GET events":
-          return await listEvents(client, `${session}/events`, query, call);
-        case "GET events/stream":
-          // Surface authorization failures as HTTP status before streaming.
-          await client.getSession(workspaceId, sessionId, call);
-          return proxySessionEventStream(client, workspaceId, sessionId, {
-            after: request,
-            signal: request.signal,
-            heartbeatMs,
-          });
-        case "POST events": {
-          const event = clientEvent(body);
-          const payload =
-            event.type === "user.message"
-              ? await forwardMessage(event.payload, {
-                  sessionId,
-                  delivery: "send",
-                })
-              : await forwardResponse(event.payload, {
-                  sessionId,
-                  delivery: "send",
-                });
-          return await forward(
-            `${session}/events`,
-            payload instanceof Response ? payload : { ...event, payload },
-          );
-        }
-        case "POST steer":
-          return await forward(
-            `${session}/steer`,
-            await forwardMessage(body, { sessionId, delivery: "steer" }),
-          );
-        case "GET queue":
-          return await read(`${session}/queue`);
-        case "GET composer-draft":
-          return await read(`${session}/composer-draft`);
-        case "PUT composer-draft":
-          return json(
-            await client.requestJson(
-              "PUT",
-              `${session}/composer-draft`,
-              await saveDraftPolicy(sanitize(body)),
-            ),
-          );
-        case "POST composer-draft/submit": {
-          const message = await forwardMessage(body, {
-            sessionId,
-            delivery: "submit",
-          });
-          return await forward(`${session}/composer-draft/submit`, message);
-        }
-        case "POST control": {
-          if (body?.action !== "pause" && body?.action !== "resume") {
-            reject(403, "control_not_allowed", "Only pause and resume are available.");
-          }
-          return json(await client.requestJson("POST", `${session}/control`, body));
-        }
-        case "GET human-input-requests":
-          return await read(`${session}/human-input-requests`);
-        case "GET goal":
-          return await read(`${session}/goal`);
-        case "PATCH goal": {
-          // Pause and resume only: the objective, limits and completion stay
-          // with the agent and the product's own server. A browser rationale is
-          // dropped, so end-user text never reaches the goal record.
-          const status = body?.status;
-          if (
-            (status !== "paused" && status !== "active") ||
-            Object.keys(body ?? {}).some((key) => key !== "status" && key !== "rationale")
-          ) {
-            reject(
-              403,
-              "goal_update_not_allowed",
-              "Only { status: paused | active } is available.",
+          case "POST realtime": {
+            // The host may refuse a call; MCP credentials (including the tool
+            // server's per-user token) are refreshed before voice can delegate.
+            const extras = await messageExtras({ sessionId, delivery: "realtime" });
+            if (extras instanceof Response) return extras;
+            await refreshSessionCredentials(
+              client,
+              workspaceId,
+              sessionId,
+              extras?.mcpCredentialUpdates ?? [],
+              call,
             );
+            return await forward();
           }
-          return json(await client.requestJson("PATCH", `${session}/goal`, { status }));
         }
-        case "DELETE goal":
-          await client.deleteGoal(workspaceId, sessionId);
-          return new Response(null, { status: 204 });
-        case "POST fs/read":
-        case "POST fs/read-workspace": {
-          if (!sandboxFilesEnabled) return errorJson(404, "route_not_allowed", "Not found.");
-          // A distinct route fails closed on older APIs that would strip the
-          // additive workspaceOnly field and otherwise permit machine-wide reads.
-          return json(
-            await client.requestJson("POST", `${session}/fs/read-workspace`, sandboxRead(body)),
-          );
+        if (
+          method === "POST" &&
+          route.length === 5 &&
+          route[2] === "queue" &&
+          route[4] === "steer"
+        ) {
+          const body = (await readJsonBody(request, maxBodyBytes))!;
+          return await forwardRestart(body, {
+            sessionId,
+            delivery: "queue-steer",
+            ...keyed(actionKey(body)),
+          });
+        }
+        if (
+          method === "POST" &&
+          route.length === 5 &&
+          route[2] === "realtime" &&
+          route[4] === "sync" &&
+          options.beforeForwardMessage
+        ) {
+          const body = (await readJsonBody(request, maxBodyBytes))!;
+          if (!hasRealtimeMessages(body)) return await forward(body);
+          // Each transcript or spoken request becomes its own message, with its
+          // own key and its own page: the host decides each entry's context.
+          const entries: unknown[] = [];
+          for (const entry of body.entries as unknown[]) {
+            if (!isRealtimeMessage(entry)) {
+              entries.push(entry);
+              continue;
+            }
+            const { modelContext: sent, ...fields } = entry;
+            const browser = withBrowserContext(sent);
+            const extras = await options.beforeForwardMessage(
+              {
+                sessionId,
+                delivery: "realtime",
+                ...keyed(typeof fields.operationId === "string" ? fields.operationId : undefined),
+                realtimeKind: fields.kind,
+                ...browser,
+              },
+              context,
+            );
+            if (extras instanceof Response) return extras;
+            const modelContext = joinContext(
+              extras?.modelContext,
+              decidedBrowserContext(extras, browser.browserContext),
+            );
+            entries.push(modelContext ? { ...fields, modelContext } : fields);
+          }
+          return await forward({ ...body, entries });
         }
       }
-      if (op[0] === "artifacts" && (op.length === 2 || op[2] === "content") && method === "GET") {
-        // Retained screenshots: the API matches the artifact to this session;
-        // the proxy first proves the user can read the session itself.
-        if (!filesEnabled || op.length > 3) {
-          return errorJson(404, "route_not_allowed", "Not found.");
-        }
-        await client.getSession(workspaceId, sessionId, call);
-        if (op.length === 2) return await read(`${session}/artifacts/${op[1]}`);
-        return retainedContent(
-          await client.getSessionRetainedArtifactContent(workspaceId, sessionId, op[1]!, {
-            ...retainedRange(request),
-            signal: request.signal,
-          }),
-        );
-      }
-      if (op.length === 2 && op[0] === "human-input-requests" && method === "GET") {
-        return await read(`${session}/human-input-requests/${op[1]}`);
-      }
-      if (
-        op.length === 3 &&
-        op[0] === "queue" &&
-        QUEUE_OPERATIONS.has(op[2]!) &&
-        method === "POST"
-      ) {
-        return json(await client.requestJson("POST", `${session}/queue/${op[1]}/${op[2]}`, body));
-      }
-      if (sessionAppEnabled && !PROXY_SESSION_OPERATIONS.has(op[0] ?? "")) {
-        // authorizeSession above already admitted this chat.
-        const path = `${session}/${op.join("/")}`;
-        if (method === "GET") return await passThrough(path);
-        if (SESSION_APP_SESSION_WRITES.some((pattern) => pattern.test(route))) {
-          return await passThrough(path, body);
-        }
-      }
-      return errorJson(404, "route_not_allowed", "Not found.");
+      return await forward();
     } catch (error) {
       return errorResponse(error, rejectedKeyNotice);
     }
   };
 }
 
+/** The workspace this resolution acts in. */
+async function resolveWorkspace(
+  target: ProxyClient | ProxyFacade,
+  resolved: SessionProxyResolution,
+  source: string,
+  chats: Chats,
+): Promise<string> {
+  // A tenant/workspaceId key that resolves to nothing must never fall
+  // through to the per-user workspace: that is a host auth bug, not a choice.
+  if (
+    ("workspaceId" in resolved && !resolved.workspaceId && !resolved.tenant) ||
+    ("tenant" in resolved && !resolved.tenant && !resolved.workspaceId) ||
+    resolved.workspaceId === "" ||
+    resolved.tenant === ""
+  ) {
+    throw new TypeError(
+      "resolve returned an empty tenant or workspaceId. Return a non-empty id, or omit the key for one workspace per user.",
+    );
+  }
+  if (chats === "isolated") {
+    if (resolved.workspaceId || !isFacade(target) || !target.workspaceIdFor) {
+      throw new TypeError(
+        'chats: "isolated" requires the Opengeni facade and a tenant or user resolution.',
+      );
+    }
+    return await target.workspaceIdFor(
+      { tenant: resolved.tenant, user: resolved.user, source },
+      { isolation: "user" },
+    );
+  }
+  if (resolved.workspaceId) return resolved.workspaceId;
+  if (resolved.tenant && isFacade(target)) {
+    // A signed-in user joins with the facade's `memberPermissions` when those
+    // are set; an anonymous visitor is left to Opengeni's first-use defaults.
+    return target.workspaceIdFor && !resolved.visitor
+      ? await target.workspaceIdFor(
+          { tenant: resolved.tenant, user: resolved.user, source },
+          { isolation: "tenant" },
+        )
+      : await target.workspaceId({ tenant: resolved.tenant });
+  }
+  if (
+    !("tenant" in resolved) &&
+    !("workspaceId" in resolved) &&
+    isFacade(target) &&
+    target.workspaceIdFor
+  ) {
+    // A user alone: their own workspace, keyed by the identity source.
+    return await target.workspaceIdFor({ user: resolved.user, source }, { isolation: "user" });
+  }
+  throw new TypeError(
+    "resolve must return a workspaceId (or a tenant or a user alone when given the Opengeni facade).",
+  );
+}
+
+/** Without a host policy: no cross-site requests and no cross-site form encodings. */
+function defaultMutationPolicy(request: Request): boolean {
+  if (request.headers.get("sec-fetch-site") === "cross-site") return false;
+  const contentType = (request.headers.get("content-type") ?? "").toLowerCase();
+  return !(
+    contentType.startsWith("text/plain") ||
+    contentType.startsWith("application/x-www-form-urlencoded")
+  );
+}
+
+function isChatCompletions(route: readonly string[]): boolean {
+  return route.length === 2 && route[0] === "chat" && route[1] === "completions";
+}
+
+/** The browser's neutral request headers. */
+function forwardedHeaders(request: Request, jsonBody: boolean): Headers {
+  const headers = new Headers();
+  for (const name of FORWARDED_REQUEST_HEADERS) {
+    const value = request.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  if (jsonBody) headers.set("content-type", "application/json");
+  if (!headers.has("accept")) headers.set("accept", "application/json");
+  return headers;
+}
+
 /**
- * Methods any forwarded route uses. Module-level so the public API inventory
- * attributes a verb only to the routes that actually forward it.
+ * Opengeni's answer, errors included, with neutral headers only. Bytes the
+ * relay serves from the product's origin never run as a page there: they keep
+ * Opengeni's own content security policy, else a sandboxing one.
  */
-const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+function relayResponse(
+  upstream: Response,
+  heartbeatMs: number,
+  rejectedKeyNotice: { sent: boolean },
+): Response {
+  if (upstream.status === 401) warnRejectedApiKey(upstream, rejectedKeyNotice);
+  const headers = new Headers({ "Cache-Control": "no-store" });
+  for (const name of RELAYED_RESPONSE_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  upstream.headers.forEach((value, name) => {
+    const lower = name.toLowerCase();
+    if (lower.startsWith("x-opengeni-") && lower !== OPENGENI_API_CONTRACT_HEADER) {
+      headers.set(name, value);
+    }
+  });
+  headers.set(
+    "Content-Security-Policy",
+    upstream.headers.get("content-security-policy") ?? "sandbox",
+  );
+  headers.set("X-Content-Type-Options", "nosniff");
+  const status = upstream.status;
+  if (status === 204 || status === 205 || status === 304 || upstream.body === null) {
+    return new Response(null, { status, headers });
+  }
+  if (/^text\/event-stream\b/i.test(upstream.headers.get("content-type") ?? "")) {
+    headers.set("Cache-Control", "no-cache, no-transform");
+    headers.delete("content-length");
+    return new Response(withHeartbeat(upstream.body, heartbeatMs), { status, headers });
+  }
+  return new Response(upstream.body, { status, headers });
+}
 
-/** Workspace areas this proxy serves itself; `sessionApp` never widens them. */
-const PROXY_WORKSPACE_AREAS: ReadonlySet<string> = new Set([
-  "sessions",
-  "usage",
-  "model-catalog",
-  "realtime-model-catalog",
-  "live-events",
-  "inference-control",
-  "office",
-  "files",
-  "artifacts",
-  "transcriptions",
-  "editable-artifacts",
-  "published-artifacts",
-  // Rosters, credentials, budgets and administration stay out of the browser
-  // even when Opengeni would let the user read them.
-  "access",
-  "allowance",
-  "api-keys",
-  "auth-runs",
-  "credential-provider",
-  "enrollments",
-  "external-members",
-  "identity-links",
-  "insights",
-  "member-candidates",
-  "members",
-  "session-tenancy",
-  "subscription-usage-pools",
-  "user-resource-authorities",
-  "vault-providers",
-  "vaults",
-  "webhooks",
-]);
+const HEARTBEAT = new TextEncoder().encode(": ping\n\n");
 
-/** Chat routes this proxy serves itself; `sessionApp` never widens them. */
-const PROXY_SESSION_OPERATIONS: ReadonlySet<string> = new Set([
-  "",
-  "archive",
-  "attention",
-  "events",
-  "steer",
-  "queue",
-  "composer-draft",
-  "control",
-  "human-input-requests",
-  "goal",
-  "realtime",
-  "fs",
-  "artifacts",
-]);
+/**
+ * An event stream with a comment line between events every `heartbeatMs`, so
+ * hosts and intermediaries with short idle timeouts keep a quiet stream open.
+ * Comments go only between whole events, never inside one.
+ */
+function withHeartbeat(
+  body: ReadableStream<Uint8Array>,
+  heartbeatMs: number,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  // The last bytes sent, to tell whether the stream is between events.
+  let tail: number[] = [];
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const stop = () => {
+    if (timer !== undefined) clearInterval(timer);
+    timer = undefined;
+  };
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      timer = setInterval(() => {
+        if (!betweenEvents(tail)) return;
+        try {
+          controller.enqueue(HEARTBEAT);
+        } catch {
+          stop();
+        }
+      }, heartbeatMs);
+    },
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          stop();
+          controller.close();
+          return;
+        }
+        if (value.byteLength > 0) {
+          tail = [...tail, ...value.subarray(Math.max(0, value.byteLength - 4))].slice(-4);
+          controller.enqueue(value);
+        }
+      } catch (error) {
+        stop();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      stop();
+      await reader.cancel(reason).catch(() => undefined);
+    },
+  });
+}
 
-/** The session app's own writes in the workspace, as the resolved user. */
-const SESSION_APP_WORKSPACE_WRITES: readonly RegExp[] = [
-  /^PUT new-session-draft$/,
-  /^POST channels$/,
-  /^(PATCH|DELETE) channels\/[^/]+$/,
-];
+/** Whether the bytes so far end an event (a blank line), or nothing was sent yet. */
+function betweenEvents(tail: readonly number[]): boolean {
+  if (tail.length === 0) return true;
+  const end = tail.slice(-2);
+  if (end.length === 2 && end[0] === 10 && end[1] === 10) return true; // \n\n
+  if (end.length === 2 && end[0] === 13 && end[1] === 13) return true; // \r\r
+  return tail.length === 4 && tail[0] === 13 && tail[1] === 10 && tail[2] === 13 && tail[3] === 10;
+}
 
-/** The session app's own writes in a chat, as the resolved user. */
-const SESSION_APP_SESSION_WRITES: readonly RegExp[] = [
-  /^PUT pin$/,
-  /^PUT channel$/,
-  /^PUT tool-policy$/,
-  /^PATCH mcp-servers\/[^/]+\/approval-policy$/,
-];
+/** The client config the relay's browser reads: Opengeni's, for this workspace and user. */
+async function clientConfig(input: {
+  client: ProxyClient;
+  workspaceId: string;
+  source: string;
+  query: Record<string, string>;
+  editableLiveUrl: string | null;
+  uploadsEnabled: boolean;
+  modelSelection: boolean | undefined;
+  chatConnections: boolean;
+  call: { signal: AbortSignal };
+}): Promise<Record<string, unknown>> {
+  const { client, workspaceId, call } = input;
+  const config = await client.requestJson<Record<string, unknown>>(
+    "GET",
+    "/v1/config/client",
+    undefined,
+    { ...input.query, workspaceId },
+    call,
+  );
+  let artifacts: Awaited<ReturnType<typeof artifactViewerCapability>> | false = false;
+  try {
+    // The editor's live socket is reached directly with a ticket; the cache
+    // partition keeps this user's cached artifacts apart from other users'.
+    if (input.editableLiveUrl) {
+      artifacts = {
+        editableLiveUrl: input.editableLiveUrl,
+        cachePartition: await cachePartition(
+          await getSessionProxyWorkspaceGrant(client, workspaceId, call),
+          workspaceId,
+          input.source,
+        ),
+      };
+    }
+  } catch (error) {
+    // Older APIs have no effective-grant read: only the artifact viewer is off.
+    if (!(error instanceof OpenGeniApiError) || error.status !== 404) throw error;
+  }
+  // Task usage limits are set by the product's server, never by the browser.
+  const {
+    artifacts: _upstreamArtifacts,
+    sessionUsageLimits: _upstreamUsageLimits,
+    ...conversationConfig
+  } = config;
+  if (!input.uploadsEnabled) {
+    // Stock UIs hide the attach control.
+    const uploads = config.fileUploads;
+    conversationConfig.fileUploads = {
+      ...(uploads && typeof uploads === "object" ? uploads : {}),
+      enabled: false,
+    };
+  }
+  return {
+    ...conversationConfig,
+    // The browser speaks this relay's contract, not the upstream deployment's:
+    // report the server SDK's revision so an Opengeni deploy never makes the
+    // embedded page look stale (and never triggers a host reload).
+    apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+    // The resolved workspace: a browser given only the relay's baseUrl reads
+    // it here instead of knowing any Opengeni id.
+    workspaceId,
+    artifacts,
+    // Explicit true also tells stock UIs to offer end users the model picker.
+    ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+    // With `createSession` the server owns chat tools, so the browser cannot
+    // add a newly connected capability to a chat: stock UIs then leave agent
+    // capability cards to the host.
+    chatConnections: input.chatConnections,
+  };
+}
 
-/** Response headers a passed-through read or write keeps. */
-const PASS_THROUGH_HEADERS = [
-  "content-type",
-  "content-length",
-  "content-disposition",
-  "etag",
-  "last-modified",
-  SESSION_SEQUENCE_HEADER,
-] as const;
-
-/** The user's access to the resolved workspace only, without key authority. */
 /**
  * The app's access context: the resolved workspace's effective grant only,
  * never the user's other workspaces or the key's own authority.
@@ -1508,7 +1384,7 @@ function scopedAccessContext(access: AccessContext, grant: AccessGrant): AccessC
   };
 }
 
-/** `catalog-assets/...` under this proxy's base path, or null. */
+/** `catalog-assets/...` under this relay's base path, or null. */
 function catalogAssetPath(pathname: string, basePath: string | undefined): string | null {
   const prefix = `${basePath !== undefined ? basePath.replace(/\/+$/, "") : ""}/v1/catalog-assets/`;
   const start = basePath !== undefined ? 0 : pathname.indexOf("/v1/catalog-assets/");
@@ -1518,15 +1394,6 @@ function catalogAssetPath(pathname: string, basePath: string | undefined): strin
   return `catalog-assets/${asset}`;
 }
 
-const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
-
-type RealtimeRoute = "begin" | "connect" | "heartbeat" | "end" | "activate" | "sync";
-const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set([
-  "webrtc",
-  "websocket",
-  "gateway",
-  "supergrok",
-]);
 /** Ledger entries that become (or join) messages and so accept `modelContext`. */
 const REALTIME_MESSAGE_KINDS: ReadonlySet<string> = new Set([
   "delegation_call",
@@ -1534,56 +1401,58 @@ const REALTIME_MESSAGE_KINDS: ReadonlySet<string> = new Set([
   "assistant_transcript",
 ]);
 
-/**
- * The live voice routes a browser call uses, after `realtime/`: begin, provider
- * connect, heartbeat, end, connection activation, and transcript sync. Bodies
- * pass to Opengeni, which validates them and binds the call to the acting user.
- */
-function realtimeRoute(method: string, rest: string[]): RealtimeRoute | null {
-  if (rest.length === 0) return method === "POST" ? "begin" : null;
-  if (rest.length === 1) {
-    if (REALTIME_CONNECT_ROUTES.has(rest[0]!)) return method === "POST" ? "connect" : null;
-    return method === "DELETE" ? "end" : null;
-  }
-  if (rest.length === 2 && rest[1] === "heartbeat") return method === "PATCH" ? "heartbeat" : null;
-  if (rest.length === 2 && rest[1] === "sync") return method === "POST" ? "sync" : null;
-  if (rest.length === 4 && rest[1] === "connections" && rest[3] === "activate") {
-    return method === "POST" ? "activate" : null;
-  }
-  return null;
-}
+type RealtimeMessageEntry = Record<string, unknown> & {
+  kind: NonNullable<SessionProxyMessageInput["realtimeKind"]>;
+};
 
-function hasRealtimeMessages(body: Record<string, unknown>): boolean {
+function isRealtimeMessage(entry: unknown): entry is RealtimeMessageEntry {
   return (
-    Array.isArray(body.entries) &&
-    body.entries.some(
-      (entry) =>
-        entry !== null &&
-        typeof entry === "object" &&
-        REALTIME_MESSAGE_KINDS.has((entry as { kind?: unknown }).kind as string),
-    )
+    entry !== null &&
+    typeof entry === "object" &&
+    REALTIME_MESSAGE_KINDS.has((entry as { kind?: unknown }).kind as string)
   );
 }
 
-/** Server context goes before the browser's on each message-bearing entry. */
-function withRealtimeContext(
-  body: Record<string, unknown>,
-  serverContext: string | undefined,
-): Record<string, unknown> {
-  if (!serverContext?.trim() || !Array.isArray(body.entries)) return body;
-  return {
-    ...body,
-    entries: body.entries.map((entry: unknown) => {
-      if (entry === null || typeof entry !== "object") return entry;
-      const record = entry as Record<string, unknown>;
-      if (!REALTIME_MESSAGE_KINDS.has(record.kind as string)) return entry;
-      const modelContext = joinContext(
-        serverContext,
-        typeof record.modelContext === "string" ? record.modelContext : undefined,
-      );
-      return modelContext ? { ...record, modelContext } : entry;
-    }),
-  };
+function hasRealtimeMessages(body: Record<string, unknown>): boolean {
+  return Array.isArray(body.entries) && body.entries.some(isRealtimeMessage);
+}
+
+/**
+ * Best-effort standalone rotation before work starts without a message body to
+ * carry it (a voice call, resume, retry, queue steer). Opengeni refuses it
+ * while a turn is running; that turn's message already refreshed them.
+ */
+async function refreshSessionCredentials(
+  client: ProxyClient,
+  workspaceId: string,
+  sessionId: string,
+  updates: SessionMcpCredentialUpdateInput[],
+  call: { signal: AbortSignal },
+): Promise<void> {
+  if (updates.length === 0) return;
+  try {
+    const servers = (await client.getSession(workspaceId, sessionId, call)).mcpServers ?? [];
+    const rotations = updates.flatMap((update) => {
+      const server = servers.find((candidate) => candidate.id === update.id);
+      return server
+        ? [
+            {
+              id: update.id,
+              expectedCredentialVersion: server.credentialVersion,
+              expectedServerUrl: server.url,
+              headers: update.headers,
+            },
+          ]
+        : [];
+    });
+    if (rotations.length === 0) return;
+    await client.rotateSessionMcpCredentials(workspaceId, sessionId, {
+      operationKey: crypto.randomUUID(),
+      updates: rotations,
+    });
+  } catch (error) {
+    if (!(error instanceof OpenGeniApiError)) throw error;
+  }
 }
 
 type NormalizedToolServer = SessionProxyToolServer & {
@@ -1634,16 +1503,28 @@ function isToolName(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-/** Attach the product tool server with a fresh per-user token. */
+/**
+ * Attach the product tool server with a fresh per-user token. An id collision
+ * in the browser's own create request is the browser's error; one returned by
+ * `createSession` is the product's, so it fails as a server error.
+ */
 function withToolServer(
   created: CreateSessionRequest,
   toolServer: NormalizedToolServer,
   token: string,
+  from: "browser" | "createSession",
 ): CreateSessionRequest {
   const servers = created.mcpServers ?? [];
   if (servers.some((server) => server.id === toolServer.id)) {
-    throw new TypeError(
-      `createSession already attaches an MCP server with the toolServer id "${toolServer.id}".`,
+    if (from === "createSession") {
+      throw new TypeError(
+        `createSession already attaches an MCP server with the toolServer id "${toolServer.id}".`,
+      );
+    }
+    throw new ProxyRejection(
+      400,
+      "tool_server_id_taken",
+      `An MCP server with the tool server id "${toolServer.id}" is already attached.`,
     );
   }
   const ask = toolServer.approvals?.ask;
@@ -1670,7 +1551,7 @@ function withToolServer(
     // Omitted tools keep workspace defaults; the attachment alone selects the
     // server, and its `eager` marker names the first-request tools. An explicit
     // allow-list without an `eager` choice gets every server tool on the first
-    // request, as before.
+    // request.
     ...(Array.isArray(tools) && !tools.some((tool) => tool.id === toolServer.id)
       ? {
           tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: eager ?? true }],
@@ -1680,27 +1561,15 @@ function withToolServer(
 }
 
 const EDITABLE_ARTIFACT_LIVE_PATH = "/v1/editable-artifacts/live";
-const SITE_LIST_FIELDS = ["limit", "cursor", "status"] as const;
-const TICKET_FIELDS = [
-  "replicaId",
-  "modality",
-  "liveProtocolVersion",
-  "kernelVersion",
-  "modelSchemaVersion",
-  "snapshotVersion",
-  "commandProtocolVersion",
-  "committedTransactionProtocolVersion",
-] as const;
-// Same delivery contract as Opengeni's own route: the browser fetches the
-// HTML and renders it in a sandboxed frame; opening the URL downloads it.
-const SITE_HTML_HEADERS = {
-  "Content-Type": "text/html; charset=utf-8",
-  "Cache-Control": "private, no-store",
-  "Content-Security-Policy": "sandbox allow-scripts",
-  "Cross-Origin-Resource-Policy": "same-origin",
-  "X-Content-Type-Options": "nosniff",
-  "Content-Disposition": 'attachment; filename="site.html"',
-} as const;
+
+function optionalLiveSocketUrl(value: string, explicit: boolean): string | null {
+  try {
+    return liveSocketUrl(value);
+  } catch (error) {
+    if (explicit) throw error;
+    return null;
+  }
+}
 
 function liveSocketUrl(value: string): string {
   const url = new URL(value);
@@ -1710,67 +1579,6 @@ function liveSocketUrl(value: string): string {
     throw new TypeError("editableLiveUrl must be an HTTP(S) or WS(S) URL");
   }
   return url.href;
-}
-
-function boundedSiteHtml(
-  body: ReadableStream<Uint8Array> | null,
-  signal: AbortSignal,
-): ReadableStream<Uint8Array> {
-  const reader = body?.getReader();
-  let bytes = 0;
-  let settled = false;
-  let controller: ReadableStreamDefaultController<Uint8Array>;
-  const cleanup = () => signal.removeEventListener("abort", abort);
-  const cancel = async (reason: unknown) => {
-    if (settled) return;
-    settled = true;
-    cleanup();
-    await reader?.cancel(reason).catch(() => undefined);
-    reader?.releaseLock();
-  };
-  const abort = () => {
-    if (settled) return;
-    controller.error(signal.reason);
-    void cancel(signal.reason);
-  };
-  return new ReadableStream<Uint8Array>(
-    {
-      start(value) {
-        controller = value;
-        if (signal.aborted) abort();
-        else signal.addEventListener("abort", abort, { once: true });
-      },
-      async pull(value) {
-        if (settled) return;
-        try {
-          const chunk = await reader?.read();
-          if (settled) return;
-          if (!chunk || chunk.done) {
-            settled = true;
-            cleanup();
-            reader?.releaseLock();
-            value.close();
-            return;
-          }
-          bytes += chunk.value.byteLength;
-          if (bytes > SESSION_PROXY_SITE_HTML_MAX_BYTES) {
-            const error = new SessionProxySiteHtmlTooLargeError();
-            value.error(error);
-            await cancel(error);
-            return;
-          }
-          value.enqueue(chunk.value);
-        } catch (error) {
-          if (settled) return;
-          value.error(error);
-          await cancel(error);
-        }
-      },
-      cancel,
-    },
-    // Read only when the downstream consumer requests a chunk.
-    { highWaterMark: 0 },
-  );
 }
 
 /**
@@ -1813,7 +1621,7 @@ export async function artifactViewerCapability(input: {
 
 /** The editor's browser cache partition for this proxied user and workspace. */
 async function cachePartition(
-  grant: import("./types").AccessGrant,
+  grant: AccessGrant,
   workspaceId: string,
   source: string,
 ): Promise<{
@@ -1852,71 +1660,14 @@ async function cachePartition(
 async function legacyViewerGrant(
   client: Pick<ProxyClient, "getAccessContext">,
   workspaceId: string,
-): Promise<import("./types").AccessGrant> {
+): Promise<AccessGrant> {
   const access = await client.getAccessContext();
   const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
   if (!grant) reject(403, "workspace_not_allowed", "This workspace is not available.");
   return grant;
 }
 
-/** The browser's byte range, passed through unchanged when well formed. */
-function retainedRange(request: Request): { range?: string } {
-  const range = request.headers.get("range");
-  if (range === null) return {};
-  if (range.length > 128 || /[^\x20-\x7e]/.test(range)) {
-    reject(400, "invalid_range", "Range must be at most 128 printable ASCII bytes.");
-  }
-  return { range };
-}
-
-/** One bounded retained-artifact page, with the range facts the browser SDK verifies. */
-function retainedContent(content: RetainedArtifactContent): Response {
-  return new Response(content.bytes as Uint8Array<ArrayBuffer>, {
-    status: content.status,
-    headers: {
-      "Content-Type": content.contentType,
-      "Content-Length": String(content.contentLength),
-      ...(content.contentRange ? { "Content-Range": content.contentRange } : {}),
-      "Accept-Ranges": "bytes",
-      "Cache-Control": "private, no-store",
-      // Bytes for the conversation's own reader; never rendered on this origin.
-      "Content-Security-Policy": "sandbox",
-      "Content-Disposition": "attachment",
-      "Cross-Origin-Resource-Policy": "same-origin",
-      "X-Content-Type-Options": "nosniff",
-    },
-  });
-}
-
-/** Sandbox link download: one path, no route/target override. */
-function sandboxRead(body: Record<string, unknown> | undefined): Record<string, unknown> {
-  const path = body?.path;
-  const encoding = body?.encoding;
-  const maxBytes = body?.maxBytes;
-  if (typeof path !== "string" || !path || path.length > 4096) {
-    reject(400, "invalid_body", "path is required.");
-  }
-  if (encoding !== undefined && encoding !== "utf8" && encoding !== "base64") {
-    reject(400, "invalid_body", "encoding must be utf8 or base64.");
-  }
-  if (
-    maxBytes !== undefined &&
-    (typeof maxBytes !== "number" ||
-      !Number.isSafeInteger(maxBytes) ||
-      maxBytes < 1 ||
-      maxBytes > 25 * 1024 * 1024)
-  ) {
-    reject(400, "invalid_body", "maxBytes must be an integer from 1 to 26214400.");
-  }
-  return {
-    path,
-    workspaceOnly: true,
-    ...(encoding === undefined ? {} : { encoding }),
-    ...(maxBytes === undefined ? {} : { maxBytes }),
-  };
-}
-
-/** Native path segments after the mount prefix, starting at `v1`'s child; null when not a proxied path. */
+/** Native path segments after the mount prefix, starting at `v1`'s child; null when not a relayed path. */
 function routeSegments(pathname: string, basePath: string | undefined): string[] | null {
   let rest: string;
   if (basePath !== undefined) {
@@ -1938,8 +1689,8 @@ function routeSegments(pathname: string, basePath: string | undefined): string[]
     } catch {
       return null;
     }
-    // Rejects empty, dot, and encoded-separator segments before any SDK path is built.
-    if (!SEGMENT.test(decoded)) return null;
+    // Rejects empty, dot, and encoded-separator segments before any path is built.
+    if (!relayableSegment(decoded)) return null;
     segments.push(decoded);
   }
   return segments;
@@ -1948,11 +1699,9 @@ function routeSegments(pathname: string, basePath: string | undefined): string[]
 async function readJsonBody(
   request: Request,
   maxBytes: number,
-  optional = false,
 ): Promise<Record<string, unknown> | undefined> {
   const bytes = await readBoundedBytes(request, maxBytes);
   if (bytes.byteLength === 0) {
-    if (optional) return undefined;
     reject(400, "invalid_body", "A JSON object body is required.");
   }
   const contentType = request.headers.get("content-type") ?? "";
@@ -1999,17 +1748,6 @@ async function readBoundedBytes(
     offset += chunk.byteLength;
   }
   return bytes;
-}
-
-function pick(
-  body: Record<string, unknown> | undefined,
-  fields: readonly string[],
-): Record<string, unknown> {
-  const picked: Record<string, unknown> = {};
-  for (const field of fields) {
-    if (body && Object.hasOwn(body, field)) picked[field] = body[field];
-  }
-  return picked;
 }
 
 function createInput(
@@ -2097,9 +1835,67 @@ function createResources(value: unknown): FileResourceRef[] {
 }
 
 /** Browser attachments are added; explicit browser model choices win, as for messages. */
+type BrowserCreateFields = {
+  modelContext?: string | undefined;
+  timeZone?: string | undefined;
+  clientEventId?: string | undefined;
+  expectedNewSessionDraftRevision?: number | undefined;
+};
+
+/**
+ * The browser's own context and the packaged app's create bookkeeping. Message
+ * context is appended after the server's, as on follow-up messages. The app
+ * also sends the id of its first message event and the revision of the
+ * new-chat draft it sent, which the relay clears once the chat exists. It
+ * sends `visibility` and an empty `connectionAccounts` too: the server chooses
+ * both, so those are dropped, and any account selection is refused.
+ */
+function browserCreateFields(body: Record<string, unknown> | undefined): BrowserCreateFields {
+  const fields: BrowserCreateFields = {};
+  const modelContext = body?.modelContext;
+  if (modelContext !== undefined && typeof modelContext !== "string") {
+    reject(400, "invalid_model_context", "modelContext must be a string.");
+  }
+  if (modelContext?.trim()) fields.modelContext = modelContext;
+  const timeZone = normalizeMessageTimeZone(body?.timeZone);
+  if (timeZone) fields.timeZone = timeZone;
+  const visibility = body?.visibility;
+  if (visibility !== undefined && visibility !== "workspace" && visibility !== "private") {
+    reject(400, "invalid_visibility", "visibility must be workspace or private.");
+  }
+  const accounts = body?.connectionAccounts;
+  if (accounts !== undefined && (!Array.isArray(accounts) || accounts.length > 0)) {
+    reject(
+      403,
+      "connection_account_not_allowed",
+      "The server chooses which connected accounts a chat uses.",
+    );
+  }
+  const clientEventId = body?.clientEventId;
+  if (clientEventId !== undefined) {
+    if (typeof clientEventId !== "string" || !clientEventId) {
+      reject(400, "invalid_client_event_id", "clientEventId must be a non-empty string.");
+    }
+    fields.clientEventId = clientEventId;
+  }
+  const revision = body?.expectedNewSessionDraftRevision;
+  if (revision !== undefined) {
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+      reject(
+        400,
+        "invalid_draft_revision",
+        "expectedNewSessionDraftRevision must be a non-negative integer.",
+      );
+    }
+    fields.expectedNewSessionDraftRevision = revision;
+  }
+  return fields;
+}
+
 function withBrowserCreateChoices(
   created: CreateSessionRequest,
   input: SessionProxyCreateInput,
+  browser: BrowserCreateFields = {},
 ): CreateSessionRequest {
   const existing = created.resources ?? [];
   const attached = new Set(
@@ -2118,48 +1914,46 @@ function withBrowserCreateChoices(
     ...(input.model ? { model: input.model } : {}),
     ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
     ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+    ...(created.clientEventId === undefined && browser.clientEventId
+      ? { clientEventId: browser.clientEventId }
+      : {}),
+    // The person's zone unless the host chose one for this create.
+    ...(created.timeZone === undefined && browser.timeZone && input.startMode !== "realtime"
+      ? { timeZone: browser.timeZone }
+      : {}),
   };
 }
 
-/** One multipart recording: only the audio, its MIME type, and its duration pass. */
-async function transcriptionInput(request: Request): Promise<{
-  audio: File;
-  mimeType: string;
-  durationSeconds?: number;
-  signal: AbortSignal;
-}> {
-  const contentType = request.headers.get("content-type") ?? "";
-  if (!/^multipart\/form-data\b/i.test(contentType)) {
-    reject(415, "unsupported_media_type", "Send multipart/form-data.");
-  }
-  const bytes = await readBoundedBytes(request, MAX_TRANSCRIPTION_BODY_BYTES);
-  // Only the fields this route reads; structural, so DOM and React Native
-  // typings of FormData both satisfy it.
-  let form: { get(name: string): File | string | null };
+/**
+ * Clear the new-chat draft the packaged app just sent. The API can clear it
+ * during create only when the create request is that draft, and the
+ * `createSession` hook decides the request, so the relay clears it after the
+ * chat exists: the same text-free next draft, one revision on. A draft that
+ * changed meanwhile is left alone, and a failure here never fails the create.
+ */
+async function clearSentNewSessionDraft(
+  client: ProxyClient,
+  workspaceId: string,
+  revision: number,
+): Promise<void> {
   try {
-    form = (await new Response(bytes, {
-      headers: { "Content-Type": contentType },
-    }).formData()) as unknown as { get(name: string): File | string | null };
-  } catch {
-    reject(400, "invalid_audio", "The recording could not be read.");
+    const draft = await client.getNewSessionDraft(workspaceId);
+    if (draft.revision !== revision) return;
+    const {
+      revision: _revision,
+      selectionHistory: _history,
+      updatedAt: _updatedAt,
+      ...rest
+    } = draft;
+    await client.saveNewSessionDraft(workspaceId, {
+      ...rest,
+      text: "",
+      resources: draft.resources.filter((resource) => resource.kind === "repository"),
+      expectedRevision: revision,
+    });
+  } catch (error) {
+    if (!(error instanceof OpenGeniApiError)) throw error;
   }
-  const audio = form.get("audio");
-  const mimeType = form.get("mimeType");
-  const duration = form.get("durationSeconds");
-  if (!(audio instanceof File)) reject(400, "invalid_audio", "Audio file is required.");
-  const durationSeconds = typeof duration === "string" && duration ? Number(duration) : undefined;
-  if (
-    durationSeconds !== undefined &&
-    !(Number.isFinite(durationSeconds) && durationSeconds >= 0)
-  ) {
-    reject(400, "invalid_audio", "durationSeconds must be a non-negative number.");
-  }
-  return {
-    audio,
-    mimeType: typeof mimeType === "string" && mimeType ? mimeType : audio.type,
-    ...(durationSeconds !== undefined ? { durationSeconds } : {}),
-    signal: request.signal,
-  };
 }
 
 /** Browser payloads cannot supply server-owned credential rotations. */
@@ -2196,17 +1990,22 @@ function sanitizeMessage(value: unknown, modelSelection: boolean): Record<string
   return input;
 }
 
-function clientEvent(body: Record<string, unknown> | undefined): Record<string, unknown> & {
-  type: string;
-} {
-  switch (body?.type) {
-    case "user.message":
-    case "user.approvalDecision":
-    case "user.humanInputResponse":
-      return body as Record<string, unknown> & { type: string };
-    default:
-      return reject(403, "event_not_allowed", "This session event type is not available.");
+/** The browser's model context as hook input, when it sent some. */
+function withBrowserContext(context: unknown): { browserContext?: string } {
+  if (context === undefined) return {};
+  if (typeof context !== "string") {
+    reject(400, "invalid_model_context", "modelContext must be a string.");
   }
+  return context.trim() ? { browserContext: context } : {};
+}
+
+/** The browser's context as the host decided: kept (absent), replaced (a string) or dropped (`null`). */
+function decidedBrowserContext(
+  extras: SessionProxyMessageExtras | undefined,
+  sent: string | undefined,
+): string | undefined {
+  if (extras?.browserContext === undefined) return sent;
+  return extras.browserContext ?? undefined;
 }
 
 function joinContext(...parts: Array<string | undefined>): string | undefined {
@@ -2217,116 +2016,40 @@ function joinContext(...parts: Array<string | undefined>): string | undefined {
   return joined || undefined;
 }
 
-async function listEvents(
-  client: ProxyClient,
-  path: string,
-  query: Record<string, string>,
-  call: { signal: AbortSignal },
-): Promise<Response> {
-  if (query.mode === "forensic") {
-    reject(403, "forensic_events_not_allowed", "Forensic event reads are not proxied.");
+/** The key Opengeni accepts an action once under: `clientEventId`, else `idempotencyKey`. */
+function actionKey(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const body = value as { clientEventId?: unknown; idempotencyKey?: unknown };
+  for (const key of [body.clientEventId, body.idempotencyKey]) {
+    if (typeof key === "string" && key.trim()) return key.trim();
   }
-  const upstream = await client.requestJsonResponse(path, query, call);
-  const headers: Record<string, string> = {};
-  upstream.headers.forEach((value, name) => {
-    const lower = name.toLowerCase();
-    // Paging metadata only; the upstream contract revision stays behind the proxy.
-    if (lower.startsWith("x-opengeni-") && lower !== OPENGENI_API_CONTRACT_HEADER) {
-      headers[name] = value;
-    }
-  });
-  return new Response(await upstream.text(), {
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-      ...headers,
-    },
-  });
+  return undefined;
 }
 
-/** Re-emit the workspace control/interaction stream the React provider subscribes to. */
-function workspaceLiveStream(
-  client: ProxyClient,
-  workspaceId: string,
-  params: URLSearchParams,
-  request: Request,
-  heartbeatMs: number,
-): Response {
-  const cursor = (name: string): number => {
-    const value = Number(params.get(name) ?? "0");
-    return Number.isSafeInteger(value) && value > 0 ? value : 0;
-  };
-  const upstream = new AbortController();
-  if (request.signal.aborted) upstream.abort();
-  else
-    request.signal.addEventListener("abort", () => upstream.abort(), {
-      once: true,
-    });
-  const events = client.streamWorkspaceLiveEvents(workspaceId, {
-    controlAfter: cursor("controlAfter"),
-    interactionAfter: cursor("interactionAfter"),
-    signal: upstream.signal,
-  });
-  const iterator = events[Symbol.asyncIterator]();
-  const encoder = new TextEncoder();
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
-  const stop = () => {
-    if (heartbeat !== undefined) clearInterval(heartbeat);
-    heartbeat = undefined;
-  };
-  const body = new ReadableStream<Uint8Array>({
-    start: (controller) => {
-      heartbeat = setInterval(() => {
-        try {
-          controller.enqueue(encoder.encode(": ping\n\n"));
-        } catch {
-          stop();
-        }
-      }, heartbeatMs);
-    },
-    pull: async (controller) => {
-      const next = await iterator.next().catch((error: unknown) => {
-        stop();
-        throw error;
-      });
-      if (next.done) {
-        stop();
-        controller.close();
-        return;
-      }
-      const event = next.value;
-      controller.enqueue(
-        encoder.encode(
-          `${"sequence" in event ? `id: ${event.sequence}\n` : ""}event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`,
-        ),
-      );
-    },
-    cancel: () => {
-      stop();
-      upstream.abort();
-      void Promise.resolve(iterator.return?.(undefined)).catch(() => undefined);
-    },
-  });
-  return new Response(body, {
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
-  });
+function keyed(key: string | undefined): { clientEventId?: string } {
+  return key ? { clientEventId: key } : {};
+}
+
+/** Statuses after which the relay cannot tell whether Opengeni acted. */
+function outcomeUnknown(status: number): boolean {
+  return status === 408 || status >= 500;
 }
 
 /**
- * The proxy always calls Opengeni with the server's own key, so an upstream
+ * The relay always calls Opengeni with the server's own key, so an upstream
  * 401 means that key is wrong, expired or revoked, never that the end user is
  * signed out. Tell the developer once, in the server log, what to fix.
  */
-function warnRejectedApiKey(error: OpenGeniApiError, notice: { sent: boolean }): void {
+function warnRejectedApiKey(error: OpenGeniApiError | Response, notice: { sent: boolean }): void {
   if (notice.sent) return;
   notice.sent = true;
+  const correlationId =
+    error instanceof Response
+      ? error.headers.get("x-opengeni-correlation-id")
+      : error.correlationId;
   console.warn(
     `[@opengeni/sdk] Opengeni rejected the session proxy's API key (401${
-      error.correlationId ? `, reference ${error.correlationId}` : ""
+      correlationId ? `, reference ${correlationId}` : ""
     }). It may be expired, revoked or mistyped: create a new key in Opengeni under ` +
       "Organization settings > Developer and update OPENGENI_API_KEY on the server.",
   );

@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { InteractionControllerError, InteractionDefiniteDriverError } from "@opengeni/interaction";
+import {
+  InteractionControllerError,
+  InteractionDefiniteDriverError,
+  InteractionOutcomeUnknownDriverError,
+} from "@opengeni/interaction";
 import { AttachedBrowserBridgeError } from "../src/attached-bridge";
 import {
   CdpCommandTimeoutError,
@@ -73,6 +77,45 @@ class FakeBridge implements AttachedBrowserBridgeTransport {
 }
 
 describe("AttachedChromeCdpConnection", () => {
+  test("a tab close whose profile connection ended is an unknown outcome, not a failure", async () => {
+    const closing = (failure: Error) =>
+      new AttachedChromeCdpConnection(
+        {
+          async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+            if (payload.type === "tabs.close") throw failure;
+            return {} as T;
+          },
+          close() {},
+        },
+        { browserName: "Chrome", browserVersion: "151.0.0.0" },
+      );
+    for (const failure of [
+      // The profile's connection ended with the command pending (Chrome
+      // closed the profile, or the extension stopped).
+      new AttachedBrowserBridgeError("resource_unavailable", "attached browser unavailable", true),
+      new AttachedBrowserBridgeError("transport_failed", "attached browser bridge closed", true),
+      new AttachedBrowserBridgeError("timeout", "attached browser command timed out", true),
+    ]) {
+      const connection = closing(failure);
+      const error = await connection
+        .send("Target.closeTarget", { targetId: "7" })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(InteractionOutcomeUnknownDriverError);
+      expect(error).toMatchObject({ code: "outcome_unknown", retryable: false });
+      connection.close();
+    }
+    // Chrome says the tab is already gone.
+    const gone = closing(
+      new AttachedBrowserBridgeError("driver_rejected", "No tab with id: 7.", false),
+    );
+    const error = await gone
+      .send("Target.closeTarget", { targetId: "7" })
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(InteractionDefiniteDriverError);
+    expect(error).toMatchObject({ code: "target_not_found" });
+    gone.close();
+  });
+
   test("reports a tab's download browser-wide with the file Chrome saved", async () => {
     const commands: Array<Record<string, unknown>> = [];
     let polls = 0;
@@ -428,6 +471,59 @@ describe("AttachedChromeCdpConnection", () => {
     expect(bridge.commands).toContainEqual({ type: "debugger.detach", tabId: "7" });
     expect(bridge.closed).toBe(true);
   });
+
+  test("polls slowly while unused and resumes fast polling on the next command", async () => {
+    const bridge = new FakeBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    connection.on("Page.frameNavigated", () => undefined);
+
+    // Fast while recently used.
+    await Bun.sleep(500);
+    expect(bridge.pollCount).toBeGreaterThan(4);
+
+    // After the quiet spell, at most about one poll a second.
+    await Bun.sleep(2_000);
+    const idleStart = bridge.pollCount;
+    await Bun.sleep(1_100);
+    expect(bridge.pollCount - idleStart).toBeLessThanOrEqual(2);
+
+    // A command wakes the idle wait at once and polling is fast again.
+    const beforeCommand = bridge.pollCount;
+    await connection.send("Target.getTargets");
+    await Bun.sleep(300);
+    expect(bridge.pollCount - beforeCommand).toBeGreaterThan(3);
+
+    await connection.shutdown();
+  }, 10_000);
+
+  test("keeps polling fast while a command runs past the quiet window", async () => {
+    class SlowListBridge extends FakeBridge {
+      slow = false;
+      override async request<T = unknown>(payload: Readonly<Record<string, unknown>>): Promise<T> {
+        if (payload.type === "tabs.list" && this.slow) await Bun.sleep(3_500);
+        return await super.request<T>(payload);
+      }
+    }
+    const bridge = new SlowListBridge();
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151.0.0.0",
+    });
+    connection.on("Page.frameNavigated", () => undefined);
+    bridge.slow = true;
+    const command = connection.send("Target.getTargets");
+
+    await Bun.sleep(2_500);
+    const during = bridge.pollCount;
+    await Bun.sleep(500);
+    expect(bridge.pollCount - during).toBeGreaterThan(4);
+
+    await command;
+    await connection.shutdown();
+  }, 10_000);
 });
 
 for (const lost of [false, true]) {
@@ -665,16 +761,15 @@ describe("attached Chrome event stream recovery", () => {
     });
     try {
       await connection.send("Target.attachToTarget", { targetId: "7" });
+      const polls = () => bridge.commands.filter((command) => command.type === "debugger.poll");
+      const before = polls().length;
       bridge.pollFailure = new AttachedBrowserBridgeError(
         "fenced",
         "attached browser connection changed",
         true,
       );
       bridge.failingPolls = Number.POSITIVE_INFINITY;
-      await eventually(
-        () => bridge.commands.filter((command) => command.type === "debugger.poll").length > 2,
-        "the fenced poll",
-      );
+      await eventually(() => polls().length > before, "the fenced poll");
       await new Promise((resolve) => setTimeout(resolve, 20));
       const failure = await connection.send("Target.getTargets").catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(InteractionControllerError);

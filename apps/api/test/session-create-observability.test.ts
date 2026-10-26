@@ -1,3 +1,5 @@
+import { waitFor } from "@opengeni/testing/process";
+import { readSessionResponsePair } from "../src/routes/session-response-reads";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { parseSync } from "oxc-parser";
@@ -8,7 +10,7 @@ import {
   variableSetsRemovedResponse,
   withoutEmptyLegacyVariableSetFields,
 } from "../src/http/variable-sets-removed";
-import { siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
 import { currentSiteViewerRlsContext } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
@@ -85,7 +87,8 @@ function productionRoute() {
       withEffectivePolicy, measureSessionCreatePhase, legacyVariableSetFields,
       variableSetsRemovedResponse, withoutEmptyLegacyVariableSetFields,
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
-      siteFrameBodyRefusal } = ports;
+      siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
+      SITE_FRAME_HEADER, hasPermission, siteViewConversationContext } = ports;
     ${code}
     return handler;
   `,
@@ -120,6 +123,12 @@ function routeFixture() {
     json: (body: unknown, status: number) => ({ body, status }),
   };
   const ports = {
+    readSessionResponsePair,
+    isAgentActingAsPerson: () => false,
+    sessionUsageLimitForRead: async (...args: unknown[]): Promise<any> => {
+      calls.push({ name: "usage", args });
+      return undefined;
+    },
     measureSessionCreatePhase,
     legacyVariableSetFields,
     variableSetsRemovedResponse,
@@ -144,6 +153,12 @@ function routeFixture() {
     currentSiteSessionOrigin,
     currentSiteViewerRlsContext,
     siteFrameBodyRefusal,
+    SITE_FRAME_HEADER,
+    // The Site view's first-message context is for people who may publish.
+    hasPermission: () => false,
+    siteViewConversationContext: async () => {
+      throw new Error("Unexpected Site view context");
+    },
     createSessionForRequest: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;
@@ -360,4 +375,34 @@ test("held route diagnostics end only with work and keep concurrent child scopes
   }
   expect(await running).toBe("3".repeat(16));
   expect(slow.endings).toEqual([{ attributes: { outcome: "completed" } }]);
+});
+
+test("committed creation starts usage and policy response reads together", async () => {
+  const f = routeFixture();
+  Object.assign(f.payload, { usageLimitMicros: 123 });
+  const usage = deferred<any>();
+  f.ports.sessionUsageLimitForRead = (...args) => {
+    f.calls.push({ name: "usage", args });
+    return usage.promise;
+  };
+  const running = f.run();
+  f.hold.authorization.resolve(f.authorization);
+  f.hold.create.resolve({ id: "committed" });
+  await waitFor(() => f.calls.some((call) => call.name === "usage"), {
+    timeoutMs: 1000,
+    intervalMs: 1,
+  });
+  expect(
+    f.calls.filter((call) => ["projection", "usage"].includes(call.name)).map((call) => call.name),
+  ).toEqual(["projection", "usage"]);
+  usage.resolve({ limitMicros: 123, state: "active" });
+  f.hold.projection.resolve({ id: "committed", policy: "same policy" });
+  expect(await running).toEqual({
+    body: {
+      id: "committed",
+      policy: "same policy",
+      usageLimit: { limitMicros: 123, state: "active" },
+    },
+    status: 202,
+  });
 });

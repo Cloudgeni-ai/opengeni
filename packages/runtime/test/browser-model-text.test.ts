@@ -133,6 +133,41 @@ describe("browser model text", () => {
     );
   });
 
+  test("a clipped name, value or text keeps its ref, its full length and the way to read it", () => {
+    const text = browserObservationText({
+      target,
+      agentView: {
+        sourceKind: "snapshot",
+        nodes: [
+          {
+            ref: "e0000000c",
+            role: "textbox",
+            depth: 0,
+            name: "Policy",
+            value: `${"a".repeat(179)}…`,
+            valueChars: 3_299,
+            states: ["readonly"],
+          },
+          {
+            ref: "e0000000d",
+            role: "text",
+            depth: 0,
+            name: `${"b".repeat(179)}…`,
+            nameChars: 1_240,
+          },
+          { ref: "e0000000e", role: "text", depth: 0, name: "Short" },
+        ],
+        clippedFieldCount: 2,
+      },
+    });
+    expect(text.split("\n").slice(1)).toEqual([
+      `- textbox "Policy" [e0000000c] value=${JSON.stringify(`${"a".repeat(179)}…`)} valueChars=3299 readonly`,
+      `- text ${JSON.stringify(`${"b".repeat(179)}…`)} nameChars=1240 [e0000000d]`,
+      '- text "Short"',
+      "(2 long fields clipped; browser_read mode=dom with an element's ref reads it in full)",
+    ]);
+  });
+
   test("says when no accessibility view is available", () => {
     expect(
       browserObservationText({ target, agentView: { sourceKind: "none", nodes: [] } }),
@@ -166,6 +201,68 @@ describe("browser model text", () => {
       'Acted on: #0 button "Place order" [e0000000f] in form "Delivery"',
       'Tab T1: "Checkout" https://shop.example/checkout',
     ]);
+  });
+
+  test("an action receipt passes on what its actions noted, such as a network that stayed busy", () => {
+    const text = browserActionText({
+      targetId: "T1",
+      state: "completed",
+      error: null,
+      notes: [
+        {
+          message:
+            "page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there",
+        },
+      ],
+      observation: formObservation(),
+    });
+    expect(text.split("\n").slice(0, 3)).toEqual([
+      "Action completed on tab T1.",
+      "Note: page loaded; its network was still busy after 30 s (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there.",
+      'Tab T1: "Checkout" https://shop.example/checkout',
+    ]);
+  });
+
+  test("an opened Chrome profile names the computer it is on", () => {
+    const session = {
+      id: "11111111-1111-4111-8111-111111111111",
+      lifecycle: "active",
+      placement: { kind: "attached_device" },
+      engine: "chromium",
+    };
+    const chosen = "22222222-2222-4222-8222-222222222222";
+    const other = "33333333-3333-4333-8333-333333333333";
+    const unknown = "44444444-4444-4444-8444-444444444444";
+    expect(
+      browserOpenText({
+        session,
+        targets: [],
+        attachedProfile: {
+          id: chosen,
+          name: "Person 1",
+          profileLabel: "ada@example.com",
+          machine: "Ada's Mac mini",
+          onThisMachine: true,
+        },
+        otherAttachedProfiles: [
+          { id: other, name: "Work", machine: "Ada's MacBook Pro" },
+          { id: unknown, name: "Old" },
+        ],
+      }).split("\n"),
+    ).toEqual([
+      `BrowserSession ${session.id} (active): chromium on the user's own Chrome`,
+      `Attached Chrome profile: "Person 1" (ada@example.com) on "Ada's Mac mini" (this session's machine) deviceId ${chosen}`,
+      `Other attached profiles: "Work" on "Ada's MacBook Pro" deviceId ${other}; "Old" deviceId ${unknown}`,
+      "No tabs are open.",
+    ]);
+    // A profile on another computer says which, with no marker.
+    expect(
+      browserOpenText({
+        session,
+        targets: [],
+        attachedProfile: { id: other, name: "Work", machine: "Ada's MacBook Pro" },
+      }).split("\n")[1],
+    ).toBe(`Attached Chrome profile: "Work" on "Ada's MacBook Pro" deviceId ${other}`);
   });
 
   test("open, tabs and read views", () => {

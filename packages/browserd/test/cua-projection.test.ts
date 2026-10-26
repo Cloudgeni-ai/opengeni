@@ -1,6 +1,84 @@
 import { expect, test } from "bun:test";
 import { InteractionSemanticNode } from "@opengeni/contracts";
-import { projectElements, unindexedTextByElement } from "../src/cua/projection";
+import {
+  dateFields,
+  dateFieldValueFromParts,
+  dateFieldTyping,
+  locate,
+  projectElements,
+  unindexedTextByElement,
+} from "../src/cua/projection";
+
+test("a table cell macOS repeats under its AXColumn is one element to a locator", () => {
+  const [row, column, elsewhere] = projectElements(
+    [
+      { x: 200, y: 459 },
+      { x: 200, y: 459 },
+      { x: 200, y: 900 },
+    ].map((frame, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      role: "AXLink",
+      label: "Juniper Dental",
+      actions: ["AXPress"],
+      frame: { ...frame, w: 106, h: 19 },
+    })),
+    "macos",
+  );
+  const locator = { kind: "role", role: "link", name: "Juniper Dental", exact: true } as const;
+  expect(locate([row!, column!], locator).ref).toBe(row!.ref);
+  expect(() => locate([row!, column!, elsewhere!], locator)).toThrow(
+    "CUA locator must resolve to exactly one observed element",
+  );
+});
+
+test("an exact name is the whole name in any case and spacing", () => {
+  const [save, saveAs] = projectElements(
+    ["  Save  changes ", "Save changes as"].map((label, offset) => ({
+      element_index: offset + 1,
+      element_token: `snapshot:${offset + 1}`,
+      role: "AXButton",
+      label,
+      actions: ["AXPress"],
+      frame: { x: 10, y: 10 + offset * 40, w: 80, h: 20 },
+    })),
+    "macos",
+  );
+  const exact = (name: string) => ({ kind: "role", role: "button", name, exact: true }) as const;
+  expect(locate([save!, saveAs!], exact("save changes")).ref).toBe(save!.ref);
+  expect(locate([save!, saveAs!], exact("Save Changes As")).ref).toBe(saveAs!.ref);
+  expect(() => locate([save!, saveAs!], exact("Save"))).toThrow(
+    "CUA locator must resolve to exactly one observed element",
+  );
+});
+
+test("a Linux or Windows checkbox or switch reads whether it is on as its value", () => {
+  const element = (role: string, selected: boolean, index: number) => ({
+    element_index: index,
+    element_token: `snapshot:${index}`,
+    role,
+    label: `Option ${index}`,
+    selected,
+    actions: ["click"],
+  });
+  const linux = projectElements(
+    [
+      element("check box", true, 1),
+      element("check box", false, 2),
+      element("switch", true, 3),
+      element("radio button", true, 4),
+    ],
+    "linux",
+  );
+  expect(linux.map((node) => node.value)).toEqual(["1", "0", "1", undefined]);
+  const [windows] = projectElements([element("CheckBox", false, 5)], "windows");
+  expect(windows).toMatchObject({ role: "checkbox", value: "0" });
+  const [mac] = projectElements(
+    [{ ...element("AXCheckBox", false, 6), value: "1", actions: ["AXPress"] }],
+    "macos",
+  );
+  expect(mac!.value).toBe("1");
+});
 
 test("desktop elements with document-sized labels and values still form valid nodes", () => {
   const [node] = projectElements(
@@ -257,4 +335,159 @@ test("Chrome tabs are named without their live memory usage", () => {
     "Player - Audio playing",
     "Memory usage - 10 MB notes",
   ]);
+});
+
+/** Chrome's elements for a page with one web date or time field. */
+function webDateField(
+  role: "AXDateField" | "AXTimeField",
+  label: string,
+  parts: string[],
+  value?: string,
+) {
+  return [
+    { element_index: 0, role: "AXWindow", label: "Page", actions: [] },
+    { element_index: 1, parent_index: 0, role: "AXWebArea", label: "Page", actions: [] },
+    {
+      element_index: 2,
+      element_token: "s1:2",
+      parent_index: 1,
+      role,
+      label,
+      ...(value === undefined ? {} : { value }),
+      actions: ["AXPress"],
+    },
+    ...parts.flatMap((part, index) => [
+      {
+        element_index: 3 + index * 2,
+        element_token: `s1:${3 + index * 2}`,
+        parent_index: 2,
+        role: "AXIncrementor",
+        label: `${part} ${label}`,
+        value: "--",
+        actions: ["AXIncrement", "AXDecrement"],
+      },
+      {
+        element_index: 4 + index * 2,
+        element_token: `s1:${4 + index * 2}`,
+        parent_index: 2,
+        role: "AXStaticText",
+        value: "/",
+        actions: [],
+      },
+    ]),
+  ];
+}
+
+test("a web date or time field takes a value; its parts are known in the order shown", () => {
+  const elements = webDateField(
+    "AXDateField",
+    "Date of birth",
+    ["Day", "Month", "Year"],
+    "1976-07-15",
+  );
+  expect([...dateFields(elements).entries()]).toEqual([
+    [2, { segments: ["day", "month", "year"], parts: [3, 5, 7] }],
+  ]);
+  const field = projectElements(elements, "macos").find((node) => node.ref === "s1:2")!;
+  expect(field.actions).toEqual(["invoke", "set_value", "focus"]);
+  expect(field.value).toBe("1976-07-15");
+  // Outside web content, or with a part named in another language, the
+  // field is not one this knows how to fill.
+  const native = elements.filter((element) => element.role !== "AXWebArea");
+  expect(dateFields(native).size).toBe(0);
+  expect(dateFields(webDateField("AXDateField", "Fødselsdato", ["Dag", "Måned", "År"])).size).toBe(
+    0,
+  );
+  expect(projectElements(native, "macos").find((node) => node.ref === "s1:2")!.actions).toEqual([
+    "invoke",
+    "focus",
+  ]);
+});
+
+test("a web date field Chrome left without a value reads what its parts read", () => {
+  const elements = webDateField("AXDateField", "Date of birth", ["Day", "Month", "Year"], "");
+  const read = (parts: string[]) =>
+    projectElements(
+      elements.map((element) =>
+        element.role === "AXIncrementor"
+          ? { ...element, value: parts[[3, 5, 7].indexOf(element.element_index)] }
+          : element,
+      ),
+      "macos",
+    ).find((node) => node.ref === "s1:2")!.value;
+  expect(read(["1", "11", "1996"])).toBe("1996-11-01");
+  // A part still showing its placeholder: the field reads what Chrome says.
+  expect(read(["1", "mm", "1996"])).toBe("");
+  // Chrome keeps the value the page gave the field first after typing
+  // changed its parts; the parts read what it holds.
+  const typedOver = (parts: string[]) =>
+    projectElements(
+      webDateField("AXDateField", "Start", ["Day", "Month", "Year"], "2026-01-02").map((element) =>
+        element.role === "AXIncrementor"
+          ? { ...element, value: parts[[3, 5, 7].indexOf(element.element_index)] }
+          : element,
+      ),
+      "macos",
+    ).find((node) => node.ref === "s1:2")!.value;
+  expect(typedOver(["7", "3", "2027"])).toBe("2027-03-07");
+  expect(typedOver(["dd", "mm", "yyyy"])).toBe("2026-01-02");
+  // Parts that are no calendar date do not stand for the field.
+  expect(typedOver(["31", "2", "2027"])).toBe("2026-01-02");
+  expect(typedOver(["29", "2", "2027"])).toBe("2026-01-02");
+  expect(typedOver(["29", "2", "2028"])).toBe("2028-02-29");
+  expect(typedOver(["31", "4", "2027"])).toBe("2026-01-02");
+  expect(dateFieldValueFromParts(["hours", "minutes", "meridiem"], ["2", "05", "PM"])).toBe(
+    "14:05",
+  );
+  expect(dateFieldValueFromParts(["hours", "minutes", "meridiem"], ["12", "15", "AM"])).toBe(
+    "00:15",
+  );
+  expect(dateFieldValueFromParts(["month", "year"], ["7", "2031"])).toBe("2031-07");
+  expect(dateFieldValueFromParts(["week", "year"], ["9", "2027"])).toBe("2027-W09");
+  expect(
+    dateFieldValueFromParts(
+      ["day", "month", "year", "hours", "minutes"],
+      ["7", "3", "2027", "14", "5"],
+    ),
+  ).toBe("2027-03-07T14:05");
+  expect(dateFieldValueFromParts(["day", "month", "year"], ["0", "0", "0"])).toBeNull();
+  expect(dateFieldValueFromParts(["hours", "minutes"], ["0", "0"])).toBe("00:00");
+  expect(dateFieldValueFromParts(["day", "month"], ["1"])).toBeNull();
+});
+
+test("a date or time value becomes each part's digits in the field's own order", () => {
+  expect(dateFieldTyping(["day", "month", "year"], "1976-07-15")).toEqual({
+    texts: ["15", "07", "1976"],
+  });
+  expect(dateFieldTyping(["month", "day", "year"], "2027-3-7")).toEqual({
+    texts: ["03", "07", "2027"],
+  });
+  expect(dateFieldTyping(["hours", "minutes"], "09:30")).toEqual({ texts: ["09", "30"] });
+  expect(dateFieldTyping(["hours", "minutes", "seconds"], "09:30")).toEqual({
+    texts: ["09", "30", "00"],
+  });
+  expect(dateFieldTyping(["hours", "minutes", "meridiem"], "14:05")).toEqual({
+    texts: ["02", "05", "P"],
+  });
+  expect(dateFieldTyping(["hours", "minutes", "meridiem"], "00:15")).toEqual({
+    texts: ["12", "15", "A"],
+  });
+  expect(dateFieldTyping(["month", "year"], "2031-07")).toEqual({ texts: ["07", "2031"] });
+  expect(dateFieldTyping(["week", "year"], "2027-W09")).toEqual({ texts: ["09", "2027"] });
+  expect(dateFieldTyping(["day", "month", "year", "hours", "minutes"], "2027-03-07T14:05")).toEqual(
+    { texts: ["07", "03", "2027", "14", "05"] },
+  );
+  // A value that does not fit names the form the field takes.
+  for (const [segments, value, form] of [
+    [["day", "month", "year"], "07/15/1976", "YYYY-MM-DD"],
+    [["day", "month", "year"], "1976-07", "YYYY-MM-DD"],
+    [["day", "month", "year"], "1976-13-01", "YYYY-MM-DD"],
+    [["day", "month", "year"], "2027-03-07T14:05", "YYYY-MM-DD"],
+    [["day", "month", "year", "hours", "minutes"], "2027-03-07", "YYYY-MM-DDTHH:MM"],
+    [["week", "year"], "2027-03", "YYYY-Www"],
+    [["hours", "minutes", "seconds"], "9.30", "HH:MM:SS"],
+  ] as const)
+    expect(dateFieldTyping(segments, value)).toEqual({
+      error: `This date or time field takes its whole value in the form ${form}`,
+    });
 });

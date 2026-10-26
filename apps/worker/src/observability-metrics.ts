@@ -23,6 +23,7 @@ import {
   type EventLogger,
 } from "@opengeni/events";
 import type { Attributes, AttributeValue, Observability } from "@opengeni/observability";
+import type { PromptCacheDiagnostics } from "@opengeni/contracts";
 import type { CompanyBrainContributionReceipt } from "./model-context-contributions";
 import {
   createTelemetryClock,
@@ -2196,6 +2197,66 @@ export function recordModelResponseUsage(
 }
 
 /**
+ * Prompt-cache health of one recorded model call, for alerting:
+ *   - `opengeni_model_prompt_cache_warm_misses_total{provider,model,class}`
+ *     counts calls that read much less cache than the previous call of the
+ *     same model in the session made warm, by cause. `context_replaced` is
+ *     expected after compaction; `idle_gap` usually is; every other class
+ *     means a request rewrote a prefix the provider had cached.
+ *   - `opengeni_model_prompt_cache_missed_tokens_total{provider,model,class}`
+ *     the tokens those misses failed to read.
+ *   - `opengeni_model_thinking_blocks_dropped_total{provider,model,reason}`
+ *     signed thinking blocks the provider dropped before inference.
+ * Recorded after the fact write, which is fenced like the usage metrics.
+ */
+export function recordPromptCacheDiagnostics(
+  observability: Observability,
+  input: {
+    provider: string;
+    model: string;
+    diagnostics: PromptCacheDiagnostics | null;
+    cachedTokens?: number | null;
+  },
+): void {
+  const diagnostics = input.diagnostics;
+  if (!diagnostics) return;
+  try {
+    const model = boundedModelMetricLabel(observability, input.model);
+    const miss = diagnostics.warmMiss;
+    if (miss) {
+      const labels = { provider: input.provider, model, class: miss.class };
+      observability.incrementCounter({
+        name: "opengeni_model_prompt_cache_warm_misses_total",
+        help: "Model calls that read much less prompt cache than the previous call of the same model in the session made warm, by provider, catalog model and cause.",
+        labels,
+      });
+      const missed = nonnegativeSafeInteger(
+        miss.expectedCachedTokens - nonnegativeSafeInteger(input.cachedTokens ?? 0),
+      );
+      if (missed > 0)
+        observability.incrementCounter({
+          name: "opengeni_model_prompt_cache_missed_tokens_total",
+          help: "Prompt tokens a warm prompt cache should have served but did not, by provider, catalog model and cause.",
+          labels,
+          amount: missed,
+        });
+    }
+    for (const [reason, count] of Object.entries(diagnostics.thinkingBlocksDropped ?? {})) {
+      const amount = nonnegativeSafeInteger(count);
+      if (amount > 0)
+        observability.incrementCounter({
+          name: "opengeni_model_thinking_blocks_dropped_total",
+          help: "Signed thinking blocks the provider dropped from model requests before inference, by provider, catalog model and reason.",
+          labels: { provider: input.provider, model, reason },
+          amount,
+        });
+    }
+  } catch {
+    // The fact is already committed; metrics are best-effort only.
+  }
+}
+
+/**
  * Credits actually debited for one model response, recorded once when the
  * ledger row is inserted (an idempotent replay debits 0 and records nothing).
  * `funding="promotional"` is the part paid by scoped promotional grants
@@ -2370,6 +2431,18 @@ export type TurnStartupPhase =
   | "runtime_preparation"
   | "session_mcp_settings"
   | "sandbox_establish"
+  | "credential_resolution"
+  | "credential_mint"
+  | "credential_materialization"
+  | "client_publication"
+  | "client_readiness"
+  | "credential_seed"
+  | "credential_hooks"
+  | "artifact_runtime"
+  | "run_credential_binding"
+  | "run_git_credential_mint"
+  | "sandbox_provision_receipt"
+  | "startup_phase_delivery"
   | "file_resolution"
   | "tool_context_preparation"
   | "tool_preparation"

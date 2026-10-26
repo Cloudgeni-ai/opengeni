@@ -4,6 +4,7 @@ import {
   GitForkIcon,
   PanelsTopLeftIcon,
   SquareTerminalIcon,
+  ZapIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
@@ -125,8 +126,10 @@ export function SessionRowHoverDetails({
               icon={
                 facts.origin.kind === "site" ? (
                   <PanelsTopLeftIcon aria-hidden="true" />
-                ) : (
+                ) : facts.origin.kind === "schedule" ? (
                   <CalendarClockIcon aria-hidden="true" />
+                ) : (
+                  <ZapIcon aria-hidden="true" />
                 )
               }
             >

@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, lt, notInArray, sql, type SQL } from "drizzle-orm";
+import { unionAll } from "drizzle-orm/pg-core";
 import { resolveSessionEventTypeFilters, type SessionEvent } from "@opengeni/contracts";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 type ListSessionEventPageOptions = import("./index").ListSessionEventPageOptions;
@@ -123,45 +124,105 @@ async function listSessionEventSlicesInternal(
     predicates.push(notInArray(schema.sessionEvents.type, filters.excludeTypes));
   // Losslessly encoded strings are decoded by the bounded view reader. An
   // ordinary JSON text predicate cannot match those stored representations.
-  if (
-    options.toolName !== undefined &&
-    toPostgresLosslessJson(options.toolName) === options.toolName
-  )
-    predicates.push(
-      eq(schema.sessionEvents.type, "agent.toolCall.created"),
-      // The trigger-maintained name avoids detoasting every skipped call's
-      // arguments. Pre-projection rows retain the exact payload fallback.
-      sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload}->>'name') = ${options.toolName}`,
+  const indexedToolName =
+    options.toolName !== undefined && toPostgresLosslessJson(options.toolName) === options.toolName;
+  const exactCallId =
+    options.callId !== undefined && toPostgresLosslessJson(options.callId) === options.callId;
+  // Only optimize the existing explicit tool-event selection. Call IDs on other
+  // event kinds retain their original payload fallback and type semantics.
+  const indexedCallId =
+    exactCallId &&
+    !indexedToolName &&
+    filters.includeTypes.length > 0 &&
+    filters.includeTypes.every(
+      (type) => type === "agent.toolCall.created" || type === "agent.toolCall.output",
     );
-  if (options.callId !== undefined && toPostgresLosslessJson(options.callId) === options.callId)
+  const callIdPredicate = exactCallId
+    ? sql`coalesce(${schema.sessionEvents.toolCallId}, ${schema.sessionEvents.payload}->>'callId', ${schema.sessionEvents.payload}->>'call_id', ${schema.sessionEvents.payload}->>'id') = ${options.callId}`
+    : undefined;
+  if (callIdPredicate && !indexedCallId)
     predicates.push(
-      sql`coalesce(${schema.sessionEvents.payload}->>'callId', ${schema.sessionEvents.payload}->>'call_id', ${schema.sessionEvents.payload}->>'id') = ${options.callId}`,
+      // As for tool names, the projection is only a payload-read optimization.
+      // Legacy rows and other event kinds retain the original identity expression.
+      callIdPredicate,
     );
   // Unlike audit `none` mode, this identity query does not compute a payload
   // projection merely to report its size. Only the selected scalar is extracted.
   const identities = selectedIdentity
     ? [selectedIdentity]
-    : await withWorkspaceRls(db, workspaceId, (tx) =>
-        tx
-          .select({
-            id: schema.sessionEvents.id,
-            sequence: schema.sessionEvents.sequence,
-            type: sql<string>`case when octet_length(${schema.sessionEvents.type}) <= 256 then ${schema.sessionEvents.type} else 'session.event.envelope_omitted' end`,
-            turnId: schema.sessionEvents.turnId,
-            turnAssociation: sql<
-              string | null
-            >`case when ${schema.sessionEvents.turnAssociation} is null then null when ${schema.sessionEvents.turnAssociation} = 'current' then 'current' else 'late_rejected' end`,
-            duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
-          })
-          .from(schema.sessionEvents)
-          .where(and(...predicates))
-          .orderBy(
-            direction === "before"
-              ? desc(schema.sessionEvents.sequence)
-              : asc(schema.sessionEvents.sequence),
-          )
-          .limit(limit + 1),
-      );
+    : await withWorkspaceRls(db, workspaceId, (tx) => {
+        const query = (extra: SQL[] = []) =>
+          tx
+            .select({
+              id: schema.sessionEvents.id,
+              sequence: schema.sessionEvents.sequence,
+              type: sql<string>`case when octet_length(${schema.sessionEvents.type}) <= 256 then ${schema.sessionEvents.type} else 'session.event.envelope_omitted' end`.as(
+                "type",
+              ),
+              turnId: schema.sessionEvents.turnId,
+              turnAssociation: sql<
+                string | null
+              >`case when ${schema.sessionEvents.turnAssociation} is null then null when ${schema.sessionEvents.turnAssociation} = 'current' then 'current' else 'late_rejected' end`.as(
+                "turn_association",
+              ),
+              duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
+            })
+            .from(schema.sessionEvents)
+            .where(and(...predicates, ...extra))
+            .orderBy(
+              direction === "before"
+                ? desc(schema.sessionEvents.sequence)
+                : asc(schema.sessionEvents.sequence),
+            )
+            .limit(limit + 1);
+        if (!indexedToolName && !indexedCallId) return query();
+        if (indexedCallId) {
+          // Literal type and byte predicates permit both partial indexes in
+          // generic plans. Every branch retains scope, RLS and keyset filters.
+          const toolEvents = sql`${schema.sessionEvents.type} in ('agent.toolCall.created', 'agent.toolCall.output')`;
+          const calls = unionAll(
+            query([
+              toolEvents,
+              sql`${schema.sessionEvents.toolCallId} is not null and octet_length(${schema.sessionEvents.toolCallId}) <= 2048`,
+              eq(schema.sessionEvents.toolCallId, options.callId!),
+            ]),
+            query([
+              toolEvents,
+              sql`(${schema.sessionEvents.toolCallId} is null or octet_length(${schema.sessionEvents.toolCallId}) > 2048)`,
+              callIdPredicate!,
+            ]),
+          ).as("tool_call_pages");
+          return tx
+            .select()
+            .from(calls)
+            .orderBy(direction === "before" ? desc(calls.sequence) : asc(calls.sequence))
+            .limit(limit + 1);
+        }
+        // Literal partial-index predicates also work with generic prepared plans.
+        // These branches are disjoint and together cover every created call.
+        // Limit each ordered branch before merging: no global top N needs more
+        // than N rows from either branch. Keep this in one statement/snapshot.
+        const created = sql`${schema.sessionEvents.type} = 'agent.toolCall.created'`;
+        const names = unionAll(
+          query([
+            created,
+            sql`${schema.sessionEvents.toolName} is not null and octet_length(${schema.sessionEvents.toolName}) <= 2048`,
+            eq(schema.sessionEvents.toolName, options.toolName!),
+          ]),
+          query([
+            created,
+            // The byte bound protects index entries, not accepted names. Keep
+            // oversized projections, including collation-equivalent spellings.
+            sql`(${schema.sessionEvents.toolName} is null or octet_length(${schema.sessionEvents.toolName}) > 2048)`,
+            sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload}->>'name') = ${options.toolName}`,
+          ]),
+        ).as("tool_name_pages");
+        return tx
+          .select()
+          .from(names)
+          .orderBy(direction === "before" ? desc(names.sequence) : asc(names.sequence))
+          .limit(limit + 1);
+      });
   const ordered = identities.slice(0, limit).map(
     (identity) =>
       ({

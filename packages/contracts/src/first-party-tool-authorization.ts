@@ -4,10 +4,11 @@ import type { Permission } from "./permissions";
 export type FirstPartyToolAuthorization = {
   sessionRequired?: true;
   /**
-   * Registered only while the session has admin access (live, per request),
-   * whatever its tool selection; the tool then acts as the person who gave it.
+   * Acts as a person: registered only in a session a person started
+   * themselves (not a child or service session) when selected, or whenever
+   * the session has full access. Never carried into a child's selection.
    */
-  adminAccessRequired?: true;
+  personSessionRequired?: true;
   allOf?: readonly Permission[];
   anyOf?: readonly Permission[];
 };
@@ -38,6 +39,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   knowledge_get: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_browse: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_retain_file: { sessionRequired: true, allOf: ["documents:search", "files:read"] },
+  // Recorded meetings, read as the person the session works for.
+  meetings_search: { sessionRequired: true, allOf: ["sessions:read"] },
+  meeting_read: { sessionRequired: true, allOf: ["sessions:read"] },
   knowledge_retain_message: { sessionRequired: true, allOf: ["documents:search", "sessions:read"] },
   knowledge_save: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_archive: { sessionRequired: true, allOf: ["documents:search"] },
@@ -114,9 +118,10 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   session_get: { allOf: ["sessions:read"] },
   session_set_model: { allOf: ["sessions:control"] },
   session_events: { allOf: ["sessions:read"] },
-  // Blocking wait inside a running turn: the live attempt's own session is the
-  // self target, so the tool exists only for session-scoped grants.
-  session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
+  // A bounded wait on named sessions. A live attempt also wakes for its own
+  // pending input; a sessionless caller (an operator, or a person's surface
+  // reached for a chat in another workspace) waits on the targets only.
+  session_wait: { allOf: ["sessions:read"] },
   command_wait: { sessionRequired: true, allOf: ["sessions:read"] },
   command_read: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
@@ -126,7 +131,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   session_target_set: { sessionRequired: true, allOf: ["sessions:read", "sessions:control"] },
   session_pause: { allOf: ["sessions:control"] },
   session_resume: { allOf: ["sessions:control"] },
-  session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
+  // A live attempt sends a typed Agent Steer; a sessionless caller appends a
+  // human/API steer, as the REST steer route does.
+  session_steer: { allOf: ["sessions:control"] },
   // A live attempt may answer another session's structured human-input
   // request (never a tool approval, which stays human-only).
   session_human_input_respond: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -234,6 +241,12 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   scheduled_task_runs_list: {
     anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
   },
+  event_sources_list: {
+    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+  },
+  events_get: {
+    anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
+  },
   slack_bot_list_channels: { allOf: ["connections:read"] },
   slack_bot_search: { allOf: ["connections:read"] },
   slack_bot_channel_history: { allOf: ["connections:read"] },
@@ -332,9 +345,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   project_reorder: { allOf: ["sessions:create"] },
   project_delete: { allOf: ["sessions:create"] },
   session_set_project: { allOf: ["sessions:control"] },
-  admin_actions_search: { sessionRequired: true, adminAccessRequired: true },
-  admin_action_describe: { sessionRequired: true, adminAccessRequired: true },
-  admin_action_call: { sessionRequired: true, adminAccessRequired: true },
+  admin_actions_search: { sessionRequired: true, personSessionRequired: true },
+  admin_action_describe: { sessionRequired: true, personSessionRequired: true },
+  admin_action_call: { sessionRequired: true, personSessionRequired: true },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 /**

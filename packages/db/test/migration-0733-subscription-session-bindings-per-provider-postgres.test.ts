@@ -417,6 +417,8 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "plan_credit_periods",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
+      // 0909 message search text.
+      "session_message_search_texts",
       "session_title_operations",
       "site_abuse_reports",
       "site_auth_codes",
@@ -443,13 +445,59 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       "site_runtime_usage",
       // 0842 adds private Site/chat grants to both posture inventories.
       "site_session_access",
+      // Per-person Site sidebar pins and archive state.
+      "site_sidebar_states",
       "site_sql_databases",
       "site_sql_migrations",
       "site_sql_queries",
       "site_sql_rate_windows",
       "site_sql_usage",
       "site_viewer_sessions",
-    ];
+      // 0929 adds event-trigger state. Its non-RLS ingress routing table is
+      // runtime-privileged since 0947 but never protected; see below.
+      "inbound_events",
+      "event_deliveries",
+      "event_sources",
+      "event_triggers",
+      "scheduled_task_event_inbox",
+      "scheduled_task_event_occurrences",
+      "scheduled_task_event_settings",
+      // 0930 recording tables are also withheld.
+      "recordings",
+      "recording_tracks",
+      "recording_chunks",
+      "recording_transcript_versions",
+      "recording_transcript_segments",
+      "recording_people",
+      "recording_speaker_assignments",
+      "recording_segment_edits",
+      "recording_events",
+      // 0932 MCP event subscriptions are also withheld.
+      "mcp_event_subscriptions",
+      // 0934 adds the Teams conversation tables to both posture inventories.
+      "teams_bot_inbox",
+      "teams_bot_installations",
+      "teams_bot_links",
+      "teams_bot_outbox",
+      "teams_bot_proofs",
+      "teams_bot_routes",
+      // 0935 adds the event source feed cursors.
+      "event_source_feeds",
+      // 0940 voice recognition and 0942 live transcript tables are also withheld.
+      "recording_voiceprints",
+      "recording_speaker_voices",
+      "recording_voice_rejections",
+      "recording_live_segments",
+      // 0952 secret approval rules and requests are also withheld.
+      "secret_approval_rules",
+      "secret_use_approvals",
+      // 0954 meeting notes are also withheld.
+      "recording_notes",
+      // 0959 automation templates are also withheld.
+      "automation_templates",
+      // 0971 per-turn app action grants are also withheld.
+      "session_turn_app_action_grants",
+    ].sort();
     // 0823 (personal machine consent) adds protected tables the runtime role
     // never reads directly; insert them in the sorted protected list.
     const PROTECTED_TABLES = [
@@ -477,7 +525,7 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       ...ABSENT_USAGE_HISTORY_POSTURE,
       // Nor Site Data (0776), published Sites (0782) or Site SQL (0783), whose
       // tables the runtime and protected contracts list.
-      `runtime privilege tables are missing: ${SITE_DATA_TABLES.join(", ")}`,
+      `runtime privilege tables are missing: ${[...SITE_DATA_TABLES, "event_ingress_routes"].sort().join(", ")}`,
       `protected tables are missing: ${PROTECTED_TABLES.join(", ")}`,
       // Nor session-tree machine consent and agent-child provenance (0851).
       "owner-internal target-schema helper guard_session_agent_creation_provenance() is missing or ambiguous",
@@ -486,7 +534,11 @@ describe.skipIf(!realDb)("0733 per-provider session bindings", () => {
       // Nor the personal machine consent helpers (0823).
       "owner-internal target-schema helper live_session_turn_machine_consent(uuid) is missing or ambiguous",
       "owner-internal target-schema helper bind_session_attempt_machine_consent(uuid, uuid, uuid) is missing or ambiguous",
+      // Nor the replacement-attempt machine carry (0948).
+      "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
       "owner-internal target-schema helper assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean) is missing or ambiguous",
+      // Nor the shared unbilled allowance counter (0976).
+      "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
       // Nor per-task usage limits (0773).
       ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES.map(
         (routine) => `owner-internal target-schema helper ${routine} is missing or ambiguous`,

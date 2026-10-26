@@ -59,6 +59,16 @@ export interface SecretUseContext {
   toolName: string;
   operationId?: string;
   sourceCallId?: string;
+  /**
+   * Where the value goes, for a person approving the use: a page's host, a
+   * machine or a connector name. Never a value.
+   */
+  destination?: string;
+  /**
+   * Looks the destination up when it costs a round trip (a browser page's
+   * host). Called only when a use must ask for approval; failures are ignored.
+   */
+  lookupDestination?: () => Promise<string | null>;
 }
 
 export type SecretMaterial =
@@ -107,6 +117,7 @@ export const SECRET_REFERENCE_FAILURE_CODES = [
   "binary_value",
   "unsupported_shell",
   "secretfile_not_allowed",
+  "approval_required",
 ] as const;
 export type SecretReferenceFailureCode = (typeof SECRET_REFERENCE_FAILURE_CODES)[number];
 
@@ -120,14 +131,38 @@ export interface SecretReferenceFailure {
 
 export const SECRET_REFERENCE_ERROR_CODE = "secret_reference_error" as const;
 
+/**
+ * approval_required: the stored request for the blocked use, and whether
+ * Opengeni itself asked the person (the host's card in the chat, their inbox
+ * and a phone notification). Their answer reaches the agent as a
+ * `secret_use_approval_decided` update; the agent never relays the card.
+ */
+export type SecretUseApprovalAsk = {
+  approvalId: string;
+  /** False only when this run could no longer post in the chat (it was superseded). */
+  asked: boolean;
+};
+
 function failureHint(
   failures: readonly SecretReferenceFailure[],
   askCard: RequestHumanInputToolInput | null,
+  approval: SecretUseApprovalAsk | null,
 ): string {
   const hints: string[] = [];
   if (askCard !== null) {
     hints.push(
-      "Nothing was run. A secret is missing: call request_human_input with askCard exactly as given, then retry with the returned references.",
+      failures.some((failure) => failure.code === "not_found")
+        ? "Nothing was run. A secret is missing. If the reference was meant to reach another workspace, chat or later work unresolved, write it as \\{{secret:…}} and retry. Otherwise call request_human_input with askCard exactly as given, then retry with the returned references."
+        : "Nothing was run. A secret is missing: call request_human_input with askCard exactly as given, then retry with the returned references.",
+    );
+  }
+  if (approval?.asked === true) {
+    hints.push(
+      "Nothing was run. Opengeni has asked the person, in this chat and by notification, to allow this use of the secret; do not ask them yourself. Their answer reaches you as an update in this chat after this turn: if they allow it, retry the same call then; if they deny it, do not retry. Until then, continue with other work or end your turn.",
+    );
+  } else if (approval !== null) {
+    hints.push(
+      "Nothing was run. The person must allow each use of this secret, and this run could not ask them. Tell them the use is waiting for their approval.",
     );
   }
   if (failures.some((failure) => failure.code === "ambiguous")) {
@@ -147,10 +182,13 @@ export class SecretReferenceError extends Error {
   readonly code = SECRET_REFERENCE_ERROR_CODE;
   readonly failures: SecretReferenceFailure[];
   readonly askCard: RequestHumanInputToolInput | null;
+  /** approval_required: the request the person was asked to decide. */
+  readonly approval: SecretUseApprovalAsk | null;
 
   constructor(
     failures: SecretReferenceFailure[],
     askCard: RequestHumanInputToolInput | null = null,
+    approval: SecretUseApprovalAsk | null = null,
   ) {
     const first = failures[0];
     super(
@@ -161,9 +199,14 @@ export class SecretReferenceError extends Error {
     this.name = "SecretReferenceError";
     this.failures = failures;
     this.askCard = askCard;
+    this.approval = approval;
   }
 
-  /** JSON string for tool output: {error, failures, askCard, hint}. Never contains values. */
+  /**
+   * JSON string for tool output: {error, failures, askCard, hint}. A use that
+   * needs approval is told in `hint` that the person was asked; the card
+   * itself never passes through the agent. Never contains values.
+   */
   toModelOutput(): string {
     return JSON.stringify({
       error: this.code,
@@ -174,7 +217,7 @@ export class SecretReferenceError extends Error {
         ...(failure.candidates ? { candidates: failure.candidates } : {}),
       })),
       askCard: this.askCard,
-      hint: failureHint(this.failures, this.askCard),
+      hint: failureHint(this.failures, this.askCard, this.approval),
     });
   }
 }

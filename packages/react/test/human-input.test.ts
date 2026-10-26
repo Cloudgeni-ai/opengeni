@@ -122,6 +122,32 @@ describe("structured human-input projection", () => {
       ]).map((request) => request.id),
     ).toEqual(["request-2"]);
   });
+
+  test("Opengeni's secret approval card outlives its turn until it is answered", () => {
+    const card = event(1, "session.humanInput.requested", {
+      request: {
+        id: "request-approval",
+        questions,
+        allowSkip: false,
+        expiresAt: null,
+        origin: "secret_use_approval",
+      },
+    });
+    expect(humanInputRequestFromEvent(card)).toMatchObject({ origin: "secret_use_approval" });
+    const afterTurn = [card, event(2, "turn.completed", {}, "turn-1")];
+    expect(projectPendingHumanInputRequests(afterTurn).map((request) => request.id)).toEqual([
+      "request-approval",
+    ]);
+    expect(
+      projectPendingHumanInputRequests([
+        ...afterTurn,
+        event(3, "user.humanInputResponse", {
+          requestId: "request-approval",
+          response: { outcome: "answered", answers: [] },
+        }),
+      ]),
+    ).toEqual([]);
+  });
 });
 
 describe("answersFromDrafts", () => {
@@ -359,6 +385,41 @@ describe("HumanInputForm async host boundary", () => {
     expect(otherInput?.labels?.[0]?.textContent).toContain(
       "Other answer for Where should this run?",
     );
+  });
+
+  test("a secret approval card offers only its own choices, with no Other field", async () => {
+    const questionId = "secret-approval:0f8fad5b-d9cb-469f-a165-70867728950e";
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request: {
+          id: "request-approval",
+          questions: [
+            {
+              id: questionId,
+              kind: "single_select" as const,
+              prompt: "Allow the agent to use GitHub › password in the browser on github.com?",
+              options: [
+                { id: "once", label: "Allow once" },
+                { id: "session", label: "Allow in this chat" },
+                { id: "window", label: "Allow for 1 hour" },
+                { id: "deny", label: "Deny" },
+              ],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: false,
+          expiresAt: null,
+        },
+        onSubmit: () => undefined,
+        autoFocus: false,
+      }),
+    );
+    const group = mounted.container.querySelector(`[data-human-input-question="${questionId}"]`);
+    expect(group?.querySelectorAll('[role="radio"], input[type="radio"]').length).toBe(4);
+    expect(group?.textContent).toContain("Allow in this chat");
+    expect(group?.textContent).not.toContain("Other");
+    expect(group?.querySelector('input[type="text"]')).toBeNull();
   });
 
   test("clicking or typing Other selects it and submits its exact text", async () => {

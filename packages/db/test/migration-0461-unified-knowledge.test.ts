@@ -50,6 +50,7 @@ import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 const migration = "0461_unified_knowledge.sql";
@@ -103,6 +104,8 @@ const forwardMigrations = [
   // Patches the account-binding fence as rewritten by withheld 0501.
   "0873_mcp_binding_delegation_revocation.sql",
   ...strictOwnerMaintenanceMigrationTail,
+  // Rewrites keys on the Knowledge tables 0461 creates; replay after it.
+  ...workspaceDeletionMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

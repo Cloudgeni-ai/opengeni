@@ -88,6 +88,16 @@ function world() {
 
 beforeEach(() => resetOnePasswordQuotasForTests());
 
+async function fileText(
+  provider: ReturnType<typeof world>["provider"],
+  ctx: ReturnType<typeof world>["ctx"],
+  itemId: string,
+): Promise<string> {
+  const [value] = await provider.readFields(ctx(), RW, itemId, ["@document"]);
+  if (value?.material.type !== "bytes") throw new Error("expected file bytes");
+  return new TextDecoder().decode(value.material.value);
+}
+
 describe("1Password adapter", () => {
   test("mirrors metadata: categories, safe names, notes/document fields, no values, passkeys skipped", async () => {
     const { provider, ctx, fake } = world();
@@ -95,6 +105,7 @@ describe("1Password adapter", () => {
     expect(fake.calls.map((call) => call.op)).toEqual(["items.list", "items.getAll"]);
     const login = items.find((item) => item.name === "Test Login")!;
     expect(login.type).toBe("login");
+    expect(login.username).toBe("alice");
     expect(login.websites).toEqual(["https://example.test"]);
     expect(login.fields).toEqual([
       { externalFieldId: "username", name: "username", kind: "text" },
@@ -104,6 +115,7 @@ describe("1Password adapter", () => {
     const note = items.find((item) => item.externalItemId === "note00000000000000000000000")!;
     expect(note.name).toBe("Deploy - notes -x-");
     expect(note.type).toBe("note");
+    expect(note.username).toBeNull();
     expect(note.fields).toEqual([{ externalFieldId: "@notes", name: "note", kind: "concealed" }]);
     const doc = items.find((item) => item.name === "kubeconfig")!;
     expect(doc.type).toBe("file");
@@ -397,11 +409,23 @@ describe("1Password adapter", () => {
     expect(error.code).toBe("provider_permission_denied");
   });
 
-  test("unsupported writes are refused before any call: passkeys, files", async () => {
+  test("unsupported writes are refused before any call: passkeys, files without bytes", async () => {
     const { provider, ctx, fake } = world();
     await expect(
       provider.writeItem(ctx(), RW, { name: "pk", type: "passkey", websites: [], fields: [] }),
     ).rejects.toMatchObject({ code: "provider_unavailable" });
+    // 1Password keeps websites only on logins and API keys, and refuses a note with them.
+    await expect(
+      provider.writeItem(ctx(), RW, {
+        name: "recovery codes",
+        type: "note",
+        websites: ["https://example.com/"],
+        fields: [{ name: "codes", kind: "concealed", value: "x" }],
+      }),
+    ).rejects.toMatchObject({
+      code: "provider_unavailable",
+      message: expect.stringContaining("websites only on logins and API keys"),
+    });
     await expect(
       provider.writeItem(ctx(), RW, {
         externalItemId: "doc000000000000000000000000",
@@ -410,10 +434,80 @@ describe("1Password adapter", () => {
         websites: [],
         fields: [{ externalFieldId: "@document", name: "file", kind: "file", value: "x" }],
       }),
-    ).rejects.toMatchObject({ code: "provider_unavailable" });
+    ).rejects.toMatchObject({
+      code: "provider_conflict",
+      message: expect.stringContaining("no file"),
+    });
     expect(fake.calls.some((call) => call.op === "items.put" || call.op === "items.create")).toBe(
       false,
     );
+  });
+
+  test("files: a Document is created with its file; file fields attach, replace and delete", async () => {
+    const { provider, ctx, fake } = world();
+    const bytes = (text: string) => new TextEncoder().encode(text);
+    const doc = await provider.writeItem(ctx(), RW, {
+      name: "service account key",
+      type: "file",
+      websites: [],
+      fields: [{ name: "file", kind: "file", file: { name: "key.json", bytes: bytes("{}") } }],
+    });
+    expect(doc.type).toBe("file");
+    expect(doc.fields).toEqual([{ externalFieldId: "@document", name: "file", kind: "file" }]);
+    expect(await fileText(provider, ctx, doc.externalItemId)).toBe("{}");
+
+    const replaced = await provider.writeItem(ctx(), RW, {
+      externalItemId: doc.externalItemId,
+      name: "service account key",
+      type: "file",
+      websites: [],
+      fields: [
+        {
+          externalFieldId: "@document",
+          name: "file",
+          kind: "file",
+          file: { name: "key.json", bytes: bytes('{"v":2}') },
+        },
+      ],
+    });
+    expect(fake.calls.map((call) => call.op)).toContain("items.files.replaceDocument");
+    expect(await fileText(provider, ctx, replaced.externalItemId)).toBe('{"v":2}');
+
+    const attached = await provider.writeItem(ctx(), RW, {
+      externalItemId: "login0000000000000000000000",
+      name: "Test Login",
+      type: "login",
+      websites: ["https://example.test"],
+      fields: [{ name: "recovery", kind: "file", file: { name: "codes.txt", bytes: bytes("c") } }],
+    });
+    const recovery = attached.fields.find((field) => field.name === "recovery")!;
+    expect(recovery.kind).toBe("file");
+    // The other fields are kept.
+    expect(attached.fields.map((field) => field.name)).toContain("password");
+
+    const removed = await provider.writeItem(ctx(), RW, {
+      externalItemId: "login0000000000000000000000",
+      name: "Test Login",
+      type: "login",
+      websites: ["https://example.test"],
+      fields: [
+        { externalFieldId: recovery.externalFieldId, name: "recovery", kind: "file", remove: true },
+      ],
+    });
+    expect(removed.fields.some((field) => field.name === "recovery")).toBe(false);
+    expect(fake.calls.map((call) => call.op)).toEqual(
+      expect.arrayContaining(["items.files.attach", "items.files.delete"]),
+    );
+  });
+
+  test("archived items stay in the mirror, marked archived", async () => {
+    const { provider, ctx } = world();
+    await provider.archiveItem(ctx(), RW, "note00000000000000000000000");
+    const items = await provider.listItems(ctx(), RW);
+    const note = items.find((item) => item.externalItemId === "note00000000000000000000000")!;
+    expect(note.archivedAt).toEqual(expect.any(String));
+    const login = items.find((item) => item.externalItemId === "login0000000000000000000000")!;
+    expect(login.archivedAt ?? null).toBeNull();
   });
 
   test("managed vaults: admins access; group grants need Teams or Business", async () => {

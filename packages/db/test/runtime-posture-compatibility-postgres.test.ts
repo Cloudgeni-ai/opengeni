@@ -360,3 +360,37 @@ realTest(
   },
   180_000,
 );
+
+realTest(
+  "this binary requires the definer and table grants 0947 and 0950 make",
+  async () => {
+    const admin = database!.admin;
+    const current = async () =>
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      );
+    expect(await current()).toEqual([]);
+    try {
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)",
+      );
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_stalled_recording_work_v1(integer)",
+      );
+      await admin`REVOKE DELETE ON TABLE event_ingress_routes FROM opengeni_app`;
+      expect(await current()).toContain(
+        "table event_ingress_routes lacks required runtime privileges: DELETE",
+      );
+    } finally {
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
+      await admin`GRANT DELETE ON TABLE event_ingress_routes TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+    }
+    expect(await current()).toEqual([]);
+  },
+  180_000,
+);

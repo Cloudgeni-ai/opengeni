@@ -141,8 +141,9 @@ export function ClaudeRow({
         claudePlan(account),
       ]}
       cells={{
+        // A disconnected account has no reading: no cell, so no empty fact.
         usage:
-          usage !== undefined ? (
+          account.status !== "active" ? null : usage !== undefined ? (
             usage
           ) : (
             <ClaudeAccountUsageReadout

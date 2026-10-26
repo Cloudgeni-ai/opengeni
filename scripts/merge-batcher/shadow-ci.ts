@@ -76,8 +76,6 @@ export class ShadowCiController {
       await this.stage(o, result);
       return result;
     };
-    if (o.telemetry?.status === "stop")
-      return wait("stop signal: rolling 24h sampled p95 ready-to-CI exceeds 30 minutes");
     if (
       o.candidates.some(
         (c) => !c.runs.length && o.missingRuns?.[c.manifest.batchId]?.status === "abandoned",
@@ -135,7 +133,6 @@ export class ShadowCiController {
       fresh.stateSha !== o.stateSha ||
       fresh.baseSha !== o.baseSha ||
       fresh.mainBusy ||
-      fresh.telemetry?.status === "stop" ||
       pulls.some((p) => !fresh.ready.some((current) => bindingKey(current) === bindingKey(p))) ||
       fresh.candidates.some(
         (c) =>

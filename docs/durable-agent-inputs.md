@@ -171,6 +171,19 @@ delivers them coalesced, `session_wait` reports them without ending the wait
 (`ownPendingImmediateUpdates` vs `ownPendingDeferredUpdateKinds`), and they
 never resume a goal by themselves.
 
+`secret_use_approval_decided` (immediate) is the person's answer to Opengeni's
+own approval card for a blocked secret use (see
+[Approval for each use](secrets.md#approval-for-each-use)). The answer
+transaction marks the card answered, records the grant or denial, and inserts
+this update (dedupe `secret-use-approval-decided:<request>`, `action_required`
+when allowed, `info` when denied). Its summary tells the agent to retry the
+blocked call, or not to; its payload names the decision, the item and field
+names, surface, tool and destination, never values or subject ids. A worker
+from before this kind marks such a row `failed` with
+`system.update.cancelled{reason: "unrecognized_kind"}`, so during a rollout an
+answer claimed by an old worker still records the grant but does not tell the
+agent.
+
 A child session reports its lifecycle to its parent through typed notices, each
 produced inside the child's own lifecycle transaction as one dedupe-keyed
 `session_system_update_outbox` row (the worker delivers it; the reaper retries a
@@ -182,7 +195,7 @@ rows:
 | Kind | Class | Produced by | Dedupe |
 | --- | --- | --- | --- |
 | `child_terminal_result` | immediate | idle/failed/cancelled terminal boundary; an idle result carries the child's `finalAnswer` | `child-completion:<child>:...` |
-| `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
+| `child_requires_action` | immediate | the child's `requires_action` settlement; bounded human-input previews and compact answerable questions (ids, kinds, prompts, option ids and labels; no secret specs) plus approval ids (no subject ids, no tool arguments) | `child-requires-action:<child>:<turn>:<generation>` |
 | `child_requires_action_resolved` | deferred | human/API/agent answer or skip, expiry, approval decision, terminal cancellation of a pending request | `child-requires-action-resolved:<child>:<turn>:<generation>:<request or approval>` |
 | `child_paused` | deferred | a direct `pause` of the child (not a recursive ancestor pause, not when the parent's own attempt issued it); `action_required` for a human/API pause, `info` for an agent pause | `child-paused:<child>:<receipt>` |
 | `child_waiting_capacity` | deferred | a Codex or xAI capacity waiter armed on the child | `child-waiting-capacity:<child>:<waiter>` |
@@ -199,8 +212,12 @@ and the parent's claim order both follow delivery order, so the reaper claims a
 backlog oldest first (`created_at`, `id`) and delivers it in exactly that order;
 the claim returns its rows sorted instead of in heap order (migration 0528). Like
 child results, an immediate child notice may autonomously wake a parent with either
-an active goal or a current session-level wait. Without either durable
-obligation, child lifecycle notices remain pending until new intent arrives.
+an active goal or a current session-level wait. Like `child_terminal_result`, a
+`child_requires_action` also wakes an idle parent that has no goal at all, so
+the parent can answer the child's question while the person sees the same card;
+a parent whose goal is paused or completed is not woken by it. Without such an
+obligation, other child lifecycle notices remain pending until new intent
+arrives.
 
 A failed or cancelled child reports from its settlement transaction. An idle
 child reports at its workflow's terminal-for-now idle boundary: after goal
@@ -464,6 +481,12 @@ tool calls, later turns, and attempt recovery. This is both a causality
 requirement and a prompt-cache cost requirement: deleting the batch on the next
 call would shift the prefix and force the provider to ingest the conversation
 again.
+
+The same invariant covers the system prompt and tools: anything that can change
+between turns of one session (workspace governance, the Skill catalog) is a
+durable history item rather than system-prompt text. Per-call diagnostics in
+`model_call_facts.prompt_cache_diagnostics` classify every warm-cache miss; see
+`docs/context-compaction.md`, "Prompt-cache stability".
 
 Migration `0135_durable_machine_input_batches.sql` performs the one-way cutover.
 It reconstructs model history for delivered legacy rows, returns old deferred

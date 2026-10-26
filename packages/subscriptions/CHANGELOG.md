@@ -1,5 +1,29 @@
 # @opengeni/subscriptions
 
+## 5.3.1
+
+## 5.2.1
+
+## 5.1.2
+
+## 5.0.2
+
+## 4.8.0
+
+## 4.7.2
+
+## 4.7.1
+
+## 4.7.0
+
+## 4.6.1
+
+## 4.5.0
+
+### Patch Changes
+
+- acbf24e: Withhold pooled subscription capacity while an account's other main limit is exhausted, and report the next usable reset when the pool is already exhausted.
+
 ## 4.4.1
 
 ### Minor Changes

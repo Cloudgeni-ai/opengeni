@@ -130,6 +130,8 @@ mock.module("./schedule-composer", () => ({
   ),
 }));
 mock.module("@opengeni/react/ui/form-dialog", () => ({
+  // The template dialog is never open on this page.
+  FormDialog: () => null,
   FormPage: ({
     children,
     onSubmit,
@@ -297,7 +299,7 @@ test("an existing-chat schedule shows no account picker and saves no pins when r
     inherited.click();
     await flush();
   });
-  expect(container.textContent).toContain("Changes apply to the chat and its scheduled runs.");
+  expect(container.textContent).toContain("Changes apply to the chat and its automated runs.");
   expect(container.textContent).toContain("Open chat settings");
   const destination = [...container.querySelectorAll("select")].find(
     (select) => select.value === "source-chat",
@@ -399,7 +401,7 @@ function audienceOption(container: HTMLElement, label: string) {
   );
 }
 
-test("who can see a schedule is only asked when the organization allows Only me", async () => {
+test("who can see an automation is only asked when the organization allows Only me", async () => {
   const hidden = await render();
   expect(hidden.container.textContent).not.toContain("Who can see it");
   await act(async () => hidden.root.unmount());
@@ -409,13 +411,13 @@ test("who can see a schedule is only asked when the organization allows Only me"
   expect(container.textContent).toContain("Who can see it");
   expect(audienceOption(container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
   expect(container.textContent).toContain(
-    "Everyone in this workspace can see this schedule and its chats.",
+    "Everyone in this workspace can see this automation and its chats.",
   );
   await act(async () => {
     audienceOption(container, "Only me")!.click();
     await flush();
   });
-  expect(container.textContent).toContain("Only you can see this schedule and its chats.");
+  expect(container.textContent).toContain("Only you can see this automation and its chats.");
   const request = (await save(container)) as { visibility?: string };
   expect(request.visibility).toBe("private");
   await act(async () => root.unmount());
@@ -465,7 +467,7 @@ test("a schedule on your own machine is Only me", async () => {
   expect(audienceOption(container, "Only me")!.getAttribute("aria-checked")).toBe("true");
   expect(audienceOption(container, "Workspace")!.getAttribute("aria-disabled")).toBe("true");
   expect(container.textContent).toContain(
-    "It runs on your own machine, so only you can see this schedule and its chats.",
+    "It runs on your own machine, so only you can see this automation and its chats.",
   );
   expect(container.textContent).toContain("My laptop");
   await act(async () => root.unmount());

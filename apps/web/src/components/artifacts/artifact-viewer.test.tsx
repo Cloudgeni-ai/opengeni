@@ -1,0 +1,616 @@
+import "@/navigation-host";
+import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import { act, useState, type ReactNode } from "react";
+import { createRoot } from "react-dom/client";
+import type { ArtifactCatalogItem, RetainedArtifactReference } from "@opengeni/sdk";
+import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
+import {
+  defaultArtifactFilters,
+  filterArtifactCatalog,
+  type ArtifactCatalogFilters,
+} from "@opengeni/react/app/lib/artifact-catalog";
+
+// Documents show the host's editable surface in the viewer, as in the session panel.
+configurePageAppHost({
+  surfaces: {
+    editableArtifact: ({ artifactId }: { artifactId: string }) => (
+      <div data-native-preview={artifactId}>
+        <button type="button">Inside the document</button>
+      </div>
+    ),
+  },
+});
+
+// Every test gets a fresh client, so the page's retained-image cache starts empty.
+const app: { client: ReturnType<typeof fakeClient>["client"] } = { client: fakeClient().client };
+mock.module("@opengeni/react/app/app-context", () => ({
+  useAppContext: () => ({
+    client: app.client,
+    accessKeyVersion: 0,
+    workspaces: [{ id: "workspace", accountId: "account", kind: "shared", name: "Design" }],
+    managedSelfContext: null,
+    accessContext: null,
+  }),
+}));
+
+let ArtifactLibrary: typeof import("@opengeni/react/app/components/artifacts/artifact-library").ArtifactLibrary;
+
+// Pixel sizes: one large screenshot and one small enough to be enlarged.
+const dimensions: Record<string, { width: number; height: number }> = {
+  "shot-1": { width: 2000, height: 1500 },
+  "shot-2": { width: 400, height: 300 },
+};
+
+function reference(artifactId: string): RetainedArtifactReference {
+  return {
+    ...(dimensions[artifactId] ? { dimensions: dimensions[artifactId] } : {}),
+    available: true,
+    artifactId,
+    kind: "file",
+    contentType: "image/png",
+    originalBytes: 1,
+    sha256: artifactId.padEnd(64, "0"),
+    retainedAt: "2026-09-01T00:00:00Z",
+    retention: { policy: "workspace_file", expiresAt: null },
+    retrieval: {
+      method: "GET",
+      path: `/retained/${artifactId}`,
+      acceptRanges: "bytes",
+      maxRangeBytes: 1048576,
+    },
+  };
+}
+
+function fakeClient() {
+  const metadata: string[] = [];
+  const bytes: string[] = [];
+  const client = {
+    getRetainedArtifact: async (_workspaceId: string, artifactId: string) => {
+      metadata.push(artifactId);
+      return reference(artifactId);
+    },
+    downloadRetainedArtifact: async (_workspaceId: string, artifact: RetainedArtifactReference) => {
+      bytes.push(artifact.artifactId);
+      return { artifact, bytes: new Uint8Array([137, 80, 78, 71]) };
+    },
+    createRetainedArtifactDownloadUrl: async () => {
+      throw new Error("Unexpected signed URL");
+    },
+  };
+  return { client, metadata, bytes };
+}
+
+const entry = (
+  id: string,
+  kind: ArtifactCatalogItem["kind"],
+  title: string,
+  updatedAt: string,
+): ArtifactCatalogItem => ({
+  id,
+  kind,
+  title,
+  status: "active",
+  createdAt: "2026-09-01T00:00:00Z",
+  updatedAt,
+});
+
+// Newest first, as the panel lists them.
+const catalog: ArtifactCatalogItem[] = [
+  entry("shot-1", "image", "shot-1.png", "2026-09-06T00:00:00Z"),
+  entry("shot-2", "image", "shot-2.png", "2026-09-05T00:00:00Z"),
+  entry("plan", "document", "Plan", "2026-09-04T00:00:00Z"),
+  entry("shot-3", "image", "shot-3.png", "2026-09-03T00:00:00Z"),
+  entry("shot-4", "image", "shot-4.png", "2026-09-02T00:00:00Z"),
+];
+
+let ownsDom = false;
+let previousObserver: PropertyDescriptor | undefined;
+beforeAll(async () => {
+  ownsDom = !GlobalRegistrator.isRegistered;
+  if (ownsDom) GlobalRegistrator.register();
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+  // Thumbnails stay offscreen, so every retained request comes from the viewer.
+  previousObserver = Object.getOwnPropertyDescriptor(globalThis, "IntersectionObserver");
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    configurable: true,
+    value: class {
+      observe() {}
+      disconnect() {}
+    },
+  });
+  ({ ArtifactLibrary } = await import("@opengeni/react/app/components/artifacts/artifact-library"));
+  // The library lazy-loads the viewer; load it up front so a cold runner does not race it.
+  await import("@opengeni/react/app/components/artifacts/artifact-viewer");
+});
+
+afterAll(async () => {
+  if (previousObserver) Object.defineProperty(globalThis, "IntersectionObserver", previousObserver);
+  else Reflect.deleteProperty(globalThis, "IntersectionObserver");
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+const mounted: { root: ReturnType<typeof createRoot>; container: HTMLElement }[] = [];
+afterEach(async () => {
+  for (const { root, container } of mounted.splice(0)) {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+async function render(node: () => ReactNode) {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  mounted.push({ root, container });
+  const router = createRouter({
+    routeTree: createRootRoute({ component: () => <>{node()}</> }),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  await act(async () => {
+    await router.load();
+    root.render(<RouterProvider router={router} />);
+  });
+  return container;
+}
+
+async function settle() {
+  for (let tick = 0; tick < 5; tick++)
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+}
+
+const viewer = () => document.querySelector<HTMLElement>("[data-artifact-viewer]");
+const position = () => viewer()?.querySelector("[data-artifact-viewer-position]")?.textContent;
+const viewerTitle = () => viewer()?.querySelector("h2")?.textContent;
+const control = (label: string) =>
+  viewer()!.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+async function openFromList(container: HTMLElement, title: string, { opens = true } = {}) {
+  const action = [...container.querySelectorAll<HTMLElement>("[data-card-action]")].find(
+    (candidate) => candidate.textContent === title,
+  );
+  expect(action).toBeDefined();
+  await act(async () => action!.click());
+  await settle();
+  if (opens) await waitForViewer();
+}
+
+async function waitForViewer() {
+  for (let waited = 0; !viewer() && waited < 5000; waited += 20)
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+}
+
+/**
+ * Gives the zoom surface a 1000 x 800 CSS-pixel layout box (its size) at the
+ * window's origin (its position); returns the restore function.
+ */
+function measureZoomSurface(width = 1000, height = 800): () => void {
+  const proto = HTMLElement.prototype;
+  const rect = proto.getBoundingClientRect;
+  const isSurface = (element: HTMLElement) => element.hasAttribute("data-zoom-pan-surface");
+  const own = {
+    clientWidth: Object.getOwnPropertyDescriptor(proto, "clientWidth"),
+    clientHeight: Object.getOwnPropertyDescriptor(proto, "clientHeight"),
+  };
+  const inherited = (name: "clientWidth" | "clientHeight") => {
+    for (let level = Object.getPrototypeOf(proto); level; level = Object.getPrototypeOf(level)) {
+      const descriptor = Object.getOwnPropertyDescriptor(level, name);
+      if (descriptor) return descriptor;
+    }
+    return undefined;
+  };
+  proto.getBoundingClientRect = function (this: HTMLElement) {
+    if (!isSurface(this)) return rect.call(this);
+    return {
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      width,
+      height,
+      right: width,
+      bottom: height,
+      toJSON: () => ({}),
+    } as DOMRect;
+  };
+  for (const [name, size] of [
+    ["clientWidth", width],
+    ["clientHeight", height],
+  ] as const) {
+    const original = own[name] ?? inherited(name);
+    Object.defineProperty(proto, name, {
+      configurable: true,
+      get(this: HTMLElement) {
+        return isSurface(this) ? size : ((original?.get?.call(this) as number | undefined) ?? 0);
+      },
+    });
+  }
+  return () => {
+    proto.getBoundingClientRect = rect;
+    for (const name of ["clientWidth", "clientHeight"] as const) {
+      const descriptor = own[name];
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else Reflect.deleteProperty(proto, name);
+    }
+  };
+}
+
+async function press(key: string, target: Element = viewer()!) {
+  await act(async () => {
+    target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+  });
+  await settle();
+}
+
+function Library({
+  initialFilters = defaultArtifactFilters,
+  onSelect,
+}: {
+  initialFilters?: ArtifactCatalogFilters | undefined;
+  onSelect?: ((item: ArtifactCatalogItem) => void) | undefined;
+}) {
+  const [filters, setFilters] = useState(initialFilters);
+  return (
+    <ArtifactLibrary
+      workspaceId="workspace"
+      compact
+      viewer
+      items={filterArtifactCatalog(catalog, filters)}
+      filters={filters}
+      onFiltersChange={setFilters}
+      loading={false}
+      onRetry={() => {}}
+      onSelect={onSelect ?? (() => {})}
+    />
+  );
+}
+
+test("an image opens large and the buttons step through the list in its order", async () => {
+  localStorage.removeItem("opengeni:artifact-library:view:v1");
+  app.client = fakeClient().client;
+  const container = await render(() => <Library />);
+  expect(viewer()).toBeNull();
+  await openFromList(container, "shot-2.png");
+  expect(viewer()).not.toBeNull();
+  expect(viewerTitle()).toBe("shot-2.png");
+  expect(position()).toBe("2 of 5");
+  expect(viewer()!.querySelector("img")?.getAttribute("alt")).toBe("shot-2.png");
+
+  // A document in the list is part of the sequence, shown with its own preview.
+  await act(async () => control("Next").click());
+  expect(position()).toBe("3 of 5");
+  expect(viewerTitle()).toBe("Plan");
+  expect(
+    viewer()!.querySelector("[data-native-preview]")?.getAttribute("data-native-preview"),
+  ).toBe("plan");
+  await act(async () => control("Next").click());
+  await act(async () => control("Next").click());
+  expect(position()).toBe("5 of 5");
+  expect(viewerTitle()).toBe("shot-4.png");
+  // The ends are ends: no wrapping around.
+  expect(control("Next").disabled).toBe(true);
+  for (let step = 0; step < 4; step++) await act(async () => control("Previous").click());
+  expect(position()).toBe("1 of 5");
+  expect(control("Previous").disabled).toBe(true);
+  expect(control("Next").disabled).toBe(false);
+});
+
+test("the arrow keys keep working after the clicked button reaches the end and turns off", async () => {
+  app.client = fakeClient().client;
+  const container = await render(() => <Library />);
+  await openFromList(container, "shot-3.png");
+  // A clicked button has focus, and loses it to the page once it is disabled.
+  control("Next").focus();
+  await act(async () => control("Next").click());
+  expect(position()).toBe("5 of 5");
+  expect(control("Next").disabled).toBe(true);
+  const focused = document.activeElement;
+  expect(focused === control("Next")).toBe(false);
+  await press("ArrowLeft", focused ?? document.body);
+  expect(position()).toBe("4 of 5");
+  // Focus that fell to the page still steps the viewer.
+  await press("ArrowLeft", document.body);
+  expect(position()).toBe("3 of 5");
+  // Not while a confirmation is open over the viewer, though: its keys are its own.
+  const confirmation = document.createElement("div");
+  confirmation.setAttribute("role", "alertdialog");
+  document.body.append(confirmation);
+  try {
+    await press("ArrowLeft", document.body);
+    expect(position()).toBe("3 of 5");
+  } finally {
+    confirmation.remove();
+  }
+});
+
+test("the viewer closes when the artifact on screen leaves the list", async () => {
+  app.client = fakeClient().client;
+  const remove: { current: (id: string) => void } = { current: () => {} };
+  function Shrinking() {
+    const [items, setItems] = useState(catalog);
+    remove.current = (id) => setItems((current) => current.filter((item) => item.id !== id));
+    return (
+      <ArtifactLibrary
+        workspaceId="workspace"
+        compact
+        viewer
+        items={items}
+        filters={defaultArtifactFilters}
+        onFiltersChange={() => {}}
+        loading={false}
+        onRetry={() => {}}
+        onSelect={() => {}}
+      />
+    );
+  }
+  const container = await render(() => <Shrinking />);
+  await openFromList(container, "shot-2.png");
+  // Another artifact going away only renumbers the sequence.
+  await act(async () => remove.current("shot-1"));
+  await settle();
+  expect(viewerTitle()).toBe("shot-2.png");
+  expect(position()).toBe("1 of 4");
+  await act(async () => remove.current("shot-2"));
+  await settle();
+  expect(viewer()).toBeNull();
+});
+
+test("a one-finger swipe steps, but a two-finger pinch never does", async () => {
+  app.client = fakeClient().client;
+  const container = await render(() => <Library />);
+  await openFromList(container, "shot-1.png");
+  const touch = async (type: string, pointerId: number, x: number, isPrimary = false) => {
+    const body = viewer()!.querySelector("[data-artifact-viewer-body]")!;
+    await act(async () => {
+      body.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          pointerId,
+          isPrimary,
+          pointerType: "touch",
+          clientX: x,
+          clientY: 300,
+        }),
+      );
+    });
+  };
+  // Two fingers spreading sideways, lifted one after the other.
+  await touch("pointerdown", 1, 500);
+  await touch("pointerdown", 2, 700);
+  await touch("pointerup", 2, 900);
+  await touch("pointerup", 1, 300);
+  expect(position()).toBe("1 of 5");
+  // One finger dragged to the left shows the next artifact.
+  await touch("pointerdown", 3, 600);
+  await touch("pointerup", 3, 400);
+  await settle();
+  expect(position()).toBe("2 of 5");
+  // A finger whose lift was never seen does not turn swiping off for good.
+  await touch("pointerdown", 4, 600);
+  await touch("pointerdown", 5, 600, true);
+  await touch("pointerup", 5, 400, true);
+  await settle();
+  expect(position()).toBe("3 of 5");
+});
+
+test("Left and Right arrow keys step, never from inside a document, and Escape closes", async () => {
+  app.client = fakeClient().client;
+  const container = await render(() => <Library />);
+  await openFromList(container, "shot-1.png");
+  expect(position()).toBe("1 of 5");
+  await press("ArrowRight");
+  expect(position()).toBe("2 of 5");
+  await press("ArrowLeft");
+  expect(position()).toBe("1 of 5");
+  // An unmodified press steps; a modified one belongs to the browser and the system.
+  await press("ArrowRight", viewer()!);
+  await act(async () => {
+    viewer()!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", metaKey: true, bubbles: true }),
+    );
+  });
+  expect(position()).toBe("2 of 5");
+  await press("ArrowRight");
+  expect(viewerTitle()).toBe("Plan");
+  // Arrow keys inside the document being read move within it.
+  await press("ArrowRight", viewer()!.querySelector("[data-native-preview] button")!);
+  expect(position()).toBe("3 of 5");
+  await press("ArrowRight");
+  expect(position()).toBe("4 of 5");
+
+  await press("Escape");
+  expect(viewer()).toBeNull();
+  // Opening again starts from the artifact clicked.
+  await openFromList(container, "shot-4.png");
+  expect(position()).toBe("5 of 5");
+  await act(async () => control("Close").click());
+  expect(viewer()).toBeNull();
+});
+
+test("the sequence is the filtered list: search narrows what the viewer steps through", async () => {
+  app.client = fakeClient().client;
+  const container = await render(() => (
+    <Library initialFilters={{ ...defaultArtifactFilters, q: "shot", sort: "title" }} />
+  ));
+  await openFromList(container, "shot-3.png");
+  expect(position()).toBe("3 of 4");
+  await press("ArrowRight");
+  expect(viewerTitle()).toBe("shot-4.png");
+  expect(position()).toBe("4 of 4");
+  await press("ArrowRight");
+  expect(position()).toBe("4 of 4");
+  for (let step = 0; step < 3; step++) await press("ArrowLeft");
+  expect(viewerTitle()).toBe("shot-1.png");
+  // The document was filtered out, so it never appears.
+  expect(viewer()!.querySelector("[data-native-preview]")).toBeNull();
+});
+
+test("neighbouring images load ahead; documents still open where they are edited", async () => {
+  const fake = fakeClient();
+  app.client = fake.client;
+  const selected: string[] = [];
+  const container = await render(() => (
+    <Library onSelect={(item) => selected.push(`${item.kind}:${item.id}`)} />
+  ));
+  await openFromList(container, "shot-1.png");
+  // The image on screen and the next one; nothing further down the list.
+  expect([...new Set(fake.metadata)].sort()).toEqual(["shot-1", "shot-2"]);
+  expect([...new Set(fake.bytes)].sort()).toEqual(["shot-1", "shot-2"]);
+  await press("ArrowRight");
+  // Stepping shows the preloaded image without asking for it again.
+  expect(fake.metadata.filter((id) => id === "shot-2")).toHaveLength(1);
+  expect(fake.bytes.filter((id) => id === "shot-2")).toHaveLength(1);
+  await act(async () => control("Close").click());
+
+  // A document opens in the session's panel, as before, not in the viewer.
+  await openFromList(container, "Plan", { opens: false });
+  expect(viewer()).toBeNull();
+  expect(selected).toEqual(["document:plan"]);
+});
+
+test("the workspace library keeps opening images on their page, where it browses", async () => {
+  app.client = fakeClient().client;
+  const selected: string[] = [];
+  const container = await render(() => (
+    <ArtifactLibrary
+      workspaceId="workspace"
+      items={catalog}
+      filters={defaultArtifactFilters}
+      onFiltersChange={() => {}}
+      loading={false}
+      onRetry={() => {}}
+      onSelect={(item) => selected.push(`${item.kind}:${item.id}`)}
+    />
+  ));
+  await openFromList(container, "shot-2.png", { opens: false });
+  expect(viewer()).toBeNull();
+  expect(selected).toEqual(["image:shot-2"]);
+});
+
+test("images zoom with the keyboard, buttons and clicks, and start fitted again after a step", async () => {
+  app.client = fakeClient().client;
+  // The image area measures 1000 x 800 CSS pixels.
+  const restore = measureZoomSurface();
+  try {
+    const container = await render(() => <Library />);
+    await openFromList(container, "shot-1.png");
+    const percent = () => viewer()!.querySelector("[data-zoom-percent]")?.textContent;
+    const zoomKey = async (key: string) => {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => {
+        viewer()!.dispatchEvent(event);
+      });
+      return event;
+    };
+    const click = async (x: number, y: number) => {
+      const surface = viewer()!.querySelector("[data-zoom-pan-surface]")!;
+      const init = {
+        bubbles: true,
+        clientX: x,
+        clientY: y,
+        pointerId: 1,
+        pointerType: "mouse",
+        button: 0,
+      };
+      await act(async () => {
+        surface.dispatchEvent(new PointerEvent("pointerdown", init));
+        surface.dispatchEvent(new PointerEvent("pointerup", init));
+      });
+    };
+
+    // A 2000 x 1500 screenshot fits the 1000 x 800 area (less its padding) at 48%.
+    expect(percent()).toBe("48%");
+    const zoomIn = await zoomKey("=");
+    // Claimed, so neither the browser nor the desktop window zooms instead.
+    expect(zoomIn.defaultPrevented).toBe(true);
+    expect(percent()).toBe("50%");
+    await zoomKey("+");
+    expect(percent()).toBe("75%");
+    await zoomKey("-");
+    expect(percent()).toBe("50%");
+    await zoomKey("0");
+    expect(percent()).toBe("48%");
+    await act(async () => control("Zoom in").click());
+    expect(percent()).toBe("50%");
+    await act(async () => control("Zoom out").click());
+    expect(percent()).toBe("48%");
+    expect(control("Zoom out").disabled).toBe(true);
+
+    // A click shows actual size, keeping the clicked point under the pointer.
+    await click(500, 400);
+    expect(percent()).toBe("100%");
+    const image = viewer()!.querySelector<HTMLImageElement>("[data-zoom-pan-surface] img")!;
+    expect(image.style.width).toBe("2000px");
+    expect(image.style.transform).toBe("translate3d(-500px, -350px, 0)");
+    await click(500, 400);
+    expect(percent()).toBe("48%");
+
+    // Zoom never carries over: the next image starts fitted, and so does this one again.
+    await zoomKey("=");
+    await zoomKey("=");
+    expect(percent()).toBe("75%");
+    await press("ArrowRight");
+    // A small screenshot is enlarged to fit, but never past 2x.
+    expect(viewerTitle()).toBe("shot-2.png");
+    expect(percent()).toBe("200%");
+    await click(500, 400);
+    expect(percent()).toBe("100%");
+    await press("ArrowLeft");
+    expect(percent()).toBe("48%");
+
+    // A document is not an image: Cmd/Ctrl + plus is left to the window.
+    await press("ArrowRight");
+    await press("ArrowRight");
+    expect(viewerTitle()).toBe("Plan");
+    expect(viewer()!.querySelector("[data-zoom-controls]")).toBeNull();
+    expect((await zoomKey("=")).defaultPrevented).toBe(false);
+
+    await press("Escape");
+    expect(viewer()).toBeNull();
+    const outside = new KeyboardEvent("keydown", {
+      key: "=",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.body.dispatchEvent(outside);
+    expect(outside.defaultPrevented).toBe(false);
+  } finally {
+    restore();
+  }
+});
+
+test("zoom and arrow keys typed into a field are left to the field", async () => {
+  app.client = fakeClient().client;
+  const container = await render(() => <Library />);
+  await openFromList(container, "shot-1.png");
+  const field = document.createElement("input");
+  document.body.append(field);
+  try {
+    const typed = new KeyboardEvent("keydown", {
+      key: "=",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    field.dispatchEvent(typed);
+    expect(typed.defaultPrevented).toBe(false);
+    await press("ArrowRight", field);
+    expect(position()).toBe("1 of 5");
+  } finally {
+    field.remove();
+  }
+});

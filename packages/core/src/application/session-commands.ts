@@ -26,6 +26,8 @@ import {
   editQueuedTurnInTransaction,
   getComposerDraftInTransaction,
   getSession,
+  retireArchivedChatWaits,
+  setSessionArchive,
   getSessionEvent,
   getWorkspaceControlEvent,
   getSessionQueueSnapshot,
@@ -966,16 +968,21 @@ export async function controlHumanSessionWorkstreamWithOutcome(
     cancelledSessionCount: result.cancelledSessionCount,
     cancelledTurnCount: result.cancelledTurnCount,
   };
+  scheduleHumanControlPostCommit(deps, context.workspaceId, result, input.action);
+  return { response, outcome: result.outcome, replay: result.replay };
+}
+
+function scheduleHumanControlPostCommit(
+  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
+  workspaceId: string,
+  result: Awaited<ReturnType<typeof mutateSessionControlInTransaction>>,
+  action: "pause" | "resume" | "cancel",
+): void {
   scheduleSessionCommandPostCommit(deps, "human_control", [
     ...result.affectedSessionEvents.map((affected) => ({
       kind: "session_event_fanout" as const,
       run: async () =>
-        await publishSessionEventIds(
-          deps,
-          context.workspaceId,
-          affected.sessionId,
-          affected.eventIds,
-        ),
+        await publishSessionEventIds(deps, workspaceId, affected.sessionId, affected.eventIds),
     })),
     ...(result.workspaceControlEventId
       ? [
@@ -984,7 +991,7 @@ export async function controlHumanSessionWorkstreamWithOutcome(
             run: async () =>
               await publishWorkspaceControlEvent(
                 deps,
-                context.workspaceId,
+                workspaceId,
                 result.workspaceControlEventId!,
               ),
           },
@@ -1010,12 +1017,65 @@ export async function controlHumanSessionWorkstreamWithOutcome(
           wakeRevision: result.workflowWake.wakeRevision,
           shouldSignal: true,
           interruptionCount: result.interruptionCount,
-          controlRequested: input.action === "pause",
+          controlRequested: action === "pause",
         });
       },
     },
   ]);
-  return { response, outcome: result.outcome, replay: result.replay };
+}
+
+/**
+ * Pause and personal visibility commit together; Restore never changes control.
+ * Pausing also retires the chat's one-time waits in the same transaction, so
+ * an archived chat is never woken by a "wake me when" it was waiting on.
+ */
+export async function archiveHumanSessionWorkstream(
+  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
+  context: HumanSessionCommandContext,
+  input: Omit<
+    Parameters<typeof setSessionArchive>[1],
+    "beforeArchive" | "workspaceId" | "subjectId" | "sessionId"
+  > & {
+    pause: boolean;
+    clientEventId?: string | undefined;
+    confirmPause?: boolean | undefined;
+  },
+) {
+  if (input.archived && input.pause) {
+    await authorizeHumanSessionCommand(deps, context, "session.control");
+  }
+  let control: Awaited<ReturnType<typeof mutateSessionControlInTransaction>> | undefined;
+  const session = await setSessionArchive(deps.db, {
+    ...input,
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+    sessionId: context.sessionId,
+    beforeArchive: input.pause
+      ? async (tx, archiveVersion) => {
+          await retireArchivedChatWaits(tx, {
+            workspaceId: context.workspaceId,
+            rootSessionId: context.sessionId,
+          });
+          control = await mutateSessionControlInTransaction(tx, {
+            accountId: context.accountId,
+            workspaceId: context.workspaceId,
+            sessionId: context.sessionId,
+            actor: { type: "human", subjectId: context.subjectId },
+            // The personal archive transition is the receipt identity. A retry does
+            // not re-pause after an explicit Resume; Restore advances the next epoch.
+            operationKey:
+              input.clientEventId ?? `archive-pause:${context.sessionId}:${archiveVersion}`,
+            action: "pause",
+            reason: "Archived",
+            requireIdleForArchive: !input.confirmPause,
+            controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+          });
+          return control.replay;
+        }
+      : undefined,
+  });
+  if (control) scheduleHumanControlPostCommit(deps, context.workspaceId, control, "pause");
+  return session;
 }
 
 /** Backward-compatible response path used by the REST control route. */

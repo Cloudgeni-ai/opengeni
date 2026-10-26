@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
@@ -15,13 +16,24 @@ import {
   buildActionCatalog,
   isActionCatalogExempt,
   registeredApiRoutes,
+  routeInputs,
+  ACTION_REQUEST_SCHEMAS,
   type ActionCatalogEntry,
 } from "../../../scripts/public-api/action-catalog";
-import { ACTION_CATALOG } from "../src/mcp/action-catalog.gen";
+import * as primitives from "../../../packages/contracts/src/primitives";
+import { secretValue, secretValues } from "@opengeni/contracts";
+import {
+  ACTION_PLAIN_STRING_MAPS,
+  ACTION_SECRET_FIELD_EXCEPTIONS,
+  actionFieldPaths as allFieldPaths,
+  actionSecretFields,
+  schemaSecretFields,
+  unclassifiedStringMaps,
+} from "../../../scripts/public-api/action-secrets";
+import { ACTION_CATALOG, READ_ONLY_POST_ACTIONS } from "@opengeni/contracts/app-actions";
 import {
   buildOrganizationMcpServer,
   organizationMcpIcons,
-  READ_ONLY_POST_ACTIONS,
   type OrganizationMcpCaller,
   searchActions,
 } from "../src/organization-mcp";
@@ -144,6 +156,81 @@ describe("organization MCP action catalog", () => {
     ])
       expect(listed.has(key)).toBe(true);
     expect(listed.has("POST /v1/identity/login-bindings/:bindingId/recovery")).toBe(false);
+    expect(listed.has("POST /v1/integrations/teams/messages")).toBe(false);
+  });
+
+  test("marks every action that carries a secret, from its schemas, unless an exception says why not", () => {
+    // The catalog's marks are exactly what the schemas say: a new action with
+    // a secret field is marked when the catalog is regenerated, and this fails
+    // until it is (or until an exception in action-secrets.ts gives a reason).
+    for (const entry of ACTION_CATALOG) {
+      expect([entry.id, entry.secretFields ?? []]).toEqual([entry.id, actionSecretFields(entry)]);
+    }
+    // The rule itself, on a schema no route uses.
+    const sample = z.object({
+      apiKey: z.string(),
+      credentialVersion: z.number(),
+      hasWebhookSecret: z.boolean(),
+      credential: z.object({ connectionId: z.string() }),
+      bundle: z.object({ credentials: z.record(z.string(), z.string()) }),
+      nested: z.array(z.object({ clientSecret: z.string().optional() })),
+      references: z.object({ otp: z.string() }),
+      previewToken: z.string(),
+      code: z.string(),
+      status: z.object({ errorCode: z.string(), code: z.string() }),
+      kind: z.enum(["token", "secret"]),
+    });
+    expect(schemaSecretFields(sample, "request")).toEqual([
+      "request.apiKey",
+      "request.bundle.credentials",
+      "request.code",
+      "request.nested[].clientSecret",
+    ]);
+    expect(schemaSecretFields(sample, "response")).toEqual([
+      "response.apiKey",
+      "response.bundle.credentials",
+      "response.nested[].clientSecret",
+    ]);
+    // A field marked secret in its contract counts whatever it is called; an
+    // unmarked bundle with a plain name doesn't.
+    const marked = z.object({
+      headers: secretValue(z.record(z.string(), z.string())).optional(),
+      values: z.record(z.string(), z.string()),
+      items: z.array(z.object({ blob: secretValue(z.string()) })),
+    });
+    expect(schemaSecretFields(marked, "request")).toEqual([
+      "request.headers",
+      "request.items[].blob",
+    ]);
+    // Marks belong to one field's schema, never a shared primitive.
+    for (const [name, value] of Object.entries(primitives))
+      if (value instanceof z.ZodType)
+        expect([name, secretValues.has(value)]).toEqual([name, false]);
+    // Every open map of strings (the shape of a header or credential bundle)
+    // is either marked secret or listed as plain with its reason.
+    for (const entry of ACTION_CATALOG)
+      for (const [side, names] of [
+        ["request", entry.request],
+        ["response", entry.response],
+      ] as const)
+        for (const name of names)
+          expect([entry.id, name, unclassifiedStringMaps(name, side)]).toEqual([
+            entry.id,
+            name,
+            [],
+          ]);
+    // Every exception still matches something, so none outlives its reason.
+    const everyPath = ACTION_CATALOG.flatMap((entry) =>
+      [
+        ...entry.request.map((name) => ["request", name] as const),
+        ...entry.response.map((name) => ["response", name] as const),
+      ].flatMap(([side, name]) => allFieldPaths(name, side)),
+    );
+    for (const exception of [...ACTION_SECRET_FIELD_EXCEPTIONS, ...ACTION_PLAIN_STRING_MAPS])
+      expect([exception.reason, everyPath.some((path) => exception.path.test(path))]).toEqual([
+        exception.reason,
+        true,
+      ]);
   });
 
   test("marks exactly the actions no agent can do as the person", () => {
@@ -170,6 +257,11 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId",
         "GET /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
+        // Teams setup and account linking require the person's verified browser.
+        "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/link",
+        "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
         // a task's usage limit bounds agent spending; agents never change it.
         "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/usage-limit",
       ].sort(),
@@ -350,7 +442,9 @@ describe("organization MCP server", () => {
       total: number;
       actions: unknown[];
     };
-    expect(everything.total).toBe(ACTION_CATALOG.filter((entry) => !entry.browserOnly).length);
+    expect(everything.total).toBe(
+      ACTION_CATALOG.filter((entry) => !entry.browserOnly && !entry.retired).length,
+    );
     expect(everything.actions).toHaveLength(5);
     const described = (await call("opengeni_action_describe", { id: "createSession" })).value as {
       method: string;
@@ -361,6 +455,31 @@ describe("organization MCP server", () => {
     expect(described.pathParameters).toEqual(["workspaceId"]);
     expect(described.input[0]!.in).toBe("body");
     expect(described.input[0]!.schema).toMatchObject({ type: "object" });
+  });
+
+  test("vault actions describe their bodies and queries", async () => {
+    const { call } = await connect(person(full));
+    const describeAction = async (id: string) =>
+      (await call("opengeni_action_describe", { id })).value as {
+        input: Array<{ name: string; in: string; schema: Record<string, any> | null }>;
+      };
+    const update = await describeAction("PATCH /v1/workspaces/:workspaceId/vaults/:vaultId");
+    expect(update.input[0]).toMatchObject({ name: "UpdateVaultRequest", in: "body" });
+    expect(update.input[0]!.schema!.required).toContain("expectedGeneration");
+    const remove = await describeAction("DELETE /v1/workspaces/:workspaceId/vaults/:vaultId");
+    expect(remove.input[0]).toMatchObject({ name: "DeleteVaultRequest", in: "body" });
+    expect(remove.input[0]!.schema!.required).toEqual(["confirmName"]);
+    const link = await describeAction("POST /v1/workspaces/:workspaceId/vaults/link");
+    expect(link.input[0]).toMatchObject({ name: "LinkProviderVaultRequest", in: "body" });
+    expect(link.input[0]!.schema).toMatchObject({ type: "object" });
+    const items = await describeAction("GET /v1/workspaces/:workspaceId/vaults/:vaultId/items");
+    expect(items.input[0]).toMatchObject({ name: "ListVaultItemsQuery", in: "query" });
+    expect(Object.keys(items.input[0]!.schema!.properties)).toContain("includeArchived");
+    const approval = await describeAction(
+      "PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval",
+    );
+    expect(approval.input[0]).toMatchObject({ name: "SetVaultItemApprovalRequest", in: "body" });
+    expect(approval.input[0]!.schema).toMatchObject({ type: "object" });
   });
 
   test("publication fixes describe both required bodies and invoke the route contract", async () => {
@@ -449,6 +568,29 @@ describe("organization MCP server", () => {
     });
   });
 
+  test("compact session-page guidance uses ordinary query dispatch without changing defaults", async () => {
+    const { call, seen } = await connect(person(readOnly));
+    const compact = await call("opengeni_action_call", {
+      id: "listSessionPage",
+      pathParameters: { workspaceId },
+      query: { view: "page", projection: "summary", limit: 50, cursor: "next-page" },
+    });
+    expect(compact.isError).toBe(false);
+    expect(Object.fromEntries(new URL(seen[0]!.url).searchParams)).toEqual({
+      view: "page",
+      projection: "summary",
+      limit: "50",
+      cursor: "next-page",
+    });
+    const fullPage = await call("opengeni_action_call", {
+      id: "listSessionPage",
+      pathParameters: { workspaceId },
+      query: { view: "page", limit: 50 },
+    });
+    expect(fullPage.isError).toBe(false);
+    expect(new URL(seen[1]!.url).searchParams.has("projection")).toBe(false);
+  });
+
   test("read only refuses changes before anything runs; reads still work", async () => {
     const { call, seen } = await connect(person(readOnly));
     const refused = await call("opengeni_action_call", {
@@ -472,7 +614,7 @@ describe("organization MCP server", () => {
     });
     // Searching sends the query as a POST body, but only reads: it runs.
     const search = await call("opengeni_action_call", {
-      id: "POST /v1/workspaces/:workspaceId/knowledge/search",
+      id: "listKnowledgeEntries",
       pathParameters: { workspaceId },
       body: { query: "release notes" },
     });
@@ -599,5 +741,194 @@ describe("organization MCP action search", () => {
     expect(first("workspaces")).toBe("listWorkspaces");
     expect(first("create session")).toBe("createSession");
     expect(first("github repositories")).toBe("listGitHubRepositories");
+  });
+});
+
+describe("organization MCP action inputs", () => {
+  const byId = (id: string) => ACTION_CATALOG.find((entry) => entry.id === id)!;
+
+  test("come from what each route's handler validates", () => {
+    expect(byId("sendEvent").request).toEqual(["ClientSessionEvent"]);
+    expect(byId("steerMessage").request).toEqual(["SteerSessionMessageRequest"]);
+    expect(byId("saveWorkspaceSkill").request).toEqual(["SaveWorkspaceSkillRequest"]);
+    expect(byId("removeWorkspaceSkill").request).toEqual(["RemoveWorkspaceSkillRequest"]);
+    expect(byId("listScheduledTasks").query).toEqual(["limit", "offset", "sessionId"]);
+    expect(byId("listWorkspaceSkills").query).toEqual(expect.arrayContaining(["cursor", "limit"]));
+  });
+
+  test("the route source reader finds body and query schemas, query names and retirement", () => {
+    expect(
+      routeInputs([
+        `async (c) => {
+          const page = c.req.query("cursor");
+          const query = c.req.query();
+          const { view } = c.req.query();
+          const filter = parseRequestQuery(z.object({ status: z.string() }).strict(), c.req.query());
+          const body = await parseRequestJson(c, SaveWorkspaceSkillRequest, { status: 422 });
+          return c.json({ page, limit: query.limit, view, filter, body });
+        }`,
+      ]),
+    ).toEqual({
+      body: ["SaveWorkspaceSkillRequest"],
+      query: [],
+      queryParameters: ["cursor", "limit", "status", "view"],
+    });
+    // A schema checked against values the route assembles from its path is
+    // not the body when the handler reads none.
+    expect(
+      routeInputs([
+        `async (c) => parseRequestBody(SaveWorkspaceSkillRequest, { id: c.req.param("id") })`,
+      ]).body,
+    ).toEqual([]);
+    expect(
+      routeInputs([
+        `async (c) => { throw routeRetired("POST /v1/workspaces/:workspaceId/knowledge/entries/search", "moved"); }`,
+      ]).retired,
+    ).toBe("POST /v1/workspaces/:workspaceId/knowledge/entries/search");
+  });
+
+  test("every hand-named request schema is still needed", () => {
+    for (const rule of ACTION_REQUEST_SCHEMAS) {
+      const routes = registeredApiRoutes().filter((route) => rule.pattern.test(routeKey(route)));
+      expect(routes).not.toEqual([]);
+      for (const route of routes) expect(routeInputs(route.sources ?? []).body).toEqual([]);
+    }
+  });
+
+  test("describe shows the body schema and the query parameters", async () => {
+    const { client, call } = await connect(person(full));
+    try {
+      for (const id of ["sendEvent", "saveWorkspaceSkill"]) {
+        const described = (await call("opengeni_action_describe", { id })).value as {
+          input: Array<{ in: string; schema: { properties?: Record<string, unknown> } | null }>;
+        };
+        expect(described.input).toHaveLength(1);
+        expect(described.input[0]!.in).toBe("body");
+        expect(described.input[0]!.schema).not.toBeNull();
+      }
+      const skill = (await call("opengeni_action_describe", { id: "saveWorkspaceSkill" }))
+        .value as {
+        input: Array<{ schema: { required?: string[]; properties: Record<string, unknown> } }>;
+      };
+      expect(skill.input[0]!.schema.required).toContain("stableKey");
+      expect(Object.keys(skill.input[0]!.schema.properties)).toContain("scope");
+      const list = (await call("opengeni_action_describe", { id: "listScheduledTasks" })).value as {
+        queryParameters?: string[];
+      };
+      expect(list.queryParameters).toEqual(["limit", "offset", "sessionId"]);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("organization MCP retired actions", () => {
+  const retiredEntries = ACTION_CATALOG.filter((entry) => entry.retired);
+
+  test("are the retired search routes, never found and never run", async () => {
+    expect(retiredEntries.map(routeKey).sort()).toEqual([
+      "POST /v1/workspaces/:workspaceId/document-bases/:baseId/search",
+      "POST /v1/workspaces/:workspaceId/knowledge/search",
+    ]);
+    const { client, call, seen } = await connect(person(full));
+    try {
+      const page = searchActions({ query: "knowledge search", limit: 50, offset: 0 });
+      for (const entry of retiredEntries)
+        expect(page.actions.map((action) => action.id)).not.toContain(entry.id);
+      expect(page.actions.map((action) => action.id)).toContain("listKnowledgeEntries");
+      for (const entry of retiredEntries) {
+        for (const [tool, args] of [
+          ["opengeni_action_describe", { id: entry.id }],
+          ["opengeni_action_call", { id: entry.id, pathParameters: { workspaceId } }],
+        ] as const) {
+          expect(await call(tool, args)).toEqual({
+            isError: true,
+            value: `${entry.id} was removed. Use the listKnowledgeEntries action (POST /v1/workspaces/:workspaceId/knowledge/entries/search) instead; describe it for its input.`,
+          });
+        }
+      }
+      expect(seen).toHaveLength(0);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("organization MCP large responses", () => {
+  const item = (index: number) => ({ id: `task-${index}`, prompt: "x".repeat(4_000) });
+
+  test("a list keeps whole items and says how to page with offset", async () => {
+    const tasks = Array.from({ length: 100 }, (_, index) => item(index));
+    const { client, call } = await connect(person(full), () => Response.json(tasks));
+    try {
+      const result = (
+        await call("opengeni_action_call", {
+          id: "listScheduledTasks",
+          pathParameters: { workspaceId },
+          query: { offset: 10 },
+        })
+      ).value as {
+        status: number;
+        body: Array<{ id: string }>;
+        truncated: { returnedItems: number; totalItems: number; returnedBytes: number };
+        hint: string;
+      };
+      const count = result.truncated.returnedItems;
+      expect(result.status).toBe(200);
+      expect(count).toBeGreaterThan(0);
+      expect(count).toBeLessThan(100);
+      expect(result.truncated.totalItems).toBe(100);
+      expect(result.body.map((task) => task.id)).toEqual(tasks.slice(0, count).map((t) => t.id));
+      expect(result.hint).toBe(
+        `Only the first ${count} of the 100 items in this response fit in one result. Call again with query offset=${10 + count} and limit=${count} for the next items.`,
+      );
+      const text = JSON.stringify(result);
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(256 * 1024);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("a cursor page trims its largest list and says how to get pages that fit", async () => {
+    const items = Array.from({ length: 100 }, (_, index) => item(index));
+    const { client, call } = await connect(person(full), () =>
+      Response.json({ items, nextCursor: "next" }),
+    );
+    try {
+      const result = (
+        await call("opengeni_action_call", {
+          id: "listWorkspaceSkills",
+          pathParameters: { workspaceId },
+        })
+      ).value as {
+        body: { items: unknown[]; nextCursor: string };
+        truncated: { returnedItems: number; field: string };
+        hint: string;
+      };
+      expect(result.truncated.field).toBe("items");
+      expect(result.body.items).toHaveLength(result.truncated.returnedItems);
+      expect(result.body.nextCursor).toBe("next");
+      expect(result.hint).toContain(
+        `Call again with query limit=${result.truncated.returnedItems}`,
+      );
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("a body that is not a list keeps the byte cut", async () => {
+    const { client, call } = await connect(person(full), () =>
+      Response.json({ text: "x".repeat(300_000) }),
+    );
+    try {
+      const result = (await call("opengeni_action_call", { id: "getAccessContext" })).value as {
+        body: string;
+        truncated: { returnedBytes: number; totalBytes: number };
+      };
+      expect(typeof result.body).toBe("string");
+      expect(result.truncated.returnedBytes).toBe(256 * 1024);
+    } finally {
+      await client.close();
+    }
   });
 });

@@ -3,8 +3,22 @@
 // connected. `many=1` gives the organization twelve Codex and eleven Claude
 // accounts with mixed owners, reach and status, and a second workspace,
 // "Research". Every write lands in `window.modelsReceipts` with keys redacted.
+// `claude=1` turns Claude subscriptions on. Its sign-in is synthetic: start
+// returns a claude.com URL (the browser test stubs that page), and complete
+// accepts only "preview-code" and holds for 1.5s when `slow=1`.
+// `azureAuth=entra_client_secret` (or `entra_deployment_identity`) starts the
+// Azure connection signed in with Microsoft Entra ID, and `azureIdentity=1`
+// offers this deployment's identity to the organization.
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { createElement, type ReactNode } from "react";
+import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
+
 const params = new URLSearchParams(window.location.search);
 const many = params.get("many") === "1";
+const claudeOn = many || params.get("claude") === "1";
+const slow = params.get("slow") === "1";
+const azureAuth = params.get("azureAuth") ?? "api_key";
+const azureIdentity = params.get("azureIdentity") === "1";
 const receipts: unknown[] = [];
 (window as unknown as { modelsReceipts: unknown[] }).modelsReceipts = receipts;
 
@@ -14,6 +28,7 @@ type Connection = {
   status: "active" | "revoked";
   version: number;
   endpoint?: string | null;
+  authMethod?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -31,6 +46,7 @@ const connections: Record<string, Connection | null> = {
           status: "active",
           version: 1,
           endpoint: "https://acme.openai.azure.com/openai/v1",
+          authMethod: azureAuth,
           createdAt: now,
           updatedAt: now,
         }
@@ -114,6 +130,44 @@ const manyClaude = names.slice(0, 11).map((name, index) => ({
   version: 1,
   reach: reaches[(index + 2) % reaches.length],
 }));
+// Claude accounts connected through this preview's sign-in.
+const claudeConnected: Record<"organization" | "workspace", unknown[]> = {
+  organization: [],
+  workspace: [],
+};
+const claudeAttempt = "11111111-1111-4111-8111-111111111111";
+const claudeStart = async (scope: "organization" | "workspace", request?: unknown) => {
+  receipts.push({ claudeStart: scope, request });
+  if (slow) await new Promise((resolve) => setTimeout(resolve, 1000));
+  return {
+    attemptId: claudeAttempt,
+    authorizationUrl: "https://claude.com/cai/oauth/authorize?state=preview",
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+  };
+};
+const claudeComplete = async (scope: "organization" | "workspace", request: { code: string }) => {
+  if (slow) await new Promise((resolve) => setTimeout(resolve, 1500));
+  receipts.push({ claudeComplete: scope, code: request.code === "preview-code" });
+  if (request.code !== "preview-code") {
+    throw new OpenGeniApiError(422, "", {
+      code: "validation_error",
+      // A real API error carries a request reference; it must fit without moving the footer.
+      correlationId: "3f2b9c1e-7a44-4d0b-9e61-5c8d2a7f1b30",
+      displayMessage: "Copy the full authorization code from the Claude page.",
+    });
+  }
+  const account = {
+    ...manyClaude[0]!,
+    id: id(900),
+    scope: scope === "organization" ? "organization" : "workspace",
+    email: "ada.claude@acme.example",
+    label: null,
+    active: true,
+    reach: everyone,
+  };
+  claudeConnected[scope] = [account];
+  return { connected: true, accountId: account.id, credentialVersion: 1 };
+};
 const pool = (provider: "codex" | "claude", accounts: { id: string; label: string }[]) => ({
   provider,
   observedAt: now,
@@ -175,6 +229,15 @@ const codexOverview = (index: number) => ({
 });
 
 const known: Record<string, (...args: any[]) => Promise<unknown>> = {
+  getClaudeSubscriptionAccountUsage: async () => previewClaudeUsage(),
+  getOrganizationClaudeSubscriptionAccountUsage: async () => previewClaudeUsage(),
+  startOrganizationClaudeSubscriptionOAuth: async () => claudeStart("organization"),
+  startWorkspaceClaudeSubscriptionOAuth: async (_workspace: string, request: unknown) =>
+    claudeStart("workspace", request),
+  completeOrganizationClaudeSubscriptionOAuth: async (_org: string, request: { code: string }) =>
+    claudeComplete("organization", request),
+  completeWorkspaceClaudeSubscriptionOAuth: async (_workspace: string, request: { code: string }) =>
+    claudeComplete("workspace", request),
   listCodexAccounts: async () => ({
     ...emptyPool,
     source: {
@@ -212,11 +275,15 @@ const known: Record<string, (...args: any[]) => Promise<unknown>> = {
   listSuperGrokAccounts: async () => emptyPool,
   listOrganizationSuperGrokAccounts: async () => emptyPool,
   listConnections: async () => [],
-  listClaudeSubscriptionAccounts: async () => ({ ...emptyPool, source: "workspace" }),
+  listClaudeSubscriptionAccounts: async () => ({
+    ...emptyPool,
+    accounts: claudeConnected.workspace,
+    source: "workspace",
+  }),
   listOrganizationClaudeSubscriptionAccounts: async () =>
     many
       ? { ...emptyPool, accounts: manyClaude, activeAccountId: manyClaude[0]!.id, source: "organization" }
-      : { ...emptyPool, source: "organization" },
+      : { ...emptyPool, accounts: claudeConnected.organization, source: "organization" },
   listWorkspaceGatewayCustomModels: async () => ({ models: [] }),
   listWorkspaceOpenRouterCustomModels: async () => ({ models: [] }),
   listWorkspaceOpperCustomModels: async () => ({ models: [] }),
@@ -264,15 +331,34 @@ const known: Record<string, (...args: any[]) => Promise<unknown>> = {
   upsertOrganizationModelProviderConnection: async (
     _org: string,
     kind: string,
-    request: { endpoint?: string },
+    request: {
+      endpoint?: string;
+      authentication?: { method: string; clientSecret?: string };
+    },
   ) => {
-    receipts.push({ upsert: kind, request: { ...request, apiKey: "redacted" } });
+    receipts.push({
+      upsert: kind,
+      request: {
+        ...request,
+        ...(request.authentication
+          ? {
+              authentication: {
+                ...request.authentication,
+                ...(request.authentication.clientSecret ? { clientSecret: "redacted" } : {}),
+              },
+            }
+          : { apiKey: "redacted" }),
+      },
+    });
     const saved: Connection = {
       id: `org-${kind}`,
       providerKind: kind,
       status: "active",
       version: (connections[kind]?.version ?? 0) + 1,
       ...(request.endpoint ? { endpoint: `${request.endpoint.replace(/\/+$/, "")}/openai/v1` } : {}),
+      ...(kind === "azure_openai"
+        ? { authMethod: request.authentication?.method ?? "api_key" }
+        : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -307,6 +393,18 @@ const known: Record<string, (...args: any[]) => Promise<unknown>> = {
   },
 };
 
+function previewClaudeUsage() {
+  return {
+    connected: true,
+    credentialVersion: 1,
+    windows: [],
+    observedAt: null,
+    source: null,
+    refreshStatus: "not_checked",
+    refreshCheckedAt: null,
+  };
+}
+
 // Reads this preview doesn't model answer empty; each one is named in the console.
 const client = new Proxy(known, {
   get(target, name: string) {
@@ -327,7 +425,8 @@ const appContext = {
       models: [],
       defaultModel: "codex/sol",
       defaultReasoningEffort: "medium",
-      ...(many ? { claudeSubscriptionEnabled: true } : {}),
+      ...(claudeOn ? { claudeSubscriptionEnabled: true } : {}),
+      ...(azureIdentity ? { azureOpenAIDeploymentIdentity: true } : {}),
     },
     accessContext: null,
     workspaces: [
@@ -341,4 +440,11 @@ const appContext = {
 
 export function useAppContext() {
   return appContext;
+}
+
+// Some lazy/shared components resolve through the package entry point instead
+// of the preview alias. Supply the same synthetic state through the real
+// context too, so navigation does not depend on Vite's optimized-module graph.
+export function PreviewAppContextProvider({ children }: { children: ReactNode }) {
+  return createElement(AppContext.Provider, { value: appContext as unknown as AppContextValue }, children);
 }

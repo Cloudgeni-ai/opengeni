@@ -86,6 +86,14 @@ pub struct StreamTokenClaims {
     /// floor, mirroring the lease-epoch stale-viewer fence.
     #[serde(rename = "authorityEpoch", default)]
     pub authority_epoch: Option<u64>,
+    /// The machine (agent) a Connected Machine relay stream token is bound to.
+    /// Optional: older mints and provider-tunnel tokens omit it.
+    #[serde(rename = "agentId", default)]
+    pub agent_id: Option<String>,
+    /// The exact stream instance (channel id) the token is bound to. Optional,
+    /// as `agent_id`.
+    #[serde(rename = "channelId", default)]
+    pub channel_id: Option<String>,
 }
 
 /// The verified claims of an agent `ogr_` relay producer token. Field names mirror

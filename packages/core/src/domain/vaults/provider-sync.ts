@@ -1,6 +1,7 @@
 import {
   isValidSecretName,
   VAULT_DEFAULT_PRIMARY_FIELD,
+  VAULT_ITEM_CATEGORY_PATTERN,
   VAULT_LIMITS,
   type VaultFieldKind,
   type VaultItemType,
@@ -9,6 +10,7 @@ import {
   type VaultSyncStatus,
 } from "@opengeni/contracts";
 import {
+  encryptEnvironmentValue,
   getProviderVaultSyncTarget,
   isVaultError,
   setVaultSyncStatus,
@@ -19,6 +21,7 @@ import {
 import {
   isVaultProviderError,
   providerOperations,
+  providerUsernameHint,
   readProviderItemInventory,
   readProviderVaultInventory,
   VaultProviderError,
@@ -32,7 +35,8 @@ import {
 /**
  * Provider vault metadata mirror (design §10.9, OP-1/OP-4; external vaults
  * §8–§9). A linked vault keeps a metadata-only mirror (item names, types,
- * websites, field names and kinds); values are always read live. A sync costs
+ * websites, field names and kinds, plus an encrypted username display hint);
+ * field values are always read live. A sync costs
  * one vault listing and skips the item listing entirely when the provider's
  * `contentVersion` is unchanged, so FAMILY-plan quotas are not burnt on
  * no-op refreshes.
@@ -63,12 +67,17 @@ export interface ProviderMirrorItem {
   /** The provider's own name, kept when it had to be sanitized or de-duplicated. */
   providerName: string;
   type: VaultItemType;
+  username: string | null;
+  /** Provider-specific kind of item; null for the plain type. */
+  category: string | null;
   websites: string[];
   fields: ProviderMirrorField[];
   primaryExternalFieldId: string | null;
   hasTotp: boolean;
   version: string | null;
   updatedAt: string | null;
+  /** Set when the connected account archived the item upstream. */
+  archivedAt: string | null;
 }
 
 export interface ProviderMirrorPlan {
@@ -283,15 +292,33 @@ export function planProviderMirror(
       name,
       providerName: item.name,
       type: item.type,
+      username: providerUsernameHint(item.username),
+      category: normalizedCategory(item.category),
       websites: [...item.websites],
       fields,
       primaryExternalFieldId: providerPrimaryFieldId({ type: item.type, fields: item.fields }),
       hasTotp: item.fields.some((field) => field.kind === "totp"),
       version: item.version,
       updatedAt: item.updatedAt,
+      archivedAt: normalizedArchivedAt(item.archivedAt),
     };
   });
   return { contentVersion, items: mirrored, truncated: 0 };
+}
+
+/**
+ * An upstream archive time as ISO 8601. An unreadable time still counts as
+ * archived (now); the mirror keeps the first time it saw an item archived.
+ */
+function normalizedArchivedAt(value: string | null | undefined): string | null {
+  if (value === undefined || value === null || value === "") return null;
+  const time = validTime(value);
+  return new Date(time ?? Date.now()).toISOString();
+}
+
+/** A provider category the mirror can keep; anything else is the plain type. */
+function normalizedCategory(value: string | null | undefined): string | null {
+  return typeof value === "string" && VAULT_ITEM_CATEGORY_PATTERN.test(value) ? value : null;
 }
 
 function validTime(value: unknown): number | null {
@@ -504,6 +531,7 @@ export function databaseProviderMirrorStore(
   context: VaultDbContext,
   vaultId: string,
   expectedCacheEpoch: string,
+  encryptionKey: Uint8Array | null = null,
 ): ProviderMirrorStore {
   return {
     async settleRefresh(update, plan) {
@@ -513,13 +541,19 @@ export function databaseProviderMirrorStore(
             items: plan.items.map((item) => ({
               providerItemRef: item.externalItemId,
               providerVersion: item.version,
+              usernameHintEncrypted:
+                encryptionKey !== null && item.username !== null
+                  ? encryptEnvironmentValue(encryptionKey, item.username)
+                  : null,
               // Passkeys live only in hosted vaults (D20); providers never mirror them.
               type: item.type === "passkey" ? "login" : item.type,
+              ...(item.category ? { category: item.category } : {}),
               // The base name: the routine de-duplicates against the stored mirror
               // so names stay sticky per provider item.
               name: providerSecretName(item.providerName),
               websites: item.websites,
               primaryFieldRef: item.primaryExternalFieldId,
+              archivedAt: item.archivedAt,
               fields: item.fields.map((field) => ({
                 providerFieldRef: field.externalFieldId,
                 name: field.name,
@@ -562,6 +596,7 @@ export function databaseProviderMirrorStore(
  */
 export async function syncLinkedProviderVault(input: {
   db: Database;
+  encryptionKey?: Uint8Array | null;
   context: VaultDbContext;
   vaultId: string;
   providers: VaultProviderRegistry;
@@ -579,6 +614,7 @@ export async function syncLinkedProviderVault(input: {
     input.context,
     input.vaultId,
     target.providerCacheEpoch ?? "0",
+    input.encryptionKey ?? null,
   );
   const now = input.now ?? (() => new Date());
   const rateLimitedUntil = target.rateLimitedUntil ? new Date(target.rateLimitedUntil) : null;
@@ -781,6 +817,7 @@ export type LinkedVaultRefreshReport = {
  */
 export async function refreshLinkedVaults(input: {
   db: Database;
+  encryptionKey?: Uint8Array | null;
   context: VaultDbContext;
   vaults: readonly LinkedVaultFreshness[];
   providers: VaultProviderRegistry;
@@ -818,6 +855,7 @@ export async function refreshLinkedVaults(input: {
       run = Promise.race([
         syncLinkedProviderVault({
           db: input.db,
+          encryptionKey: input.encryptionKey ?? null,
           context: input.context,
           vaultId: vault.id,
           providers: input.providers,
@@ -875,6 +913,7 @@ export async function refreshLinkedVaults(input: {
  */
 export async function refreshStaleLinkedVaults(input: {
   db: Database;
+  encryptionKey?: Uint8Array | null;
   context: VaultDbContext;
   vaults: readonly LinkedVaultFreshness[];
   providers: VaultProviderRegistry;

@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import {
   CLAUDE_DEFAULT_CONNECTION_MODEL_IDS,
   environmentsEncryptionKeyBytes,
+  type AzureEntraProviderCredential,
   type Settings,
 } from "@opengeni/config";
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
+import { z } from "zod";
 
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
 import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
@@ -17,6 +19,9 @@ import { readSubscriptionCoreProviderRoute } from "./subscription-core/provider-
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { defaultModelRequestHash } from "./model-catalog";
 import * as schema from "./schema";
+import type { OrganizationModelProviderAuthMethod } from "./schema";
+
+export type { OrganizationModelProviderAuthMethod } from "./schema";
 
 /** Providers whose organization key runs models, with custom models to choose. */
 export type OrganizationModelCatalogProviderKind =
@@ -35,9 +40,87 @@ export type OrganizationModelProviderConnection = {
   version: number;
   /** Azure OpenAI only: the non-secret resource endpoint; null for every other kind. */
   endpoint: string | null;
+  /** How the connection signs in; Microsoft Entra ID methods are Azure OpenAI only. */
+  authMethod: OrganizationModelProviderAuthMethod;
   createdAt: Date;
   updatedAt: Date;
 };
+
+/**
+ * What an organization connection signs in with. An API key is stored as the
+ * key itself, so every existing row reads unchanged; a Microsoft Entra ID
+ * method is stored as a small versioned JSON document under the same
+ * encryption (the app's client secret is the only secret in it).
+ */
+export type OrganizationModelProviderCredential =
+  | { method: "api_key"; apiKey: string }
+  | { method: "entra_client_secret"; tenantId: string; clientId: string; clientSecret: string }
+  | { method: "entra_deployment_identity" };
+
+/** The decrypted credential of an active Azure OpenAI or OpenAI connection, with its endpoint. */
+export type OrganizationDirectProviderCredential =
+  | { apiKey: string; endpoint: string | null }
+  | { azureEntra: AzureEntraProviderCredential; endpoint: string | null };
+
+/** The plaintext stored (encrypted) for a credential, and its non-secret method. */
+export function organizationModelProviderCredentialPlaintext(
+  credential: OrganizationModelProviderCredential,
+): { authMethod: OrganizationModelProviderAuthMethod; plaintext: string } {
+  switch (credential.method) {
+    case "api_key":
+      return { authMethod: "api_key", plaintext: credential.apiKey };
+    case "entra_client_secret":
+      return {
+        authMethod: "entra_client_secret",
+        plaintext: JSON.stringify({
+          version: 1,
+          tenantId: credential.tenantId,
+          clientId: credential.clientId,
+          clientSecret: credential.clientSecret,
+        }),
+      };
+    case "entra_deployment_identity":
+      return { authMethod: "entra_deployment_identity", plaintext: JSON.stringify({ version: 1 }) };
+  }
+}
+
+const StoredEntraClientSecret = z.object({
+  version: z.literal(1),
+  tenantId: z.string().min(1),
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
+});
+
+/**
+ * Read a stored credential back. An unreadable Entra document yields null, so
+ * the connection fails closed instead of sending it anywhere as a key.
+ */
+function storedDirectCredential(
+  authMethod: OrganizationModelProviderAuthMethod,
+  plaintext: string,
+  endpoint: string | null,
+): OrganizationDirectProviderCredential | null {
+  if (authMethod === "api_key") return { apiKey: plaintext, endpoint };
+  if (authMethod === "entra_deployment_identity")
+    return { azureEntra: { source: "deployment_identity" }, endpoint };
+  let document: unknown;
+  try {
+    document = JSON.parse(plaintext);
+  } catch {
+    return null;
+  }
+  const parsed = StoredEntraClientSecret.safeParse(document);
+  if (!parsed.success) return null;
+  return {
+    azureEntra: {
+      source: "client_secret",
+      tenantId: parsed.data.tenantId,
+      clientId: parsed.data.clientId,
+      clientSecret: parsed.data.clientSecret,
+    },
+    endpoint,
+  };
+}
 export type OrganizationModelProviderCustomModel = {
   id: string;
   accountId: string;
@@ -122,6 +205,7 @@ function mapConnection(
     status: row.status,
     version: row.version,
     endpoint: row.endpoint ?? null,
+    authMethod: row.authMethod,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -135,6 +219,7 @@ function mapConnectionOperation(
     status: row.resultStatus,
     version: row.resultVersion,
     endpoint: row.resultEndpoint ?? null,
+    authMethod: row.resultAuthMethod,
     createdAt: row.resultCreatedAt,
     updatedAt: row.resultUpdatedAt,
   };
@@ -157,6 +242,7 @@ async function recordConnectionOperation(
     resultStatus: input.connection.status,
     resultVersion: input.connection.version,
     resultEndpoint: input.connection.endpoint,
+    resultAuthMethod: input.connection.authMethod,
     resultCreatedAt: input.connection.createdAt,
     resultUpdatedAt: input.connection.updatedAt,
   });
@@ -218,13 +304,24 @@ export async function upsertOrganizationModelProviderConnection(
      * endpoint change is a new connection version.
      */
     endpoint?: string | null;
+    /**
+     * How the stored credential signs in; defaults to an API key. Microsoft
+     * Entra ID methods are refused for every kind but `azure_openai`. A
+     * non-default method is bound into the request hash.
+     */
+    authMethod?: OrganizationModelProviderAuthMethod;
     operationId: string;
     expectedVersion?: number;
   },
 ): Promise<OrganizationModelProviderConnection> {
   const endpoint = input.endpoint ?? null;
+  const authMethod = input.authMethod ?? "api_key";
   if ((input.providerKind === "azure_openai") !== (endpoint !== null))
     throw new Error("an organization Azure OpenAI connection needs exactly its resource endpoint");
+  if (authMethod !== "api_key" && input.providerKind !== "azure_openai")
+    throw new Error(
+      "only an organization Azure OpenAI connection signs in with Microsoft Entra ID",
+    );
   return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
     await scopedDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider:${input.organizationId}:${input.providerKind}`}, 0))`,
@@ -235,6 +332,8 @@ export async function upsertOrganizationModelProviderConnection(
       credentialDigest: input.credentialDigest,
       // Present only for Azure, so every pre-existing kind keeps its hash.
       ...(endpoint === null ? {} : { endpoint }),
+      // Present only for Entra, so every API-key connection keeps its hash.
+      ...(authMethod === "api_key" ? {} : { authMethod }),
     });
     const [replay] = await scopedDb
       .select()
@@ -271,6 +370,7 @@ export async function upsertOrganizationModelProviderConnection(
             status: "active",
             credentialEncrypted: input.credentialEncrypted,
             endpoint,
+            authMethod,
             version: existing.version + 1,
             operationId: input.operationId,
             requestHash,
@@ -286,6 +386,7 @@ export async function upsertOrganizationModelProviderConnection(
             providerKind: input.providerKind,
             credentialEncrypted: input.credentialEncrypted,
             endpoint,
+            authMethod,
             operationId: input.operationId,
             requestHash,
             updatedBySubjectId: input.actorSubjectId,
@@ -402,6 +503,7 @@ export async function loadOrganizationModelProviderApiKey(
   prepared?: {
     loadOrganizationCredentials: boolean;
     encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
+    organizationAuthMethods: Partial<Record<"azure_openai", OrganizationModelProviderAuthMethod>>;
   },
 ): Promise<string | null> {
   const key = environmentsEncryptionKeyBytes(settings);
@@ -411,12 +513,19 @@ export async function loadOrganizationModelProviderApiKey(
   if (!key) return null;
   if (prepared) {
     const encrypted = prepared.encryptedCredentials[input.providerKind];
+    // A Microsoft Entra ID connection has no key to hand out.
+    if (
+      input.providerKind === "azure_openai" &&
+      (prepared.organizationAuthMethods.azure_openai ?? "api_key") !== "api_key"
+    )
+      return null;
     return encrypted === undefined ? null : decryptEnvironmentValue(key, encrypted);
   }
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
         credentialEncrypted: schema.organizationModelProviderConnections.credentialEncrypted,
+        authMethod: schema.organizationModelProviderConnections.authMethod,
       })
       .from(schema.organizationModelProviderConnections)
       .where(
@@ -427,7 +536,9 @@ export async function loadOrganizationModelProviderApiKey(
         ),
       )
       .limit(1);
-    return row ? decryptEnvironmentValue(key, row.credentialEncrypted) : null;
+    return row && row.authMethod === "api_key"
+      ? decryptEnvironmentValue(key, row.credentialEncrypted)
+      : null;
   });
 }
 
@@ -453,11 +564,11 @@ export async function getOrganizationModelProviderExecutionConnectionId(
 }
 
 /**
- * The decrypted key and non-secret endpoint of an active organization
- * connection, read under the workspace's RLS scope (personal workspaces never
- * see API-key provider rows). Null when there is no active connection or no
- * encryption key; callers then fail closed and never fall back to deployment
- * credentials.
+ * The decrypted key (or Azure OpenAI's Microsoft Entra ID sign-in) and
+ * non-secret endpoint of an active organization connection, read under the
+ * workspace's RLS scope (personal workspaces never see API-key provider rows).
+ * Null when there is no active connection or no encryption key; callers then
+ * fail closed and never fall back to deployment credentials.
  */
 export async function loadOrganizationModelProviderCredential(
   db: Database,
@@ -467,8 +578,10 @@ export async function loadOrganizationModelProviderCredential(
     loadOrganizationCredentials: boolean;
     encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
     organizationEndpoints: Partial<Record<"azure_openai", string>>;
+    /** Present for an Azure OpenAI connection that signs in with Microsoft Entra ID. */
+    organizationAuthMethods: Partial<Record<"azure_openai", OrganizationModelProviderAuthMethod>>;
   },
-): Promise<{ apiKey: string; endpoint: string | null } | null> {
+): Promise<OrganizationDirectProviderCredential | null> {
   const key = environmentsEncryptionKeyBytes(settings);
   if (prepared && prepared.loadOrganizationCredentials !== (key !== null)) {
     throw new Error("Prepared provider credentials do not match encryption settings");
@@ -477,19 +590,19 @@ export async function loadOrganizationModelProviderCredential(
   if (prepared) {
     const encrypted = prepared.encryptedCredentials[input.providerKind];
     if (encrypted === undefined) return null;
-    return {
-      apiKey: decryptEnvironmentValue(key, encrypted),
-      endpoint:
-        input.providerKind === "azure_openai"
-          ? (prepared.organizationEndpoints.azure_openai ?? null)
-          : null,
-    };
+    const azure = input.providerKind === "azure_openai";
+    return storedDirectCredential(
+      (azure ? prepared.organizationAuthMethods.azure_openai : undefined) ?? "api_key",
+      decryptEnvironmentValue(key, encrypted),
+      azure ? (prepared.organizationEndpoints.azure_openai ?? null) : null,
+    );
   }
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
         credentialEncrypted: schema.organizationModelProviderConnections.credentialEncrypted,
         endpoint: schema.organizationModelProviderConnections.endpoint,
+        authMethod: schema.organizationModelProviderConnections.authMethod,
       })
       .from(schema.organizationModelProviderConnections)
       .where(
@@ -501,10 +614,11 @@ export async function loadOrganizationModelProviderCredential(
       )
       .limit(1);
     return row
-      ? {
-          apiKey: decryptEnvironmentValue(key, row.credentialEncrypted),
-          endpoint: row.endpoint ?? null,
-        }
+      ? storedDirectCredential(
+          row.authMethod,
+          decryptEnvironmentValue(key, row.credentialEncrypted),
+          row.endpoint ?? null,
+        )
       : null;
   });
 }
@@ -522,7 +636,7 @@ export async function loadOrganizationModelProviderCredentialForAdministrator(
     actorSubjectId: string;
     providerKind: OrganizationModelProviderKind;
   },
-): Promise<{ apiKey: string; endpoint: string | null } | null> {
+): Promise<OrganizationDirectProviderCredential | null> {
   const key = environmentsEncryptionKeyBytes(settings);
   if (!key) return null;
   return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
@@ -530,6 +644,7 @@ export async function loadOrganizationModelProviderCredentialForAdministrator(
       .select({
         credentialEncrypted: schema.organizationModelProviderConnections.credentialEncrypted,
         endpoint: schema.organizationModelProviderConnections.endpoint,
+        authMethod: schema.organizationModelProviderConnections.authMethod,
       })
       .from(schema.organizationModelProviderConnections)
       .where(
@@ -541,10 +656,11 @@ export async function loadOrganizationModelProviderCredentialForAdministrator(
       )
       .limit(1);
     return row
-      ? {
-          apiKey: decryptEnvironmentValue(key, row.credentialEncrypted),
-          endpoint: row.endpoint ?? null,
-        }
+      ? storedDirectCredential(
+          row.authMethod,
+          decryptEnvironmentValue(key, row.credentialEncrypted),
+          row.endpoint ?? null,
+        )
       : null;
   });
 }
@@ -591,6 +707,22 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
     providerKinds: readonly OrganizationModelCatalogProviderKind[];
   },
 ): Promise<Record<OrganizationModelCatalogProviderKind, OrganizationModelProviderCatalogEntry>> {
+  if (input.providerKinds.length === 0)
+    return await getOrganizationModelProviderCatalogInScope(db, input);
+  return await withRlsContext(db, input, (scopedDb) =>
+    getOrganizationModelProviderCatalogInScope(scopedDb, input),
+  );
+}
+
+/** Internal reader; the caller owns the workspace's tenant scope and shared fence. */
+export async function getOrganizationModelProviderCatalogInScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    providerKinds: readonly OrganizationModelCatalogProviderKind[];
+  },
+): Promise<Record<OrganizationModelCatalogProviderKind, OrganizationModelProviderCatalogEntry>> {
   const catalog: Record<
     OrganizationModelCatalogProviderKind,
     OrganizationModelProviderCatalogEntry
@@ -604,46 +736,42 @@ export async function getOrganizationModelProviderCatalogForWorkspace(
     azure_openai: { active: false, models: [], endpoint: null },
   };
   if (input.providerKinds.length === 0) return catalog;
-  return await withRlsContext(db, input, async (scopedDb) => {
-    // Every row of a requested kind: readiness comes from active rows only,
-    // while Azure's non-secret endpoint is kept from a revoked row too, so its
-    // curated deployments stay listed (not ready) instead of vanishing.
-    const connections = await scopedDb
-      .select({
-        providerKind: schema.organizationModelProviderConnections.providerKind,
-        status: schema.organizationModelProviderConnections.status,
-        endpoint: schema.organizationModelProviderConnections.endpoint,
-      })
-      .from(schema.organizationModelProviderConnections)
-      .where(
-        and(
-          eq(schema.organizationModelProviderConnections.accountId, input.accountId),
-          inArray(schema.organizationModelProviderConnections.providerKind, [
-            ...input.providerKinds,
-          ]),
-        ),
-      );
-    const models = await scopedDb
-      .select()
-      .from(schema.organizationModelProviderCustomModels)
-      .where(
-        and(
-          eq(schema.organizationModelProviderCustomModels.accountId, input.accountId),
-          inArray(schema.organizationModelProviderCustomModels.providerKind, [
-            ...input.providerKinds,
-          ]),
-          isNull(schema.organizationModelProviderCustomModels.retiredAt),
-        ),
-      );
-    for (const connection of connections) {
-      if (connection.providerKind === "elevenlabs") continue;
-      const entry = catalog[connection.providerKind];
-      if (connection.status === "active") entry.active = true;
-      if (connection.providerKind === "azure_openai") entry.endpoint = connection.endpoint ?? null;
-    }
-    for (const model of models) catalog[model.providerKind].models.push(mapModel(model));
-    return catalog;
-  });
+  // Every row of a requested kind: readiness comes from active rows only,
+  // while Azure's non-secret endpoint is kept from a revoked row too, so its
+  // curated deployments stay listed (not ready) instead of vanishing.
+  const connections = await scopedDb
+    .select({
+      providerKind: schema.organizationModelProviderConnections.providerKind,
+      status: schema.organizationModelProviderConnections.status,
+      endpoint: schema.organizationModelProviderConnections.endpoint,
+    })
+    .from(schema.organizationModelProviderConnections)
+    .where(
+      and(
+        eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+        inArray(schema.organizationModelProviderConnections.providerKind, [...input.providerKinds]),
+      ),
+    );
+  const models = await scopedDb
+    .select()
+    .from(schema.organizationModelProviderCustomModels)
+    .where(
+      and(
+        eq(schema.organizationModelProviderCustomModels.accountId, input.accountId),
+        inArray(schema.organizationModelProviderCustomModels.providerKind, [
+          ...input.providerKinds,
+        ]),
+        isNull(schema.organizationModelProviderCustomModels.retiredAt),
+      ),
+    );
+  for (const connection of connections) {
+    if (connection.providerKind === "elevenlabs") continue;
+    const entry = catalog[connection.providerKind];
+    if (connection.status === "active") entry.active = true;
+    if (connection.providerKind === "azure_openai") entry.endpoint = connection.endpoint ?? null;
+  }
+  for (const model of models) catalog[model.providerKind].models.push(mapModel(model));
+  return catalog;
 }
 
 export async function getOrganizationModelProviderCustomModelForExecution(

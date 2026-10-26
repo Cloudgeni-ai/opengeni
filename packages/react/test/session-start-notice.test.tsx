@@ -311,4 +311,20 @@ describe("SessionStartNotice", () => {
     expect(button("Choose machine")).toBeUndefined();
     expect(button("Recheck access")!.disabled).toBe(false);
   });
+
+  test("a viewer who can't read machines never requests them", async () => {
+    const { client, listMachines } = fakeClient(blockedResponse);
+    await render(
+      <SessionStartNotice
+        client={client as never}
+        workspaceId="workspace-a"
+        session={blockedSession()}
+        onSessionChanged={async () => {}}
+        machinesEnabled={false}
+      />,
+    );
+    expect(listMachines).not.toHaveBeenCalled();
+    expect(container!.textContent).toContain("Permission needed");
+    expect(button("Choose machine")).toBeUndefined();
+  });
 });

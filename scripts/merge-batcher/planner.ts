@@ -1,7 +1,6 @@
 import {
   bindingKey,
   compareText,
-  canonical,
   ejectionKey,
   type BatchSpec,
   type Candidate,
@@ -9,9 +8,11 @@ import {
   type Ejection,
   type Ledger,
   type Observation,
+  type ParkedPull,
   type Pull,
   type Run,
 } from "./model";
+import { failedBaseHold } from "./base-failure";
 
 export type Action =
   | { kind: "wait"; reason: string }
@@ -19,7 +20,8 @@ export type Action =
   | { kind: "build"; spec: BatchSpec; publish: boolean; recoveryIndex: number | null }
   | { kind: "land"; candidate: Candidate }
   | { kind: "retry"; candidate: Candidate; run: Run }
-  | { kind: "announce"; ejection: Ejection };
+  | { kind: "announce"; ejection: Ejection }
+  | { kind: "park"; parked: ParkedPull };
 
 export function latestRun(candidate: Candidate, config: Config): Run | undefined {
   return candidate.runs
@@ -46,6 +48,9 @@ export function infrastructureRetryReason(candidate: Candidate, run: Run, config
   )
     return null;
   const reason = run.infrastructureRetryReason;
+  if (run.trusted && run.outcome === "code_failure") return "failed-batch";
+  if (reason === "failed-batch" && ["infrastructure", "cancelled"].includes(run.outcome))
+    return reason;
   if (reason === "verified-infrastructure" && run.trusted && run.outcome === "infrastructure")
     return reason;
   if (reason === "provider-cancelled" && run.outcome === "cancelled") return reason;
@@ -83,6 +88,11 @@ export function descendants(id: string, candidates: Candidate[]): string[] {
   return [...ids];
 }
 export function plan(o: Observation, c: Config): Action {
+  // Latency is diagnostic, not permission to suppress recovery or admission.
+  // All evidence, provenance and single-slot guards remain in planCandidate.
+  return planCandidate(o, c);
+}
+function planCandidate(o: Observation, c: Config): Action {
   const ledger = structuredClone(o.ledger);
   const record = (reason: string): Action => ({ kind: "record", ledger, reason });
   const invalid = (id: string, reason: string): Action => {
@@ -91,11 +101,19 @@ export function plan(o: Observation, c: Config): Action {
   };
   const fresh = new Map(o.ready.map((p) => [p.number, bindingKey(p)]));
   const matches = (p: Pull) => fresh.get(p.number) === bindingKey(p);
-  if (o.telemetry?.status === "stop")
-    return {
-      kind: "wait",
-      reason: "stop signal: rolling 24h sampled p95 ready-to-CI exceeds 30 minutes",
-    };
+  // Main/label churn does not retry code. A changed head or an explicit native
+  // auto-merge re-enable after parking can re-enter; retain old failure evidence.
+  const parked = (p: Pull) =>
+    ledger.parked?.some(
+      (item) =>
+        item.pull.number === p.number &&
+        item.pull.headSha === p.headSha &&
+        !(
+          p.binding.source === "auto-merge" &&
+          p.binding.eventId !== item.pull.binding.eventId &&
+          Date.parse(p.binding.at) > Date.parse(item.parkedAt)
+        ),
+    );
   for (const item of o.candidates) {
     const id = item.manifest.batchId;
     if (item.containedInBase && !ledger.landed.includes(id)) {
@@ -127,7 +145,7 @@ export function plan(o: Observation, c: Config): Action {
         reason:
           "missing-run infrastructure hold expired; candidate abandoned pending explicit recover-missing-run confirmation",
       };
-    if (item.manifest.pulls.some((p) => !matches(p)))
+    if ((item.headRefresh?.pulls ?? item.manifest.pulls).some((p) => !matches(p)))
       return invalid(
         item.manifest.batchId,
         "head or ready/evidence binding changed; descendants invalidated, running CI preserved",
@@ -142,55 +160,18 @@ export function plan(o: Observation, c: Config): Action {
   // Publication reserves capacity before the provider exposes its run, even
   // after composition invalidation. Only terminal evidence or explicit
   // infrastructure release frees that reservation; abandonment alone does not.
-  const inflight = o.candidates.reduce((n, x) => {
+  const localInflight = o.candidates.reduce((n, x) => {
     const running = x.runs.filter(
       (r) => r.workflow === c.workflow && r.status !== "completed",
     ).length;
     const missing = o.missingRuns?.[x.manifest.batchId] ?? ledger.missingRuns[x.manifest.batchId];
     return n + running + (!latestRun(x, c) && missing?.status !== "released" ? 1 : 0);
   }, 0);
-  if (c.mode === "active") {
-    const base =
-      o.baseCI?.sha === o.baseSha
-        ? o.baseCI
-        : {
-            sha: o.baseSha,
-            status: "unknown" as const,
-            runId: null,
-            attempt: null,
-            reason: "Exact-base full main CI evidence unavailable",
-          };
-    if (
-      ledger.baseHold?.status === "red" &&
-      ledger.baseHold.sha === o.baseSha &&
-      base.status !== "red"
-    )
-      return {
-        kind: "wait",
-        reason: "base_broken: require a later green main tip, not a rerun of the broken base",
-      };
-    if (base.status !== "green") {
-      if (canonical(ledger.baseHold ?? null) !== canonical(base)) {
-        ledger.baseHold = structuredClone(base);
-        return record(
-          base.status === "red"
-            ? "base_broken: hold queue; alert parent/F; no member ejection"
-            : "base_unknown: hold landing and culprit decisions",
-        );
-      }
-      return {
-        kind: "wait",
-        reason:
-          base.status === "red"
-            ? "base_broken: awaiting green main tip"
-            : "base_unknown: awaiting exact full main CI success",
-      };
-    }
-    if (ledger.baseHold) {
-      delete ledger.baseHold;
-      return record("base_recovered: exact current main tip has full CI success");
-    }
-  }
+  const inflight = Math.max(localInflight, o.headroom?.occupiedBatchSlots ?? 0);
+  const publicationBlocked = o.mainBusy || o.headroom?.publicationBlocked === true;
+  // Full main CI is an independent backstop, not candidate admission evidence.
+  // Retain any legacy baseHold for audit; it neither blocks a tested green tip
+  // nor authorizes attribution of a failed subset to one of its members.
   const root = live.find((x) => x.manifest.baseSha === o.baseSha);
   if (root) {
     const run = latestRun(root, c);
@@ -202,6 +183,25 @@ export function plan(o: Observation, c: Config): Action {
               reason: "full-main CI has priority; tested candidate retained without cancellation",
             }
           : { kind: "land", candidate: root };
+      // A red exact base is not proof that members caused this failure. Hold
+      // before retry/splitting, retaining the failed candidate and all evidence.
+      // This does not claim identical fingerprints or authorize a green result.
+      if (run.trusted && run.outcome === "code_failure") {
+        const reason = failedBaseHold(run, root.manifest.baseSha, o.baseCI);
+        if (reason) return { kind: "wait", reason };
+      }
+      // A failed exact candidate gets one flake allowance before any split or
+      // singleton parking. The durable retry intent prevents duplicate requests.
+      if (run.attempt === 1 && infrastructureRetryReason(root, run, c)) {
+        if (ledger.retries[root.manifest.batchId])
+          return { kind: "wait", reason: "single batch retry already requested; no duplicate" };
+        if (!run.completedAt || inflight >= c.maxInflight || publicationBlocked)
+          return {
+            kind: "wait",
+            reason: "retry requires completion evidence and an available Batch slot",
+          };
+        return { kind: "retry", candidate: root, run };
+      }
       if (run.trusted && run.outcome === "code_failure") {
         const children = descendants(root.manifest.batchId, o.candidates).filter(
           (id) => id !== root.manifest.batchId && !ledger.invalidated.includes(id),
@@ -215,26 +215,35 @@ export function plan(o: Observation, c: Config): Action {
         ledger.invalidated = [
           ...new Set([...ledger.invalidated, ...descendants(root.manifest.batchId, o.candidates)]),
         ];
-        const pulls: Pull[] = root.manifest.pulls.map(({ mergeSha, ...p }) => {
+        const pulls = root.manifest.pulls.map(({ mergeSha, ...p }) => {
           void mergeSha;
           return p;
         });
-        if (pulls.length === 1)
-          ledger.ejected.push({
-            pull: pulls[0]!,
-            reason: "non-retryable exact-candidate code failure; no automatic code/test retry",
-            batchId: root.manifest.batchId,
-            announced: false,
-          });
-        else {
+        const cohortId = root.manifest.recoveryOf ?? root.manifest.batchId;
+        if (pulls.length === 1) {
+          ledger.parked ??= [];
+          if (!parked(pulls[0]!))
+            ledger.parked.push({
+              pull: pulls[0]!,
+              baseSha: root.manifest.baseSha,
+              batchId: root.manifest.batchId,
+              cohortId,
+              runId: run.id,
+              attempt: run.attempt,
+              parkedAt: o.now,
+              announced: false,
+            });
+        } else {
           const middle = Math.ceil(pulls.length / 2);
           ledger.recovery.unshift(
-            { batchId: root.manifest.batchId, pulls: pulls.slice(0, middle) },
-            { batchId: root.manifest.batchId, pulls: pulls.slice(middle) },
+            { batchId: cohortId, pulls: pulls.slice(0, middle) },
+            { batchId: cohortId, pulls: pulls.slice(middle) },
           );
         }
         return record(
-          pulls.length === 1 ? "isolate exact-head culprit" : "deterministic bisection",
+          pulls.length === 1
+            ? "park exact failed head without blame; same-way fingerprint unavailable"
+            : "split failed cohort without retry or member blame",
         );
       }
       const intent = ledger.retries[root.manifest.batchId];
@@ -249,14 +258,11 @@ export function plan(o: Observation, c: Config): Action {
           reason:
             "not an eligible first-attempt infrastructure-only candidate; hold without PR blame",
         };
-      const backoff = 60;
-      if (
-        !run.completedAt ||
-        Date.parse(o.now) < Date.parse(run.completedAt) + backoff * 1000 ||
-        inflight >= c.maxInflight ||
-        o.mainBusy
-      )
-        return { kind: "wait", reason: "bounded retry backoff or CI capacity" };
+      if (!run.completedAt || inflight >= c.maxInflight || publicationBlocked)
+        return {
+          kind: "wait",
+          reason: "retry requires completion evidence and an available Batch slot",
+        };
       return { kind: "retry", candidate: root, run };
     }
     if (!run)
@@ -267,23 +273,35 @@ export function plan(o: Observation, c: Config): Action {
       };
   }
   const unannounced = ledger.ejected.find((e) => !e.announced && !e.effectId);
-  if (unannounced) return { kind: "announce", ejection: unannounced };
-  // Recovery groups are tested sequentially against the actual landed base.
+  if (unannounced)
+    return unannounced.reason === "merge-tree conflict against candidate predecessor"
+      ? { kind: "announce", ejection: unannounced }
+      : {
+          kind: "wait",
+          reason: "legacy code-failure ejection held pending comparable base batch-suite evidence",
+        };
+  const pendingPark = ledger.parked?.find((item) => !item.announced && !item.effectId);
+  if (pendingPark) return { kind: "park", parked: pendingPark };
+  // Recovery tests subsets sequentially on the actual current base. No member
+  // is ejected: failed singletons are parked, including legacy recovery groups.
   if (!live.length && ledger.recovery.length) {
     const group = ledger.recovery[0]!;
     const pulls = group.pulls.filter(
-      (p) => matches(p) && !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p)),
+      (p) =>
+        matches(p) &&
+        !parked(p) &&
+        !ledger.ejected.some((e) => ejectionKey(e.pull) === ejectionKey(p)),
     );
     if (!pulls.length) {
       ledger.recovery.shift();
-      return record("discard obsolete recovery bindings");
+      return record("discard obsolete or parked recovery bindings");
     }
     return makeBuild(
       o.baseSha,
       null,
       pulls,
       group.batchId,
-      inflight < c.maxInflight && !o.mainBusy,
+      inflight < c.maxInflight && !publicationBlocked,
       0,
     );
   }
@@ -309,6 +327,7 @@ export function plan(o: Observation, c: Config): Action {
   const queued = o.ready.filter(
     (p) =>
       !assigned.has(p.number) &&
+      !parked(p) &&
       !alreadyLanded(p) &&
       !o.candidates.some(
         (candidate) =>
@@ -327,7 +346,7 @@ export function plan(o: Observation, c: Config): Action {
     tail?.manifest.batchId ?? null,
     pulls,
     null,
-    inflight < c.maxInflight && !o.mainBusy,
+    inflight < c.maxInflight && !publicationBlocked,
     null,
   );
 }

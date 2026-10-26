@@ -4,7 +4,7 @@
   "cleanedAt": "2026-08-17T11:18:21.937Z",
   "cleaning": {
     "inputRows": 1334,
-    "outputRows": 643,
+    "outputRows": 645,
     "skippedRows": 687,
     "quarantinedRows": 4,
     "duplicateDomainNameRows": 109,
@@ -13,9 +13,9 @@
     "controlCharacterFields": 0
   },
   "probe": {
-    "kept": 643,
+    "kept": 645,
     "dropped": 143,
-    "real": 643,
+    "real": 645,
     "unverified": 111,
     "googleapisDropped": 2
   },
@@ -14548,6 +14548,120 @@
       "probe": {
         "status": "real",
         "reason": "mcp_sse",
+        "httpStatus": 200
+      }
+    },
+    {
+      "domain": "drivemcp.googleapis.com",
+      "name": "Google Drive",
+      "description": "Search, read, download, copy and upload Drive files through Google's MCP server, with Opengeni tools for file updates, moves, sharing and change-feed checkpoints. Recurring work uses ordinary agent schedules.",
+      "category": "productivity",
+      "featured": true,
+      "official": false,
+      "mcpUrl": "https://drivemcp.googleapis.com/mcp/v1",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.file"
+      ],
+      "allowedTools": [
+        "copy_file",
+        "create_file",
+        "download_file_content",
+        "get_file_metadata",
+        "get_file_permissions",
+        "list_recent_files",
+        "read_file_content",
+        "search_files",
+        "update_file",
+        "overwrite_file_content",
+        "move_file",
+        "trash_file",
+        "restore_file",
+        "delete_file",
+        "create_permission",
+        "update_permission",
+        "delete_permission",
+        "get_changes_start_token",
+        "list_changes"
+      ],
+      "requireApproval": [
+        "copy_file",
+        "create_file",
+        "update_file",
+        "overwrite_file_content",
+        "move_file",
+        "trash_file",
+        "restore_file",
+        "delete_file",
+        "create_permission",
+        "update_permission",
+        "delete_permission"
+      ],
+      "connectionOwnership": "personal_only",
+      "credentialFacts": [
+        {
+          "id": "google_oauth_client",
+          "type": "oauth2",
+          "generateUrl": "https://console.cloud.google.com/auth/clients",
+          "setup": "Requires Google Workspace Developer Preview access, Drive API and Drive MCP API, and a registered AI-agent OAuth web client with approved drive.readonly and drive.file scopes. Writes are limited to files authorized for this app."
+        }
+      ],
+      "tier": "verified",
+      "provenance": "official:developers.google.com/workspace/drive/api/reference/mcp",
+      "logoSourceUrl": null,
+      "homepageUrl": "https://developers.google.com/workspace/drive/api/reference/mcp",
+      "installUrl": "https://developers.google.com/workspace/drive/api/guides/configure-mcp-server",
+      "documentationUrl": "https://developers.google.com/workspace/drive/api/reference/mcp",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
+        "httpStatus": 200
+      }
+    },
+    {
+      "domain": "calendarmcp.googleapis.com",
+      "name": "Google Calendar",
+      "description": "See events, check free and busy times, and add, move or delete events in Google Calendar.",
+      "category": "productivity",
+      "featured": true,
+      "official": true,
+      "mcpUrl": "https://calendarmcp.googleapis.com/mcp/v1",
+      "transport": "streamable-http",
+      "authKind": "oauth2",
+      "scopesHint": [
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.freebusy"
+      ],
+      "allowedTools": [
+        "list_calendars",
+        "list_events",
+        "get_event",
+        "create_event",
+        "update_event",
+        "delete_event"
+      ],
+      "requireApproval": ["create_event", "update_event", "delete_event"],
+      "connectionOwnership": "personal_only",
+      "credentialFacts": [
+        {
+          "id": "google_oauth_client",
+          "type": "oauth2",
+          "generateUrl": "https://console.cloud.google.com/auth/clients",
+          "setup": "Use the Google OAuth web client for Opengeni's integration callback, enable the Google Calendar API, and approve the calendar.calendarlist.readonly, calendar.events and calendar.freebusy scopes."
+        }
+      ],
+      "tier": "verified",
+      "provenance": "official:developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+      "logoSourceUrl": null,
+      "homepageUrl": "https://developers.google.com/workspace/calendar/api/v3/reference",
+      "installUrl": "https://developers.google.com/workspace/calendar/api/guides/configure-mcp-server",
+      "documentationUrl": "https://developers.google.com/workspace/calendar/api/v3/reference",
+      "probe": {
+        "status": "real",
+        "reason": "mcp_json_rpc",
         "httpStatus": 200
       }
     }

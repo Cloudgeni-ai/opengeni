@@ -147,7 +147,7 @@ test("reuses the compact Schedule button without requiring creation metadata", a
       onToggleInspector={() => undefined}
       onRename={async () => null}
       onPin={async () => null}
-      onOpenSchedule={
+      onOpenAutomations={
         linked
           ? () => {
               opened++;
@@ -158,15 +158,15 @@ test("reuses the compact Schedule button without requiring creation metadata", a
   );
   try {
     await act(async () => root.render(render(true)));
-    const button = container.querySelector<HTMLButtonElement>(
-      'button[title="Open schedules for this session"]',
-    );
-    expect(button?.textContent?.trim()).toBe("Schedule");
+    const button = container.querySelector<HTMLButtonElement>("button[data-automation-wait]");
+    expect(button?.getAttribute("data-automation-wait")).toBe("schedule");
+    expect(button?.title).toBe("On a schedule. Open this chat's automations.");
+    expect(button?.textContent?.trim()).toBe("On a schedule");
     await act(async () => button?.click());
     expect(opened).toBe(1);
     await act(async () => root.render(render(false)));
-    expect(container.querySelector('button[title="Open schedules for this session"]')).toBeNull();
-    // A paused or finished schedule still links to its settings, marked inactive.
+    expect(container.querySelector("button[data-automation-wait]")).toBeNull();
+    // A paused or finished automation still links to its settings, marked inactive.
     await act(async () =>
       root.render(
         <SessionHeader
@@ -180,19 +180,122 @@ test("reuses the compact Schedule button without requiring creation metadata", a
           onToggleInspector={() => undefined}
           onRename={async () => null}
           onPin={async () => null}
-          onOpenSchedule={() => {
+          onOpenAutomations={() => {
             opened++;
           }}
         />,
       ),
     );
     const inactive = container.querySelector<HTMLButtonElement>(
-      'button[title="No upcoming runs. Open schedules for this session"]',
+      'button[data-automation-wait="none"]',
     );
-    expect(inactive?.textContent?.trim()).toBe("Schedule");
-    expect(inactive?.querySelector("svg")?.getAttribute("class")).toContain("lucide-calendar-off");
+    expect(inactive?.title).toBe("Nothing upcoming. Open this chat's automations.");
+    expect(inactive?.textContent?.trim()).toBe("Automation");
+    expect(inactive?.querySelector("svg")?.getAttribute("class")).toContain("lucide-zap-off");
     await act(async () => inactive?.click());
     expect(opened).toBe(2);
+    // An automation an event can still wake says so.
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{ ...session, hasSchedules: true, waitingForEvents: true }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenAutomations={() => undefined}
+        />,
+      ),
+    );
+    const listening = container.querySelector<HTMLButtonElement>(
+      'button[data-automation-wait="event"]',
+    );
+    expect(listening?.title).toBe("Waiting for an event. Open this chat's automations.");
+    expect(listening?.textContent?.trim()).toBe("Waiting on an event");
+    expect(listening?.querySelector("svg")?.getAttribute("class")).toContain("lucide-zap");
+    // With the details, the pill names the source and its tooltip the event.
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{
+            ...session,
+            hasSchedules: true,
+            waitingForEvents: true,
+            automationWait: {
+              nextRunAt: null,
+              event: {
+                source: { kind: "github", name: "GitHub" },
+                eventTypes: ["check_suite.completed"],
+              },
+              automations: 1,
+            },
+          }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenAutomations={() => undefined}
+        />,
+      ),
+    );
+    const detailed = container.querySelector<HTMLButtonElement>(
+      'button[data-automation-wait="event"]',
+    );
+    expect(detailed?.title).toBe(
+      "Waiting for check_suite.completed from GitHub. Open this chat's automations.",
+    );
+    expect(detailed?.textContent?.trim()).toBe("Waiting on GitHub");
+    // Two automations on two apps: the pill names both, not only the first.
+    const checks = {
+      source: { kind: "github" as const, name: "GitHub" },
+      eventTypes: ["check_suite.completed"],
+    };
+    const mail = {
+      source: { kind: "gmail" as const, name: "Gmail" },
+      eventTypes: ["message.received"],
+    };
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{
+            ...session,
+            hasSchedules: true,
+            waitingForEvents: true,
+            automationWait: {
+              nextRunAt: null,
+              event: checks,
+              events: [checks, mail],
+              automations: 2,
+            },
+          }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          onOpenAutomations={() => undefined}
+        />,
+      ),
+    );
+    const both = container.querySelector<HTMLButtonElement>('button[data-automation-wait="event"]');
+    expect(both?.title).toBe(
+      "Waiting for check_suite.completed from GitHub or message.received from Gmail. Open this chat's automations.",
+    );
+    expect(both?.textContent?.trim()).toBe("Waiting on GitHub and Gmail");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -316,10 +419,81 @@ test("names the model cleanly for org- and workspace-connected copies alike", as
       const text = container.querySelector("header")?.textContent ?? "";
       expect(text).toContain("Opus 5.5");
       expect(text).not.toContain("claude-subscription");
-      expect(container.querySelector('[data-model-vendor="anthropic"]')).not.toBeNull();
-      seen.push(container.querySelector("[data-model-vendor]")?.parentElement?.textContent ?? "");
+      const mark = container.querySelector(
+        '[data-testid="billing-class-icon-claude_subscription"]',
+      );
+      expect(mark).not.toBeNull();
+      seen.push(mark?.parentElement?.textContent ?? "");
     }
     expect(seen[0]).toBe(seen[1]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+// Bendik's report: a Claude chat showed a static Claude logo where a Codex chat
+// shows its account control. Every subscription rail gets the same control.
+test.each([
+  ["codex_subscription", "codex/gpt-6-astra"],
+  ["claude_subscription", "organization-claude-subscription/claude-opus-5-5"],
+  ["supergrok_subscription", "supergrok/grok-4.6"],
+] as const)("the %s header shows the account control", async (billingClass, model) => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{ ...session, model }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          billingClass={billingClass}
+          accountSlot={<button type="button" data-testid="account-control" />}
+        />,
+      ),
+    );
+    expect(container.querySelector('[data-testid="account-control"]')).not.toBeNull();
+    expect(container.querySelector("[data-model-vendor]")).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("other payment rails keep the maker's logo and never show an account control", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(
+        <SessionHeader
+          session={{ ...session, model: "opper/aws/claude-opus-5-5" }}
+          ancestors={[]}
+          connectionState="live"
+          status="idle"
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          billingClass="opengeni_credits"
+          accountSlot={<button type="button" data-testid="account-control" />}
+        />,
+      ),
+    );
+    expect(container.querySelector('[data-testid="account-control"]')).toBeNull();
+    expect(container.querySelector('[data-model-vendor="anthropic"]')).not.toBeNull();
   } finally {
     await act(async () => root.unmount());
     container.remove();

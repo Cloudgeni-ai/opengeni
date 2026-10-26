@@ -59,7 +59,7 @@ import {
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, readBoundedRawBody } from "../http/request-body";
 
 /**
  * Create, change, delete or fire an automation: a workspace admin, but never
@@ -767,33 +767,5 @@ export async function readAutomationWebhookBody(
   request: Request,
   maxBytes: number,
 ): Promise<Uint8Array> {
-  const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) {
-    throw new HTTPException(413, {
-      message: "automation webhook payload is too large",
-    });
-  }
-  if (!request.body) return new Uint8Array();
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    length += value.byteLength;
-    if (length > maxBytes) {
-      await reader.cancel();
-      throw new HTTPException(413, {
-        message: "automation webhook payload is too large",
-      });
-    }
-    chunks.push(value);
-  }
-  const result = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return result;
+  return await readBoundedRawBody(request, maxBytes, "automation webhook payload is too large");
 }

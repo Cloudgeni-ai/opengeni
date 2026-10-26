@@ -19,6 +19,33 @@ every API, worker, web, SDK/React and embedded consumer, then enable
 `OPENGENI_SESSION_USAGE_LIMITS_ENABLED`. Disabling it refuses new limits but
 keeps enforcing persisted ones. See [task usage limit rollout](session-usage-limits.md#rollout-and-activation).
 
+Event triggers for automations (migration 0929) are off by default. Apply the
+migration, upgrade every API and worker, then set
+`OPENGENI_EVENT_TRIGGERS_ENABLED=true` on the API to turn on event sources, the
+public webhook intake at `/v1/webhooks/events/:routeId` and event runs. While it
+is off, the intake answers 404, automations cannot be given event triggers, and
+no event runs start; stored deliveries and events still expire on schedule
+(delivery bodies after 7 days, events after 30). See
+[automations and events](design/automations-and-events.md).
+
+Webhook senders and the GitHub App are given addresses under
+`OPENGENI_PUBLIC_BASE_URL`. If the console is reachable only on a private
+network, publish just `POST /v1/webhooks/events/*` and `POST /v1/webhooks/github`
+at a public address and set `OPENGENI_WEBHOOK_BASE_URL` to it (for example
+`https://hooks.example.com`); webhook URLs, the GitHub App's webhook and MCP
+Events callbacks then use that address. Without a public https address, MCP
+event sources poll instead of receiving webhooks.
+
+GitHub event sources also need the platform GitHub App's webhook secret,
+`OPENGENI_GITHUB_WEBHOOK_SECRET`, and a public webhook address. The
+App sends its webhooks to `/v1/webhooks/github`; adding a workspace's GitHub
+source points an App without a webhook URL there automatically. An App whose
+webhook already points elsewhere is left alone, and the person adding the
+source is told what to change. The events a trigger can use are the ones the
+App subscribes to under its Permissions & events settings: issues, issue
+comments, pull requests, reviews, review comments, pushes and releases, plus
+check runs, check suites and workflow runs for CI.
+
 Allowance accounting tables are in `opengeni_private`, with FORCE RLS and
 EXECUTE-only lifecycle access. This preserves older binaries' exact data-schema
 inventory during a rolling upgrade; no maintenance drain is required for these
@@ -777,14 +804,25 @@ seconds after admission, falling back to whole-host `MemAvailable` only when no
 finite cgroup exists. Process RSS pressure first receives a bounded asynchronous
 GC opportunity. If the authoritative scope remains at or above the distinct 90%
 emergency threshold for 30 seconds, it
-requests the ordinary graceful worker drain so
-in-flight turns checkpoint and recover on replacement capacity. Override the
+requests the ordinary graceful worker drain: the worker stops polling, lets
+in-flight turns finish naturally for its shutdown grace, and checkpoints the
+rest for recovery on replacement capacity. Override the
 emergency threshold, cadence, and sustained window with
 `OPENGENI_TURN_WORKER_EMERGENCY_MEMORY_USAGE`,
 `OPENGENI_TURN_WORKER_MEMORY_GUARD_INTERVAL_MS` and
 `OPENGENI_TURN_WORKER_MEMORY_GUARD_SUSTAIN_MS`; do not replace this protection
 with a turn-duration limit or a blind hard kill. Managed profiles may combine a
 hard per-process maximum with resource-based admission and HPA.
+
+A draining turn worker (rollout, scale-down, eviction or the memory guard)
+stops polling at once, lets in-flight turns finish naturally for
+`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS` (default 90000), then cancels the rest
+with the recoverable `WORKER_SHUTDOWN` checkpoint; the Temporal SDK force-stops
+at `OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS` (default 105000) and the process
+exits at most 10 seconds later. Keep that exit inside the pod's termination
+grace. The Helm chart renders both from `worker.turns.shutdown` (derived from
+`worker.turns.terminationGracePeriodSeconds`, default 120, when unset); see
+[worker autoscaling](worker-autoscaling.md#deletion-and-shutdown-limitations).
 
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
@@ -1015,6 +1053,12 @@ exact vector-installation statement in `0000_initial.sql`. A missing extension
 or changed initial preamble fails before initial migration DDL; other migrations
 and the default path remain unchanged. Do not set this flag merely to hide an
 extension permission error without independently confirming installation.
+
+Migrations also install the `pg_trgm` and `btree_gin` extensions, which back
+indexed conversation message search. Both are trusted extensions that the
+database owner may create, but a managed service with an extension allowlist
+(Azure Database for PostgreSQL's `azure.extensions`, for example) must allow
+them before the migration that installs them runs.
 
 The ordinary SQL migration runner applies a transaction-local 5-second
 `lock_timeout` before each migration body. This bounds lock acquisition in
@@ -1885,7 +1929,10 @@ filesystems even though Docker accepts the mount.
 The production web image serves the built SPA through the repository-owned Bun
 server, not Vite's preview server. The build precompresses text assets;
 content-hashed `/assets/*` responses are served with immutable one-year caching,
-while the HTML shell revalidates. Every shell response carries
+while the HTML shell revalidates. A hashed asset the build lacks is answered
+from the previous builds' assets listed in `OPENGENI_WEB_PREVIOUS_ASSET_ROOTS`
+(comma-separated, newest first), which the Helm chart fills; see
+[Web assets across rollouts](#web-assets-across-rollouts). Every shell response carries
 `X-Content-Type-Options: nosniff` and `Referrer-Policy:
 strict-origin-when-cross-origin` (the setup-account page keeps its stricter
 `no-referrer`). The server deliberately sets no `X-Frame-Options`,
@@ -2018,6 +2065,15 @@ a later GitHub `APPROVE` or structured PASS body on the exact head:
 
 - the source SHA must be that PR's `merge_commit_sha`;
 - reviewed base/head are the provider-retained `pull.base.sha` / `pull.head.sha`;
+- GitHub rewrites a merged PR's `pull.base.sha` to the merge-time `main` tip,
+  so the reviewed delta starts at the provider compare's merge base (the
+  recorded `patchBaseSha`) and must equal the landed delta path for path. When
+  that patch base differs from `pull.base.sha`, no exact-head Version CI ran
+  against the landed base: admission then also requires a `changeset-release/main`
+  PR from the GitHub Actions bot whose head is one commit on the patch base, and
+  the landed commit's own complete fully green `push` run, `Full CI` status and
+  current-attempt receipts as required for tested descendants below. The
+  provider identity fields and review digest still use `pull.base.sha`;
 - trees, merge provenance, `opengeni-release-head-<head>` retention, and the
   required main CI jobs remain fail-closed;
 - GitHub branch protection may still require a review to merge into `main`;
@@ -2066,6 +2122,32 @@ The walk is bounded to 100 intervening merges and 2,000 compared commits. Any
 later change to a reviewed Version path fails closed; choose an earlier green
 tip. The admission job reports `release_source_sha`, `version_provenance_sha`
 and `release_admission_mode`; the candidate receipt schema is unchanged.
+
+A reviewed, green Version PR that lands as a merge commit stays releasable from
+its exact head. With an empty `provenance_sha`, `source_sha` may be the bot
+Version PR head itself instead of its merge result (`release_admission_mode`
+`merge-version-head`). The candidate then builds that head's own tree; the merge
+commit is used only to prove how the head landed, never as release content, so
+changesets merged to `main` after the Version base cannot reach the candidate.
+Admission requires, fail-closed:
+
+- `source_sha` is the second parent of a two-parent merge commit retained by
+  `main`, and that merge commit is the `merge_commit_sha` of exactly one merged
+  `github-actions[bot]` PR from `changeset-release/main` into `main` whose single
+  commit is `source_sha`, directly on its reviewed base; any other PR head,
+  including an ordinary feature PR, is rejected;
+- the exact-head `Automation PR CI` check on `source_sha` succeeded, and a green
+  `workflow_dispatch` CI run on `main` at the Version base binds this PR, head and
+  base in its `Report exact-head automation CI` job log, with the admission,
+  required source and report jobs green in its latest attempt (the newest bound
+  run is recorded; every successful run that binds this head must record a
+  successful exact-head completion, and a later failed completion turns the
+  exact-head check red and fails admission);
+- the source-admission check, retained `opengeni-release-head-<source_sha>`
+  evidence and no pending `.changeset/*.md` at `source_sha`.
+
+The controller must descend from `source_sha` on `main`, as on the exact-source
+lane. Re-checking this evidence depends on GitHub retaining the job log.
 
 Recover a failed full-main run intended for release with **Re-run all jobs**, not
 "Re-run failed jobs": the canary image and full-green receipts must come from the
@@ -2707,7 +2789,117 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
   --object-connect-to opengeni-local-garage:3900:127.0.0.1:29000
 ```
 
-The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
+The chart defaults API, web, relay, control-worker and turn-worker deployments to surge rolling updates (`maxSurge: 1`, `maxUnavailable: 0`). API, web and relay pods drain for `preStopDrainSeconds` before SIGTERM; turn pods may take up to their termination grace to finish in-flight turns. One-node smoke clusters without spare capacity can select zero-surge updates (`maxSurge: 0`, `maxUnavailable: 1`), as the local Kubernetes and preview examples do.
+
+### Web assets across rollouts
+
+The console loads route code and stylesheets lazily from content-hashed
+`/assets/*` files, and each web build has its own names. Without help, two
+kinds of tab fail to load them during and after a web rollout:
+
+- A tab opened before the rollout keeps asking for the previous build's names
+  after every pod runs the new build.
+- During the rollout, old and new pods serve behind one Service and
+  ingress-nginx balances each request separately, so a page from one build can
+  ask a pod of the other build for a name it does not have.
+
+The chart covers both directions. `web.previousAssets` (on by default, at most
+`maxImages: 2`) gives each web pod one init container per previous web image.
+It runs that image's Bun with a short copy script (old images may have no
+shell) and copies its `assets`, `office/assets` and `react-demo/assets`
+directories into a pod-local emptyDir. The server answers an asset it lacks
+from those copies, newest build first, with the usual cache headers. HTML is
+never served from them and a missing asset is still a 404. `helm upgrade`
+finds the previous images with a `lookup` of the live web Deployment: its
+current image followed by the images it already carried, which the chart
+records in the Deployment annotation `opengeni.ai/previous-web-images`. The
+list is de-duplicated and never contains the image being deployed. A
+config-only upgrade keeps the chain, and a `helm upgrade` to an older image
+keeps the newer build's assets. `helm rollback` does not render again: it
+re-applies the earlier revision's stored manifest, including that revision's
+chain, so tabs already on the newer build lose its assets and rely on the
+reload described below. When asset continuity matters, prefer `helm upgrade`
+with the older tag over `helm rollback`.
+
+Offline renders (`helm template`, client dry runs) cannot look up, so they
+carry nothing and render the web Deployment exactly as before unless
+`web.previousAssets.images` lists the previous image references explicitly; a
+non-empty list replaces the lookup. A pipeline that renders and applies can
+either render with `helm template --dry-run=server` (Helm 3.13 or later, with
+permission to read Deployments in the namespace), so the lookup works, or
+build the list from the live Deployment:
+
+```bash
+web=$(kubectl -n <namespace> get deployment <release>-web -o json)
+previous=$(printf '%s' "$web" | jq -r '[(.spec.template.spec.containers[]
+  | select(.name == "web") | .image)] + ((.metadata.annotations["opengeni.ai/previous-web-images"]
+  // "") | split(",")) | map(select(. != "")) | join(",")')
+helm template ... --set-string "web.previousAssets.images={$previous}"
+```
+
+The chart still de-duplicates the list, drops the image being deployed and
+caps it at `maxImages`.
+
+Carried images stay in the web Deployment for its lifetime, not only for the
+rollout: every new web pod pulls them before it starts, including pods created
+by autoscaling, evictions, node drains and node-pool replacement. A carried
+image the registry no longer serves leaves those pods in
+`Init:ImagePullBackOff`, which can take web down once the running pods are
+replaced. Keep at least the last `maxImages` deployed web images in the
+registry, or set `maxImages: 0` to turn carrying off. The copy script itself
+always exits 0 (a missing dist copies nothing), but a pull failure, an image
+without Bun or an init container killed for memory still fails the pod. The
+init containers run one after another with the web container's resources and
+security context, so a new pod starts later by up to `maxImages` pulls and
+copies. They also work with a read-only root filesystem. An optional
+`sizeLimit` bounds the emptyDir, which counts toward the node's ephemeral
+storage; only the three asset directories are ever copied.
+
+`ingress.webAssetsIngress` (on by default) adds a second Ingress,
+`<release>-web-assets`, for the same hashed asset paths. It renders only when
+the ingress class (`ingress.className`, or the legacy
+`kubernetes.io/ingress.class` annotation) contains `nginx`; set
+`requireNginxClassName: false` for an ingress-nginx controller with another
+class name. It sets
+`nginx.ingress.kubernetes.io/proxy-next-upstream: "error timeout http_404"` and
+`proxy-next-upstream-tries` (`nextUpstreamTries`, default 3), so ingress-nginx
+retries a 404 on another web pod. The default round-robin balancer can pick the
+same pod again for a retry
+([ingress-nginx issue 11852](https://github.com/kubernetes/ingress-nginx/issues/11852)),
+so the asset Ingress also sets `nginx.ingress.kubernetes.io/load-balance: ewma`,
+whose balancer skips endpoints the request already tried until none is left.
+ingress-nginx keeps one balancer per Service port for every Ingress that routes
+to it, so the asset Ingress routes to its own `<release>-web-assets` Service,
+which selects the same web pods; the primary Ingress keeps its balancer. Keep
+`nextUpstreamTries` above the most web pods of one build that can serve at once
+(replicas, or the autoscaler maximum): a page of the new build may first try
+every old pod. An asset that no pod has costs up to `nextUpstreamTries`
+upstream requests before the 404. Setting `upstream-hash-by` or a load-balance
+annotation in `webAssetsIngress.annotations` replaces this behaviour.
+
+The asset Ingress covers only hosts and asset paths whose longest matching
+primary route (`Prefix` or `ImplementationSpecific`) already goes to the web
+service; entries for the same host are judged together, as ingress-nginx merges
+them. Hosts served only by `ingress.publicIngress`, and regex routes, get no
+asset Ingress. It uses the primary class and TLS and copies the primary
+annotations as rendered by the chart, including edge auth. It leaves out
+cert-manager issuance and external-dns annotations, so that the primary Ingress
+alone owns each certificate and DNS name, and `canary*`, `rewrite-target`,
+`app-root`, `server-snippet` and `server-alias`, which would change or
+duplicate what the asset paths do today. Annotations added to the primary
+Ingress after rendering (for example by a post-renderer) are not copied.
+`webAssetsIngress.annotations` are applied last. Other paths keep their primary
+routing. ingress-nginx metrics and logs label asset requests with the
+`<release>-web-assets` Ingress.
+
+The first upgrade that ships this replaces pods without it. The new pods carry
+the live pre-upgrade image, so tabs on the old build keep working after the
+rollout. A page served by a new pod that asks an old pod for a new asset has
+that 404 retried on another pod. The console's one-time automatic reload on a
+failed chunk load (`apps/web/src/lib/vite-preload-recovery.ts`) remains the last
+resort. For example, it still applies when only one pod is serving, when a
+retry lands on the same pod, after a `helm rollback`, or when every carried
+build is older than the tab's build.
 
 The in-cluster Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
@@ -2882,6 +3074,56 @@ connections. Subtract PostgreSQL's reserved slots from `max_connections`.
 Pools are lazy; observed idle/active counts are not the rollout upper bound.
 Set server capacity against that budget and measured backend memory rather
 than shrinking application pools to fit an accidental server default.
+
+Budget PostgreSQL memory per connection too. Each backend keeps its catalog
+cache and the plans of every statement it has prepared until its connection
+closes, and an idle connection keeps all of it. Replaying the 908 distinct
+statements a staging deployment ran, on the migrated schema as the FORCE-RLS
+runtime role, one backend grew from about 2 MB to:
+
+| Statements run                       | Prepared statements off | On (default for direct URLs) |
+| ------------------------------------ | ----------------------- | ---------------------------- |
+| Each once                            | 45 MB                   | 126 MB                       |
+| Each six times (generic plans cached) | 50 MB                   | 223 MB                       |
+
+Prepared statements save a round trip and a re-plan per query, and cost about
+80 MB, up to 170 MB, more per backend that has run everything; a superuser
+bypasses row-level security and measures far less (72 and 94 MB), so measure
+as the runtime role. Most backends run only part of the set. Size the server so
+that `max_connections` × per-backend memory fits beside `shared_buffers` and the
+operating system: a 32 GiB server with 8 GiB of `shared_buffers` has roughly
+20 GiB for backends, about 400 backends at 50 MB but about 90 at 220 MB. To
+estimate per-backend memory for your own workload, divide the server's used
+memory minus its idle baseline by the connection count.
+
+The application pools (API runtime, worker, readiness and editable-artifact
+service pools) bound how long a backend can accumulate. The API's managed-auth
+pool keeps its own fixed settings.
+
+- `OPENGENI_DATABASE_POOL_IDLE_TIMEOUT_SECONDS` (default 30) closes idle
+  connections, so the backend count follows actual concurrency. A longer
+  timeout saves bursty work a reconnect (tens of milliseconds) but keeps every
+  idle backend's memory: at five minutes, staging's backends averaged about
+  65 MB and its 32 GiB server ran out of memory at about 340 connections.
+- `OPENGENI_DATABASE_POOL_MAX_LIFETIME_SECONDS` (default 600) bounds each
+  connection's age. Each connection slot draws its lifetime once from the top
+  quarter below the bound (450-600 s by default) and keeps it for the life of
+  the process, so pools opened together do not reconnect together. A pool reuses its most recently idle connection first, so
+  a busy one never reaches the idle timeout; the lifetime stops it collecting
+  new statements, generic plans and every arity of statements whose text varies
+  with a list's length. A replacement backend spends well under a second of
+  extra query time re-warming. An expiring connection finishes its current
+  query or transaction first.
+- `0` turns either timer off; use it rather than a very large number. Values
+  above 2,147,483 s (about 24.8 days, the longest timer the runtime can arm)
+  are rejected.
+- If backends still do not fit, add memory, reduce pool sizes or replicas, or
+  set `OPENGENI_DATABASE_PREPARED_STATEMENTS=false`. Most of the growth after
+  the first pass is generic plans, which the server's default
+  `plan_cache_mode=auto` caches once a statement has run five times. A role
+  setting of `force_custom_plan` held the replay above at 126 MB, but its warm
+  passes ran 25-40% slower, and it also re-plans every statement inside PL/pgSQL
+  routines and triggers, so Opengeni keeps `auto`.
 
 Scoped transactions retry transient connection acquisition up to eight times
 with exponential equal-jitter backoff (250 ms to 4 s, at most 15.75 s total
@@ -3607,12 +3849,20 @@ and the self-update channel. Route these paths (and an optional `get.<domain>`
 host) to the `api` service in the ingress.
 
 `/agent/latest/<asset>` is a compatibility route backed by the immutable
-versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.54`).
-`OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
-back the stable channel by changing the configured version only after the
-corresponding `agent-v<version>` release and its signed assets exist; never move
-or delete an agent release tag. A baked asset still takes precedence so a
-deployed control-plane image serves its release-coherent binary directly.
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION`. Unset, it is the
+agent release of the control plane's own source tree (the `agent/Cargo.toml`
+version it was built from), so Windows and macOS installs and the stable update
+channel advance with each control-plane deploy, matching the baked Linux agent.
+An image built from an agent release commit serves that release once its
+release workflow has published it. An API that runs without that file (for
+example from the published npm package) and without the setting has no stable
+release: `/agent/latest/<asset>` and the stable manifest answer 404 and no
+automatic update is requested. `OPENGENI_AGENT_RELEASES_BASE_URL` selects
+the archive origin. Pin, promote or roll back the stable channel by setting the
+version only after the corresponding `agent-v<version>` release and its signed
+assets exist; never move or delete an agent release tag. A baked asset still
+takes precedence so a deployed control-plane image serves its release-coherent
+binary directly.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
 Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as
@@ -3777,6 +4027,12 @@ every limiter. A refused Better Auth request receives HTTP 429 with an
 `details.retryAfterSeconds`. Per-email counters are stored as keyed digests,
 never as email or client addresses.
 
+Session reads (`/v1/auth/get-session`) and sign-out are never limited per
+client address: they verify no credential, and every page load reads the
+session. Other Better Auth endpoints keep Better Auth's default of 100 requests
+per 10 seconds per address and path, a counter that resets only after 10
+seconds with no admitted request.
+
 Upgrading a managed deployment behind a proxy: earlier releases let Better Auth
 read a single-value `X-Forwarded-For` by default. It now ignores forwarding
 headers unless `OPENGENI_API_TRUSTED_PROXY_HOPS` is set, so without it every
@@ -3915,6 +4171,12 @@ Useful settings:
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.
 - `OPENGENI_OTEL_EXPORTER_OTLP_HEADERS=key=value,...` for exporter headers; put this in a secret when it contains credentials.
+- `OPENGENI_OBSERVABILITY_TRUST_INCOMING_TRACE_CONTEXT=true` makes each API request span a child of the caller's W3C `traceparent`, so a calling service sees Opengeni's spans inside its own trace. Leave it off (the default) when untrusted clients can reach the API: the request span then starts its own trace and carries a span link to the caller's context. See `docs/application-observability.md`.
+- For a private collector CA alongside compute-control TLS, the Helm chart's
+  `computeControl.apiTls.additionalCaConfigMaps` composes explicitly selected
+  public CA bundles with compute trust before API/control/turn startup. See the
+  [chart trust configuration](../deploy/helm/opengeni/README.md#additional-trust-beside-compute-control-tls).
+  CA changes require a normal pod rollout; never disable TLS verification.
 
 The Helm chart has optional Prometheus Operator wiring, off by default:
 

@@ -10,7 +10,14 @@ import {
   type Tool,
 } from "@openai/agents";
 import { testSettings } from "@opengeni/testing/settings";
-import { bm25RankTools, searchToolPool, toolsNamedInQuery } from "../src/codex-tool-search";
+import {
+  bm25RankTools,
+  rankToolPool,
+  searchToolPool,
+  toolsNamedInQuery,
+  shortNameAlternatives,
+  unresolvedToolNames,
+} from "../src/codex-tool-search";
 import { MCP_MAX_TOOL_DEFINITION_BYTES } from "../src/mcp-network";
 import {
   buildOpenGeniAgent,
@@ -239,6 +246,33 @@ describe("searchToolPool disclosure bounds", () => {
       }),
     ).toEqual([wanted]);
     expect(searchToolPool([unrelated], { query: "legal", names: ["not_authorized"] })).toEqual([]);
+  });
+
+  test("an exact name without its server prefix loads the tool, and a full name stays exact", () => {
+    const wanted = connectorTool("sandboxes_list", "List the person's computers");
+    const other = connectorTool("sandbox_swap", "Move this chat to a computer");
+    const pool = [other, wanted];
+    expect(searchToolPool(pool, { query: "", names: ["sandboxes_list"] })).toEqual([wanted]);
+    expect(rankToolPool(pool, { query: "", names: ["sandboxes_list"] })).toEqual([wanted]);
+    // A prefixed name never falls back to another server's tool of that name.
+    expect(searchToolPool(pool, { query: "", names: ["other__sandboxes_list"] })).toEqual([]);
+    expect(unresolvedToolNames(pool, ["sandboxes_list", "missing_tool"])).toEqual(["missing_tool"]);
+  });
+
+  test("a short name several servers share loads one tool, Opengeni's own first", () => {
+    const named = (name: string) =>
+      ({ ...connectorTool("x", `Search ${name}`), name }) as unknown as Tool;
+    const docs = named("docs__search");
+    const own = named("opengeni__search");
+    const mail = named("mail__search");
+    const pool = [docs, own, mail];
+    expect(searchToolPool(pool, { query: "", names: ["search"] })).toEqual([own]);
+    expect(rankToolPool(pool, { query: "", names: ["search"] })).toEqual([own]);
+    expect(shortNameAlternatives(pool as never, "search")).toEqual([docs, mail]);
+    // Without a first-party match the first one loads; a full name stays exact.
+    expect(rankToolPool([docs, mail], { query: "", names: ["search"] })).toEqual([docs]);
+    expect(rankToolPool(pool, { query: "", names: ["mail__search"] })).toEqual([mail]);
+    expect(shortNameAlternatives(pool as never, "mail__search")).toEqual([]);
   });
 
   test("backfills rank-limited results after rejecting an oversized definition", () => {
@@ -578,5 +612,47 @@ describe("tool_search tool wiring", () => {
     expect(matched.map((tool) => (tool as { name: string }).name)).toContain(
       "codex_apps__search_documents",
     );
+  });
+});
+
+describe("searchToolPool native CUA working set", () => {
+  function cuaTool(name: string): Tool {
+    return {
+      type: "function",
+      name: `interaction__cua_${name}`,
+      description: `Native CUA ${name}`,
+      isEnabled: async () => true,
+      parameters: { type: "object", properties: {} },
+    } as unknown as Tool;
+  }
+  const CUA_POOL = ["click", "type_text", "get_window_state", "run_steps", "zoom"].map(cuaTool);
+  const names = (tools: Tool[]) => tools.map((tool) => (tool as { name: string }).name);
+
+  test("any CUA tool brings the window read and the batch tool", () => {
+    expect(
+      names(searchToolPool(CUA_POOL, { query: "", names: ["interaction__cua_click"] })),
+    ).toEqual([
+      "interaction__cua_click",
+      "interaction__cua_get_window_state",
+      "interaction__cua_run_steps",
+    ]);
+  });
+
+  test("other tools bring no CUA tools", () => {
+    const other = {
+      type: "function",
+      name: "interaction__computer_targets",
+      description: "List computer targets",
+      isEnabled: async () => true,
+      parameters: { type: "object", properties: {} },
+    } as unknown as Tool;
+    expect(
+      names(
+        searchToolPool([other, ...CUA_POOL], {
+          query: "",
+          names: ["interaction__computer_targets"],
+        }),
+      ),
+    ).toEqual(["interaction__computer_targets"]);
   });
 });

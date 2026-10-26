@@ -277,6 +277,8 @@ export async function retainGeneratedImage(input: {
   providerId: string;
   providerBindingHash: string;
   output: GeneratedImageOutput;
+  /** The adapter operation completes, and is charged, as the image turns ready. */
+  operation?: { operationId: string; operationKey: string };
   now?: Date;
 }): Promise<RetainedGeneratedImage> {
   if (!input.objectStorage) {
@@ -371,6 +373,7 @@ export async function retainGeneratedImage(input: {
       workspaceId: input.workspaceId,
       artifactId: identity.artifactId,
       settlementKey: identity.settlementKey,
+      ...(input.operation ? { operation: input.operation } : {}),
     });
     return retainedGeneratedImageFromArtifact(settled);
   } catch (error) {
@@ -783,6 +786,7 @@ export async function recoverGeneratedImageArtifact(input: {
   accountId: string;
   workspaceId: string;
   artifact: GeneratedImageArtifact;
+  operation?: { operationId: string; operationKey: string };
 }): Promise<GeneratedImageArtifact | null> {
   const { artifact } = input;
   if (artifact.status === "ready") {
@@ -809,6 +813,7 @@ export async function recoverGeneratedImageArtifact(input: {
     workspaceId: input.workspaceId,
     artifactId: artifact.artifactId,
     settlementKey: artifact.settlementKey,
+    ...(input.operation ? { operation: input.operation } : {}),
   });
 }
 

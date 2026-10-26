@@ -47,7 +47,11 @@ describe("managed self-context surfaces", () => {
     // The picker is startup code: importing the organization-settings access module
     // pulls the settings chunks into the direct-session graph (bundle budget).
     expect(switcherSource).not.toContain("@/lib/organization-settings-access");
-    expect(switcherSource).toContain("workspaces={context.workspaces}");
+    // Every workspace, except a Personal one the organization turned off.
+    expect(switcherSource).toContain(
+      "navigableWorkspaces(context.workspaces, context.managedSelfContext, props.workspaceId)",
+    );
+    expect(switcherSource).toContain("workspaces={workspaces}");
     expect(switcherSource).toContain("export const WorkspaceSwitcherTrigger = forwardRef");
     expect(switcherSource).toContain("{props.collapsed ? (");
     expect(switcherSource).toContain('<span className="inline-flex">{trigger}</span>');

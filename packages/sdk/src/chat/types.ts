@@ -43,15 +43,30 @@ export type OpenGeniOptions = {
   /** Display name for a tenant workspace created on first use. Defaults to the tenant id. */
   workspaceName?: ((tenant: string) => string) | undefined;
   /**
-   * Per-user workspaces only (`{ user }` alone, or `chats: "isolated"`):
-   * permissions for the one owner the SDK adds explicitly. Tenant workspaces
-   * rely on Opengeni, which adds a user on their first request. Both default
-   * to workspace read, session create/read/control (including sending
-   * messages), file upload/read, and per-session MCP attachment; no admin
-   * permissions. Never updates an existing membership: use
-   * `client.updateExternalWorkspaceMember` for that.
+   * Your users' permissions in the workspaces the SDK resolves for them. A
+   * per-user workspace (`{ user }` alone, or `chats: "isolated"`) gets its one
+   * owner from the SDK with these permissions. In a tenant workspace, setting
+   * this makes the SDK add each user it resolves with exactly these
+   * permissions before their first request; without it, Opengeni adds a user
+   * on their first request. Both default to workspace read, session
+   * create/read/control (including sending messages), file upload/read, and
+   * per-session MCP attachment; per-user workspaces also let people connect
+   * their own accounts (see `identities`). No admin permissions. Never
+   * updates an existing membership: use `client.updateExternalWorkspaceMember`
+   * for that.
    */
   memberPermissions?: WorkspaceIdResolverOptions["memberPermissions"];
+  /**
+   * Whether each of your users is their own Opengeni user (`per_user`: your
+   * `resolve` returns a distinct `user` per person) or many of your users
+   * share one (`shared`). It decides whether people may connect their own
+   * accounts, such as Gmail, from the chat (`connections:personal`): a
+   * personal connection belongs to the Opengeni user, so with a shared
+   * identity everyone behind it could use it. Unset: per-user workspaces get
+   * it and tenant workspaces do not; `per_user`: both do (the SDK then adds
+   * tenant users itself); `shared`: neither. `memberPermissions` overrides it.
+   */
+  identities?: WorkspaceIdResolverOptions["identities"];
 };
 
 /**

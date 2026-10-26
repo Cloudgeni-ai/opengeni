@@ -366,11 +366,27 @@ worker:
   turns:
     replicaCount: 4
     priorityClassName: ""
+    # Surge a replacement before removing an old pod, so turn capacity never
+    # drops while old pods drain their in-flight turns.
     strategy:
       type: RollingUpdate
       rollingUpdate:
-        maxSurge: 0
-        maxUnavailable: 1
+        maxSurge: 1
+        maxUnavailable: 0
+    # Kubernetes grace for turn pods; null uses worker.terminationGracePeriodSeconds.
+    # A draining turn worker stops polling at once, lets in-flight turns finish
+    # naturally for shutdown.graceSeconds, then cancels the rest with
+    # WORKER_SHUTDOWN (recoverable checkpoint), force-stops at
+    # shutdown.forceSeconds and exits within 10s of that, before this grace.
+    terminationGracePeriodSeconds: null
+    shutdown:
+      # null derives both from the pod grace, keeping 15s between each phase:
+      # force = grace period - 15, natural drain = force - 15 (90s / 105s at
+      # the default 120s). Explicit values must keep the natural drain at least
+      # 10s before the force time and the force time more than 10s before the
+      # pod grace. A key in `config` owns that variable instead.
+      graceSeconds: null
+      forceSeconds: null
     resources:
       requests:
         cpu: 500m
@@ -419,10 +435,12 @@ worker:
         - ALL
   podAnnotations: {}
   priorityClassName: ""
-  # Worker shutdown starts a recoverable checkpoint path, but does not prove
-  # writer quiescence. The SDK currently allows 5s natural completion before
-  # cancellation and forces shutdown at 100s, inside this 120s Kube grace.
-  # Forced termination may leave uncertain writers and delayed receipt-gated
+  # Worker shutdown stops polling at once. Turn workers then let in-flight
+  # turns finish naturally (default 90s, worker.turns.shutdown) before the
+  # recoverable WORKER_SHUTDOWN checkpoint and force-stop at 105s; control
+  # workers keep 5s natural completion and a 100s force time. Both exit before
+  # this 120s Kube grace. The checkpoint does not prove writer quiescence:
+  # forced termination may leave uncertain writers and delayed receipt-gated
   # recovery. See docs/worker-autoscaling.md before enabling downscale.
   terminationGracePeriodSeconds: 120
   topologySpreadConstraints:
@@ -663,6 +681,31 @@ web:
   # Seconds a terminating pod keeps serving in-flight requests after it leaves the Service
   # endpoints and before SIGTERM. 0 omits the hook (clusters older than k8s 1.30).
   preStopDrainSeconds: 10
+  # Keep serving the content-hashed assets (lazy route chunks, stylesheets) of
+  # previous web builds after a rollout, so a tab still running an older build
+  # does not fail to load them. Each previous image runs once per pod as an init
+  # container that copies its asset directories into a pod-local emptyDir; the
+  # server answers an asset it lacks from there, newest build first. `helm
+  # upgrade` finds the previous images by looking up the live web Deployment:
+  # its image plus the images it already carried (annotation
+  # opengeni.ai/previous-web-images). Offline renders (`helm template`) cannot
+  # look up, so they carry nothing unless `images` is set; `helm rollback`
+  # restores the earlier revision's chain. Every new web pod (scale-ups, node
+  # replacement) pulls the carried images, so keep them in the registry. During
+  # the rollout itself see ingress.webAssetsIngress.
+  previousAssets:
+    enabled: true
+    # Most previous builds carried, newest first. 0 disables carrying.
+    maxImages: 2
+    # Explicit previous web image references, newest first, for offline
+    # renders. A non-empty list replaces the live lookup; it is still
+    # de-duplicated, capped at maxImages and never includes the deployed image.
+    images: []
+    # Where a web image keeps its built dist.
+    distPath: /app/apps/web/dist
+    # Optional size limit for the shared emptyDir, for example 1Gi. Empty
+    # leaves it unbounded.
+    sizeLimit: ""
   topologySpreadConstraints:
     enabled: true
     maxSkew: 1
@@ -1118,6 +1161,12 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
+  # The largest request body the primary Ingress passes on, as
+  # nginx.ingress.kubernetes.io/proxy-body-size (unless annotations set one).
+  # The API refuses bodies over 32 MiB itself (API_MAX_REQUEST_BODY_BYTES);
+  # ingress-nginx's own default of 1m would refuse sandbox file writes, voice
+  # uploads and imports the API accepts. "" leaves the controller's default.
+  maxRequestBody: 32m
   hosts:
     - host: opengeni.local
       paths:
@@ -1175,6 +1224,29 @@ ingress:
   # the primary Ingress with auth annotations must repeat them here.
   mcpOAuthIngress:
     enabled: true
+    annotations: {}
+  # During a web rollout old and new web pods serve side by side and every
+  # request is balanced separately, so a page from one build can ask a pod of
+  # the other build for a hashed asset it does not have. This extra Ingress
+  # routes only the hashed asset paths (/assets, /office/assets,
+  # /react-demo/assets) of hosts that already send them to the web service, and
+  # has ingress-nginx retry a 404, connection error or timeout on another web
+  # pod. It balances through its own `<release>-web-assets` Service with EWMA,
+  # which never retries an endpoint the request already tried while an untried
+  # one remains. It keeps the primary Ingress class, TLS and rendered
+  # annotations, except cert-manager, external-dns, canary, rewrite-target,
+  # app-root, server-snippet and server-alias annotations; `annotations` here
+  # are applied last.
+  webAssetsIngress:
+    enabled: true
+    # Render only when ingress.className contains "nginx". Set false to render
+    # it for an ingress-nginx controller registered under another class name.
+    requireNginxClassName: true
+    # Attempts for one asset request, including the first. Keep it above the
+    # most web pods of one build that can serve at once during a rollout
+    # (replicas, or the autoscaler maximum): a page of the new build may first
+    # try every old pod.
+    nextUpstreamTries: 3
     annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
   # unauthenticated-by-design public paths. Used by edge-gated deployments
@@ -1410,6 +1482,11 @@ computeControl:
   # control-worker and turn-worker pods trust ca.crt (NODE_EXTRA_CA_CERTS)
   # and OPENGENI_COMPUTE_API_URL is https://<apiTls.host>:<apiPort>.
   apiTls:
+    # Optional public CA bundles in same-namespace ConfigMaps (name/key).
+    # Composed with compute ca.crt once at pod initialization, using the same
+    # workload image. Empty preserves the existing compute-only trust path.
+    # Source CA changes require a normal pod rollout; no live reload is implied.
+    additionalCaConfigMaps: []
     secretName: ""
     # Default: the API Service's cluster name, <name>.<namespace>.svc.
     host: ""
@@ -1445,6 +1522,13 @@ computeControl:
   # creates may name (name: image id, as `compute-host build-image` prints).
   defaultImage: base
   storedImages: {}
+  # The OCI image, pinned by digest, this release's sandboxes of each image
+  # name start from (name: registry/repository@sha256:<hex>), normally the
+  # release's sandbox and desktop images. When none was built from it, the
+  # service has a host build it into a stored image and new creates of the
+  # name start from that; until then from the image the name had before, or
+  # its storedImages entry. Existing sandboxes keep the image they have.
+  imageSources: {}
   diskMib: 1024
   # Grow and fence a GCP managed instance group of hosts:
   # projects/P/zones/Z/instanceGroupManagers/N. Empty: hosts are added and

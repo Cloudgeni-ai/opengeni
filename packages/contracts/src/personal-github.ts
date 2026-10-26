@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -16,7 +17,7 @@ export const PERSONAL_GITHUB_API_ORIGIN = "https://api.github.com" as const;
 export const PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX = 100 as const;
 
 export const PersonalGitHubRepositoryId = /* @__PURE__ */ defineSchema(() =>
-  z.string().regex(/^[1-9]\d*$/u),
+  primitives.string.regex(/^[1-9]\d*$/u),
 );
 export type PersonalGitHubRepositoryId = z.infer<typeof PersonalGitHubRepositoryId>;
 
@@ -28,11 +29,11 @@ export type PersonalGitHubRepositoryAccess = z.infer<typeof PersonalGitHubReposi
 export const PersonalGitHubRepositoryPermissions = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      pull: z.boolean(),
-      push: z.boolean(),
-      admin: z.boolean(),
-      maintain: z.boolean(),
-      triage: z.boolean(),
+      pull: primitives.boolean,
+      push: primitives.boolean,
+      admin: primitives.boolean,
+      maintain: primitives.boolean,
+      triage: primitives.boolean,
     })
     .strict(),
 );
@@ -66,9 +67,9 @@ export const PersonalGitHubRepository = /* @__PURE__ */ defineSchema(() =>
       canonicalUrl: z.string().url().max(512),
       defaultBranch: z.string().min(1).max(255),
       visibility: PersonalGitHubRepositoryVisibility,
-      private: z.boolean(),
-      archived: z.boolean(),
-      disabled: z.boolean(),
+      private: primitives.boolean,
+      archived: primitives.boolean,
+      disabled: primitives.boolean,
       permissions: PersonalGitHubRepositoryPermissions,
     })
     .strict()
@@ -94,9 +95,9 @@ export type PersonalGitHubRepository = z.infer<typeof PersonalGitHubRepository>;
 export const PersonalGitHubSelectedRepository = /* @__PURE__ */ defineSchema(() =>
   PersonalGitHubRepository.safeExtend({
     selectedAccess: PersonalGitHubRepositoryAccess,
-    selectionGeneration: z.number().int().positive(),
-    selectedAt: z.string().datetime({ offset: true }),
-    lastVerifiedAt: z.string().datetime({ offset: true }),
+    selectionGeneration: primitives.positiveInteger,
+    selectedAt: primitives.string.datetime({ offset: true }),
+    lastVerifiedAt: primitives.string.datetime({ offset: true }),
   }).strict(),
 );
 export type PersonalGitHubSelectedRepository = z.infer<typeof PersonalGitHubSelectedRepository>;
@@ -104,10 +105,10 @@ export type PersonalGitHubSelectedRepository = z.infer<typeof PersonalGitHubSele
 export const PersonalGitHubRepositorySelectionState = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      connectionAuthorityGeneration: z.number().int().positive(),
-      credentialBindingId: z.string().uuid(),
+      connectionAuthorityGeneration: primitives.positiveInteger,
+      credentialBindingId: primitives.uuid,
       providerPrincipalId: PersonalGitHubRepositoryId,
-      selectionGeneration: z.number().int().nonnegative(),
+      selectionGeneration: primitives.nonnegativeInteger,
       repositories: z
         .array(PersonalGitHubSelectedRepository)
         .max(PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX),
@@ -170,9 +171,9 @@ export type PersonalGitHubRepositorySelectionInput = z.infer<
 export const ReplacePersonalGitHubRepositorySelectionsRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      expectedConnectionAuthorityGeneration: z.number().int().positive(),
-      expectedSelectionGeneration: z.number().int().nonnegative(),
-      idempotencyKey: z.string().trim().min(1).max(200),
+      expectedConnectionAuthorityGeneration: primitives.positiveInteger,
+      expectedSelectionGeneration: primitives.nonnegativeInteger,
+      idempotencyKey: primitives.string.trim().min(1).max(200),
       repositories: z
         .array(PersonalGitHubRepositorySelectionInput)
         .max(PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX),
@@ -209,9 +210,9 @@ export type ReplacePersonalGitHubRepositorySelectionsRequest = z.infer<
 export const VerifyPersonalGitHubRepositorySelectionsRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      expectedConnectionAuthorityGeneration: z.number().int().positive(),
-      expectedSelectionGeneration: z.number().int().nonnegative(),
-      idempotencyKey: z.string().trim().min(1).max(200),
+      expectedConnectionAuthorityGeneration: primitives.positiveInteger,
+      expectedSelectionGeneration: primitives.nonnegativeInteger,
+      idempotencyKey: primitives.string.trim().min(1).max(200),
     })
     .strict(),
 );
@@ -229,16 +230,16 @@ export const PersonalGitHubConnectionMetadata = /* @__PURE__ */ defineSchema(() 
     .object({
       credentialRole: z.literal(PERSONAL_GITHUB_CREDENTIAL_ROLE),
       providerFamily: z.literal(PERSONAL_GITHUB_PROVIDER_FAMILY),
-      providerPrincipalId: z.string().regex(/^\d+$/u),
-      githubUserId: z.string().regex(/^\d+$/u),
+      providerPrincipalId: primitives.string.regex(/^\d+$/u),
+      githubUserId: primitives.string.regex(/^\d+$/u),
       githubLogin: z.string().min(1).max(100),
       oauthEnvironment: z.string().min(1).max(128),
-      oauthClientMarker: z.string().regex(/^[a-f0-9]{32}$/u),
-      credentialBindingId: z.string().uuid(),
-      connectedAt: z.string().datetime({ offset: true }),
-      lastVerifiedAt: z.string().datetime({ offset: true }),
-      disconnectedAt: z.string().datetime({ offset: true }).nullable().optional(),
-      refreshTokenExpiresAt: z.string().datetime({ offset: true }).nullable().optional(),
+      oauthClientMarker: primitives.string.regex(/^[a-f0-9]{32}$/u),
+      credentialBindingId: primitives.uuid,
+      connectedAt: primitives.string.datetime({ offset: true }),
+      lastVerifiedAt: primitives.string.datetime({ offset: true }),
+      disconnectedAt: primitives.string.datetime({ offset: true }).nullable().optional(),
+      refreshTokenExpiresAt: primitives.string.datetime({ offset: true }).nullable().optional(),
     })
     .passthrough(),
 );
@@ -248,7 +249,7 @@ export const PersonalGitHubOAuthStartRequest = /* @__PURE__ */ defineSchema(() =
   z
     .object({
       /** Existing exact connection generation to re-authorize in place. */
-      connectionId: z.string().uuid().optional(),
+      connectionId: primitives.optionalUuid,
       /** Same-workspace UI path restored after the callback. */
       returnPath: z.string().min(1).max(2048).optional(),
     })
@@ -260,7 +261,7 @@ export const PersonalGitHubOAuthStartResponse = /* @__PURE__ */ defineSchema(() 
   z
     .object({
       authorizationUrl: z.string().url(),
-      expiresAt: z.string().datetime({ offset: true }),
+      expiresAt: primitives.string.datetime({ offset: true }),
     })
     .strict(),
 );
@@ -269,7 +270,7 @@ export type PersonalGitHubOAuthStartResponse = z.infer<typeof PersonalGitHubOAut
 export const PersonalGitHubConnectionStatusResponse = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      enabled: z.boolean(),
+      enabled: primitives.boolean,
       connection: ConnectionMetadata.nullable(),
       reviewUrl: z.string().url().nullable(),
     })
@@ -282,8 +283,8 @@ export type PersonalGitHubConnectionStatusResponse = z.infer<
 export const PersonalGitHubDisconnectRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      expectedVersion: z.number().int().positive(),
-      idempotencyKey: z.string().trim().min(1).max(200),
+      expectedVersion: primitives.positiveInteger,
+      idempotencyKey: primitives.string.trim().min(1).max(200),
     })
     .strict(),
 );

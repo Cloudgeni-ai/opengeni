@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   SiteOpenedResponse,
+  SiteSidebarStateResponse,
   WorkspaceArtifactContentResponse,
+  WorkspaceArtifactCurrentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
@@ -907,6 +909,133 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       (await request(grant, ["artifacts:read"], `${base}/not-a-site/opened`, { method: "POST" }))
         .status,
     ).toBe(422);
+  }, 60_000);
+
+  test("pins and archives a Site row in this person's sidebar without changing the Site", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Sidebar board",
+            html: "<!doctype html><h1>Sidebar</h1>",
+            idempotencyKey: "sidebar-board",
+          }),
+        })
+      ).json(),
+    );
+    const path = `${base}/${site.artifact.id}/sidebar`;
+    const put = (body: unknown) =>
+      requestAsCanonicalLocalHuman(path, { method: "PUT", body: JSON.stringify(body) });
+    const pinned = SiteSidebarStateResponse.parse(await (await put({ pinned: true })).json());
+    expect(pinned).toMatchObject({ siteId: site.artifact.id, pinned: true, archived: false });
+    const archived = SiteSidebarStateResponse.parse(await (await put({ archived: true })).json());
+    expect(archived).toMatchObject({ pinned: true, archived: true });
+    // Archive only hides the row: the Site stays published.
+    const detail = WorkspaceArtifactDetailResponse.parse(
+      await (await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}`)).json(),
+    );
+    expect(detail.artifact.status).toBe("active");
+    // Opening the Site again restores the row.
+    expect(
+      (await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}/opened`, { method: "POST" }))
+        .status,
+    ).toBe(200);
+    expect(
+      SiteSidebarStateResponse.parse(await (await put({ pinned: false })).json()),
+    ).toMatchObject({ pinned: false, archived: false });
+
+    expect((await put({})).status).toBe(422);
+    expect((await put({ pinned: "yes" })).status).toBe(422);
+    const fromSite = await withSiteSessionOrigin(
+      { siteId: site.artifact.id, title: "Sidebar board" },
+      () => put({ pinned: true }),
+    );
+    expect(fromSite.status).toBe(403);
+    const body = JSON.stringify({ pinned: true });
+    expect((await request(grant, ["sessions:read"], path, { method: "PUT", body })).status).toBe(
+      403,
+    );
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["artifacts:read"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/sidebar`,
+          { method: "PUT", body },
+        )
+      ).status,
+    ).toBe(404);
+  }, 60_000);
+
+  test("reads a Site's current version alone, for an open Site view's checks", async () => {
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const site = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await requestAsCanonicalLocalHuman(base, {
+          method: "POST",
+          body: JSON.stringify({
+            title: "Watched board",
+            html: "<!doctype html><h1>One</h1>",
+            idempotencyKey: "watched-board",
+          }),
+        })
+      ).json(),
+    );
+    const path = `${base}/${site.artifact.id}/current`;
+    const read = async () => {
+      const response = await request(grant, ["artifacts:read"], path);
+      expect(response.status).toBe(200);
+      return WorkspaceArtifactCurrentResponse.parse(await response.json());
+    };
+    const first = await read();
+    expect(first).not.toHaveProperty("versions");
+    expect(first.artifact.currentVersion?.id).toBe(site.version.id);
+    expect(first.artifact.currentVersion?.revision).toBe(1);
+
+    // A new version is what the next check sees.
+    const published = await requestAsCanonicalLocalHuman(`${base}/${site.artifact.id}/versions`, {
+      method: "POST",
+      body: JSON.stringify({
+        title: "Watched board",
+        html: "<!doctype html><h1>Two</h1>",
+        expectedCurrentVersionId: site.version.id,
+        idempotencyKey: "watched-board-2",
+      }),
+    });
+    expect(published.status).toBe(200);
+    const second = await read();
+    expect(second.artifact.currentVersion?.revision).toBe(2);
+    expect(second.artifact.currentVersion?.id).not.toBe(site.version.id);
+    // As in lists, who made the version is left out, so a check reads no sessions.
+    expect(second.artifact.currentVersion).toMatchObject({
+      sourceSessionId: null,
+      sourceTurnId: null,
+      sourceAttemptId: null,
+      sourceExecutionGeneration: null,
+    });
+    // It agrees with the full read.
+    const detail = WorkspaceArtifactDetailResponse.parse(
+      await (await request(grant, ["artifacts:read"], `${base}/${site.artifact.id}`)).json(),
+    );
+    expect(second.artifact.currentVersion?.id).toBe(detail.artifact.currentVersion?.id);
+    expect(second.artifact.updatedAt).toBe(detail.artifact.updatedAt);
+
+    // Reading permission, the workspace and a real id are required.
+    expect((await request(grant, ["sessions:read"], path)).status).toBe(403);
+    expect(
+      (
+        await request(
+          otherGrant,
+          ["artifacts:read"],
+          `/v1/workspaces/${otherGrant.workspaceId}/published-artifacts/${site.artifact.id}/current`,
+        )
+      ).status,
+    ).toBe(404);
+    expect((await request(grant, ["artifacts:read"], `${base}/not-a-site/current`)).status).toBe(
+      422,
+    );
   }, 60_000);
 
   test("carries exact attempt provenance through create, publish, rollback, and replay", async () => {

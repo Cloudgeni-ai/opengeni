@@ -15,7 +15,10 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  listSessionSystemUpdatesForTurn,
+  sendAgentMessageInTransaction,
   submitHumanPromptInTransaction,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   type ClaimSessionWorkForAttemptInput,
 } from "../src/index";
@@ -47,7 +50,13 @@ async function fixture() {
     subjectId: `subject-${suffix}`,
   });
   const g = access.workspaceGrants[0]!;
-  const s = await createSession(client.db, {
+  const s = await newSession(g);
+  return { g, sessionId: s.id };
+}
+type World = Awaited<ReturnType<typeof fixture>>;
+
+async function newSession(g: { accountId: string; workspaceId: string | null }) {
+  return await createSession(client.db, {
     accountId: g.accountId,
     workspaceId: g.workspaceId!,
     initialMessage: "Work",
@@ -59,9 +68,7 @@ async function fixture() {
     latencyMode: "standard",
     sandboxBackend: "none",
   });
-  return { g, sessionId: s.id };
 }
-type World = Awaited<ReturnType<typeof fixture>>;
 
 async function account(w: World, ownerSubjectId: string) {
   const delegation: McpPersonalConnectionDelegation = {
@@ -97,12 +104,12 @@ async function account(w: World, ownerSubjectId: string) {
   return { delegation, binding };
 }
 
-async function submit(w: World, intent: ConnectionAccountIntent | null) {
+async function submit(w: World, intent: ConnectionAccountIntent | null, sessionId = w.sessionId) {
   return withWorkspaceSubjectSessionActivityRls(client.db, w.g.workspaceId!, w.g.subjectId, (tx) =>
     submitHumanPromptInTransaction(tx, {
       accountId: w.g.accountId,
       workspaceId: w.g.workspaceId!,
-      sessionId: w.sessionId,
+      sessionId,
       subjectId: w.g.subjectId,
       actor: { type: "human", subjectId: w.g.subjectId },
       operationKey: crypto.randomUUID(),
@@ -120,11 +127,11 @@ async function submit(w: World, intent: ConnectionAccountIntent | null) {
   );
 }
 
-async function claim(w: World, resolver?: Resolver) {
+async function claim(w: World, resolver?: Resolver, sessionId = w.sessionId) {
   const attemptId = crypto.randomUUID();
   const r = await claimSessionWorkForAttempt(client.db, w.g.workspaceId!, {
-    sessionId: w.sessionId,
-    workflowId: `session-${w.sessionId}`,
+    sessionId,
+    workflowId: `session-${sessionId}`,
     workflowRunId: crypto.randomUUID(),
     attemptId,
     dispatchId: crypto.randomUUID(),
@@ -296,4 +303,57 @@ test("a turn without an intent never calls the resolver and keeps copying", asyn
   const [row] =
     await shared.admin`select connection_account_intent from session_turns where id=${next.turn.id}`;
   expect(row!.connection_account_intent).toBeNull();
+}, 60_000);
+
+test("another agent's message delivered into the receiving context resolves its intent afresh", async () => {
+  // A chat mostly driven by other agents' messages must not keep the accounts
+  // its person had at their last message: after a reconnect the frozen copy
+  // names a superseded authority generation and every connector call fails.
+  const w = await fixture();
+  const intent = intentOf(w.g.subjectId);
+  const origin = await startedTurnWithIntent(w, intent);
+  const fresh = await account(w, w.g.subjectId);
+  const sending = await newSession(w.g);
+  await submit(w, null, sending.id);
+  const sender = await claim(w, undefined, sending.id);
+  const sent = await withWorkspaceSessionActivityRls(client.db, w.g.workspaceId!, (tx) =>
+    sendAgentMessageInTransaction(tx, {
+      accountId: w.g.accountId,
+      workspaceId: w.g.workspaceId!,
+      targetSessionId: w.sessionId,
+      actor: {
+        type: "agent_attempt",
+        sessionId: sender.turn.sessionId,
+        turnId: sender.turn.id,
+        attemptId: sender.attemptId,
+        executionGeneration: sender.turn.executionGeneration,
+      },
+      operationKey: crypto.randomUUID(),
+      text: "Result from another agent session",
+    }),
+  );
+  const seen: ConnectionAccountIntent[] = [];
+  const next = await claim(w, async (_tx, input) => {
+    seen.push(input.intent);
+    return {
+      mcpAccountBindings: [fresh.binding],
+      personalConnectionDelegations: [fresh.delegation],
+    };
+  });
+  const delivered = await listSessionSystemUpdatesForTurn(
+    client.db,
+    w.g.workspaceId!,
+    w.sessionId,
+    next.turn.id,
+  );
+  expect(delivered.map((row) => row.id)).toEqual([sent.updateId]);
+  expect(seen).toEqual([intent]);
+  const [row] =
+    await shared.admin`select connection_account_intent, mcp_account_bindings, execution_context_turn_id
+      from session_turns where id=${next.turn.id}`;
+  expect(row!.execution_context_turn_id).toBe(origin);
+  expect(row!.connection_account_intent).toEqual(intent);
+  expect(row!.mcp_account_bindings.map((b: { connectionId: string }) => b.connectionId)).toEqual([
+    fresh.binding.connectionId,
+  ]);
 }, 60_000);

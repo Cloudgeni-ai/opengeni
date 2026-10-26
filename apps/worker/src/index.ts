@@ -11,6 +11,7 @@ import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  databasePoolOptions,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   summarizeSessionRecoveryBacklog,
@@ -50,6 +51,7 @@ import type {
   SignalSessionAttemptQuiesced,
   StartSandboxReaperWorkflow,
   StartVideoGenerationWorkflow,
+  StartRecordingWorkflow,
   StartSessionTitleWorkflow,
   WakeSessionWorkflowSignal,
 } from "./activities/types";
@@ -100,6 +102,14 @@ import {
   type WorkerRunTarget,
 } from "./worker-service-lifecycle";
 import {
+  armWorkerProcessExitDeadline,
+  closeWithinBudget,
+  resolveWorkerShutdownTiming,
+  runWorkerProcessEntrypoint,
+  temporalWorkerShutdownOptions,
+  type WorkerShutdownTiming,
+} from "./worker-shutdown";
+import {
   createTurnWorkerMemoryPressureGuard,
   turnWorkerMemoryPressureGuardEnabled,
   type TurnWorkerMemoryPressureGuard,
@@ -140,6 +150,14 @@ export {
   startInternalMaintenanceCadences,
   type InternalMaintenanceJob,
 } from "./internal-maintenance";
+export {
+  CONTROL_WORKER_SHUTDOWN_FORCE_MS,
+  CONTROL_WORKER_SHUTDOWN_GRACE_MS,
+  WORKER_PROCESS_EXIT_MARGIN_MS,
+  WORKER_SHUTDOWN_MIN_CHECKPOINT_WINDOW_MS,
+  resolveWorkerShutdownTiming,
+  type WorkerShutdownTiming,
+} from "./worker-shutdown";
 
 export const FILE_UPLOAD_REAPER_SCHEDULE_ID = "opengeni-file-upload-reaper";
 export const FILE_UPLOAD_REAPER_PERIOD_MS = 15 * 60 * 1_000;
@@ -244,6 +262,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   connection: NativeConnection;
   activityTelemetry?: TurnWorkerActivityTelemetry;
   turnQueueIdentity?: TurnTaskQueueIdentity;
+  shutdownTiming: WorkerShutdownTiming;
 }> {
   const settings = options.settings ?? getSettings();
   if (options.role === "control") {
@@ -255,6 +274,14 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
   const observability =
     options.activityDependencies?.observability ??
     createObservability(settings, { component: `worker-${options.role}` });
+  const shutdownTiming = resolveWorkerShutdownTiming(options.role, settings);
+  if (shutdownTiming.configuredGraceMs !== undefined) {
+    observability.warn("turn worker shutdown grace shortened to keep the checkpoint window", {
+      surface: "worker_shutdown",
+      reason: "grace_exceeds_force_window",
+      delayMs: shutdownTiming.graceMs,
+    });
+  }
   initializeWorkerOutcomeMetrics(observability);
   if (options.role === "turn") {
     initializeContextCompactionMetrics(observability);
@@ -327,11 +354,13 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         // and exact receipt-gated replacement admission.
         ...turnCancellationHeartbeatThrottleOptions(),
         // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
-        // after shutdown() stops polling, in-flight activities get this long to
-        // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN.
-        shutdownGraceTime: "5s",
-        // Hard ceiling inside the pod's termination grace period.
-        shutdownForceTime: "100s",
+        // shutdown() stops polling at once, so new and recovered work goes to
+        // other workers. In-flight activities get the role's grace to finish
+        // naturally (turns: OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS, default
+        // 90s); the rest are then CANCELLED with WORKER_SHUTDOWN, which
+        // checkpoints a turn as recoverable. The force time is the SDK's hard
+        // ceiling and must fit inside the pod's termination grace period.
+        ...temporalWorkerShutdownOptions(shutdownTiming),
       } as const;
       const worker = await Worker.create({
         ...sharedWorkerOptions,
@@ -367,6 +396,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
           }),
           connection,
           turnQueueIdentity,
+          shutdownTiming,
         };
       }
 
@@ -393,6 +423,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
         return {
           worker: combineWorkerRunTargets(ownedWorkers),
           connection,
+          shutdownTiming,
         };
       } catch (error) {
         for (const ownedWorker of ownedWorkers) {
@@ -431,6 +462,7 @@ export async function createWorkerWorkflowSignaler(
   startSandboxReaperWorkflow: StartSandboxReaperWorkflow;
   startVideoGenerationWorkflow: StartVideoGenerationWorkflow;
   startSessionTitleWorkflow: StartSessionTitleWorkflow;
+  startRecordingWorkflow: StartRecordingWorkflow;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -588,6 +620,34 @@ export async function createWorkerWorkflowSignaler(
         throw error;
       }
     },
+    startRecordingWorkflow: async (work) => {
+      const transcript = work.kind === "transcript" && work.versionId !== null;
+      try {
+        await temporal.workflow.start(
+          transcript ? "recordingTranscriptWorkflow" : "recordingDeletionWorkflow",
+          {
+            taskQueue: settings.temporalTaskQueue,
+            workflowId: transcript
+              ? `recording-transcript:${work.versionId}`
+              : `recording-deletion:${work.recordingId}`,
+            workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+            args: [
+              {
+                accountId: work.accountId,
+                workspaceId: work.workspaceId,
+                recordingId: work.recordingId,
+                ownerSubjectId: work.ownerSubjectId,
+                ...(transcript ? { versionId: work.versionId } : {}),
+              },
+            ],
+          },
+        );
+        return "started";
+      } catch (error) {
+        if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
+        throw error;
+      }
+    },
     startVideoGenerationWorkflow: async ({ accountId, workspaceId, operationId }) => {
       try {
         await temporal.workflow.start("videoGenerationWorkflow", {
@@ -714,6 +774,8 @@ export async function registerSessionStorageMaintenanceSchedule(
 }
 
 export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependencies"> & {
+  /** Host-owned deadline hook, shared by signal and internal drain requests. */
+  onDrainStarted?: () => void;
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
   /** Host-owned final containment after a stalled cleanup has drained peers.
    * The standalone process exits; embedded hosts own their termination policy. */
@@ -743,6 +805,8 @@ export type OpenGeniWorkerService = {
   readonly role: OpenGeniWorkerRole;
   readonly worker: WorkerRunTarget;
   readonly connection: NativeConnection;
+  /** The role's natural-drain grace, SDK force time and process exit deadline. */
+  readonly shutdownTiming: WorkerShutdownTiming;
   state(): WorkerLifecycleState;
   run(): Promise<void>;
   drain(reason?: string): void;
@@ -805,7 +869,8 @@ export async function createOpenGeniWorkerService(
       !options.activityDependencies.signalCodexCapacityWorkflow ||
       !options.activityDependencies.startSandboxReaperWorkflow ||
       !options.activityDependencies.startVideoGenerationWorkflow ||
-      !options.activityDependencies.startSessionTitleWorkflow;
+      !options.activityDependencies.startSessionTitleWorkflow ||
+      !options.activityDependencies.startRecordingWorkflow;
     if (needsSignaler) {
       signaler = await retryStartupDependency(
         "Temporal client",
@@ -832,6 +897,8 @@ export async function createOpenGeniWorkerService(
       signaler?.startVideoGenerationWorkflow;
     const startSessionTitleWorkflow =
       options.activityDependencies.startSessionTitleWorkflow ?? signaler?.startSessionTitleWorkflow;
+    const startRecordingWorkflow =
+      options.activityDependencies.startRecordingWorkflow ?? signaler?.startRecordingWorkflow;
     if (
       !wakeSessionWorkflow ||
       !signalSessionAttemptQuiesced ||
@@ -839,7 +906,8 @@ export async function createOpenGeniWorkerService(
       !signalCodexCapacityWorkflow ||
       !startSandboxReaperWorkflow ||
       !startVideoGenerationWorkflow ||
-      !startSessionTitleWorkflow
+      !startSessionTitleWorkflow ||
+      !startRecordingWorkflow
     ) {
       throw new Error("Opengeni worker lifecycle could not resolve its workflow signalers");
     }
@@ -859,6 +927,7 @@ export async function createOpenGeniWorkerService(
         startSandboxReaperWorkflow,
         startVideoGenerationWorkflow,
         startSessionTitleWorkflow,
+        startRecordingWorkflow,
         requestWorkerDrain: () => {
           if (!cleanupContainment) throw new Error("worker cleanup containment is not initialized");
           cleanupContainment.request();
@@ -963,9 +1032,18 @@ export async function createOpenGeniWorkerService(
     drain: () => lifecycle?.drain("stalled turn finalization") ?? false,
     ...(options.terminateWorker ? { terminate: options.terminateWorker } : {}),
     observability,
+    // A stalled cleanup drains peers through the ordinary turn sequence:
+    // natural grace, WORKER_SHUTDOWN checkpoint, SDK force stop. Terminate
+    // only after that sequence had its chance; the control role keeps its
+    // original 100-second containment.
+    ...(options.role === "turn"
+      ? { timeoutMs: activeWorkerBundle.shutdownTiming.processExitDeadlineMs }
+      : {}),
   });
   const activeCleanupContainment = cleanupContainment;
   lifecycle = createWorkerServiceLifecycle({
+    cleanupContainmentRequested: activeCleanupContainment.requested,
+    ...(options.onDrainStarted ? { onDrainStarted: options.onDrainStarted } : {}),
     role: options.role,
     worker: {
       shutdown: () => activeWorkerBundle.worker.shutdown(),
@@ -980,14 +1058,16 @@ export async function createOpenGeniWorkerService(
       closeWorkerHttpAfterActivityExecution(activeWorkerBundle.activityTelemetry, () =>
         httpServer?.stop(true),
       );
-      await Promise.allSettled([
-        turnCapacityMonitor?.close(),
-        sessionRecoveryMonitor?.close(),
-        contextCompactionPendingMonitor?.close(),
-        activeWorkerBundle.connection.close(),
-        activeSignaler?.close(),
-        ...schedules.map((schedule) => schedule.close()),
-      ]);
+      await Promise.all(
+        [
+          () => turnCapacityMonitor?.close(),
+          () => sessionRecoveryMonitor?.close(),
+          () => contextCompactionPendingMonitor?.close(),
+          () => activeWorkerBundle.connection.close(),
+          () => activeSignaler?.close(),
+          ...schedules.map((schedule) => () => schedule.close()),
+        ].map((close) => closeWithinBudget(close)),
+      );
     },
     onReady: () => {
       observability.info("Opengeni worker listening", {
@@ -1034,6 +1114,7 @@ export async function createOpenGeniWorkerService(
     role: options.role,
     worker: activeWorkerBundle.worker,
     connection: activeWorkerBundle.connection,
+    shutdownTiming: activeWorkerBundle.shutdownTiming,
     state: activeLifecycle.state,
     run: activeLifecycle.run,
     drain: (reason) => {
@@ -1046,6 +1127,9 @@ export async function createOpenGeniWorkerService(
 export type RunOpenGeniWorkerOptions = OpenGeniWorkerServiceOptions & {
   /** Defaults to SIGTERM and SIGINT. Pass false when the host owns process signals. */
   shutdownSignals?: false | ReadonlyArray<"SIGTERM" | "SIGINT">;
+  /** Called after a handled shutdown signal has requested the drain. The
+   * standalone entry arms its process exit deadline here. */
+  onShutdownSignal?: (signal: "SIGTERM" | "SIGINT") => void;
 };
 
 /** Start, drain, and close one embedded worker process. */
@@ -1070,7 +1154,10 @@ export async function runOpenGeniWorker(options: RunOpenGeniWorkerOptions): Prom
   const signals =
     options.shutdownSignals === false ? [] : (options.shutdownSignals ?? ["SIGTERM", "SIGINT"]);
   const handlers = signals.map((signal) => {
-    const handler = () => service.drain(signal);
+    const handler = () => {
+      service.drain(signal);
+      options.onShutdownSignal?.(signal);
+    };
     process.on(signal, handler);
     return { signal, handler };
   });
@@ -1091,6 +1178,30 @@ export async function startWorker() {
   }
   const settings = getSettings();
   const observability = createObservability(settings, { component: `worker-${role}` });
+  // A rollout's SIGTERM starts the role's drain (natural grace, WORKER_SHUTDOWN
+  // checkpoint, SDK force stop). Whatever happens after that, this process
+  // exits shortly after the force time and before the pod's termination grace,
+  // instead of waiting for SIGKILL: a resource close that never settles or a
+  // leftover referenced handle must not hold a terminating pod.
+  const shutdownTiming = resolveWorkerShutdownTiming(role, settings);
+  let disarmExitDeadline: (() => void) | undefined;
+  const armExitDeadline = () => {
+    if (disarmExitDeadline) return;
+    disarmExitDeadline = armWorkerProcessExitDeadline({
+      deadlineMs: shutdownTiming.processExitDeadlineMs,
+      onExpired: () => {
+        try {
+          observability.error("worker shutdown exceeded its exit deadline; exiting", {
+            surface: "worker_shutdown",
+            outcome: "exit_deadline",
+            durationMs: shutdownTiming.processExitDeadlineMs,
+          });
+        } finally {
+          process.exit(1);
+        }
+      },
+    });
+  };
   // Before any NativeConnection: SDK and core logs become structured lines.
   installTemporalRuntimeLogging(observability);
   // `kill -USR2 <pid>` samples this process for 30 s and logs where the event
@@ -1107,14 +1218,11 @@ export async function startWorker() {
   const onRetry = (event: Parameters<typeof logStartupDependencyRetry>[1]) =>
     logStartupDependencyRetry(observability, event);
   const searchPath = dbSearchPath(settings);
-  const preparedStatements =
-    settings.databasePreparedStatements === undefined
-      ? {}
-      : { preparedStatements: settings.databasePreparedStatements };
+  const poolOptions = databasePoolOptions(settings);
   const dbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
-    ...preparedStatements,
+    ...poolOptions,
   });
   // Readiness must prove PostgreSQL independently of activity demand. Sharing
   // the default application pool makes the probe wait behind live turns when
@@ -1124,7 +1232,7 @@ export async function startWorker() {
   const readinessDbClient = createDb(settings.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
-    ...preparedStatements,
+    ...poolOptions,
     max: 1,
   });
   const databasePosture = {
@@ -1155,6 +1263,7 @@ export async function startWorker() {
     await runOpenGeniWorker({
       role,
       terminateWorker: () => process.exit(1),
+      onDrainStarted: armExitDeadline,
       settings,
       databasePosture,
       http: { readinessDb: readinessDbClient.db },
@@ -1165,30 +1274,33 @@ export async function startWorker() {
       },
     });
   } finally {
-    await Promise.allSettled([
-      closeNativeExternalVaultProviders(),
-      bus?.close(),
-      readinessDbClient.close(),
-      dbClient.close(),
-    ]);
+    const closes = await Promise.all(
+      (
+        [
+          ["external_vaults", () => closeNativeExternalVaultProviders()],
+          ["nats", () => bus?.close()],
+          ["readiness_database", () => readinessDbClient.close()],
+          ["database", () => dbClient.close()],
+        ] as const
+      ).map(async ([reason, close]) => [reason, await closeWithinBudget(close)] as const),
+    );
+    for (const [reason, outcome] of closes) {
+      if (outcome === "timed_out") {
+        observability.warn("worker resource close exceeded its budget", {
+          surface: "worker_shutdown",
+          outcome,
+          reason,
+        });
+      }
+    }
+    // Final shutdown spans and logs are best-effort and bounded.
+    await closeWithinBudget(() => observability.flush(1_000));
     disposeUnhandledRejectionBoundary();
+    // Shutdown completed within the deadline; the entry point exits next.
+    disarmExitDeadline?.();
   }
 }
 
 if (import.meta.main) {
-  // `bun --watch` keeps its supervisor alive after the application consumes
-  // SIGINT. Once the worker, NATS, DB, and Temporal resources have all closed,
-  // explicitly terminate that supervisor too; otherwise a later file edit can
-  // resurrect this stopped process as a duplicate worker with stale env/code.
-  let interrupted = false;
-  const markInterrupted = () => {
-    interrupted = true;
-  };
-  process.once("SIGINT", markInterrupted);
-  try {
-    await startWorker();
-  } finally {
-    process.off("SIGINT", markInterrupted);
-    if (interrupted) process.exit(0);
-  }
+  await runWorkerProcessEntrypoint(startWorker);
 }

@@ -62,7 +62,7 @@ export function ScheduledTaskAccessNotices(props: {
       size="xs"
       disabled={props.busy}
       onClick={props.onRefreshAccess}
-      title="Save this schedule again with your current connectors and tools"
+      title="Save this automation again with your current connectors and tools"
     >
       <ShieldCheckIcon className="size-3" />
       Refresh access
@@ -72,12 +72,12 @@ export function ScheduledTaskAccessNotices(props: {
   // A refresh never changes pins, so only a failed run can be helped by it.
   const hint =
     blockedText && !failuresText
-      ? "Reconnect the account in Capabilities, or edit the schedule to pin another one or use your current accounts."
+      ? "Reconnect the account in Capabilities, or edit the automation to pin another one or use your current accounts."
       : canRefreshAccess
         ? refreshInDrift
           ? "Refreshing access below may fix it."
           : "Refreshing access uses the accounts you can use now."
-        : "Check the connection in Capabilities, then run the schedule again.";
+        : "Check the connection in Capabilities, then run the automation again.";
   return (
     <div className={cn("grid gap-2", props.className)} data-scheduled-task-access>
       {awaitingHumanText ? (
@@ -91,7 +91,7 @@ export function ScheduledTaskAccessNotices(props: {
           title={
             blockedText
               ? props.pinnedAccountsRequired
-                ? "Runs of this schedule are being skipped"
+                ? "Runs of this automation are being skipped"
                 : "A pinned account can no longer be used"
               : "The last run could not use a connector"
           }
@@ -106,7 +106,7 @@ export function ScheduledTaskAccessNotices(props: {
       {driftLines.length > 0 ? (
         <Notice
           tone="waiting"
-          title="This schedule's access is out of date"
+          title="This automation's access is out of date"
           action={
             refreshButton || dismissible ? (
               <div className="flex flex-wrap items-center gap-1.5">
@@ -117,7 +117,7 @@ export function ScheduledTaskAccessNotices(props: {
                     size="xs"
                     disabled={props.busy}
                     onClick={props.onDismissDrift}
-                    title="Stop showing these defaults for this schedule in this browser. A refresh leaves them out."
+                    title="Stop showing these defaults for this automation in this browser. A refresh leaves them out."
                   >
                     Keep without these
                   </Button>
@@ -134,7 +134,7 @@ export function ScheduledTaskAccessNotices(props: {
           </ul>
           {canRefreshAccess ? null : (
             <p className="mt-1 text-fg-subtle">
-              Refreshing needs a signed-in person who can manage schedules.
+              Refreshing needs a signed-in person who can manage automations.
             </p>
           )}
         </Notice>

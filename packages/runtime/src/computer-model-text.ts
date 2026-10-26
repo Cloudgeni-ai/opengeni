@@ -3,8 +3,9 @@
  *
  * A computer tool result keeps its complete typed value in
  * `structuredContent` for Code Mode, the API and the UI. What the model reads
- * is this text: one line per useful accessibility element, in the role/name
- * vocabulary that computer_act locators use. Desktop accessibility trees are
+ * is this text: one line per useful accessibility element (a run of plain
+ * menu bar items shares one), in the role/name vocabulary that computer_act
+ * locators use. Desktop accessibility trees are
  * far noisier than web pages: a Linux AT-SPI window repeats platform metadata
  * on every node, names unlabeled containers after their role, and keeps
  * hundreds of hidden elements. As JSON one browser window costs over 20k
@@ -20,6 +21,7 @@ export type ComputerTextNode = {
   value?: string | { redacted: true; reason: string } | undefined;
   states: readonly string[];
   actions: readonly string[];
+  bounds?: { x: number; y: number; width: number; height: number } | null | undefined;
   children?: readonly ComputerTextNode[] | undefined;
 };
 
@@ -37,13 +39,23 @@ export type ComputerTextObservation = {
   observationId: string;
   target: ComputerTextTarget & { targetGeneration: string };
   frameId: string | null;
-  capturedFrame?: { width: number; height: number } | undefined;
+  capturedFrame?:
+    | {
+        width: number;
+        height: number;
+        /** A zoomed frame: the rectangle it shows, in the pixels of the
+         *  `regionFrame` screenshot it was measured on. */
+        region?: { x: number; y: number; width: number; height: number } | undefined;
+        regionFrame?: { width: number; height: number } | undefined;
+      }
+    | undefined;
   semantic:
     | {
         kind: "snapshot";
         roots: readonly ComputerTextNode[];
         nodeCount: number;
         incomplete?: { reason: "time_budget" | "node_budget"; unreadCount: number } | undefined;
+        readByNativeTools?: true | undefined;
       }
     | {
         kind: "diff";
@@ -265,8 +277,15 @@ export function computerNodeLines(
   const tree = options.tree ?? conventions(roots);
   const clip: Clip = { clipped: 0 };
   const lines: string[] = [];
+  // macOS lists a table's cells again under each AXColumn, as new elements
+  // with the same role, label and bounds; the one listed first stands for
+  // both.
+  const listedAt = new Set<string>();
   let omitted = 0;
   let focusedListed = false;
+  // The line of the menu bar items listed last and its depth, while the run
+  // continues.
+  let menuBar: { line: number; depth: number } | null = null;
   const visit = (
     nodes: readonly ComputerTextNode[],
     depth: number,
@@ -297,12 +316,45 @@ export function computerNodeLines(
       // Nothing to read, act on or descend into (macOS table rows whose cells
       // the platform did not expose).
       const empty = plain && !labelled && node.actions.length === 0 && !node.children?.length;
-      if (hidden || container || repeatedText || empty || (offscreen && !labelled && !focused)) {
+      const place =
+        node.bounds && (node.bounds.width > 0 || node.bounds.height > 0)
+          ? JSON.stringify([
+              node.role,
+              name ?? null,
+              value ?? null,
+              node.bounds.x,
+              node.bounds.y,
+              node.bounds.width,
+              node.bounds.height,
+            ])
+          : null;
+      const listedElsewhere = !focused && place !== null && listedAt.has(place);
+      if (
+        hidden ||
+        container ||
+        repeatedText ||
+        empty ||
+        listedElsewhere ||
+        (offscreen && !labelled && !focused)
+      ) {
         omitted += 1;
         if (!hidden && node.children) visit(node.children, depth, parentName);
         continue;
       }
+      if (place !== null) listedAt.add(place);
       if (node.ref === options.focusedRef) focusedListed = true;
+      // A macOS menu bar lists a dozen plain items; one line holds them all.
+      const disabled = tree.reportsEnabled && !node.states.includes("enabled");
+      if (plainMenuBarItem(node, name, value, focused || disabled || offscreen)) {
+        const item = `${quoted(clipped(name ?? "", MAX_NAME_CHARS, clip))} [${node.ref}]`;
+        if (menuBar !== null && menuBar.line === lines.length - 1 && menuBar.depth === depth) {
+          lines[menuBar.line] += `, ${item}`;
+        } else {
+          lines.push(`${"  ".repeat(depth)}- ${node.role} ${item}`);
+          menuBar = { line: lines.length - 1, depth };
+        }
+        continue;
+      }
       lines.push(computerNodeLine(node, depth, tree, offscreen, focused, clip));
       if (node.children) visit(node.children, depth + 1, name);
     }
@@ -311,9 +363,42 @@ export function computerNodeLines(
   return { lines, listed: lines.length, omitted, clipped: clip.clipped, focusedListed };
 }
 
+/** A named menu bar item with nothing else to say: no value, state, own
+ * action or children. */
+function plainMenuBarItem(
+  node: ComputerTextNode,
+  name: string | undefined,
+  value: ComputerTextNode["value"],
+  marked: boolean,
+): boolean {
+  return (
+    node.role === "AXMenuBarItem" &&
+    name !== undefined &&
+    value === undefined &&
+    !marked &&
+    !node.description &&
+    !node.identifier &&
+    actionableRef(node.ref) &&
+    !node.children?.length &&
+    listedActions(node).length === 0 &&
+    !node.states.includes("expandable") &&
+    !node.states.some((state) => SHOWN_STATES.has(state))
+  );
+}
+
 function boundsText(bounds: ComputerTextTarget["bounds"]): string | null {
   if (!bounds || (bounds.width === 0 && bounds.height === 0)) return null;
   return `at ${bounds.x},${bounds.y} size ${bounds.width}x${bounds.height}`;
+}
+
+/** A screenshot coordinate as given, to at most one decimal. */
+function pixels(value: number): string {
+  return String(Math.round(value * 10) / 10);
+}
+
+/** How many zoomed pixels show one pixel of the measured screenshot. */
+function zoomFactor(zoomedWidth: number, regionWidth: number): string {
+  return String(Math.round((zoomedWidth / regionWidth) * 10) / 10);
 }
 
 export function computerTargetLine(target: ComputerTextTarget): string {
@@ -335,8 +420,14 @@ export function computerObservationText(observation: ComputerTextObservation): s
   if (observation.frameId) fence.push(`frame ${observation.frameId}`);
   lines.push(fence.join(", "));
   if (observation.capturedFrame) {
+    const { width, height, region, regionFrame } = observation.capturedFrame;
+    const measuredOn = regionFrame
+      ? `the ${regionFrame.width}x${regionFrame.height} screenshot`
+      : "the full screenshot";
     lines.push(
-      `Screenshot ${observation.capturedFrame.width}x${observation.capturedFrame.height} pixels; pointer x,y use these pixels.`,
+      region
+        ? `Zoomed screenshot ${width}x${height} pixels of ${measuredOn}'s region at ${pixels(region.x)},${pixels(region.y)} size ${pixels(region.width)}x${pixels(region.height)} (${zoomFactor(width, region.width)}x); pointer x,y on frame ${observation.frameId} use these zoomed pixels.`
+        : `Screenshot ${width}x${height} pixels; pointer x,y use these pixels.`,
     );
   }
   if (observation.changedRegions.length > 0) {
@@ -345,6 +436,12 @@ export function computerObservationText(observation: ComputerTextObservation): s
   const semantic = observation.semantic;
   if (!semantic) {
     lines.push("No accessibility tree is available for this target; use the screenshot.");
+    return lines.join("\n");
+  }
+  if (semantic.kind === "snapshot" && semantic.readByNativeTools) {
+    lines.push(
+      "Elements are not listed here because this session reads them with interaction__cua_get_window_state; reading them here too would invalidate its element tokens. Call interaction__cua_get_window_state for this window's elements.",
+    );
     return lines.join("\n");
   }
   const roots = semantic.kind === "snapshot" ? semantic.roots : semantic.changed;
@@ -359,11 +456,15 @@ export function computerObservationText(observation: ComputerTextObservation): s
         : `Changed elements since ${semantic.baseObservationId}; elements not listed are unchanged and keep their refs:`,
     );
   } else if (rendered.listed === 0) {
-    lines.push("The accessibility tree has no readable elements; use the screenshot.");
+    lines.push(
+      rendered.omitted
+        ? `No element is listed: the accessibility tree's ${plural(rendered.omitted, "element")} are all hidden, unlabeled or repeated; use the screenshot.`
+        : "The accessibility tree has no readable elements; use the screenshot.",
+    );
   }
   lines.push(...rendered.lines);
   const notes = [
-    rendered.omitted
+    rendered.omitted && rendered.listed > 0
       ? `${plural(rendered.omitted, "hidden, unlabeled or repeated element")} not shown`
       : null,
     semantic.kind === "diff" && semantic.removedRefs.length > 0
@@ -406,6 +507,8 @@ export function computerObservationDiff<Observation extends ComputerTextObservat
     after?.kind !== "snapshot" ||
     before.incomplete ||
     after.incomplete ||
+    before.readByNativeTools ||
+    after.readByNativeTools ||
     base.target.id !== next.target.id ||
     base.target.targetGeneration !== next.target.targetGeneration ||
     base.target.title !== next.target.title ||
@@ -517,6 +620,20 @@ function computerErrorLine(error: NonNullable<ComputerTextError>): string {
   }`;
 }
 
+type ComputerTextRoleStandIn = {
+  actionIndex: number;
+  requestedRole: string;
+  role: string;
+  name: string;
+};
+
+/** An action that named a button that is a link here, or a link that is a
+ * button, and acted on it: says so, so the next call names the right role. */
+function roleStandInLine(standIn: ComputerTextRoleStandIn, batch: boolean): string {
+  const { requestedRole, role, name } = standIn;
+  return `${batch ? `Action ${standIn.actionIndex + 1}` : "The action"} named ${requestedRole} ${quoted(name)}, but no ${requestedRole} here has that name, so it used the ${role} ${quoted(name)}; name it as role ${quoted(role)} next time.`;
+}
+
 export function computerActionText(
   receipt:
     | {
@@ -526,6 +643,7 @@ export function computerActionText(
         state: string;
         error: ComputerTextError;
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
+        roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
       }
     | {
         type: "batch";
@@ -534,6 +652,7 @@ export function computerActionText(
         steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
         observationPrecedesStop?: boolean | undefined;
+        roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
       },
 ): string {
   if (receipt.type === "batch") return computerBatchText(receipt);
@@ -541,6 +660,7 @@ export function computerActionText(
     `Action ${receipt.state} on ${receipt.targetId} (operation ${receipt.operationId}).`,
   ];
   if (receipt.error) lines.push(computerErrorLine(receipt.error));
+  for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, false));
   if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(
       `This action opened ${receipt.observation.target.id}; act on that target with the observation below.`,
@@ -559,6 +679,7 @@ function computerBatchText(receipt: {
   steps: readonly { operationId: string; state: string; error: ComputerTextError }[];
   observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
   observationPrecedesStop?: boolean | undefined;
+  roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
 }): string {
   const last = receipt.steps.at(-1);
   const lines: string[] = [];
@@ -615,6 +736,7 @@ function computerBatchText(receipt: {
     lines.push(
       `Action ${receipt.steps.length} opened ${opened}; act on that target with the observation below.`,
     );
+  for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, true));
   if (receipt.observation) lines.push(computerObservationText(receipt.observation));
   return lines.join("\n");
 }

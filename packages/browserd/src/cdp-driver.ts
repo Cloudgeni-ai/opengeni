@@ -7,6 +7,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { basename, extname, resolve as resolvePath } from "node:path";
 import {
+  BROWSER_ACTION_NAVIGATION_SETTLE_MS,
+  BROWSER_ACTION_REQUEST_SETTLE_MS,
+  BROWSER_ANIMATION_SETTLE_MS,
+  BROWSER_DEFAULT_WAIT_MS,
+  BROWSER_LOCATOR_WAIT_MS,
+  BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS,
   BrowserActionCommand,
   BrowserClipboard,
   BrowserDiagnosticBatch,
@@ -37,9 +43,11 @@ import {
   type BrowserTargetState as BrowserTargetStateValue,
   type BrowserObservation as BrowserObservationValue,
   type BrowserTarget as BrowserTargetValue,
+  type BrowserActionNote as BrowserActionNoteValue,
   type BrowserActionResolvedTarget as BrowserActionResolvedTargetValue,
   type InteractionSemanticNodeValue,
   INTERACTION_MAX_RESOLVED_TARGET_TEXT,
+  redactInteractionDriverMessage,
 } from "@opengeni/contracts";
 import {
   InteractionControllerError,
@@ -48,6 +56,13 @@ import {
   type BrowserInteractionDriver,
   type InteractionDispatchTrace,
 } from "@opengeni/interaction";
+import {
+  NETWORK_BODY_STALL_MS,
+  NETWORK_LONG_POLL_MS,
+  requestIgnoredForIdle,
+  requestLoad,
+  type TrackedRequest,
+} from "./network-idle";
 import {
   accessibilityContainer,
   namespaceCdpAccessibilityFrame,
@@ -85,6 +100,7 @@ import type {
 import type { AgentBrowserJsonCommand, OwnedManagedBrowserProcess } from "./runner";
 import type { BrowserPasskeyManager } from "./passkeys";
 import { TypedSecretMemory } from "./typed-secrets";
+import { reportUnexpectedDispatchError } from "./controller-diagnostics";
 import {
   completeClientHints,
   hasEmptiedHighEntropyHints,
@@ -98,8 +114,12 @@ import {
   type HeadlessSessionCookies,
 } from "./headless-session-cookies";
 import { BrowserWindowParking } from "./window-parking";
+import { MAX_CLOSED_BLANK_TABS, type OwnedTabsState } from "./attached-tab-ledger";
+import type { BrowserRelaunchedTabs, BrowserRelaunchReason } from "./stopped-browser-tabs";
 
-const DEFAULT_ACTION_TIMEOUT_MS = 30_000;
+/** The request deadline that carries an action is derived from this bound and
+ * the other declared waits (see browserActionDeadlineMs). */
+const DEFAULT_ACTION_TIMEOUT_MS = BROWSER_DEFAULT_WAIT_MS;
 // Attached Chrome without file access receives upload bytes over its
 // one-megabyte command channel: 384 KiB per chunk is 512 KiB of base64.
 const ATTACHED_TRANSFER_CHUNK_BYTES = 384 * 1024;
@@ -187,16 +207,69 @@ const GRACEFUL_BROWSER_CLOSE_TIMEOUT_MS = 30_000;
 const BROWSER_CLOSE_REQUEST_TIMEOUT_MS = 5_000;
 const NETWORK_IDLE_MS = 500;
 /** How long an action's locator waits for its element to appear or enable. */
-const LOCATOR_WAIT_MS = 10_000;
+const LOCATOR_WAIT_MS = BROWSER_LOCATOR_WAIT_MS;
 /** Response types that stay open for the life of the page by design. */
 const STREAMING_MIME_TYPES = new Set(["text/event-stream", "multipart/x-mixed-replace"]);
 /** How long a navigation may wait for its server to answer before the tab
  * stops loading. Chromium itself waits for the operating system's connect
  * timeout, which outlives every caller's deadline. */
-const NAVIGATION_COMMIT_TIMEOUT_MS = 20_000;
+const NAVIGATION_COMMIT_TIMEOUT_MS = BROWSER_NAVIGATION_COMMIT_TIMEOUT_MS;
+/** The least time a navigation's commit may take after Chromium answered it,
+ * even when the server used up most of NAVIGATION_COMMIT_TIMEOUT_MS. */
+const NAVIGATION_COMMIT_GRACE_MS = 2_000;
+const NAVIGATION_COMMIT_POLL_MS = 25;
+/** Chromium's load error for an HTTP error status whose response had no body. */
+const HTTP_ERROR_STATUS_LOAD_ERROR = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
+/** Recent main-frame loaders remembered per tab, to recognize a navigation's
+ * commit even after a later document (a client redirect) replaced it. */
+const COMMITTED_LOADER_HISTORY = 16;
+/** Captures of a tab that keeps committing new documents before giving up. */
+const SCREENSHOT_DOCUMENT_ATTEMPTS = 3;
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
+/** Pages whose last accessibility read had at most this many nodes count as
+ * cheap to rebuild (about 25 ms for a rebuilt read of 1,000 nodes). */
+export const ACCESSIBILITY_CHEAP_REBUILD_NODES = 1_000;
+/** How often a polling read on a cheap page rebuilds the tree. */
+export const ACCESSIBILITY_REBUILD_INTERVAL_MS = 1_000;
+
+/** Why the driver reads a tab's accessibility tree: for an outline the model
+ * sees, for a locator or wait ("read", which may be a poll), right after a
+ * locator or wait first missed in an action ("miss"), or for the last look
+ * before reporting that a locator found nothing. */
+export type AccessibilityRead = "outline" | "read" | "miss" | "final";
+
+/**
+ * Whether to rebuild Chromium's accessibility tree before a read (see
+ * rebuildAccessibility for the staleness it repairs). A rebuild makes Chromium
+ * build the whole tree again; on large pages (mail, consoles, long documents)
+ * that costs hundreds of milliseconds and renderer CPU per action, which every
+ * user would pay for a rare pattern. So only the look before a failure always
+ * rebuilds: a locator never reports
+ * "not found", and a wait never times out, from a stale tree. Routine reads
+ * rebuild only on cheap pages: every outline, the first read of each call or
+ * batch action, and polls about once a second. A tab not read yet rebuilds
+ * once. Larger pages also rebuild once when an action's locator or wait first
+ * misses, so a stale tree costs one rebuild there rather than the whole wait.
+ * The cost is judged by the node count of the tab's last read rather
+ * than by timing a rebuild: a count does not swing with host load, and every
+ * read refreshes it, so a page that grows or shrinks is re-judged at once.
+ */
+export function accessibilityRebuildWanted(input: {
+  read: AccessibilityRead;
+  lastNodeCount: number | null;
+  firstReadOfCall: boolean;
+  msSinceRebuild: number;
+}): boolean {
+  if (input.read === "final" || input.lastNodeCount === null) return true;
+  if (input.lastNodeCount > ACCESSIBILITY_CHEAP_REBUILD_NODES) return input.read === "miss";
+  return (
+    input.read === "outline" ||
+    input.firstReadOfCall ||
+    input.msSinceRebuild >= ACCESSIBILITY_REBUILD_INTERVAL_MS
+  );
+}
 type BrowserPermissionAction = Extract<BrowserAction, { type: "permission" }>;
 const CDP_PERMISSION_NAMES: Record<BrowserPermissionAction["permission"], string> = {
   geolocation: "geolocation",
@@ -226,6 +299,56 @@ const USER_AGENT_METADATA_EXPRESSION = `(async () => {
 })()`;
 
 class DialogOpenedSignal extends Error {}
+
+/** Whether an error is about the browser's transport rather than the page:
+ * the browser or the connection to it or to the tab is gone, or a command
+ * deadline passed (which the unresponsive-tab path reports). */
+function browserTransportFailure(error: unknown): boolean {
+  return error instanceof CdpTransportError || error instanceof CdpSessionDetachedError;
+}
+
+/**
+ * The failure of one action of a dispatch. An error no step classified (a
+ * protocol error the page caused, say) on a live browser becomes a definite
+ * driver_failed, which the batch then reports as failed or, once input was
+ * sent, as an unknown outcome. Typed errors, dialogs and transport failures
+ * pass through unchanged.
+ */
+function classifyActionFailure(error: unknown, command: BrowserActionCommandValue): unknown {
+  if (
+    error instanceof InteractionControllerError ||
+    error instanceof InteractionDefiniteDriverError ||
+    error instanceof InteractionOutcomeUnknownDriverError ||
+    error instanceof DialogOpenedSignal ||
+    browserTransportFailure(error)
+  )
+    return error;
+  reportUnexpectedDispatchError("browser", error, command);
+  return new InteractionDefiniteDriverError(
+    "driver_failed",
+    `the browser could not perform this action (${
+      error instanceof Error ? redactInteractionDriverMessage(error.message) : "unknown error"
+    })`,
+  );
+}
+
+/** The definite refusal for an element Chromium would not scroll into view,
+ * by its reply: one removed from the page is stale, and one the page does not
+ * render (hidden, or drawn by the browser rather than the page) has no box to
+ * scroll to or point at. Null for any other reply. */
+export function scrollRefusal(message: string): InteractionDefiniteDriverError | null {
+  if (/no node with given id|node is detached/iu.test(message))
+    return new InteractionDefiniteDriverError(
+      "locator_not_found",
+      "browser element is no longer present",
+    );
+  if (/does not have a layout object/iu.test(message))
+    return new InteractionDefiniteDriverError(
+      "invalid_action",
+      "browser element has no box on the page to act on; it is hidden or not rendered",
+    );
+  return null;
+}
 
 /** Page reads cannot complete while a JavaScript dialog is open: the page's
  * renderer is blocked until the dialog is answered. */
@@ -389,8 +512,33 @@ type TargetState = {
   frame: MainFrame;
   documentGeneration: string;
   frameGeneration: string;
+  /** Main-frame documents (loader ids) this attachment saw commit, oldest
+   * first and bounded. A navigation is complete only once its own loader
+   * appears here: Chromium answers Page.navigate before the renderer commits. */
+  committedLoaders: string[];
+  /** Main-frame document requests the browser cancelled (bounded): a
+   * navigation whose loader is here will not commit. */
+  abandonedLoaders: string[];
+  /** Counts main-frame commits, cross- and same-document alike, so a history
+   * traversal can wait for the entry it asked for to commit. */
+  mainFrameCommits: number;
+  /** The document an input action resolved its element in. The action's first
+   * input event goes out only while that document is still the current one. */
+  inputFence: string | null;
+  /** When set, the current action's locator waits end here instead of
+   * LOCATOR_WAIT_MS after they start: a re-find keeps the action's deadline. */
+  locatorDeadline?: number | null;
   accessibility: CdpAccessibilitySnapshot | null;
+  /** When Chromium's accessibility tree for this tab was last rebuilt, how
+   * many nodes its last read had, and whether the next read is the first of a
+   * call or batch action (see accessibilityRebuildWanted). */
+  accessibilityRebuiltAt: number;
+  accessibilityNodeCount: number | null;
+  accessibilityRebuildDue: boolean;
   dialog: BrowserDialog | null;
+  /** Hit-target guards a JavaScript dialog kept from being read back. Page
+   * scripts are paused under the dialog, so they are removed once it closes. */
+  unsettledHitTargetGuards: HitTargetGuard[];
   diagnostics: Diagnostics;
   diagnosticEntries: BrowserDiagnosticEntry[];
   diagnosticSequence: number;
@@ -400,19 +548,9 @@ type TargetState = {
   inflightRequests: Set<string>;
   networkTrackingOverflow: boolean;
   failedRequests: Set<string>;
-  requests: Map<
-    string,
-    {
-      method: string;
-      url: string;
-      /** The document that issued the request; absent when not reported. */
-      loaderId: string | null;
-      browserInitiated: boolean;
-      /** An event stream or other response that never finishes by design,
-       * so it does not keep the page from being network idle. */
-      stream: boolean;
-    }
-  >;
+  requests: Map<string, TrackedRequest>;
+  /** When a request that counts as page loading (see requestLoading) last
+   * started or ended. Requests that never count do not move it. */
   lastNetworkActivityAt: number;
   networkActivitySequence: number;
   /** Counts cross-document navigations the page started in its main frame. */
@@ -432,6 +570,9 @@ type TargetState = {
   /** Cross-origin iframes (out-of-process frames) by frame id. Each has its own
    * flattened CDP session, auto-attached from this page session. */
   oopifs: Map<string, OopifSession>;
+  /** Dedicated workers of the page and its cross-origin iframes, by session
+   * id, each with the listeners that feed its requests into the ledger. */
+  workers: Map<string, Array<() => void>>;
   /** Node-level CDP calls go to this OOPIF session while one operation acts on
    * a node inside it. Input always goes to the page session. */
   nodeRoute: OopifSession | null;
@@ -455,6 +596,8 @@ type OopifSession = {
   parentSessionId: string;
   /** Frame ids rendered by this session (the OOPIF and its same-process children). */
   frameIds: Set<string>;
+  /** Stops this session's network and load listeners when it detaches. */
+  unsubscribe: Array<() => void>;
 };
 
 export type AgentBrowserDriverOptions = {
@@ -487,9 +630,25 @@ export type AgentBrowserDriverOptions = {
    * creates page targets. Remote and non-Chromium CDP engines commonly scope
    * targets to the connection that created them, so they require `cdp`. */
   targetLifecycle?: "runner" | "cdp";
-  /** The browser belongs to the person (attached Chrome): an explicit end
-   * closes the tabs this session opened that are still blank. */
-  closeUnusedOwnedTabsOnEnd?: boolean;
+  /** The browser belongs to the person (attached Chrome). The driver tracks
+   * the tabs this session opens there, and closing the driver (however the
+   * session's runtime goes away) closes the ones still blank. A runtime that
+   * continues a session continues in the tab the earlier one was using. */
+  ownedTabs?: {
+    /** What an earlier runtime of this session left in the browser. */
+    previous?: OwnedTabsState | null;
+    /** Called whenever the tracked tabs change, before anything else can. */
+    onChange?: (tabs: OwnedTabsState) => void;
+    /** Called once the driver closed; `tabsSettled` is false when a blank
+     * tab it opened could not be closed (or is still in use elsewhere). */
+    onClosed?: (tabsSettled: boolean) => void | Promise<void>;
+    /** A blank tab this session opened that another session is using now
+     * stays open; whoever cleans up later closes it once it is free. */
+    inUseElsewhere?: (targetId: string) => boolean;
+    /** How long a continuing runtime waits for the earlier tab to answer
+     * before it opens a new one instead. */
+    rebindTimeoutMs?: number;
+  };
   tabControl?: boolean;
   /** Keep owned Chromium pages active without changing the foreground tab. */
   focusEmulation?: boolean;
@@ -552,6 +711,49 @@ export type BrowserRuntimeSnapshot = {
   tabs: Array<{ url: string; selected: boolean }>;
 };
 
+/** How many vanished tabs the driver remembers, to say why each is gone. */
+const MAX_GONE_TARGETS = 64;
+
+/** What the driver knows about a tab that no longer exists. */
+export type GoneBrowserTarget =
+  | { kind: "closed"; at: string; byCloseCall: boolean }
+  | {
+      kind: "relaunched";
+      reason: BrowserRelaunchReason;
+      idleReleaseMinutes?: number;
+      replacementId: string | null;
+    };
+
+const LIST_CURRENT_TABS = "list the current tabs and use one of their IDs";
+
+/** The answer for a tab ID that names no open tab: why it is gone when the
+ * driver knows, and how to carry on. Always starts "browser target does not
+ * exist", which callers match. */
+export function goneBrowserTargetMessage(gone: GoneBrowserTarget | null): string {
+  if (!gone) {
+    return `browser target does not exist: this ID is not one of this browser's tabs; ${LIST_CURRENT_TABS}`;
+  }
+  if (gone.kind === "closed") {
+    const by = gone.byCloseCall
+      ? "by a close-tab call"
+      : "by its page, or by a person or agent using this browser";
+    return `browser target does not exist: this tab was closed at ${gone.at} ${by}; ${LIST_CURRENT_TABS}`;
+  }
+  const minutes = gone.idleReleaseMinutes;
+  const why =
+    gone.reason === "idle_release"
+      ? `this browser was stopped after going unused${minutes ? ` for ${minutes} minute${minutes === 1 ? "" : "s"}` : ""} and relaunched on its next call`
+      : gone.reason === "controller_restart"
+        ? "this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call"
+        : gone.reason === "browser_lost"
+          ? "this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched"
+          : "this browser restarted to save its profile state";
+  const next = gone.replacementId
+    ? `this tab's page is now tab ${gone.replacementId}`
+    : LIST_CURRENT_TABS;
+  return `browser target does not exist: ${why}, so its tabs reopened with new IDs and unsaved page input may be lost; ${next}`;
+}
+
 function hasBrowserEmulation(
   value: BrowserSessionEmulation | undefined,
 ): value is BrowserSessionEmulation {
@@ -573,6 +775,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   get networkNotice(): string | null {
     return this.runner.networkNotice ?? null;
   }
+  /** The load error of the page start() opened and kept on the browser's
+   * error page (keepTabOnLoadError), such as net::ERR_CONNECTION_REFUSED. */
+  startLoadError: string | null = null;
   private readonly browserSessionId: string;
   private readonly controllerGeneration: string;
   private readonly runner: BrowserCommandRunner;
@@ -584,10 +789,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private physicalGeneration: string;
   private readonly engine: "chromium" | "chrome" | "lightpanda";
   private readonly targetLifecycle: "runner" | "cdp";
-  private readonly closeUnusedOwnedTabsOnEnd: boolean;
+  private readonly ownedTabs: AgentBrowserDriverOptions["ownedTabs"] | null;
   private readonly navigationCommitTimeoutMs: number;
   /** Tabs this session created, in a browser it does not own. */
   private readonly createdTargetIds = new Set<string>();
+  /** Blank tabs this session closed itself, most recent last. */
+  private readonly closedBlankTargetIds = new Set<string>();
+  /** Tabs that vanished while this driver knew them, or that a relaunch
+   * replaced, most recent last: a later call naming one learns why. */
+  private readonly goneTargets = new Map<string, GoneBrowserTarget>();
+  /** Tabs a close-tab call of this driver is closing. */
+  private readonly closingTargetIds = new Set<string>();
+  /** The tab an earlier runtime of this session was using; start continues
+   * in it rather than opening another. */
+  private rebindTargetId: string | null = null;
+  private reportedOwnedTabs = "";
   private readonly tabControl: boolean;
   /** Cleared once the browser refuses focus emulation, so later targets keep
    * working without it instead of each paying the refusal. */
@@ -689,7 +905,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       ? validateHeadlessSessionCookies(options.headlessSessionCookies)
       : null;
     this.targetLifecycle = options.targetLifecycle ?? "runner";
-    this.closeUnusedOwnedTabsOnEnd = options.closeUnusedOwnedTabsOnEnd ?? false;
+    this.ownedTabs = options.ownedTabs ?? null;
+    if (this.ownedTabs?.previous) {
+      for (const targetId of this.ownedTabs.previous.created) this.createdTargetIds.add(targetId);
+      for (const targetId of this.ownedTabs.previous.closedBlank)
+        this.closedBlankTargetIds.add(targetId);
+      this.rebindTargetId = this.ownedTabs.previous.selected;
+    }
     this.navigationCommitTimeoutMs =
       options.navigationCommitTimeoutMs ?? NAVIGATION_COMMIT_TIMEOUT_MS;
     this.tabControl = options.tabControl ?? true;
@@ -781,6 +1003,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       connection = await this.ensureConnection();
       await this.windowParking?.presentNow();
       if (deferNavigation) connection.assertNavigable?.(url);
+      // A session continuing in the person's browser (after an idle release
+      // or a controller restart) carries on in the tab it was using.
+      const rebound = deferNavigation ? null : await this.rebindPreviousTarget(connection);
+      if (rebound) return rebound;
       const created = await connection.send<{ targetId?: unknown }>(
         "Target.createTarget",
         { url: "about:blank", background: true, ...this.contextScope() },
@@ -789,15 +1015,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       if (typeof created.targetId !== "string" || !created.targetId) {
         throw new Error("browser did not return its initial page target");
       }
-      if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(created.targetId);
+      this.recordCreatedTarget(created.targetId);
       // Attached Chrome's tab inventory may lag the creation receipt. Never
       // substitute another tab (even another blank tab) for the exact target
       // we created: the initial navigation would overwrite the user's page.
       try {
         target = await this.waitForCreatedTargetInfo(connection, created.targetId);
         this.selectedTargetId = target.targetId;
+        this.ownedTabsChanged();
         if (deferNavigation)
-          await this.navigate(await this.ensureTargetState(target), url, options);
+          this.startLoadError = await this.navigate(
+            await this.ensureTargetState(target),
+            url,
+            options,
+          );
         this.windowParking?.arm();
         return await this.observe(target.targetId);
       } catch (error) {
@@ -845,7 +1076,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     this.selectedTargetId = target.targetId;
     if (deferNavigation) {
-      await this.navigate(await this.ensureTargetState(target), url, options);
+      this.startLoadError = await this.navigate(await this.ensureTargetState(target), url, options);
     }
     this.windowParking?.arm();
     return await this.observe(target.targetId);
@@ -861,6 +1092,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return true;
     } catch (error) {
       return error instanceof CdpCommandTimeoutError || !(error instanceof CdpTransportError);
+    }
+  }
+
+  /** Whether the browser answered a bounded probe ("connected"), its
+   * connection is gone ("lost"), or it did not answer in time
+   * ("unresponsive"), which proves neither. */
+  async connectionState(): Promise<"connected" | "lost" | "unresponsive"> {
+    if (!this.started || !this.connection) return "lost";
+    try {
+      await this.connection.send("Browser.getVersion", {}, { timeoutMs: 2_000 });
+      return "connected";
+    } catch (error) {
+      if (error instanceof CdpCommandTimeoutError) return "unresponsive";
+      return error instanceof CdpTransportError ? "lost" : "connected";
     }
   }
 
@@ -924,12 +1169,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       background: true,
     });
     if (typeof result.targetId !== "string") throw new Error("CDP did not return a target id");
-    if (this.closeUnusedOwnedTabsOnEnd) this.createdTargetIds.add(result.targetId);
+    this.recordCreatedTarget(result.targetId);
     const previousSelection = this.selectedTargetId;
     const createdTarget = await this.waitForCreatedTargetInfo(connection, result.targetId);
     const createdState = await this.ensureTargetState(createdTarget);
     await this.waitForCreatedTargetFrame(createdState);
     this.selectedTargetId = result.targetId;
+    this.ownedTabsChanged();
     if (deferNavigation) {
       try {
         await this.navigate(createdState, url, options);
@@ -941,6 +1187,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (!isNavigationTimeout(error)) {
           await this.discardCreatedTarget(connection, result.targetId);
           if (this.selectedTargetId === result.targetId) this.selectedTargetId = previousSelection;
+          this.ownedTabsChanged();
         }
         throw error;
       }
@@ -953,14 +1200,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
   ): Promise<void> {
     this.removeState(targetId);
-    this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
     try {
       await this.closeTargetAndSettle(connection, targetId);
+      this.createdTargetIds.delete(targetId);
     } catch {
       // Best effort: the tab may already be gone, and the original failure
-      // is what the caller needs to see.
+      // is what the caller needs to see. A tab still open stays recorded, so
+      // the session's cleanup closes it while it is blank.
     }
+    this.ownedTabsChanged();
   }
 
   /** A managed Chrome opens its own new-tab page at launch beside the page
@@ -989,6 +1238,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     targetId: string,
   ): Promise<void> {
     await connection.send("Target.closeTarget", { targetId });
+    await this.settleClosedTarget(connection, targetId);
+  }
+
+  private async settleClosedTarget(
+    connection: BrowserCdpConnection,
+    targetId: string,
+  ): Promise<void> {
     const deadline = Date.now() + TARGET_CLOSE_SETTLE_TIMEOUT_MS;
     while ((await this.targetInfos(connection)).some((info) => info.targetId === targetId)) {
       if (Date.now() >= deadline) return;
@@ -1000,6 +1256,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
     this.selectedTargetId = targetId;
+    this.ownedTabsChanged();
     return await this.observe(targetId);
   }
 
@@ -1012,34 +1269,178 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     const connection = await this.ensureConnection();
     await this.requireTargetInfo(connection, targetId);
-    await this.closeTargetAndSettle(connection, targetId);
+    this.closingTargetIds.add(targetId);
+    try {
+      await connection.send("Target.closeTarget", { targetId });
+    } catch (error) {
+      this.closingTargetIds.delete(targetId);
+      throw error;
+    }
+    // The browser closed the tab. Losing the connection before the tab list
+    // is read must not report the close as a failure (attached Chrome can
+    // end the connection right after the tab closes).
+    let settleFailure: unknown;
+    try {
+      await this.settleClosedTarget(connection, targetId);
+    } catch (error) {
+      settleFailure = error;
+    }
+    this.rememberClosedTarget(targetId, true);
+    this.closingTargetIds.delete(targetId);
     this.removeState(targetId);
     this.createdTargetIds.delete(targetId);
     if (this.selectedTargetId === targetId) this.selectedTargetId = null;
-    return await this.listTargets();
+    this.ownedTabsChanged();
+    try {
+      if (settleFailure !== undefined) throw settleFailure;
+      return await this.listTargets();
+    } catch (error) {
+      throw closedTargetListFailure(error);
+    }
   }
 
   /** Close the tabs this session opened in the person's browser that are
-   * still blank, so ending the session does not leave empty tabs behind.
-   * Tabs that show a page stay: the person may still want what the agent
-   * left there. */
-  async closeUnusedOwnedTabs(): Promise<void> {
-    if (!this.closeUnusedOwnedTabsOnEnd || this.createdTargetIds.size === 0 || !this.connection)
-      return;
+   * still blank, so a session never leaves empty tabs behind, however its
+   * runtime goes away. Tabs that show a page stay: the person may still want
+   * what the agent left there. Never touches a tab the session did not open.
+   * Returns whether every such tab is closed. */
+  async closeUnusedOwnedTabs(): Promise<boolean> {
+    if (!this.ownedTabs || this.createdTargetIds.size === 0) return true;
     const connection = this.connection;
-    const infos = await this.targetInfos(connection);
-    for (const info of infos) {
-      if (!this.createdTargetIds.has(info.targetId) || !isBlankTabUrl(info.url)) continue;
-      try {
-        await this.closeTargetAndSettle(connection, info.targetId);
-      } catch {
-        // Best effort per tab; the session end itself still proceeds.
+    if (!connection) return false;
+    let infos: TargetInfo[];
+    try {
+      infos = await this.targetInfos(connection);
+    } catch {
+      return false;
+    }
+    let settled = true;
+    for (const targetId of [...this.createdTargetIds]) {
+      const info = infos.find((candidate) => candidate.targetId === targetId);
+      if (!info) {
+        // Already closed, by the person or by the browser.
+        this.createdTargetIds.delete(targetId);
+        continue;
       }
-      this.createdTargetIds.delete(info.targetId);
+      if (!isBlankTabUrl(info.url)) continue;
+      if (this.ownedTabs.inUseElsewhere?.(targetId)) {
+        settled = false;
+        continue;
+      }
+      try {
+        await this.closeTargetAndSettle(connection, targetId);
+        this.removeState(targetId);
+        this.createdTargetIds.delete(targetId);
+        this.closedBlankTargetIds.delete(targetId);
+        this.closedBlankTargetIds.add(targetId);
+      } catch {
+        // Kept, so a later cleanup closes it.
+        settled = false;
+      }
+    }
+    while (this.closedBlankTargetIds.size > MAX_CLOSED_BLANK_TABS) {
+      this.closedBlankTargetIds.delete(this.closedBlankTargetIds.values().next().value!);
+    }
+    this.ownedTabsChanged();
+    return settled;
+  }
+
+  /** Continue in the tab an earlier runtime of this session was using when
+   * it is still open and answers promptly; null when a new tab is needed
+   * instead. A tab whose page does not answer (a dialog the page opened while
+   * no agent held the browser blocks it, and only the person can answer that
+   * one) is left as it is, rather than holding the session's return. */
+  private async rebindPreviousTarget(
+    connection: BrowserCdpConnection,
+  ): Promise<BrowserObservationValue | null> {
+    const targetId = this.rebindTargetId;
+    this.rebindTargetId = null;
+    if (!targetId || this.closedBlankTargetIds.has(targetId)) return null;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<null>((resolve) => {
+      deadline = setTimeout(
+        () => resolve(null),
+        this.ownedTabs?.rebindTimeoutMs ?? REBIND_TIMEOUT_MS,
+      );
+      deadline.unref?.();
+    });
+    let abandoned = false;
+    const rebind = (async () => {
+      const info = (await this.targetInfos(connection)).find(
+        (candidate) => candidate.targetId === targetId,
+      );
+      if (abandoned || !info || !isVisibleTarget(info)) return null;
+      this.selectedTargetId = targetId;
+      return await this.observe(targetId);
+    })().catch(() => null);
+    try {
+      const observation = await Promise.race([rebind, expired]);
+      if (observation) {
+        this.windowParking?.arm();
+        this.ownedTabsChanged();
+        return observation;
+      }
+    } finally {
+      clearTimeout(deadline);
+    }
+    // A tab that cannot be read now (it closed meanwhile, Chrome will no
+    // longer let the extension control it, or its page is not answering) is
+    // not worth failing the session for: open a new one, as a new session
+    // would. A read still waiting on the tab ends by itself.
+    abandoned = true;
+    if (this.selectedTargetId === targetId) this.selectedTargetId = null;
+    if (!this.attaching.has(targetId)) {
+      // The tab stays open but unread: detach its session too, so no frame
+      // or worker it starts waits for a listener that is gone.
+      const sessionId = this.states.get(targetId)?.sessionId;
+      this.removeState(targetId);
+      if (sessionId)
+        void connection
+          .send("Target.detachFromTarget", { sessionId }, { timeoutMs: 1_000 })
+          .catch(() => undefined);
+    }
+    return null;
+  }
+
+  private recordCreatedTarget(targetId: string): void {
+    if (!this.ownedTabs) return;
+    this.createdTargetIds.add(targetId);
+    this.ownedTabsChanged();
+  }
+
+  /** Report the tracked tabs to the owner's ledger when they changed. */
+  private ownedTabsChanged(): void {
+    const onChange = this.ownedTabs?.onChange;
+    if (!onChange) return;
+    const tabs: OwnedTabsState = {
+      created: [...this.createdTargetIds],
+      selected: this.selectedTargetId,
+      closedBlank: [...this.closedBlankTargetIds],
+    };
+    const serialized = JSON.stringify(tabs);
+    if (serialized === this.reportedOwnedTabs) return;
+    this.reportedOwnedTabs = serialized;
+    try {
+      onChange(tabs);
+    } catch {
+      // Recording is the owner's concern; it never fails browser work.
     }
   }
 
   async close(): Promise<void> {
+    // In the person's own browser, the empty tabs this session opened go
+    // with it, whatever ends the runtime. Best effort: closing never fails
+    // because a tab could not be closed.
+    const tabsSettled =
+      this.ownedTabs && this.started ? await this.closeUnusedOwnedTabs().catch(() => false) : true;
+    try {
+      await this.closeDriver();
+    } finally {
+      await this.ownedTabs?.onClosed?.(tabsSettled);
+    }
+  }
+
+  private async closeDriver(): Promise<void> {
     this.windowParking?.close();
     for (const unsubscribe of this.browserUnsubscribe.splice(0)) unsubscribe();
     for (const targetId of [...this.states.keys()]) this.removeState(targetId);
@@ -1173,18 +1574,44 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return this.preserveHeadlessSessionCookies;
   }
 
+  /** When the most recent JavaScript dialog still waiting for an answer
+   * opened (epoch milliseconds), or null when none is. Chrome offers a dialog
+   * only to the debugger that was attached when it opened: one attached later
+   * can neither see nor answer it, and the page stays blocked. Letting go of
+   * the browser now would strand it. */
+  openDialogSince(): number | null {
+    let newest: number | null = null;
+    for (const state of this.states.values()) {
+      if (!state.dialog) continue;
+      const openedAt = Date.parse(state.dialog.openedAt);
+      if (Number.isFinite(openedAt) && (newest === null || openedAt > newest)) newest = openedAt;
+    }
+    return newest;
+  }
+
   async target(targetId: string): Promise<BrowserTargetValue | null> {
     const connection = await this.ensureConnection();
     const info = (await this.targetInfos(connection)).find(
       (candidate) => candidate.targetId === targetId,
     );
+    if (!info && this.closedBlankTargetIds.has(targetId))
+      throw this.closedBlankTargetError(targetId);
+    if (!info && this.goneTargets.has(targetId)) throw this.missingTargetError(targetId);
     if (!info || !isVisibleTarget(info)) return null;
     const state = await this.ensureTargetState(info);
     // A JavaScript dialog blocks ordinary page-domain inspection. Keep the
     // event-derived target/document/frame generations authoritative until the
     // dialog is handled; otherwise the controller's generic pre-dispatch
     // target validation can fail before `handle_dialog` reaches Chromium.
-    if (!state.dialog) await this.refreshFrame(state);
+    // A dialog can open just before its event arrives (the person's own
+    // Chrome reports events by polling): a read that meets one reports it.
+    if (!state.dialog) {
+      try {
+        await this.untilDialog(state, async () => await this.refreshFrame(state));
+      } catch (error) {
+        if (!(error instanceof DialogBlockedError)) throw error;
+      }
+    }
     return this.typedSecrets.redact(this.targetFromInfo(info, state));
   }
 
@@ -1257,7 +1684,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state,
         entry.backendDOMNodeId,
         DOM_READ_FUNCTION,
-        [{ value: request.maxChars ?? 4_096 }, { value: request.attributes ?? [] }],
+        [
+          { value: request.maxChars ?? 4_096 },
+          { value: request.attributes ?? [] },
+          { value: false },
+          { value: request.offset ?? 0 },
+        ],
         { isolatedFrameId: entry.frameId ?? state.frame.id },
       );
       if (!isRecord(value) || value.ok !== true) {
@@ -1314,30 +1746,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   private async domSelectorCount(state: TargetState, selector: string): Promise<number> {
-    const document = await this.sendTarget<{ root?: unknown }>(state, "DOM.getDocument", {
-      depth: 0,
-      pierce: true,
-    });
-    if (!isRecord(document.root) || typeof document.root.nodeId !== "number") {
-      throw new Error("CDP returned an invalid DOM root");
-    }
-    let result: { nodeIds?: unknown };
-    try {
-      result = await this.sendTarget(state, "DOM.querySelectorAll", {
-        nodeId: document.root.nodeId,
-        selector,
-      });
-    } catch (error) {
-      if (error instanceof CdpProtocolError) {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser CSS selector is invalid",
-        );
-      }
-      throw error;
-    }
-    if (!Array.isArray(result.nodeIds)) throw new Error("CDP returned an invalid DOM query result");
-    return result.nodeIds.length;
+    return (await this.domMatchNodeIds(state, selector)).length;
   }
 
   async debug(
@@ -1405,98 +1814,117 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       async (state) =>
         await this.untilDialog(state, async () => {
           const deadline = Date.now() + SCREENSHOT_CAPTURE_TIMEOUT_MS;
-          await this.screenshotRead(
-            "Page.getFrameTree",
-            deadline,
-            async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
-          );
-          const metrics = await this.screenshotRead(
-            "Page.getLayoutMetrics",
-            deadline,
-            async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-          );
-          const capture: Record<string, unknown> = {
-            format: normalized.format,
-            fromSurface: true,
-            captureBeyondViewport: normalized.fullPage,
-            ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
-          };
-          let cssWidth = metrics.viewport.width;
-          let cssHeight = metrics.viewport.height;
-          let scrollX = metrics.viewport.x;
-          let scrollY = metrics.viewport.y;
-          if (normalized.fullPage) {
-            cssWidth = metrics.content.width;
-            cssHeight = metrics.content.height;
-            scrollX = 0;
-            scrollY = 0;
-            assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
-            capture.clip = {
-              x: 0,
-              y: 0,
-              width: cssWidth,
-              height: cssHeight,
-              scale: 1,
-            };
-          }
-          const captureOnce = async () => {
-            const response = await this.screenshotRead(
-              "Page.captureScreenshot",
+          for (let attempt = 0; attempt < SCREENSHOT_DOCUMENT_ATTEMPTS; attempt += 1) {
+            await this.screenshotRead(
+              "Page.getFrameTree",
               deadline,
-              async (timeoutMs) =>
-                await this.sendTarget<{ data?: unknown }>(
-                  state,
-                  "Page.captureScreenshot",
-                  capture,
-                  {
-                    timeoutMs,
-                  },
-                ),
+              async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
             );
-            const data = decodeBoundedBase64Image(response.data);
-            return { data, dimensions: imageDimensions(data, normalized.format) };
-          };
-          let { data, dimensions } = await captureOnce();
-          // Chromium applies a new device-metrics override asynchronously, so a
-          // capture right after a viewport change can still return the previous
-          // surface. A viewport capture of an emulated device has an exact size;
-          // wait briefly for the compositor instead of publishing the stale frame.
-          const expected = normalized.fullPage ? undefined : state.emulatedViewport;
-          if (expected) {
-            const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
-            const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
-            const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
-            let pause = 16;
-            while (
-              (Math.abs(dimensions.width - expectedWidth) > 1 ||
-                Math.abs(dimensions.height - expectedHeight) > 1) &&
-              Date.now() + pause < settleDeadline
-            ) {
-              await delay(pause);
-              pause = Math.min(pause * 2, 200);
-              const refreshed = await this.screenshotRead(
-                "Page.getLayoutMetrics",
-                deadline,
-                async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
-              );
-              cssWidth = refreshed.viewport.width;
-              cssHeight = refreshed.viewport.height;
-              scrollX = refreshed.viewport.x;
-              scrollY = refreshed.viewport.y;
-              ({ data, dimensions } = await captureOnce());
+            const metrics = await this.screenshotRead(
+              "Page.getLayoutMetrics",
+              deadline,
+              async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+            );
+            const capture: Record<string, unknown> = {
+              format: normalized.format,
+              fromSurface: true,
+              captureBeyondViewport: normalized.fullPage,
+              ...(normalized.format === "jpeg" ? { quality: normalized.quality } : {}),
+            };
+            let cssWidth = metrics.viewport.width;
+            let cssHeight = metrics.viewport.height;
+            let scrollX = metrics.viewport.x;
+            let scrollY = metrics.viewport.y;
+            if (normalized.fullPage) {
+              cssWidth = metrics.content.width;
+              cssHeight = metrics.content.height;
+              scrollX = 0;
+              scrollY = 0;
+              assertImageDimensions(Math.ceil(cssWidth), Math.ceil(cssHeight));
+              capture.clip = {
+                x: 0,
+                y: 0,
+                width: cssWidth,
+                height: cssHeight,
+                scale: 1,
+              };
             }
+            const captureOnce = async () => {
+              const response = await this.screenshotRead(
+                "Page.captureScreenshot",
+                deadline,
+                async (timeoutMs) =>
+                  await this.sendTarget<{ data?: unknown }>(
+                    state,
+                    "Page.captureScreenshot",
+                    capture,
+                    {
+                      timeoutMs,
+                    },
+                  ),
+              );
+              const data = decodeBoundedBase64Image(response.data);
+              return { data, dimensions: imageDimensions(data, normalized.format) };
+            };
+            let { data, dimensions } = await captureOnce();
+            // Chromium applies a new device-metrics override asynchronously, so a
+            // capture right after a viewport change can still return the previous
+            // surface. A viewport capture of an emulated device has an exact size;
+            // wait briefly for the compositor instead of publishing the stale frame.
+            const expected = normalized.fullPage ? undefined : state.emulatedViewport;
+            if (expected) {
+              const expectedWidth = Math.round(expected.width * expected.deviceScaleFactor);
+              const expectedHeight = Math.round(expected.height * expected.deviceScaleFactor);
+              const settleDeadline = Math.min(deadline, Date.now() + STALE_SURFACE_SETTLE_MS);
+              let pause = 16;
+              while (
+                (Math.abs(dimensions.width - expectedWidth) > 1 ||
+                  Math.abs(dimensions.height - expectedHeight) > 1) &&
+                Date.now() + pause < settleDeadline
+              ) {
+                await delay(pause);
+                pause = Math.min(pause * 2, 200);
+                const refreshed = await this.screenshotRead(
+                  "Page.getLayoutMetrics",
+                  deadline,
+                  async (timeoutMs) => await this.layoutMetrics(state, timeoutMs),
+                );
+                cssWidth = refreshed.viewport.width;
+                cssHeight = refreshed.viewport.height;
+                scrollX = refreshed.viewport.x;
+                scrollY = refreshed.viewport.y;
+                ({ data, dimensions } = await captureOnce());
+              }
+            }
+            // The image is labeled with the document it shows. A commit while it
+            // was captured leaves the label unproven, so capture the new page.
+            const shown = state.documentGeneration;
+            await this.screenshotRead(
+              "Page.getFrameTree",
+              deadline,
+              async (timeoutMs) => await this.refreshFrame(state, timeoutMs),
+            );
+            if (state.documentGeneration !== shown) {
+              if (attempt + 1 < SCREENSHOT_DOCUMENT_ATTEMPTS) continue;
+              throw new InteractionControllerError(
+                "resource_unavailable",
+                "browser page kept changing to new documents while its screenshot was captured",
+                true,
+              );
+            }
+            return this.imageFrame({
+              state,
+              sequence: 0,
+              format: normalized.format,
+              data,
+              width: dimensions.width,
+              height: dimensions.height,
+              deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
+              scrollX,
+              scrollY,
+            });
           }
-          return this.imageFrame({
-            state,
-            sequence: 0,
-            format: normalized.format,
-            data,
-            width: dimensions.width,
-            height: dimensions.height,
-            deviceScaleFactor: finiteScale(dimensions.width / cssWidth),
-            scrollX,
-            scrollY,
-          });
+          throw new Error("unreachable screenshot attempt");
         }),
     );
   }
@@ -1721,6 +2149,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       await this.bringToFrontForAction(state);
       let completedActions = 0;
+      // Navigations complete only once their page committed, so a batch that
+      // has so far only navigated and waited knows exactly where the tab is.
+      let onlyCommittedNavigation = true;
+      let committedNavigations = 0;
       const initialEffectCount = state.actionEffectCount;
       const requestsBeforeActions = {
         open: new Set(state.inflightRequests),
@@ -1731,6 +2163,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.actionTrace = trace ? { actionIndex, trace } : undefined;
         state.locatorFollowsNavigation =
           command.action.type === "batch" && !command.action.fenceEachAction && actionIndex > 0;
+        state.accessibilityRebuildDue = true;
         const effectsBeforeAction = state.actionEffectCount;
         try {
           if (action.type === "handle_dialog") {
@@ -1740,6 +2173,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             // this action reads the page, ends the batch here: the page
             // cannot answer until the dialog is handled.
             await this.untilDialog(state, async () => {
+              await this.settleUnsettledHitTargetGuards(state);
               if (
                 completedActions > 0 &&
                 command.action.type === "batch" &&
@@ -1748,13 +2182,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                 await this.refreshFrame(state);
                 this.assertExpectedGenerations(command, state);
               }
-              await this.dispatchAction(state, action, command.operationId);
+              await this.dispatchAction(state, action, command.operationId, {
+                // Only an action whose locators already follow the page to a
+                // new document (a later action of a batch without
+                // fenceEachAction) may look again there. A single or first
+                // action is fenced to the document the caller checked, so a
+                // change before its input stays a refusal.
+                refindAfterDocumentChange: state.locatorFollowsNavigation === true,
+              });
             });
           }
           state.nodeRoute = null;
+          state.inputFence = null;
           state.actionTrace = undefined;
           state.locatorFollowsNavigation = false;
           completedActions += 1;
+          if (action.type === "navigate" || action.type === "history") committedNavigations += 1;
+          else if (action.type !== "wait") onlyCommittedNavigation = false;
           if (state.dialog) {
             if (completedActions < actions.length)
               throw await this.dialogPause(
@@ -1766,10 +2210,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               );
             break;
           }
-        } catch (error) {
+        } catch (thrown) {
           state.nodeRoute = null;
+          state.inputFence = null;
           state.actionTrace = undefined;
           state.locatorFollowsNavigation = false;
+          const error = classifyActionFailure(thrown, command);
           if (error instanceof DialogBlockedError || error instanceof DialogOpenedSignal) {
             // This action counts as run once it sent input: that input is
             // what opened the dialog, or it may have had effects before it.
@@ -1795,6 +2241,24 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               command,
               secretValues,
               error,
+              null,
+            );
+          if (
+            error instanceof InteractionDefiniteDriverError &&
+            action.type === "wait" &&
+            onlyCommittedNavigation &&
+            committedNavigations > 0
+          )
+            throw await this.withFailureObservation(
+              state,
+              info.targetId,
+              command,
+              secretValues,
+              new InteractionDefiniteDriverError(
+                error.code,
+                `browser action #${actionIndex} (wait) failed after the preceding navigation committed (${error.code}: ${error.message}); the tab shows the committed page`,
+                error.retryable,
+              ),
               null,
             );
           throw await this.withFailureObservation(
@@ -1872,7 +2336,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           return await this.untilDialog(state, async () => {
             if (last !== "navigate" && last !== "history" && last !== "wait")
               await this.settleActionRequests(state, requestsBeforeActions);
+            // Taken before animations settle: a handler may start its request
+            // while a click ripple or transition is still running.
+            const late =
+              last !== undefined && LATE_REQUEST_ACTIONS.has(last) ? settleBaseline(state) : null;
             await this.settleFiniteAnimations(state);
+            if (late) await this.settleLateActionRequests(state, late);
             const currentInfo = await this.requireTargetInfo(
               await this.ensureConnection(),
               info.targetId,
@@ -1897,7 +2366,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             error.cause instanceof CdpSessionDetachedError);
         // A native invalid-session reply after this exact attachment retired
         // is target loss, not loss of the browser transport or healthy peers.
-        if (!(error instanceof InteractionDefiniteDriverError) && !retiredSession) throw error;
+        if (!(error instanceof InteractionDefiniteDriverError) && !retiredSession) {
+          if (error instanceof InteractionControllerError || browserTransportFailure(error))
+            throw error;
+          // Every action ran. Only reading the page after them failed (a page
+          // whose frames keep changing, say), and the browser is still there:
+          // the actions completed, and the receipt says why it has no outline.
+          reportUnexpectedDispatchError("browser", error, command);
+          trace?.record({
+            actionIndex: actions.length - 1,
+            kind: "observation_unavailable",
+            message:
+              actions.length > 1
+                ? `all ${actions.length} actions completed, but the page could not be read after them, so this receipt has no outline; observe the tab to see the page now`
+                : "the action completed, but the page could not be read after it, so this receipt has no outline; observe the tab to see the page now",
+          } satisfies BrowserActionNoteValue);
+          return null;
+        }
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
           "Browser input was sent, but the resulting page could not be observed. Check the current tabs before continuing; do not repeat the action automatically.",
@@ -2138,7 +2623,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       await connection.send("Target.setDiscoverTargets", { discover: true });
       this.browserUnsubscribe.push(
         connection.on("Target.targetDestroyed", (event) => {
-          if (typeof event.params.targetId === "string") this.removeState(event.params.targetId);
+          if (typeof event.params.targetId !== "string") return;
+          this.rememberClosedTarget(event.params.targetId);
+          this.removeState(event.params.targetId);
         }),
         connection.on("Target.detachedFromTarget", (event) => {
           const sessionId = event.params.sessionId;
@@ -2534,6 +3021,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const result = state.tail.then(async () => {
       this.assertCurrentTargetState(state);
       state.nodeRoute = null;
+      state.accessibilityRebuildDue = true;
       try {
         return await operation(state, info);
       } finally {
@@ -2654,6 +3142,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       sessionId,
       authorityGeneration,
       actionEffectCount: 0,
+      unsettledHitTargetGuards: [],
       createdAt: this.firstSeen(info.targetId),
       frame,
       documentGeneration: documentGeneration(
@@ -2668,7 +3157,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         info.targetId,
         frame.id,
       ),
+      committedLoaders: [frame.loaderId],
+      abandonedLoaders: [],
+      mainFrameCommits: 0,
+      inputFence: null,
       accessibility: null,
+      accessibilityRebuiltAt: 0,
+      accessibilityNodeCount: null,
+      accessibilityRebuildDue: true,
       dialog: null,
       diagnostics: {
         consoleErrorCount: 0,
@@ -2691,6 +3187,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       tail: Promise.resolve(),
       unsubscribe: [],
       oopifs: new Map(),
+      workers: new Map(),
       nodeRoute: null,
       ...(viewport
         ? {
@@ -2735,6 +3232,15 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         },
         sessionId,
       ),
+      // A same-document navigation (a history entry made by pushState, a
+      // fragment) commits without a new loader or frameNavigated event.
+      connection.on(
+        "Page.navigatedWithinDocument",
+        (event) => {
+          if (event.params.frameId === state.frame.id) state.mainFrameCommits += 1;
+        },
+        sessionId,
+      ),
       ...(this.engine === "lightpanda"
         ? [
             connection.on(
@@ -2749,94 +3255,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             ),
           ]
         : []),
-      connection.on(
-        "Network.requestWillBeSent",
-        (event) => {
-          const requestId = stringField(event.params, "requestId");
-          if (requestId) {
-            if (state.inflightRequests.size >= 10_000 && !state.inflightRequests.has(requestId)) {
-              state.networkTrackingOverflow = true;
-            } else {
-              state.inflightRequests.add(requestId);
-            }
-            const request = isRecord(event.params.request) ? event.params.request : {};
-            const initiator = isRecord(event.params.initiator) ? event.params.initiator : {};
-            state.requests.set(requestId, {
-              method: boundedMethod(request.method),
-              url: boundedUrlField(request.url) ?? "about:blank",
-              loaderId: stringField(event.params, "loaderId"),
-              // Chrome fetches the page's icon (/favicon.ico or a declared
-              // <link rel=icon>) by itself, reported as type Other with an
-              // "other" initiator. A missing icon is not a page failure and,
-              // being on almost every site, would otherwise show as a failed
-              // request in every observation.
-              browserInitiated: event.params.type === "Other" && initiator.type === "other",
-              stream: event.params.type === "EventSource",
-            });
-            boundMap(state.requests, 10_000);
-          }
-          state.networkActivitySequence += 1;
-          state.lastNetworkActivityAt = Date.now();
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Network.loadingFinished",
-        (event) => {
-          const requestId = stringField(event.params, "requestId");
-          if (requestId) {
-            state.inflightRequests.delete(requestId);
-            state.failedRequests.delete(requestId);
-            state.requests.delete(requestId);
-          }
-          state.networkActivitySequence += 1;
-          state.lastNetworkActivityAt = Date.now();
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Network.loadingFailed",
-        (event) => {
-          const requestId = stringField(event.params, "requestId");
-          if (requestId) {
-            state.inflightRequests.delete(requestId);
-            if (event.params.canceled !== true && event.params.errorText !== "net::ERR_ABORTED") {
-              this.recordFailedRequest(state, requestId, {
-                message:
-                  boundedTextField(event.params.errorText, 8_192) ?? "Network request failed",
-              });
-            }
-            state.failedRequests.delete(requestId);
-            state.requests.delete(requestId);
-          }
-          state.networkActivitySequence += 1;
-          state.lastNetworkActivityAt = Date.now();
-        },
-        sessionId,
-      ),
-      connection.on(
-        "Network.responseReceived",
-        (event) => {
-          const requestId = stringField(event.params, "requestId");
-          const response = isRecord(event.params.response) ? event.params.response : null;
-          const request = requestId ? state.requests.get(requestId) : undefined;
-          if (
-            request &&
-            typeof response?.mimeType === "string" &&
-            STREAMING_MIME_TYPES.has(response.mimeType.split(";")[0]!.trim().toLowerCase())
-          ) {
-            request.stream = true;
-          }
-          if (requestId && typeof response?.status === "number" && response.status >= 400) {
-            this.recordFailedRequest(state, requestId, {
-              message: `HTTP ${Math.trunc(response.status)}`,
-              status: Math.trunc(response.status),
-              url: boundedUrlField(response.url),
-            });
-          }
-        },
-        sessionId,
-      ),
+      ...this.trackNetwork(connection, state, sessionId, true),
       connection.on(
         "Page.javascriptDialogOpening",
         (event) => {
@@ -2862,6 +3281,168 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     }
     return state;
+  }
+
+  /**
+   * Keeps the tab's request ledger from one session's Network domain: the
+   * page's, or a cross-origin iframe's. Such a frame's document request starts
+   * on its parent's session and ends on the frame's own, so every session of
+   * a tab shares one ledger keyed by request id. Failed requests are reported
+   * from the page session only, as before frames were tracked.
+   */
+  private trackNetwork(
+    connection: BrowserCdpConnection,
+    state: TargetState,
+    sessionId: string,
+    page: boolean,
+  ): Array<() => void> {
+    const counted = (request: TrackedRequest | undefined) =>
+      request === undefined || (!request.ignored && !request.stream);
+    return [
+      connection.on(
+        "Network.requestWillBeSent",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const now = Date.now();
+          let tracked: TrackedRequest | undefined;
+          if (requestId) {
+            if (state.inflightRequests.size >= 10_000 && !state.inflightRequests.has(requestId)) {
+              state.networkTrackingOverflow = true;
+            } else {
+              state.inflightRequests.add(requestId);
+            }
+            const request = isRecord(event.params.request) ? event.params.request : {};
+            const initiator = isRecord(event.params.initiator) ? event.params.initiator : {};
+            const type = stringField(event.params, "type");
+            const url = boundedUrlField(request.url) ?? "about:blank";
+            // Chrome fetches the page's icon (/favicon.ico or a declared
+            // <link rel=icon>) by itself, reported as type Other with an
+            // "other" initiator. A missing icon is not a page failure and,
+            // being on almost every site, would otherwise show as a failed
+            // request in every observation.
+            const browserInitiated = type === "Other" && initiator.type === "other";
+            tracked = {
+              method: boundedMethod(request.method),
+              url,
+              loaderId: stringField(event.params, "loaderId"),
+              browserInitiated,
+              stream: type === "EventSource",
+              ignored: requestIgnoredForIdle(type, url, browserInitiated),
+              type,
+              frameId: stringField(event.params, "frameId"),
+              sessionId,
+              // A redirect is the same request continuing under the same id.
+              startedAt: state.requests.get(requestId)?.startedAt ?? now,
+              respondedAt: null,
+              dataAt: null,
+            };
+            state.requests.set(requestId, tracked);
+            boundMap(state.requests, 10_000);
+          }
+          state.networkActivitySequence += 1;
+          if (counted(tracked)) state.lastNetworkActivityAt = now;
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.loadingFinished",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (requestId) {
+            state.inflightRequests.delete(requestId);
+            state.failedRequests.delete(requestId);
+            state.requests.delete(requestId);
+          }
+          state.networkActivitySequence += 1;
+          if (counted(request)) state.lastNetworkActivityAt = Date.now();
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.loadingFailed",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (requestId) {
+            state.inflightRequests.delete(requestId);
+            // A document request's id is its navigation's loader id. One the
+            // browser cancelled (a newer navigation took over) never commits.
+            if (
+              page &&
+              event.params.type === "Document" &&
+              (event.params.canceled === true || event.params.errorText === "net::ERR_ABORTED")
+            ) {
+              state.abandonedLoaders.push(requestId);
+              if (state.abandonedLoaders.length > COMMITTED_LOADER_HISTORY)
+                state.abandonedLoaders.shift();
+            }
+            if (
+              page &&
+              event.params.canceled !== true &&
+              event.params.errorText !== "net::ERR_ABORTED"
+            ) {
+              this.recordFailedRequest(state, requestId, {
+                message:
+                  boundedTextField(event.params.errorText, 8_192) ?? "Network request failed",
+              });
+            }
+            state.failedRequests.delete(requestId);
+            state.requests.delete(requestId);
+          }
+          state.networkActivitySequence += 1;
+          if (counted(request)) state.lastNetworkActivityAt = Date.now();
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.responseReceived",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const response = isRecord(event.params.response) ? event.params.response : null;
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (request) request.respondedAt = Date.now();
+          if (
+            request &&
+            typeof response?.mimeType === "string" &&
+            STREAMING_MIME_TYPES.has(response.mimeType.split(";")[0]!.trim().toLowerCase())
+          ) {
+            request.stream = true;
+          }
+          if (page && requestId && typeof response?.status === "number" && response.status >= 400) {
+            this.recordFailedRequest(state, requestId, {
+              message: `HTTP ${Math.trunc(response.status)}`,
+              status: Math.trunc(response.status),
+              url: boundedUrlField(response.url),
+            });
+          }
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.dataReceived",
+        (event) => {
+          const requestId = stringField(event.params, "requestId");
+          const request = requestId ? state.requests.get(requestId) : undefined;
+          if (request) request.dataAt = Date.now();
+        },
+        sessionId,
+      ),
+    ];
+  }
+
+  /** A cross-origin iframe's document request started on its parent's session.
+   * Once the frame has stopped loading, or is gone, it can no longer be loading
+   * however the frame's own session reported it. */
+  private finishFrameDocuments(state: TargetState, frameIds: ReadonlySet<string>): void {
+    for (const requestId of [...state.inflightRequests]) {
+      const request = state.requests.get(requestId);
+      if (request?.type !== "Document" || !request.frameId || !frameIds.has(request.frameId))
+        continue;
+      state.inflightRequests.delete(requestId);
+      state.requests.delete(requestId);
+      state.lastNetworkActivityAt = Date.now();
+    }
   }
 
   /** Page-level auto-attach: one flattened child session per cross-origin
@@ -2890,9 +3471,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       "Target.setAutoAttach",
       {
         autoAttach: true,
-        waitForDebuggerOnStart: false,
+        // A new frame or dedicated worker waits until its session listens, so
+        // the requests its first scripts start are seen. Chromium holds a
+        // page's dedicated workers whatever the filter says, so they are
+        // attached too; onFrameAttached always resumes what it attached.
+        waitForDebuggerOnStart: true,
         flatten: true,
-        filter: [{ type: "iframe" }],
+        filter: [{ type: "iframe" }, { type: "worker" }],
       },
       { sessionId: parentSessionId },
     );
@@ -2906,14 +3491,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     const sessionId = params.sessionId;
     if (typeof sessionId !== "string") return;
+    const waiting = params.waitingForDebugger === true;
     let info: TargetInfo;
     try {
       info = normalizeTargetInfo(params.targetInfo);
     } catch {
+      if (waiting)
+        await connection
+          .send("Runtime.runIfWaitingForDebugger", {}, { sessionId })
+          .catch(() => undefined);
       return;
     }
-    const waiting = params.waitingForDebugger === true;
     try {
+      if (info.type === "worker" && this.states.get(state.targetId) === state) {
+        await this.onWorkerAttached(connection, state, sessionId);
+        return;
+      }
       if (info.type !== "iframe" || this.states.get(state.targetId) !== state) {
         if (waiting) await connection.send("Runtime.runIfWaitingForDebugger", {}, { sessionId });
         await connection.send(
@@ -2923,19 +3516,56 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         );
         return;
       }
+      // A frame that moved to another process can attach its new session
+      // before the old one detaches: retire the old one now.
+      const replaced = state.oopifs.get(info.targetId);
+      if (replaced && replaced.sessionId !== sessionId)
+        this.forgetFrameSession(state, replaced.sessionId);
       // A cross-origin iframe's target id is its frame id.
-      state.oopifs.set(info.targetId, {
+      const oopif: OopifSession = {
         frameId: info.targetId,
         sessionId,
         parentSessionId,
         frameIds: new Set([info.targetId]),
-      });
+        unsubscribe: [],
+      };
+      state.oopifs.set(info.targetId, oopif);
+      // The frame's requests count toward the tab's network activity, and its
+      // document request, begun on the parent's session, finishes here.
+      oopif.unsubscribe.push(
+        ...this.trackNetwork(connection, state, sessionId, false),
+        connection.on(
+          "Page.frameStoppedLoading",
+          (event) => {
+            const frameId = stringField(event.params, "frameId");
+            if (frameId) this.finishFrameDocuments(state, new Set([frameId]));
+          },
+          sessionId,
+        ),
+      );
       state.accessibility = null;
       await Promise.all([
         connection.send("DOM.enable", {}, { sessionId }),
         connection.send("Page.enable", {}, { sessionId }),
         connection.send("Accessibility.enable", {}, { sessionId }),
+        connection.send("Network.enable", {}, { sessionId }),
       ]);
+      // A frame that was already running when its session attached (one the
+      // page had before this controller) may have finished loading unheard.
+      if (!waiting) {
+        const loaded = await connection
+          .send<{ result?: { value?: unknown } }>(
+            "Runtime.evaluate",
+            {
+              expression: "location.href !== 'about:blank' && document.readyState === 'complete'",
+              returnByValue: true,
+            },
+            { sessionId, timeoutMs: 5_000 },
+          )
+          .catch(() => null);
+        if (loaded?.result?.value === true)
+          this.finishFrameDocuments(state, new Set([info.targetId]));
+      }
       await this.attachFrameSessions(connection, state, sessionId);
     } catch {
       // A frame that navigated away or closed during setup is simply absent.
@@ -2947,16 +3577,47 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
   }
 
+  /** A dedicated worker's requests count toward its page's network activity,
+   * and its own script request, begun on the page's session, finishes on the
+   * worker's. The caller resumes the worker. */
+  private async onWorkerAttached(
+    connection: BrowserCdpConnection,
+    state: TargetState,
+    sessionId: string,
+  ): Promise<void> {
+    state.workers.set(sessionId, this.trackNetwork(connection, state, sessionId, false));
+    await connection.send("Network.enable", {}, { sessionId, timeoutMs: 5_000 });
+  }
+
   private forgetFrameSession(state: TargetState, sessionId: string): void {
+    const worker = state.workers.get(sessionId);
+    if (worker) {
+      state.workers.delete(sessionId);
+      for (const stop of worker) stop();
+      this.forgetSessionRequests(state, sessionId);
+      return;
+    }
     for (const oopif of [...state.oopifs.values()]) {
       if (oopif.sessionId !== sessionId) continue;
       state.oopifs.delete(oopif.frameId);
       if (state.nodeRoute === oopif) state.nodeRoute = null;
       state.accessibility = null;
+      for (const stop of oopif.unsubscribe.splice(0)) stop();
+      this.forgetSessionRequests(state, sessionId);
+      this.finishFrameDocuments(state, oopif.frameIds);
       // Nested frames went with their parent session.
       for (const nested of [...state.oopifs.values()]) {
         if (nested.parentSessionId === sessionId) this.forgetFrameSession(state, nested.sessionId);
       }
+    }
+  }
+
+  /** Nothing reports the requests of a frame or worker that is gone. */
+  private forgetSessionRequests(state: TargetState, sessionId: string): void {
+    for (const requestId of [...state.inflightRequests]) {
+      if (state.requests.get(requestId)?.sessionId !== sessionId) continue;
+      state.inflightRequests.delete(requestId);
+      state.requests.delete(requestId);
     }
   }
 
@@ -2977,6 +3638,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     pageFrames: readonly MainFrame[],
     pageNodes: readonly CdpAxNode[],
+    rebuild: boolean,
   ): Promise<CdpAxNode[]> {
     const connection = await this.ensureConnection();
     const known = [...pageNodes];
@@ -3009,6 +3671,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               node.backendDOMNodeId === owner.backendNodeId,
           );
           if (!ownerNode || typeof ownerNode.nodeId !== "string") continue;
+          if (rebuild) await this.rebuildAccessibility(oopif.sessionId);
           const nodes = await this.collectAccessibilityFrames(oopif.sessionId, frames);
           const ids = new Set(nodes.map((node) => node.nodeId));
           const origin = frameOrigin(frames[0]?.url);
@@ -3286,19 +3949,27 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     connection: BrowserCdpConnection,
     sessionId: string,
   ): Promise<BrowserUserAgentMetadata> {
-    const evaluated = await connection.send<{
-      result?: unknown;
-      exceptionDetails?: unknown;
-    }>(
-      "Runtime.evaluate",
-      {
-        expression: USER_AGENT_METADATA_EXPRESSION,
-        awaitPromise: true,
-        returnByValue: true,
-      },
-      { sessionId },
-    );
+    let evaluated: { result?: unknown; exceptionDetails?: unknown } | null = null;
+    try {
+      evaluated = await connection.send<{
+        result?: unknown;
+        exceptionDetails?: unknown;
+      }>(
+        "Runtime.evaluate",
+        {
+          expression: USER_AGENT_METADATA_EXPRESSION,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        { sessionId },
+      );
+    } catch (error) {
+      // A page still loading after a relaunch restored it may have no
+      // JavaScript context yet; the hidden target below has its own.
+      if (!missingExecutionContext(error)) throw error;
+    }
     if (
+      evaluated &&
       !evaluated.exceptionDetails &&
       isRecord(evaluated.result) &&
       evaluated.result.value !== null &&
@@ -3417,7 +4088,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         ? state.accessibility
         : state.dialog
           ? emptyAccessibilitySnapshot()
-          : await this.refreshAccessibility(state);
+          : await this.refreshAccessibility(state, "outline");
     const focused = accessibility.focusedRef
       ? accessibility.entriesByRef.get(accessibility.focusedRef)
       : null;
@@ -3515,12 +4186,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return result.result?.value === true;
   }
 
-  private async refreshAccessibility(state: TargetState): Promise<CdpAccessibilitySnapshot> {
+  /**
+   * Read the tab's accessibility tree, first rebuilding Chromium's tree when
+   * accessibilityRebuildWanted says this read should.
+   */
+  private async refreshAccessibility(
+    state: TargetState,
+    read: AccessibilityRead = "read",
+  ): Promise<CdpAccessibilitySnapshot> {
+    const rebuilding =
+      this.engine !== "lightpanda" &&
+      accessibilityRebuildWanted({
+        read,
+        lastNodeCount: state.accessibilityNodeCount,
+        firstReadOfCall: state.accessibilityRebuildDue,
+        msSinceRebuild: Date.now() - state.accessibilityRebuiltAt,
+      });
     for (let attempt = 0; attempt < ACCESSIBILITY_SNAPSHOT_ATTEMPTS; attempt += 1) {
       const before = flattenFrameTree(await this.frameTree(state.sessionId));
+      // The snapshot carries the current document's generation, so it must be
+      // read from that document: a commit since the frame was last read makes
+      // the new page current first, and the read starts over.
+      const main = before[0];
+      if (main && (main.loaderId !== state.frame.loaderId || main.id !== state.frame.id)) {
+        this.assertCurrentTargetState(state);
+        this.adoptMainFrame(state, main);
+        continue;
+      }
+      if (rebuilding) await this.rebuildAccessibility(state.sessionId);
+      state.accessibilityRebuildDue = false;
       const nodes = await this.collectAccessibilityFrames(state.sessionId, before);
       if (state.oopifs.size > 0)
-        nodes.push(...(await this.oopifAccessibility(state, before, nodes)));
+        nodes.push(...(await this.oopifAccessibility(state, before, nodes, rebuilding)));
       const after = flattenFrameTree(await this.frameTree(state.sessionId));
       if (frameTreeFingerprint(before) !== frameTreeFingerprint(after)) {
         continue;
@@ -3533,9 +4230,29 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       });
       this.assertCurrentTargetState(state);
       state.accessibility = accessibility;
+      state.accessibilityNodeCount = nodes.length;
+      if (rebuilding) state.accessibilityRebuiltAt = Date.now();
       return accessibility;
     }
     throw new Error("browser frame tree did not settle for a bounded accessibility observation");
+  }
+
+  /**
+   * Chromium updates its accessibility tree incrementally and can miss a
+   * change: content assigned to a shadow-root slot after that slot was laid
+   * out stays out of the tree (or is reported as not rendered) while it is
+   * on screen, so a custom context menu can be visible yet absent. Restarting
+   * the domain makes the next read build the tree from the current DOM and
+   * layout, at some cost on large pages, so refreshAccessibility rebuilds it
+   * only for the reads that matter. DOM-backed node ids are DOM node ids, so
+   * refs survive the rebuild (see normalizeCdpAccessibilityTree for the
+   * others).
+   */
+  private async rebuildAccessibility(sessionId: string): Promise<void> {
+    if (this.engine === "lightpanda") return;
+    const connection = await this.ensureConnection();
+    await connection.send("Accessibility.disable", {}, { sessionId });
+    await connection.send("Accessibility.enable", {}, { sessionId });
   }
 
   private async collectAccessibilityFrames(
@@ -3589,23 +4306,41 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async refreshFrame(state: TargetState, timeoutMs?: number): Promise<void> {
     const frame = await this.mainFrame(state.sessionId, timeoutMs);
     this.assertCurrentTargetState(state);
-    if (frame.loaderId !== state.frame.loaderId || frame.id !== state.frame.id) {
+    this.adoptMainFrame(state, frame);
+  }
+
+  /**
+   * Make `frame` the target's current main-frame document. Every generation a
+   * receipt reports (its URL, outline refs, fences and screenshot labels)
+   * derives from this one state, so a new document replaces all of them at
+   * once and drops the old document's accessibility snapshot.
+   */
+  private adoptMainFrame(state: TargetState, frame: MainFrame): void {
+    if (frame.loaderId === state.frame.loaderId && frame.id === state.frame.id) {
+      // A new URL in the same document is a same-document commit (pushState,
+      // a fragment), seen here before its event when the frame is read first.
+      if (frame.url !== state.frame.url) state.mainFrameCommits += 1;
       state.frame = frame;
-      state.documentGeneration = documentGeneration(
-        this.controllerGeneration,
-        state.authorityGeneration,
-        state.targetId,
-        frame.loaderId,
-      );
-      state.frameGeneration = frameGeneration(
-        this.controllerGeneration,
-        state.authorityGeneration,
-        state.targetId,
-        frame.id,
-      );
-      state.accessibility = null;
-    } else {
-      state.frame = frame;
+      return;
+    }
+    state.frame = frame;
+    state.mainFrameCommits += 1;
+    state.documentGeneration = documentGeneration(
+      this.controllerGeneration,
+      state.authorityGeneration,
+      state.targetId,
+      frame.loaderId,
+    );
+    state.frameGeneration = frameGeneration(
+      this.controllerGeneration,
+      state.authorityGeneration,
+      state.targetId,
+      frame.id,
+    );
+    state.accessibility = null;
+    if (!state.committedLoaders.includes(frame.loaderId)) {
+      state.committedLoaders.push(frame.loaderId);
+      if (state.committedLoaders.length > COMMITTED_LOADER_HISTORY) state.committedLoaders.shift();
     }
   }
 
@@ -3694,14 +4429,23 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async viewport(state: TargetState): Promise<BrowserObservationValue["viewport"]> {
     if (this.engine === "lightpanda") return null;
-    const result = await this.sendTarget<{
-      result?: unknown;
-      exceptionDetails?: unknown;
-    }>(state, "Runtime.evaluate", {
-      expression:
-        "({width:innerWidth,height:innerHeight,visualWidth:visualViewport?.width??innerWidth,visualHeight:visualViewport?.height??innerHeight,deviceScaleFactor:devicePixelRatio,maxTouchPoints:navigator.maxTouchPoints??0})",
-      returnByValue: true,
-    });
+    let result: { result?: unknown; exceptionDetails?: unknown };
+    try {
+      result = await this.sendTarget<{
+        result?: unknown;
+        exceptionDetails?: unknown;
+      }>(state, "Runtime.evaluate", {
+        expression:
+          "({width:innerWidth,height:innerHeight,visualWidth:visualViewport?.width??innerWidth,visualHeight:visualViewport?.height??innerHeight,deviceScaleFactor:devicePixelRatio,maxTouchPoints:navigator.maxTouchPoints??0})",
+        returnByValue: true,
+      });
+    } catch (error) {
+      // A page between documents (a restored tab still loading) has no
+      // JavaScript context to read. The viewport is optional; the
+      // observation stays usable without it, as when the page throws.
+      if (missingExecutionContext(error)) return null;
+      throw error;
+    }
     const value = isRecord(result.result) ? result.result.value : null;
     if (result.exceptionDetails || !isRecord(value)) {
       return null;
@@ -3924,8 +4668,54 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     action: BrowserAction,
     operationId: string,
+    options: { refindAfterDocumentChange?: boolean } = {},
+  ): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      await this.dispatchActionOnce(state, action, operationId);
+      return;
+    } catch (error) {
+      // The page moved to a new document after the action found its element,
+      // just before its first input event (which would have landed on the new
+      // page at the old element's position). Only an action whose locators
+      // follow the page by design (a later action of a batch without
+      // fenceEachAction) looks for an element named by role, text or another
+      // locator once more there, within its own locator deadline. A single or
+      // first action is fenced to the document its caller checked, and a ref
+      // names an element of the page the caller saw: both stay refusals.
+      const locators = actionLocators(action);
+      if (
+        options.refindAfterDocumentChange !== true ||
+        !(error instanceof DocumentMovedBeforeInputError) ||
+        locators.length === 0 ||
+        locators.some((locator) => locator.kind === "ref")
+      )
+        throw error;
+      state.locatorDeadline = startedAt + LOCATOR_WAIT_MS;
+    }
+    try {
+      await this.refreshFrame(state);
+      await this.dispatchActionOnce(state, action, operationId);
+    } catch (error) {
+      if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
+        throw new InteractionDefiniteDriverError(
+          "document_stale",
+          `browser document changed before the action sent input, and its element was not found on the new page (${error.message}); no input was sent`,
+        );
+      }
+      throw error;
+    } finally {
+      state.locatorDeadline = null;
+    }
+  }
+
+  private async dispatchActionOnce(
+    state: TargetState,
+    action: BrowserAction,
+    operationId: string,
   ): Promise<void> {
     state.nodeRoute = null;
+    state.inputFence = null;
     switch (action.type) {
       case "navigate":
         await this.navigate(state, action.url);
@@ -3989,6 +4779,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         return;
       case "click": {
         const node = await this.resolveActionLocator(state, action.locator);
+        if ((action.button ?? "left") === "left" && (await this.chooseDropdownOption(state, node)))
+          return;
         await this.clickNode(
           state,
           node.backendDOMNodeId,
@@ -4027,6 +4819,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       case "fill": {
         const node = await this.resolveActionLocator(state, action.locator);
         if (await this.fillNativeDateTimeInput(state, node.backendDOMNodeId, action.value)) return;
+        if (await this.fillSlider(state, node.backendDOMNodeId, action.value)) return;
         await this.assertFillableTarget(state, node.backendDOMNodeId);
         await this.focusNode(state, node.backendDOMNodeId);
         await this.selectAllAndDelete(state, node.backendDOMNodeId);
@@ -4108,7 +4901,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           await this.selectPopupOptions(state, node, inspected, action.values);
           return;
         }
-        const result = await this.callOnNode(
+        const result = await this.changeSelection(
           state,
           node.backendDOMNodeId,
           SELECT_OPTIONS_FUNCTION,
@@ -4122,9 +4915,6 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
               : "browser locator is not a selectable control",
           );
         }
-        // This function returns false before any change for an invalid control.
-        // A true reply confirms a selection effect before later fencing checks.
-        state.actionEffectCount += 1;
         return;
       }
       case "check": {
@@ -4137,7 +4927,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           );
         }
         if (current !== action.checked)
-          await this.clickNode(state, node.backendDOMNodeId, "left", 1);
+          await this.clickNode(
+            state,
+            node.backendDOMNodeId,
+            "left",
+            1,
+            node.frameId ?? state.frame.id,
+          );
         return;
       }
       case "scroll": {
@@ -4324,7 +5120,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     });
     let clicked = false;
     try {
-      await this.clickNode(state, node.backendDOMNodeId, "left", 1);
+      await this.clickNode(state, node.backendDOMNodeId, "left", 1, frameId);
       clicked = true;
       const event = await Promise.race([chooser, dialog]);
       if (event === "dialog") throw new DialogOpenedSignal("upload control opened a dialog");
@@ -4601,7 +5397,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       return;
     }
     if (action.operation === "copy") {
-      const text = await this.copyBrowserText(state, action.locator, action.content ?? "selection");
+      // Copying an element without saying what copies what it shows, or its
+      // selected part; without an element, the page's selection.
+      const text = await this.copyBrowserText(
+        state,
+        action.locator,
+        action.content ?? (action.locator ? "whole" : "selection"),
+      );
       this.setClipboard(text, "copy", state.targetId);
       return;
     }
@@ -4652,7 +5454,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async copyBrowserText(
     state: TargetState,
     locator: BrowserLocator | undefined,
-    content: "selection" | "value" | "text",
+    content: "selection" | "value" | "text" | "whole",
   ): Promise<string> {
     let value: unknown;
     if (locator) {
@@ -4686,9 +5488,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         isRecord(value) && typeof value.error === "string" ? value.error : "unavailable";
       throw new InteractionDefiniteDriverError(
         reason === "protected" ? "permission_denied" : "invalid_action",
-        reason === "protected"
-          ? "browser clipboard cannot copy a protected field"
-          : "browser clipboard source is unavailable",
+        clipboardCopyFailure(reason, locator !== undefined),
       );
     }
     this.assertClipboardText(value.text);
@@ -4744,25 +5544,38 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     options: { input?: boolean } = {},
   ): Promise<CdpAccessibilityEntry> {
     const input = options.input ?? true;
-    const deadline = Date.now() + LOCATOR_WAIT_MS;
+    const deadline = state.locatorDeadline ?? Date.now() + LOCATOR_WAIT_MS;
     const fence = state.locatorFollowsNavigation
       ? null
       : { document: state.documentGeneration, frame: state.frameGeneration };
     let pause = 25;
     let entry: CdpAccessibilityEntry;
+    let finalAttempt = false;
+    let missed = false;
+    let read: AccessibilityRead = "read";
     for (;;) {
       let found: CdpAccessibilityEntry | null = null;
+      const purpose: AccessibilityRead = finalAttempt ? "final" : read;
+      read = "read";
+      // The document this attempt reads. A match counts only if that document
+      // is still the current one once the element is found.
+      const document = state.documentGeneration;
       try {
-        found = await this.resolveLocator(state, locator);
+        found = await this.resolveLocator(state, locator, purpose);
       } catch (error) {
-        if (
-          locator.kind === "ref" ||
-          !(
-            error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found"
-          ) ||
-          Date.now() >= deadline
-        ) {
-          throw error;
+        const notFound =
+          error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found";
+        if (locator.kind === "ref" || !notFound || finalAttempt) throw error;
+        // Polls may reuse Chromium's tree; "not found" is only reported from
+        // a freshly built one, and the first miss looks again at once.
+        if (!missed) {
+          missed = true;
+          read = "miss";
+          continue;
+        }
+        if (Date.now() >= deadline) {
+          finalAttempt = true;
+          continue;
         }
       }
       if (
@@ -4774,9 +5587,22 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "browser document changed while the action waited for its element",
         );
       }
+      if (found && state.documentGeneration !== document) {
+        // A followed navigation committed while this attempt read the page
+        // it left: look for the element again in the new document.
+        found = null;
+      }
       if (found) {
         if (!input || Date.now() >= deadline || !(await this.nodeDisabled(state, found))) {
           entry = found;
+          if (state.inputFence !== null && state.inputFence !== document) {
+            // An action with two elements (a drag) needs both in one document.
+            throw new InteractionDefiniteDriverError(
+              "document_stale",
+              "browser document changed while the action waited for its element",
+            );
+          }
+          state.inputFence = document;
           break;
         }
       }
@@ -4878,11 +5704,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async resolveLocator(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead = "read",
   ): Promise<CdpAccessibilityEntry> {
     // Each resolution decides where this node's DOM and runtime calls go:
     // the page session, or the session of the cross-origin frame holding it.
     state.nodeRoute = null;
-    const entry = await this.resolveLocatorInPage(state, locator);
+    const entry = await this.resolveLocatorInPage(state, locator, read);
     state.nodeRoute = this.oopifForFrame(state, entry.frameId);
     return entry;
   }
@@ -4890,6 +5717,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async resolveLocatorInPage(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead = "read",
   ): Promise<CdpAccessibilityEntry> {
     await this.refreshFrame(state);
     if (locator.kind === "css" || locator.kind === "test_id" || locator.kind === "placeholder") {
@@ -4906,7 +5734,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (partial) return partial;
       }
     }
-    const accessibility = await this.refreshAccessibility(state);
+    const accessibility = await this.refreshAccessibility(state, read);
     if (locator.kind === "ref") {
       const entry = accessibility.entriesByRef.get(locator.ref);
       if (!entry || entry.backendDOMNodeId === null) {
@@ -4923,7 +5751,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // name is the requested text, that is the element the caller named.
     const unique =
       uniqueEntries(matches) ??
-      (needle !== undefined && !(locator.kind === "role" && locator.exact)
+      (needle !== undefined && !locator.exact
         ? uniqueEntries(matches.filter((entry) => sameAccessibleName(entry.name, needle)))
         : null);
     if (!unique) {
@@ -4972,13 +5800,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       targetId: state.targetId,
       documentGeneration: state.documentGeneration,
     }).entriesByRef.get(previous.ref);
-    if (!current || current.backendDOMNodeId !== previous.backendDOMNodeId) {
-      throw new InteractionDefiniteDriverError(
-        "locator_not_found",
-        "browser element reference is stale or unavailable",
-      );
-    }
-    return current;
+    // Chromium's incremental tree can report a visible node as not rendered.
+    // Without this proof, the rebuilt full tree decides whether the ref holds.
+    return current && current.backendDOMNodeId === previous.backendDOMNodeId ? current : null;
   }
 
   private async uniqueDomMatch(state: TargetState, selector: string): Promise<number> {
@@ -4995,41 +5819,72 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "browser locator matched multiple elements",
       );
     }
-    return await this.describeBackendNode(state, nodeIds[0]!);
+    const backendNodeId = await this.describeBackendNode(state, nodeIds[0]!);
+    if (backendNodeId === null) {
+      throw new InteractionDefiniteDriverError(
+        "locator_not_found",
+        "browser locator found no element",
+      );
+    }
+    return backendNodeId;
   }
 
+  /**
+   * The node ids `selector` matches in the current main-frame document.
+   * DOM.getDocument and DOM.querySelectorAll are two calls, and a document
+   * that commits between them (a navigation while a locator waits) drops the
+   * root's node id. Chromium refuses that query with the same error code as
+   * an invalid selector, so only a refusal of a root it still holds reports
+   * the selector as invalid; a vanished root is read again from the new
+   * document, whose generation the caller's fence then sees.
+   */
   private async domMatchNodeIds(state: TargetState, selector: string): Promise<number[]> {
-    const document = await this.sendTarget<{ root?: unknown }>(state, "DOM.getDocument", {
-      depth: 0,
-      pierce: true,
-    });
-    if (!isRecord(document.root) || typeof document.root.nodeId !== "number") {
-      throw new Error("CDP returned an invalid DOM root");
+    for (let attempt = 1; ; attempt += 1) {
+      const document = await this.sendTarget<{ root?: unknown }>(state, "DOM.getDocument", {
+        depth: 0,
+        pierce: true,
+      });
+      if (!isRecord(document.root) || typeof document.root.nodeId !== "number") {
+        throw new Error("CDP returned an invalid DOM root");
+      }
+      let result: { nodeIds?: unknown };
+      try {
+        result = await this.sendTarget(state, "DOM.querySelectorAll", {
+          nodeId: document.root.nodeId,
+          selector,
+        });
+      } catch (error) {
+        if (cdpNodeGone(error)) {
+          if (attempt >= DOM_QUERY_ATTEMPTS) throw error;
+          await this.refreshFrame(state);
+          continue;
+        }
+        if (error instanceof CdpProtocolError) {
+          throw new InteractionDefiniteDriverError(
+            "invalid_action",
+            "browser CSS selector is invalid",
+          );
+        }
+        throw error;
+      }
+      if (!Array.isArray(result.nodeIds)) {
+        throw new Error("CDP returned an invalid DOM query result");
+      }
+      return result.nodeIds.filter((value): value is number => typeof value === "number");
     }
-    let result: { nodeIds?: unknown };
+  }
+
+  /** A matched node's backend id, or null when its document has since gone. */
+  private async describeBackendNode(state: TargetState, nodeId: number): Promise<number | null> {
+    let described: { node?: unknown };
     try {
-      result = await this.sendTarget(state, "DOM.querySelectorAll", {
-        nodeId: document.root.nodeId,
-        selector,
+      described = await this.sendTarget<{ node?: unknown }>(state, "DOM.describeNode", {
+        nodeId,
       });
     } catch (error) {
-      if (error instanceof CdpProtocolError) {
-        throw new InteractionDefiniteDriverError(
-          "invalid_action",
-          "browser CSS selector is invalid",
-        );
-      }
+      if (cdpNodeGone(error)) return null;
       throw error;
     }
-    return Array.isArray(result.nodeIds)
-      ? result.nodeIds.filter((value): value is number => typeof value === "number")
-      : [];
-  }
-
-  private async describeBackendNode(state: TargetState, nodeId: number): Promise<number> {
-    const described = await this.sendTarget<{ node?: unknown }>(state, "DOM.describeNode", {
-      nodeId,
-    });
     if (!isRecord(described.node) || typeof described.node.backendNodeId !== "number") {
       throw new Error("CDP did not resolve the DOM locator");
     }
@@ -5044,18 +5899,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private async locatorCandidates(
     state: TargetState,
     locator: BrowserLocator,
+    read: AccessibilityRead,
   ): Promise<CdpAccessibilityEntry[]> {
-    if (locator.kind === "ref") return [await this.resolveLocatorInPage(state, locator)];
+    if (locator.kind === "ref") return [await this.resolveLocatorInPage(state, locator, read)];
     await this.refreshFrame(state);
     if (locator.kind === "css" || locator.kind === "test_id" || locator.kind === "placeholder") {
       const nodeIds = await this.domMatchNodeIds(state, domLocatorSelector(locator));
       const entries: CdpAccessibilityEntry[] = [];
       for (const nodeId of nodeIds.slice(0, WAIT_LOCATOR_CANDIDATE_LIMIT)) {
-        entries.push(syntheticEntry(await this.describeBackendNode(state, nodeId)));
+        const backendNodeId = await this.describeBackendNode(state, nodeId);
+        if (backendNodeId !== null) entries.push(syntheticEntry(backendNodeId));
       }
       return entries;
     }
-    const accessibility = await this.refreshAccessibility(state);
+    const accessibility = await this.refreshAccessibility(state, read);
     const byBackend = new Map<number, CdpAccessibilityEntry>();
     for (const entry of accessibilityLocatorMatches(accessibility.entries, locator)) {
       if (entry.backendDOMNodeId !== null && !byBackend.has(entry.backendDOMNodeId)) {
@@ -5063,6 +5920,99 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
     }
     return [...byBackend.values()].slice(0, WAIT_LOCATOR_CANDIDATE_LIMIT);
+  }
+
+  /**
+   * The options of a native dropdown (a single-choice select shown as a
+   * button) have no box on the page: the browser draws its list itself, so a
+   * pointer cannot reach them. A person who clicks one chooses it, so choose
+   * it the same way the select action does. Returns false for any other
+   * element, which is clicked as usual.
+   */
+  private async chooseDropdownOption(
+    state: TargetState,
+    node: CdpAccessibilityEntry,
+  ): Promise<boolean> {
+    // Only an option, or an element a DOM locator found (its role is not
+    // known), costs the extra read; every other click goes straight on.
+    const synthetic = node.nodeId === "";
+    if (
+      node.backendDOMNodeId === null ||
+      this.engine === "lightpanda" ||
+      (!synthetic && !/option/iu.test(node.role))
+    )
+      return false;
+    const option = await this.callOnNode(
+      state,
+      node.backendDOMNodeId,
+      DROPDOWN_OPTION_FUNCTION,
+      [],
+    );
+    if (!isRecord(option) || option.kind === "other") return false;
+    if (option.kind === "unavailable") {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "this option of a native dropdown is disabled or hidden and cannot be chosen",
+      );
+    }
+    // As for a person: the option is chosen (the page sees input and change
+    // only when that changes the value), and then the open list closes.
+    if (option.kind === "choosable") {
+      const chosen = await this.changeSelection(
+        state,
+        node.backendDOMNodeId,
+        CHOOSE_DROPDOWN_OPTION_FUNCTION,
+        [],
+      );
+      if (chosen !== true) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          "this option of a native dropdown is disabled or hidden and cannot be chosen",
+        );
+      }
+    }
+    if (option.open === true) await this.closeDropdownList(state);
+    return true;
+  }
+
+  /**
+   * Runs a page function that changes a select's value and then dispatches
+   * input and change, returning true, or returns false before any change.
+   * The page's handlers run inside the call, and one of them may open a
+   * JavaScript dialog that holds the call open, so the call counts as an
+   * effect from the moment it is sent; only a false reply undoes that.
+   */
+  private async changeSelection(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    functionDeclaration: string,
+    args: Array<{ value?: unknown }>,
+  ): Promise<unknown> {
+    const effectsBefore = state.actionEffectCount;
+    const result = await this.callOnNode(state, backendDOMNodeId, functionDeclaration, args, {
+      potentialEffect: true,
+    });
+    if (result !== true) state.actionEffectCount = effectsBefore;
+    return result;
+  }
+
+  /**
+   * Closes the list a native dropdown shows while it is open. The browser
+   * draws that list itself and gives it the keyboard, so Escape closes it
+   * without reaching the page, as a person's choice does: no blur or focus
+   * on the select, which keeps its focus. Best effort: a list that stays open
+   * changes nothing about the choice already made.
+   */
+  private async closeDropdownList(state: TargetState): Promise<void> {
+    for (const type of ["rawKeyDown", "keyUp"] as const) {
+      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+        type,
+        key: "Escape",
+        code: "Escape",
+        windowsVirtualKeyCode: 27,
+        nativeVirtualKeyCode: 27,
+      });
+    }
   }
 
   private async clickNode(
@@ -5075,24 +6025,236 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const point = await this.actionPoint(state, backendDOMNodeId, true, frameId);
     const { x, y, sessionId } = await this.clickInput(state, point);
     const input = sessionId === undefined ? {} : { sessionId };
-    await this.sendActionTarget(
-      state,
-      "Input.dispatchMouseEvent",
-      { type: "mouseMoved", x, y },
-      input,
-    );
-    for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+    const guard = await this.installHitTargetGuard(state, backendDOMNodeId, frameId);
+    try {
       await this.sendActionTarget(
         state,
         "Input.dispatchMouseEvent",
-        { type: "mousePressed", x, y, button, clickCount },
+        { type: "mouseMoved", x, y },
         input,
       );
-      await this.sendActionTarget(
+      for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+        await this.sendActionTarget(
+          state,
+          "Input.dispatchMouseEvent",
+          { type: "mousePressed", x, y, button, clickCount },
+          input,
+        );
+        await this.sendActionTarget(
+          state,
+          "Input.dispatchMouseEvent",
+          { type: "mouseReleased", x, y, button, clickCount },
+          input,
+        );
+      }
+    } catch (error) {
+      // The input already fails or pauses this action (a JavaScript dialog,
+      // an unresponsive tab), and reading the guard back now could wait on
+      // the same page. The next action removes it, and it disarms itself
+      // after a few seconds regardless.
+      if (guard !== null) {
+        guard.stopReports();
+        state.unsettledHitTargetGuards.push(guard);
+      }
+      throw error;
+    }
+    if (guard === null) return;
+    const blocked = await this.settleHitTargetGuard(state, guard, count);
+    if (blocked !== null) {
+      // The pointer did move there, so whatever its arrival did stands, and
+      // the refusal is reported as an unknown outcome.
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `browser element is covered by ${blocked.slice(0, 160)} at its center; the click was not delivered`,
+        true,
+      );
+    }
+  }
+
+  /**
+   * Installs the hit-target guard for one click, before any pointer input, and
+   * returns a handle to it. Only an engine without the guard (Lightpanda, which
+   * has no compositor hit testing to race) clicks unguarded; on Chromium a
+   * guard that cannot be installed refuses the click instead of sending it
+   * unverified. When the target's frame is known the listeners live in an
+   * isolated world, out of page scripts' reach, and also report each press's
+   * verdict as it happens, so the verdict survives the document going away
+   * before it is read back.
+   */
+  private async installHitTargetGuard(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    frameId: string | undefined,
+  ): Promise<HitTargetGuard | null> {
+    if (this.engine === "lightpanda") return null;
+    if (backendDOMNodeId === null) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "browser node cannot receive pointer input",
+      );
+    }
+    const connection = await this.ensureConnection();
+    const reportSession = this.commandSession(state, "Runtime.addBinding");
+    const token = randomUUID();
+    const verdicts: Array<string | null> = [];
+    let stopReports: () => void = () => undefined;
+    let executionContextId: number | undefined;
+    if (frameId !== undefined) {
+      const world = await this.sendTarget<{ executionContextId?: unknown }>(
         state,
-        "Input.dispatchMouseEvent",
-        { type: "mouseReleased", x, y, button, clickCount },
-        input,
+        "Page.createIsolatedWorld",
+        { frameId, worldName: HIT_TARGET_GUARD_WORLD },
+      );
+      if (!Number.isSafeInteger(world.executionContextId)) {
+        throw new Error("CDP did not create an isolated world for the click guard");
+      }
+      executionContextId = world.executionContextId as number;
+      // Exposed only to the guard's isolated world; the page cannot see or
+      // call it. Chrome reports calls without the Runtime domain enabled.
+      await this.sendTarget(state, "Runtime.addBinding", {
+        name: HIT_TARGET_VERDICT_BINDING,
+        executionContextName: HIT_TARGET_GUARD_WORLD,
+      });
+      stopReports = connection.on(
+        "Runtime.bindingCalled",
+        (event) => {
+          if (event.params.name !== HIT_TARGET_VERDICT_BINDING) return;
+          if (typeof event.params.payload !== "string") return;
+          let report: unknown;
+          try {
+            report = JSON.parse(event.params.payload);
+          } catch {
+            return;
+          }
+          if (!isRecord(report) || report.token !== token) return;
+          verdicts.push(typeof report.blocked === "string" ? report.blocked : null);
+        },
+        reportSession,
+      );
+    }
+    try {
+      const resolved = await this.sendTarget<{ object?: unknown }>(state, "DOM.resolveNode", {
+        backendNodeId: backendDOMNodeId,
+        ...(executionContextId === undefined ? {} : { executionContextId }),
+      });
+      if (!isRecord(resolved.object) || typeof resolved.object.objectId !== "string") {
+        throw new InteractionDefiniteDriverError(
+          "locator_not_found",
+          "browser element is no longer present",
+        );
+      }
+      const nodeObjectId = resolved.object.objectId;
+      try {
+        const installed = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+          state,
+          "Runtime.callFunctionOn",
+          {
+            objectId: nodeObjectId,
+            functionDeclaration: HIT_TARGET_GUARD_FUNCTION,
+            arguments: [{ value: token }],
+          },
+        );
+        if (installed.exceptionDetails || !isRecord(installed.result)) {
+          throw new Error("browser click guard could not be installed");
+        }
+        if (typeof installed.result.objectId !== "string") {
+          // The guard function returns null only for a detached element.
+          throw new InteractionDefiniteDriverError(
+            "locator_not_found",
+            "browser element is no longer present",
+          );
+        }
+        return {
+          objectId: installed.result.objectId,
+          reported: executionContextId !== undefined,
+          verdicts,
+          stopReports,
+        };
+      } finally {
+        // Not awaited: CDP runs a session's commands in order, and nothing
+        // waits on the release.
+        void this.sendTarget(state, "Runtime.releaseObject", { objectId: nodeObjectId }).catch(
+          () => undefined,
+        );
+      }
+    } catch (error) {
+      stopReports();
+      throw error;
+    }
+  }
+
+  /**
+   * Removes the guard's listeners and returns what it held back, or null when
+   * every press reached the target. When the guarded document is gone before
+   * the readback (the click, a hover effect, a timer or a navigation replaced
+   * or detached it), the verdicts the guard reported as each press happened
+   * decide; without a verdict for every press, and on any other failure, it
+   * is unknown whether the click reached the target, and the error says so.
+   */
+  private async settleHitTargetGuard(
+    state: TargetState,
+    guard: HitTargetGuard,
+    presses: number,
+  ): Promise<string | null> {
+    const unknown = () =>
+      new InteractionOutcomeUnknownDriverError(
+        "outcome_unknown",
+        "browser click was sent, but whether it reached the element could not be confirmed; check the page before continuing",
+      );
+    let settled: { result?: unknown; exceptionDetails?: unknown };
+    try {
+      settled = await this.sendTarget<{ result?: unknown; exceptionDetails?: unknown }>(
+        state,
+        "Runtime.callFunctionOn",
+        {
+          objectId: guard.objectId,
+          functionDeclaration: "function () { return this.settle(); }",
+          returnByValue: true,
+        },
+      );
+    } catch (error) {
+      if (error instanceof CdpProtocolError && GUARD_DOCUMENT_GONE.test(error.message)) {
+        // Over the extension bridge, the reports the guard sent before its
+        // document went away can still be on their way; take them in first.
+        try {
+          await (await this.ensureConnection()).flushEvents?.();
+        } catch {
+          // The verdicts already in decide, as without a bridge.
+        }
+        guard.stopReports();
+        const blocked = guard.verdicts.find((verdict) => verdict !== null);
+        if (blocked !== undefined) return blocked;
+        if (guard.reported && guard.verdicts.length >= presses) return null;
+        throw unknown();
+      }
+      guard.stopReports();
+      if (!(error instanceof CdpProtocolError)) throw error;
+      throw unknown();
+    }
+    guard.stopReports();
+    void this.sendTarget(state, "Runtime.releaseObject", { objectId: guard.objectId }).catch(
+      () => undefined,
+    );
+    const value = isRecord(settled.result) ? settled.result.value : undefined;
+    if (settled.exceptionDetails || (value !== null && typeof value !== "string")) {
+      throw unknown();
+    }
+    return value === null || value === "" ? null : value;
+  }
+
+  /** Removes guards an interrupted click left armed, so they cannot hold back
+   * later input. Best effort: a guard that cannot be reached is gone with its
+   * document or disarms itself shortly. */
+  private async settleUnsettledHitTargetGuards(state: TargetState): Promise<void> {
+    if (state.dialog) return;
+    const guards = state.unsettledHitTargetGuards.splice(0);
+    for (const guard of guards) {
+      await this.sendTarget(state, "Runtime.callFunctionOn", {
+        objectId: guard.objectId,
+        functionDeclaration: "function () { this.settle(); }",
+      }).catch(() => undefined);
+      await this.sendTarget(state, "Runtime.releaseObject", { objectId: guard.objectId }).catch(
+        () => undefined,
       );
     }
   }
@@ -5156,9 +6318,18 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const scrollBefore = await this.scrollPositions(state, backendDOMNodeId, frameId);
     const effectsBeforeScroll = state.actionEffectCount;
     if (state.nodeRoute) await this.scrollFrameOwnersIntoView(state, state.nodeRoute);
-    await this.sendActionTarget(state, "DOM.scrollIntoViewIfNeeded", {
-      backendNodeId: backendDOMNodeId,
-    });
+    const effectsBeforeElementScroll = state.actionEffectCount;
+    try {
+      await this.sendActionTarget(state, "DOM.scrollIntoViewIfNeeded", {
+        backendNodeId: backendDOMNodeId,
+      });
+    } catch (error) {
+      // -32001: the tab's session is gone, which is not about this element.
+      if (!(error instanceof CdpProtocolError) || error.code === -32_001) throw error;
+      // The browser refused the scroll itself, so nothing moved.
+      state.actionEffectCount = effectsBeforeElementScroll;
+      throw scrollRefusal(error.message) ?? error;
+    }
     if (
       scrollBefore !== null &&
       (await this.scrollPositions(state, backendDOMNodeId, frameId)) === scrollBefore
@@ -5302,6 +6473,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           potentialEffect: true,
         },
       );
+      // Layout that reacts to the scroll, such as a popover that follows its
+      // anchor, catches up on the next frames. Test the hit after it has.
+      await this.callOnNode(state, backendDOMNodeId, SETTLE_FRAMES_FUNCTION, [], {
+        isolatedFrameId: frameId,
+      });
       if (await this.hitsAtCenter(state, backendDOMNodeId)) {
         return await this.centerPoint(state, backendDOMNodeId);
       }
@@ -5406,6 +6582,151 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         "outcome_unknown",
         `browser set the ${type} input's value but the page did not keep it; check the current page before continuing`,
       );
+    }
+    return true;
+  }
+
+  /**
+   * Sets a slider to a number. A native range input takes the value
+   * directly, the way dragging its handle commits one. A custom slider
+   * (role slider) only moves the way its page lets a person move it, so press
+   * the arrow keys toward the value, reading its aria-valuenow after each
+   * press. Returns false for every other element.
+   */
+  private async fillSlider(
+    state: TargetState,
+    backendDOMNodeId: number | null,
+    value: string,
+  ): Promise<boolean> {
+    if (backendDOMNodeId === null) return false;
+    const target = value.trim() === "" ? Number.NaN : Number(value.trim());
+    const read = async (): Promise<SliderState | null> =>
+      sliderState(
+        await this.callOnNode(state, backendDOMNodeId, SLIDER_STATE_FUNCTION, [
+          { value: Number.isFinite(target) ? target : null },
+        ]),
+      );
+    const initial = await read();
+    if (initial === null) return false;
+    if (initial.disabled) {
+      throw new InteractionDefiniteDriverError("invalid_action", "this slider is disabled");
+    }
+    const range = `${initial.min ?? "its minimum"} to ${initial.max ?? "its maximum"}`;
+    if (
+      !Number.isFinite(target) ||
+      (initial.min !== null && target < initial.min) ||
+      (initial.max !== null && target > initial.max)
+    ) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        `this slider takes a number from ${range}; it is at ${initial.value ?? "an unknown value"}`,
+      );
+    }
+    if (initial.kind === "range") {
+      if (initial.nearest !== null && initial.nearest !== target) {
+        throw new InteractionDefiniteDriverError(
+          "invalid_action",
+          `this slider moves in steps; the nearest value it takes is ${initial.nearest}`,
+        );
+      }
+      const result = await this.callOnNode(
+        state,
+        backendDOMNodeId,
+        SET_RANGE_VALUE_FUNCTION,
+        [{ value: target }],
+        { potentialEffect: true },
+      );
+      if (!isRecord(result) || result.kind !== "set") {
+        if (isRecord(result) && result.kind === "disabled") {
+          throw new InteractionDefiniteDriverError("invalid_action", "this slider is disabled");
+        }
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "browser set the slider's value but the page did not keep it; check the current page before continuing",
+        );
+      }
+      return true;
+    }
+    if (initial.value === null) {
+      throw new InteractionDefiniteDriverError(
+        "invalid_action",
+        "this slider does not report its value; drag its handle or press its keys and check the page",
+      );
+    }
+    if (sameSliderValue(initial.value, target)) return true;
+    await this.focusNode(state, backendDOMNodeId);
+    let current = initial.value;
+    let presses = 0;
+    const press = async (key: string): Promise<number | null> => {
+      presses += 1;
+      await this.pressKey(state, this.parseActionKey(key));
+      let next = (await read())?.value ?? null;
+      if (next !== null && sameSliderValue(next, current)) {
+        await this.evaluateAction(state, AFTER_KEY_EFFECTS_EXPRESSION);
+        next = (await read())?.value ?? null;
+      }
+      return next !== null && sameSliderValue(next, current) ? null : next;
+    };
+    // Which arrow raises the value depends on the slider: a vertical one may
+    // listen only for up and down, and a right-to-left one lowers with the
+    // right arrow. Learn it from the first press that moves the slider.
+    const [primary, secondary] = initial.vertical
+      ? [SLIDER_VERTICAL_KEYS, SLIDER_HORIZONTAL_KEYS]
+      : [SLIDER_HORIZONTAL_KEYS, SLIDER_VERTICAL_KEYS];
+    let keys: { raise: string; lower: string } | null = null;
+    while (!sameSliderValue(current, target)) {
+      if (presses >= SLIDER_MAX_KEY_PRESSES) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `the slider moved from ${initial.value} to ${current} in ${presses} arrow key presses without reaching ${target}; drag its handle the rest of the way`,
+        );
+      }
+      const up = current < target;
+      let next: number | null = null;
+      if (keys === null) {
+        const candidates = up
+          ? [primary.raise, secondary.raise, primary.lower]
+          : [primary.lower, secondary.lower, primary.raise];
+        for (const key of candidates) {
+          next = await press(key);
+          if (next === null) continue;
+          const opposite = SLIDER_OPPOSITE_KEY[key] ?? key;
+          keys = next > current ? { raise: key, lower: opposite } : { raise: opposite, lower: key };
+          break;
+        }
+        if (next === null) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider did not move when its arrow keys were pressed (it is at ${current}); drag its handle or click its track instead`,
+          );
+        }
+        // A first press the wrong way only taught which key is which.
+        if (up ? next < current : next > current) {
+          current = next;
+          continue;
+        }
+      } else {
+        next = await press(up ? keys.raise : keys.lower);
+        if (next === null) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider did not move when its arrow key was pressed (it is at ${current}); drag its handle or click its track instead`,
+          );
+        }
+        if (up ? next < current : next > current) {
+          throw new InteractionOutcomeUnknownDriverError(
+            "outcome_unknown",
+            `this slider moved away from ${target} when its arrow keys were pressed; it is now at ${next}`,
+          );
+        }
+      }
+      if (!sameSliderValue(next, target) && (up ? next > target : next < target)) {
+        throw new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          `this slider moves in steps of ${Number(Math.abs(next - current).toPrecision(12))} and cannot be set to ${target}; it is now at ${next}`,
+        );
+      }
+      current = next;
     }
     return true;
   }
@@ -5825,16 +7146,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     state: TargetState,
     url: string,
     options: BrowserTabNavigationOptions = {},
-  ): Promise<void> {
+  ): Promise<string | null> {
     this.connection?.assertNavigable?.(url);
-    let result: { errorText?: unknown };
+    const startedAt = Date.now();
+    const loaderBefore = state.frame.loaderId;
+    let result: { errorText?: unknown; loaderId?: unknown; isDownload?: unknown };
     try {
-      result = await this.sendActionTarget<{ errorText?: unknown }>(
-        state,
-        "Page.navigate",
-        { url },
-        { timeoutMs: this.navigationCommitTimeoutMs },
-      );
+      result = await this.sendActionTarget<{
+        errorText?: unknown;
+        loaderId?: unknown;
+        isDownload?: unknown;
+      }>(state, "Page.navigate", { url }, { timeoutMs: this.navigationCommitTimeoutMs });
     } catch (error) {
       if (!(error instanceof CdpCommandTimeoutError)) throw error;
       // The server never answered. Stop the pending navigation so the tab
@@ -5849,21 +7171,124 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       failure.cause = error;
       throw failure;
     }
-    if (
-      typeof result.errorText === "string" &&
-      result.errorText &&
-      !(options.keepTabOnLoadError === true && isPageLoadError(result.errorText))
-    ) {
+    let errorText =
+      typeof result.errorText === "string" && result.errorText ? result.errorText : null;
+    if (errorText !== null && !isPageLoadError(errorText)) {
       throw new InteractionDefiniteDriverError(
         "resource_unavailable",
-        isPageLoadError(result.errorText)
-          ? `browser could not navigate to the requested URL (${result.errorText})`
-          : "browser could not navigate to the requested URL",
+        "browser could not navigate to the requested URL",
+        true,
+      );
+    }
+    // Chromium answers once the response is ready to commit, while the tab
+    // still shows the previous document. Until the new document commits, a
+    // readiness check or a locator would read the page being left. A failed
+    // load commits the browser's error page under the same loader, except an
+    // aborted one (a download, an empty response), which commits nothing. A
+    // response the browser turned into a download never commits either: the
+    // tab keeps its page, and the navigation is over once Chromium says so.
+    const loaderId =
+      typeof result.loaderId === "string" && result.loaderId ? result.loaderId : null;
+    if (
+      loaderId !== null &&
+      this.engine !== "lightpanda" &&
+      errorText !== "net::ERR_ABORTED" &&
+      result.isDownload !== true
+    ) {
+      const committed = () => state.committedLoaders.includes(loaderId);
+      const outcome = await this.waitForCommit(
+        state,
+        committed,
+        () => state.abandonedLoaders.includes(loaderId),
+        errorText === null
+          ? Math.max(
+              startedAt + this.navigationCommitTimeoutMs,
+              Date.now() + NAVIGATION_COMMIT_GRACE_MS,
+            )
+          : Date.now() + NAVIGATION_COMMIT_GRACE_MS,
+      );
+      if (outcome === "committed") {
+        // The server answered with an HTTP error status and an empty body, so
+        // the browser shows its own page naming that status. That is the
+        // site's answer, as a status page with a body would be, not a failure.
+        if (errorText === HTTP_ERROR_STATUS_LOAD_ERROR) errorText = null;
+      } else if (errorText === null) {
+        await this.failUncommittedNavigation(state, loaderBefore, outcome, committed);
+      }
+    }
+    // A failed load is reported whichever page the tab shows.
+    if (errorText !== null && options.keepTabOnLoadError !== true) {
+      throw new InteractionDefiniteDriverError(
+        "resource_unavailable",
+        `browser could not navigate to the requested URL (${errorText})`,
         true,
       );
     }
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
+    // The caller asked to keep the tab on the browser's error page.
+    return errorText;
+  }
+
+  /**
+   * Wait until `committed` holds for the main frame, reading the frame tree as
+   * the authority so a commit event still in flight cannot be missed. Ends
+   * early when `abandoned` reports that the browser gave the navigation up.
+   */
+  private async waitForCommit(
+    state: TargetState,
+    committed: () => boolean,
+    abandoned: () => boolean,
+    deadline: number,
+  ): Promise<"committed" | "abandoned" | "timeout"> {
+    for (;;) {
+      if (committed()) return "committed";
+      await this.refreshFrame(state);
+      if (committed()) return "committed";
+      if (state.dialog) {
+        // A beforeunload prompt holds the navigation until it is answered.
+        throw new DialogOpenedSignal("browser navigation opened a JavaScript dialog");
+      }
+      if (abandoned()) return "abandoned";
+      if (Date.now() >= deadline) return "timeout";
+      await delay(NAVIGATION_COMMIT_POLL_MS);
+    }
+  }
+
+  /**
+   * Fail a navigation whose page did not commit. One still pending is stopped
+   * first, so it cannot replace the page later; the failure observation then
+   * shows the page the tab kept.
+   */
+  private async failUncommittedNavigation(
+    state: TargetState,
+    loaderBefore: string,
+    outcome: "abandoned" | "timeout",
+    committed: () => boolean,
+  ): Promise<void> {
+    if (outcome === "timeout") {
+      await this.sendActionTarget(
+        state,
+        "Page.stopLoading",
+        {},
+        { potentialEffect: false, timeoutMs: TARGET_CLOSE_SETTLE_TIMEOUT_MS },
+      ).catch(() => undefined);
+    }
+    await this.refreshFrame(state);
+    if (committed()) return;
+    const kept =
+      state.frame.loaderId === loaderBefore ? "; the tab still shows its previous page" : "";
+    throw outcome === "timeout"
+      ? new InteractionDefiniteDriverError(
+          "timeout",
+          `browser navigation did not commit a new page in time and was stopped${kept}`,
+          true,
+        )
+      : new InteractionDefiniteDriverError(
+          "resource_unavailable",
+          `browser navigation was cancelled before its page committed${kept}`,
+          true,
+        );
   }
 
   private async navigateHistory(state: TargetState, direction: "back" | "forward"): Promise<void> {
@@ -5892,7 +7317,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         `browser target has no ${direction} history entry`,
       );
     }
+    const commitsBefore = state.mainFrameCommits;
+    const loaderBefore = state.frame.loaderId;
+    const startedAt = Date.now();
     await this.sendActionTarget(state, "Page.navigateToHistoryEntry", { entryId: entry.id });
+    // The entry commits after Chromium answered: a new document, a page the
+    // back/forward cache restores, or a same-document entry (pushState).
+    const committed = () => state.mainFrameCommits !== commitsBefore;
+    const outcome = await this.waitForCommit(
+      state,
+      committed,
+      () => false,
+      Math.max(startedAt + this.navigationCommitTimeoutMs, Date.now() + NAVIGATION_COMMIT_GRACE_MS),
+    );
+    if (outcome !== "committed")
+      await this.failUncommittedNavigation(state, loaderBefore, outcome, committed);
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
   }
@@ -5903,7 +7342,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<void> {
     const timeoutMs = action.timeoutMs ?? DEFAULT_ACTION_TIMEOUT_MS;
     const deadline = Date.now() + timeoutMs;
+    let pollMs = 0;
+    let lookedFinal = false;
+    let locatorPolls = 0;
+    let loaded = false;
+    // When a poll last saw a request still loading: one that stops counting
+    // (its body stalled, or it waited too long for a response) leaves the
+    // same quiet window after it as one that finished.
+    let loadingSeenAt = 0;
     while (Date.now() < deadline) {
+      const pollStartedAt = Date.now();
       if (action.condition === "load") {
         // An explicit load wait means the load event: images and other
         // subresources finished, unlike navigation's own interactive wait.
@@ -5916,22 +7364,56 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             true,
           );
         }
-        // Live pages keep event streams open for good. Only requests that
-        // can still finish count as loading; anything not positively known
-        // to be a stream (a slow fetch or a long poll alike) still counts.
-        const loading = [...state.inflightRequests].some(
-          (requestId) => state.requests.get(requestId)?.stream !== true,
-        );
+        loaded = await this.documentReady(state);
+        const now = Date.now();
+        let loading = false;
+        let longPolls = 0;
+        let stalled = 0;
+        for (const requestId of state.inflightRequests) {
+          const load = requestLoad(state.requests.get(requestId), now);
+          if (load === "loading") {
+            loading = true;
+            break;
+          }
+          if (load === "long_poll") longPolls += 1;
+          if (load === "stalled") stalled += 1;
+        }
+        if (loading) loadingSeenAt = now;
         if (
-          (await this.documentReady(state)) &&
+          loaded &&
           !loading &&
-          Date.now() - state.lastNetworkActivityAt >= NETWORK_IDLE_MS
+          now - Math.max(state.lastNetworkActivityAt, loadingSeenAt) >= NETWORK_IDLE_MS
         ) {
+          if (longPolls > 0) {
+            state.actionTrace?.trace.record({
+              actionIndex: state.actionTrace.actionIndex,
+              kind: "network_busy",
+              message: `page loaded; its network went quiet except for ${longPolls === 1 ? "1 request" : `${longPolls} requests`} still waiting for a response after ${formatSeconds(NETWORK_LONG_POLL_MS)} (as long polls do), so the wait ended without ${longPolls === 1 ? "it" : "them"}`,
+            } satisfies BrowserActionNoteValue);
+          }
+          if (stalled > 0) {
+            state.actionTrace?.trace.record({
+              actionIndex: state.actionTrace.actionIndex,
+              kind: "network_busy",
+              message: `page loaded; its network went quiet except for ${stalled === 1 ? "1 response" : `${stalled} responses`} whose body has had no data for ${formatSeconds(NETWORK_BODY_STALL_MS)} (as paused streams do; more may still arrive), so the wait ended without ${stalled === 1 ? "it" : "them"}`,
+            } satisfies BrowserActionNoteValue);
+          }
           return;
         }
       } else if (action.locator) {
-        const visible = await this.locatorVisible(state, action.locator);
+        // Polls may reuse Chromium's tree; the one after the first miss and
+        // the one expected to be last before the deadline look at a freshly
+        // built one, once each.
+        const last: boolean = !lookedFinal && pollStartedAt + pollMs + 50 >= deadline;
+        const visible = await this.locatorVisible(
+          state,
+          action.locator,
+          last ? "final" : locatorPolls === 1 ? "miss" : "read",
+        );
         if (action.condition === "visible" ? visible : !visible) return;
+        lookedFinal ||= last;
+        locatorPolls += 1;
+        pollMs = Date.now() - pollStartedAt;
       } else {
         throw new InteractionDefiniteDriverError(
           "invalid_action",
@@ -5940,19 +7422,41 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       }
       await delay(50);
     }
+    if (
+      action.locator &&
+      !lookedFinal &&
+      (action.condition === "visible" || action.condition === "hidden")
+    ) {
+      // A poll ran longer than expected and the deadline passed first: the
+      // timeout is still only reported from a freshly built tree.
+      const visible = await this.locatorVisible(state, action.locator, "final");
+      if (action.condition === "visible" ? visible : !visible) return;
+    }
     // Some live pages never go quiet: a long poll or a request the page keeps
-    // open is indistinguishable from a slow fetch until it ends. Network idle
-    // waits for the page to settle, so a document that finished loading has
-    // settled as far as anything will within the wait; failing here would
-    // make a completed navigation look uncertain.
-    if (action.condition === "network_idle" && (await this.documentReady(state))) return;
+    // open is indistinguishable from a slow fetch until it ends. A loaded page
+    // is ready to use, so the wait ends here and the batch carries on, and the
+    // receipt says the network never went idle rather than claim it did.
+    if (action.condition === "network_idle" && loaded) {
+      state.actionTrace?.trace.record({
+        actionIndex: state.actionTrace.actionIndex,
+        kind: "network_busy",
+        message: `page loaded; its network was still busy after ${formatSeconds(timeoutMs)} (it kept requests open or kept starting new ones, as pages that poll continuously do), so the wait ended there`,
+      } satisfies BrowserActionNoteValue);
+      return;
+    }
     throw new InteractionDefiniteDriverError("timeout", "browser wait condition timed out", true);
   }
 
   private async waitForDocumentReady(state: TargetState, timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (await this.documentReady(state)) return;
+      try {
+        if (await this.documentReady(state)) return;
+      } catch (error) {
+        // A document that has just committed may not have its JavaScript
+        // context yet; read it again shortly.
+        if (!missingExecutionContext(error)) throw error;
+      }
       await delay(25);
     }
     throw new InteractionDefiniteDriverError("timeout", "browser navigation timed out", true);
@@ -5963,10 +7467,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     return value === "interactive" || value === "complete";
   }
 
-  private async locatorVisible(state: TargetState, locator: BrowserLocator): Promise<boolean> {
+  private async locatorVisible(
+    state: TargetState,
+    locator: BrowserLocator,
+    read: AccessibilityRead = "read",
+  ): Promise<boolean> {
     let candidates: CdpAccessibilityEntry[];
     try {
-      candidates = await this.locatorCandidates(state, locator);
+      candidates = await this.locatorCandidates(state, locator, read);
     } catch (error) {
       if (error instanceof InteractionDefiniteDriverError && error.code === "locator_not_found") {
         return false;
@@ -6020,7 +7528,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const deadline = Date.now() + ACTION_REQUEST_SETTLE_LIMIT_MS;
     const pending = () =>
       state.networkTrackingOverflow ||
-      [...state.inflightRequests].some((requestId) => !before.open.has(requestId));
+      [...state.inflightRequests].some(
+        (requestId) =>
+          !before.open.has(requestId) &&
+          requestLoad(state.requests.get(requestId), Date.now()) === "loading",
+      );
     while (pending() && Date.now() < deadline && !state.dialog) {
       await delay(ACTION_REQUEST_POLL_MS);
     }
@@ -6068,6 +7580,43 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
    */
   private async settleFiniteAnimations(state: TargetState): Promise<void> {
     if (this.engine !== "chromium" || state.dialog) return;
+    await this.evaluateForSettle(
+      state,
+      SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+      ANIMATION_SETTLE_LIMIT_MS + 1_000,
+    );
+  }
+
+  /**
+   * Many handlers await something before their request: reading the chosen
+   * file, hashing a password, a validation promise. When the action's first
+   * settle ran, that request had not started, so the result would show the
+   * page before the response the agent is waiting for. Give such a handler
+   * one frame to start its request, and settle every request started since
+   * `later` (taken before animations settled) like the others. A page that
+   * starts nothing pays only that frame.
+   */
+  private async settleLateActionRequests(
+    state: TargetState,
+    later: ActionSettleBaseline,
+  ): Promise<void> {
+    if (this.engine !== "chromium" || state.dialog) return;
+    await this.evaluateForSettle(state, LATE_REQUEST_FRAME_EXPRESSION, 1_000);
+    await this.settleActionRequests(state, later);
+    if (
+      state.networkActivitySequence !== later.activity ||
+      state.navigationSequence !== later.navigation
+    ) {
+      await this.settleFiniteAnimations(state);
+    }
+  }
+
+  /** Evaluates a settle wait where page scripts cannot see or stall it. */
+  private async evaluateForSettle(
+    state: TargetState,
+    expression: string,
+    timeoutMs: number,
+  ): Promise<void> {
     try {
       const world = await this.sendTarget<{ executionContextId?: unknown }>(
         state,
@@ -6079,12 +7628,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state,
         "Runtime.evaluate",
         {
-          expression: SETTLE_FINITE_ANIMATIONS_EXPRESSION,
+          expression,
           contextId: world.executionContextId,
           returnByValue: true,
           awaitPromise: true,
         },
-        { timeoutMs: ANIMATION_SETTLE_LIMIT_MS + 1_000 },
+        { timeoutMs },
       );
     } catch {
       // Settling only improves the snapshot; it never decides the outcome.
@@ -6218,6 +7767,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   ): Promise<T> {
     const connection = await this.ensureConnection();
     this.assertCurrentTargetState(state);
+    if (state.inputFence !== null && method.startsWith("Input.")) {
+      const fence = state.inputFence;
+      // Checked once, before the action's first input event: input that the
+      // page answers by navigating (a mousedown handler, say) must still be
+      // allowed to finish, as must the release of a pressed button.
+      state.inputFence = null;
+      // Input lands on whatever document the tab shows, so read the frame tree
+      // itself: a commit whose event is still in flight counts too.
+      await this.refreshFrame(state);
+      if (fence !== state.documentGeneration) {
+        throw new DocumentMovedBeforeInputError(
+          "browser document changed after the action found its element; no input was sent",
+        );
+      }
+    }
     let unsubscribe: () => void = () => undefined;
     const dialog = new Promise<{ kind: "dialog" }>((resolve) => {
       unsubscribe = connection.on(
@@ -6400,9 +7964,69 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       (candidate) => candidate.targetId === targetId,
     );
     if (!info || !isVisibleTarget(info)) {
-      throw new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
+      if (!info && this.closedBlankTargetIds.has(targetId))
+        throw this.closedBlankTargetError(targetId);
+      throw this.missingTargetError(info ? null : targetId);
     }
     return info;
+  }
+
+  /** No open tab has this ID: say why when this driver knows, and how to
+   * carry on. */
+  private missingTargetError(targetId: string | null): InteractionDefiniteDriverError {
+    return new InteractionDefiniteDriverError(
+      "target_not_found",
+      goneBrowserTargetMessage(targetId ? (this.goneTargets.get(targetId) ?? null) : null),
+    );
+  }
+
+  /** A tab this driver knew closed. A close this driver asked for says so;
+   * any other close came from the page or from someone using the browser. */
+  private rememberClosedTarget(targetId: string, byCloseCall = false): void {
+    const closing = byCloseCall || this.closingTargetIds.has(targetId);
+    const existing = this.goneTargets.get(targetId);
+    if (existing?.kind === "relaunched") return;
+    if (existing && !closing) return;
+    if (!closing && !this.firstSeenAt.has(targetId) && !this.states.has(targetId)) return;
+    this.rememberGoneTarget(targetId, {
+      kind: "closed",
+      at: this.timestamp().replace(/\.\d{3}Z$/u, "Z"),
+      byCloseCall: closing,
+    });
+  }
+
+  private rememberGoneTarget(targetId: string, gone: GoneBrowserTarget): void {
+    this.goneTargets.delete(targetId);
+    this.goneTargets.set(targetId, gone);
+    while (this.goneTargets.size > MAX_GONE_TARGETS) {
+      this.goneTargets.delete(this.goneTargets.keys().next().value!);
+    }
+  }
+
+  /** The browser this driver runs replaced an earlier one, whose tabs it
+   * reopened with new IDs: a call naming an earlier tab learns why it is gone
+   * and which tab shows its page now. */
+  noteRelaunchedTabs(relaunched: BrowserRelaunchedTabs): void {
+    for (const tab of relaunched.tabs) {
+      this.rememberGoneTarget(tab.targetId, {
+        kind: "relaunched",
+        reason: relaunched.reason,
+        ...(relaunched.idleReleaseMinutes !== undefined
+          ? { idleReleaseMinutes: relaunched.idleReleaseMinutes }
+          : {}),
+        replacementId: tab.replacementId,
+      });
+    }
+  }
+
+  /** The session closed its own empty tab when it last let go of the
+   * person's browser: say so, and where to continue. */
+  private closedBlankTargetError(targetId: string): InteractionDefiniteDriverError {
+    const current = this.selectedTargetId;
+    return new InteractionDefiniteDriverError(
+      "target_not_found",
+      `browser target does not exist: this session closed this empty tab when it last released the browser${current && current !== targetId ? `; its current tab is ${current}` : ""}`,
+    );
   }
 
   /** Headed Chromium can acknowledge a background target before its first URL
@@ -6463,6 +8087,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     // frame id itself changes.
     if (frame.id !== state.frame.id) return;
     state.navigationPending = false;
+    state.mainFrameCommits += 1;
     if (frame.loaderId !== state.frame.loaderId) {
       // The previous document and its frames are gone. Chromium does not
       // always report their unfinished requests (a WebUI start page's
@@ -6474,20 +8099,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         state.requests.delete(requestId);
       }
     }
-    state.frame = { id: frame.id, loaderId: frame.loaderId, url: frame.url };
-    state.documentGeneration = documentGeneration(
-      this.controllerGeneration,
-      state.authorityGeneration,
-      state.targetId,
-      frame.loaderId,
-    );
-    state.frameGeneration = frameGeneration(
-      this.controllerGeneration,
-      state.authorityGeneration,
-      state.targetId,
-      frame.id,
-    );
-    state.accessibility = null;
+    const replaced = frame.loaderId !== state.frame.loaderId;
+    this.adoptMainFrame(state, { id: frame.id, loaderId: frame.loaderId, url: frame.url });
+    // Any main-frame commit can change the page's content, so its snapshot
+    // is read again even when the loader id stayed the same.
+    if (!replaced) state.accessibility = null;
   }
 
   private recordFailedRequest(
@@ -6648,6 +8264,11 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (!state) return;
     this.failAllScreencasts(state, new CdpTransportError("browser target closed"));
     for (const unsubscribe of state.unsubscribe) unsubscribe();
+    for (const oopif of state.oopifs.values()) {
+      for (const stop of oopif.unsubscribe.splice(0)) stop();
+    }
+    for (const stop of [...state.workers.values()].flat()) stop();
+    state.workers.clear();
     this.states.delete(targetId);
     if (!preserveFirstSeen) {
       this.firstSeenAt.delete(targetId);
@@ -6702,6 +8323,11 @@ function tabCrashedError(): InteractionDefiniteDriverError {
   );
 }
 
+/** How long a runtime continuing a session in the person's own browser waits
+ * for the tab the session was using before it opens a new one instead. A
+ * live page answers in well under a second. */
+const REBIND_TIMEOUT_MS = 5_000;
+
 const TAB_NOT_RESPONDING_MESSAGE =
   "This browser tab is not responding: its page did not answer in time. Close it and open the page in a new tab, or reload it from the browser window. The browser and other tabs remain usable.";
 
@@ -6735,7 +8361,7 @@ function normalizeTargetInfo(value: unknown): TargetInfo {
 
 /** A tab with no page: the blank document a new tab starts on (attached
  * Chrome creates it as an empty data URL) or the browser's new-tab page. */
-function isBlankTabUrl(url: string): boolean {
+export function isBlankTabUrl(url: string): boolean {
   return (
     url === "" ||
     url === "about:blank" ||
@@ -6743,6 +8369,40 @@ function isBlankTabUrl(url: string): boolean {
     url === "chrome://newtab/" ||
     url === "chrome://new-tab-page/"
   );
+}
+
+/** Why the tab list after a completed close could not be read. A lost
+ * connection leaves the result unknown, not failed: the tab closed, but which
+ * tabs remain is unread. Other failures keep their own classification. */
+function closedTargetListFailure(error: unknown): unknown {
+  if (!(error instanceof CdpTransportError || error instanceof CdpCommandTimeoutError)) {
+    return error;
+  }
+  return new InteractionOutcomeUnknownDriverError(
+    "outcome_unknown",
+    "The tab closed, but the browser's connection ended before its remaining tabs could be listed; list the tabs again once the browser is connected",
+    false,
+  );
+}
+
+/** Why a clipboard copy found nothing to copy, and what copies instead. */
+export function clipboardCopyFailure(reason: string, fromElement: boolean): string {
+  switch (reason) {
+    case "protected":
+      return "browser clipboard cannot copy a protected field";
+    case "no_value":
+      return 'browser clipboard copy found no value on this element; copy its text with content "text", or read it with browser_read mode=dom';
+    case "no_selection":
+      return fromElement
+        ? "browser clipboard copy found nothing selected in this element; omit content to copy all of its text or value"
+        : "browser clipboard copy found nothing selected on the page; select text first, or pass a locator to copy an element's text or value";
+    case "detached":
+      return "browser clipboard copy lost its element, which is no longer on the page; observe the page and copy again";
+    case "too_large":
+      return "browser clipboard copy is larger than the 1 MiB clipboard limit; read the text in parts with browser_read mode=dom and offset";
+    default:
+      return "browser clipboard copy found no focused element to copy from; pass a locator to copy an element's text or value";
+  }
 }
 
 function absoluteTargetUrl(value: unknown): string | null {
@@ -6816,6 +8476,8 @@ function sameAccessibleName(name: string | null, requested: string): boolean {
 const AMBIGUOUS_LOCATOR_LISTED_MATCHES = 5;
 /** Bounds the per-poll work of a wait whose locator matches many elements. */
 const WAIT_LOCATOR_CANDIDATE_LIMIT = 50;
+/** Queries of a CSS locator when each finds its document root gone. */
+const DOM_QUERY_ATTEMPTS = 3;
 
 function domLocatorSelector(
   locator: Extract<BrowserLocator, { kind: "css" | "test_id" | "placeholder" }>,
@@ -6838,7 +8500,7 @@ function accessibilityLocatorMatches(
         entry.role.toLowerCase() === locator.role.toLowerCase() &&
         (locator.name === undefined ||
           (locator.exact
-            ? entry.name === locator.name
+            ? sameAccessibleName(entry.name, locator.name)
             : (entry.name ?? "").toLocaleLowerCase().includes(locator.name.toLocaleLowerCase()))),
     );
   }
@@ -6846,7 +8508,7 @@ function accessibilityLocatorMatches(
     return entries.filter(
       (entry) =>
         entry.backendDOMNodeId !== null &&
-        entry.name === locator.text &&
+        sameAccessibleName(entry.name, locator.text) &&
         isFormControlRole(entry.role),
     );
   }
@@ -6854,7 +8516,9 @@ function accessibilityLocatorMatches(
     (entry) =>
       entry.backendDOMNodeId !== null &&
       entry.role === "text" &&
-      (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase()),
+      (locator.exact
+        ? sameAccessibleName(entry.name, locator.text)
+        : (entry.name ?? "").toLocaleLowerCase().includes(locator.text.toLocaleLowerCase())),
   );
 }
 
@@ -7069,15 +8733,54 @@ const KEY_DEFINITIONS: Record<string, KeyDefinition> = {
 
 // Typical exit animations take 100-300 ms. Longer finite animations are
 // waited for only this long, so a slow transition cannot stall every action.
-const ANIMATION_SETTLE_LIMIT_MS = 750;
+// Action request deadlines count these settle limits (BROWSER_ACTION_SETTLE_MAX_MS).
+const ANIMATION_SETTLE_LIMIT_MS = BROWSER_ANIMATION_SETTLE_MS;
 // Requests an action starts usually answer in well under a second; a request
 // that stays open (a stream, a stalled server) must not hold the result back.
-const ACTION_REQUEST_SETTLE_LIMIT_MS = 1_500;
+const ACTION_REQUEST_SETTLE_LIMIT_MS = BROWSER_ACTION_REQUEST_SETTLE_MS;
 // A navigation an action starts (a form post, a followed link) is waited for
 // this long to show its new document; a server slower than this leaves the
 // result on the page as it is, still loading.
-const ACTION_NAVIGATION_SETTLE_LIMIT_MS = 10_000;
+const ACTION_NAVIGATION_SETTLE_LIMIT_MS = BROWSER_ACTION_NAVIGATION_SETTLE_MS;
 const ACTION_REQUEST_POLL_MS = 20;
+// Input after which a page handler commonly starts a request: a click or
+// key that submits, a choice, a chosen file, a click at a point, typed keys
+// (a code box that submits after its last digit).
+const LATE_REQUEST_ACTIONS: ReadonlySet<string> = new Set([
+  "click",
+  "double_click",
+  "press",
+  "type",
+  "select",
+  "check",
+  "upload",
+  "pointer",
+]);
+
+/** What an action's settle had seen, to tell later requests apart. */
+function settleBaseline(state: TargetState): ActionSettleBaseline {
+  return {
+    open: new Set(state.inflightRequests),
+    activity: state.networkActivitySequence,
+    navigation: state.navigationSequence,
+  };
+}
+
+/** Resolves after the next frame and the task after it, or within 50 ms when
+ * the page does not animate. A hidden tab neither draws frames nor runs short
+ * timers promptly, so there two message-channel tasks stand in for them. */
+const LATE_REQUEST_FRAME_EXPRESSION = `new Promise((resolve) => {
+  const done = () => resolve(true);
+  if (document.visibilityState === "hidden") {
+    const channel = new MessageChannel();
+    let turns = 0;
+    channel.port1.onmessage = () => (++turns >= 2 ? done() : channel.port2.postMessage(0));
+    channel.port2.postMessage(0);
+    return;
+  }
+  setTimeout(done, 50);
+  requestAnimationFrame(() => setTimeout(done, 0));
+})`;
 // The response handler runs after the network layer reports the load finished.
 const ACTION_RESPONSE_APPLY_MS = 50;
 
@@ -7180,30 +8883,162 @@ const HIT_TEST_FUNCTION = `function() {
   return Boolean(hit && owns(element, hit));
 }`;
 
-// Describes the element on top at the target's centre by its nearest
-// labelled ancestor: role (or tag) and accessible label. Text content is
-// read only from non-editable elements and bounded; input values never are.
+// Describes an element by its nearest labelled ancestor: role (or tag) and
+// accessible label. Text content is read only from non-editable elements and
+// bounded; input values never are.
+const DESCRIBE_HELPER = `
+  const describe = (hit) => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    let node = hit instanceof Element ? hit : hit && hit.parentElement;
+    if (!(node instanceof Element)) return "another element";
+    const start = node;
+    for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
+      const role = node.getAttribute("role");
+      const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
+      if (role || label) {
+        const kind = role || node.tagName.toLowerCase();
+        return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+      }
+      node = node.parentElement;
+    }
+    const editable = start.closest("input, textarea, select, [contenteditable]");
+    const text = editable ? "" : clean(start.textContent).slice(0, 60);
+    return start.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
+  };`;
+
+// Describes the element on top at the target's centre, or null when nothing
+// else is there.
 const COVER_DESCRIPTION_FUNCTION = `function() {
   const element = this instanceof Element ? this : this.parentElement;
   if (!(element instanceof Element) || !element.isConnected) return null;
   const rect = element.getBoundingClientRect();
   ${HIT_HELPERS}
+  ${DESCRIBE_HELPER}
   const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
   if (!hit || owns(element, hit) || owns(hit, element)) return null;
-  const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-  let node = hit;
-  for (let depth = 0; node instanceof Element && depth < 6; depth += 1) {
-    const role = node.getAttribute("role");
-    const label = clean(node.getAttribute("aria-label") || node.getAttribute("title"));
-    if (role || label) {
-      const kind = role || node.tagName.toLowerCase();
-      return label ? kind + " " + JSON.stringify(label.slice(0, 80)) : kind;
+  return describe(hit);
+}`;
+
+// Guards one pointer click on the target. Hit-testing happens before input is
+// sent, and the page can still move something over the target in between: a
+// popover following its anchor after a scroll, or a card the pointer's arrival
+// opens. Capture listeners on the target's window see each press first; one
+// that would reach anything other than the target (or its descendants) is
+// cancelled and stopped there, as are the release and clicks that follow it,
+// and the guard records what was in the way. Releases and clicks are not
+// judged by their own target: pointer capture can retarget a release, and a
+// label forwards its click to its control.
+// Returns the guard object; its settle() removes the listeners and
+// reports what was held back. A guard that is never settled (a JavaScript
+// dialog interrupted the click) disarms itself after a few seconds.
+const HIT_TARGET_GUARD_WORLD = "opengeni-hit-target-guard";
+const HIT_TARGET_VERDICT_BINDING = "__opengeniHitTargetVerdict";
+
+/** One click's guard: its object in the page, and the verdicts it reported
+ * for each press as it happened (null: the press reached the target; text:
+ * what it landed on instead). `reported` is false when the guard runs where
+ * it cannot report (no isolated world), so only its readback counts. */
+interface HitTargetGuard {
+  objectId: string;
+  reported: boolean;
+  verdicts: Array<string | null>;
+  stopReports: () => void;
+}
+
+const HIT_TARGET_GUARD_FUNCTION = `function(token) {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  const view = element.ownerDocument && element.ownerDocument.defaultView;
+  if (!view) return null;
+  ${HIT_HELPERS}
+  ${DESCRIBE_HELPER}
+  const report = globalThis.${HIT_TARGET_VERDICT_BINDING};
+  // The target's own markup and its parent's text, as found: a copy must
+  // match both, so a re-render that shifted other data into the target's
+  // place (the next item's button, a row now showing another invoice) does
+  // not pass for it.
+  const markup = (node) => String(node.outerHTML || "");
+  const text = (node) => String(node.textContent || "");
+  const original = markup(element);
+  const parent = element.parentElement;
+  const parentText = parent ? text(parent) : "";
+  const position = parent ? Array.prototype.indexOf.call(parent.children, element) : -1;
+  const reaches = (hit) => {
+    if (hit instanceof Node && owns(element, hit)) return true;
+    // Seen from outside a closed shadow root, a press on the target is
+    // retargeted to that root's host.
+    if (
+      hit instanceof Element &&
+      hit.shadowRoot === null &&
+      owns(hit, element) &&
+      element.getRootNode() !== hit.getRootNode()
+    )
+      return true;
+    // The page re-rendered the target since it was found, replacing it with
+    // a copy in the same place of the same parent: the press reaches the
+    // copy, as it would a person's. A lookalike elsewhere (the next row's
+    // identical button once this row is removed) is not the target.
+    if (!element.isConnected && parent && parent.isConnected && text(parent) === parentText) {
+      const copy = parent.children[position];
+      if (copy && markup(copy) === original && hit instanceof Node && owns(copy, hit)) return true;
     }
-    node = node.parentElement;
-  }
-  const editable = hit.closest("input, textarea, select, [contenteditable]");
-  const text = editable ? "" : clean(hit.textContent).slice(0, 60);
-  return hit.tagName.toLowerCase() + (text ? " " + JSON.stringify(text) : "");
+    return false;
+  };
+  const presses = ["pointerdown", "mousedown"];
+  const followers = ["pointerup", "mouseup", "click", "dblclick", "auxclick", "contextmenu"];
+  const types = [...presses, ...followers];
+  const guard = { blocked: null };
+  const expiresAt = Date.now() + 5000;
+  let pointerDowns = 0;
+  const listener = (event) => {
+    if (Date.now() > expiresAt) {
+      guard.settle();
+      return;
+    }
+    if (!event.isTrusted) return;
+    if (presses.includes(event.type)) {
+      if (event.type === "pointerdown") pointerDowns += 1;
+      const hit = event.composedPath()[0];
+      // Only a click's first press is judged: a double-click's second press
+      // lands where the first one's effect left the page (a row the first
+      // click turned into an editor), as a person's does.
+      const onTarget = pointerDowns > 1 || reaches(hit);
+      const verdict = onTarget ? null : describe(hit);
+      // One report per physical press, before any page listener after this
+      // one can replace the document.
+      if (event.type === "pointerdown" && typeof report === "function") {
+        report(JSON.stringify({ token, blocked: verdict }));
+      }
+      if (onTarget && guard.blocked === null) return;
+      if (guard.blocked === null) guard.blocked = verdict;
+    } else if (guard.blocked === null) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  for (const type of types) view.addEventListener(type, listener, true);
+  guard.settle = () => {
+    for (const type of types) view.removeEventListener(type, listener, true);
+    return guard.blocked;
+  };
+  return guard;
+}`;
+
+// Chromium's replies when a remote object's execution context is gone: the
+// document that held the click guard was replaced or detached.
+const GUARD_DOCUMENT_GONE =
+  /Cannot find context with specified id|Could not find object with given id|Execution context was destroyed|Inspected target navigated or closed/i;
+
+// Resolves after the page has rendered two more frames, so layout that reacts
+// to a scroll (scroll listeners, anchored popovers) has caught up. Bounded,
+// because a hidden tab may not render frames at all.
+const SETTLE_FRAMES_FUNCTION = `function() {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 100);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      clearTimeout(timer);
+      resolve(true);
+    }));
+  });
 }`;
 
 // Whether pointer input at the target's centre falls through it to one of its
@@ -7282,6 +9117,33 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
   for (const option of this.options) option.selected = selected.has(option.value) || selected.has(option.label);
   this.dispatchEvent(new Event("input", { bubbles: true }));
   this.dispatchEvent(new Event("change", { bubbles: true }));
+  return true;
+}`;
+
+// What a click on an option of a native dropdown (whose options are never
+// laid out on the page) does, read without changing anything: kind
+// "choosable", "selected" when it is already chosen, "unavailable" when it is
+// disabled or hidden, or "other" for anything else (including an option a
+// pointer can reach); open says whether the dropdown's list is showing.
+const DROPDOWN_OPTION_FUNCTION = `function() {
+  if (!(this instanceof HTMLOptionElement) || this.getClientRects().length > 0) return { kind: "other" };
+  const select = this.closest("select");
+  if (!(select instanceof HTMLSelectElement) || select.multiple || select.getClientRects().length === 0) return { kind: "other" };
+  let open = false;
+  try { open = select.matches(":open"); } catch {}
+  if (select.matches(":disabled") || this.matches(":disabled") || this.hidden) return { kind: "unavailable", open };
+  return { kind: this.selected ? "selected" : "choosable", open };
+}`;
+
+// Chooses that option, as the browser does when a person picks it from the
+// list; false, before any change, when it cannot be chosen.
+const CHOOSE_DROPDOWN_OPTION_FUNCTION = `function() {
+  const select = this instanceof HTMLOptionElement ? this.closest("select") : null;
+  if (!(select instanceof HTMLSelectElement) || select.matches(":disabled") || this.matches(":disabled") || this.hidden) return false;
+  if (this.selected) return true;
+  this.selected = true;
+  select.dispatchEvent(new Event("input", { bubbles: true }));
+  select.dispatchEvent(new Event("change", { bubbles: true }));
   return true;
 }`;
 
@@ -7426,11 +9288,12 @@ const PAGE_SCROLL_FUNCTION = `function(deltaX, deltaY) {
   return root.scrollLeft !== before[0] || root.scrollTop !== before[1];
 }`;
 
-/** Fixed browser-side projection. Every field shares one character budget, so
- * a huge page cannot turn a focused query into an unbounded CDP payload. */
-const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect) {
-  const element = this && this.nodeType === 1 ? this : this?.parentElement;
-  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
+/** Why an element's text or value must not leave the page: it is, sits in, or
+ * (as a container) holds a password, one-time code, payment, hidden or
+ * explicitly private field. With a range, only the descendants that range
+ * touches count, for a copy of selected text. Shared by DOM reads and
+ * clipboard copies, so neither can return what the other withholds. */
+const PROTECTED_CONTENT_FUNCTION = `function(element, range) {
   const privateSelector = "[data-private], [data-sensitive], [data-opengeni-private]";
   const sensitiveReason = (node) => {
     const nodeTag = String(node.tagName || "").toLowerCase();
@@ -7442,33 +9305,54 @@ const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect
     if (type === "hidden" || node.matches(privateSelector)) return "private";
     return null;
   };
-  const tag = String(element.tagName || "").toLowerCase();
-  let redacted = sensitiveReason(element);
-  for (let ancestor = element.parentElement; !redacted && ancestor; ancestor = ancestor.parentElement) {
-    redacted = sensitiveReason(ancestor);
+  let reason = sensitiveReason(element);
+  for (let ancestor = element.parentElement; !reason && ancestor; ancestor = ancestor.parentElement) {
+    reason = sensitiveReason(ancestor);
   }
-  if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
-  // A container's innerText includes sensitive descendants. Refuse the whole
+  if (reason) return reason;
+  // A container's text includes its sensitive descendants. Refuse the whole
   // container rather than returning their protected text through an ancestor.
   for (const node of element.querySelectorAll("[id], [name], [autocomplete], input, " + privateSelector)) {
-    const reason = sensitiveReason(node);
-    if (reason) return { ok: true, text: null, value: null, attributes: {}, redacted: reason, truncated: false };
+    if (range && !range.intersectsNode(node)) continue;
+    const found = sensitiveReason(node);
+    if (found) return found;
   }
+  return null;
+}`;
+
+/** Fixed browser-side projection. Every field shares one character budget, so
+ * a huge page cannot turn a focused query into an unbounded CDP payload. */
+const DOM_READ_FUNCTION = `function(maxChars, requestedAttributes, includeSelect, offset) {
+  const element = this && this.nodeType === 1 ? this : this?.parentElement;
+  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false };
+  const tag = String(element.tagName || "").toLowerCase();
+  const redacted = (${PROTECTED_CONTENT_FUNCTION})(element, null);
+  if (redacted) return { ok: true, text: null, value: null, attributes: {}, redacted, truncated: false };
   const allowed = new Set(["href", "src", "alt", "title", "role", "aria-label", "aria-expanded",
     "aria-checked", "aria-selected", "placeholder", "type", "name", "data-testid"]);
   let remaining = maxChars;
   let truncated = false;
-  const bounded = (raw) => {
+  const bounded = (raw, skip = 0) => {
     if (raw === null || raw === undefined) return null;
-    const value = String(raw);
-    const kept = value.slice(0, remaining);
+    const value = String(raw).slice(skip);
+    let kept = value.slice(0, remaining);
+    // Never end a page between the two halves of a character outside the
+    // basic plane; the next page starts with the whole character instead.
+    if (kept.length > 1 && kept.length < value.length) {
+      const last = kept.charCodeAt(kept.length - 1);
+      if (last >= 0xd800 && last <= 0xdbff) kept = kept.slice(0, -1);
+    }
     remaining -= kept.length;
-    if (kept.length < value.length) truncated = true;
+    if (kept.length < value.length) {
+      truncated = true;
+      remaining = 0;
+    }
     return kept;
   };
-  const text = bounded(element.innerText ?? element.textContent ?? "");
+  const skip = Number(offset) || 0;
+  const text = bounded(element.innerText ?? element.textContent ?? "", skip);
   const value = tag === "input" || tag === "textarea" || tag === "select"
-    ? bounded(element.value ?? "") : null;
+    ? bounded(element.value ?? "", skip) : null;
   const attributes = {};
   for (const attribute of requestedAttributes) {
     if (allowed.has(attribute)) attributes[attribute] = bounded(element.getAttribute(attribute));
@@ -7494,35 +9378,70 @@ function assertSafeDomReadSelector(selector: string): void {
   }
 }
 
+// What a clipboard copy takes from an element. "value" is a form field's
+// value, or the text of an element whose accessible value is its text
+// (editable content, custom text boxes, combo boxes and spin buttons);
+// "text" is what the element shows, which for a text field is its value;
+// "selection" is the selected text inside it; "whole" (content omitted) is
+// the selection when there is one, otherwise all of what it shows.
 const COPY_BROWSER_TEXT_FUNCTION = `function(content) {
   const element = this && this.nodeType === 1 ? this : this?.parentElement;
-  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "unavailable" };
+  if (!element || element.nodeType !== 1 || !element.isConnected) return { ok: false, error: "detached" };
+  const protectedContent = ${PROTECTED_CONTENT_FUNCTION};
   const tag = String(element.tagName || "").toLowerCase();
-  if (tag === "input" && String(element.type).toLowerCase() === "password") {
-    return { ok: false, error: "protected" };
-  }
-  if (content === "value") {
-    if (tag === "input" || tag === "textarea" || tag === "select") {
-      return { ok: true, text: String(element.value ?? "") };
+  const textField = tag === "input" || tag === "textarea";
+  const shown = () => textField
+    ? String(element.value ?? "")
+    : String(element.innerText ?? element.textContent ?? "");
+  // Size is checked here, before the text crosses to the controller. Each
+  // UTF-16 unit is at most three UTF-8 bytes, so most text needs no encoding.
+  const copied = (text) => {
+    if (text.length > ${INTERACTION_MAX_CLIPBOARD_BYTES} || (text.length * 3 > ${INTERACTION_MAX_CLIPBOARD_BYTES}
+      && new TextEncoder().encode(text).length > ${INTERACTION_MAX_CLIPBOARD_BYTES})) {
+      return { ok: false, error: "too_large" };
     }
-    return { ok: false, error: "unavailable" };
+    return { ok: true, text };
+  };
+  // A protected text field is refused whatever is asked of it.
+  if (textField && protectedContent(element, null)) return { ok: false, error: "protected" };
+  const whole = () => protectedContent(element, null) ? { ok: false, error: "protected" } : copied(shown());
+  if (content === "value") {
+    if (textField) return copied(String(element.value ?? ""));
+    if (tag === "select") {
+      return protectedContent(element, null) ? { ok: false, error: "protected" } : copied(String(element.value ?? ""));
+    }
+    const role = String(element.getAttribute("role") || "").toLowerCase();
+    if (element.isContentEditable === true || ["textbox", "searchbox", "combobox", "spinbutton"].includes(role)) {
+      return whole();
+    }
+    return { ok: false, error: "no_value" };
   }
-  if (content === "text") {
-    return { ok: true, text: String(element.innerText ?? element.textContent ?? "") };
-  }
-  if (tag === "input" || tag === "textarea") {
+  if (content === "text") return whole();
+  if (textField) {
     const start = element.selectionStart;
     const end = element.selectionEnd;
-    if (typeof start !== "number" || typeof end !== "number") return { ok: false, error: "unavailable" };
-    return { ok: true, text: String(element.value).slice(start, end) };
+    if (typeof start === "number" && typeof end === "number" && end > start) {
+      return copied(String(element.value).slice(start, end));
+    }
+  } else {
+    const selection = element.ownerDocument.defaultView?.getSelection();
+    if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+      const range = selection.getRangeAt(0);
+      if (element === range.commonAncestorContainer || element.contains(range.commonAncestorContainer)) {
+        const selected = selection.toString();
+        if (selected !== "") {
+          const common = range.commonAncestorContainer.nodeType === 1
+            ? range.commonAncestorContainer
+            : range.commonAncestorContainer.parentElement;
+          return common && protectedContent(common, range)
+            ? { ok: false, error: "protected" }
+            : copied(selected);
+        }
+      }
+    }
   }
-  const selection = element.ownerDocument.defaultView?.getSelection();
-  if (!selection || selection.rangeCount === 0) return { ok: true, text: "" };
-  const range = selection.getRangeAt(0);
-  if (!element.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== element) {
-    return { ok: false, error: "unavailable" };
-  }
-  return { ok: true, text: selection.toString() };
+  if (content === "whole") return whole();
+  return { ok: false, error: "no_selection" };
 }`;
 
 const COPY_ACTIVE_BROWSER_TEXT_FUNCTION = `function(content) {
@@ -7577,6 +9496,108 @@ const FILL_TARGET_FUNCTION = `function() {
     return { kind: "popup", role: role || "button" };
   }
   return { kind: "other", role: role || tag || "element" };
+}`;
+
+// Enough arrow presses for a 0 to 100 slider end to end, twice over.
+const SLIDER_MAX_KEY_PRESSES = 250;
+
+const SLIDER_HORIZONTAL_KEYS = { raise: "ArrowRight", lower: "ArrowLeft" };
+const SLIDER_VERTICAL_KEYS = { raise: "ArrowUp", lower: "ArrowDown" };
+const SLIDER_OPPOSITE_KEY: Record<string, string> = {
+  ArrowRight: "ArrowLeft",
+  ArrowLeft: "ArrowRight",
+  ArrowUp: "ArrowDown",
+  ArrowDown: "ArrowUp",
+};
+
+// Page sliders often step in tenths, which add up to values like
+// 0.30000000000000004; those count as the value asked for.
+function sameSliderValue(a: number, b: number): boolean {
+  return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+}
+
+type SliderState = {
+  kind: "range" | "aria";
+  value: number | null;
+  min: number | null;
+  max: number | null;
+  /** For a range input, the value it would take for the requested one. */
+  nearest: number | null;
+  disabled: boolean;
+  /** The slider says it runs up and down. */
+  vertical: boolean;
+};
+
+function sliderState(value: unknown): SliderState | null {
+  if (!isRecord(value) || (value.kind !== "range" && value.kind !== "aria")) return null;
+  const number = (field: unknown): number | null =>
+    typeof field === "number" && Number.isFinite(field) ? field : null;
+  return {
+    kind: value.kind,
+    value: number(value.value),
+    min: number(value.min),
+    max: number(value.max),
+    nearest: number(value.nearest),
+    disabled: value.disabled === true,
+    vertical: value.vertical === true,
+  };
+}
+
+// A native range input, or an element with role slider and its ARIA value. A
+// control is disabled the way a person meets it: disabled itself or by a
+// disabled fieldset, or marked aria-disabled on itself or an ancestor.
+const SLIDER_STATE_FUNCTION = `function(expected) {
+  if (!(this instanceof Element) || !this.isConnected) return { kind: "other" };
+  const number = (text) => {
+    if (text === null || text === undefined || String(text).trim() === "") return null;
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const disabled = this.matches(":disabled") || this.closest('[aria-disabled="true"]') !== null;
+  if (String(this.tagName || "").toLowerCase() === "input" && String(this.type).toLowerCase() === "range") {
+    let nearest = null;
+    if (typeof expected === "number") {
+      const probe = this.ownerDocument.createElement("input");
+      probe.type = "range";
+      for (const name of ["min", "max", "step"]) if (this.hasAttribute(name)) probe.setAttribute(name, this.getAttribute(name));
+      probe.value = String(expected);
+      nearest = Number(probe.value);
+    }
+    return {
+      kind: "range",
+      value: number(this.value),
+      min: number(this.min) ?? 0,
+      max: number(this.max) ?? 100,
+      nearest,
+      disabled,
+      vertical: false,
+    };
+  }
+  if (String(this.getAttribute("role") || "").toLowerCase() !== "slider") return { kind: "other" };
+  return {
+    kind: "aria",
+    value: number(this.getAttribute("aria-valuenow")),
+    min: number(this.getAttribute("aria-valuemin")),
+    max: number(this.getAttribute("aria-valuemax")),
+    disabled,
+    vertical: String(this.getAttribute("aria-orientation") || "").toLowerCase() === "vertical",
+  };
+}`;
+
+// Sets a native range input through the prototype setter, which bypasses the
+// per-instance value trackers frameworks install, then notifies listeners as
+// a drag does.
+const SET_RANGE_VALUE_FUNCTION = `async function(expected) {
+  if (!(this instanceof HTMLInputElement) || !this.isConnected) return { kind: "gone" };
+  if (this.matches(":disabled") || this.closest('[aria-disabled="true"]') !== null) return { kind: "disabled" };
+  const view = this.ownerDocument.defaultView;
+  const setter = Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, "value").set;
+  this.focus();
+  setter.call(this, String(expected));
+  this.dispatchEvent(new view.Event("input", { bubbles: true, composed: true }));
+  this.dispatchEvent(new view.Event("change", { bubbles: true }));
+  await Promise.resolve();
+  return this.isConnected && Number(this.value) === Number(expected) ? { kind: "set" } : { kind: "lost" };
 }`;
 
 const CONFIRM_EDITABLE_VALUE_FUNCTION = `async function(expected) {
@@ -7754,6 +9775,24 @@ function boundedPositiveInteger(value: number, maximum: number, label: string): 
     throw new Error(`browser ${label} must be a positive bounded integer`);
   }
   return value;
+}
+
+/** Chrome's answer to a Runtime call on a page that has no JavaScript context
+ * at that moment: one between documents, or one whose document was replaced
+ * while the call ran. */
+function missingExecutionContext(error: unknown): boolean {
+  return (
+    error instanceof CdpProtocolError &&
+    /(cannot find (default )?(execution )?context|execution context was destroyed)/iu.test(
+      error.message,
+    )
+  );
+}
+
+/** A wait length as people say it: "30 s", or "1.5 s" below ten seconds. */
+function formatSeconds(ms: number): string {
+  const seconds = ms / 1_000;
+  return `${seconds < 10 ? Math.round(seconds * 10) / 10 : Math.round(seconds)} s`;
 }
 
 function delay(ms: number): Promise<void> {
@@ -7953,6 +9992,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Chromium's refusal of a DOM node id its current document no longer holds,
+ * as after the page navigated. It shares its error code with an invalid
+ * selector's refusal ("DOM Error while querying"), so only the message tells
+ * them apart.
+ */
+function cdpNodeGone(error: unknown): boolean {
+  return error instanceof CdpProtocolError && /could not find node/i.test(error.message);
+}
+
 /** Answer an authenticating proxy for every page, worker and new tab of the
  * browser. Browser-wide request interception is the only CDP surface that
  * reaches proxy challenges, so each request pauses briefly and is continued
@@ -8040,6 +10089,25 @@ function isNavigationTimeout(error: unknown): boolean {
     (error instanceof CdpCommandTimeoutError ||
       (error instanceof InteractionDefiniteDriverError && error.code === "timeout"))
   );
+}
+
+/** The page committed a new document after an action found its element and
+ * before its first input event: nothing was sent to either document. */
+class DocumentMovedBeforeInputError extends InteractionDefiniteDriverError {
+  constructor(message: string) {
+    super("document_stale", message);
+    this.name = "DocumentMovedBeforeInputError";
+  }
+}
+
+/** The locators an action resolves before it sends input. */
+function actionLocators(action: BrowserAction): BrowserLocator[] {
+  const locators: Array<BrowserLocator | undefined> = [];
+  if (action.type === "wait") return [];
+  if ("locator" in action) locators.push(action.locator);
+  if ("from" in action) locators.push(action.from);
+  if ("to" in action) locators.push(action.to);
+  return locators.filter((locator): locator is BrowserLocator => locator !== undefined);
 }
 
 /** The server never answered and the tab stopped loading: unlike a slow

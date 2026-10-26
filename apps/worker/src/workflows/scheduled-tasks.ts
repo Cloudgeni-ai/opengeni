@@ -30,6 +30,16 @@ export type ScheduledTaskFireWorkflowInput = ScheduledTaskFireWorkflowBase &
         credentialRestriction?: never;
       }
     | {
+        /**
+         * Events matched the automation. The workflow id is the occurrence's
+         * producer key, `scheduled-task-event:<occurrenceId>`.
+         */
+        triggerType: "event";
+        agentRunUsageIdempotencyKey?: never;
+        initiator?: never;
+        credentialRestriction?: never;
+      }
+    | {
         triggerType: "manual" | "initial" | "provider_event" | "retry" | "repair";
         agentRunUsageIdempotencyKey: string;
         initiator: TurnInitiator;
@@ -46,17 +56,18 @@ export function scheduledTaskDispatchInput(
     taskId: input.taskId,
     producerKey,
   };
-  return input.triggerType !== "scheduled"
-    ? {
-        ...base,
-        triggerType: input.triggerType,
-        agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey,
-        initiator: input.initiator,
-        ...(input.credentialRestriction === "developer_setup"
-          ? { credentialRestriction: input.credentialRestriction }
-          : {}),
-      }
-    : { ...base, triggerType: "scheduled" };
+  if (input.triggerType === "scheduled" || input.triggerType === "event") {
+    return { ...base, triggerType: input.triggerType };
+  }
+  return {
+    ...base,
+    triggerType: input.triggerType,
+    agentRunUsageIdempotencyKey: input.agentRunUsageIdempotencyKey,
+    initiator: input.initiator,
+    ...(input.credentialRestriction === "developer_setup"
+      ? { credentialRestriction: input.credentialRestriction }
+      : {}),
+  };
 }
 
 export async function scheduledTaskFireWorkflow(
@@ -68,6 +79,7 @@ export async function scheduledTaskFireWorkflow(
   if (
     patched("scheduled-task-manual-initiator-v1") &&
     input.triggerType !== "scheduled" &&
+    input.triggerType !== "event" &&
     (!input.agentRunUsageIdempotencyKey || !input.initiator)
   ) {
     return;

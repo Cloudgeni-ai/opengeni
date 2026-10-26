@@ -197,7 +197,26 @@ export function useReadSessionInbox(sessionId: string) {
   }, [client, personal, sessionId]);
 }
 
-export type SessionRepliesMute = { muted: boolean; busy: boolean; toggle: () => void };
+/**
+ * "schedule" when the session is one run of a schedule that starts a new
+ * session per run: the mute then covers every run of that schedule.
+ */
+export type SessionRepliesMuteScope = "session" | "schedule";
+
+export type SessionRepliesMute = {
+  muted: boolean;
+  busy: boolean;
+  toggle: () => void;
+  scope?: SessionRepliesMuteScope | undefined;
+};
+
+/** The session menu's mute action, naming the schedule when it covers one. */
+export function repliesMuteLabel(mute: Pick<SessionRepliesMute, "muted" | "scope">): string {
+  if (mute.scope === "schedule") {
+    return mute.muted ? "Unmute this automation's replies" : "Mute this automation's replies";
+  }
+  return mute.muted ? "Unmute replies" : "Mute replies";
+}
 
 /**
  * The signed-in person's mute on a top-level session's replies. Null when it
@@ -213,15 +232,19 @@ export function useSessionRepliesMute(session: {
   const client = context.client;
   const applies = hasInbox(context.accessContext) && session.parentSessionId === null;
   const [muted, setMuted] = useState<boolean | null>(null);
+  const [scope, setScope] = useState<SessionRepliesMuteScope>("session");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     setMuted(null);
+    setScope("session");
     if (!applies) return;
     let current = true;
     client
       .getSessionInboxMute(session.workspaceId, session.id)
       .then((value) => {
-        if (current) setMuted(value.repliesMuted);
+        if (!current) return;
+        setMuted(value.repliesMuted);
+        setScope(value.scope ?? "session");
       })
       .catch(() => undefined);
     return () => {
@@ -236,19 +259,23 @@ export function useSessionRepliesMute(session: {
       .setSessionInboxMute(session.workspaceId, session.id, { repliesMuted: next })
       .then((value) => {
         setMuted(value.repliesMuted);
+        const nextScope = value.scope ?? "session";
+        setScope(nextScope);
         void storeFor(client).refresh();
+        const subject = nextScope === "schedule" ? "Replies from this automation" : "Replies";
         toast.success(
           value.repliesMuted
-            ? "Replies muted. Notifications and questions still reach you."
-            : "Replies unmuted.",
+            ? `${subject} muted. Notifications and questions still reach you.`
+            : `${subject} unmuted.`,
         );
       })
       .catch((error: unknown) => {
-        toast.error(next ? "Couldn't mute replies." : "Couldn't unmute replies.", {
+        const what = scope === "schedule" ? "this automation's replies" : "replies";
+        toast.error(next ? `Couldn't mute ${what}.` : `Couldn't unmute ${what}.`, {
           description: error instanceof Error ? error.message : String(error),
         });
       })
       .finally(() => setBusy(false));
-  }, [busy, client, muted, session.id, session.workspaceId]);
-  return applies && muted !== null ? { muted, busy, toggle } : null;
+  }, [busy, client, muted, scope, session.id, session.workspaceId]);
+  return applies && muted !== null ? { muted, busy, toggle, scope } : null;
 }

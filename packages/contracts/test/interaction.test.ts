@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import {
+  BrowserDomReadRequest,
   AuthRun,
   BrowserActionCommand,
   BrowserActionRequest,
@@ -10,6 +11,7 @@ import {
   BrowserExternalAuthCommand,
   BrowserExternalAuthResult,
   BrowserIdentity,
+  BrowserLocator,
   BrowserObservation,
   BrowserRevision,
   BrowserRevisionMaterialization,
@@ -88,6 +90,19 @@ function observation() {
 }
 
 describe("interaction contracts", () => {
+  test("browser role, label and text locators all take exact", () => {
+    for (const locator of [
+      { kind: "role", role: "menuitem", name: "Delete", exact: true },
+      { kind: "label", text: "Email", exact: true },
+      { kind: "text", text: "Delete", exact: true },
+    ]) {
+      expect(BrowserLocator.parse(locator)).toEqual(locator as BrowserLocator);
+    }
+    expect(BrowserLocator.safeParse({ kind: "css", selector: "a", exact: true }).success).toBe(
+      false,
+    );
+  });
+
   test("preserves optional background input capability without changing native defaults", () => {
     const native = {
       semanticObservation: true,
@@ -1160,5 +1175,27 @@ describe("interaction contracts", () => {
         expiresAt: null,
       }).url,
     ).toBe("https://auth.example.test/hosted");
+  });
+
+  test("a DOM element read can start at an offset to read on past a truncated read", () => {
+    const fences = {
+      expectedTargetGeneration: "target-1",
+      expectedDocumentGeneration: "document-1",
+      expectedFrameId: "frame-1",
+    };
+    const read = {
+      ...fences,
+      kind: "element",
+      locator: { kind: "ref", ref: "e0000000c" },
+      maxChars: 32_768,
+    };
+    expect(BrowserDomReadRequest.parse({ ...read, offset: 32_768 })).toMatchObject({
+      offset: 32_768,
+    });
+    expect(BrowserDomReadRequest.safeParse({ ...read, offset: -1 }).success).toBe(false);
+    expect(
+      BrowserDomReadRequest.safeParse({ ...fences, kind: "count", selector: "p", offset: 1 })
+        .success,
+    ).toBe(false);
   });
 });

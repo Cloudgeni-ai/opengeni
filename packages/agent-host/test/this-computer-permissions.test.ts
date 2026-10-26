@@ -117,4 +117,71 @@ describe("checking the folders macOS guards", () => {
       }
     },
   );
+
+  test.skipIf(!existsSync("/bin/ls"))(
+    "tells the agent which of them it may read: only the ones that opened",
+    async () => {
+      const { dir, computer, done } = await fakeComputer();
+      const env = (computer as unknown as { agentEnv: Record<string, string> }).agentEnv;
+      const allowed = () =>
+        (computer as unknown as { foldersAllowed(): Promise<boolean> }).foldersAllowed();
+      try {
+        const folders = env.OPENGENI_MAC_FOLDERS_ALLOWED!;
+        expect(folders).toBe(join(dir, "mac-folders-allowed"));
+        expect(existsSync(folders)).toBe(false);
+        await mkdir(join(dir, "Desktop"));
+        await mkdir(join(dir, "Documents"));
+        await chmod(join(dir, "Documents"), 0o000);
+        await computer.requestPermission("files");
+        const refusable = process.getuid?.() !== 0;
+        expect(existsSync(join(folders, "Desktop"))).toBe(true);
+        expect(existsSync(join(folders, "Documents"))).toBe(!refusable);
+        // A folder that isn't there needs no permission.
+        expect(existsSync(join(folders, "Downloads"))).toBe(true);
+
+        // Allowed later in System Settings: the next check records it.
+        await chmod(join(dir, "Documents"), 0o755);
+        await allowed();
+        expect(existsSync(join(folders, "Documents"))).toBe(true);
+        // No longer opens (refused, or macOS forgot its answer): taken back.
+        await chmod(join(dir, "Desktop"), 0o000);
+        await allowed();
+        expect(existsSync(join(folders, "Desktop"))).toBe(!refusable);
+      } finally {
+        await chmod(join(dir, "Documents"), 0o755).catch(() => undefined);
+        await chmod(join(dir, "Desktop"), 0o755).catch(() => undefined);
+        await done();
+      }
+    },
+  );
+
+  test.skipIf(!existsSync("/bin/ls"))(
+    "checks them again as the agent starts, when no status read may",
+    async () => {
+      const { dir, computer, done } = await fakeComputer();
+      const internals = computer as unknown as {
+        spawnAgent(apiUrl: string): unknown;
+        checkingFolders: Promise<boolean> | null;
+        agentEnv: Record<string, string>;
+      };
+      try {
+        const folders = internals.agentEnv.OPENGENI_MAC_FOLDERS_ALLOWED!;
+        await mkdir(join(dir, "Desktop"));
+        // Never asked about: starting the agent opens nothing.
+        internals.spawnAgent("http://127.0.0.1:9");
+        expect(internals.checkingFolders).toBeNull();
+
+        await computer.requestPermission("files");
+        expect(existsSync(join(folders, "Desktop"))).toBe(true);
+        // Taken back in System Settings while nothing was checking.
+        await chmod(join(dir, "Desktop"), 0o000);
+        internals.spawnAgent("http://127.0.0.1:9");
+        await internals.checkingFolders;
+        expect(existsSync(join(folders, "Desktop"))).toBe(process.getuid?.() === 0);
+      } finally {
+        await chmod(join(dir, "Desktop"), 0o755).catch(() => undefined);
+        await done();
+      }
+    },
+  );
 });

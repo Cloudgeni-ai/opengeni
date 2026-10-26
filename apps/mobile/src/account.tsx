@@ -40,6 +40,7 @@ import {
   writeAccountToken,
 } from "@/account-store";
 import { openLinkFromApp } from "@/app-link-registry";
+import { recordingFailedRequests } from "@/feedback/recent-errors";
 import { signInThroughWeb, type WebSignInResult } from "@/web-sign-in";
 
 /** The deployment a new account signs in to unless the person names another. */
@@ -80,7 +81,8 @@ const AccountContext = createContext<AccountState | null>(null);
 function newClient(baseUrl: string, token?: string | null): OpenGeniClient {
   return new OpenGeniClient({
     baseUrl,
-    fetch: expoStreamingFetch,
+    // Failed requests are remembered (in memory) so a feedback report can show them.
+    fetch: recordingFailedRequests(expoStreamingFetch),
     onDeprecation: false,
     ...(token ? { apiKey: token } : {}),
   });
@@ -157,16 +159,21 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<Error | null>(null);
   const retries = useRef(0);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Refreshes overlap (foreground, pull to refresh, opening the switcher); only
+  // the latest one may apply, so a slow older answer never brings back a stale list.
+  const reloadGeneration = useRef(0);
   const models = useMemo(() => config?.models ?? [], [config]);
 
   const reload = useCallback(async () => {
     if (!accountId || !activeToken) return;
+    const generation = ++reloadGeneration.current;
     try {
       const [nextContext, next, nextConfig] = await Promise.all([
         client.getAccessContext(),
         client.listWorkspaces(),
         client.getClientConfig().catch(() => null),
       ]);
+      if (generation !== reloadGeneration.current) return;
       setAccessContext(nextContext);
       setWorkspaces(next);
       if (nextConfig) setConfig(nextConfig);
@@ -185,6 +192,7 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       }
       retries.current = 0;
     } catch (caught) {
+      if (generation !== reloadGeneration.current) return;
       if (unauthorized(caught)) {
         updateAccount(accountId, { signedOut: true });
       } else {

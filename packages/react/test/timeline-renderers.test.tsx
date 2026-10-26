@@ -1,5 +1,5 @@
 import { setStartupDetails } from "../src/timeline/startup-preference";
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { EMPTY_FINAL_REPLY_NOTICE, type SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush, actRun } from "./render-hook";
@@ -28,6 +28,20 @@ const englishText = createOpenGeniText();
    -------------------------------------------------------------------------- */
 
 registerDom({ clock: "virtual" });
+
+// The timeline's lazy rows load with real I/O, but this file runs on the
+// virtual clock, where Date.now(), performance.now() and even Bun.nanoseconds()
+// advance with every flush. A wait for a row is therefore a budget of flush
+// steps, which a loaded runner can spend in a few real milliseconds before a
+// cold import finishes. Load the modules once up front so no render waits on I/O.
+beforeAll(async () => {
+  await Promise.all([
+    import("../src/timeline/fleet-decision-row"),
+    import("../src/timeline/platform-activity-row"),
+    import("../src/components/timeline-annotation-selection"),
+    import("../src/components/timeline-annotation-markers"),
+  ]);
+});
 
 // Radix chooses its layout-effect implementation at import time. Load the real
 // renderers only after the DOM exists so close/open assertions test browser
@@ -139,8 +153,8 @@ function timelineEvent(
 }
 
 async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElement> {
-  const deadline = performance.now() + 5_000;
-  while (performance.now() < deadline) {
+  // Virtual time (see the preload above): 500 flush steps, not five real seconds.
+  for (let step = 0; step < 500; step += 1) {
     const disclosure = Array.from(
       container.querySelectorAll<HTMLElement>('[role="button"][aria-expanded]'),
     ).find((candidate) => candidate.textContent?.includes("Fleet policy shadow"));
@@ -148,7 +162,7 @@ async function fleetDecisionDisclosure(container: HTMLElement): Promise<HTMLElem
     await flush(10);
   }
 
-  throw new Error("Fleet policy shadow disclosure did not load within 5 seconds");
+  throw new Error("Fleet policy shadow disclosure did not render within 500 flush steps");
 }
 
 describe("allowance refusal rendering", () => {
@@ -415,6 +429,52 @@ describe("structured human-input history", () => {
     }
   });
 
+  test("an answered question renders its Markdown prompt like a chat reply", async () => {
+    timelineSequence = 0;
+    const fileId = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+    const r = await renderComponent(
+      <MessageTimeline
+        resolveLink={(target) =>
+          target.kind === "file" ? { href: `/files/${target.fileId}` } : null
+        }
+        events={[
+          timelineEvent("session.humanInput.requested", {
+            request: {
+              id: "request-markdown",
+              questions: [
+                {
+                  id: "dish",
+                  kind: "text",
+                  prompt: `Is the **soup** in [the cookbook](artifact:${fileId}) or \`notes.md\`? [x](javascript:alert(1))`,
+                  options: [],
+                },
+              ],
+            },
+          }),
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-markdown",
+            response: { outcome: "answered", answers: [{ questionId: "dish", values: ["ok"] }] },
+          }),
+          timelineEvent("turn.completed", {}),
+        ]}
+      />,
+    );
+    await flush();
+    try {
+      const history = r.container.querySelector('[data-human-input-history="request-markdown"]');
+      expect(history?.querySelector("strong")?.textContent).toBe("soup");
+      expect(history?.querySelector("code")?.textContent).toBe("notes.md");
+      const anchors = [...(history?.querySelectorAll<HTMLAnchorElement>("a") ?? [])];
+      expect(anchors.map((anchor) => [anchor.textContent, anchor.getAttribute("href")])).toEqual([
+        ["the cookbook", `/files/${fileId}`],
+      ]);
+      expect(history?.textContent).not.toContain("](");
+      expect(history?.textContent).not.toContain("**");
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("keeps an answered request visible outside the collapsed steps", async () => {
     timelineSequence = 0;
     const r = await renderComponent(
@@ -488,6 +548,212 @@ describe("structured human-input history", () => {
     const steps = turnSummaryTrigger(r.container);
     expect(steps).toBeNull();
     expect(r.container.querySelector('[data-human-input-history="request-1"]')).not.toBeNull();
+    await r.unmount();
+  });
+
+  // A sub-session whose question was answered by its parent agent (or a
+  // person): the real readable turn the app renders.
+  function subSessionQuestionEvents(respondedByKind?: string, outcome = "answered") {
+    const questions = [
+      {
+        id: "base",
+        kind: "single_select",
+        label: "Target branch",
+        prompt: "The fix also applies to the release branch. Where should it land?",
+        options: [
+          { id: "main", label: "main only" },
+          { id: "both", label: "main and release/2026.10" },
+        ],
+      },
+    ];
+    return [
+      timelineEvent("user.message", { text: "Review PR #4418 and land the fix." }, null),
+      timelineEvent("turn.started", {}),
+      timelineEvent("agent.message.completed", {
+        messageId: "m1",
+        text: "The fix is correct. Which branches should it land on?",
+      }),
+      timelineEvent("agent.toolCall.created", {
+        id: "ask-1",
+        name: "request_human_input",
+        arguments: { questions },
+      }),
+      timelineEvent("session.humanInput.requested", {
+        request: { id: "review-base", toolCallId: "ask-1", questions },
+      }),
+      timelineEvent("user.humanInputResponse", {
+        requestId: "review-base",
+        ...(respondedByKind ? { respondedByKind } : {}),
+        response:
+          outcome === "answered"
+            ? { outcome, answers: [{ questionId: "base", values: ["both"] }] }
+            : { outcome },
+      }),
+      timelineEvent("agent.toolCall.output", {
+        id: "ask-1",
+        output: JSON.stringify({ requestId: "review-base", outcome }),
+      }),
+      timelineEvent("agent.message.completed", {
+        messageId: "m2",
+        text: "Landing it on main and release/2026.10.",
+      }),
+      timelineEvent("turn.completed", {}),
+    ];
+  }
+
+  test("folds a question the parent agent answered into the turn's work, off the person's side", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("agent_attempt")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    try {
+      // Collapsed: only the conversation and the "Worked for" row.
+      expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
+      const text = r.container.textContent ?? "";
+      expect(text).not.toContain("Agent answered");
+      expect(text).not.toContain("You answered");
+      expect(text).not.toContain("Agent asked");
+      expect(text).toContain("Landing it on main and release/2026.10.");
+
+      const work = turnSummaryTrigger(r.container);
+      expect(work).not.toBeNull();
+      await act(async () => work!.click());
+      await flush();
+
+      // Expanded work: one quiet row, "Asked  Target branch → main and release/2026.10".
+      const row = r.container.querySelector<HTMLElement>(
+        '[data-og-agent-answered][data-human-input-history="review-base"]',
+      );
+      expect(row).not.toBeNull();
+      expect(row!.textContent).toContain("Asked");
+      expect(row!.textContent).toContain("Target branch → main and release/2026.10");
+      expect(row!.textContent).not.toContain("Agent answered");
+      // Not a user message: no bubble or right-aligned answer anywhere.
+      expect(row!.querySelector(".justify-end")).toBeNull();
+
+      // Opening the row keeps every detail: the question, who answered, the answer.
+      const toggle = row!.querySelector<HTMLElement>('[role="button"]');
+      await act(async () => {
+        toggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+      const details = row!.textContent ?? "";
+      expect(details).toContain("Target branch");
+      expect(details).toContain(
+        "The fix also applies to the release branch. Where should it land?",
+      );
+      expect(details).toContain("Agent answered");
+      expect(details).toContain("main and release/2026.10");
+    } finally {
+      await r.unmount();
+    }
+  });
+
+  test("a question a person answered keeps its card and answer bubble in the conversation", async () => {
+    for (const respondedByKind of ["human", "api", undefined]) {
+      timelineSequence = 0;
+      const r = await renderComponent(
+        <MessageTimeline
+          events={subSessionQuestionEvents(respondedByKind)}
+          turnSummary={{ rolling: true }}
+        />,
+      );
+      await flush();
+      try {
+        const history = r.container.querySelector<HTMLElement>(
+          '[data-human-input-history="review-base"]',
+        );
+        expect(history).not.toBeNull();
+        expect(history!.hasAttribute("data-og-agent-answered")).toBe(false);
+        expect(history!.textContent).toContain("Agent asked");
+        expect(history!.textContent).toContain("You answered");
+        expect(history!.textContent).toContain("main and release/2026.10");
+        expect(history!.querySelector(".justify-end")).not.toBeNull();
+      } finally {
+        await r.unmount();
+      }
+    }
+  });
+
+  test("an agent's skip is quiet work; a system skip or an expired question stays visible", async () => {
+    timelineSequence = 0;
+    let r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("agent_attempt", "skipped")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("[data-human-input-history]")).toBeNull();
+    await act(async () => turnSummaryTrigger(r.container)!.click());
+    await flush();
+    const skippedRow = r.container.querySelector("[data-og-agent-answered]");
+    expect(skippedRow?.textContent).toContain("Target branch → Skipped");
+    await act(async () => {
+      skippedRow!
+        .querySelector<HTMLElement>('[role="button"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(skippedRow?.textContent).toContain("Agent skipped");
+    await r.unmount();
+
+    // The system settles a question only when a scheduled run's question went
+    // unanswered in time: the person must still see that card.
+    timelineSequence = 0;
+    r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("system", "skipped")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    const systemSkipped = r.container.querySelector('[data-human-input-history="review-base"]');
+    expect(systemSkipped).not.toBeNull();
+    expect(systemSkipped?.hasAttribute("data-og-agent-answered")).toBe(false);
+    expect(systemSkipped?.textContent).toContain("Skipped");
+    await r.unmount();
+
+    timelineSequence = 0;
+    r = await renderComponent(
+      <MessageTimeline
+        events={subSessionQuestionEvents("system", "expired")}
+        turnSummary={{ rolling: true }}
+      />,
+    );
+    await flush();
+    const expired = r.container.querySelector('[data-human-input-history="review-base"]');
+    expect(expired?.hasAttribute("data-og-agent-answered")).toBe(false);
+    expect(expired?.textContent).toContain("Expired");
+    await r.unmount();
+  });
+
+  test("outside readable turns an agent's answer is still a quiet row", async () => {
+    timelineSequence = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("user.humanInputResponse", {
+            requestId: "request-agent",
+            respondedByKind: "agent_attempt",
+            response: {
+              outcome: "answered",
+              answers: [{ questionId: "region", values: ["eu-north"] }],
+            },
+          }),
+        ]}
+      />,
+    );
+    await flush();
+
+    const row = r.container.querySelector('[data-human-input-history="request-agent"]');
+    expect(row?.hasAttribute("data-og-agent-answered")).toBe(true);
+    expect(row?.textContent).toContain("Region → eu-north");
+    expect(row?.textContent).not.toContain("You answered");
     await r.unmount();
   });
 
@@ -2639,7 +2905,35 @@ describe("MessageTimeline — settled turn folding", () => {
 
     const trigger = turnSummaryTrigger(r.container);
     expect(trigger?.getAttribute("data-state")).toBe("open");
-    expect(trigger?.textContent).toContain("provider down");
+    // Unclassified text is a diagnostic: the chip names the outcome and keeps
+    // the recorded text as its hover title, never as visible chip text.
+    expect(trigger?.textContent).toContain("The turn stopped unexpectedly");
+    expect(trigger?.textContent).not.toContain("provider down");
+    expect(trigger?.querySelector('[title="provider down"]')).not.toBeNull();
+
+    await r.unmount();
+  });
+
+  test("copy written for people stays on the failed summary chip", async () => {
+    resetTimelineEvents();
+    const events = [
+      timelineEvent("user.message", { text: "Deploy preview" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "call-1",
+        name: "exec_command",
+        arguments: { cmd: "helm upgrade preview ./chart" },
+      }),
+      timelineEvent("turn.failed", {
+        code: "mcp_server_unavailable",
+        error: "The GitHub connection is unavailable.",
+      }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.textContent).toContain("The GitHub connection is unavailable.");
+    expect(trigger?.querySelector("[title]")).toBeNull();
 
     await r.unmount();
   });
@@ -2989,11 +3283,11 @@ describe("MessageTimeline — settled turn folding", () => {
     // Outer owns the loud failure (auto-open). Nested cluster chips stay bare /
     // closed — no repeated failure text, two calm sub-expands for the two clusters.
     expect(triggers).toHaveLength(3);
-    expect(triggers[0]?.textContent ?? "").toContain("provider down");
+    expect(triggers[0]?.textContent ?? "").toContain("The turn stopped unexpectedly");
     expect(triggers[0]?.getAttribute("data-state")).toBe("open");
-    expect(triggers.slice(1).every((t) => !(t.textContent ?? "").includes("provider down"))).toBe(
-      true,
-    );
+    expect(
+      triggers.slice(1).every((t) => !(t.textContent ?? "").includes("stopped unexpectedly")),
+    ).toBe(true);
     expect(triggers.slice(1).every((t) => t.getAttribute("data-state") === "closed")).toBe(true);
 
     await r.unmount();
@@ -3741,6 +4035,46 @@ describe("SandboxRow — failed chip", () => {
 });
 
 describe("StartupPhaseRow", () => {
+  test("a failed step keeps its recorded error behind Details, not in its title", async () => {
+    const detail = "This compute sandbox's agent is too old (capabilities.op_release).";
+    const item: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "sandbox-failed",
+      turnId: "turn-failed",
+      phase: "sandbox",
+      status: "failed",
+      detail,
+      startedAt: new Date(0).toISOString(),
+      completedAt: new Date(1000).toISOString(),
+      durationMs: 1000,
+      outcome: null,
+      occurredAt: new Date(0).toISOString(),
+    };
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+    const row = r.container.querySelector<HTMLElement>('[role="button"][data-status="failed"]');
+    expect(row?.textContent ?? "").toContain("Sandbox didn’t start");
+    expect(r.container.textContent ?? "").not.toContain(detail);
+    expect(row?.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => row!.click());
+    expect(r.container.textContent ?? "").toContain("Details");
+    expect(r.container.textContent ?? "").toContain(detail);
+    await r.unmount();
+
+    // A host that hides raw technical detail keeps the row a plain status.
+    const { ToolDetailsProvider } = await import("../src/timeline/tool-details");
+    const plain = await renderComponent(
+      <ToolDetailsProvider value="plain">
+        <ActivityRail items={[item]} />
+      </ToolDetailsProvider>,
+    );
+    await flush();
+    expect(plain.container.querySelector('[role="button"][data-status="failed"]')).toBeNull();
+    expect(plain.container.textContent ?? "").toContain("Sandbox didn’t start");
+    expect(plain.container.textContent ?? "").not.toContain(detail);
+    await plain.unmount();
+  });
+
   test("names a sandbox rotation wait", async () => {
     const item: StartupPhaseItem = {
       kind: "startup-phase",

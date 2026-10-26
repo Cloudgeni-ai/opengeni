@@ -17,6 +17,7 @@ import {
   providerRecoveryResult,
 } from "../src/activities/agent-turn/errors";
 import {
+  ATTACHED_FILES_GUIDANCE,
   MAX_INLINE_MODEL_ATTACHMENT_BYTES,
   RetainedAttachmentTransportLimitError,
   RetainedAttachmentUnavailableError,
@@ -25,6 +26,16 @@ import {
   turnInput,
   withCurrentUserAttachmentRefs,
 } from "../src/activities/run-input";
+
+function activeHistoryRead(
+  items: opengeniDb.ActiveSessionHistoryRow[],
+): opengeniDb.ActiveSessionHistoryRead {
+  return {
+    items,
+    footprint: { jsonBytes: 0, rows: items.length, jsonNodes: 0, jsonProperties: 0 },
+    recovery: null,
+  };
+}
 
 const user = (content: string) => ({ type: "message", role: "user", content });
 const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
@@ -477,14 +488,15 @@ describe("turnInput attachment projection", () => {
           turnId: "00000000-0000-4000-8000-000000000033",
           fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
           providerApi: "responses",
-          loadActiveHistory: async () => [
-            {
-              id: "00000000-0000-4000-8000-000000000034",
-              position: 0,
-              item: user("measure history"),
-              providerArtifactInvalidatedAt: null,
-            },
-          ],
+          loadActiveHistory: async () =>
+            activeHistoryRead([
+              {
+                id: "00000000-0000-4000-8000-000000000034",
+                position: 0,
+                item: user("measure history"),
+                providerArtifactInvalidatedAt: null,
+              },
+            ]),
           onPreparationPhase: (measurement) => {
             phases.push(measurement.phase);
             expect(measurement.outcome).toBe("completed");
@@ -550,14 +562,15 @@ describe("turnInput attachment projection", () => {
           turnId: "00000000-0000-4000-8000-000000000043",
           fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
           providerApi: "responses",
-          loadActiveHistory: async () => [
-            {
-              id: "00000000-0000-4000-8000-000000000044",
-              position: 0,
-              item: storedUser,
-              providerArtifactInvalidatedAt: null,
-            },
-          ],
+          loadActiveHistory: async () =>
+            activeHistoryRead([
+              {
+                id: "00000000-0000-4000-8000-000000000044",
+                position: 0,
+                item: storedUser,
+                providerArtifactInvalidatedAt: null,
+              },
+            ]),
         },
       );
       expect(preparedInput?.historyItems).toEqual([storedUser]);
@@ -577,14 +590,16 @@ describe("turnInput attachment projection", () => {
     let preparedInput: AgentSegmentInput | undefined;
     const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([image]);
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
-      {
-        id: "00000000-0000-4000-8000-000000000054",
-        position: 0,
-        item: storedUser,
-        providerArtifactInvalidatedAt: null,
-      },
-    ]);
+    const getHistory = spyOn(opengeniDb, "readActiveSessionHistory").mockResolvedValue(
+      activeHistoryRead([
+        {
+          id: "00000000-0000-4000-8000-000000000054",
+          position: 0,
+          item: storedUser,
+          providerArtifactInvalidatedAt: null,
+        },
+      ]),
+    );
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
       prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
@@ -625,7 +640,8 @@ describe("turnInput attachment projection", () => {
         kind: "message",
         internalContext:
           "Attached files are available in the sandbox:\n" +
-          `- diagram.png (image/png, 5 bytes): .opengeni/files/${image.id}/diagram.png`,
+          `- diagram.png (image/png, 5 bytes): .opengeni/files/${image.id}/diagram.png` +
+          `\n${ATTACHED_FILES_GUIDANCE}`,
         historyItems: [
           {
             type: "message",
@@ -654,6 +670,85 @@ describe("turnInput attachment projection", () => {
     }
   });
 
+  test("lists every file mounted for the turn in its notice, once, even outside the payload", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    const attached = file("00000000-0000-4000-8000-000000000060", "text/csv", 7, "sales.csv");
+    const supplied = file("00000000-0000-4000-8000-000000000061", "application/pdf", 9, "spec.pdf");
+    const unreadable = "00000000-0000-4000-8000-000000000062";
+    let preparedInput: AgentSegmentInput | undefined;
+    const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockImplementation(
+      async (_db, { fileIds }) =>
+        [attached, supplied].filter((candidate) => fileIds.includes(candidate.id)),
+    );
+    const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockResolvedValue([]);
+    const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
+    const runtime = {
+      prepareInput: async (_agent: unknown, input: AgentSegmentInput) => {
+        preparedInput = input;
+        return { input: [], persistedHistoryCount: 1 };
+      },
+    } as unknown as OpenGeniRuntime;
+    const turnWith = (payloadFileIds: string[]) =>
+      turnInput(
+        {} as Database,
+        runtime,
+        {},
+        {
+          id: "00000000-0000-4000-8000-000000000063",
+          workspaceId,
+          sessionId: "00000000-0000-4000-8000-000000000064",
+          sequence: 1,
+          type: "user.message",
+          payload: {
+            text: "compare them",
+            resources: payloadFileIds.map((fileId) => ({ kind: "file", fileId })),
+          },
+          occurredAt: "2026-10-25T00:00:00.000Z",
+        },
+        {
+          turnId: "00000000-0000-4000-8000-000000000065",
+          fileAuthority: { accountId: ACCOUNT_ID, subjectId: SUBJECT_ID },
+          providerApi: "responses",
+          mountedFileResources: [
+            { kind: "file", fileId: attached.id },
+            { kind: "file", fileId: supplied.id },
+            { kind: "file", fileId: unreadable },
+          ],
+          loadActiveHistory: async () =>
+            activeHistoryRead([
+              {
+                id: "00000000-0000-4000-8000-000000000066",
+                position: 0,
+                item: user("compare them"),
+                providerArtifactInvalidatedAt: null,
+              },
+            ]),
+        },
+      );
+    const expectedNotice =
+      "Attached files are available in the sandbox:\n" +
+      `- sales.csv (text/csv, 7 bytes): .opengeni/files/${attached.id}/sales.csv\n` +
+      `- spec.pdf (application/pdf, 9 bytes): .opengeni/files/${supplied.id}/spec.pdf` +
+      `\n${ATTACHED_FILES_GUIDANCE}`;
+
+    try {
+      // A file attached to the message and one supplied only as a turn
+      // resource are both listed, the attached one once, in the same order as
+      // the mounted files. A file the requester cannot read neither appears
+      // nor fails the turn.
+      await turnWith([attached.id]);
+      expect(preparedInput?.internalContext).toBe(expectedNotice);
+
+      // Files supplied only as session or API resources still reach the model.
+      await turnWith([]);
+      expect(preparedInput?.internalContext).toBe(expectedNotice);
+    } finally {
+      getFilesForSubject.mockRestore();
+      listUpdates.mockRestore();
+      getEnvelope.mockRestore();
+    }
+  });
+
   test("system-update turns retain historical receipts without reloading bytes", async () => {
     const imageBytes = new TextEncoder().encode("image");
     const image = {
@@ -671,14 +766,16 @@ describe("turnInput attachment projection", () => {
         deliveredHistoryItemId: "00000000-0000-4000-8000-000000000056",
       } as never,
     ]);
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
-      {
-        id: "00000000-0000-4000-8000-000000000056",
-        position: 0,
-        item: storedUser,
-        providerArtifactInvalidatedAt: null,
-      },
-    ]);
+    const getHistory = spyOn(opengeniDb, "readActiveSessionHistory").mockResolvedValue(
+      activeHistoryRead([
+        {
+          id: "00000000-0000-4000-8000-000000000056",
+          position: 0,
+          item: storedUser,
+          providerArtifactInvalidatedAt: null,
+        },
+      ]),
+    );
     const getFilesForSubject = spyOn(opengeniDb, "getFilesForSubject").mockResolvedValue([image]);
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
@@ -749,14 +846,16 @@ describe("turnInput attachment projection", () => {
     const listUpdates = spyOn(opengeniDb, "listSessionSystemUpdatesForTurn").mockImplementation(
       async () => [],
     );
-    const getHistory = spyOn(opengeniDb, "getActiveSessionHistoryItemsPaged").mockResolvedValue([
-      {
-        id: "00000000-0000-4000-8000-000000000064",
-        position: 0,
-        item: storedUser,
-        providerArtifactInvalidatedAt: null,
-      },
-    ]);
+    const getHistory = spyOn(opengeniDb, "readActiveSessionHistory").mockResolvedValue(
+      activeHistoryRead([
+        {
+          id: "00000000-0000-4000-8000-000000000064",
+          position: 0,
+          item: storedUser,
+          providerArtifactInvalidatedAt: null,
+        },
+      ]),
+    );
     const getEnvelope = spyOn(opengeniDb, "getSandboxSessionEnvelope").mockResolvedValue(null);
     const runtime = {
       prepareInput: async (agent: unknown, input: AgentSegmentInput) => {
@@ -812,12 +911,14 @@ describe("turnInput attachment projection", () => {
       // A retry/new turn retains the exact earlier notice, appending the fresh
       // durable warning instead of recomputing any earlier model-visible item.
       getHistory.mockResolvedValue(
-        warned.map((item, position) => ({
-          id: crypto.randomUUID(),
-          position,
-          item,
-          providerArtifactInvalidatedAt: null,
-        })),
+        activeHistoryRead(
+          warned.map((item, position) => ({
+            id: crypto.randomUUID(),
+            position,
+            item,
+            providerArtifactInvalidatedAt: null,
+          })),
+        ),
       );
       await prepareWithWarning();
       expect((modelInputs[3] as unknown[]).slice(0, warned.length)).toEqual(warned);
@@ -827,14 +928,16 @@ describe("turnInput attachment projection", () => {
       // Even if compaction replaces the active tail, the new attempt appends
       // the warning from its durable receipt without changing the summary.
       const summary = user("Earlier conversation summary");
-      getHistory.mockResolvedValue([
-        {
-          id: crypto.randomUUID(),
-          position: 4,
-          item: summary,
-          providerArtifactInvalidatedAt: null,
-        },
-      ]);
+      getHistory.mockResolvedValue(
+        activeHistoryRead([
+          {
+            id: crypto.randomUUID(),
+            position: 4,
+            item: summary,
+            providerArtifactInvalidatedAt: null,
+          },
+        ]),
+      );
       await prepareWithWarning();
       expect((modelInputs[4] as unknown[])[0]).toEqual(summary);
       expect(String((modelInputs[4] as Array<Record<string, unknown>>).at(-1)!.content)).toContain(

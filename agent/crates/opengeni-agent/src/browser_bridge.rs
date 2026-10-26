@@ -48,6 +48,9 @@ const MAX_ATTACHED_PROFILES: usize = 1_000;
 const MAX_TABS_PER_PROFILE: usize = 100_000;
 const MAX_PENDING_COMMANDS: usize = 4_096;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long past the caller's timeout an unanswered command still counts as
+/// work the extension is doing.
+const LATE_RESULT_GRACE: Duration = Duration::from_secs(10 * 60);
 /// Ended extension connections a bridge remembers and reports.
 const MAX_RECORDED_CONNECTION_ENDS: usize = 32;
 const MAX_CONNECTION_END_DETAIL_BYTES: usize = 512;
@@ -55,6 +58,14 @@ const MAX_CONNECTION_END_DETAIL_BYTES: usize = 512;
 const MAX_TAB_TITLE_BYTES: usize = 8_192;
 const MAX_TAB_URL_BYTES: usize = 65_536;
 const TAB_URL_TOO_LONG: &str = "This tab's address is too long for Opengeni to control";
+
+/// Reading buffered debugger events changes nothing in the browser. Every live
+/// attached connection polls continuously, so treating a poll as accepted work
+/// would keep a self-update waiting for as long as any connection exists, and
+/// refusing one during an idle probe would break every event stream.
+fn is_passive_request(payload: &serde_json::Value) -> bool {
+    payload.get("type").and_then(serde_json::Value::as_str) == Some("debugger.poll")
+}
 
 /// Failures at the trusted local browser-bridge boundary.
 #[derive(Debug, thiserror::Error)]
@@ -1045,7 +1056,10 @@ struct PendingCommand {
     device_id: String,
     connection_generation: String,
     settle: Option<oneshot::Sender<Result<ExtensionCommandResult, BrowserBridgeRequestFailure>>>,
-    _reservation: Option<WorkReservation>,
+    /// Physical work the extension may still be doing. Released when the
+    /// result arrives, the port ends, or the extension has had
+    /// `LATE_RESULT_GRACE` past the caller's timeout to answer.
+    reservation: Option<WorkReservation>,
 }
 
 struct ControllerReply {
@@ -1241,7 +1255,7 @@ impl BrowserBridgeInventory {
                     device_id: device_id.to_string(),
                     connection_generation: transport_generation.clone(),
                     settle: Some(settle),
-                    _reservation: opengeni_agent_platform::current_work_reservation(),
+                    reservation: opengeni_agent_platform::current_work_reservation(),
                 },
             );
             (outbound, bytes, receiver, transport_generation)
@@ -1264,9 +1278,33 @@ impl BrowserBridgeInventory {
             Err(_) => {
                 // Timeout ends only the caller's wait. The extension may still
                 // execute; a matching late result is the physical settlement.
+                // A command that never answers (a CDP call that never returns)
+                // must not hold self-updates while its port stays open, so its
+                // work stops counting after a further grace period. A result
+                // that still arrives later is matched and ignored as before.
+                let inventory = self.clone();
+                let request_id = request_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(LATE_RESULT_GRACE).await;
+                    inventory.stop_counting_late_command(&request_id, &transport_generation);
+                });
                 Err(BrowserBridgeError::Timeout)
             }
         }
+    }
+
+    /// Keep an unanswered command matchable for its late result, but stop it
+    /// holding self-updates.
+    fn stop_counting_late_command(&self, request_id: &str, connection_generation: &str) {
+        let released = {
+            let mut state = self.state.write().expect("browser bridge inventory lock");
+            state
+                .pending
+                .get_mut(request_id)
+                .filter(|pending| pending.connection_generation == connection_generation)
+                .and_then(|pending| pending.reservation.take())
+        };
+        drop(released);
     }
 
     fn register(
@@ -1476,22 +1514,27 @@ impl BrowserBridgeInventory {
     }
 }
 
+/// Fail and forget every command sent on a native port that has ended or been
+/// replaced. Its result can only come back on that port, so nothing can settle
+/// it any more; keeping it would hold its work reservation, and with it every
+/// self-update, for as long as the agent runs.
 fn notify_pending_for_profile(
     state: &mut InventoryState,
     device_id: &str,
     connection_generation: Option<&str>,
     reason: BrowserBridgeRequestFailure,
 ) {
-    for command in state.pending.values_mut() {
-        if command.device_id == device_id
+    state.pending.retain(|_, command| {
+        let ended = command.device_id == device_id
             && connection_generation
-                .is_none_or(|generation| command.connection_generation == generation)
-        {
+                .is_none_or(|generation| command.connection_generation == generation);
+        if ended {
             if let Some(settle) = command.settle.take() {
                 let _ = settle.send(Err(reason));
             }
         }
-    }
+        !ended
+    });
 }
 
 /// Long-running loopback server owned by the main agent process.
@@ -1781,11 +1824,18 @@ async fn serve_controller(
         let request_responses = responses.clone();
         // Reserve before spawn/first await. A controller peer's disappearing
         // waiter cannot cancel an accepted extension command or its publisher.
-        let reservation = inventory.update_drain.reserve_work(None);
+        // A passive event poll is neither reserved nor refused: losing one in
+        // a swap only makes the controller resynchronize its event cursor.
+        let passive = is_passive_request(&payload);
+        let reservation = if passive {
+            None
+        } else {
+            inventory.update_drain.reserve_work(None)
+        };
         if let Some(reservation) = &reservation {
             reservation.describe(format!("attached-browser request {request_id}"));
         }
-        let accepted = reservation.is_some();
+        let accepted = passive || reservation.is_some();
         let reply_reservation = reservation.clone();
         let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
             reservation,
@@ -2884,6 +2934,41 @@ mod tests {
         assert_eq!(refused["requestId"], refused_id);
         assert_eq!(refused["error"]["code"], "update_draining");
         assert_eq!(drain.snapshot().unwrap().routed, 1);
+
+        // An event poll behind the same fence is still served and is not
+        // counted as work that holds the update back.
+        let poll_id = "55555555-5555-4555-8555-555555555555";
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type":"request", "protocolVersion":1, "requestId":poll_id, "deviceId":device_id,
+                "expectedConnectionGeneration":generation,
+                "payload":{"type":"debugger.poll", "afterSequence":0, "limit":100}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let poll_command = read_json(&mut extension).await;
+        assert_eq!(poll_command["requestId"], poll_id);
+        assert_eq!(poll_command["payload"]["type"], "debugger.poll");
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        write_native_frame(
+            &mut extension,
+            &serde_json::to_vec(&json!({
+                "type":"command_result", "requestId":poll_id, "deviceId":device_id,
+                "connectionGeneration":generation, "ok":true,
+                "payload":{"events":[], "cursor":0, "truncated":false}, "error":null
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let polled = read_json(&mut controller).await;
+        assert_eq!(polled["requestId"], poll_id);
+        assert_eq!(polled["ok"], true);
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+
         write_native_frame(
             &mut extension,
             &serde_json::to_vec(&json!({
@@ -3198,6 +3283,116 @@ mod tests {
             serde_json::from_slice(&hello(device_id, generation, 1)).expect("hello");
         edit(&mut value);
         serde_json::to_vec(&value).expect("hello")
+    }
+
+    async fn wait_until_no_routed_work(drain: &crate::uploads::update_drain::UpdateDrain) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the ended port's command no longer holds work");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_command_on_an_ended_port_does_not_hold_self_updates() {
+        use super::test_support::connect_extension;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let device_id = "11111111-1111-4111-8111-111111111111";
+        let inventory = server.inventory();
+        let drain = inventory.update_drain.clone();
+
+        // A command whose caller stopped waiting (a timeout) is still owned by
+        // the extension while its port lives.
+        let mut first = connect_extension(directory.path(), device_id, "connection-1", None).await;
+        let sent = |request_id: &'static str, generation: &'static str| {
+            let inventory = inventory.clone();
+            let reservation = drain.reserve_work(None).unwrap();
+            tokio::spawn(opengeni_agent_platform::with_work_reservation(
+                Some(reservation),
+                async move {
+                    inventory
+                        .request(request_id, device_id, generation, json!({"type":"ping"}))
+                        .await
+                },
+            ))
+        };
+        let waiter = sent("22222222-2222-4222-8222-222222222222", "connection-1");
+        assert_eq!(read_json(&mut first).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+
+        // The profile reconnects on a new port: the old port's result can
+        // never arrive, so its command must stop holding updates.
+        let mut second = connect_extension(directory.path(), device_id, "connection-2", None).await;
+        wait_until_no_routed_work(&drain).await;
+
+        // The same when the live port closes with a command outstanding.
+        let waiter = sent("33333333-3333-4333-8333-333333333333", "connection-2");
+        assert_eq!(read_json(&mut second).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        drop(second);
+        wait_until_no_routed_work(&drain).await;
+        assert_eq!(
+            drain.reserve_update("update"),
+            crate::uploads::update_drain::UpdateReservation::Started
+        );
+        assert!(drain.seal_update("update"));
+        drain.release_update("update");
+
+        // A command the extension never answers on a live port stops holding
+        // updates after its grace period, and its late result is still taken.
+        let mut third = connect_extension(directory.path(), device_id, "connection-3", None).await;
+        let late_id = "44444444-4444-4444-8444-444444444444";
+        let waiter = sent(late_id, "connection-3");
+        assert_eq!(read_json(&mut third).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        inventory.stop_counting_late_command(late_id, "connection-2");
+        assert_eq!(
+            drain.snapshot().unwrap().routed,
+            1,
+            "only the exact port's command"
+        );
+        inventory.stop_counting_late_command(late_id, "connection-3");
+        assert_eq!(drain.snapshot().unwrap().routed, 0);
+        write_native_frame(
+            &mut third,
+            &serde_json::to_vec(&json!({
+                "type":"command_result", "requestId":late_id, "deviceId":device_id,
+                "connectionGeneration":"connection-3", "ok":true, "payload":{"pong":true},
+                "error":null
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while inventory
+                .state
+                .read()
+                .unwrap()
+                .pending
+                .contains_key(late_id)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the late result settles the command");
+        assert_eq!(server.inventory().snapshot().devices.len(), 1);
+
+        drop(third);
+        drop(first);
+        server.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -99,6 +99,7 @@ export class OpenGeni {
       source: this.source,
       workspaceName: options.workspaceName,
       memberPermissions: options.memberPermissions,
+      identities: options.identities,
     });
     this.sessions = { list: (listOptions) => this.listSessions(listOptions) };
   }
@@ -140,8 +141,9 @@ export class OpenGeni {
    * Translate your own ids to the Opengeni workspace id, creating the
    * workspace on first use (cached per instance):
    * `{ tenant }` is one workspace per tenant, `{ user }` (no tenant) is one
-   * workspace per user, and `{ workspaceId }` is returned as is. Opengeni adds
-   * a tenant workspace's users on their first request; a per-user workspace
+   * workspace per user, and `{ workspaceId }` is returned as is. A tenant
+   * workspace's user is added by the SDK with `memberPermissions` when those
+   * are set, else by Opengeni on their first request; a per-user workspace
    * gets its one owner from the SDK and admits nobody else.
    */
   async workspaceId(
@@ -155,7 +157,9 @@ export class OpenGeni {
     }
     if (target.workspaceId) return target.workspaceId;
     if (target.tenant) {
-      return await this.workspaceIdFor({ tenant: target.tenant }, { isolation: "tenant" });
+      // The user, when named, joins with `memberPermissions` when those are set.
+      const user = "user" in target ? target.user : undefined;
+      return await this.workspaceIdFor({ tenant: target.tenant, user }, { isolation: "tenant" });
     }
     if ("tenant" in target || "workspaceId" in target) {
       // A tenant/workspaceId key with no value is a host bug: never silently

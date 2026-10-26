@@ -167,6 +167,7 @@ describe("session proxy chats", () => {
       "files:upload",
       "files:read",
       "mcp_servers:attach",
+      "connections:personal",
     ]);
     const again = createWorkspaceIdResolver(api.client, {
       organizationId: ORGANIZATION_ID,
@@ -205,6 +206,110 @@ describe("session proxy chats", () => {
     expect(
       api.requests.filter((request) => request.path.endsWith("/external-members")),
     ).toHaveLength(1);
+  });
+
+  test("tenant workspaces add each named user once with the custom member permissions", async () => {
+    const api = fakeApi();
+    const permissions = ["workspace:read", "sessions:read", "artifacts:read"] as const;
+    const resolver = createWorkspaceIdResolver(api.client, {
+      organizationId: ORGANIZATION_ID,
+      source: "app",
+      memberPermissions: permissions,
+    });
+    const members = () =>
+      api.requests.filter((request) => request.path.endsWith("/external-members"));
+    expect(await resolver({ tenant: "acme" }, { isolation: "tenant" })).toBe(WORKSPACE_ID);
+    expect(members()).toHaveLength(0);
+    await resolver({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
+    await resolver({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
+    await resolver({ tenant: "acme", user: "bob" }, { isolation: "tenant" });
+    expect(
+      api.requests.filter((request) => request.path === "/v1/workspaces/external"),
+    ).toHaveLength(1);
+    await resolver({ tenant: "acme", user: "alice", source: "other" }, { isolation: "tenant" });
+    expect(members().map((request) => request.path)).toEqual(
+      Array(3).fill(`/v1/workspaces/${WORKSPACE_ID}/external-members`),
+    );
+    expect(members().map((request) => request.body.identity)).toEqual([
+      { source: "app", externalId: "alice" },
+      { source: "app", externalId: "bob" },
+      { source: "other", externalId: "alice" },
+    ]);
+    expect(members()[0]!.body.permissions).toEqual([...permissions]);
+    // A new process reuses the same onboarding key, so a revoked grant stays revoked.
+    const again = createWorkspaceIdResolver(api.client, {
+      organizationId: ORGANIZATION_ID,
+      source: "app",
+      memberPermissions: permissions,
+    });
+    await again({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
+    expect(members().at(-1)!.body.operationId).toBe(members()[0]!.body.operationId);
+  });
+
+  test("without custom member permissions, tenant users are left to Opengeni's first-use grant", async () => {
+    const api = fakeApi();
+    await api.og.workspaceIdFor({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
+    await api.og.workspaceId({ tenant: "acme", user: "alice" });
+    expect(api.requests.map((request) => request.path)).toEqual(["/v1/workspaces/external"]);
+  });
+
+  test("an existing tenant member keeps their grant and the address still resolves", async () => {
+    const api = fakeApi();
+    let grants = 0;
+    const resolver = createWorkspaceIdResolver(
+      {
+        ensureWorkspace: (request) => api.client.ensureWorkspace(request),
+        addExternalWorkspaceMember: async () => {
+          grants++;
+          throw new OpenGeniApiError(409, "External member already exists", { code: "conflict" });
+        },
+      },
+      { organizationId: ORGANIZATION_ID, source: "app", memberPermissions: ["workspace:read"] },
+    );
+    expect(await resolver({ tenant: "acme", user: "alice" }, { isolation: "tenant" })).toBe(
+      WORKSPACE_ID,
+    );
+    expect(await resolver({ tenant: "acme", user: "alice" }, { isolation: "tenant" })).toBe(
+      WORKSPACE_ID,
+    );
+    expect(grants).toBe(1);
+  });
+
+  test("the relay adds a signed-in tenant user before their first request, but not a visitor", async () => {
+    const api = fakeApi();
+    const og = new Opengeni({
+      organizationId: ORGANIZATION_ID,
+      apiKey: "og_test",
+      baseUrl: API,
+      fetch: api.fetch,
+      memberPermissions: ["workspace:read", "sessions:create", "sessions:read", "artifacts:read"],
+    });
+    const handler = createSessionProxyHandler(og, {
+      chats: "shared",
+      resolve: (request) => ({
+        tenant: "acme",
+        user: request.headers.get("user") ?? "alice",
+        visitor: request.headers.has("visitor"),
+      }),
+      createSession: (input) => input,
+    });
+    expect((await handler(createRequest())).status).toBe(200);
+    expect(api.requests.map((request) => request.path)).toEqual([
+      "/v1/workspaces/external",
+      `/v1/workspaces/${WORKSPACE_ID}/external-members`,
+      `/v1/workspaces/${WORKSPACE_ID}/sessions`,
+    ]);
+    expect(api.requests[1]!.body).toMatchObject({
+      identity: { source: "app", externalId: "alice" },
+      permissions: ["workspace:read", "sessions:create", "sessions:read", "artifacts:read"],
+    });
+    const visitor = createRequest();
+    visitor.headers.set("user", "visitor-1");
+    visitor.headers.set("visitor", "1");
+    expect((await handler(visitor)).status).toBe(200);
+    expect(api.requests.slice(3).map((request) => request.path)).toEqual([
+      `/v1/workspaces/${WORKSPACE_ID}/sessions`,
+    ]);
   });
 
   test("the chat facade forwards custom isolated member permissions", async () => {
@@ -276,9 +381,115 @@ describe("session proxy chats", () => {
           resolver({ tenant: "acme", user: "alice" }, { isolation: "user" }),
         ).rejects.toBe(failure);
       }
-      expect(grants).toBe(2);
+      // A defaulted personal setup grant refused by the key retries once with
+      // the conversation defaults; a second refusal still propagates.
+      const refused = failure instanceof OpenGeniApiError && failure.status === 403;
+      expect(grants).toBe(refused ? 4 : 2);
     },
   );
+
+  describe("identities and personal setup", () => {
+    const CONVERSATION = [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+      "files:upload",
+      "files:read",
+      "mcp_servers:attach",
+    ];
+    const members = (api: ReturnType<typeof fakeApi>) =>
+      api.requests.filter((request) => request.path.endsWith("/external-members"));
+
+    test("per-user workspaces let each person connect their own accounts by default", async () => {
+      const api = fakeApi();
+      const resolver = createWorkspaceIdResolver(api.client, {
+        organizationId: ORGANIZATION_ID,
+        source: "app",
+      });
+      await resolver({ tenant: "acme", user: "alice" }, { isolation: "user" });
+      expect(members(api)[0]!.body.permissions).toContain("connections:personal");
+      expect(members(api)[0]!.body.permissions).not.toContain("connections:write");
+      expect(members(api)[0]!.body.permissions).not.toContain("capabilities:manage");
+      // Tenant workspaces are shared by default: nobody is added.
+      await resolver({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
+      expect(members(api)).toHaveLength(1);
+    });
+
+    test("shared identities never get it by default", async () => {
+      const api = fakeApi();
+      const resolver = createWorkspaceIdResolver(api.client, {
+        organizationId: ORGANIZATION_ID,
+        source: "app",
+        identities: "shared",
+      });
+      await resolver({ tenant: "acme", user: "team" }, { isolation: "user" });
+      expect(members(api)[0]!.body.permissions).toEqual(CONVERSATION);
+      await resolver({ tenant: "acme", user: "team" }, { isolation: "tenant" });
+      expect(members(api)).toHaveLength(1);
+    });
+
+    test("declared per-user identities add tenant users with it", async () => {
+      const api = fakeApi();
+      const resolver = createWorkspaceIdResolver(api.client, {
+        organizationId: ORGANIZATION_ID,
+        source: "app",
+        identities: "per_user",
+      });
+      await resolver({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
+      expect(members(api)).toHaveLength(1);
+      expect(members(api)[0]!.body.permissions).toEqual([...CONVERSATION, "connections:personal"]);
+    });
+
+    test("memberPermissions overrides identities either way", async () => {
+      const api = fakeApi();
+      const resolver = createWorkspaceIdResolver(api.client, {
+        organizationId: ORGANIZATION_ID,
+        source: "app",
+        identities: "shared",
+        memberPermissions: [...CONVERSATION, "connections:personal"],
+      });
+      await resolver({ tenant: "acme", user: "alice" }, { isolation: "user" });
+      expect(members(api)[0]!.body.permissions).toContain("connections:personal");
+    });
+
+    test("an older key policy without it still onboards with the conversation defaults", async () => {
+      const api = fakeApi();
+      const calls: { permissions: unknown; operationId: unknown }[] = [];
+      const resolver = createWorkspaceIdResolver(
+        {
+          ensureWorkspace: (request) => api.client.ensureWorkspace(request),
+          addExternalWorkspaceMember: async (_workspaceId, request) => {
+            calls.push({ permissions: request.permissions, operationId: request.operationId });
+            if (request.permissions.includes("connections:personal"))
+              throw new OpenGeniApiError(403, "membership exceeds key authority");
+            return {} as never;
+          },
+        },
+        { organizationId: ORGANIZATION_ID, source: "app" },
+      );
+      await resolver({ tenant: "acme", user: "alice" }, { isolation: "user" });
+      expect(calls.map((call) => call.permissions)).toEqual([
+        [...CONVERSATION, "connections:personal"],
+        CONVERSATION,
+      ]);
+      // The same keyed operation, so a cancelled grant stays fenced.
+      expect(calls[1]!.operationId).toBe(calls[0]!.operationId);
+    });
+
+    test("the chat facade forwards identities", async () => {
+      const api = fakeApi();
+      const og = new Opengeni({
+        organizationId: ORGANIZATION_ID,
+        apiKey: "og_test",
+        baseUrl: API,
+        fetch: api.fetch,
+        identities: "per_user",
+      });
+      await og.workspaceIdFor({ tenant: "acme", user: "alice" }, { isolation: "tenant" });
+      expect(members(api)[0]!.body.permissions).toContain("connections:personal");
+    });
+  });
 
   test("rejected mutations never provision isolated workspaces or members", async () => {
     const api = fakeApi();

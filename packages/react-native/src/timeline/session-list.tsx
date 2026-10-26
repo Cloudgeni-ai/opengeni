@@ -38,7 +38,7 @@ import Svg, { Path } from "react-native-svg";
 import { Icon } from "./icon";
 import { useNativeTimelineMessages } from "./messages";
 import { withAlpha } from "./primitives";
-import { fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
+import { BAR_MAX_FONT_SCALE, fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
 
 /* ----------------------------------------------------------------------------
    The web app's session list rows at phone width (Recent sessions on the
@@ -132,6 +132,11 @@ export interface SessionRowProps {
   onTogglePin?: (() => void) | undefined;
   /** The workspace the chat lives in, when it is not the one on screen (search results). */
   workspaceName?: string | undefined;
+  /**
+   * A word the person must act on (a sub-agent that failed, is stuck, needs
+   * them or is paused). It replaces the last-update time and sets the dot's tone.
+   */
+  attention?: { word: string; tone: "failed" | "waiting" } | null | undefined;
   now?: Date | undefined;
 }
 
@@ -142,6 +147,7 @@ export function SessionRow({
   onPress,
   onTogglePin,
   workspaceName,
+  attention,
   now,
 }: SessionRowProps) {
   const theme = useNativeTimelineTheme();
@@ -150,7 +156,8 @@ export function SessionRow({
   const t = useOpenGeniText();
   const rows = useMemo(() => projectClientModelRows(t, [...models]), [t, models]);
   const title = sessionDisplayTitle(session);
-  const status = recentSessionStatus(session);
+  const recent = recentSessionStatus(session);
+  const status = attention ? { tone: attention.tone, pulse: false } : recent;
   const model = recentSessionModelPresentation(session.model, rows);
   const repo = sessionRepoLabel(session);
   const meta = [model.label, repo].filter(Boolean).join(" · ");
@@ -186,6 +193,7 @@ export function SessionRow({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={[title, pinned ? m.pinned : null, workspaceName ?? null]
+        .concat(attention ? [attention.word] : [])
         .filter(Boolean)
         .join(", ")}
       accessibilityActions={onTogglePin ? [{ name: "pin", label: pinLabel }] : undefined}
@@ -241,14 +249,18 @@ export function SessionRow({
         {pinned ? <Icon name="pin" size={11} color={c["fg-subtle"]} /> : null}
         <Text
           style={{
-            ...fontStyle(theme, 400),
+            ...fontStyle(theme, attention ? 500 : 400),
             fontSize: 11,
             lineHeight: 16,
-            color: c["fg-subtle"],
+            color: attention
+              ? attention.tone === "failed"
+                ? c["status-failed"]
+                : c["status-waiting"]
+              : c["fg-subtle"],
             fontVariant: ["tabular-nums"],
           }}
         >
-          {relativeTimeLabel(t, session.updatedAt, now)}
+          {attention ? attention.word : relativeTimeLabel(t, session.updatedAt, now)}
         </Text>
       </View>
     </Pressable>
@@ -367,6 +379,7 @@ export function SessionHeaderTitle({
   statusLabel,
   align = Platform.OS === "ios" ? "center" : "left",
   sideInset = 116,
+  fullAccess = false,
 }: {
   title: string;
   /** The display status: pass `blocked` for an admission-blocked session. */
@@ -381,6 +394,11 @@ export function SessionHeaderTitle({
    * running under them.
    */
   sideInset?: number | undefined;
+  /**
+   * The session has full access (its agent acts as the person who gave it):
+   * a small shield and "Full access" on the status line, as on the web header.
+   */
+  fullAccess?: boolean | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
@@ -395,11 +413,14 @@ export function SessionHeaderTitle({
     presentation?.tone === "running" ||
     presentation?.tone === "waiting" ||
     presentation?.tone === "failed";
+  const spoken = [title, label, fullAccess ? "Full access is on" : undefined]
+    .filter(Boolean)
+    .join(", ");
   return (
     <View
       accessible
       accessibilityRole="header"
-      accessibilityLabel={label ? `${title}, ${label}` : title}
+      accessibilityLabel={spoken}
       // iOS sizes a custom title view once, often before the session (and its
       // title) has loaded; a fixed width keeps a late title from collapsing to
       // "H…". Centered, it stays clear of the wider side's buttons on both sides.
@@ -414,24 +435,56 @@ export function SessionHeaderTitle({
     >
       <Text
         numberOfLines={1}
+        maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
         style={{ ...fontStyle(theme, 600), fontSize: 16, lineHeight: 20, color: c.fg }}
       >
         {title}
       </Text>
-      {presentation && label ? (
+      {(presentation && label) || fullAccess ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 1 }}>
-          <StatusDot tone={presentation.tone} pulse={presentation.pulse} size={6} />
-          <Text
-            numberOfLines={1}
-            style={{
-              ...fontStyle(theme, 500),
-              fontSize: 12,
-              lineHeight: 15,
-              color: emphasized ? c[TONE_COLOR[presentation.tone]] : c["fg-muted"],
-            }}
-          >
-            {label}
-          </Text>
+          {presentation && label ? (
+            <>
+              <StatusDot tone={presentation.tone} pulse={presentation.pulse} size={6} />
+              <Text
+                numberOfLines={1}
+                maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+                style={{
+                  ...fontStyle(theme, 500),
+                  fontSize: 12,
+                  lineHeight: 15,
+                  flexShrink: 1,
+                  color: emphasized ? c[TONE_COLOR[presentation.tone]] : c["fg-muted"],
+                }}
+              >
+                {label}
+              </Text>
+            </>
+          ) : null}
+          {fullAccess ? (
+            <View
+              testID="session-full-access-badge"
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 3,
+                marginLeft: presentation && label ? 3 : 0,
+              }}
+            >
+              <Icon name="shield-check" size={11} color={c["status-waiting"]} />
+              <Text
+                numberOfLines={1}
+                maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+                style={{
+                  ...fontStyle(theme, 500),
+                  fontSize: 12,
+                  lineHeight: 15,
+                  color: c["fg-muted"],
+                }}
+              >
+                Full access
+              </Text>
+            </View>
+          ) : null}
         </View>
       ) : null}
     </View>

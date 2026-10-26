@@ -16,6 +16,7 @@ import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
+import { eventTriggerMigrationTail } from "./event-trigger-migration-tail";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -122,8 +123,13 @@ const subscriptionCoreMigrations = [
   "0900_workspace_admin_predicate_privileges.sql",
   // Folds the pool rows and rewrites the auto-assignment routine 0713 creates.
   "0907_subscription_connection_one_owner.sql",
+  // Redefines 0759's predicate, which reads the subscription authority column
+  // from withheld 0688; replay after it.
+  "0972_capability_setup_continuations.sql",
   // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
   ...strictOwnerMaintenanceMigrationTail,
+  // Redefines the exhausted-task predicate withheld 0761 creates; replay after it.
+  ...eventTriggerMigrationTail,
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.

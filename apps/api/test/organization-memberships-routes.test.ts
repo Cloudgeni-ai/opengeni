@@ -1703,6 +1703,7 @@ describe("organization membership routes", () => {
           organizationId: stored!.accountId,
           status: "active",
           personalWorkspaceId: stored!.personalWorkspaceId,
+          personalWorkspacesEnabled: true,
         },
       ],
     });

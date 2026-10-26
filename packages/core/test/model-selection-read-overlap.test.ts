@@ -20,9 +20,7 @@ const dependencies = [
   "loadWorkspaceClaudeSubscriptionReadiness",
   "getWorkspaceModelPolicy",
   "loadWorkspaceCodexCatalogReadiness",
-  "listConnectionsMetadata",
-  "listWorkspaceProviderCustomModelsByKind",
-  "getOrganizationModelProviderCatalogForWorkspace",
+  "loadWorkspaceModelCatalogInputs",
   "workspaceProviderApiKeyConnectionMetadataFromConnections",
 ];
 // Execute the complete current production declaration, not a copied parallel
@@ -94,6 +92,14 @@ function fixture(
       claude_subscription: { active: false, models: ["org-subscription"] },
     },
   };
+  values.catalog = {
+    workspaceConnections: values.connections,
+    workspaceCustomModels: values["workspace-models"],
+    organizationProviders: values["org-catalog"],
+  };
+  delete values.connections;
+  delete values["workspace-models"];
+  delete values["org-catalog"];
   const holds = Object.fromEntries(Object.keys(values).map((name) => [name, deferred()]));
   const calls: { name: string; args: unknown[] }[] = [];
   const syncError = new Error("synchronous read failure");
@@ -109,10 +115,7 @@ function fixture(
     loadWorkspaceClaudeSubscriptionReadiness: (...args: unknown[]) => read("claude", args),
     getWorkspaceModelPolicy: (...args: unknown[]) => read("policy", args),
     loadWorkspaceCodexCatalogReadiness: (...args: unknown[]) => read("codex", args),
-    listConnectionsMetadata: (...args: unknown[]) => read("connections", args),
-    listWorkspaceProviderCustomModelsByKind: (...args: unknown[]) => read("workspace-models", args),
-    getOrganizationModelProviderCatalogForWorkspace: (...args: unknown[]) =>
-      read("org-catalog", args),
+    loadWorkspaceModelCatalogInputs: (...args: unknown[]) => read("catalog", args),
     workspaceProviderApiKeyConnectionMetadataFromConnections: (
       connections: Record<string, unknown>,
       kind: string,
@@ -155,9 +158,9 @@ function fixture(
   };
 }
 
-const catalogReads = ["connections", "workspace-models", "org-catalog"];
+const catalogReads = ["catalog"];
 
-test("all independent catalog reads start while the policy/readiness batch is held", async () => {
+test("the public catalog batch starts while the policy/readiness batch is held", async () => {
   const f = fixture();
   try {
     await flush();
@@ -257,16 +260,13 @@ test("disabled subscription skips only its catalog; every read keeps its exact s
       expect(new Set(f.names()).size).toBe(f.names().length);
       for (const { name, args } of f.calls) {
         expect(args[0]).toBe(f.db);
-        if (name === "workspace-models" || name === "org-catalog")
+        if (name === "catalog")
           expect(args[1]).toEqual({
             accountId: f.context.accountId,
             workspaceId: f.context.workspaceId,
-            // Organization Azure OpenAI has no workspace custom-model rail.
-            providerKinds:
-              name === "org-catalog" ? [...providerKinds, "openai", "azure_openai"] : providerKinds,
+            providerKinds,
+            organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
           });
-        else if (name === "connections")
-          expect(args.slice(1)).toEqual([f.context.workspaceId, null]);
         else if (name === "restrictions" || name === "claude")
           expect(args.slice(1)).toEqual([f.settings, f.context, null]);
         else if (name === "claude-core") expect(args.slice(1)).toEqual([f.settings, f.context]);
@@ -368,7 +368,7 @@ test("a refused transaction input batch never starts catalog reads", async () =>
   }
 });
 
-for (const failure of ["policy", "org-catalog"] as const) {
+for (const failure of ["policy", "catalog"] as const) {
   test(`${failure} failure waits for the other read wave and prevents downstream admission`, async () => {
     const f = fixture();
     const error = new Error(failure);
@@ -393,16 +393,16 @@ for (const failure of ["policy", "org-catalog"] as const) {
   });
 }
 
-for (const first of ["policy", "org-catalog"] as const) {
+for (const first of ["policy", "catalog"] as const) {
   test(`dual failure retains original input-wave priority when ${first} rejects first`, async () => {
     const f = fixture();
-    const errors = { policy: new Error("policy"), "org-catalog": new Error("catalog") };
+    const errors = { policy: new Error("policy"), catalog: new Error("catalog") };
     try {
       await flush();
       f.holds[first]!.reject(errors[first]);
       await flush();
       expect(f.settled()).toBe(false);
-      const second = first === "policy" ? "org-catalog" : "policy";
+      const second = first === "policy" ? "catalog" : "policy";
       f.holds[second]!.reject(errors[second]);
       await expect(f.running).rejects.toBe(errors.policy);
     } finally {
@@ -411,7 +411,7 @@ for (const first of ["policy", "org-catalog"] as const) {
   });
 }
 
-for (const failure of ["policy", "org-catalog"] as const) {
+for (const failure of ["policy", "catalog"] as const) {
   test(`synchronous ${failure} refusal cannot escape the other wave join`, async () => {
     const f = fixture({ syncFailure: failure });
     try {

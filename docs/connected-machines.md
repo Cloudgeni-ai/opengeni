@@ -6,6 +6,11 @@ an organization, workspace, or organization user and driven by the agent directl
 primary compute target**, not a backend variant layered on top of a managed
 box.
 
+The program that runs on the machine is **Opengeni Runner** (command
+`opengeni-agent`, source in [`../agent`](../agent)). In this document, "native
+agent", "machine agent" and "Connected Machine agent" mean the Runner; "the
+agent" in the context of a session means the AI agent driving it.
+
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
@@ -346,8 +351,12 @@ Vault secrets reach a machine only per command. When an `exec_command` or
 `/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
-`ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
+`ExecRequest.env`. This also applies when the POSIX host's default login shell
+is zsh: a secret-bearing `run_on` exec explicitly selects `/bin/sh`, rather than
+letting the host choose a shell. The tool gateway preserves references and
+escapes until this delivery boundary, including for Codemode calls; it never
+substitutes values into `run_on` command text. `{{secretfile:…}}` files are written
+under the 0700 `/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
 end; terminal one-offs clean it on return, while yielded `run_on` commands retain
 it as described below. That best-effort cleanup
 first waits for any write still in flight from an exec that timed out during
@@ -494,6 +503,20 @@ agent report for the same generation replaces either inference. Native-host
 diagnostics are written to stderr because stdout carries Chrome frames.
 Oversized tab titles are truncated and oversized tab URLs make only that tab
 uncontrollable; neither ends the profile's connection.
+
+Chrome closes a profile together with its last window, which stops the
+extension and ends the profile's connection (`browser_closed_port`) even when
+Chrome itself keeps running, as it does on macOS. The extension therefore never
+closes a profile's only tab without first opening a new tab page in its place
+(a new unfocused window when that tab is in a popup or app window), and when
+Chrome has no window open it creates a requested tab in a new unfocused window.
+A tab close whose connection ends before the extension answers is reported as
+`outcome_unknown` (HTTP 409), because the tab may already be closed; a tab
+Chrome reports as gone is `target_not_found`, and the agent then forgets only
+that tab, not its current browser. A close the browser acknowledged whose
+connection ends before the remaining tabs are listed is also `outcome_unknown`.
+A profile whose last window the person closed stays disconnected until a
+window opens in it again.
 
 An accepted full inventory snapshot observes every connected profile once through
 `attached_browser_inventories.observed_at`. Unchanged profiles need neither a
@@ -698,6 +721,42 @@ owner:
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
 
+In a chat on a personal machine, only the owner's own messages start work. A
+message somebody else sends there (through the API, an agent acting for them,
+or an integration) is accepted and kept, but it waits for the owner instead of
+becoming the chat's next turn:
+
+- It is never claimed while the chat stays on that machine, never steers (it
+  cannot interrupt the owner's running turn) and does not count as pending
+  work, so the chat stays idle or keeps running the owner's turn. The send
+  result reports `waitsForMachineOwner: true`, and the operator
+  `session_send_message` tool returns a warning saying so.
+- The owner's next own turn takes the waiting messages in, oldest first, as
+  history ahead of the owner's prompt, each with a short note that it waited
+  for the owner. The agent sees what the other person wrote, and the owner's
+  message says what to do with it. The taken-in rows end as superseded by that
+  turn and never run again.
+- Moving the chat to another machine wakes it, so waiting messages the new
+  machine may run start as their own turns.
+- Steering a waiting message returns `409 WAITING_FOR_MACHINE_OWNER`. An
+  agent's steer into such a chat for anyone but the owner is refused before
+  anything changes (`personal_machine_owner_required`).
+- `get_session_machine_access` lists whose messages wait (`waitingMessages`),
+  and the console explains them in one notice that needs no action.
+
+Whether a message waits is decided live from the chat's current machine
+(`opengeni_private.session_machine_owner_subject_v1`), with the same causal person the attempt
+admission trigger reads. That lookup authorizes nothing; the trigger stays the
+only authority. The console still warns other people before they send. Updates
+from other people's work (agent messages and worker results) keep their own
+waiting-work path, which the owner continues explicitly.
+
+The lookup takes effect one release after it ships: migration 0978 creates it
+without runtime `EXECUTE`, and a later migration grants it once the previous
+release knows it. Until then the lookup reports no personal machine, so nothing
+waits, `waitingMessages` is omitted, and a message from someone other than the
+owner is still refused when it is claimed.
+
 On macOS, the enrollment display offer is independent of Screen Recording
 permission. A detected display keeps the existing screen-control consent option
 available while OS grants are pending. Approval does not grant macOS permissions:
@@ -814,7 +873,8 @@ remains in that group. The browsers it launched run in their own sessions and
 are adopted by the next controller. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
-busy attached browser sessions, browsers without a durable working runtime, and
+busy attached browser sessions, browsers without a durable working runtime,
+sessions with a JavaScript dialog unanswered for less than 30 minutes, and
 isolated virtual desktops. A quiescent managed browser with a durable working
 runtime does not: graceful browserd shutdown detaches from it without closing
 it, so its tabs and unsaved page state stay live and the restarted controller
@@ -1558,6 +1618,11 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   workspace access and confirms locally before connecting. The link carries only
   the origin, workspace/chat destination and subject, never an enrollment token.
   Mobile browsers direct the person to the computer they want to connect;
+- inside the desktop app, the same dialog is **Connect a machine**: for the
+  computer the app runs on it shows the **Computer use** switch (off, turning
+  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
+  command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.
   Only then is a token minted. The person chooses **Who can use it?** (**Only me** by
   default, or **This workspace**) and screen control (off by default); both are
@@ -2073,6 +2138,35 @@ remain enforced. Reuse honors
 explicit placement, identity, revision, network route and linked desktop choices.
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
+
+An attached BrowserSession never leaves its empty tabs or Chrome's debugger
+behind. Whatever ends its controller runtime (an explicit end, a controller
+shutdown or restart, or an idle release after the same idle time as a managed
+browser) closes the tabs that session opened that are still blank, and releases
+Chrome's debugger on the tabs it attached, so Chrome stops showing that it is
+being debugged once no agent is using the profile. A tab the session did not
+open, a tab showing a page, and a tab another session on the same controller is
+using are left alone. The session's next request recovers it as it recovers a
+released managed browser, and it continues in the tab it was using; when that
+was an empty tab that has since been closed, it opens a new one, and a request
+naming the closed tab is told which tab is current. Each session records these
+tabs in an owner-only `attached-tabs.json` in its session directory. A
+controller that starts after another crashed finishes any cleanup left undone,
+for the same extension connection generation only: Chrome tab ids are not
+trusted to name the same tabs after the extension reconnects.
+
+A session waiting on a JavaScript dialog is still in use: neither an idle
+release nor an agent restart lets go of its browser until the dialog is
+answered, for attached and managed browsers alike, or until it has been open
+for 30 minutes: a dialog nobody answered by then is taken as forgotten (or its
+close was never reported), and losing it is better than holding the browser
+and the machine's updates indefinitely. Chrome offers a dialog only
+to the debugger that was attached when it opened; a debugger attached later can
+neither see nor answer it, and the page answers nothing until the person does.
+For the same reason, a session that continues in its earlier tab waits at most
+a few seconds for it. A tab blocked by a dialog its page opened while no agent
+held the browser is left as it is for the person, and the session continues in
+a new tab.
 
 An attached tab's debugger disconnect invalidates its cached target, document,
 frame and element authority without restarting Chrome or changing other tabs.

@@ -1,11 +1,14 @@
 import {
   BrowserActionCommand,
+  BrowserActionNote,
   BrowserActionReceipt,
   INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
   BrowserObservation,
   BrowserTarget,
   ComputerNativeCommand,
   ComputerNativeReceipt,
+  ComputerActionReceipt,
+  INTERACTION_MAX_ACTIONS_PER_BATCH,
   ComputerOperationCommand,
   ComputerOperationReceipt,
   ComputerOperationObservation,
@@ -31,6 +34,7 @@ import {
   secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
+  type InteractionDriverConnectionState,
   type InteractionOperationJournalRecord,
 } from "./controller-core";
 
@@ -41,6 +45,7 @@ export {
   secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
+  type InteractionDriverConnectionState,
 };
 
 export type BrowserInteractionDriver = {
@@ -52,6 +57,9 @@ export type BrowserInteractionDriver = {
     command: BrowserActionCommandValue,
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null>;
+  /** Bounded probe of the browser connection. Without it, a dispatch error
+   * the driver did not classify counts as a lost controller. */
+  connectionState?(): Promise<InteractionDriverConnectionState>;
 };
 
 export type BrowserInteractionAuthority = {
@@ -175,9 +183,23 @@ export class BrowserInteractionController {
             error: input.error,
           });
         },
-        maxDispatchTraceItems: INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
+        // Resolved elements and per-action notes share one bounded trace.
+        maxDispatchTraceItems:
+          INTERACTION_MAX_RESOLVED_ACTION_TARGETS + INTERACTION_MAX_ACTIONS_PER_BATCH,
         attachDispatchTrace(receipt, items) {
-          return BrowserActionReceipt.parse({ ...receipt, targets: items });
+          const targets: unknown[] = [];
+          const notes: unknown[] = [];
+          for (const item of items)
+            (BrowserActionNote.safeParse(item).success ? notes : targets).push(item);
+          return BrowserActionReceipt.parse({
+            ...receipt,
+            ...(targets.length > 0
+              ? { targets: targets.slice(0, INTERACTION_MAX_RESOLVED_ACTION_TARGETS) }
+              : {}),
+            ...(notes.length > 0
+              ? { notes: notes.slice(0, INTERACTION_MAX_ACTIONS_PER_BATCH) }
+              : {}),
+          });
         },
         recoverReceipt(receipt, settledAt) {
           if (
@@ -256,7 +278,12 @@ export type ComputerInteractionDriver = {
   target(targetId: string): Promise<ComputerTargetValue | null>;
   observe(targetId: string): Promise<ComputerObservationValue>;
   validate?(command: ComputerActionCommandValue, target: ComputerTargetValue): Promise<void> | void;
-  dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue | null>;
+  /** Drivers record on `trace` each action that acted on an element of another
+   * role than its locator named (a ComputerActionRoleStandIn). */
+  dispatch(
+    command: ComputerActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<ComputerObservationValue | null>;
   validateNative?(command: ComputerNativeCommand): Promise<void>;
   dispatchNative?(command: ComputerNativeCommand): Promise<ComputerNativeResult>;
 };
@@ -317,10 +344,10 @@ export class ComputerInteractionController {
             );
           await options.driver.validateNative(command);
         },
-        dispatch: (command) =>
+        dispatch: (command, trace) =>
           command.targetId === null
             ? options.driver.dispatchNative!(command)
-            : options.driver.dispatch(command),
+            : options.driver.dispatch(command, trace),
       },
       authority: {
         authorizeDispatch: async (command) => {
@@ -459,6 +486,12 @@ export class ComputerInteractionController {
             observation: input.observation,
             error: input.error,
           });
+        },
+        // The computer driver records an action that acted on an element of
+        // another role than the one named (see ComputerActionRoleStandIn).
+        maxDispatchTraceItems: INTERACTION_MAX_ACTIONS_PER_BATCH,
+        attachDispatchTrace(receipt, items) {
+          return ComputerActionReceipt.parse({ ...receipt, roleStandIns: items });
         },
         recoverReceipt(receipt, settledAt) {
           if (

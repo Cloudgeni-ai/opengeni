@@ -17,18 +17,21 @@ const organizationId = "00000000-0000-4000-8000-000000000001";
 const workspaceId = "00000000-0000-4000-8000-000000000002";
 
 let allowed = params.get("org") !== "off";
+let chatActionsAllowed = params.get("chat") !== "off";
 const client = {
   getOrganizationAgentAdminAccess: async () => ({
     organizationId,
     sessionAdminAccessAllowed: allowed,
+    chatActionsAllowed,
   }),
   updateOrganizationAgentAdminAccess: async (
     _organizationId: string,
-    request: { sessionAdminAccessAllowed: boolean },
+    request: { sessionAdminAccessAllowed?: boolean; chatActionsAllowed?: boolean },
   ) => {
     await new Promise((resolve) => setTimeout(resolve, 150));
-    allowed = request.sessionAdminAccessAllowed;
-    return { organizationId, sessionAdminAccessAllowed: allowed };
+    allowed = request.sessionAdminAccessAllowed ?? allowed;
+    chatActionsAllowed = request.chatActionsAllowed ?? chatActionsAllowed;
+    return { organizationId, sessionAdminAccessAllowed: allowed, chatActionsAllowed };
   },
 } as unknown as OpenGeniBrowserClient;
 
@@ -122,7 +125,7 @@ createRoot(document.getElementById("root")!).render(
         </Section>
       </div>
       <div className="flex flex-col gap-4">
-        <p className="text-sm text-fg-muted">Session header · admin access on, then off</p>
+        <p className="text-sm text-fg-muted">Session header · full access on, then off</p>
         <Header active testId="header-on" />
         <Header active={false} testId="header-off" />
       </div>

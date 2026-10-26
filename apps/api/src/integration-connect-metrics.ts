@@ -26,6 +26,9 @@ const FIXED_CONNECT_PROVIDERS = [
   "graphql",
   "slack-bot",
   "gmail",
+  // The Drive MCP connection (its native API integration retired).
+  "google-drive",
+  "google-calendar",
   "slack-personal",
   "github-personal",
   "github-app",

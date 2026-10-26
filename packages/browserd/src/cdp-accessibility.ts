@@ -82,13 +82,46 @@ export function normalizeCdpAccessibilityTree(options: {
   for (const node of options.nodes) {
     if (typeof node.nodeId === "string") rawById.set(node.nodeId, node);
   }
+  // A DOM-backed node's id is its DOM node id, stable for the document's
+  // life. A node with no DOM node (CSS generated text) gets a fresh negative
+  // id whenever Chromium rebuilds its accessibility tree, which the driver
+  // does on every read. Its ref therefore comes from its place in the tree:
+  // the nearest DOM-backed ancestor and its position among that parent's
+  // other DOM-less children, so it stays the same across rebuilds.
+  const refKeys = new Map<string, string>();
+  const positions = new Map<string, number>();
+  const positionedParents = new Set<string>();
+  const refKey = (nodeId: string, depth = 0): string => {
+    const known = refKeys.get(nodeId);
+    if (known !== undefined) return known;
+    const node = rawById.get(nodeId);
+    let key = nodeId;
+    if (node && finitePositiveInteger(node.backendDOMNodeId) === null && depth < 64) {
+      const parentId = typeof node.parentId === "string" ? node.parentId : null;
+      const parent = parentId === null ? undefined : rawById.get(parentId);
+      if (parentId !== null && parent) {
+        if (!positionedParents.has(parentId)) {
+          positionedParents.add(parentId);
+          let position = 0;
+          for (const childId of childIds(parent)) {
+            const child = rawById.get(childId);
+            if (child && finitePositiveInteger(child.backendDOMNodeId) === null)
+              positions.set(childId, position++);
+          }
+        }
+        key = `${refKey(parentId, depth + 1)}\0${roleValue(node)}\0${positions.get(nodeId) ?? -1}`;
+      }
+    }
+    refKeys.set(nodeId, key);
+    return key;
+  };
   const entriesByNodeId = new Map<string, CdpAccessibilityEntry>();
   const usedRefs = new Set<string>();
   for (const [nodeId, node] of rawById) {
     if (node.ignored === true || roleValue(node) === "InlineTextBox") continue;
     const role = normalizedRole(roleValue(node));
     const name = accessibleStringValue(node.name) || null;
-    const states = propertyStates(node.properties);
+    const states = propertyStates(node.properties, node.value?.value);
     const backendDOMNodeId = finitePositiveInteger(node.backendDOMNodeId);
     const ref = semanticRef(
       {
@@ -96,7 +129,7 @@ export function normalizeCdpAccessibilityTree(options: {
         targetId: options.targetId,
         documentGeneration: options.documentGeneration,
         frameId: typeof node.frameId === "string" ? node.frameId : null,
-        nodeId,
+        nodeId: refKey(nodeId),
         backendDOMNodeId,
       },
       usedRefs,
@@ -256,7 +289,10 @@ function safeValue(
   node: CdpAxNode,
   role: string,
 ): { value?: string | { redacted: true; reason: "password" } } {
-  const value = stringValue(node.value);
+  // Sliders, progress bars and meters report a number.
+  const raw = node.value?.value;
+  const value =
+    typeof raw === "number" && Number.isFinite(raw) ? numericText(raw) : stringValue(node.value);
   if (!value) return {};
   // Chromium exposes a password field's value as one mask character per
   // character typed. Report it as redacted rather than as dots. Other form
@@ -341,7 +377,20 @@ export function semanticRef(
   return usedRefs.has(short) ? `${kind}${digest}` : short;
 }
 
-function propertyStates(properties: unknown): string[] {
+/**
+ * Chromium keeps these values as 32-bit floats, so a slider at 0.3 arrives
+ * as 0.30000001192092896. Print the shortest number that is the same float.
+ */
+function numericText(value: number): string {
+  if (Number.isInteger(value) || Math.fround(value) !== value) return String(value);
+  for (let digits = 1; digits <= 9; digits++) {
+    const shortest = Number(value.toPrecision(digits));
+    if (Math.fround(shortest) === value) return String(shortest);
+  }
+  return String(value);
+}
+
+function propertyStates(properties: unknown, numericValue: unknown = undefined): string[] {
   if (!Array.isArray(properties)) return [];
   const states: string[] = [];
   for (const property of properties) {
@@ -349,6 +398,16 @@ function propertyStates(properties: unknown): string[] {
       continue;
     }
     const value = property.value.value;
+    // An empty property (the value text of a slider without one) says nothing.
+    if (value === "") continue;
+    // A slider's value text that repeats its value adds nothing to the value.
+    if (
+      property.name === "valuetext" &&
+      typeof numericValue === "number" &&
+      Number.isFinite(numericValue) &&
+      String(value) === numericText(numericValue)
+    )
+      continue;
     if (value === true || value === "true") states.push(property.name.slice(0, 128));
     else if (value !== false && value !== undefined && value !== null && value !== "false") {
       states.push(`${property.name}=${String(value)}`.slice(0, 128));
@@ -381,6 +440,7 @@ function actionsForRole(
     return ["focus", "fill", "type", "press"];
   }
   if (NATIVE_DATE_TIME_ROLES.has(role)) return ["focus", "fill"];
+  if (role === "slider") return ["focus", "fill", "press"];
   if (["checkbox", "radio", "switch"].includes(role)) return ["click", "check"];
   if (["combobox", "listbox"].includes(role)) return ["click", "select"];
   return [];

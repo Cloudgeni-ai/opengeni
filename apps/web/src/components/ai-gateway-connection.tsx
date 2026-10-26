@@ -12,7 +12,11 @@ import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer
 import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
-import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
+import {
+  OrganizationModelProviderEntraAuthentication,
+  WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH,
+  type OrganizationModelProviderAuthMethod,
+} from "@opengeni/contracts";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { KeyRoundIcon, Loader2Icon, MinusCircleIcon, PlusIcon, UnplugIcon } from "lucide-react";
 import {
@@ -28,6 +32,7 @@ import {
 import { toast } from "sonner";
 
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import {
   ConnectionAccessFormPage,
   ConnectionAccessRows,
@@ -426,8 +431,26 @@ export interface ProviderConnectionView {
   refreshCustomModels(): Promise<unknown>;
   /** The non-secret endpoint the connected key uses, for providers that have one. */
   endpoint?: string | undefined;
-  /** Connects or replaces the key. Resolves true once it's saved; toasts on failure. */
-  saveKey(apiKey: string, options?: { endpoint?: string | undefined }): Promise<boolean>;
+  /** How the active connection signs in (Azure OpenAI), when it is known. */
+  authMethod?: OrganizationModelProviderAuthMethod | undefined;
+  /**
+   * The ways this connection can sign in, when there is a choice (Azure
+   * OpenAI: an API key, a Microsoft Entra app, and this deployment's identity
+   * when the operator offers it). Absent for key-only providers.
+   */
+  signInMethods?: readonly OrganizationModelProviderAuthMethod[] | undefined;
+  /**
+   * Connects or replaces the credential: the key, or with `authentication`
+   * a Microsoft Entra ID sign-in instead. Resolves true once it's saved;
+   * toasts on failure.
+   */
+  saveKey(
+    apiKey: string,
+    options?: {
+      endpoint?: string | undefined;
+      authentication?: OrganizationModelProviderEntraAuthentication | undefined;
+    },
+  ): Promise<boolean>;
   /** Resolves true once no active key remains; toasts either way. */
   disconnect(): Promise<boolean>;
   addCustomModel(upstreamModelId?: string): Promise<void>;
@@ -1404,16 +1427,18 @@ export function ReplaceKeyDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
-  const [key, setKey] = useState("");
   const { config } = state;
   const [endpoint, setEndpoint] = useState(state.endpoint ?? "");
+  const credential = useCredentialDraft(state);
+  const { reset } = credential;
   useEffect(() => {
     if (!open) {
-      setKey("");
+      reset();
       setEndpoint(state.endpoint ?? "");
     }
-  }, [open, state.endpoint]);
+  }, [open, state.endpoint, reset]);
   const endpointBlocked = Boolean(config.endpointField?.validate(endpoint));
+  const choosing = credential.choices.length > 1;
   return (
     <FormDialog
       open={open}
@@ -1423,40 +1448,262 @@ export function ReplaceKeyDialog({
       title={
         config.provider === "claude_subscription"
           ? "Replace Claude setup token"
-          : `Replace the ${config.title} key`
+          : choosing
+            ? `Change how ${config.title} signs in`
+            : `Replace the ${config.title} key`
       }
       description="New work uses the new credential right away. Work already running finishes on the old one."
-      submitLabel={config.provider === "claude_subscription" ? "Replace token" : "Replace key"}
+      submitLabel={
+        config.provider === "claude_subscription"
+          ? "Replace token"
+          : choosing
+            ? "Save sign-in"
+            : "Replace key"
+      }
       pendingLabel="Saving…"
-      submitDisabled={!key.trim() || endpointBlocked}
+      submitDisabled={!credential.ready || endpointBlocked}
       onSubmit={async () =>
-        await state.saveKey(key, config.endpointField ? { endpoint: endpoint.trim() } : undefined)
+        await state.saveKey(credential.key, {
+          ...(config.endpointField ? { endpoint: endpoint.trim() } : {}),
+          ...(credential.authentication ? { authentication: credential.authentication } : {}),
+        })
       }
       onSubmitted={() => onOpenChange(false)}
     >
-      {config.endpointField ? (
-        <ProviderEndpointInput
-          field={config.endpointField}
-          value={endpoint}
-          onChange={setEndpoint}
+      <FieldStack>
+        {config.endpointField ? (
+          <ProviderEndpointInput
+            field={config.endpointField}
+            value={endpoint}
+            onChange={setEndpoint}
+          />
+        ) : null}
+        <CredentialFields
+          state={state}
+          draft={credential}
+          keyLabel={
+            config.provider === "claude_subscription"
+              ? "Setup token"
+              : (config.credentialLabelText ?? "API key")
+          }
+          storedHint="It's stored encrypted and never shown again."
         />
-      ) : null}
-      <Field
-        label={
-          config.provider === "claude_subscription"
-            ? "Setup token"
-            : (config.credentialLabelText ?? "API key")
-        }
-        hint={`${config.keyHelp} It's stored encrypted and never shown again.`}
-      >
-        <SecretInput
-          value={key}
-          autoComplete="off"
-          aria-label={config.keyAriaLabel}
-          onChange={(event) => setKey(event.target.value)}
-        />
-      </Field>
+      </FieldStack>
     </FormDialog>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+   How a connection signs in. Most providers take one key; Azure OpenAI can
+   instead sign in with Microsoft Entra ID, as the organization's own app
+   (tenant, application and client secret) or as this deployment's identity
+   when the operator offers it.
+   -------------------------------------------------------------------------- */
+
+const SIGN_IN_CHOICES: Record<
+  OrganizationModelProviderAuthMethod,
+  { title: string; description: string }
+> = {
+  api_key: {
+    title: "API key",
+    description: "A key from the resource’s Keys and Endpoint page.",
+  },
+  entra_client_secret: {
+    title: "Microsoft Entra app",
+    description:
+      "An app registration and its client secret. Works when key access is turned off on the resource.",
+  },
+  entra_deployment_identity: {
+    title: "This deployment's identity",
+    description:
+      "Signs in as the identity this deployment runs as. No secret to enter or rotate here.",
+  },
+};
+
+const ENTRA_ROLE_HINT =
+  "Give it the Cognitive Services OpenAI User role on the Azure OpenAI resource.";
+
+type CredentialDraft = ReturnType<typeof useCredentialDraft>;
+
+/** The credential being typed, and the sign-in it amounts to once complete. */
+function useCredentialDraft(state: ProviderConnection) {
+  const choices = state.signInMethods ?? ["api_key"];
+  const initial =
+    state.authMethod && choices.includes(state.authMethod) ? state.authMethod : "api_key";
+  const [method, setMethod] = useState<OrganizationModelProviderAuthMethod>(initial);
+  const [key, setKey] = useState("");
+  const [tenantId, setTenantId] = useState("");
+  const [clientId, setClientId] = useState("");
+  const [clientSecret, setClientSecret] = useState("");
+  const reset = useCallback(() => {
+    setMethod(initial);
+    setKey("");
+    setTenantId("");
+    setClientId("");
+    setClientSecret("");
+  }, [initial]);
+  const parsed =
+    method === "entra_client_secret"
+      ? OrganizationModelProviderEntraAuthentication.safeParse({
+          method,
+          tenantId: tenantId.trim(),
+          clientId: clientId.trim(),
+          clientSecret,
+        })
+      : method === "entra_deployment_identity"
+        ? OrganizationModelProviderEntraAuthentication.safeParse({ method })
+        : null;
+  const authentication = parsed?.success ? parsed.data : undefined;
+  return {
+    choices,
+    method: choices.includes(method) ? method : "api_key",
+    setMethod,
+    key: method === "api_key" ? key : "",
+    setKey,
+    tenantId,
+    setTenantId,
+    clientId,
+    setClientId,
+    clientSecret,
+    setClientSecret,
+    reset,
+    authentication,
+    ready: method === "api_key" ? Boolean(key.trim()) : authentication !== undefined,
+  };
+}
+
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** A plain identifier field, judged once the person leaves it. */
+function EntraIdInput({
+  label,
+  hint,
+  value,
+  placeholder,
+  problem,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  value: string;
+  placeholder: string;
+  problem: string | null;
+  onChange: (value: string) => void;
+}) {
+  const [checked, setChecked] = useState(false);
+  return (
+    <Field
+      label={label}
+      hint={hint}
+      error={checked && value.trim() && problem ? problem : undefined}
+      required
+    >
+      <TextInput
+        mono
+        value={value}
+        placeholder={placeholder}
+        autoComplete="off"
+        autoCapitalize="none"
+        autoCorrect="off"
+        spellCheck={false}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={() => setChecked(true)}
+      />
+    </Field>
+  );
+}
+
+/** The sign-in choice (when there is one) and the fields of the chosen way. */
+function CredentialFields({
+  state,
+  draft,
+  keyLabel,
+  storedHint,
+}: {
+  state: ProviderConnection;
+  draft: CredentialDraft;
+  keyLabel: string;
+  storedHint: string;
+}) {
+  const { config } = state;
+  return (
+    <>
+      {draft.choices.length > 1 ? (
+        <Field
+          label="How it signs in"
+          group
+          hint={
+            draft.method === "entra_deployment_identity"
+              ? "The deployment operator manages this identity. Ask them which identity it is, and give it the Cognitive Services OpenAI User role on the Azure OpenAI resource."
+              : undefined
+          }
+        >
+          <ChoiceCards
+            value={draft.method}
+            onValueChange={(value) => draft.setMethod(value as OrganizationModelProviderAuthMethod)}
+            aria-label="How it signs in"
+          >
+            {draft.choices.map((choice) => (
+              <ChoiceCard
+                key={choice}
+                value={choice}
+                title={SIGN_IN_CHOICES[choice].title}
+                description={SIGN_IN_CHOICES[choice].description}
+              />
+            ))}
+          </ChoiceCards>
+        </Field>
+      ) : null}
+      {draft.method === "api_key" ? (
+        <Field label={keyLabel} hint={`${config.keyHelp} ${storedHint}`}>
+          <SecretInput
+            value={draft.key}
+            autoComplete="off"
+            aria-label={config.keyAriaLabel}
+            onChange={(event) => draft.setKey(event.target.value)}
+          />
+        </Field>
+      ) : draft.method === "entra_client_secret" ? (
+        <>
+          <EntraIdInput
+            label="Directory (tenant) ID"
+            hint="On the app registration’s Overview page in Microsoft Entra ID."
+            placeholder="00000000-0000-0000-0000-000000000000"
+            value={draft.tenantId}
+            problem={
+              GUID_PATTERN.test(draft.tenantId.trim()) ||
+              /^[^\s/]+\.[^\s/]+$/u.test(draft.tenantId.trim())
+                ? null
+                : "Enter the directory (tenant) ID, or a domain such as contoso.onmicrosoft.com."
+            }
+            onChange={draft.setTenantId}
+          />
+          <EntraIdInput
+            label="Application (client) ID"
+            hint="On the same Overview page."
+            placeholder="00000000-0000-0000-0000-000000000000"
+            value={draft.clientId}
+            problem={
+              GUID_PATTERN.test(draft.clientId.trim())
+                ? null
+                : "Enter the application (client) ID, such as 00000000-0000-0000-0000-000000000000."
+            }
+            onChange={draft.setClientId}
+          />
+          <Field
+            label="Client secret"
+            hint={`The secret’s Value from Certificates & secrets. ${ENTRA_ROLE_HINT} ${storedHint}`}
+          >
+            <SecretInput
+              value={draft.clientSecret}
+              autoComplete="off"
+              aria-label={`${config.title} client secret`}
+              onChange={(event) => draft.setClientSecret(event.target.value)}
+            />
+          </Field>
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -1485,7 +1732,11 @@ export function ProviderDisconnectDialog({
         "Work already running finishes first.",
         config.provider === "claude_subscription"
           ? "The saved token is removed from Opengeni. Your Claude subscription stays active."
-          : "The saved API key is removed from Opengeni. You can reconnect with a valid key.",
+          : state.authMethod === "entra_client_secret"
+            ? "The saved client secret is removed from Opengeni. You can connect again at any time."
+            : state.authMethod === "entra_deployment_identity"
+              ? "Opengeni stops signing in as this deployment's identity here. You can connect again at any time."
+              : "The saved API key is removed from Opengeni. You can reconnect with a valid key.",
       ]}
       confirmLabel="Disconnect"
       pendingLabel="Disconnecting…"
@@ -1522,6 +1773,8 @@ export function ProviderConnectionPage({
   const listLabel = useModelsListLabel();
   const { config } = state;
   const status = providerStatus(state);
+  const signIn = state.connected ? state.authMethod : undefined;
+  const changeSignIn = (state.signInMethods?.length ?? 0) > 1;
   const [replacing, setReplacing] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const access = useConnectionAccess({
@@ -1557,7 +1810,11 @@ export function ProviderConnectionPage({
         )
       }
       meta={[
-        config.provider === "claude_subscription" ? "Claude plan" : "API key",
+        config.provider === "claude_subscription"
+          ? "Claude plan"
+          : signIn && signIn !== "api_key"
+            ? SIGN_IN_CHOICES[signIn].title
+            : "API key",
         scopeName ?? state.scopeLabel,
       ]}
       actions={
@@ -1570,7 +1827,11 @@ export function ProviderConnectionPage({
                 }
                 disabled={state.busy}
               >
-                {config.provider === "claude_subscription" ? "Sign in again" : "Replace key"}
+                {config.provider === "claude_subscription"
+                  ? "Sign in again"
+                  : changeSignIn
+                    ? "Change sign-in"
+                    : "Replace key"}
               </RowButton>
               <MoreMenu label={`More actions for ${config.title}`}>
                 {config.provider === "claude_subscription" ? (
@@ -1607,18 +1868,26 @@ export function ProviderConnectionPage({
       <DetailPageBody
         aside={
           <DetailAside label={`About ${config.title}`}>
-            <DetailAsideItem
-              label={config.credentialLabelText ?? "API key"}
-              icon={<KeyRoundIcon />}
-            >
-              {status.status === "loading"
-                ? "Loading…"
-                : status.status === "unavailable"
-                  ? "Unavailable"
-                  : state.connected
-                    ? "Stored encrypted"
-                    : "Not connected"}
-            </DetailAsideItem>
+            {signIn === "entra_client_secret" || signIn === "entra_deployment_identity" ? (
+              <DetailAsideItem label="Signs in with" icon={<KeyRoundIcon />}>
+                {signIn === "entra_client_secret"
+                  ? "Microsoft Entra app, secret stored encrypted"
+                  : "This deployment's identity"}
+              </DetailAsideItem>
+            ) : (
+              <DetailAsideItem
+                label={config.credentialLabelText ?? "API key"}
+                icon={<KeyRoundIcon />}
+              >
+                {status.status === "loading"
+                  ? "Loading…"
+                  : status.status === "unavailable"
+                    ? "Unavailable"
+                    : state.connected
+                      ? "Stored encrypted"
+                      : "Not connected"}
+              </DetailAsideItem>
+            )}
             {config.endpointField && state.connected && state.endpoint ? (
               <DetailAsideItem label={config.endpointField.label}>
                 <span className="font-mono text-xs break-all">{state.endpoint}</span>
@@ -1705,8 +1974,8 @@ export function ProviderConnectPage({
 }) {
   const listLabel = useModelsListLabel();
   const { config } = state;
-  const [key, setKey] = useState("");
   const [endpoint, setEndpoint] = useState(state.endpoint ?? "");
+  const credential = useCredentialDraft(state);
   const endpointBlocked = Boolean(config.endpointField?.validate(endpoint));
   if (config.provider === "claude_subscription")
     return (
@@ -1725,14 +1994,20 @@ export function ProviderConnectPage({
     <ModelsFormPage
       backLabel={state.connected ? config.title : listLabel}
       headerAside={<ProviderTile provider={config.provider} />}
-      title={state.connected ? `Replace ${config.title} API key` : `Connect ${config.title}`}
+      title={
+        state.connected
+          ? credential.choices.length > 1
+            ? `Change how ${config.title} signs in`
+            : `Replace ${config.title} API key`
+          : `Connect ${config.title}`
+      }
       description={config.summary}
       onClose={onClose}
       submitLabel={state.connected ? "Save replacement" : `Connect ${config.title}`}
       pendingLabel="Connecting…"
       submitAnalyticsAction={config.analyticsAction}
       submitDisabled={
-        !key.trim() || endpointBlocked || !state.canManageConnection || Boolean(blockedReason)
+        !credential.ready || endpointBlocked || !state.canManageConnection || Boolean(blockedReason)
       }
       disabledReason={
         state.canManageConnection
@@ -1746,10 +2021,10 @@ export function ProviderConnectPage({
           : undefined)
       }
       onSubmit={async () => {
-        const saved = await state.saveKey(
-          key,
-          config.endpointField ? { endpoint: endpoint.trim() } : undefined,
-        );
+        const saved = await state.saveKey(credential.key, {
+          ...(config.endpointField ? { endpoint: endpoint.trim() } : {}),
+          ...(credential.authentication ? { authentication: credential.authentication } : {}),
+        });
         if (saved) await afterSave?.();
         return saved;
       }}
@@ -1764,17 +2039,16 @@ export function ProviderConnectPage({
             onChange={setEndpoint}
           />
         ) : null}
-        <Field
-          label={config.credentialLabelText ?? "API key"}
-          hint={`${config.keyHelp} It is stored encrypted. Connecting makes no model calls.`}
-        >
-          <SecretInput
-            value={key}
-            autoComplete="off"
-            aria-label={config.keyAriaLabel}
-            onChange={(event) => setKey(event.target.value)}
-          />
-        </Field>
+        <CredentialFields
+          state={state}
+          draft={credential}
+          keyLabel={config.credentialLabelText ?? "API key"}
+          storedHint={
+            credential.method === "api_key"
+              ? "It is stored encrypted. Connecting makes no model calls."
+              : "It is stored encrypted. Connecting signs in once to check it and makes no model calls."
+          }
+        />
       </FieldStack>
     </ModelsFormPage>
   );

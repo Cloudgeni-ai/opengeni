@@ -15,6 +15,7 @@ import {
   RetainedScreenshotQuotaExceededError,
   getRetainedScreenshotArtifact,
   getRetainedScreenshotArtifactForToolCall,
+  getSessionRetainedScreenshotArtifacts,
   getWithheldRetainedScreenshotArtifactIdForToolCall,
   isDatabasePersistenceFailure,
   isSessionEventPersistenceError,
@@ -24,14 +25,31 @@ import {
   type Database,
   type RetainedScreenshotArtifact,
 } from "@opengeni/db";
-import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
+import {
+  ObjectBodyIncompleteError,
+  retryWhileMissing,
+  type ObjectStorage,
+} from "@opengeni/storage";
 import { createHash } from "node:crypto";
 import { requesterUnavailableReceiptText } from "./requester-unavailable-receipt";
+import { RetainedAttachmentUnavailableError } from "./retained-image-unavailable";
 
 const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 const PNG_ALLOWED_CRITICAL_CHUNKS = new Set(["IHDR", "PLTE", "IDAT", "IEND"]);
 const PNG_MAX_CHUNKS = 16_384;
 const RETAINED_IMAGE_MARKER = "retained_artifact";
+/**
+ * Object reads for one history run concurrently, so one slow storage read
+ * delays the history by its own latency instead of stalling every image
+ * after it. Matches the model attachment projection's read concurrency.
+ */
+export const RETAINED_SCREENSHOT_READ_CONCURRENCY = 8;
+/**
+ * Pauses before reading a found image again after its body failed. A dropped
+ * connection recovers within them; a replica that lost the image's data fails
+ * every read, and the image is then treated as no longer retained.
+ */
+export const RETAINED_SCREENSHOT_INCOMPLETE_READ_RETRY_DELAYS_MS = [100, 400] as const;
 
 export type TypedScreenshotToolOutput = {
   callId: string;
@@ -976,6 +994,29 @@ export async function materializeRetainedScreenshotHistory(input: {
   return await materializeRetainedScreenshotHistoryWithCache(input, new Map());
 }
 
+/**
+ * One retained image's stored bytes, or null when they are gone: missing after
+ * the visibility wait, or found but never delivered intact on any read.
+ */
+async function readRetainedImageObject(
+  storage: ObjectStorage,
+  objectKey: string,
+  artifactId: string,
+): Promise<{ bytes: Uint8Array } | null> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await retryWhileMissing(async () => storage.getObjectBytes(objectKey));
+    } catch (error) {
+      if (!(error instanceof ObjectBodyIncompleteError)) {
+        throw new RetainedAttachmentUnavailableError([artifactId], { cause: error });
+      }
+      const delayMs = RETAINED_SCREENSHOT_INCOMPLETE_READ_RETRY_DELAYS_MS[attempt];
+      if (delayMs === undefined) return null;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 /** Expand durable markers in an SDK RunState immediately before resume. */
 export async function materializeRetainedScreenshotRunState(input: {
   db: Database;
@@ -1020,15 +1061,20 @@ async function materializeRetainedScreenshotHistoryWithCache(
   // invalid) projects as the same neutral receipt as a withheld image. The
   // turn that captured it already saw its pixels; failing every later turn of
   // the session because the bytes are gone would leave it permanently stuck.
-  // Transient database or storage errors still throw so the turn retries.
+  // That includes an object the store still lists but whose bytes never arrive
+  // intact on repeated reads (its data was lost). Transient database or
+  // storage errors still throw so the turn retries; a storage error throws as
+  // RetainedAttachmentUnavailableError, so it is not mistaken for the model
+  // provider failing.
   const unretained = (artifactId: string) => {
     cache.set(artifactId, null);
     return null;
   };
-  const receiptForMarker = async (
+  type MarkerReceipt = RetainedArtifactMetadata | "unrecoverable" | null;
+  const resolveReceiptForMarker = async (
     marker: unknown,
     callId: string | null,
-  ): Promise<RetainedArtifactMetadata | "unrecoverable" | null> => {
+  ): Promise<MarkerReceipt> => {
     if (!isRetainedImageMarker(marker)) return null;
     const receipt = retainedReceipt(marker.artifact);
     if (receipt) return receipt;
@@ -1054,72 +1100,139 @@ async function materializeRetainedScreenshotHistoryWithCache(
     if (!withheldId) return "unrecoverable";
     return unavailable(withheldId, "pending");
   };
-  /** The image as a data URL, or null when this requester cannot receive its pixels. */
-  const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string | null> => {
-    let dataUrl = cache.get(receipt.artifactId);
-    if (dataUrl === undefined) {
-      if (!input.objectStorage) return unretained(receipt.artifactId);
-      const artifact = await getRetainedScreenshotArtifact(
+  // The prefetch walk and the projection walk see the same marker objects;
+  // resolve each once so legacy tool-call lookups are not repeated.
+  const receiptsByMarker = new WeakMap<object, Promise<MarkerReceipt>>();
+  const receiptForMarker = (marker: unknown, callId: string | null): Promise<MarkerReceipt> => {
+    if (!isRetainedImageMarker(marker)) return Promise.resolve(null);
+    let receipt = receiptsByMarker.get(marker);
+    if (!receipt) {
+      receipt = resolveReceiptForMarker(marker, callId);
+      receiptsByMarker.set(marker, receipt);
+    }
+    return receipt;
+  };
+  /**
+   * The retained row for an uncached image, or null after caching it as not
+   * receivable. A row the caller already loaded for this session is reused.
+   */
+  const retainedArtifactForReceipt = async (
+    receipt: RetainedArtifactMetadata,
+    loaded?: RetainedScreenshotArtifact,
+  ): Promise<RetainedScreenshotArtifact | null> => {
+    if (!input.objectStorage) return unretained(receipt.artifactId);
+    const artifact =
+      loaded ??
+      (await getRetainedScreenshotArtifact(
         input.db,
         input.workspaceId,
         input.sessionId,
         receipt.artifactId,
-      );
-      // No readable row: never retained, already reaped, or, in a shared
-      // session, another participant's private image whose file is hidden
-      // from this requester. All become the same neutral receipt: no bytes,
-      // no fetch hint, and no new access.
-      if (!artifact) return unretained(receipt.artifactId);
-      if (artifact.status !== "ready" || artifact.retentionExpiresAt.getTime() <= now.getTime()) {
-        return unretained(receipt.artifactId);
-      }
-      const object = await retryWhileMissing(async () =>
-        input.objectStorage!.getObjectBytes(artifact.file.objectKey),
-      );
-      if (!object) return unretained(receipt.artifactId);
-      const bytes = object.bytes;
-      let validated: ValidatedSessionImage;
-      try {
-        validated = validateRetainableSessionImage({
-          bytes,
-          declaredMediaType: artifact.mediaType,
-        });
-      } catch (error) {
-        if (error instanceof ScreenshotValidationError) {
-          return unretained(receipt.artifactId);
-        }
-        throw error;
-      }
-      if (
-        validated.sizeBytes !== artifact.sizeBytes ||
-        validated.sha256 !== artifact.sha256 ||
-        validated.width !== artifact.width ||
-        validated.height !== artifact.height ||
-        (receipt.available &&
-          (receipt.sha256 !== artifact.sha256 || receipt.originalBytes !== artifact.sizeBytes))
-      ) {
-        return unretained(receipt.artifactId);
-      }
-      dataUrl = `data:${validated.mediaType};base64,${Buffer.from(validated.bytes).toString("base64")}`;
-      cache.set(receipt.artifactId, dataUrl);
+      ));
+    // No readable row: never retained, already reaped, or, in a shared
+    // session, another participant's private image whose file is hidden
+    // from this requester. All become the same neutral receipt: no bytes,
+    // no fetch hint, and no new access.
+    if (!artifact) return unretained(receipt.artifactId);
+    if (artifact.status !== "ready" || artifact.retentionExpiresAt.getTime() <= now.getTime()) {
+      return unretained(receipt.artifactId);
     }
+    return artifact;
+  };
+  /** Read, verify and cache one retained image's pixels as a data URL. */
+  const dataUrlForArtifact = async (
+    receipt: RetainedArtifactMetadata,
+    artifact: RetainedScreenshotArtifact,
+  ): Promise<string | null> => {
+    const object = await readRetainedImageObject(
+      input.objectStorage!,
+      artifact.file.objectKey,
+      receipt.artifactId,
+    );
+    if (!object) return unretained(receipt.artifactId);
+    const bytes = object.bytes;
+    let validated: ValidatedSessionImage;
+    try {
+      validated = validateRetainableSessionImage({
+        bytes,
+        declaredMediaType: artifact.mediaType,
+      });
+    } catch (error) {
+      if (error instanceof ScreenshotValidationError) {
+        return unretained(receipt.artifactId);
+      }
+      throw error;
+    }
+    if (
+      validated.sizeBytes !== artifact.sizeBytes ||
+      validated.sha256 !== artifact.sha256 ||
+      validated.width !== artifact.width ||
+      validated.height !== artifact.height ||
+      (receipt.available &&
+        (receipt.sha256 !== artifact.sha256 || receipt.originalBytes !== artifact.sizeBytes))
+    ) {
+      return unretained(receipt.artifactId);
+    }
+    const dataUrl = `data:${validated.mediaType};base64,${Buffer.from(validated.bytes).toString("base64")}`;
+    cache.set(receipt.artifactId, dataUrl);
     return dataUrl;
+  };
+  /** The image as a data URL, or null when this requester cannot receive its pixels. */
+  const dataUrlForReceipt = async (receipt: RetainedArtifactMetadata): Promise<string | null> => {
+    const cached = cache.get(receipt.artifactId);
+    if (cached !== undefined) return cached;
+    const artifact = await retainedArtifactForReceipt(receipt);
+    return artifact ? await dataUrlForArtifact(receipt, artifact) : null;
   };
   const withheldReceiptText = (receipt: RetainedArtifactMetadata) =>
     requesterUnavailableReceiptText(`Image: retained artifactId=${receipt.artifactId}`, "image");
   const unrecoverableReceiptText = requesterUnavailableReceiptText("Image: retained", "image");
   const materializeEntry = async (entry: unknown, callId: string | null): Promise<unknown> => {
-    const image =
-      entry && typeof entry === "object" && !Array.isArray(entry)
-        ? (entry as Record<string, unknown>).image
-        : null;
-    const receipt = await receiptForMarker(image, callId);
+    const receipt = await receiptForMarker(historyEntryImage(entry), callId);
     if (!receipt) return entry;
     if (receipt === "unrecoverable") return { type: "input_text", text: unrecoverableReceiptText };
     const dataUrl = await dataUrlForReceipt(receipt);
     if (dataUrl !== null) return { ...(entry as Record<string, unknown>), image: dataUrl };
     return { type: "input_text", text: withheldReceiptText(receipt) };
   };
+
+  // Prefetch every image this history needs. The first receipt for an
+  // artifact decides its cache entry, exactly as projection would. This
+  // session's rows load in one query; only images it did not find (a fork's
+  // inherited ones, or reaped ones) take the per-image lookup, sequentially.
+  // Object reads then run concurrently.
+  const firstReceiptByArtifact = new Map<string, RetainedArtifactMetadata>();
+  const noteReceipt = (receipt: MarkerReceipt) => {
+    if (!receipt || receipt === "unrecoverable") return;
+    if (cache.has(receipt.artifactId) || firstReceiptByArtifact.has(receipt.artifactId)) return;
+    firstReceiptByArtifact.set(receipt.artifactId, receipt);
+  };
+  for (const item of input.history) {
+    const callId = historyCallId(item);
+    const directReceipt = await receiptForMarker(item.output, callId);
+    if (directReceipt) {
+      noteReceipt(directReceipt);
+      continue;
+    }
+    for (const entry of historyOutputEntries(item) ?? []) {
+      noteReceipt(await receiptForMarker(historyEntryImage(entry), callId));
+    }
+  }
+  const sessionRows =
+    input.objectStorage && firstReceiptByArtifact.size > 0
+      ? await getSessionRetainedScreenshotArtifacts(input.db, input.workspaceId, input.sessionId, [
+          ...firstReceiptByArtifact.keys(),
+        ])
+      : new Map<string, RetainedScreenshotArtifact>();
+  const reads: Array<{ receipt: RetainedArtifactMetadata; artifact: RetainedScreenshotArtifact }> =
+    [];
+  for (const receipt of firstReceiptByArtifact.values()) {
+    const artifact = await retainedArtifactForReceipt(receipt, sessionRows.get(receipt.artifactId));
+    if (artifact) reads.push({ receipt, artifact });
+  }
+  await forEachConcurrently(reads, RETAINED_SCREENSHOT_READ_CONCURRENCY, async (read) => {
+    await dataUrlForArtifact(read.receipt, read.artifact);
+  });
 
   const materialized: Array<Record<string, unknown>> = [];
   for (const item of input.history) {
@@ -1141,11 +1254,7 @@ async function materializeRetainedScreenshotHistoryWithCache(
       item.output && typeof item.output === "object" && !Array.isArray(item.output)
         ? (item.output as Record<string, unknown>)
         : null;
-    const outputEntries = Array.isArray(item.output)
-      ? item.output
-      : resultOutput && Array.isArray(resultOutput.content)
-        ? resultOutput.content
-        : null;
+    const outputEntries = historyOutputEntries(item);
     if (!outputEntries) {
       materialized.push(item);
       continue;
@@ -1355,6 +1464,45 @@ function isInlineImageContent(entry: unknown): boolean {
 function historyCallId(item: Record<string, unknown>): string | null {
   const value = item.callId ?? item.call_id;
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** A tool result's content entries: a bare array output or an output object's content. */
+function historyOutputEntries(item: Record<string, unknown>): unknown[] | null {
+  if (Array.isArray(item.output)) return item.output;
+  const output = item.output;
+  if (!output || typeof output !== "object") return null;
+  const content = (output as Record<string, unknown>).content;
+  return Array.isArray(content) ? content : null;
+}
+
+function historyEntryImage(entry: unknown): unknown {
+  return entry && typeof entry === "object" && !Array.isArray(entry)
+    ? (entry as Record<string, unknown>).image
+    : null;
+}
+
+/**
+ * Run `task` over `items` with at most `limit` in flight. After the first
+ * failure no new task starts; the in-flight ones settle before it is thrown.
+ */
+async function forEachConcurrently<T>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<void>,
+): Promise<void> {
+  const state: { next: number; failure: { error: unknown } | null } = { next: 0, failure: null };
+  const worker = async () => {
+    while (state.failure === null && state.next < items.length) {
+      const item = items[state.next++]!;
+      try {
+        await task(item);
+      } catch (error) {
+        state.failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (state.failure) throw state.failure.error;
 }
 
 function canonicalMediaType(value: string): string {

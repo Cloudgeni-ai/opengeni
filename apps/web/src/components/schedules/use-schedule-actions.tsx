@@ -1,6 +1,7 @@
 /**
- * The row and page actions a schedule shares between the list and its own
- * page: Run now, Pause (with Undo), Resume and Delete (a centered confirm).
+ * The row and page actions an automation shares between the list and its own
+ * page: Run now, Pause (with Undo), Resume, the list switch's quiet pause and
+ * resume, and Delete (a centered confirm).
  * Every action goes through the same API calls the old page used; failures
  * say what happened in a toast and leave the list as it was.
  */
@@ -15,19 +16,31 @@ import {
 import { useAppContext } from "@opengeni/react/app/app-context";
 import type { ScheduledTask } from "@opengeni/react/app/types";
 
-import { isKnowledgeSync, nextRunOf, runTimeLabel, scheduleErrorText } from "./schedule-model";
+import {
+  hasEventTriggers,
+  isFinishedOnce,
+  isKnowledgeSync,
+  nextRunOf,
+  runTimeLabel,
+  scheduleErrorText,
+} from "./schedule-model";
 
 export type ScheduleAction = "pause" | "resume" | "trigger" | "delete";
 
 const ACTION_ERROR: Record<ScheduleAction, string> = {
-  pause: "Couldn't pause the schedule",
-  resume: "Couldn't resume the schedule",
+  pause: "Couldn't pause the automation",
+  resume: "Couldn't resume the automation",
   trigger: "Couldn't start a run",
-  delete: "Couldn't delete the schedule",
+  delete: "Couldn't delete the automation",
 };
 
 export interface ScheduleActions {
   busyTaskId: string | null;
+  /**
+   * Pause or resume without a toast on success, for a switch that already
+   * shows the new state. Says what failed in a toast and resolves to null.
+   */
+  setPaused: (task: ScheduledTask, paused: boolean) => Promise<ScheduledTask | null>;
   runNow: (task: ScheduledTask) => Promise<boolean>;
   pause: (task: ScheduledTask) => Promise<boolean>;
   resume: (task: ScheduledTask) => Promise<boolean>;
@@ -74,14 +87,38 @@ export function useScheduleActions({
     [client, workspaceId],
   );
 
+  // Leaves busyTaskId alone: each switch shows its own pending state, so
+  // several rows can change at once.
+  const setPaused = useCallback(
+    async (task: ScheduledTask, paused: boolean): Promise<ScheduledTask | null> => {
+      try {
+        return paused
+          ? await client.pauseScheduledTask(workspaceId, task.id)
+          : await client.resumeScheduledTask(workspaceId, task.id);
+      } catch (error) {
+        toast.error(ACTION_ERROR[paused ? "pause" : "resume"], {
+          description: scheduleErrorText(error),
+        });
+        return null;
+      }
+    },
+    [client, workspaceId],
+  );
+
   const resume = useCallback(
     async (task: ScheduledTask) => {
       const done = await run(task, "resume");
       if (!done) return false;
       const now = new Date();
       const next = nextRunOf({ ...task, status: "active" }, now);
-      toast.success(`Resumed ${task.name}`, {
-        description: next ? `Next run ${runTimeLabel(next, now)}.` : undefined,
+      // A finished run-once automation is on again: it waits for its next event.
+      const listening = hasEventTriggers(task);
+      toast.success(`${isFinishedOnce(task) ? "Turned on" : "Resumed"} ${task.name}`, {
+        description: next
+          ? `Next run ${runTimeLabel(next, now)}.`
+          : listening
+            ? "It runs when a matching event arrives."
+            : undefined,
       });
       await onChanged(task);
       return true;
@@ -132,7 +169,7 @@ export function useScheduleActions({
       onOpenChange={(open) => {
         if (!open) setConfirmDelete(null);
       }}
-      title={confirmDelete ? `Delete ${confirmDelete.name}?` : "Delete schedule?"}
+      title={confirmDelete ? `Delete ${confirmDelete.name}?` : "Delete automation?"}
       consequences={
         knowledge
           ? [
@@ -142,12 +179,14 @@ export function useScheduleActions({
           : [
               next
                 ? `It stops running. The next run was ${runTimeLabel(next, now)}.`
-                : "It won't run again.",
+                : confirmDelete && hasEventTriggers(confirmDelete) && !isFinishedOnce(confirmDelete)
+                  ? "It stops listening for events and won't run again."
+                  : "It won't run again.",
               "Chats from earlier runs stay in your chats.",
               "This can't be undone. Pause it instead to keep it for later.",
             ]
       }
-      confirmLabel="Delete schedule"
+      confirmLabel="Delete automation"
       pendingLabel="Deleting…"
       onConfirm={async () => {
         const task = confirmDelete;
@@ -164,6 +203,7 @@ export function useScheduleActions({
 
   return {
     busyTaskId,
+    setPaused,
     runNow,
     pause,
     resume,

@@ -1,20 +1,25 @@
-import { MAX_SESSION_ADMIN_ACCESS_HOURS } from "@opengeni/contracts";
+import { MAX_SESSION_ADMIN_ACCESS_HOURS, Permission } from "@opengeni/contracts";
 import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
 import * as schema from "./schema";
+import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
 
 /**
- * Admin access for agent sessions (migration 0691). An organization allows it
- * (off by default); an owner or admin then gives one of their sessions admin
- * access for a number of hours or with no time limit, and the agent there can
- * do what that person can manage. Every use goes through
- * {@link resolveSessionAdminAuthority}, which re-checks the allowance, the
- * grant, its time limit and the person's live role.
+ * Full access for agent sessions (migration 0691; stored as "admin access").
+ * An organization allows it (off by default); any member then gives a session
+ * they started themselves their own access for a number of hours or with no
+ * time limit, and the agent there can do what that person can do, never more:
+ * every action it runs is checked against the person's live access. Every use
+ * goes through {@link resolveSessionAdminAuthority}, which re-checks the
+ * allowance, the grant, its time limit and that the person still belongs to
+ * the session's workspace.
  */
 export type OrganizationAgentAdminAccess = {
   sessionAdminAccessAllowed: boolean;
+  /** In-chat app actions, each change confirmed by the person (0971). On unless turned off. */
+  chatActionsAllowed: boolean;
   updatedAt: string | null;
 };
 
@@ -29,8 +34,16 @@ export type SessionAdminAccessGrant = {
 /** Raised when the organization does not allow admin access for sessions. */
 export class SessionAdminAccessNotAllowedError extends Error {
   constructor() {
-    super("This organization doesn't allow admin access for agent sessions");
+    super("This organization doesn't allow full access for agent sessions");
     this.name = "SessionAdminAccessNotAllowedError";
+  }
+}
+
+/** Raised when the person no longer belongs to the session's workspace. */
+export class SessionAdminAccessNotWorkspaceMemberError extends Error {
+  constructor() {
+    super("Only someone who can use this workspace can give a session their access");
+    this.name = "SessionAdminAccessNotWorkspaceMemberError";
   }
 }
 
@@ -41,7 +54,7 @@ export class SessionAdminAccessNotAllowedError extends Error {
  */
 export class SessionAdminAccessNotOwnSessionError extends Error {
   constructor() {
-    super("Only a session you started yourself can be given your admin access");
+    super("Only a session you started yourself can be given your access");
     this.name = "SessionAdminAccessNotOwnSessionError";
   }
 }
@@ -55,6 +68,7 @@ async function readAllowance(scopedDb: Database, accountId: string, lock = false
   const [row] = lock ? await query.for("update") : await query;
   return {
     sessionAdminAccessAllowed: row?.sessionAdminAccessAllowed ?? false,
+    chatActionsAllowed: row?.chatActionsAllowed ?? true,
     updatedAt: row?.updatedAt.toISOString() ?? null,
   } satisfies OrganizationAgentAdminAccess;
 }
@@ -69,6 +83,31 @@ async function assertOrganizationAdministrator(
   await scopedDb.execute(sql`
     select get_organization_administration_overview(${organizationId}::uuid, ${subjectId})
   `);
+}
+
+/**
+ * Whether `subjectId` can give a session in `workspaceId` their access, and
+ * whether a grant they gave still holds: they still belong to the workspace
+ * (live), or they are an active owner or admin of the organization. Runs in
+ * its own savepoint so a refused administrator check never aborts the caller.
+ */
+async function canActInWorkspace(
+  scopedDb: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<boolean> {
+  return await scopedDb.transaction(async (nested) => {
+    await setSubjectRlsContext(nested, input.subjectId);
+    if (await subjectHasLiveWorkspaceAuthorityInScope(nested, input)) return true;
+    try {
+      await nested.transaction(async (inner) => {
+        await assertOrganizationAdministrator(inner, input.accountId, input.subjectId);
+      });
+      return true;
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "42501") return false;
+      throw error;
+    }
+  });
 }
 
 function mapGrant(row: typeof schema.sessionAdminAccess.$inferSelect): SessionAdminAccessGrant {
@@ -86,7 +125,7 @@ const grantNotExpired = or(
   gt(schema.sessionAdminAccess.expiresAt, sql`now()`),
 );
 
-/** Whether owners and admins may give sessions admin access. Absent reads as off. */
+/** The organization's agent choices. Absent reads as full access off, in-chat actions on. */
 export async function getOrganizationAgentAdminAccess(
   db: Database,
   accountId: string,
@@ -97,35 +136,49 @@ export async function getOrganizationAgentAdminAccess(
 }
 
 /**
- * Allow or stop admin access for sessions. Only an owner or admin may change
- * it. Turning it off also removes every session's admin access, so turning it
- * on again never silently restores old grants.
+ * Allow or stop full access for sessions, in-chat app actions, or both; an
+ * omitted choice stays as it is. Only an owner or admin may change them.
+ * Turning full access off also removes every session's full access, so
+ * turning it on again never silently restores old grants.
  */
 export async function setOrganizationAgentAdminAccess(
   db: Database,
-  input: { organizationId: string; actorSubjectId: string; sessionAdminAccessAllowed: boolean },
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    sessionAdminAccessAllowed?: boolean | undefined;
+    chatActionsAllowed?: boolean | undefined;
+  },
 ): Promise<OrganizationAgentAdminAccess> {
   return await withRlsContext(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (scopedDb) => {
       await assertOrganizationAdministrator(scopedDb, input.organizationId, input.actorSubjectId);
+      const changes = {
+        ...(input.sessionAdminAccessAllowed !== undefined
+          ? { sessionAdminAccessAllowed: input.sessionAdminAccessAllowed }
+          : {}),
+        ...(input.chatActionsAllowed !== undefined
+          ? { chatActionsAllowed: input.chatActionsAllowed }
+          : {}),
+      };
       await scopedDb
         .insert(schema.organizationAgentAdminAccess)
         .values({
           accountId: input.organizationId,
-          sessionAdminAccessAllowed: input.sessionAdminAccessAllowed,
+          ...changes,
           updatedBySubjectId: input.actorSubjectId,
         })
         .onConflictDoUpdate({
           target: schema.organizationAgentAdminAccess.accountId,
           set: {
-            sessionAdminAccessAllowed: input.sessionAdminAccessAllowed,
+            ...changes,
             updatedBySubjectId: input.actorSubjectId,
             updatedAt: new Date(),
           },
         });
-      if (!input.sessionAdminAccessAllowed) {
+      if (input.sessionAdminAccessAllowed === false) {
         await scopedDb
           .delete(schema.sessionAdminAccess)
           .where(eq(schema.sessionAdminAccess.accountId, input.organizationId));
@@ -160,9 +213,9 @@ export async function getSessionAdminAccess(
 }
 
 /**
- * Give a session admin access as `actorSubjectId`, who must be an active owner
- * or admin, in an organization that allows it, on a session they started
- * themselves, for `durationHours` hours or, when null, with no time limit.
+ * Give a session admin access as `actorSubjectId`, who must belong to the
+ * session's workspace (or be an active owner or admin), in an organization
+ * that allows it, on a session they started themselves, for `durationHours` hours or, when null, with no time limit.
  * Giving it again while it is on sets a new time limit from now; after it
  * ended by itself, it counts as given anew.
  */
@@ -190,7 +243,15 @@ export async function grantSessionAdminAccess(
     db,
     { accountId: input.organizationId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      await assertOrganizationAdministrator(scopedDb, input.organizationId, input.actorSubjectId);
+      if (
+        !(await canActInWorkspace(scopedDb, {
+          accountId: input.organizationId,
+          workspaceId: input.workspaceId,
+          subjectId: input.actorSubjectId,
+        }))
+      ) {
+        throw new SessionAdminAccessNotWorkspaceMemberError();
+      }
       const allowance = await readAllowance(scopedDb, input.organizationId, true);
       if (!allowance.sessionAdminAccessAllowed) throw new SessionAdminAccessNotAllowedError();
       const [own] = await scopedDb
@@ -262,8 +323,8 @@ export async function revokeSessionAdminAccess(
 /**
  * The person whose access this session uses right now, or null. Live on every
  * call: the organization must still allow it, the grant must still exist and
- * be within its time limit, and the person who gave it must still be an
- * active owner or admin.
+ * be within its time limit, and the person who gave it must still belong to
+ * the session's workspace (or be an active owner or admin).
  */
 export async function resolveSessionAdminAuthority(
   db: Database,
@@ -287,13 +348,14 @@ export async function resolveSessionAdminAuthority(
         )
         .limit(1);
       if (!row) return null;
-      try {
-        await scopedDb.transaction(async (nested) => {
-          await assertOrganizationAdministrator(nested, input.accountId, row.grantedBySubjectId);
-        });
-      } catch (error) {
-        if (nestedPostgresSqlState(error) === "42501") return null;
-        throw error;
+      if (
+        !(await canActInWorkspace(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: row.grantedBySubjectId,
+        }))
+      ) {
+        return null;
       }
       return {
         subjectId: row.grantedBySubjectId,
@@ -307,8 +369,8 @@ export async function resolveSessionAdminAuthority(
 /**
  * What a viewer needs to show and change a session's admin access: whether
  * the organization allows it, the grant while it is within its time limit,
- * whether it is in effect right now, and whether the viewer started this
- * session and is an owner or admin themselves.
+ * whether it is in effect right now, whether the viewer started this
+ * session, and whether they are an owner or admin (who may end anyone's).
  */
 export async function getSessionAdminAccessView(
   db: Database,
@@ -372,4 +434,227 @@ export async function getSessionAdminAccessView(
     ),
   ]);
   return { ...details, active: authority !== null };
+}
+
+/**
+ * Whether a session lists the app-action tools: it is one a person started
+ * themselves (not a child or service session). Fixed for the session's life,
+ * so its tool list never changes because of it.
+ */
+export async function sessionStartedByPerson(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [session] = await scopedDb
+        .select({
+          createdByKind: schema.sessions.createdByKind,
+          parentSessionId: schema.sessions.parentSessionId,
+        })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.id, input.sessionId),
+            eq(schema.sessions.workspaceId, input.workspaceId),
+          ),
+        )
+        .limit(1);
+      return session?.createdByKind === "subject" && session.parentSessionId === null;
+    },
+  );
+}
+
+/** Why an app action can't run as anyone in this turn. */
+export type SessionAppActionUnavailableReason =
+  | "organization_off"
+  | "not_person_session"
+  | "no_person_present"
+  | "not_signed_in_person"
+  | "not_member";
+
+/**
+ * What one turn's message may do through app actions, frozen when the message
+ * is accepted and never changed: who sent it, whether they can confirm changes
+ * from where they sent it, and the most it may do (their own access then).
+ */
+export type TurnAppActionGrant = {
+  subjectId: string;
+  /**
+   * `confirm`: each change runs after this person confirms it in the chat
+   * (signed in to the app itself, or an embed whose host opted in).
+   * `none`: reads only (any other embed or integration).
+   */
+  changes: "confirm" | "none";
+  permissions: readonly Permission[];
+};
+
+/** Record a turn's frozen app-action grant, inside the transaction that accepts its message. */
+export async function recordTurnAppActionGrant(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; turnId: string; grant: TurnAppActionGrant },
+): Promise<void> {
+  await tx
+    .insert(schema.sessionTurnAppActionGrants)
+    .values({
+      turnId: input.turnId,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.grant.subjectId,
+      changes: input.grant.changes,
+      permissions: [...new Set(input.grant.permissions)],
+    })
+    .onConflictDoNothing({ target: schema.sessionTurnAppActionGrants.turnId });
+}
+
+/**
+ * As whom an app action in this turn runs, checked live on every call:
+ *
+ * - `full_access`: the session has full access; the person who gave it, with
+ *   everything they can do, no confirmation (unchanged).
+ * - `confirm`: the person who sent this turn's message, in a session a person
+ *   started, in an organization that allows in-chat actions, from where they
+ *   can confirm (see {@link TurnAppActionGrant}). Reads run; each change runs
+ *   only after that same person confirms it in the chat.
+ * - `read_only`: the same, from an embed or integration that can't confirm
+ *   changes; reads run, changes never do.
+ * - `unavailable`: nobody; scheduled, goal and other unattended turns, child
+ *   and service sessions gain nothing.
+ *
+ * `confirm` and `read_only` carry the turn's frozen permissions: an action
+ * never runs with more than the sender's own access when they sent it, and
+ * each route still checks their live access.
+ */
+export async function resolveSessionAppActionAuthority(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string },
+): Promise<
+  | { kind: "full_access"; subjectId: string }
+  | { kind: "confirm" | "read_only"; subjectId: string; permissions: Permission[] }
+  | { kind: "unavailable"; reason: SessionAppActionUnavailableReason }
+> {
+  const full = await resolveSessionAdminAuthority(db, input);
+  if (full) return { kind: "full_access", subjectId: full.subjectId };
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const allowance = await readAllowance(scopedDb, input.accountId);
+      if (!allowance.chatActionsAllowed) {
+        return { kind: "unavailable", reason: "organization_off" } as const;
+      }
+      const [row] = await scopedDb
+        .select({
+          createdByKind: schema.sessions.createdByKind,
+          parentSessionId: schema.sessions.parentSessionId,
+          source: schema.sessionTurns.source,
+          initiatorKind: schema.sessionTurns.initiatorKind,
+          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+        })
+        .from(schema.sessionTurns)
+        .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionTurns.sessionId))
+        .where(
+          and(
+            eq(schema.sessionTurns.id, input.turnId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessions.workspaceId, input.workspaceId),
+          ),
+        )
+        .limit(1);
+      if (!row || row.createdByKind !== "subject" || row.parentSessionId !== null) {
+        return { kind: "unavailable", reason: "not_person_session" } as const;
+      }
+      // Only a message a person sent; schedules, goals, inbox and other
+      // continuations run with nobody there to confirm anything.
+      if (row.initiatorKind !== "subject" || (row.source !== "user" && row.source !== "api")) {
+        return { kind: "unavailable", reason: "no_person_present" } as const;
+      }
+      const [frozen] = await scopedDb
+        .select({
+          subjectId: schema.sessionTurnAppActionGrants.subjectId,
+          changes: schema.sessionTurnAppActionGrants.changes,
+          permissions: schema.sessionTurnAppActionGrants.permissions,
+        })
+        .from(schema.sessionTurnAppActionGrants)
+        .where(
+          and(
+            eq(schema.sessionTurnAppActionGrants.turnId, input.turnId),
+            eq(schema.sessionTurnAppActionGrants.workspaceId, input.workspaceId),
+          ),
+        )
+        .limit(1);
+      // No frozen grant: an API key, a service, or a message accepted before
+      // this existed. Nobody signed in to act for.
+      if (!frozen || frozen.subjectId !== row.initiatorSubjectId) {
+        return { kind: "unavailable", reason: "not_signed_in_person" } as const;
+      }
+      if (
+        !(await canActInWorkspace(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: row.initiatorSubjectId,
+        }))
+      ) {
+        return { kind: "unavailable", reason: "not_member" } as const;
+      }
+      return {
+        kind: frozen.changes === "confirm" ? "confirm" : "read_only",
+        subjectId: row.initiatorSubjectId,
+        permissions: frozen.permissions.flatMap((value) => {
+          const parsed = Permission.safeParse(value);
+          return parsed.success ? [parsed.data] : [];
+        }),
+      } as const;
+    },
+  );
+}
+
+/**
+ * The saved arguments of app-action changes `subjectId` confirmed in the chat
+ * that this attempt is running right now: approved by that person while signed
+ * in where a change may be confirmed (the app itself, or an embed the
+ * deployment opted in), and marked as executing by this exact attempt. An
+ * Allow sent with a key, a chat integration button or another token carrying
+ * the same identity confirms nothing. The API runs a change without full access
+ * only when its arguments are one of these.
+ */
+export async function listConfirmedAppActionChanges(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    subjectId: string;
+    toolName: string;
+  },
+): Promise<string[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .select({ reviewArguments: schema.connectorActionRequests.reviewArguments })
+        .from(schema.connectorActionRequests)
+        .where(
+          and(
+            eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
+            eq(schema.connectorActionRequests.sessionId, input.sessionId),
+            eq(schema.connectorActionRequests.turnId, input.turnId),
+            eq(schema.connectorActionRequests.executionAttemptId, input.attemptId),
+            eq(schema.connectorActionRequests.serverId, "opengeni"),
+            eq(schema.connectorActionRequests.toolName, input.toolName),
+            eq(schema.connectorActionRequests.status, "executing"),
+            eq(schema.connectorActionRequests.decision, "approve"),
+            eq(schema.connectorActionRequests.decisionBySubjectId, input.subjectId),
+            eq(schema.connectorActionRequests.decisionByKind, "human"),
+            eq(schema.connectorActionRequests.decisionBySignedInPerson, true),
+          ),
+        );
+      return rows.flatMap((row) => (row.reviewArguments === null ? [] : [row.reviewArguments]));
+    },
+  );
 }

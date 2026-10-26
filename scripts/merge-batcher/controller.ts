@@ -12,6 +12,7 @@ import {
   canonical,
   digest,
   emptyLedger,
+  requireInitializedState,
   type Candidate,
   type Config,
   type Ledger,
@@ -20,9 +21,11 @@ import {
   type Pull,
   type Run,
 } from "./model";
-import { plan, infrastructureRetryReason, type Action } from "./planner";
+import { plan, latestRun, infrastructureRetryReason, type Action } from "./planner";
 import { DiskCache } from "./cache";
 import { ObservationJournal } from "./journal";
+import { proveHeadRefresh } from "./head-refresh";
+import type { HeadRefresh } from "./model";
 
 export interface Reader {
   observe(): Promise<Observation>;
@@ -30,12 +33,15 @@ export interface Reader {
 export type Effect =
   | { kind: "record" }
   | { kind: "publish"; branch: string; manifest: Manifest }
-  | { kind: "land"; manifest: Manifest; expectedBase: string }
+  | { kind: "land"; manifest: Manifest; expectedBase: string; headRefresh?: HeadRefresh }
   | { kind: "retry"; run: Run }
-  | { kind: "announce"; number: number; body: string; key: string };
+  | { kind: "announce"; number: number; body: string; key: string }
+  | { kind: "park"; number: number; body: string; key: string };
+/** Final read-only validation found contention; no transaction was attempted. */
+export class ReplanRequired extends Error {}
+
 export interface Transaction {
   expectedState: string | null;
-  nextState: string;
   expectedLedger: Ledger;
   nextLedger: Ledger;
   now: string;
@@ -67,7 +73,12 @@ export class LiveReader implements Reader {
     const baseSha = refs.get(`refs/heads/${this.config.baseBranch}`);
     if (!baseSha) throw new Error("Base ref missing");
     const stateSha = refs.get(this.config.stateRef) ?? null;
+    if (this.config.mode === "active" && !stateSha) requireInitializedState(null, emptyLedger());
     const observationWarnings: string[] = [];
+    if (this.config.maxInflight > this.config.speculationDepth)
+      observationWarnings.push(
+        "Configured max-inflight exceeds speculation depth; extra hosted slots cannot be filled by this chain",
+      );
     const queue = [...refs]
       .filter(([ref]) => ref.startsWith(`refs/heads/${this.config.branchPrefix}`))
       .filter(([ref]) => {
@@ -79,16 +90,19 @@ export class LiveReader implements Reader {
       });
     // Exact SHAs, not mutable ref names: a racing fetch cannot silently change
     // the base or candidate bound by the remote-ref observation.
-    await this.git.fetch(remote, [
-      ...new Set([baseSha, ...(stateSha ? [stateSha] : []), ...queue.map(([, sha]) => sha)]),
-    ]);
+    await this.git.fetch(
+      remote,
+      [...new Set([baseSha, ...(stateSha ? [stateSha] : []), ...queue.map(([, sha]) => sha)])],
+      "state",
+    );
     const admission = await this.github.ready();
-    if (admission.ready.length)
-      await this.git.fetch(
-        remote,
-        admission.ready.map((p) => p.headSha),
-      );
+    await this.git.fetch(
+      remote,
+      admission.ready.map((p) => p.headSha),
+      "candidate",
+    );
     const ledger = stateSha ? await this.git.readLedger(stateSha) : emptyLedger();
+    if (this.config.mode === "active") requireInitializedState(stateSha, ledger);
     // A new head on an already-landed PR is admitted only when it retains that
     // landed ancestry. merge-tree then composes only its remaining delta.
     const eligible: Pull[] = [];
@@ -163,6 +177,16 @@ export class LiveReader implements Reader {
         archived || this.config.mode !== "active",
         !archived || selected.has(candidate.manifest.batchId),
       );
+      const latest = latestRun(candidate, this.config);
+      if (
+        !archived &&
+        (!latest ||
+          latest.status !== "completed" ||
+          (latest.trusted && latest.outcome === "success"))
+      ) {
+        const refresh = await proveHeadRefresh(this.git, candidate.manifest, eligible, baseSha);
+        if (refresh) candidate.headRefresh = refresh;
+      }
     }
     if (historical.length)
       await this.manifestCache.set(cursorKey, (cursor + selected.size) % historical.length);
@@ -170,17 +194,57 @@ export class LiveReader implements Reader {
       observationWarnings.push(
         `Historical CI scan sampled ${selected.size}/${historical.length} refs; deferred unknown/running candidates retain capacity until terminal evidence or explicit infrastructure release`,
       );
+    const failedRoot = candidates.some((candidate) => {
+      const run = latestRun(candidate, this.config);
+      return (
+        !archivedIds.has(candidate.manifest.batchId) &&
+        candidate.manifest.baseSha === baseSha &&
+        run?.status === "completed" &&
+        run.trusted &&
+        run.outcome === "code_failure"
+      );
+    });
     return {
       now: new Date().toISOString(),
       baseSha,
-      ...(this.config.mode === "active" ? { baseCI: await this.github.baseCI(baseSha) } : {}),
+      ...(failedRoot ? { baseCI: await this.github.baseCI(baseSha) } : {}),
+      // Do not make full-main-CI observation availability a hidden admission
+      // gate. Exact candidate receipts are verified separately at landing.
       ...admission,
       ready: eligible,
       candidates,
       stateSha,
       ledger,
       observationWarnings,
-      mainBusy: this.config.mode === "shadow" ? false : await this.github.mainBusy(),
+      // The planner separately counts live runs and durable missing-run
+      // reservations. A full provider slot must not veto a safe root landing.
+      // Publication/retry rechecks provider capacity at the effect boundary.
+      mainBusy:
+        this.config.mode === "shadow"
+          ? false
+          : await this.github.mainBusy(
+              "observe",
+              candidates.flatMap((candidate) => {
+                const reservations = candidate.runs
+                  .filter(
+                    (run) => run.workflow === this.config.workflow && run.status !== "completed",
+                  )
+                  .map((run) => ({
+                    branch: candidate.branch,
+                    headSha: candidate.manifest.tipSha,
+                    runId: run.id,
+                  }));
+                if (
+                  !latestRun(candidate, this.config) &&
+                  ledger.missingRuns[candidate.manifest.batchId]?.status !== "released"
+                )
+                  return [
+                    ...reservations,
+                    { branch: candidate.branch, headSha: candidate.manifest.tipSha },
+                  ];
+                return reservations;
+              }),
+            ),
       headroom: this.github.lastHeadroom,
     };
   }
@@ -305,8 +369,14 @@ export class Controller {
         await this.stage(fresh, result);
         return result;
       }
-      bindings = manifest.pulls;
-      effect = { kind: "land", manifest, expectedBase: observation.baseSha };
+      const headRefresh = replan.candidate.headRefresh;
+      bindings = headRefresh?.pulls ?? manifest.pulls;
+      effect = {
+        kind: "land",
+        manifest,
+        expectedBase: observation.baseSha,
+        ...(headRefresh ? { headRefresh } : {}),
+      };
       ledger.landed.push(manifest.batchId);
     } else if (action.kind === "retry") {
       const reason = infrastructureRetryReason(action.candidate, action.run, this.config);
@@ -321,6 +391,17 @@ export class Controller {
       ledger.retries[id] = retry;
       if (ledger.stages[id]) ledger.stages[id]!.retry = retry;
       effect = { kind: "retry", run: action.run };
+    } else if (action.kind === "park") {
+      const item = action.parked;
+      ledger.parked = (ledger.parked ?? []).map((entry) =>
+        entry.batchId === item.batchId ? { ...entry, announced: true } : entry,
+      );
+      effect = {
+        kind: "park",
+        number: item.pull.number,
+        key: item.batchId,
+        body: `Parked ${item.pull.headSha}: singleton Batch CI failed. Auto-merge disable requested. Push a fix or explicitly re-enable auto-merge to retry; label toggles do not retry. Logs: https://github.com/${this.config.repository}/actions/runs/${item.runId}/attempts/${item.attempt}.\n\n<!-- batcher-parking:${item.batchId} -->`,
+      };
     } else if (action.kind === "announce") {
       const key = bindingKey(action.ejection.pull);
       ledger.ejected = ledger.ejected.map((e) =>
@@ -357,16 +438,21 @@ export class Controller {
               this.clock().toISOString();
         }
         ledger = this.executor?.prepareLedger?.(ledger, effect, observation.now) ?? ledger;
-        const nextState = await this.git.stateCommit(ledger, observation.stateSha, observation.now);
-        await this.executor!.transact({
-          expectedState: observation.stateSha,
-          nextState,
-          expectedLedger: observation.ledger,
-          nextLedger: ledger,
-          now: observation.now,
-          bindings,
-          effect,
-        });
+        try {
+          await this.executor!.transact({
+            expectedState: observation.stateSha,
+            expectedLedger: observation.ledger,
+            nextLedger: ledger,
+            now: observation.now,
+            bindings,
+            effect,
+          });
+        } catch (error) {
+          if (!(error instanceof ReplanRequired)) throw error;
+          result.reason = error.message;
+          await this.stage(observation, result);
+          return result;
+        }
         if (effect.kind === "publish" || effect.kind === "land")
           await this.journal.event(
             effect.manifest,
@@ -434,15 +520,18 @@ export class FencedGitExecutor implements Executor {
   }
   async transact(t: Transaction): Promise<void> {
     requireActiveCapabilities(this.capabilities);
-    if (t.nextLedger.epoch !== t.expectedLedger.epoch + 1 || t.nextState === t.expectedState)
+    if (t.effect.kind === "land" && t.effect.headRefresh)
+      throw new Error("This adapter does not implement verified head refresh landing");
+    if (t.nextLedger.epoch !== t.expectedLedger.epoch + 1)
       throw new Error("Invalid fence transition");
     if (
       t.expectedLedger.owner !== t.nextLedger.owner &&
       Date.parse(t.expectedLedger.expiresAt) > Date.parse(t.now)
     )
       throw new Error("Live lease cannot be stolen");
+    const nextState = await this.writer.git.stateCommit(t.nextLedger, t.expectedState, t.now);
     const updates: RefUpdate[] = [
-      { ref: this.writer.stateRef, expected: t.expectedState, next: t.nextState },
+      { ref: this.writer.stateRef, expected: t.expectedState, next: nextState },
     ];
     if (t.effect.kind === "publish")
       updates.push({

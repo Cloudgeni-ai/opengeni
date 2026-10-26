@@ -29,6 +29,7 @@ import { CopyButton } from "./copy-button";
 import { PreviewLoading } from "./preview-loading";
 import type { observeMarkdownTableLayout } from "./markdown-table-layout";
 import { remarkSoftLineBreaks } from "./remark-soft-line-breaks";
+import { rehypeInlineFlow } from "./rehype-inline-flow";
 import { rehypeSecretRefs } from "./rehype-secret-refs";
 import { mayContainSecretReference, SecretRefChip } from "./secret-ref-chip";
 import { useSecretsUi } from "../secrets-ui";
@@ -269,11 +270,17 @@ const baseComponents: Components = {
 };
 
 const MARKDOWN_LINK_CLASS = "break-words font-medium og-link";
+// Inline text sits in compact chrome (card headers, labels): a long sign-in
+// URL must wrap anywhere so it never widens the card.
+const INLINE_MARKDOWN_LINK_CLASS = "font-medium og-link [overflow-wrap:anywhere]";
 
 // Keep renderer component types stable: rebuilding them remounts paragraphs,
 // destroys native selections, and resets embedded media on host updates.
 const MarkdownLinkContext = createContext<
-  Pick<MarkdownProps, "onSandboxFile" | "artifactHref" | "resolveLink" | "renderLink">
+  Pick<MarkdownProps, "onSandboxFile" | "artifactHref" | "resolveLink" | "renderLink"> & {
+    /** Links sit in an {@link InlineMarkdown} run. */
+    inline?: boolean;
+  }
 >({});
 
 const UNAVAILABLE_LABEL = (
@@ -341,8 +348,9 @@ const markdownComponents: Components = {
   },
   a: ({ children, href, ...linkProps }) => {
     const t = useOpenGeniText();
-    const { onSandboxFile, artifactHref, resolveLink, renderLink } =
+    const { onSandboxFile, artifactHref, resolveLink, renderLink, inline } =
       useContext(MarkdownLinkContext);
+    const linkClass = inline ? INLINE_MARKDOWN_LINK_CLASS : MARKDOWN_LINK_CLASS;
     const inherited = useOpenGeniLinkResolver();
     const { [STANDALONE_LINK_ATTRIBUTE]: standaloneMarker, ...props } =
       linkProps as typeof linkProps & Record<typeof STANDALONE_LINK_ATTRIBUTE, unknown>;
@@ -353,12 +361,7 @@ const markdownComponents: Components = {
         const destination = defaultUrlTransform(artifactHref(target.fileId));
         if (destination) {
           return (
-            <a
-              className={MARKDOWN_LINK_CLASS}
-              href={destination}
-              target="_blank"
-              rel="noreferrer noopener"
-            >
+            <a className={linkClass} href={destination} target="_blank" rel="noreferrer noopener">
               {children}
             </a>
           );
@@ -397,19 +400,18 @@ const markdownComponents: Components = {
       }
       if (destination) {
         return (
-          <a
-            className={MARKDOWN_LINK_CLASS}
-            href={destination}
-            target="_blank"
-            rel="noreferrer noopener"
-          >
+          <a className={linkClass} href={destination} target="_blank" rel="noreferrer noopener">
             {children}
           </a>
         );
       }
       if (resolution?.open) {
         return (
-          <ActionMarkdownLink title={linkActionTitle(t, target)} onOpen={resolution.open}>
+          <ActionMarkdownLink
+            className={linkClass}
+            title={linkActionTitle(t, target)}
+            onOpen={resolution.open}
+          >
             {children}
           </ActionMarkdownLink>
         );
@@ -463,13 +465,7 @@ const markdownComponents: Components = {
       );
     }
     return (
-      <a
-        className={MARKDOWN_LINK_CLASS}
-        target="_blank"
-        rel="noreferrer noopener"
-        href={safeHref}
-        {...props}
-      >
+      <a className={linkClass} target="_blank" rel="noreferrer noopener" href={safeHref} {...props}>
         {children}
       </a>
     );
@@ -477,10 +473,12 @@ const markdownComponents: Components = {
 };
 
 function ActionMarkdownLink({
+  className,
   title,
   onOpen,
   children,
 }: {
+  className: string;
   title: string;
   onOpen: () => void | Promise<void>;
   children: ReactNode;
@@ -491,7 +489,7 @@ function ActionMarkdownLink({
     <button
       type="button"
       className={cn(
-        MARKDOWN_LINK_CLASS,
+        className,
         "inline-flex min-h-7 cursor-pointer items-center aria-disabled:cursor-wait aria-disabled:opacity-70 pointer-coarse:min-h-11",
       )}
       // Not `disabled`: disabling the focused control drops focus to the page,
@@ -920,6 +918,70 @@ function MarkdownImpl({
     </MarkdownLinkContext.Provider>
   );
 }
+
+// Phrasing content only, so a run fits inside a heading, label or paragraph.
+const INLINE_MARKDOWN_ELEMENTS = ["a", "br", "code", "del", "em", "span", "strong"];
+
+const inlineMarkdownComponents: Components = {
+  a: markdownComponents.a!,
+  // Code follows the surrounding text size (help text and options are smaller).
+  code: ({ children, className: _className, node: _node, ...props }) => (
+    <code
+      className="rounded-og-xs bg-og-surface-2 px-1 py-0.5 font-og-mono text-[0.9em] text-og-fg"
+      {...props}
+    >
+      {children}
+    </code>
+  ),
+  em: baseComponents.em!,
+  span: MarkdownSpan,
+  strong: baseComponents.strong!,
+};
+
+const INLINE_FLOW_BREAK = [[rehypeInlineFlow, { separator: "break" }]];
+const INLINE_FLOW_SPACE = [[rehypeInlineFlow, { separator: "space" }]];
+
+/**
+ * Short agent-written text inside host chrome (question prompts, help text,
+ * option descriptions) with the chat renderer's inline Markdown: links
+ * (including `artifact:` and app-relative links, resolved by the nearest
+ * {@link OpenGeniLinkProvider}), emphasis, inline code and secret
+ * references, under the same link safety rules as chat bodies. It renders
+ * no wrapper of its own: block structure flows into one inline run, broken
+ * at paragraph and line boundaries, or joined by spaces with `singleLine`.
+ */
+export const InlineMarkdown = memo(function InlineMarkdown({
+  children,
+  singleLine = false,
+}: {
+  children: string;
+  /** Fold line and paragraph breaks into spaces (truncated one-line chrome). */
+  singleLine?: boolean | undefined;
+}) {
+  const secretsUi = useSecretsUi();
+  const renderLink = useOpenGeniLinkRenderer() ?? undefined;
+  const linkContext = useMemo(() => ({ renderLink, inline: true }), [renderLink]);
+  const rehypePlugins = [
+    ...(singleLine ? INLINE_FLOW_SPACE : INLINE_FLOW_BREAK),
+    ...(secretsUi && mayContainSecretReference(children)
+      ? [[rehypeSecretRefs, { tokenize: secretsUi.tokenize }]]
+      : []),
+  ] as unknown as NonNullable<Parameters<typeof ReactMarkdown>[0]["rehypePlugins"]>;
+  return (
+    <MarkdownLinkContext.Provider value={linkContext}>
+      <ReactMarkdown
+        remarkPlugins={singleLine ? REMARK_PLUGINS : SOFT_LINE_BREAK_REMARK_PLUGINS}
+        rehypePlugins={rehypePlugins}
+        components={inlineMarkdownComponents}
+        urlTransform={markdownUrlTransform}
+        allowedElements={INLINE_MARKDOWN_ELEMENTS}
+        unwrapDisallowed
+      >
+        {children}
+      </ReactMarkdown>
+    </MarkdownLinkContext.Provider>
+  );
+});
 
 /** Memoized so streaming re-renders of the parent don't re-parse settled bodies. */
 export const Markdown = memo(function SearchableMarkdown(props: MarkdownProps) {

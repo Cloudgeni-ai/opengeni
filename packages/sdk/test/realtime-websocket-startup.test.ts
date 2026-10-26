@@ -342,3 +342,92 @@ describe("WebSocket startup cleanup (controlled browser primitives)", () => {
     expect(f.tracks.map((track) => track.stopCalls)).toEqual([0, 0, 0]);
   });
 });
+
+describe("context delivery to the voice model", () => {
+  async function connected() {
+    let events: RTCDataChannel | null = null;
+    const f = fixture();
+    (f.input as { onEventsCreated: (channel: RTCDataChannel) => void }).onEventsCreated = (
+      channel,
+    ) => {
+      events = channel;
+    };
+    const connection = await createRealtimeWebsocketTransportStarter()(f.input);
+    const socket = FakeSocket.instances[0]!;
+    const append = async (message: Record<string, unknown>) => {
+      events!.send(JSON.stringify(message));
+      await Promise.resolve();
+    };
+    const providerEvent = (event: Record<string, unknown>) =>
+      socket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(event) }));
+    const items = () =>
+      socket.sent
+        .filter((event) => event.type === "conversation.item.create")
+        .map((event) => (event as unknown as { item: Record<string, unknown> }).item);
+    return { connection, socket, append, providerEvent, items };
+  }
+  const progress = (text: string) => ({
+    type: "delegation.context.append",
+    delegation_item_id: "call_1",
+    channel: "commentary",
+    content: [{ type: "text", text }],
+  });
+
+  // Eleven Realtime keeps user items unread until a response is requested and
+  // rejects more than ten; one item per streamed fragment overflowed it.
+  test("progress is held and sent as one item when the person starts speaking", async () => {
+    const live = await connected();
+    for (const fragment of ["Checking ", "the employee ", "list."])
+      await live.append(progress(fragment));
+    await live.append({
+      type: "session.context.append",
+      channel: "commentary",
+      content: [{ type: "text", text: "Kari was added." }],
+    });
+    expect(live.items()).toEqual([]);
+
+    live.providerEvent({ type: "input_audio_buffer.speech_started" });
+    expect(live.items()).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: "<execution_progress>\nChecking the employee list.\n</execution_progress>\n<session_update>\nKari was added.\n</session_update>",
+          },
+        ],
+      },
+    ]);
+    // Nothing new is held, so further speech sends nothing.
+    live.providerEvent({ type: "input_audio_buffer.speech_started" });
+    expect(live.items()).toHaveLength(1);
+    live.connection.stop();
+  });
+
+  test("held progress precedes a speakable result and its response request", async () => {
+    const live = await connected();
+    await live.append(progress("Opening the project."));
+    await live.append({
+      type: "delegation.context.append",
+      delegation_item_id: "call_1",
+      channel: "speakable",
+      content: [{ type: "text", text: "Done." }],
+    });
+    expect(
+      live.socket.sent.map((event) =>
+        event.type === "conversation.item.create"
+          ? (event as unknown as { item: { type: string } }).item.type
+          : event.type,
+      ),
+    ).toEqual(["message", "function_call_output", "response.create"]);
+    expect(live.items()[0]).toMatchObject({
+      content: [
+        {
+          text: "<execution_progress>\nOpening the project.\n</execution_progress>",
+        },
+      ],
+    });
+    live.connection.stop();
+  });
+});

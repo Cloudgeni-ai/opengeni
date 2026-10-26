@@ -29,7 +29,7 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
       OPENGENI_SOURCE_ADMISSION_ACTION: verify_immutable_pr_head
       ADMISSION_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      ADMISSION_HELPER_SHA256: d7a5619c88a0118348ee923b862ecac6ad9608c696494f42252f89455b5fe55a
+      ADMISSION_HELPER_SHA256: 907f5317ec0b21e4525828d2008b5592a36e8f732ad812065ab47ef1aa3a52d3
     steps:
       - name: Execute the exact base-owned admission verifier
         shell: bash

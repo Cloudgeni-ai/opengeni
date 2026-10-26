@@ -41,7 +41,7 @@ mod threads;
 mod working_set;
 
 pub use agent::{
-    BusyRule, DiskGauge, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig,
+    BusyRule, DiskGauge, GuestChecks, Handle, HostAgent, HostConfig, HostError, Lease, PagerConfig,
 };
 pub use chunked::{CHUNK_BYTES, Chunked};
 pub use compute_protocol::host as protocol;

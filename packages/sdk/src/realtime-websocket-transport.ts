@@ -117,9 +117,8 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
           websocket.close(1000, "Opengeni realtime startup failed");
         }
       };
-      const channel = new RealtimeWebsocketDataChannel((payload) =>
-        handleBridgeOutbound(websocket, payload, codec),
-      );
+      const outbox = new RealtimeWebsocketContextOutbox(websocket, codec);
+      const channel = new RealtimeWebsocketDataChannel((payload) => outbox.deliver(payload));
       const closeSocketAndAudio = cleanupStartup;
       cleanupStartup = () => {
         try {
@@ -154,6 +153,7 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
           channel,
           websocket,
           audio,
+          outbox,
           finalizedAssistantItems,
           getCurrentOutputItemId: () => currentOutputItemId,
           setCurrentOutputItemId: (value) => {
@@ -195,14 +195,6 @@ export function createRealtimeWebsocketTransportStarter(): RealtimeControllerTra
       await waitForWebSocketOpen(websocket, input.signal);
       channel.open();
       if (answer.sessionUpdate) send(websocket, answer.sessionUpdate as RealtimeClientEvent);
-      for (const item of answer.initialItems) {
-        send(
-          websocket,
-          codec.textItem(
-            `<session_initial_item role="${item.role}">\n${item.text}\n</session_initial_item>`,
-          ),
-        );
-      }
       sendAudio = (encoded) => send(websocket, codec.audioAppend(encoded));
       await capture;
       throwIfAborted(input.signal);
@@ -252,6 +244,7 @@ function handleRealtimeEvent(input: {
   channel: RealtimeWebsocketDataChannel;
   websocket: WebSocket;
   audio: RealtimeWebsocketAudio;
+  outbox: RealtimeWebsocketContextOutbox;
   finalizedAssistantItems: Set<string>;
   getCurrentOutputItemId(): string | null;
   setCurrentOutputItemId(value: string | null): void;
@@ -276,6 +269,8 @@ function handleRealtimeEvent(input: {
       input.audio.stopPlayback();
       send(input.websocket, input.codec.truncate(itemId, Math.max(0, Math.round(audioEndMs))));
     }
+    // The reply to this speech is the next moment the model reads context.
+    input.outbox.flush();
     return;
   }
   if (
@@ -425,52 +420,98 @@ class RealtimeWebsocketDataChannel extends EventTarget {
   }
 }
 
-function handleBridgeOutbound(
-  websocket: WebSocket,
-  messages: Array<Record<string, unknown>>,
-  codec: RealtimeWireCodec,
-): void {
-  const groups = new Map<
-    string,
-    { type: string; id: string | null; channel: string; text: string }
-  >();
-  for (const message of messages) {
-    const type = stringValue(message.type);
-    if (type !== "session.context.append" && type !== "delegation.context.append") continue;
-    const id = stringValue(message.delegation_item_id) ?? null;
-    const channel = stringValue(message.channel) ?? "commentary";
-    const key = `${type}:${id ?? "session"}:${channel}`;
-    const content = Array.isArray(message.content) ? message.content : [];
-    const text = content
-      .filter(isRecord)
-      .map((part) => stringValue(part.text) ?? "")
-      .join("");
-    const existing = groups.get(key);
-    groups.set(key, {
-      type,
-      id,
-      channel,
-      text: `${existing?.text ?? ""}${text}`,
-    });
-  }
-  for (const group of groups.values()) {
-    if (group.type === "delegation.context.append" && group.id && group.channel === "speakable") {
-      send(
-        websocket,
-        codec.functionOutput(group.id, DELEGATION_TOOL, JSON.stringify({ result: group.text })),
-      );
-      send(websocket, codec.responseCreate());
-      continue;
+/** Newest unspoken context kept for the voice model; older text is dropped first. */
+const HELD_CONTEXT_MAX_CHARS = 32_768;
+const HELD_CONTEXT_TRUNCATION_MARKER = "…[earlier progress truncated]\n";
+
+/**
+ * Delivers the session's context to the voice model. A speakable update goes
+ * out at once with a response request. Progress and other unspoken context is
+ * held and sent as one item at the two moments the model reads it: when the
+ * person starts speaking, and just before a response this client requests.
+ * Sending every streamed progress fragment as its own item as it arrived
+ * flooded providers that keep user items unread until a response is
+ * requested; Eleven Realtime rejects more than ten.
+ */
+class RealtimeWebsocketContextOutbox {
+  private held: Array<{ key: string; wrapper: string; text: string }> = [];
+
+  constructor(
+    private readonly websocket: WebSocket,
+    private readonly codec: RealtimeWireCodec,
+  ) {}
+
+  deliver(messages: Array<Record<string, unknown>>): void {
+    const groups = new Map<
+      string,
+      { type: string; id: string | null; channel: string; text: string }
+    >();
+    for (const message of messages) {
+      const type = stringValue(message.type);
+      if (type !== "session.context.append" && type !== "delegation.context.append") continue;
+      const id = stringValue(message.delegation_item_id) ?? null;
+      const channel = stringValue(message.channel) ?? "commentary";
+      const key = `${type}:${id ?? "session"}:${channel}`;
+      const content = Array.isArray(message.content) ? message.content : [];
+      const text = content
+        .filter(isRecord)
+        .map((part) => stringValue(part.text) ?? "")
+        .join("");
+      const existing = groups.get(key);
+      groups.set(key, {
+        type,
+        id,
+        channel,
+        text: `${existing?.text ?? ""}${text}`,
+      });
     }
-    const wrapper =
-      group.type === "delegation.context.append"
-        ? group.channel === "commentary"
-          ? "execution_progress"
-          : "execution_result"
-        : "session_update";
-    const text = `<${wrapper}>\n${group.text}\n</${wrapper}>`;
-    send(websocket, codec.textItem(text));
-    if (group.channel === "speakable") send(websocket, codec.responseCreate());
+    for (const [key, group] of groups) {
+      const wrapper =
+        group.type === "delegation.context.append"
+          ? group.channel === "commentary"
+            ? "execution_progress"
+            : "execution_result"
+          : "session_update";
+      if (group.channel !== "speakable") {
+        this.hold(key, wrapper, group.text);
+        continue;
+      }
+      this.flush();
+      if (group.type === "delegation.context.append" && group.id) {
+        send(
+          this.websocket,
+          this.codec.functionOutput(
+            group.id,
+            DELEGATION_TOOL,
+            JSON.stringify({ result: group.text }),
+          ),
+        );
+      } else {
+        send(this.websocket, this.codec.textItem(`<${wrapper}>\n${group.text}\n</${wrapper}>`));
+      }
+      send(this.websocket, this.codec.responseCreate());
+    }
+  }
+
+  /** Sends everything held as one item. */
+  flush(): void {
+    if (this.held.length === 0) return;
+    let text = this.held
+      .map((entry) => `<${entry.wrapper}>\n${entry.text}\n</${entry.wrapper}>`)
+      .join("\n");
+    this.held = [];
+    if (text.length > HELD_CONTEXT_MAX_CHARS) {
+      text = `${HELD_CONTEXT_TRUNCATION_MARKER}${text.slice(text.length - HELD_CONTEXT_MAX_CHARS)}`;
+    }
+    send(this.websocket, this.codec.textItem(text));
+  }
+
+  // Streamed fragments of one update continue its text.
+  private hold(key: string, wrapper: string, text: string): void {
+    if (text.length === 0) return;
+    const last = this.held.at(-1);
+    if (last?.key === key) last.text += text;
+    else this.held.push({ key, wrapper, text });
   }
 }
 

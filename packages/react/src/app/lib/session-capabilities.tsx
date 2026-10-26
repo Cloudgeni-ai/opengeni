@@ -140,10 +140,25 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
     matches: (tool) => tool.startsWith("secret_"),
   },
   {
+    id: "meetings",
+    name: "Meetings",
+    description: "Search recorded meetings and read their transcripts.",
+    kind: "opengeni",
+    matches: (tool) => tool === "meetings_search" || tool === "meeting_read",
+  },
+  {
+    id: "app-actions",
+    name: "Settings in chat",
+    description:
+      "Do what you could do in settings yourself: invite people, share chats, check your plan, credits and usage, and change preferences. Each change asks you first.",
+    kind: "opengeni",
+    matches: (tool) => tool === "admin_actions_search" || tool.startsWith("admin_action_"),
+  },
+  {
     id: "workspace",
     name: "Workspace operations",
     description:
-      "Use sandboxes, sandbox environments, variables, schedules, artifacts, and Site Data.",
+      "Use sandboxes, sandbox environments, variables, automations and their event sources, artifacts, and Site Data.",
     kind: "opengeni",
     matches: (tool) =>
       tool.startsWith("sandbox") ||
@@ -154,6 +169,8 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool.startsWith("variable_set_") ||
       tool.startsWith("environment_") ||
       tool.startsWith("scheduled_") ||
+      tool.startsWith("event_sources_") ||
+      tool === "events_get" ||
       tool.startsWith("artifacts_") ||
       tool.startsWith("editable_artifact_") ||
       tool.startsWith("site_data_") ||

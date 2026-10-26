@@ -8,12 +8,15 @@ import type {
   SessionPendingInputPreview,
   SessionTurn,
 } from "@opengeni/sdk";
+import { isTransientRequestError } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { normalizeError } from "../lib/error-message";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import {
+  DEFAULT_TRANSIENT_READ_RETRY,
   projectionReadThrough,
+  transientReadRetryStep,
   useDebouncedCallback,
   usePageLiveActivity,
   useSessionEventTrigger,
@@ -57,6 +60,14 @@ export type AcceptedQueueSteer = {
   state: "sending" | "queued";
 };
 
+/** Outcome of withdrawing one waiting prompt back into an empty composer. */
+export type QueueRecallResult =
+  | { status: "recalled"; draft: ComposerDraft }
+  /** The prompt left the queue first (the agent took it); nothing changed. */
+  | { status: "already_sent" }
+  /** Anything else (offline, draft changed, a mutation in flight); the queue shows why. */
+  | { status: "failed" };
+
 export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
@@ -84,6 +95,14 @@ export type UseTurnQueueResult = {
     turnId: string,
     options: { expectedDraftRevision: number; replaceDraft: boolean },
   ) => Promise<ComposerDraft | null>;
+  /**
+   * Withdraw a waiting prompt into an empty durable composer draft. Losing the
+   * race to the agent is a quiet `already_sent`, not a queue error.
+   */
+  recallTurn?: (
+    turnId: string,
+    options: { expectedDraftRevision: number },
+  ) => Promise<QueueRecallResult>;
   /** Advance the same durable waiting prompt; no duplicate prompt is created. */
   steerTurn: (turnId: string) => Promise<boolean>;
   removeTurn: (turnId: string) => Promise<boolean>;
@@ -111,6 +130,8 @@ export function useTurnQueue(
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
   const pageLive = usePageLiveActivity();
+  const pageLiveRef = useRef(pageLive);
+  pageLiveRef.current = pageLive;
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [loading, setLoading] = useState(enabled);
@@ -122,6 +143,19 @@ export function useTurnQueue(
   const readGeneration = useRef(0);
   const targetKeyRef = useRef(targetKey);
   const snapshotRef = useRef<SessionQueueSnapshot | null>(null);
+  // A deploy or maintenance window makes queue reads fail for a while. Keep
+  // the last queue on screen and retry quietly; only a failure that outlasts
+  // the quiet window (or a definitive one) becomes the queue's error.
+  const transientStreakRef = useRef<{ since: number; attempts: number; surfaced: boolean } | null>(
+    null,
+  );
+  const transientRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelTransientRetry = useCallback(() => {
+    if (transientRetryTimerRef.current !== null) {
+      clearTimeout(transientRetryTimerRef.current);
+      transientRetryTimerRef.current = null;
+    }
+  }, []);
 
   // Revoke the old target only when the new one commits. A concurrent render
   // may suspend while the previous target remains visible and interactive.
@@ -135,10 +169,12 @@ export function useTurnQueue(
     setSnapshot(null);
     setLoading(enabled);
     setError(null);
+    transientStreakRef.current = null;
+    cancelTransientRetry();
     setMutationError(null);
     setPendingByTurn({});
     setAcceptedSteers([]);
-  }, [enabled, targetKey]);
+  }, [cancelTransientRetry, enabled, targetKey]);
 
   useEffect(() => {
     if (acceptedSteers.length === 0 || options.events === undefined) return;
@@ -193,6 +229,8 @@ export function useTurnQueue(
       try {
         const fetched = await client.getQueue(workspaceId, sessionId);
         if (targetKeyRef.current !== ownedTargetKey) return;
+        transientStreakRef.current = null;
+        cancelTransientRetry();
         const ownsLatestRead = ticket === readGeneration.current;
         if (rejectOnFailure) {
           const committed = acceptSnapshot(ownedTargetKey, fetched);
@@ -211,17 +249,48 @@ export function useTurnQueue(
           targetKeyRef.current === ownedTargetKey &&
           (ticket === readGeneration.current || rejectOnFailure)
         ) {
-          setError(asError(cause));
-          if (ticket === readGeneration.current) setLoading(false);
+          if (isTransientRequestError(cause)) {
+            const now = Date.now();
+            const streak = (transientStreakRef.current ??= {
+              since: now,
+              attempts: 0,
+              surfaced: false,
+            });
+            const step = transientReadRetryStep(streak, now, DEFAULT_TRANSIENT_READ_RETRY, cause);
+            if (!step.quiet) {
+              // One stable error per streak; background retries stay silent.
+              if (!streak.surfaced) setError(asError(cause));
+              streak.surfaced = true;
+              if (ticket === readGeneration.current) setLoading(false);
+            }
+            // A reconciliation read is retried by its caller; a hidden page
+            // reads again when it is shown.
+            if (!rejectOnFailure && pageLiveRef.current) {
+              cancelTransientRetry();
+              transientRetryTimerRef.current = setTimeout(() => {
+                transientRetryTimerRef.current = null;
+                if (targetKeyRef.current === ownedTargetKey) void loadRef.current();
+              }, step.delayMs);
+            }
+          } else {
+            transientStreakRef.current = null;
+            setError(asError(cause));
+            if (ticket === readGeneration.current) setLoading(false);
+          }
         }
         if (rejectOnFailure) throw cause;
       }
     },
-    [client, workspaceId, sessionId, acceptSnapshot],
+    [client, workspaceId, sessionId, acceptSnapshot, cancelTransientRetry],
   );
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  useEffect(() => cancelTransientRetry, [cancelTransientRetry]);
 
   useEffect(() => {
     if (!enabled || !pageLive) {
+      // A hidden page does not keep retrying; it reads again when shown.
+      cancelTransientRetry();
       setLoading(false);
       return;
     }
@@ -248,7 +317,7 @@ export function useTurnQueue(
       if (timer !== null) clearTimeout(timer);
       readGeneration.current += 1;
     };
-  }, [load, enabled, pageLive, options.pollIntervalMs]);
+  }, [cancelTransientRetry, load, enabled, pageLive, options.pollIntervalMs]);
 
   useEffect(() => {
     if (enabled && workspaceControlEvent) void load();
@@ -296,6 +365,7 @@ export function useTurnQueue(
         turn: SessionTurn,
         clientEventId: string,
       ) => Promise<SessionQueueMutationResponse>,
+      failure: { quietWhenGone?: boolean } = {},
     ): Promise<SessionQueueMutationResponse | null> => {
       const ownedTargetKey = targetKey;
       if (!sessionId || targetKeyRef.current !== ownedTargetKey || pendingRef.current[turnId]) {
@@ -324,8 +394,20 @@ export function useTurnQueue(
         return result;
       } catch (cause) {
         if (targetKeyRef.current === ownedTargetKey) {
-          setMutationError(asError(cause));
-          await load();
+          if (failure.quietWhenGone) {
+            // Reconcile first: a prompt that already left the queue is the
+            // caller's quiet outcome, never a flash of queue error.
+            await load();
+            const stillWaiting = snapshotRef.current?.items.some(
+              (candidate) => candidate.id === turnId,
+            );
+            if (stillWaiting !== false && targetKeyRef.current === ownedTargetKey) {
+              setMutationError(asError(cause));
+            }
+          } else {
+            setMutationError(asError(cause));
+            await load();
+          }
         }
         return null;
       } finally {
@@ -370,6 +452,36 @@ export function useTurnQueue(
       return result?.draft ?? null;
     },
     [client, mutate, sessionId, workspaceId],
+  );
+
+  const recallTurn = useCallback(
+    async (
+      turnId: string,
+      recall: { expectedDraftRevision: number },
+    ): Promise<QueueRecallResult> => {
+      const ownedTargetKey = targetKey;
+      const known = snapshotRef.current?.items.some((candidate) => candidate.id === turnId);
+      if (known === false) return { status: "already_sent" };
+      const result = await mutate(
+        turnId,
+        "edit",
+        (_current, turn, clientEventId) =>
+          client.editQueueItem(workspaceId, sessionId!, turnId, {
+            clientEventId,
+            expectedTurnVersion: turn.version,
+            expectedDraftRevision: recall.expectedDraftRevision,
+            replaceDraft: false,
+          }),
+        { quietWhenGone: true },
+      );
+      if (targetKeyRef.current !== ownedTargetKey) return { status: "failed" };
+      if (result?.draft) return { status: "recalled", draft: result.draft };
+      const stillWaiting = snapshotRef.current?.items.some((candidate) => candidate.id === turnId);
+      return result === null && stillWaiting === false
+        ? { status: "already_sent" }
+        : { status: "failed" };
+    },
+    [client, mutate, sessionId, targetKey, workspaceId],
   );
 
   const steerTurn = useCallback(
@@ -473,6 +585,7 @@ export function useTurnQueue(
     refresh: load,
     moveTurn,
     editTurn,
+    recallTurn,
     steerTurn,
     removeTurn,
     pendingByTurn: visiblePendingByTurn,

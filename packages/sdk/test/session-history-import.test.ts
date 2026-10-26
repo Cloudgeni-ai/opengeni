@@ -288,7 +288,8 @@ describe("server-only archived session history import SDK", () => {
       });
       expect(build.success).toBe(true);
       const output = await build.outputs[0]!.text();
-      expect(output).not.toContain("session-imports");
+      // The relay names the route segment only to refuse it; no import path is built.
+      expect(output).not.toContain("/session-imports");
       expect(output).not.toContain("importArchivedSession");
       expect(output).not.toContain("Import request exceeds its byte limit");
     }

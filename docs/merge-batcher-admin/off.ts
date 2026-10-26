@@ -1,6 +1,6 @@
 /** Operator-only STOP + exact reverse stages. Importing this file does nothing. */
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rmdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rmdir, writeFile, rm, rename } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { validatePlan, verify, type Phase, type Plan, type RuleSet, type Snapshot } from "./bundle";
 
@@ -10,6 +10,7 @@ const controlFiles = [
   "service-config.ts",
   "service-limits.ts",
   "stopped-reconciliation.ts",
+  "stopped-lineage.ts",
 ] as const;
 type DrainWitness = {
   uid: string;
@@ -26,6 +27,7 @@ type Reconciliation = {
   effects: number;
 };
 type Deployment = {
+  lineageReconciliation?: any;
   uid: string;
   image: string;
   uri: string;
@@ -41,10 +43,12 @@ type Deployment = {
 type Contract = {
   schemaVersion: 1;
   directory: string;
+  receiptDirectory?: string;
   sources: Record<string, string>;
   deployment: Deployment;
 };
 type Stop = {
+  lineageReconciliation?: any;
   command: string;
   disabled: boolean;
   manualZero: boolean;
@@ -141,6 +145,7 @@ export function verifyStop(result: Stop, receipt: Deployment, expected: Deployme
     result.writer.reconciliationRequired === false;
   const prior = result.outcome === "verified-disabled" && result.priorDrainProof === true;
   const reconciled = verifyReconciliation(result, receipt, expected);
+  const lineage = verifyLineageReconciliation(result, receipt, expected);
   const oldProof =
     (drained || prior) &&
     receipt.stopProof?.uid === expected.uid &&
@@ -154,12 +159,91 @@ export function verifyStop(result: Stop, receipt: Deployment, expected: Deployme
     result.stopPersisted !== true ||
     result.forced !== false ||
     !stableState ||
-    (!oldProof && !reconciled)
+    (!oldProof && !reconciled && !lineage)
   ) {
     throw new Error(
       "STOP is not proven drained/reconciled; keep protections and hold manual merges",
     );
   }
+}
+function verifyLineageReconciliation(
+  result: Stop,
+  receipt: Deployment,
+  expected: Deployment,
+): boolean {
+  const p = result.lineageReconciliation;
+  if (
+    result.outcome !== "lineage-reconciled-disabled" ||
+    !p ||
+    JSON.stringify(p) !== JSON.stringify(receipt.lineageReconciliation)
+  )
+    return false;
+  if (
+    result.drainProven !== false ||
+    result.idempotent !== true ||
+    result.writer != null ||
+    result.priorDrainProof !== false
+  )
+    return false;
+  if (
+    p.schema !== 1 ||
+    p.uid !== expected.uid ||
+    !/^[1-9][0-9]*$/.test(p.generation) ||
+    typeof p.revision !== "string" ||
+    !p.revision ||
+    !/^[a-f0-9]{64}$/.test(p.lineageDigest)
+  )
+    return false;
+  if (
+    p.stateSha !== result.stateBefore ||
+    p.proof?.stateSha !== p.stateSha ||
+    p.proof?.outcome !== "stable-state-observed" ||
+    p.proof?.settledCandidates !== true
+  )
+    return false;
+  if (
+    p.rootWitness?.uid !== expected.uid ||
+    p.rootWitness?.mode !== "active" ||
+    !p.rootWitness.instance ||
+    !/^stop-/.test(p.rootWitness.controlGeneration)
+  )
+    return false;
+  if (
+    !/^[1-9][0-9]*$/.test(String(p.rootWitness.generation)) ||
+    BigInt(p.generation) <= BigInt(p.rootWitness.generation)
+  )
+    return false;
+  if (
+    !Array.isArray(p.audits) ||
+    p.audits.length < 1 ||
+    p.audits.length > 16 ||
+    p.audits.some((a: any) => !a.insertId || !a.etag || !Number.isFinite(Date.parse(a.timestamp)))
+  )
+    return false;
+  if (
+    !Array.isArray(p.controls) ||
+    p.controls.length < 1 ||
+    p.controls.length > 65 ||
+    p.controls.some(
+      (c: any, i: number) =>
+        !Number.isSafeInteger(c.version) ||
+        c.version < 1 ||
+        !/^stop-/.test(c.generation) ||
+        (i > 0 && c.version !== p.controls[i - 1].version + 1),
+    )
+  )
+    return false;
+  if (
+    p.controls[0].generation !== p.rootWitness.controlGeneration ||
+    p.controls.at(-1).version !== p.controlVersion
+  )
+    return false;
+  return (
+    Number.isSafeInteger(p.proof.effects) &&
+    p.proof.effects >= 0 &&
+    /^[a-f0-9]{40}$/.test(p.proof.mainSha) &&
+    Array.isArray(p.proof.candidateRefs)
+  );
 }
 function verifyReconciliation(result: Stop, receipt: Deployment, expected: Deployment): boolean {
   if (result.outcome !== "reconciled-disabled") return false;
@@ -232,8 +316,17 @@ function verifyReconciliation(result: Stop, receipt: Deployment, expected: Deplo
     );
   return result.drainProven === false && result.idempotent === true;
 }
-async function command(args: string[], directory: string, name: string): Promise<string> {
-  const child = Bun.spawn(args, { stdout: "pipe", stderr: "pipe" });
+async function command(
+  args: string[],
+  directory: string,
+  name: string,
+  planInput?: string,
+): Promise<string> {
+  const child = Bun.spawn(args, {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, BATCHER_VERIFIED_PLAN: planInput ?? "" },
+  });
   const [status, out, err] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -247,49 +340,151 @@ async function command(args: string[], directory: string, name: string): Promise
     );
   return out;
 }
-export async function off(adminPath: string, optIn: string): Promise<void> {
+export async function off(
+  adminPath: string,
+  optIn: string,
+  expectedContractSha256?: string,
+  expectedPlanSha256?: string,
+  resumeOnly = false,
+): Promise<void> {
   if (optIn !== "--apply-after-go")
     throw new Error("OFF requires separate operator go and --apply-after-go");
   const admin = resolve(adminPath),
     planDir = join(admin, "plan");
-  const contract = await json<Contract>(join(admin, "stop-contract.json"));
+  const contractBytes = await readFile(join(admin, "stop-contract.json"));
+  if (
+    expectedContractSha256 !== undefined &&
+    createHash("sha256").update(contractBytes).digest("hex") !== expectedContractSha256
+  )
+    throw Error("Pinned STOP contract changed");
+  const contract = JSON.parse(contractBytes.toString()) as Contract;
   if (contract.schemaVersion !== 1 || !isAbsolute(contract.directory))
     throw new Error("Invalid STOP contract");
+  const receiptDirectory = contract.receiptDirectory ?? contract.directory;
+  if (
+    contract.receiptDirectory !== undefined &&
+    (contract.directory !== "/opt/batcher-operator" ||
+      receiptDirectory !== "/work/operator" ||
+      !expectedContractSha256)
+  )
+    throw Error("Separate receipt directory requires pinned image operator contract");
   if (JSON.stringify(await hashes(contract.directory)) !== JSON.stringify(contract.sources))
     throw new Error("Reviewed STOP source changed");
   if (
     JSON.stringify(
-      identity(await json<Deployment>(join(contract.directory, "deployment-receipt.json"))),
+      identity(await json<Deployment>(join(receiptDirectory, "deployment-receipt.json"))),
     ) !== JSON.stringify(contract.deployment)
   )
     throw new Error("STOP target changed");
   // A local lock prevents two invocations using this plan; not a remote admin fence.
   const lock = join(planDir, "off-lock");
   await mkdir(lock);
+  let verifiedDirectory: string | undefined;
   try {
     const attempt = await mkdtemp(join(admin, "off."));
     // STOP precedes GitHub reads and plan validation: a GitHub outage must not
     // prevent the already-bound runtime's durable stop operation.
-    const result = JSON.parse(
-      await command(
-        [process.execPath, join(contract.directory, "control.ts"), "stop"],
-        attempt,
-        "stop",
-      ),
-    ) as Stop;
+    const pointer = join(planDir, "off-stop-attempt.json");
+    let result: Stop;
+    let receipt = await json<Deployment>(join(receiptDirectory, "deployment-receipt.json"));
+    if (resumeOnly) {
+      const retained = await json<{ name: string }>(pointer);
+      if (!/^off\.[A-Za-z0-9]+$/.test(retained.name)) throw Error("Invalid retained STOP path");
+      const original = await json<Stop>(join(admin, retained.name, "stop.stdout"));
+      const cloud = await import(join(contract.directory, "cloud-auth.ts"));
+      const config = await import(join(contract.directory, "service-config.ts"));
+      const { reconcileRetainedStop } = await import("./resume-stop");
+      let reads = 0;
+      const supplemental = await reconcileRetainedStop(
+        original,
+        receipt,
+        contract.deployment,
+        config.serviceId,
+        config.controlSecret,
+        cloud.api,
+        async (path) =>
+          JSON.parse(
+            await command(
+              ["bash", join(code, "stage.sh"), admin, "read-json", path],
+              attempt,
+              `reconciliation-${++reads}`,
+            ),
+          ),
+        { project: cloud.project, region: cloud.region },
+      );
+      await writeFile(join(attempt, "stop-supplement.json"), JSON.stringify(supplemental), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      result = supplemental.result;
+      receipt = supplemental.receipt;
+    } else {
+      // The lock serializes writers. Point to this attempt atomically BEFORE
+      // STOP, so later activations never reconcile an older drain. Every old
+      // attempt directory and its original outcome remain unchanged.
+      const nextPointer = join(attempt, "stop-attempt-pointer.json");
+      await writeFile(nextPointer, JSON.stringify({ name: attempt.slice(admin.length + 1) }), {
+        flag: "wx",
+        mode: 0o600,
+      });
+      await rename(nextPointer, pointer);
+      result = JSON.parse(
+        await command(
+          [process.execPath, join(contract.directory, "control.ts"), "stop"],
+          attempt,
+          "stop",
+        ),
+      ) as Stop;
+    }
     verifyStop(
       result,
-      await json<Deployment>(join(contract.directory, "deployment-receipt.json")),
+      resumeOnly
+        ? receipt
+        : await json<Deployment>(join(receiptDirectory, "deployment-receipt.json")),
       contract.deployment,
     );
-    const plan = await json<Plan>(join(planDir, "plan.json"));
+    const planBytes = await readFile(join(planDir, "plan.json"));
+    if (
+      expectedPlanSha256 !== undefined &&
+      createHash("sha256").update(planBytes).digest("hex") !== expectedPlanSha256
+    )
+      throw Error("Pinned OFF plan changed");
+    const plan = JSON.parse(planBytes.toString()) as Plan;
     validatePlan(plan);
+    // Deliberately outside /work and TMPDIR: mutable recovery storage is not
+    // the source for any subsequent policy read or HTTP request payload.
+    verifiedDirectory = await mkdtemp("/tmp/batcher-off-plan-");
+    for (const [name, value] of Object.entries({
+      plan,
+      admission: plan.admission,
+      restore: plan.restore,
+      guard: plan.guard,
+      namespace: plan.namespace,
+    }))
+      await writeFile(join(verifiedDirectory, `${name}.json`), JSON.stringify(value), {
+        flag: "wx",
+        mode: 0o400,
+      });
     let serial = 0;
+    // Freeze each retained ruleset receipt once. Verification and DELETE target
+    // selection must consume the same bytes even if recovery storage changes.
+    for (const kind of ["guard", "namespace"] as const) {
+      try {
+        const bytes = await readFile(join(planDir, `${kind}-receipt.json`));
+        await writeFile(join(verifiedDirectory, `${kind}-receipt.json`), bytes, {
+          flag: "wx",
+          mode: 0o400,
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
     async function stage(action: string, arg?: string): Promise<string> {
       return command(
         ["bash", join(code, "stage.sh"), admin, action, ...(arg ? [arg] : [])],
         attempt,
         `${++serial}-${action}`,
+        verifiedDirectory,
       );
     }
     async function phase(): Promise<Phase> {
@@ -297,10 +492,18 @@ export async function off(adminPath: string, optIn: string): Promise<void> {
       const snapshot = await json<Snapshot>(path);
       const receipts: { guard?: RuleSet; namespace?: RuleSet } = {};
       for (const kind of ["guard", "namespace"] as const) {
-        if (await exists(join(planDir, `${kind}-receipt.json`)))
-          receipts[kind] = await json(join(planDir, `${kind}-receipt.json`));
+        if (await exists(join(verifiedDirectory!, `${kind}-receipt.json`)))
+          receipts[kind] = await json(join(verifiedDirectory!, `${kind}-receipt.json`));
       }
-      for (const candidate of ["restored", "guard", "namespace", "applied"] as const) {
+      for (const candidate of [
+        "restored",
+        "guard",
+        "namespace",
+        "applied",
+        "legacy-applied",
+        "upgrade-admission",
+        "legacy-namespace",
+      ] as const) {
         try {
           verify(plan, snapshot, candidate, receipts);
           return candidate;
@@ -311,10 +514,25 @@ export async function off(adminPath: string, optIn: string): Promise<void> {
       throw new Error("Unknown/drifted inventory; STOP retained, no restoration writes");
     }
     let current = await phase();
-    if (current === "applied" && !(await exists(join(planDir, "admit-attempt", "verified"))))
-      await stage("reconcile-admit");
+    if (
+      current === "upgrade-admission" &&
+      (await exists(join(planDir, "upgrade-admission-attempt"))) &&
+      !(await exists(join(planDir, "upgrade-admission-attempt", "verified")))
+    )
+      await stage("reconcile-upgrade-admission");
+    if (current === "applied") {
+      if (await exists(join(planDir, "upgrade-namespace-attempt"))) {
+        if (!(await exists(join(planDir, "upgrade-namespace-attempt", "verified"))))
+          await stage("reconcile-upgrade-namespace");
+      } else if (!(await exists(join(planDir, "admit-attempt", "verified")))) {
+        await stage("reconcile-admit");
+      }
+    }
     for (const [before, action] of [
+      ["legacy-applied", "restore-legacy-admission"],
+      ["upgrade-admission", "restore-upgrade-admission"],
       ["applied", "restore-admission"],
+      ["legacy-namespace", "delete-legacy-namespace"],
       ["namespace", "delete-namespace"],
       ["guard", "delete-guard"],
     ] as const) {
@@ -343,9 +561,12 @@ export async function off(adminPath: string, optIn: string): Promise<void> {
       `OFF verified; normal reviewed squash path restored. Receipt: ${attempt}/off-verified.json`,
     );
   } finally {
+    if (verifiedDirectory) await rm(verifiedDirectory, { recursive: true });
     await rmdir(lock);
   }
 }
+export const resumeOff = (admin: string, optIn: string, contract?: string, plan?: string) =>
+  off(admin, optIn, contract, plan, true);
 if (import.meta.main) {
   const [action, admin, argument] = process.argv.slice(2);
   if (action === "bind-stop" && admin && argument) await bindStop(admin, argument);

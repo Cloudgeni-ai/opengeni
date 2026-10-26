@@ -28,49 +28,53 @@ export const HANDSHAKE_TIMEOUT_ERROR = `${BRAND.product} agent did not answer th
 
 export const AGENT_NOT_SET_UP: AgentStatus = {
   title: "Not set up on this computer",
-  detail: `${BRAND.product} isn't set up for this browser on this computer. Connect this computer in the ${BRAND.product} app, or install the ${BRAND.product} agent, then restart the browser.`,
+  detail: `${BRAND.product} isn't set up for this browser on this computer. Connect this computer in the ${BRAND.product} app, or install ${BRAND.product} Runner, then restart the browser.`,
 };
 
 export const AGENT_NOT_RUNNING: AgentStatus = {
-  title: "Agent not running",
-  detail: `The ${BRAND.product} agent isn't running on this computer. Open the ${BRAND.product} app or start the agent; this profile connects as soon as it runs.`,
+  title: "Runner not running",
+  detail: `${BRAND.product} Runner isn't running on this computer. Open the ${BRAND.product} app or start the Runner; this profile connects as soon as it runs.`,
 };
 
 export const AGENT_NOT_RESPONDING: AgentStatus = {
-  title: "Agent not responding",
-  detail: `The ${BRAND.product} agent on this computer did not answer. Restart the ${BRAND.product} app or the agent.`,
+  title: "Runner not responding",
+  detail: `${BRAND.product} Runner on this computer did not answer. Restart the ${BRAND.product} app or the Runner.`,
 };
 
 export const AGENT_STOPPED: AgentStatus = {
-  title: "Agent stopped",
-  detail: `The ${BRAND.product} agent on this computer stopped. This profile reconnects when it runs again.`,
+  title: "Runner stopped",
+  detail: `${BRAND.product} Runner on this computer stopped. This profile reconnects when it runs again.`,
 };
 
 export const CONNECTING: AgentStatus = {
   title: "Connecting",
-  detail: `Connecting to the ${BRAND.product} agent on this computer.`,
+  detail: `Connecting to ${BRAND.product} Runner on this computer.`,
 };
 
 export function agentOutdated(agentVersion: string | null): AgentStatus {
-  const agent = agentVersion ? `${BRAND.product} agent ${agentVersion}` : `${BRAND.product} agent`;
+  const runner = agentVersion
+    ? `${BRAND.product} Runner ${agentVersion}`
+    : `${BRAND.product} Runner`;
   return {
-    title: `Update the ${BRAND.product} agent`,
-    detail: `The ${agent} on this computer is older than this extension. Update the ${BRAND.product} app or agent on this computer, or restart it if it just updated; then this profile connects.`,
+    title: `Update ${BRAND.product} Runner`,
+    detail: `${runner} on this computer is older than this extension. Update the ${BRAND.product} app or Runner on this computer, or restart it if it just updated; then this profile connects.`,
   };
 }
 
 export function extensionOutdated(agentVersion: string | null): AgentStatus {
-  const agent = agentVersion ? `${BRAND.product} agent ${agentVersion}` : `${BRAND.product} agent`;
+  const runner = agentVersion
+    ? `${BRAND.product} Runner ${agentVersion}`
+    : `${BRAND.product} Runner`;
   return {
     title: "Update this extension",
-    detail: `This ${BRAND.product} extension is older than the ${agent} on this computer. Chrome is updating it now; if this stays, update it from chrome://extensions.`,
+    detail: `This ${BRAND.product} extension is older than ${runner} on this computer. Chrome is updating it now; if this stays, update it from chrome://extensions.`,
   };
 }
 
 export function agentRefused(detail: string | null): AgentStatus {
   return {
-    title: "Agent refused this browser",
-    detail: `The ${BRAND.product} agent on this computer did not accept this browser${detail ? ` (${detail})` : ""}. Restart the ${BRAND.product} app or the agent, and update it if this continues.`,
+    title: "Runner refused this browser",
+    detail: `${BRAND.product} Runner on this computer did not accept this browser${detail ? ` (${detail})` : ""}. Restart the ${BRAND.product} app or the Runner, and update it if this continues.`,
   };
 }
 

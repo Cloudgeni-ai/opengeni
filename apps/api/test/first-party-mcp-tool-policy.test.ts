@@ -7,7 +7,7 @@ import {
   FIRST_PARTY_REMOTE_MCP_TOOL_NAMES,
   Permission,
   SESSION_INSTRUCTIONS_MAX_CHARACTERS,
-  SESSION_ADMIN_ACCESS_TOOL_NAME_SET,
+  SESSION_APP_ACTION_TOOL_NAME_SET,
   SESSION_TITLE_MAX_CHARACTERS,
   WORK_DISCOVERY_QUERY_MAX_CHARS,
   type AccessGrant,
@@ -29,6 +29,9 @@ import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@ope
 import { buildOpenGeniMcpServer, slackBotFileContentResult } from "../src/mcp/server";
 import type { OpenGeniSlackBotClient } from "../src/integrations/slack-bot";
 import { buildFilesMcpServer } from "../src/mcp/files";
+import { ToolSearchIndex } from "../../../packages/runtime/src/tool-discovery-ranking";
+
+type SearchableTool = ConstructorParameters<typeof ToolSearchIndex>[0][number];
 
 const accountId = crypto.randomUUID();
 const workspaceId = crypto.randomUUID();
@@ -326,7 +329,7 @@ describe("first-party MCP tool visibility policy", () => {
     );
   });
 
-  test("session_wait needs caller-session context as well as sessions:read", () => {
+  test("session_wait needs sessions:read and also serves sessionless callers", () => {
     const scoped = grant(["sessions:read"], ["session_wait"]);
     const { sessionId: _sessionId, ...sessionlessMetadata } = scoped.metadata!;
     expect(
@@ -336,7 +339,7 @@ describe("first-party MCP tool visibility policy", () => {
           metadata: sessionlessMetadata,
         }),
       ),
-    ).not.toContain("session_wait");
+    ).toContain("session_wait");
     expect(registeredToolNames(buildOpenGeniMcpServer(deps(), scoped))).toContain("session_wait");
     expect(
       registeredToolNames(
@@ -615,7 +618,18 @@ describe("first-party MCP tool visibility policy", () => {
     const server = buildOpenGeniMcpServer(
       deps(),
       grant([...Permission.options], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]),
-      { workspaceMemoryEnabled: true },
+      {
+        workspaceMemoryEnabled: true,
+        // A session a person started: the app-action tools join the catalog.
+        appActions: {
+          access: {
+            origin: "http://opengeni.test",
+            dispatch: async () => new Response(null, { status: 500 }),
+          },
+          startedByPerson: true,
+          fullAccess: false,
+        },
+      },
     );
 
     const broad = registeredToolNames(server);
@@ -1289,8 +1303,8 @@ describe("first-party MCP tool visibility policy", () => {
     const broad = registeredToolNames(server);
     expect(broad).toEqual(
       FIRST_PARTY_REMOTE_MCP_TOOL_NAMES.filter(
-        // Admin tools come from the session's admin access, not its selection.
-        (name) => name !== "slack_bot_search" && !SESSION_ADMIN_ACCESS_TOOL_NAME_SET.has(name),
+        // App-action tools need a session a person started; this grant has none.
+        (name) => name !== "slack_bot_search" && !SESSION_APP_ACTION_TOOL_NAME_SET.has(name),
       ).sort(),
     );
     // Generic agent calls cannot supply Slack's trusted interaction action token,
@@ -1541,7 +1555,7 @@ describe("first-party MCP tool visibility policy", () => {
   });
 });
 
-describe("session admin access tools", () => {
+describe("app-action tools", () => {
   const adminTools = ["admin_action_call", "admin_action_describe", "admin_actions_search"];
   const access = {
     origin: "http://opengeni.test",
@@ -1549,31 +1563,95 @@ describe("session admin access tools", () => {
   };
   const admin = (server: unknown) =>
     registeredToolNames(server).filter((name) => name.startsWith("admin_"));
+  const selected = [...DEFAULT_FIRST_PARTY_MCP_TOOLS] as FirstPartyMcpToolName[];
+  const listed = async (server: ReturnType<typeof buildOpenGeniMcpServer>) => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "app-action-listing-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      return (await client.listTools()).tools.filter((tool) => tool.name.startsWith("admin_"));
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  };
 
-  test("are never selected by default", () => {
+  test("are selected by default and listed in a session a person started, without full access", () => {
     for (const name of adminTools) {
-      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS as readonly string[]).not.toContain(name);
+      expect(DEFAULT_FIRST_PARTY_MCP_TOOLS as readonly string[]).toContain(name);
     }
     expect(
-      admin(buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]))),
-    ).toEqual([]);
+      admin(
+        buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected), {
+          appActions: { access, startedByPerson: true, fullAccess: false },
+        }),
+      ),
+    ).toEqual(adminTools);
   });
 
-  test("appear only while the session has admin access, whatever its selection or permissions", () => {
-    // An empty selection and no permissions: admin access alone adds them.
+  test("are not listed in a child or service session, or when the host leaves them out", () => {
+    // A child or service session: selected, but nobody started it.
     expect(
-      admin(buildOpenGeniMcpServer(deps(), grant([], []), { sessionAdminAccess: access })),
-    ).toEqual(adminTools);
-    // Selecting them by name without admin access never registers them.
+      admin(
+        buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected), {
+          appActions: { access, startedByPerson: false, fullAccess: false },
+        }),
+      ),
+    ).toEqual([]);
+    // An embedding host turns the route off by leaving the tools out of its selection.
     expect(
       admin(
         buildOpenGeniMcpServer(
           deps(),
-          grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], adminTools as FirstPartyMcpToolName[]),
-          { sessionAdminAccess: null },
+          grant(
+            [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+            selected.filter((name) => !adminTools.includes(name)),
+          ),
+          { appActions: { access, startedByPerson: true, fullAccess: false } },
         ),
       ),
     ).toEqual([]);
+    // No route facts: nothing.
+    expect(
+      admin(
+        buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected)),
+      ),
+    ).toEqual([]);
+  });
+
+  test("full access still lists them whatever the selection or permissions, as before", () => {
+    expect(
+      admin(
+        buildOpenGeniMcpServer(deps(), grant([], []), {
+          appActions: { access, startedByPerson: false, fullAccess: true },
+        }),
+      ),
+    ).toEqual(adminTools);
+  });
+
+  test("are never carried into a child session's selection", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected),
+      { appActions: { access, startedByPerson: true, fullAccess: false } },
+    ) as unknown as { holdsSelectableTool(name: FirstPartyMcpToolName): boolean };
+    for (const name of adminTools)
+      expect(server.holdsSelectableTool(name as FirstPartyMcpToolName)).toBe(false);
+  });
+
+  test("read the same, byte for byte, before and after the person gives the session full access", async () => {
+    const before = await listed(
+      buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected), {
+        appActions: { access, startedByPerson: true, fullAccess: false },
+      }),
+    );
+    const after = await listed(
+      buildOpenGeniMcpServer(deps(), grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], selected), {
+        appActions: { access, startedByPerson: true, fullAccess: true },
+      }),
+    );
+    expect(before.map((tool) => tool.name).sort()).toEqual(adminTools);
+    expect(JSON.stringify(after)).toBe(JSON.stringify(before));
   });
 
   test("need an agent turn bound to a session", () => {
@@ -1584,9 +1662,61 @@ describe("session admin access tools", () => {
       principalKind: "human_session",
       permissions: [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
     };
-    expect(admin(buildOpenGeniMcpServer(deps(), human, { sessionAdminAccess: access }))).toEqual(
-      [],
+    expect(
+      admin(
+        buildOpenGeniMcpServer(deps(), human, {
+          appActions: { access, startedByPerson: true, fullAccess: true },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  test("tool search finds a way to a chat in another workspace", async () => {
+    // The lazy pool a full-access agent searches: its default first-party
+    // tools plus the app-action tools, named as the runtime names them.
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS], [...DEFAULT_FIRST_PARTY_MCP_TOOLS]),
+      { appActions: { access, startedByPerson: true, fullAccess: true } },
     );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "admin-tool-search-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listedTools = (await client.listTools()).tools;
+      const pool = listedTools.map(
+        (tool) =>
+          ({
+            type: "function",
+            name: `opengeni__${tool.name}`,
+            description: tool.description ?? "",
+            parameters: tool.inputSchema,
+            strict: false,
+            needsApproval: async () => false,
+            invoke: async () => "",
+          }) as unknown as SearchableTool,
+      );
+      const index = new ToolSearchIndex(pool);
+      for (const query of ["read a chat in another workspace", "chat in a different workspace"]) {
+        const names = index.rank(query, 8).map((tool) => tool.name);
+        expect(names, query).toContain("opengeni__admin_actions_search");
+      }
+      // Session-shaped queries rank the session tools by name; those now
+      // reach another workspace themselves, through workspaceId.
+      const message = index
+        .rank("message a session in another workspace", 3)
+        .map((tool) => tool.name);
+      expect(message).toContain("opengeni__session_send_message");
+      for (const name of ["session_send_message", "session_get", "session_events"]) {
+        expect(
+          JSON.stringify(listedTools.find((tool) => tool.name === name)?.inputSchema),
+          name,
+        ).toContain("workspaceId");
+      }
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
   });
 });
 

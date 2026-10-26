@@ -1489,3 +1489,348 @@ describe("descendant merge-content audit", () => {
     );
   });
 });
+
+// Exact-source Version squash reviewed on its generator parent. GitHub rewrites
+// a merged PR's `pull.base.sha` to the merge-time `main` tip, so a Version head
+// generated before later `main` commits reports the squash parent as its base.
+type PatchBaseVariant =
+  | "good"
+  | "merge"
+  | "tampered-tree"
+  | "extra-file"
+  | "overlap"
+  | "conflict-resolved";
+
+const patchBaseScenarios = new Map<PatchBaseVariant, Scenario>();
+
+function patchBaseScenario(variant: PatchBaseVariant): Scenario {
+  const cached = patchBaseScenarios.get(variant);
+  if (cached) return cached;
+  const root = mkdtempSync(join(tmpdir(), "opengeni-patch-base-admission-"));
+  temporaryRoots.push(root);
+  const repo = new Repo(root);
+  repo.write("package.json", '{\n  "name": "fixture",\n  "version": "1.0.0"\n}\n');
+  repo.write(".changeset/README.md", "Changesets\n");
+  repo.write(".changeset/feature.md", "---\n'fixture': patch\n---\n\nFeature.\n");
+  repo.write("src/a.txt", "a1\n");
+  const reviewedBase = repo.commit("initial");
+
+  repo.branch(contract.versionBranch, reviewedBase);
+  repo.write("package.json", '{\n  "name": "fixture",\n  "version": "1.0.1"\n}\n');
+  repo.remove(".changeset/feature.md");
+  repo.write("CHANGELOG.md", "# 1.0.1\n\n- Feature.\n");
+  const versionHead = repo.commit("chore: version packages");
+
+  const pulls: PullFixture[] = [];
+  // `main` advances after generation; the later PR touches only unrelated paths
+  // unless the variant deliberately overlaps a reviewed Version path.
+  repo.branch("pr0", reviewedBase);
+  repo.write("src/a.txt", "a2\n");
+  if (variant === "overlap" || variant === "conflict-resolved") {
+    repo.write("CHANGELOG.md", "# Unreleased\n\n- Main.\n");
+  }
+  const pr0Head = repo.commit("pr0");
+  repo.git("checkout", "-q", "main");
+  repo.git("merge", "-q", "--ff-only", "pr0");
+  const providerBase = repo.head();
+  pulls.push({
+    number: 90,
+    mergeSha: providerBase,
+    headSha: pr0Head,
+    baseSha: reviewedBase,
+    headRef: "pr0",
+    user: human,
+    commits: 1,
+  });
+
+  // Provider squash (or true merge): landed on the merge-time tip.
+  let provenance: string;
+  try {
+    provenance =
+      variant === "merge"
+        ? repo.merge(contract.versionBranch, "Merge pull request #100 from changeset-release/main")
+        : (repo.git("cherry-pick", versionHead), repo.head());
+  } catch {
+    // CHANGELOG.md add/add conflict; a hand resolution is not the reviewed delta.
+    repo.write(
+      "CHANGELOG.md",
+      variant === "overlap"
+        ? "# 1.0.1\n\n- Feature.\n"
+        : "# 1.0.1\n\n- Feature.\n\n# Unreleased\n\n- Main.\n",
+    );
+    provenance = repo.commit("chore: version packages (#100)");
+  }
+  if (variant === "tampered-tree" || variant === "extra-file") {
+    if (variant === "tampered-tree") {
+      repo.write("package.json", '{\n  "name": "fixture",\n  "version": "1.0.2"\n}\n');
+    } else {
+      repo.write("src/unreviewed.txt", "masquerading as the reviewed Version delta\n");
+    }
+    repo.git("add", "-A");
+    repo.git("commit", "-q", "--amend", "--no-edit");
+    provenance = repo.head();
+  }
+  pulls.push({
+    number: 100,
+    mergeSha: provenance,
+    headSha: versionHead,
+    baseSha: providerBase,
+    headRef: contract.versionBranch,
+    user: versionBot,
+    commits: 1,
+  });
+
+  repo.branch("pr3", provenance);
+  repo.write("src/d.txt", "d1\n");
+  const pr3Head = repo.commit("pr3");
+  const later = repo.merge("pr3", "Merge pull request #103 from pr3");
+  pulls.push({
+    number: 103,
+    mergeSha: later,
+    headSha: pr3Head,
+    baseSha: provenance,
+    headRef: "pr3",
+    user: human,
+    commits: 1,
+  });
+
+  const built = {
+    repo,
+    reviewedBase,
+    versionHead,
+    provenance,
+    firstIntervening: providerBase,
+    candidate: provenance,
+    later,
+    pulls,
+  };
+  patchBaseScenarios.set(variant, built);
+  return built;
+}
+
+function patchBaseAdmit(
+  s: Scenario,
+  env: Record<string, string | undefined> = {},
+  options: FixtureOptions = {},
+) {
+  return admit(
+    s,
+    {
+      SOURCE_SHA: s.provenance,
+      RELEASE_PROVENANCE_SHA: undefined,
+      RELEASE_DESCENDANT_GIT_DIR: undefined,
+      RELEASE_CONTROLLER_SHA: s.later,
+      ...env,
+    },
+    options,
+  );
+}
+
+describe("exact-source Version on a merge-time advanced provider base", () => {
+  test("fixture reproduces the provider shape: head parent is not the squash parent", () => {
+    const s = patchBaseScenario("good");
+    const version = s.pulls.find((pull) => pull.number === 100)!;
+    expect(s.repo.parents(s.versionHead)).toEqual([s.reviewedBase]);
+    expect(s.repo.parents(s.provenance)).toEqual([version.baseSha]);
+    expect(version.baseSha).not.toBe(s.reviewedBase);
+    expect(s.repo.isAncestor(s.reviewedBase, version.baseSha)).toBe(true);
+    expect(s.repo.tree(s.provenance)).not.toBe(s.repo.tree(s.versionHead));
+  });
+
+  test("admits the exact reviewed patch from the generator parent with full-green landed CI", async () => {
+    const s = patchBaseScenario("good");
+    const providerBase = s.pulls.find((pull) => pull.number === 100)!.baseSha;
+    for (const controller of [s.later, providerBase]) {
+      const { result, requests } = await patchBaseAdmit(s, { RELEASE_CONTROLLER_SHA: controller });
+      expect(requests.every((request) => request.startsWith("GET "))).toBe(true);
+      expect(result.version).toBe(2);
+      expect(result.admissionMode).toBeUndefined();
+      expect(result.sourceSha).toBe(s.provenance);
+      expect(result.sourceParents).toEqual([providerBase]);
+      expect(result.mergeMethod).toBe("provider-verified-moving-main-squash");
+      expect(result.sourceComposition).toMatchObject({
+        type: "exact-reviewed-delta-on-moving-main",
+        patchBaseSha: s.reviewedBase,
+        integrationBaseSha: providerBase,
+        integrationBaseTreeSha: s.repo.tree(providerBase),
+        pathCount: 3,
+      });
+      // Provider identity fields stay the provider-retained PR base/head.
+      expect(result.reviewedBaseSha).toBe(providerBase);
+      expect(result.reviewedHeadSha).toBe(s.versionHead);
+      expect(result.releaseHead.sha).toBe(s.versionHead);
+      expect(result.requiredSourceChecks.map((check: { name: string }) => check.name)).toEqual(
+        ciJobNames,
+      );
+      expect(result.fullGreen.workflowRunId).toBe(5001);
+      expect(result.fullGreen.workflowRunAttempt).toBe(ciRunAttempt);
+      expect(result.fullGreen.status.targetUrl).toBe(attemptUrl(5001, ciRunAttempt));
+      expect(result.fullGreen.artifacts.map((artifact: { name: string }) => artifact.name)).toEqual(
+        [`full-green-main-${s.provenance}`, `canary-images-${s.provenance}`],
+      );
+      expect(requests).toContain(`GET ${prefix}/compare/${providerBase}...${s.versionHead}`);
+      for (const artifact of result.fullGreen.artifacts) {
+        expect(requests).toContain(`GET ${prefix}/actions/artifacts/${artifact.id}/zip`);
+      }
+      // No exact-head Version CI is consulted or required.
+      expect(requests).not.toContain(`GET ${prefix}/commits/${s.versionHead}/statuses`);
+    }
+  });
+
+  test("rejects a tampered landed tree, an extra file and a dirty overlapping composition", async () => {
+    for (const variant of [
+      "tampered-tree",
+      "extra-file",
+      "overlap",
+      "conflict-resolved",
+    ] as const) {
+      await expect(patchBaseAdmit(patchBaseScenario(variant))).rejects.toThrow(
+        "release source tree differs from the exact reviewed moving-main composition",
+      );
+    }
+  });
+
+  test("rejects a non-automation PR or branch on the patch-base route", async () => {
+    const s = patchBaseScenario("good");
+    await expect(
+      patchBaseAdmit(
+        s,
+        {},
+        {
+          pulls: (pulls) => {
+            pulls.find((pull) => pull.number === 100)!.user = human;
+          },
+        },
+      ),
+    ).rejects.toThrow("Version provenance pull-request author numeric identity changed");
+    await expect(
+      patchBaseAdmit(
+        s,
+        {},
+        {
+          pulls: (pulls) => {
+            pulls.find((pull) => pull.number === 100)!.headRef = "feature/version";
+          },
+        },
+      ),
+    ).rejects.toThrow("Version provenance pull request is not from the Version branch");
+  });
+
+  test("requires the landed commit's own fully green push run; no override", async () => {
+    const s = patchBaseScenario("good");
+    const withCi = (mutate: (fixture: CiFixture) => void) => ({
+      ci: (ci: Map<string, CiFixture>) => mutate(ci.get(s.provenance)!),
+    });
+    // Neither landed full green nor any head CI: no CI at all on the source.
+    await expect(patchBaseAdmit(s, {}, { ci: (ci) => ci.clear() })).rejects.toThrow(
+      "check run is missing on",
+    );
+    // Required source jobs only (the ordinary exact-source lane) are not enough.
+    await expect(
+      patchBaseAdmit(
+        s,
+        {},
+        withCi((fixture) => {
+          const fullGreenJobs = new Set<string>(contract.checks.fullGreenJobs);
+          fixture.jobs = fixture.jobs.filter((job) => !fullGreenJobs.has(job.name));
+          fixture.checks = fixture.checks.filter((check) => !fullGreenJobs.has(check.name));
+        }),
+      ),
+    ).rejects.toThrow(`${contract.checks.fullGreenJobs[0]} check run is missing on`);
+    await expect(
+      patchBaseAdmit(
+        s,
+        {},
+        withCi((fixture) => {
+          fixture.statuses = fixture.statuses.filter(
+            (status) => status.context !== contract.checks.fullGreenStatus,
+          );
+        }),
+      ),
+    ).rejects.toThrow(`${contract.checks.fullGreenStatus} status is missing on`);
+    await expect(
+      patchBaseAdmit(
+        s,
+        {},
+        withCi((fixture) => {
+          fixture.statuses.find(
+            (status) => status.context === contract.checks.fullGreenStatus,
+          )!.state = "failure";
+        }),
+      ),
+    ).rejects.toThrow("is not a success for the exact authoritative run attempt");
+    await expect(
+      patchBaseAdmit(
+        s,
+        {},
+        withCi((fixture) => {
+          fixture.artifacts = fixture.artifacts.filter(
+            (artifact) => !artifact.name.startsWith("canary-images-"),
+          );
+        }),
+      ),
+    ).rejects.toThrow(`canary-images-${s.provenance} is not exactly one artifact`);
+    await expect(
+      patchBaseAdmit(
+        s,
+        {},
+        withCi((fixture) => {
+          fixture.artifacts[0]!.expired = true;
+        }),
+      ),
+    ).rejects.toThrow("has expired");
+  });
+
+  test("admits a true merge of the generated head with full-green landed CI", async () => {
+    const s = patchBaseScenario("merge");
+    const providerBase = s.pulls.find((pull) => pull.number === 100)!.baseSha;
+    expect(s.repo.parents(s.provenance)).toEqual([providerBase, s.versionHead]);
+    const { result } = await patchBaseAdmit(s);
+    expect(result.mergeMethod).toBe("provider-verified-moving-main-merge");
+    expect(result.sourceComposition).toMatchObject({
+      patchBaseSha: s.reviewedBase,
+      integrationBaseSha: providerBase,
+    });
+    expect(result.fullGreen.status.targetUrl).toBe(attemptUrl(5001, ciRunAttempt));
+  });
+
+  test("rejects a head that is not one generated commit on its patch base", async () => {
+    const s = patchBaseScenario("good");
+    await expect(
+      patchBaseAdmit(
+        s,
+        {},
+        {
+          pulls: (pulls) => {
+            pulls.find((pull) => pull.number === 100)!.commits = 2;
+          },
+        },
+      ),
+    ).rejects.toThrow(
+      "advanced-provider-base release head is not one generated commit on its patch base",
+    );
+  });
+
+  test("leaves the tested-descendant lane's true-merge requirement unchanged", async () => {
+    const s = patchBaseScenario("good");
+    const providerBase = s.pulls.find((pull) => pull.number === 100)!.baseSha;
+    await expect(
+      admit(
+        s,
+        {
+          SOURCE_SHA: s.later,
+          RELEASE_PROVENANCE_SHA: s.provenance,
+          RELEASE_CONTROLLER_SHA: providerBase,
+        },
+        {
+          ci: (ci) => {
+            ci.clear();
+            ci.set(s.later, ciFor(s.later, 5004));
+          },
+        },
+      ),
+    ).rejects.toThrow(
+      "Version provenance provider-verified-moving-main-squash is not a true merge commit",
+    );
+  });
+});

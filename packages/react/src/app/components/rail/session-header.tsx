@@ -1,10 +1,12 @@
+import { useOptionalAppContext } from "../../app-context";
+import { archiveActionLabel } from "../../lib/archive-session";
 // The session header bar — the slim canvas top strip's contents on a session
 // route. Split out of the session shell as a PURE, presentational component: it takes
 // plain session data + callbacks and renders the two-line identity block
 // (breadcrumb → title) on the left and the action cluster on the right
 // (provider+model·effort·speed, sandbox, pin, connection, status, panel).
 // The live children that need their own hooks — the sandbox switcher and the
-// codex account indicator — arrive as slots so the whole bar can be rendered
+// subscription account control — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in session-shell owns the
 // data wiring and passes the real slots.
 import { t } from "../../lib/console-text";
@@ -26,7 +28,6 @@ import {
   BellIcon,
   BellOffIcon,
   CalendarClockIcon,
-  CalendarOffIcon,
   GaugeIcon,
   LinkIcon,
   LockIcon,
@@ -40,6 +41,8 @@ import {
   ShieldCheckIcon,
   ShieldOffIcon,
   SmartphoneIcon,
+  ZapIcon,
+  ZapOffIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -67,11 +70,8 @@ import { RENAME_CURRENT_CHAT_EVENT } from "../../lib/actions/events";
 import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
-import {
-  sessionControlPaused,
-  sessionHasUpcomingSchedule,
-  sessionInputWait,
-} from "../../lib/session-rail";
+import { sessionControlPaused, sessionInputWait } from "../../lib/session-rail";
+import { sessionAutomationWaitWords } from "../../../components/automations/automation-model";
 import { useSessionStartup } from "../../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
@@ -81,16 +81,22 @@ import {
   type InlineRename,
 } from "../../lib/session-rename";
 import { pinLiveAnnouncement } from "../../lib/pin-live-announcement";
-import type { SessionRepliesMute } from "../../lib/inbox";
+import { repliesMuteLabel, type SessionRepliesMute } from "../../lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
 import { useUiEventTarget } from "../../lib/ui-events";
 
+const SUBSCRIPTION_RAILS: ReadonlySet<BillingClass> = new Set([
+  "codex_subscription",
+  "claude_subscription",
+  "supergrok_subscription",
+]);
+
 export function SessionHeader({
   session,
   ancestors,
-  onOpenSchedule,
+  onOpenAutomations,
   lineageLoading,
   lineageError,
   connectionState,
@@ -106,7 +112,7 @@ export function SessionHeader({
   adminAccess,
   onOpenUsageLimit,
   sandboxSlot,
-  codexSlot,
+  accountSlot,
   accessSlot,
   leading,
   lastStartedModel,
@@ -121,10 +127,11 @@ export function SessionHeader({
   /** Root-to-direct-parent order. */
   ancestors: SessionSummary[];
   /**
-   * Present only when a scheduled task started this session. Opens that task on
-   * the Schedules page so the reader can see or edit what put this here.
+   * Present only when an automation posts into this session. Opens the
+   * Automations page filtered to this chat, so the reader can see or edit what
+   * puts runs here.
    */
-  onOpenSchedule?: ((() => void) | null) | undefined;
+  onOpenAutomations?: ((() => void) | null) | undefined;
   lineageLoading?: boolean | undefined;
   lineageError?: Error | null | undefined;
   connectionState: SessionEventsConnectionState;
@@ -144,7 +151,7 @@ export function SessionHeader({
    */
   repliesMute?: SessionRepliesMute | null | undefined;
   /**
-   * This session's admin access, when the viewer can see it on or give it.
+   * This session's full access, when the viewer can see it on or give it.
    * Absent hides the shield and the menu action.
    */
   adminAccess?: SessionAdminAccessControl | null | undefined;
@@ -156,10 +163,11 @@ export function SessionHeader({
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode | undefined;
   /**
-   * Replaces the static provider mark when the session is on Codex — same icon,
-   * clickable for account status/switch. Absent for host-credit sessions.
+   * Replaces the static provider mark when the session runs on a subscription
+   * (Codex, Claude, SuperGrok): the same mark, clickable for the account and
+   * its usage. Absent for other payment rails.
    */
-  codexSlot?: ReactNode | undefined;
+  accountSlot?: ReactNode | undefined;
   /** Compact session access state/menu, lazy-mounted by the route shell. */
   accessSlot?: ReactNode | undefined;
   /** Leading control (the mobile hamburger); absent on desktop. */
@@ -172,7 +180,7 @@ export function SessionHeader({
   lastStartedModel?: string | undefined;
   lastStartedReasoningEffort?: IntelligenceEffort | undefined;
   lastStartedLatencyMode?: LatencyMode | undefined;
-  /** Billing rail: Codex account chip, or the mark for makers without a logo. */
+  /** Billing rail: subscription account chip, or the mark for makers without a logo. */
   billingClass?: BillingClass | undefined;
   /** Product model label (e.g. GPT-5.6 Luna). */
   modelLabel?: string | undefined;
@@ -186,8 +194,8 @@ export function SessionHeader({
   const uiEvents = useUiEventTarget("document");
   const page = usePage();
   const waiting = sessionInputWait({ ...session, status });
-  // A paused or finished schedule still links to its settings, marked inactive.
-  const upcomingSchedule = sessionHasUpcomingSchedule(session);
+  // A paused or finished automation still links to its settings, marked inactive.
+  const automationWait = sessionAutomationWaitWords(t, session, { now: new Date() });
   // A session the runtime could not start reads as stuck, not "Waiting on you".
   const displayStatus = sessionDisplayStatus({
     status,
@@ -206,9 +214,10 @@ export function SessionHeader({
   const resolvedModel = modelLabel?.trim() || modelDisplayName(modelId);
   const displayEffort: IntelligenceEffort = lastStartedReasoningEffort ?? session.reasoningEffort;
   const displayLatency: LatencyMode = lastStartedLatencyMode ?? session.latencyMode;
-  // Codex → clickable account chip. Other rails → static provider icon only
-  // (never invent a text "Opengeni"/"BYOK" word). Don't key off `codexSlot != null`.
-  const isCodexRail = resolvedBilling === "codex_subscription";
+  // Subscription rails → clickable account chip, the same for every provider.
+  // Other rails → static provider icon only (never invent a text
+  // "Opengeni"/"BYOK" word). Don't key off `accountSlot != null`.
+  const isSubscriptionRail = SUBSCRIPTION_RAILS.has(resolvedBilling);
   const policyBits = [
     resolvedModel,
     labelEffort(displayEffort),
@@ -222,6 +231,7 @@ export function SessionHeader({
   ].filter((bit): bit is string => Boolean(bit));
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
+  const context = useOptionalAppContext();
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
@@ -240,10 +250,10 @@ export function SessionHeader({
     uiEvents.addEventListener(RENAME_CURRENT_CHAT_EVENT, start);
     return () => uiEvents.removeEventListener(RENAME_CURRENT_CHAT_EVENT, start);
   }, [uiEvents, startRenaming]);
-  const providerControl = isCodexRail ? (
-    (codexSlot ?? (
+  const providerControl = isSubscriptionRail ? (
+    (accountSlot ?? (
       <BillingClassMark
-        billingClass="codex_subscription"
+        billingClass={resolvedBilling}
         className="size-3.5 shrink-0 text-fg-muted"
         aria-label=""
       />
@@ -270,7 +280,7 @@ export function SessionHeader({
       {/* The title takes every pixel the actions leave; it truncates last. */}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
         {/* Child sessions link back to the manager that spawned them, and a
-            session links to its current schedules. */}
+            session links to the automations that post into it. */}
         <div className="flex min-w-0 items-center gap-1.5">
           <SessionAncestryBreadcrumb
             workspaceId={session.workspaceId}
@@ -280,23 +290,26 @@ export function SessionHeader({
             error={lineageError}
           />
           <SiteOriginLink session={session} />
-          {onOpenSchedule ? (
+          {onOpenAutomations ? (
             <button
               type="button"
-              onClick={onOpenSchedule}
-              className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
-              title={
-                upcomingSchedule
-                  ? "Open schedules for this session"
-                  : "No upcoming runs. Open schedules for this session"
-              }
+              onClick={onOpenAutomations}
+              data-automation-wait={automationWait?.kind ?? "none"}
+              className="inline-flex min-w-0 max-w-80 shrink items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
+              title={t("automations.wait.openPanel", {
+                wait: automationWait?.label ?? t("automations.wait.none"),
+              })}
             >
-              {upcomingSchedule ? (
-                <CalendarClockIcon aria-hidden className="size-3" />
+              {automationWait?.kind === "event" ? (
+                <ZapIcon aria-hidden className="size-3 shrink-0" />
+              ) : automationWait?.kind === "schedule" ? (
+                <CalendarClockIcon aria-hidden className="size-3 shrink-0" />
               ) : (
-                <CalendarOffIcon aria-hidden className="size-3" />
+                <ZapOffIcon aria-hidden className="size-3 shrink-0" />
               )}
-              Schedule
+              <span className="truncate">
+                {automationWait?.short ?? t("sessionChrome.automation")}
+              </span>
             </button>
           ) : null}
         </div>
@@ -512,7 +525,7 @@ export function SessionHeader({
             {repliesMute ? (
               <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
                 {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
-                {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+                {repliesMuteLabel(repliesMute)}
               </DropdownMenuItem>
             ) : null}
             {onOpenUsageLimit ? (
@@ -528,7 +541,7 @@ export function SessionHeader({
             {adminAccess?.state.active && adminAccess.state.canRevoke ? (
               <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
                 <ShieldOffIcon />
-                Turn off admin access
+                Turn off full access
               </DropdownMenuItem>
             ) : adminAccess && !adminAccess.state.active && adminAccess.state.canGrant ? (
               <DropdownMenuItem
@@ -538,7 +551,7 @@ export function SessionHeader({
                 }}
               >
                 <ShieldCheckIcon />
-                Give admin access…
+                Give full access…
               </DropdownMenuItem>
             ) : null}
             {canArchive ? (
@@ -549,7 +562,11 @@ export function SessionHeader({
                   onSelect={() => void onArchive?.(session, !session.archived)}
                 >
                   {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
-                  {session.archived ? "Restore" : "Archive"}
+                  {context
+                    ? archiveActionLabel(context, session)
+                    : session.archived
+                      ? "Restore"
+                      : "Archive"}
                   {session.archived ? (
                     <DropdownMenuMeta>Archived</DropdownMenuMeta>
                   ) : archiveKeys ? (

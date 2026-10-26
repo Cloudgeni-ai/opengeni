@@ -2,6 +2,10 @@ import { afterAll, expect, mock, test } from "bun:test";
 import type { SessionEvent, WorkspaceControlEvent } from "@opengeni/contracts";
 import { SESSION_EVENT_DURABLE_FANOUT_CAPABILITY_VERSION, type EventBus } from "@opengeni/events";
 
+const allControl = {
+  visibleControlEvents: async (events: readonly WorkspaceControlEvent[]) => [...events],
+};
+
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
 const fakeDb = {};
@@ -226,7 +230,7 @@ test("HTTP/1 browser fallback reads a finite durable snapshot without opening su
       0,
       0,
       new AbortController().signal,
-      options,
+      { ...allControl, ...options },
     ),
   ]);
   const sessionBody = await sessionResponse.text();
@@ -394,7 +398,7 @@ test("workspace live SSE carries both durable domains over one response", async 
     0,
     0,
     controller.signal,
-    { pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
+    { ...allControl, pollIntervalMs: 100, heartbeatIntervalMs: 1_000 },
   );
   const reader = response.body!.getReader();
   expect((await readSequences(reader, 2)).sort((a, b) => a - b)).toEqual([2, 7]);
@@ -857,7 +861,10 @@ test("every long-lived SSE surface closes when its current workspace authority i
   const signal = () => new AbortController().signal;
   const responses = await Promise.all([
     sseSessionStream(fakeDb as never, bus, WORKSPACE_ID, SESSION_ID, 0, signal(), revoked()),
-    sseWorkspaceControlStream(fakeDb as never, bus, WORKSPACE_ID, 0, signal(), revoked()),
+    sseWorkspaceControlStream(fakeDb as never, bus, WORKSPACE_ID, 0, signal(), {
+      ...allControl,
+      ...revoked(),
+    }),
     sseWorkspaceInteractionRevisionStream(
       fakeDb as never,
       "00000000-0000-4000-8000-000000000010",
@@ -874,7 +881,7 @@ test("every long-lived SSE surface closes when its current workspace authority i
       0,
       0,
       signal(),
-      { ...revoked(), pollIntervalMs: 100 },
+      { ...allControl, ...revoked(), pollIntervalMs: 100 },
     ),
   ]);
   for (const response of responses) {
@@ -912,6 +919,7 @@ test("workspace-control SSE uses the same one-frame stall bound", async () => {
     0,
     new AbortController().signal,
     {
+      ...allControl,
       stallTimeoutMs: 20,
       onObservation: (observation) => observations.push(observation),
     },
@@ -947,7 +955,7 @@ test("workspace-control replay bounds a poison row and reconnect advances past i
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { stallTimeoutMs: 100 },
+    { ...allControl, stallTimeoutMs: 100 },
   );
   const reader = response.body!.getReader();
   const replayed = await readControlEvents(reader, 2);
@@ -967,7 +975,7 @@ test("workspace-control replay bounds a poison row and reconnect advances past i
     WORKSPACE_ID,
     1,
     new AbortController().signal,
-    { stallTimeoutMs: 100 },
+    { ...allControl, stallTimeoutMs: 100 },
   );
   const resumedReader = resumed.body!.getReader();
   const resumedEvents = await readControlEvents(resumedReader, 1);
@@ -988,7 +996,7 @@ test("workspace-control SSE accepts a migration-created sparse first revision", 
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { stallTimeoutMs: 100 },
+    { ...allControl, stallTimeoutMs: 100 },
   );
   const reader = response.body!.getReader();
 
@@ -1012,7 +1020,7 @@ test("workspace-control SSE reconnects across a legitimate sparse revision gap",
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { stallTimeoutMs: 100 },
+    { ...allControl, stallTimeoutMs: 100 },
   );
   const reader = response.body!.getReader();
 
@@ -1044,7 +1052,7 @@ test("workspace-control live fanout rechecks durable actor visibility and never 
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { stallTimeoutMs: 1_000 },
+    { ...allControl, stallTimeoutMs: 1_000 },
   );
   const reader = response.body!.getReader();
   await waitFor(() => publish !== undefined);
@@ -1118,7 +1126,7 @@ test("a live subscription that ends under an open stream fails it retryably for 
     WORKSPACE_ID,
     0,
     new AbortController().signal,
-    { heartbeatIntervalMs: 1_000, stallTimeoutMs: 1_000 },
+    { ...allControl, heartbeatIntervalMs: 1_000, stallTimeoutMs: 1_000 },
   );
   const controlReader = controlResponse.body!.getReader();
   expect(
@@ -1180,6 +1188,51 @@ async function readSessionEvents(
   }
   return events;
 }
+
+test("workspace-control streams omit chat events the reader cannot see and still advance", async () => {
+  const hiddenChat = "44444444-4444-4444-8444-444444444444";
+  const privateEvent = (sequence: number): WorkspaceControlEvent => ({
+    ...controlEvent(sequence),
+    scope: "session",
+    rootSessionId: hiddenChat,
+    reason: "private reason",
+  });
+  const onlyWorkspace = {
+    visibleControlEvents: async (events: readonly WorkspaceControlEvent[]) =>
+      events.filter((candidate) => candidate.scope === "workspace"),
+  };
+  durableControlEvents = [privateEvent(1), controlEvent(2), privateEvent(3)];
+  const bus = {
+    subscribeWorkspaceControl: async () => () => {},
+  } as unknown as EventBus;
+  const response = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { ...onlyWorkspace, stallTimeoutMs: 100 },
+  );
+  const reader = response.body!.getReader();
+  expect((await readControlEvents(reader, 1)).map((candidate) => candidate.sequence)).toEqual([2]);
+  await reader.cancel();
+
+  const batch = await sseWorkspaceControlStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    0,
+    new AbortController().signal,
+    { ...onlyWorkspace, ...browserSseDeliveryOptions("http1-bounded") },
+  );
+  const body = await batch.text();
+  expect(body).not.toContain(hiddenChat);
+  expect(body).not.toContain("private reason");
+  expect(body).toContain('"sequence":2');
+  expect(body).toContain(
+    `data: {"type":"workspace.control.cursor","workspaceId":"${WORKSPACE_ID}","sequence":3}`,
+  );
+});
 
 async function readControlEvents(
   reader: ReadableStreamDefaultReader<Uint8Array>,

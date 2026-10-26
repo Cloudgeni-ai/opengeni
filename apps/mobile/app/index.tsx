@@ -5,8 +5,10 @@ import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { useNativeFileAttachments } from "@opengeni/react-native";
 import {
   AttachmentChips,
+  BAR_MAX_FONT_SCALE,
   Button,
   ComposerPill,
+  HEADING_MAX_FONT_SCALE,
   ModelPickerSheet,
   fontStyle,
   ModelMark,
@@ -419,6 +421,7 @@ function Home() {
       >
         <Text
           accessibilityRole="header"
+          maxFontSizeMultiplier={HEADING_MAX_FONT_SCALE}
           style={{
             ...fontStyle(theme, 600),
             fontSize: 24,
@@ -635,7 +638,7 @@ function InboxButton() {
             top: 6,
             right: 4,
             minWidth: 16,
-            height: 16,
+            minHeight: 16,
             paddingHorizontal: 4,
             borderRadius: 8,
             alignItems: "center",
@@ -643,7 +646,10 @@ function InboxButton() {
             backgroundColor: c["status-waiting"],
           }}
         >
-          <Text style={{ ...fontStyle(theme, 600), fontSize: 10, lineHeight: 12, color: "#fff" }}>
+          <Text
+            maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+            style={{ ...fontStyle(theme, 600), fontSize: 10, lineHeight: 12, color: "#fff" }}
+          >
             {waiting > 99 ? "99+" : waiting}
           </Text>
         </View>
@@ -711,6 +717,7 @@ function Wordmark() {
   return (
     <Text
       accessibilityRole="header"
+      maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
       style={{
         ...fontStyle(theme, 600),
         fontSize: 18,

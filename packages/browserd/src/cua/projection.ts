@@ -31,6 +31,20 @@ const roles: Record<string, string> = {
 };
 
 const MARKDOWN_ROW = /^(\s*)- (?:\[(\d+)\] )?(\S+)(.*)$/u;
+
+/** Checkbox and switch roles as observations show them on each platform. */
+export const TOGGLE_ROLES: ReadonlySet<string> = new Set([
+  "checkbox",
+  "check box",
+  "switch",
+  "toggle button",
+  "check menu item",
+]);
+
+/** The role an observation shows for an element CUA names by its own role. */
+export function observedRole(role: string): string {
+  return roles[role] ?? role;
+}
 const QUOTED = String.raw`"((?:[^"\\]|\\.)*)"`;
 const MARKDOWN_LABEL = new RegExp(`^ ${QUOTED}`, "u");
 const MARKDOWN_VALUE = new RegExp(`(?:^| )= (?:${QUOTED}|([^\\s\\[][^\\[]*?))(?: \\[|$)`, "u");
@@ -76,8 +90,32 @@ export function unindexedTextByElement(
   platform: Platform = "macos",
 ): Map<number, string[]> {
   const texts = new Map<number, string[]>();
-  if (!markdown || platform === "windows") return texts;
-  const ancestors: Array<{ indent: number; index: number | null; protected: boolean }> = [];
+  for (const row of unindexedRows(markdown, platform)) {
+    const list = texts.get(row.owner) ?? [];
+    if (list.length < MAX_ROW_TEXTS) list.push(row.text);
+    texts.set(row.owner, list);
+  }
+  return texts;
+}
+
+/** One unindexed row of CUA's Markdown tree that has text: the element_index
+ * of its nearest indexed ancestor, its own role, and whether it is, or sits
+ * inside, a menu. Protected rows are left out, as unindexedTextByElement
+ * describes. */
+export type UnindexedRow = { owner: number; role: string; text: string; inMenu: boolean };
+
+export function unindexedRows(
+  markdown: string | undefined,
+  platform: Platform = "macos",
+): UnindexedRow[] {
+  const rows: UnindexedRow[] = [];
+  if (!markdown || platform === "windows") return rows;
+  const ancestors: Array<{
+    indent: number;
+    index: number | null;
+    protected: boolean;
+    menu: boolean;
+  }> = [];
   for (const line of markdown.split("\n")) {
     const row = MARKDOWN_ROW.exec(line);
     if (!row) continue;
@@ -86,7 +124,8 @@ export function unindexedTextByElement(
     const index = row[2] === undefined ? null : Number(row[2]);
     const isProtected =
       protectionFor(row[3]!, platform) !== null || (ancestors.at(-1)?.protected ?? false);
-    ancestors.push({ indent, index, protected: isProtected });
+    const inMenu = /menu/iu.test(row[3]!) || (ancestors.at(-1)?.menu ?? false);
+    ancestors.push({ indent, index, protected: isProtected, menu: inMenu });
     if (index !== null || isProtected) continue;
     const rest = row[4] ?? "";
     const label = MARKDOWN_LABEL.exec(rest);
@@ -106,11 +145,9 @@ export function unindexedTextByElement(
       .reverse()
       .find((ancestor) => ancestor.index !== null);
     if (!owner) continue;
-    const list = texts.get(owner.index!) ?? [];
-    if (list.length < MAX_ROW_TEXTS) list.push(text);
-    texts.set(owner.index!, list);
+    rows.push({ owner: owner.index!, role: row[3]!, text, inMenu });
   }
-  return texts;
+  return rows;
 }
 
 type CuaElement = z.infer<typeof Element>;
@@ -123,6 +160,18 @@ type CuaElement = z.infer<typeof Element>;
  */
 export function opensOnInvoke(element: { readonly actions: readonly string[] }): boolean {
   return element.actions.includes("AXOpen") && !element.actions.includes("AXPress");
+}
+
+/**
+ * Whether a macOS element is a number field that takes a value: an
+ * AXIncrementor (Chrome's `<input type=number>`, a native stepper) that is
+ * not one part of a date or time field. A part takes neither the focus nor
+ * a value on its own (see dateFields).
+ */
+function isNumberField(element: CuaElement, byIndex: ReadonlyMap<number, CuaElement>): boolean {
+  if (element.role !== "AXIncrementor") return false;
+  const parent = element.parent_index === undefined ? undefined : byIndex.get(element.parent_index);
+  return parent?.role !== "AXDateField" && parent?.role !== "AXTimeField";
 }
 
 /**
@@ -183,6 +232,255 @@ function withoutLiveMemoryUsage(label: string): string {
   return label.replace(/ - (?:High )?[Mm]emory usage - [\d.,]+\s?[KMGT]?B(?= - |$)/u, "");
 }
 
+/**
+ * The title a reading's window element carries: its own label, not the page
+ * text an unlabeled element is named by, and clipped to a target title's
+ * bounds. Undefined when the reading has no labeled window element.
+ */
+export function readWindowTitle(
+  elements: readonly CuaElement[],
+  platform: Platform,
+): string | undefined {
+  const window = elements.find(
+    (element) => observedRole(element.role) === "window" && element.label?.trim(),
+  );
+  if (!window?.label) return undefined;
+  const title = platform === "macos" ? withoutLiveMemoryUsage(window.label) : window.label;
+  return title.trim() ? title.slice(0, 4_096) : undefined;
+}
+
+/** One part of a web page's date or time field, in the order the page shows
+ * them (the locale's order: day, month, year in much of the world). */
+export type DateSegment =
+  | "year"
+  | "month"
+  | "day"
+  | "week"
+  | "hours"
+  | "minutes"
+  | "seconds"
+  | "milliseconds"
+  | "meridiem";
+
+const DATE_SEGMENT_NAMES: Record<string, DateSegment> = {
+  year: "year",
+  month: "month",
+  day: "day",
+  week: "week",
+  hours: "hours",
+  minutes: "minutes",
+  seconds: "seconds",
+  milliseconds: "milliseconds",
+  "am/pm": "meridiem",
+};
+
+/**
+ * The date and time fields of web content (Chrome's and Safari's date, time,
+ * month, week and datetime-local inputs), by element_index, with their parts
+ * in the order shown. macOS reads such a field as an AXDateField or
+ * AXTimeField whose parts are AXIncrementors named "<part> <field label>"
+ * ("Day Date of birth"). A part cannot take the focus or a value on its own,
+ * and the field takes no value through accessibility, so it is filled by
+ * typing each part's digits. A field with a part this does not know (a
+ * browser in another language names them differently) is left out.
+ */
+export function dateFields(
+  elements: readonly CuaElement[],
+  webContent: ReadonlySet<number> = webContentIndexes(elements),
+): Map<number, { segments: DateSegment[]; parts: number[] }> {
+  const fields = new Map<number, { segments: DateSegment[]; parts: number[] }>();
+  const children = new Map<number, CuaElement[]>();
+  for (const element of elements)
+    if (element.parent_index !== undefined && element.role === "AXIncrementor")
+      children.set(element.parent_index, [...(children.get(element.parent_index) ?? []), element]);
+  for (const element of elements) {
+    if (
+      (element.role !== "AXDateField" && element.role !== "AXTimeField") ||
+      !element.element_token ||
+      !webContent.has(element.element_index)
+    )
+      continue;
+    const parts = children.get(element.element_index) ?? [];
+    const fieldLabel = (element.label ?? "").trim();
+    const segments = parts.map((part) => {
+      const label = (part.label ?? "").trim();
+      const name =
+        fieldLabel && label.endsWith(` ${fieldLabel}`)
+          ? label.slice(0, -fieldLabel.length - 1)
+          : label;
+      return DATE_SEGMENT_NAMES[name.trim().toLowerCase()];
+    });
+    if (segments.length === 0 || segments.some((segment) => segment === undefined)) continue;
+    if (new Set(segments).size !== segments.length) continue;
+    fields.set(element.element_index, {
+      segments: segments as DateSegment[],
+      parts: parts.map((part) => part.element_index),
+    });
+  }
+  return fields;
+}
+
+/** The ISO form a date or time field with these parts takes and shows. */
+export function dateFieldFormat(segments: readonly DateSegment[]): string {
+  const has = (segment: DateSegment) => segments.includes(segment);
+  const date = has("week")
+    ? "YYYY-Www"
+    : has("day")
+      ? "YYYY-MM-DD"
+      : has("month")
+        ? "YYYY-MM"
+        : has("year")
+          ? "YYYY"
+          : "";
+  const time = has("hours")
+    ? `HH:MM${has("seconds") ? ":SS" : ""}${has("milliseconds") ? ".mmm" : ""}`
+    : "";
+  return date && time ? `${date}T${time}` : date || time;
+}
+
+/**
+ * The ISO value a date or time field's parts read, in the parts' order, or
+ * null when a part reads no number (an empty part reads its placeholder,
+ * "dd" or "--") or the date reads zero. Chrome on macOS does not keep the
+ * field's own value current: after typing it still reads the value the page
+ * gave it first, or none, while its parts read what was typed.
+ */
+export function dateFieldValueFromParts(
+  segments: readonly DateSegment[],
+  values: readonly unknown[],
+): string | null {
+  if (values.length !== segments.length) return null;
+  const parts: DateParts = {};
+  let pm: boolean | null = null;
+  for (const [index, segment] of segments.entries()) {
+    const text = String(values[index] ?? "").trim();
+    if (segment === "meridiem") {
+      if (/^p/iu.test(text)) pm = true;
+      else if (/^a/iu.test(text)) pm = false;
+      else return null;
+      continue;
+    }
+    if (!/^\d{1,6}$/u.test(text)) return null;
+    parts[segment] = Number(text);
+  }
+  // A time of 00:00 is a time; a date of all zeros is not a date.
+  const dateParts = (["year", "month", "day", "week"] as const)
+    .filter((segment) => parts[segment] !== undefined)
+    .map((segment) => parts[segment]);
+  if (dateParts.length > 0 && dateParts.every((part) => part === 0)) return null;
+  if (pm !== null) {
+    if (parts.hours === undefined || parts.hours < 1 || parts.hours > 12) return null;
+    parts.hours = (parts.hours % 12) + (pm ? 12 : 0);
+  }
+  const pad = (part: number | undefined, width: number) => String(part).padStart(width, "0");
+  const has = (segment: DateSegment) => segments.includes(segment);
+  const date = has("week")
+    ? `${pad(parts.year, 4)}-W${pad(parts.week, 2)}`
+    : has("day")
+      ? `${pad(parts.year, 4)}-${pad(parts.month, 2)}-${pad(parts.day, 2)}`
+      : has("month")
+        ? `${pad(parts.year, 4)}-${pad(parts.month, 2)}`
+        : has("year")
+          ? pad(parts.year, 4)
+          : "";
+  const time = has("hours")
+    ? `${pad(parts.hours, 2)}:${pad(parts.minutes, 2)}${
+        has("seconds") ? `:${pad(parts.seconds, 2)}` : ""
+      }${has("milliseconds") ? `.${pad(parts.milliseconds, 3)}` : ""}`
+    : "";
+  const value = date && time ? `${date}T${time}` : date || time;
+  return value && !value.includes("undefined") && parseDateValue(value) ? value : null;
+}
+
+type DateParts = Partial<Record<Exclude<DateSegment, "meridiem">, number>>;
+
+/** The parts of an ISO date, time, month, week or local date-time, or null. */
+export function parseDateValue(value: string): DateParts | null {
+  const text = value.trim();
+  if (!text) return null;
+  const [datePart, timePart] = /^\d{4,6}-.*[T ]/u.test(text)
+    ? (text.split(/[T ]/u, 2) as [string, string])
+    : text.includes(":")
+      ? ["", text]
+      : [text, ""];
+  const parts: DateParts = {};
+  if (datePart) {
+    const week = /^(\d{4,6})-W(\d{1,2})$/iu.exec(datePart);
+    const date = /^(\d{4,6})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$/u.exec(datePart);
+    if (week) Object.assign(parts, { year: Number(week[1]), week: Number(week[2]) });
+    else if (date) {
+      parts.year = Number(date[1]);
+      if (date[2] !== undefined) parts.month = Number(date[2]);
+      if (date[3] !== undefined) parts.day = Number(date[3]);
+    } else return null;
+  }
+  if (timePart) {
+    const time = /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/u.exec(timePart);
+    if (!time) return null;
+    parts.hours = Number(time[1]);
+    parts.minutes = Number(time[2]);
+    if (time[3] !== undefined) parts.seconds = Number(time[3]);
+    if (time[4] !== undefined) parts.milliseconds = Number(time[4].padEnd(3, "0"));
+  }
+  const ranges: Record<keyof DateParts, [number, number]> = {
+    year: [1, 275760],
+    month: [1, 12],
+    day: [1, 31],
+    week: [1, 53],
+    hours: [0, 23],
+    minutes: [0, 59],
+    seconds: [0, 59],
+    milliseconds: [0, 999],
+  };
+  for (const [key, part] of Object.entries(parts) as [keyof DateParts, number][]) {
+    const [low, high] = ranges[key];
+    if (part < low || part > high) return null;
+  }
+  // A real calendar date: the 31st of February is not one.
+  if (parts.day !== undefined && parts.month !== undefined) {
+    const year = parts.year;
+    const leap = year === undefined || (year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0));
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][parts.month - 1]!;
+    if (parts.day > days) return null;
+  }
+  return parts;
+}
+
+/**
+ * The text to type into each part of a date or time field to give it this
+ * ISO value, in the parts' order, or why the value does not fit the field.
+ * Seconds and milliseconds the value leaves out are zero.
+ */
+export function dateFieldTyping(
+  segments: readonly DateSegment[],
+  value: string,
+): { texts: string[] } | { error: string } {
+  const format = dateFieldFormat(segments);
+  const unfit = {
+    error: `This date or time field takes its whole value in the form ${format}`,
+  };
+  const parts = parseDateValue(value);
+  if (!parts) return unfit;
+  const fieldParts = new Set<string>(segments);
+  if (Object.keys(parts).some((key) => !fieldParts.has(key))) return unfit;
+  const texts: string[] = [];
+  for (const segment of segments) {
+    if (segment === "meridiem") {
+      if (parts.hours === undefined) return unfit;
+      texts.push(parts.hours < 12 ? "A" : "P");
+      continue;
+    }
+    let part = parts[segment];
+    if (part === undefined && (segment === "seconds" || segment === "milliseconds")) part = 0;
+    if (part === undefined) return unfit;
+    if (segment === "hours" && fieldParts.has("meridiem")) part = part % 12 || 12;
+    texts.push(
+      String(part).padStart(segment === "year" ? 4 : segment === "milliseconds" ? 3 : 2, "0"),
+    );
+  }
+  return { texts };
+}
+
 export function projectElements(
   allElements: CuaElement[],
   platform: Platform = "macos",
@@ -194,10 +492,15 @@ export function projectElements(
       ? allElements.filter((element) => !repeatsParentLabel(element, byIndex))
       : allElements;
   const webContent = platform === "macos" ? webContentIndexes(allElements) : new Set<number>();
+  const typedFields =
+    platform === "macos"
+      ? dateFields(allElements, webContent)
+      : new Map<number, { segments: DateSegment[]; parts: number[] }>();
   // CUA may omit non-actionable parents. A flat, bounded forest preserves every
   // returned node without inventing ancestry or dropping orphaned children.
   return elements.map((element) => {
     const protectedReason = protectionFor(element.role, platform);
+    const numberField = platform === "macos" && isNumberField(element, byIndex);
     const opaqueWindowsEdit = protectedReason === "policy";
     // The SDK uses value as its label fallback when the native name is absent.
     const valueLabel =
@@ -225,14 +528,16 @@ export function projectElements(
             ? element.actions.includes("set_value")
             : // An item of a file list is shown as a text field, but its text is
               // the item's name, not something to edit.
-              !opensOnInvoke(element) &&
-              [
-                "AXTextField",
-                "AXTextArea",
-                "AXSecureTextField",
-                "AXSlider",
-                "AXPopUpButton",
-              ].includes(element.role)
+              (!opensOnInvoke(element) &&
+                [
+                  "AXTextField",
+                  "AXTextArea",
+                  "AXSecureTextField",
+                  "AXSlider",
+                  "AXPopUpButton",
+                ].includes(element.role)) ||
+              numberField ||
+              typedFields.has(element.element_index)
       )
         actions.push("set_value");
       // A control a person can operate can take the keyboard focus, so keys
@@ -250,12 +555,32 @@ export function projectElements(
       (text) => text !== label && text !== String(element.value ?? ""),
     );
     const containedText = contained.length > 0 ? contained.join(" | ").slice(0, 8_192) : undefined;
+    // A web date or time field reads what its parts read whenever they read
+    // a whole value: Chrome keeps the field's own value at the one the page
+    // gave it first (or none) while typing changes the parts.
+    const typed = typedFields.get(element.element_index);
+    const role = (numberField ? "spinbutton" : (roles[element.role] ?? element.role)).slice(0, 256);
+    const fieldValue =
+      (typed &&
+        dateFieldValueFromParts(
+          typed.segments,
+          typed.parts.map((part) => byIndex.get(part)?.value),
+        )) ??
+      element.value;
+    // Linux and Windows report whether a checkbox or switch is on only as
+    // CUA's `selected`; it reads as its value, "1" or "0", as on macOS.
+    const value =
+      fieldValue === undefined && typeof element.selected === "boolean" && TOGGLE_ROLES.has(role)
+        ? element.selected
+          ? "1"
+          : "0"
+        : fieldValue;
     return {
       ref: element.element_token ?? `read-only:${element.element_index}`,
       // Desktop labels and values can be whole documents (an editor's text
       // area). Clip to the semantic-node contract so one element cannot make
       // the entire observation invalid.
-      role: (roles[element.role] ?? element.role).slice(0, 256),
+      role,
       ...(label
         ? { name: label.slice(0, 8_192) }
         : containedText && !protectedReason
@@ -264,8 +589,8 @@ export function projectElements(
       ...(label && containedText && !protectedReason ? { description: containedText } : {}),
       ...(protectedReason
         ? { value: { redacted: true as const, reason: protectedReason } }
-        : element.value !== undefined
-          ? { value: String(element.value).slice(0, 32_768) }
+        : value !== undefined
+          ? { value: String(value).slice(0, 32_768) }
           : {}),
       states: [
         ...(element.enabled === false ? ["disabled"] : []),
@@ -286,13 +611,35 @@ export function projectElements(
   });
 }
 
+/** The elements of a reading with each listed once. macOS lists a table's
+ * cells again under each AXColumn, as new elements with the same role, label
+ * and bounds; the first of them stands for the element. */
+export function distinctElements<
+  Node extends Pick<InteractionSemanticNodeValue, "role" | "name" | "bounds">,
+>(nodes: readonly Node[]): Node[] {
+  const places = new Set<string>();
+  return nodes.filter((node) => {
+    if (!node.bounds || (node.bounds.width === 0 && node.bounds.height === 0)) return true;
+    const { x, y, width, height } = node.bounds;
+    const place = JSON.stringify([node.role, node.name ?? null, x, y, width, height]);
+    if (places.has(place)) return false;
+    places.add(place);
+    return true;
+  });
+}
+
 export function locate(
   nodes: InteractionSemanticNodeValue[],
   locator: ComputerLocator,
 ): InteractionSemanticNodeValue {
-  const matches = nodes.filter((node) => {
+  const found = nodes.filter((node) => {
+    // An exact name is the whole name, compared the way names are shown:
+    // trimmed, runs of whitespace as one space, and in any case.
+    const normalized = (value: string) => value.replace(/\s+/gu, " ").trim().toLowerCase();
     const match = (value: string | undefined, query: string, exact = false) =>
-      exact ? value === query : (value ?? "").toLowerCase().includes(query.toLowerCase());
+      exact
+        ? value !== undefined && normalized(value) === normalized(query)
+        : (value ?? "").toLowerCase().includes(query.toLowerCase());
     switch (locator.kind) {
       case "ref":
         return node.ref === locator.ref;
@@ -312,6 +659,7 @@ export function locate(
         return node.identifier === locator.value;
     }
   });
+  const matches = distinctElements(found);
   if (matches.length !== 1)
     throw new ComputerBackendError(
       matches.length ? "locator_ambiguous" : "locator_not_found",

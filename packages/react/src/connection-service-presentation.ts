@@ -4,8 +4,18 @@ import gmailLogo from "./assets/gmail.ico";
 import outlookLogo from "./assets/outlook.ico";
 
 /** Passive service identity only. Never selects an account or grants tool access. */
-const services: Record<string, { name: string; logo: string; mcpUrl?: string }> = {
+const services: Record<string, { name: string; logo: string | null; mcpUrl?: string }> = {
+  "google-drive": {
+    name: "Google Drive",
+    logo: null,
+    mcpUrl: "https://drivemcp.googleapis.com/mcp/v1",
+  },
   gmail: { name: "Gmail", logo: gmailLogo, mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
+  "google-calendar": {
+    name: "Google Calendar",
+    logo: null,
+    mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1",
+  },
   "microsoft-outlook-mail": { name: "Outlook Mail", logo: outlookLogo },
   "microsoft-outlook-calendar": { name: "Outlook Calendar", logo: outlookLogo },
   "microsoft-outlook-contacts": { name: "Outlook Contacts", logo: outlookLogo },

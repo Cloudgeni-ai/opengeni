@@ -37,6 +37,7 @@ const WORKSPACE_PAGE_TARGETS = [
   "/workspaces/$workspaceId/secrets",
   "/workspaces/$workspaceId/rigs",
   "/workspaces/$workspaceId/machines",
+  "/workspaces/$workspaceId/computer-use",
 ] as const;
 export type WorkspacePageTarget = (typeof WORKSPACE_PAGE_TARGETS)[number];
 

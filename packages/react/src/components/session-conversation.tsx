@@ -3,6 +3,7 @@ import {
   SESSION_SCOPE_HEADER,
   type ClientVoiceInputConfig,
   type OpenGeniClient,
+  type SessionEvent,
 } from "@opengeni/sdk";
 import {
   lazy,
@@ -25,6 +26,7 @@ import {
   type UseSessionConversationOptions,
 } from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
+import { useQueuedPromptRecall } from "../hooks/use-queued-prompt-recall";
 import { useDocumentForeground, useElementOnScreen } from "../hooks/use-foreground-visibility";
 import { useSessionReadAcknowledgement } from "../hooks/use-session-read-acknowledgement";
 import {
@@ -40,11 +42,21 @@ import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
 import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
-import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import { AuthNeededRow, MessageTimeline, type MessageTimelineProps } from "./message-timeline";
+import {
+  inChatConnectDecision,
+  isAgentCapabilityRequest,
+  useInChatConnectSupport,
+  type InChatConnectSource,
+} from "./conversation-capability-connect";
+import type { SessionMcpCapabilityCardProps } from "./session-mcp-capability-card";
+import type { SessionIntegrationCapabilityCardProps } from "./session-integration-capability-card";
+import type { AuthNeededItem } from "../timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
 import { currentProviderRecovery } from "../lib/provider-recovery";
 import {
   chainLinkResolvers,
+  OpenGeniLinkProvider,
   sessionLinkResolver,
   useOpenGeniLinkResolver,
   viewerLinkResolver,
@@ -53,6 +65,7 @@ import {
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { cn } from "../lib/cn";
+import { useComposerWithStreamState } from "../lib/use-calm-service-failure";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
 import {
@@ -68,7 +81,7 @@ export type SessionConversationLabels = {
   retry: string;
   /** Action when the conversation could not load at all. */
   tryAgain: string;
-  /** Shown in place of a Site preview when the session proxy does not serve Sites. */
+  /** Shown in place of a Site preview when the client config reports `artifacts: false`. */
   sitePreviewUnavailable: string;
 };
 
@@ -120,8 +133,8 @@ export type SessionConversationProps = ClientOverride &
     resolveSessionTitle?: ((sessionId: string) => string | null | undefined) | undefined;
     /**
      * Inline previews for assistant `opengeni-site` / `opengeni-html` fences.
-     * Defaults to the Opengeni preview. Behind a session proxy without its
-     * `artifacts` option, Sites show as unavailable without a request; `false`
+     * Defaults to the Opengeni preview. When the client config reports
+     * `artifacts: false`, Sites show as unavailable without a request; `false`
      * shows the fence as code.
      */
     renderInteractiveBlock?: MessageTimelineProps["renderInteractiveBlock"] | false;
@@ -144,23 +157,21 @@ export type SessionConversationProps = ClientOverride &
     /**
      * File attachments in the composer. Defaults to true; the attach control
      * appears only when the deployment's client config enables file uploads.
-     * A session proxy reports them off when `files` is false and for anonymous
-     * visitors (`visitor: true` from `resolve`) unless it sets `visitorUploads`.
+     * A session proxy reports them off for anonymous visitors (`visitor: true`
+     * from `resolve`) unless it sets `visitorUploads`.
      */
     attachments?: boolean | undefined;
     /**
      * Composer microphone (dictation into the draft). Defaults to true; it
-     * appears only when the client config reports voice input available
-     * (`createSessionProxyHandler({ voiceInput: false })` turns it off).
+     * appears only when the client config reports voice input available.
      */
     voiceInput?: boolean | undefined;
     /**
      * Live speech-to-speech voice in the composer. Opt-in: a call spends the
      * workspace's credits and asks for the microphone, so it is off unless this
-     * is `true` or the client config reports `realtimeVoice: true`
-     * (`createSessionProxyHandler({ realtimeVoice: true })`). The button then
-     * appears only when the workspace offers an available voice model and the
-     * proxy has not turned voice off (`realtimeVoice: false`).
+     * is `true` (or an older session proxy reports `realtimeVoice: true`). The
+     * button then appears only when the workspace offers an available voice
+     * model and the config has not turned voice off (`realtimeVoice: false`).
      */
     realtimeVoice?: boolean | undefined;
     /** Optional connection/voice handoff; the stock control owns call lifecycle and admission. */
@@ -210,6 +221,13 @@ export type SessionConversationProps = ClientOverride &
      */
     readAcknowledgement?: boolean | undefined;
     /**
+     * Called once for each event that arrives while the conversation is open,
+     * after its history first loaded (never for that history or for older
+     * pages read later). For hosts that react to the agent's work, for
+     * example reloading a preview when a tool call returns.
+     */
+    onEvent?: ((event: SessionEvent) => void) | undefined;
+    /**
      * Light or dark. Defaults to `auto`: follow the host page (an enclosing
      * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
      * host's `color-scheme`, then its background), not the OS setting alone.
@@ -223,6 +241,14 @@ export type SessionConversationProps = ClientOverride &
     surface?: HostSurfacePreference | undefined;
     /** Conversation-owned copy (error actions). */
     labels?: Partial<SessionConversationLabels> | undefined;
+    /**
+     * The signed-in person's subject id, as recorded on their turns
+     * (`turn.initiator.subjectId`). When set, Up in an empty composer pulls
+     * their latest waiting prompt back for editing; prompts from anyone else,
+     * including ones your backend sends with a service key, are never
+     * recalled. Omit it and Up keeps its normal behaviour.
+     */
+    viewerSubjectId?: string | null | undefined;
     /** Presentation/custom controls only; queue and delivery wiring stay owned here. */
     composerProps?: Omit<
       ChatComposerProps,
@@ -315,6 +341,37 @@ export function SessionConversation({
   );
 }
 
+/**
+ * `onEvent` for each event newer than any seen since the history first
+ * loaded. The first ready read only sets where "new" starts, so loading the
+ * history, an older page or a reconnect's replay calls nothing again.
+ */
+function useLiveEvents(
+  sessionId: string | null,
+  events: readonly SessionEvent[],
+  ready: boolean,
+  onEvent: ((event: SessionEvent) => void) | undefined,
+) {
+  const callback = useRef(onEvent);
+  callback.current = onEvent;
+  const seen = useRef<{ sessionId: string | null; sequence: number | null }>({
+    sessionId,
+    sequence: null,
+  });
+  useEffect(() => {
+    if (seen.current.sessionId !== sessionId) seen.current = { sessionId, sequence: null };
+    if (!ready || sessionId === null) return;
+    const previous = seen.current.sequence;
+    const newest = events.reduce((max, event) => Math.max(max, event.sequence), previous ?? 0);
+    seen.current = { sessionId, sequence: newest };
+    if (previous === null) return;
+    const fresh = events
+      .filter((event) => event.sequence > previous)
+      .sort((a, b) => a.sequence - b.sequence);
+    for (const event of fresh) callback.current?.(event);
+  }, [events, ready, sessionId]);
+}
+
 function RetryingConversation(props: Omit<SessionConversationProps, "baseUrl">) {
   // A failed initial load retries by remounting the whole conversation.
   const [attempt, setAttempt] = useState(0);
@@ -367,10 +424,12 @@ function ConversationView({
   className,
   height = "100%",
   readAcknowledgement = true,
+  onEvent,
   theme,
   surface,
   labels: labelOverrides,
   composerProps,
+  viewerSubjectId,
   chromeProps,
   humanInputProps,
   approvalProps,
@@ -399,7 +458,23 @@ function ConversationView({
     loadFailed,
   } = conversation;
   const context = conversation;
+  // A dropped event stream (an update or brief outage) reads as "updating" in
+  // the composer while it reconnects.
+  const composerView = useComposerWithStreamState(
+    composer,
+    feed.connectionState,
+    feed.initialLoading,
+  );
+  const builtInQueuedRecall = useQueuedPromptRecall({
+    queue,
+    composer,
+    subjectId: viewerSubjectId,
+    enabled: sessionId !== null && !terminal && Boolean(viewerSubjectId),
+  });
+  // One recall drives both the composer key and the queue row's ↑ hint.
+  const queuedRecall = composerProps?.queuedRecall ?? builtInQueuedRecall;
   const formatError = useErrorMessage();
+  useLiveEvents(sessionId, feed.events, feed.initialHistoryReady, onEvent);
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
   // Read means seen: the timeline itself must be on screen (hosts may hide it
@@ -468,6 +543,59 @@ function ConversationView({
     [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
   );
   const labels = { ...DEFAULT_CONVERSATION_LABELS(t), ...labelOverrides };
+  // The agent's capability cards get the shared connect card, so a person
+  // can connect from the chat with no host code; the agent then continues.
+  const showsCapabilityRequest = useMemo(
+    () =>
+      conversation.timeline.some(
+        (item) => item.kind === "auth-needed" && isAgentCapabilityRequest(item),
+      ),
+    [conversation.timeline],
+  );
+  const connectSupport = useInChatConnectSupport(
+    // Custom session clients may not read grants or the catalog; the stock
+    // card then stays off.
+    context.client as Partial<InChatConnectSource>,
+    context.workspaceId,
+    showsCapabilityRequest && config.chatConnections && !importedArchive,
+  );
+  const renderStockAuthNeeded = (item: AuthNeededItem) => {
+    if (!sessionId || importedArchive) return undefined;
+    const decision = inChatConnectDecision(item, connectSupport, config.chatConnections);
+    if (decision.kind === "unavailable") return <AuthNeededRow item={item} setupUnavailable />;
+    if (decision.kind === "integration") {
+      return (
+        <Suspense fallback={<AuthNeededRow item={item} />}>
+          <LazySessionIntegrationCapabilityCard
+            client={context.client as unknown as SessionIntegrationCapabilityCardProps["client"]}
+            workspaceId={context.workspaceId}
+            sessionId={sessionId}
+            capabilityId={decision.capabilityId}
+            name={decision.name}
+            rationale={item.capability?.rationale ?? ""}
+            returnUrl={typeof window === "undefined" ? "" : window.location.href}
+          />
+        </Suspense>
+      );
+    }
+    if (decision.kind !== "card") return undefined;
+    return (
+      <Suspense fallback={<AuthNeededRow item={item} />}>
+        <LazySessionMcpCapabilityCard
+          client={context.client as unknown as SessionMcpCapabilityCardProps["client"]}
+          workspaceId={context.workspaceId}
+          sessionId={sessionId}
+          capabilityId={decision.item.id}
+          name={decision.item.name}
+          personalOnly={decision.personalOnly}
+          rationale={item.capability?.rationale ?? ""}
+          // OAuth returns to this exact host page; the card follows the
+          // attempt's durable state, so the page needs no return handler.
+          returnUrl={typeof window === "undefined" ? "" : window.location.href}
+        />
+      </Suspense>
+    );
+  };
   const retryInPlace = () => void conversation.retry();
   const realtimeVoiceRequested = realtimeVoiceProp ?? config.realtimeVoiceOffered;
   const loadingOptions = useMemo(() => embeddedGenieLoading(t, genieLoading), [genieLoading, t]);
@@ -593,7 +721,9 @@ function ConversationView({
               timelineProps?.renderAuthNeeded?.(item) ??
               (item.capability?.id === "api:connected-machine" && computerConnection ? (
                 <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
-              ) : undefined)
+              ) : (
+                renderStockAuthNeeded(item)
+              ))
             }
             emptyState={timelineProps?.emptyState}
             renderMessageSender={timelineProps?.renderMessageSender}
@@ -645,23 +775,26 @@ function ConversationView({
                 className="mx-auto max-w-3xl px-1"
                 recovery={providerRecovery}
               />
-              <HumanInputSurface
-                className="mx-auto max-w-3xl"
-                autoFocus={false}
-                decisionButtons
-                {...humanInputProps}
-                loadSkillReview={loadSkillReview}
-                requests={human.requests}
-                onSubmit={async (id, response) => {
-                  // `respond` reports a failed send as null. Reject so the card
-                  // keeps what was typed (including a secret) for a retry.
-                  if (!(await human.respond(id, response))) {
-                    throw new Error(t("sessionConversation.yourAnswerWasnTSent"));
-                  }
-                }}
-                respondingRequestId={human.respondingRequestId}
-                error={human.mutationError ? formatError(human.mutationError) : null}
-              />
+              {/* Links in agent questions resolve like links in its replies. */}
+              <OpenGeniLinkProvider resolveLink={links}>
+                <HumanInputSurface
+                  className="mx-auto max-w-3xl"
+                  autoFocus={false}
+                  decisionButtons
+                  {...humanInputProps}
+                  loadSkillReview={loadSkillReview}
+                  requests={human.requests}
+                  onSubmit={async (id, response) => {
+                    // `respond` reports a failed send as null. Reject so the card
+                    // keeps what was typed (including a secret) for a retry.
+                    if (!(await human.respond(id, response))) {
+                      throw new Error(t("sessionConversation.yourAnswerWasnTSent"));
+                    }
+                  }}
+                  respondingRequestId={human.respondingRequestId}
+                  error={human.mutationError ? formatError(human.mutationError) : null}
+                />
+              </OpenGeniLinkProvider>
               <ConversationChrome
                 sessionId={sessionId}
                 client={context.client}
@@ -680,6 +813,7 @@ function ConversationView({
                         ...chromeProps,
                         queue,
                         composer,
+                        queuedRecall,
                         sessionStatus: status,
                         onOpenSession,
                         onComposerFocus: () =>
@@ -710,7 +844,7 @@ function ConversationView({
                   )
                 }
                 transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
-                composer={composer}
+                composer={composerView}
                 attachments={uploadsEnabled ? files : undefined}
                 // Nothing can be written (typed, dictated or chosen) into a
                 // session the host is still creating.
@@ -748,6 +882,7 @@ function ConversationView({
                   detail.session?.effectiveControl
                 }
                 queuedAheadCount={queue.queue.length}
+                queuedRecall={queuedRecall}
               />
             </div>
           </>
@@ -808,6 +943,18 @@ function GoalChrome({
   return <SessionChrome {...chrome} goal={goal} />;
 }
 const LazyEmbeddedRealtimeVoice = lazy(() => import("../realtime/embedded-voice"));
+
+const LazySessionIntegrationCapabilityCard = lazy(() =>
+  import("./session-connect-cards").then((module) => ({
+    default: module.SessionIntegrationCapabilityCard,
+  })),
+);
+
+const LazySessionMcpCapabilityCard = lazy(() =>
+  import("./session-connect-cards").then((module) => ({
+    default: module.SessionMcpCapabilityCard,
+  })),
+);
 
 const LazyChatInteractiveBlock = lazy(() =>
   import("./artifacts/chat-interactive-block").then((module) => ({
@@ -880,8 +1027,9 @@ type RetainedLoaderClient = Partial<
 
 /**
  * Generated images, published files, screenshots and generated video, read
- * through this conversation's session scope (a session proxy only serves
- * media that session produced). Clients without the SDK reads get none.
+ * through this conversation's session scope (`x-opengeni-session-id`, which
+ * a session proxy's `authorizeSession` checks). Clients without the SDK reads
+ * get none.
  */
 function useRetainedLoaders(
   client: unknown,
@@ -976,7 +1124,8 @@ export function useComposerTranscription(
     () =>
       supported
         ? {
-            client: reader as Pick<OpenGeniClient, "transcribeAudio">,
+            client: reader as Pick<OpenGeniClient, "transcribeAudio"> &
+              Partial<Pick<OpenGeniClient, "requestJson">>,
             workspaceId,
             capability,
             workspaceEnabled:

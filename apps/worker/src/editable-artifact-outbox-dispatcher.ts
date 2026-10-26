@@ -12,6 +12,7 @@ import {
 import {
   PostgresEditableArtifactStore,
   createDb,
+  databasePoolOptions,
   dbSql,
   type Database,
   type DbClient,
@@ -45,6 +46,10 @@ export type EditableArtifactOutboxWorkerOptions = Readonly<{
   databasePoolSize?: number;
   /** Unset → decided from the URL; see `CreateDbOptions.preparedStatements`. */
   databasePreparedStatements?: boolean;
+  /** Unset → pool default; see `CreateDbOptions.idleTimeoutSeconds`. */
+  databaseIdleTimeoutSeconds?: number;
+  /** Unset → pool default; see `CreateDbOptions.maxLifetimeSeconds`. */
+  databaseMaxLifetimeSeconds?: number;
   natsUrl: string;
   natsAuth: EditableArtifactHintNatsAuth;
   owner?: string;
@@ -123,9 +128,11 @@ export async function createEditableArtifactOutboxWorker(
   const database = createDb(dispatcherDatabaseUrl, {
     max: databasePoolSize,
     ...(options.databaseSearchPath ? { searchPath: options.databaseSearchPath } : {}),
-    ...(options.databasePreparedStatements === undefined
-      ? {}
-      : { preparedStatements: options.databasePreparedStatements }),
+    ...databasePoolOptions({
+      databasePreparedStatements: options.databasePreparedStatements,
+      databasePoolIdleTimeoutSeconds: options.databaseIdleTimeoutSeconds,
+      databasePoolMaxLifetimeSeconds: options.databaseMaxLifetimeSeconds,
+    }),
   });
   let broker: ConfirmedNatsEditableArtifactHintBroker;
   try {

@@ -81,3 +81,10 @@ test("route keeps suggestions below recent sessions and uses the ordinary draft/
   expect(route).toContain("<RunsOnMenuBody");
   expect(route).toContain("<ComputeTargetControl");
 });
+
+test("without the chat list, the new-chat page shows no recent chats or project picker", () => {
+  const route = readFileSync(new URL("../routes/sessions-index.tsx", import.meta.url), "utf8");
+  expect(route).toContain('const chatList = useSessionUiFeature("chatList");');
+  expect(route).toContain("{chatList ? <RecentSessions workspaceId={workspaceId} /> : null}");
+  expect(route).toMatch(/chatList \? \(\s*<SessionSetupStrip/);
+});

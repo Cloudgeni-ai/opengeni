@@ -4,6 +4,9 @@
     "noEmit": true
   },
   "include": [
+    "backfill-event-identities.ts",
+    "backfill-event-identities.test.ts",
+    "bench-http-model-catalog.ts",
     "credit-promotion-policy.ts",
     "connected-machine-load-profile.ts",
     "connected-machine-load-profile.test.ts",

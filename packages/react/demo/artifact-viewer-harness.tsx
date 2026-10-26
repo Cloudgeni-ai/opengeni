@@ -10,7 +10,7 @@ import "@opengeni/react/compiled.css";
  * An embedding host: a narrow assistant panel on the left and the product's
  * main area on the right. Agent links and Site previews open
  * SessionArtifactViewer over the main area (full screen below 768px). The fake
- * client stands in for createSessionProxyHandler({ artifacts: true }).
+ * client stands in for createSessionProxyHandler.
  */
 
 const EDITABLE_ID = "0123456789abcdef0123456789abcdef";

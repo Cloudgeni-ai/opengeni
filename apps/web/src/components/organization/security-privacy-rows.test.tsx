@@ -58,6 +58,7 @@ beforeEach(() => {
   privacy = {
     organizationId: identity.organizationId,
     defaultVisibility: "workspace",
+    personalWorkspaces: true,
     adminsSeePrivateSchedules: true,
     limits: {
       onlyMeAllowed: true,
@@ -68,12 +69,14 @@ beforeEach(() => {
   };
 });
 
-async function render() {
+async function render(onAccessChanged?: () => void) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<PrivateChatsRow client={client} identity={identity} />);
+    root.render(
+      <PrivateChatsRow client={client} identity={identity} onAccessChanged={onAccessChanged} />,
+    );
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
   return { container, root };
@@ -89,10 +92,10 @@ function switchFor(container: HTMLElement, label: string) {
   return container.querySelector<HTMLButtonElement>(`[role="switch"][aria-label="${label}"]`);
 }
 
-test("owners pick the default audience and whether admins see Only me schedules", async () => {
+test("owners pick the default audience and whether admins see Only me automations", async () => {
   const { container, root } = await render();
-  expect(container.textContent).toContain("Only me chats and schedules");
-  expect(container.textContent).toContain("New chats and schedules");
+  expect(container.textContent).toContain("Only me chats and automations");
+  expect(container.textContent).toContain("New chats and automations");
   expect(radio(container, "Workspace")!.getAttribute("aria-checked")).toBe("true");
   await act(async () => {
     radio(container, "Only me")!.click();
@@ -105,14 +108,14 @@ test("owners pick the default audience and whether admins see Only me schedules"
 
   expect(container.textContent).toContain("Never its name, message or chats.");
   await act(async () => {
-    switchFor(container, "Admins see Only me schedules")!.click();
+    switchFor(container, "Admins see Only me automations")!.click();
     await new Promise((resolve) => setTimeout(resolve, 20));
   });
   expect(updatePrivacy).toHaveBeenLastCalledWith(identity.organizationId, {
     adminsSeePrivateSchedules: false,
   });
   expect(container.textContent).toContain(
-    "Admins can't see other people's Only me schedules at all, like Only me chats.",
+    "Admins can't see other people's Only me automations at all, like Only me chats.",
   );
   await act(async () => root.unmount());
 });
@@ -129,14 +132,52 @@ test("choices this app fixes are shown locked, with the reason", async () => {
     },
   };
   const { container, root } = await render();
-  const onlyMeSwitch = switchFor(container, "Only me chats and schedules")!;
+  const onlyMeSwitch = switchFor(container, "Only me chats and automations")!;
   expect(onlyMeSwitch.getAttribute("aria-checked")).toBe("false");
   expect(onlyMeSwitch.disabled).toBe(true);
   expect(container.textContent).toContain(
     "Only me is off. This is set for everyone using this app.",
   );
   // The default only matters while Only me is on.
-  expect(container.textContent).not.toContain("New chats and schedules");
-  expect(switchFor(container, "Admins see Only me schedules")!.disabled).toBe(true);
+  expect(container.textContent).not.toContain("New chats and automations");
+  expect(switchFor(container, "Admins see Only me automations")!.disabled).toBe(true);
+  await act(async () => root.unmount());
+});
+
+test("owners turn Personal workspaces off and the app reloads what people can see", async () => {
+  const accessChanged = mock(() => undefined);
+  const { container, root } = await render(accessChanged);
+  const personal = switchFor(container, "Personal workspaces")!;
+  expect(personal.getAttribute("aria-checked")).toBe("true");
+  expect(container.textContent).toContain(
+    "Everyone has a private workspace of their own, next to the shared ones.",
+  );
+  expect(container.textContent).toContain("Personal workspaces are always private.");
+  await act(async () => {
+    personal.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(updatePrivacy).toHaveBeenLastCalledWith(identity.organizationId, {
+    personalWorkspaces: false,
+  });
+  expect(toastSuccess).toHaveBeenLastCalledWith("Personal workspaces are hidden");
+  expect(accessChanged).toHaveBeenCalledTimes(1);
+  expect(switchFor(container, "Personal workspaces")!.getAttribute("aria-checked")).toBe("false");
+  expect(container.textContent).toContain(
+    "People work in shared workspaces, where their own machines, browsers and vaults keep working.",
+  );
+  // Only me no longer mentions a workspace nobody sees.
+  expect(container.textContent).not.toContain("Personal workspaces are always private.");
+  await act(async () => root.unmount());
+});
+
+test("other privacy choices do not reload access", async () => {
+  const accessChanged = mock(() => undefined);
+  const { container, root } = await render(accessChanged);
+  await act(async () => {
+    switchFor(container, "Admins see Only me automations")!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  expect(accessChanged).not.toHaveBeenCalled();
   await act(async () => root.unmount());
 });

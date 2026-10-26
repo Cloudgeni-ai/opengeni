@@ -27,7 +27,7 @@ icon: "palette"
 
 The new-chat composer is the same as the follow-up one: attachments, your `conversationProps.composerProps`, and the model picker when offered. Files attached to the first message are added to the new chat.
 
-Live voice is off unless you turn it on, because each call is paid from your Opengeni credits per minute and asks the browser for the microphone. Pass `realtimeVoice: true` to `createSessionProxyHandler`, or `conversationProps={{ realtimeVoice: true }}`. The composer then shows a voice button when your workspace has a voice model available (for example hosted GPT Live). Starting voice in a new chat creates an empty conversation and starts the call there; typed text and attachments remain an unsent draft, not an invented first message. The user talks, the voice model answers, hands work to the agent in the same chat, and the transcript appears in the timeline. `realtimeVoice: false` on the proxy refuses voice even when the component asks for it.
+Live voice is off unless you turn it on, because each call is paid from your Opengeni credits per minute and asks the browser for the microphone. Pass `conversationProps={{ realtimeVoice: true }}`. The composer then shows a voice button when your workspace has a voice model available (for example hosted GPT Live). Starting voice in a new chat creates an empty conversation and starts the call there; typed text and attachments remain an unsent draft, not an invented first message. The user talks, the voice model answers, hands work to the agent in the same chat, and the transcript appears in the timeline.
 
 The indicator shown while the agent starts says "Thinking…". Use `conversationProps={{ genieLoading: { phrases: ["One moment…"] } }}` for your own copy, or `genieLoading.render` for your own visual.
 
@@ -56,7 +56,7 @@ If your app authenticates with a bearer token instead of cookies, pass it on eve
 
 The function runs per request, so it can return a refreshed token. Pass `fetch` instead when the token must be awaited. A `client` you pass with `baseUrl` is used instead of the one the component would create.
 
-The list shows the chats the user created. Set `sessionList: "visible"` on the proxy to list every chat they can read. Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
+The list shows every chat the user can read; pass `listProps={{ mineOnly: true }}` for only their own, `listProps={{ archive: false }}` to hide "Hide for me", and `newChat={false}` to hide "New chat". Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
 
 For a single conversation, use `SessionConversation`. It includes streaming replies, tool activity, approvals, questions, attachments, the message queue, Steer, and Pause/Resume.
 
@@ -236,7 +236,7 @@ const toolRegistry = createDefaultToolRegistry({
 
 ## Start sessions from the browser
 
-New chats go through the proxy's `createSession` hook. The browser sends the first message and permitted choices; your hook returns the full request, so tools, skills, and authority stay on your server:
+Without a hook, the browser starts chats with Opengeni's own create request, limited by the user's permissions. To own chat setup on your server, add the proxy's `createSession` hook. The browser then sends the first message and permitted choices; your hook returns the full request, so tools, skills, and authority stay on your server, and the proxy refuses the routes that would change that setup later:
 
 ```ts
 createSessionProxyHandler(og, {
@@ -255,14 +255,13 @@ The proxy carries the browser's idempotency key through unless the hook provides
 its own. Voice-first creation includes `startMode: "realtime"`, with no initial
 message or first-message files. The same value reaches `beforeForwardMessage`
 so an admission hook can distinguish empty creation from a text turn. Model
-choices still require the proxy's `modelSelection` option; live voice still
-obeys its `realtimeVoice` gate.
+choices still require the proxy's `modelSelection` option.
 
 ## Links, artifacts, and Sites
 
-File links download by file ID. Set `sandboxFiles: true` on the proxy to let users download files from the session's sandbox.
+File links download by file ID, and `sandbox:` links download files from the session's sandbox for users with `files:read`.
 
-To open artifacts and Sites, either route them to your own pages with `resolveLink`, or enable the proxy's `artifacts: true` and render `SessionArtifactViewer` from `@opengeni/react/artifacts` in `onOpenArtifact` (members need `artifacts:read`).
+To open artifacts and Sites, either route them to your own pages with `resolveLink`, or render `SessionArtifactViewer` from `@opengeni/react/artifacts` in `onOpenArtifact` (members need `artifacts:read`).
 
 ## Other UI shapes
 

@@ -47,9 +47,11 @@ import {
   revealText,
 } from "./secret-actions";
 import { formatTotpCode, TotpRing, useTotp } from "./totp-code";
+import { ItemApprovalSection } from "./item-approval";
 import {
   hostOf,
   ITEM_TYPE_LABEL,
+  itemCategoryLabel,
   vaultErrorText,
 } from "@opengeni/react/app/components/secrets/vault-model";
 import { ExpiryBadge, ItemTile } from "./vault-parts";
@@ -409,6 +411,7 @@ export function ItemPage({
   actions,
   personName,
   transfer,
+  workspaceId,
 }: {
   item: VaultItem;
   vault: VaultSummary;
@@ -423,6 +426,8 @@ export function ItemPage({
   transfer?: ItemTransfer;
   /** Names version authors: "you", a member's name, or null when unknown. */
   personName?: ((subjectId: string) => string | null) | undefined;
+  /** The workspace being viewed: approvals and their chat links belong to it. */
+  workspaceId?: string | undefined;
 }) {
   // Plaintext by field id. Component state only; gone on unmount.
   const [revealed, setRevealed] = useState<Record<string, string>>({});
@@ -540,6 +545,9 @@ export function ItemPage({
         }
         meta={[
           <span key="type">{ITEM_TYPE_LABEL[item.type]}</span>,
+          ...(item.category
+            ? [<span key="category">{itemCategoryLabel(item.category)}</span>]
+            : []),
           <span key="vault">in {vault.name}</span>,
           <span key="updated">
             updated <RelativeTime date={item.updatedAt} inSentence />
@@ -687,6 +695,17 @@ export function ItemPage({
                 ) : null}
               </div>
             </DetailSection>
+          ) : null}
+          {fields.length && item.type !== "passkey" ? (
+            <ItemApprovalSection
+              key={item.id}
+              api={api}
+              vaultId={item.vaultId}
+              itemId={item.id}
+              workspaceId={workspaceId}
+              archived={archived}
+              fields={fields.map((field) => ({ name: field.name, label: fieldLabel(field.name) }))}
+            />
           ) : null}
           {(() => {
             const versioned = fields.filter(

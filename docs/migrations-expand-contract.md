@@ -247,6 +247,27 @@ inventory, not a provisioning grant list. Never regenerate it from a live
 database to silence findings. New named private capabilities need explicit
 registration and their own authority tests.
 
+**A new definer the runtime must call takes two releases.** Create it without
+runtime EXECUTE, and register it in `RUNTIME_DEFINER_ROUTINES` and
+`DEFERRED_RUNTIME_PRIVATE_ROUTINES` so readiness accepts it with or without
+the grant. Code that calls it treats `insufficient_privilege` as "not yet".
+Once a binary that knows it is the previous release (the pinned baseline
+below), grant it in a rolling migration, drop it from
+`DEFERRED_RUNTIME_PRIVATE_ROUTINES` so readiness requires it, and remove the
+"not yet" handling. A new non-RLS table the runtime writes needs the same two
+steps, with readiness accepting no runtime DML or all four. 0929, 0930, 0932
+and 0935 granted on creation instead; 0937 withheld those grants and the
+`event_ingress_routes` DML again, and 0947 restored them. 0946 created the
+recording retention inventory withheld, and 0950 granted it. 0978 created the
+personal-machine owner lookup withheld; its callers check
+`has_function_privilege` first, because they run inside transactions that a
+permission error would abort.
+
+**If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
+immediately.** Until 0937 commits, the previous release's readiness rejects
+those grants, so the old fleet stays unready. The gap is normally only the
+seconds the migrations before rollout (`--phase=maintenance`) take.
+
 Every existing check for **known** objects remains exact: missing objects and
 privileges, excess grants, owner relationships, RLS, capability predicates,
 search paths and cutover receipts. Caller-specific contract overrides cannot

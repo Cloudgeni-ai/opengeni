@@ -5,6 +5,7 @@ import {
 } from "@opengeni/config";
 import {
   createDb,
+  databasePoolOptions,
   dbSql,
   PostgresEditableArtifactMaterializationRepository,
   type Database,
@@ -162,9 +163,7 @@ export async function createProductionEditableArtifactMaterializerService(
   const dbClient = createDb(options.databaseUrl, {
     ...(searchPath ? { searchPath } : {}),
     ...(options.settings.rlsStrategy ? { rlsStrategy: options.settings.rlsStrategy } : {}),
-    ...(options.settings.databasePreparedStatements === undefined
-      ? {}
-      : { preparedStatements: options.settings.databasePreparedStatements }),
+    ...databasePoolOptions(options.settings),
     max: Math.max(2, concurrency + 1),
   });
   let created = false;

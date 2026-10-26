@@ -4,6 +4,7 @@ import {
   startupPhaseTitle,
   STARTUP_WAIT_TITLES,
 } from "./platform-activity-presentation";
+import { useToolDetails } from "./tool-details";
 import type { ReasoningItem, SandboxItem, StartupPhaseItem } from "./types";
 import { useOpenGeniText } from "../messages/runtime";
 
@@ -30,6 +31,7 @@ export default function PlatformActivityRow({
   s: RowJsxs;
 }) {
   const msg = useOpenGeniText();
+  const plainDetails = useToolDetails() === "plain";
   if (item.kind === "reasoning") {
     return j(ActivityDisclosure, {
       icon: brainIcon(j, s),
@@ -84,6 +86,9 @@ export default function PlatformActivityRow({
   const failed = item.status === "failed";
   const running = item.status === "running";
   const duration = startupDuration(item.durationMs);
+  // A failed step's recorded error is diagnostic detail: behind the row, never
+  // its title, and absent where the host hides raw technical detail.
+  const detail = failed && !plainDetails ? item.detail : undefined;
   return j(ActivityDisclosure, {
     icon: j(BotIcon, { className: "size-3.5" }),
     iconTone: failed ? "failed" : running ? "running" : "muted",
@@ -98,7 +103,13 @@ export default function PlatformActivityRow({
     failed,
     cancelled: item.status === "cancelled",
     chip: duration ? { tone: failed ? "bad" : "muted", text: duration } : undefined,
-    expandable: false,
+    expandable: Boolean(detail),
+    children: detail
+      ? j(PayloadBlock, {
+          label: msg("timeline.platformActivityRow.details"),
+          value: detail,
+        })
+      : undefined,
   });
 }
 

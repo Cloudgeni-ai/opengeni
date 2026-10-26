@@ -1,5 +1,6 @@
 import {
   Client,
+  type ClientCapabilities,
   ProtocolError,
   SdkError,
   SdkErrorCode,
@@ -16,6 +17,8 @@ export type McpStreamableHttpConnectInput = {
   timeoutMs: number;
   requestInit?: RequestInit;
   fetch?: (url: string | URL, init?: RequestInit) => Promise<Response>;
+  /** Client capabilities to advertise, such as protocol extensions. */
+  capabilities?: ClientCapabilities;
 };
 
 /**
@@ -94,7 +97,7 @@ async function connectOnce(
 ): Promise<McpStreamableHttpClient> {
   const client = new Client(
     { name: input.clientName, version: input.clientVersion },
-    { capabilities: {}, versionNegotiation: { mode } },
+    { capabilities: input.capabilities ?? {}, versionNegotiation: { mode } },
   );
   const transport = new StreamableHTTPClientTransport(new URL(input.url), {
     ...(input.requestInit ? { requestInit: input.requestInit } : {}),

@@ -2,22 +2,21 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 describe("personal-resource direct-read authority", () => {
-  test("local title and publication admission use the linked effective permission ceiling", async () => {
+  // Native Google Drive publication admission retired with the Drive MCP
+  // connection; the local title admission remains.
+  test("local title admission uses the linked effective permission ceiling", async () => {
     const source = await readFile(
       new URL("../src/activities/agent-turn/tool-environment.ts", import.meta.url),
       "utf8",
     );
     const start = source.indexOf("const needsTitle = shouldRequestMissingSessionTitle(");
-    const end = source.indexOf("const googleDriveConnectorBindings", start);
+    const end = source.indexOf("const attemptConnectorActionBindings", start);
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const admission = source.slice(start, end);
     expect(admission).not.toContain("session.firstPartyMcpPermissions");
     expect(admission).toContain("firstPartyMcpPermissions: effectiveFirstPartyPermissions");
     expect(admission).toContain("shouldRequestTitle: needsTitle &&");
-    expect(
-      admission.match(/effectiveFirstPartyPermissions \?\? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS/g),
-    ).toHaveLength(2);
     expect(admission).not.toContain("?.length");
   });
   test("revalidates Rig reads early and never materializes Variable Sets into the turn", async () => {

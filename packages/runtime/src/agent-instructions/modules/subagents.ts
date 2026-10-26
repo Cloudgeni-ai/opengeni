@@ -108,6 +108,8 @@ export const subagentsModule: AgentPromptModule = {
         "Do not present delegated work as incorporated until you have consumed the completed result.",
         "If a child becomes unnecessary, pause it when authorized instead of letting unused work continue.",
       ),
+      toolAvailable(context, "session_human_input_respond") &&
+        "A child's question to the person may also reach you as a `child_requires_action` update; the first answer wins. Answer it with `session_human_input_respond` when you can from your task context; leave questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answer a question meant for the person on their behalf.",
       shortWaits(context),
     );
   },

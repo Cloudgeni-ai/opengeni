@@ -57,7 +57,7 @@ test("agent account labels use verified provider identity without changing exact
   const legacy = { ...connection(), metadata: { slackUserId: "U_ONE", slackTeamId: "T_ONE" } };
   expect(
     mcpAccountBindingsFromVisibleConnections({ ...input, connections: [legacy] })[0]?.accountLabel,
-  ).toBe("U_ONE · T_ONE · Only me");
+  ).toBe("slack.example.test account · Only me");
 });
 
 test("rejected pinned accounts retain safe structured identity and eligibility reason", () => {

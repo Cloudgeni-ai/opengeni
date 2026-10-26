@@ -2,6 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  OpenGeniMessagesProvider,
+  createOpenGeniText,
+  type OpenGeniMessages,
+} from "../messages/runtime";
+import {
   RelativeTime,
   formatAbsoluteTime,
   formatDate,
@@ -142,5 +147,79 @@ describe("RelativeTime", () => {
     );
     expect(html).not.toContain("tabindex");
     expect(html).toContain("Wed 23 Sep 2026, 11:12 Oslo time");
+  });
+});
+
+/** A host's Norwegian (Bokmål) words for times. */
+const NORWEGIAN: OpenGeniMessages = {
+  "time.justNow": "Akkurat nå",
+  "time.minutesAgo_other": "For {count} min siden",
+  "time.inMinutes_other": "Om {count} min",
+  "time.hoursAgo_one": "For {count} time siden",
+  "time.hoursAgo_other": "For {count} timer siden",
+  "time.yesterday": "I går",
+  "time.tomorrow": "I morgen",
+  "time.daysAgo_other": "For {count} dager siden",
+  "time.inDays_other": "Om {count} dager",
+  "time.todayAt": "I dag kl. {time}",
+  "time.dateTime": "{weekday} {day}. {month} kl. {time}",
+  "time.date": "{day}. {month}",
+  "time.dateWithYear": "{day}. {month} {year}",
+  "time.exact": "{weekday} {day}. {month} {year} kl. {time} ({zone})",
+  "time.zoneTime": "{city}-tid",
+  "time.weekday.mon": "man.",
+  "time.weekday.wed": "ons.",
+  "time.month.sep": "sep.",
+  "time.month.mar": "mars",
+};
+const NB = { ...OSLO, text: createOpenGeniText({ locale: "nb", messages: NORWEGIAN }) };
+
+describe("times in the host's language", () => {
+  test("relative phrases use the catalog and its plural forms", () => {
+    expect(formatRelativeTime(before(20_000), NB)).toBe("Akkurat nå");
+    expect(formatRelativeTime(before(48 * MINUTE), NB)).toBe("For 48 min siden");
+    expect(formatRelativeTime(before(HOUR), NB)).toBe("For 1 time siden");
+    expect(formatRelativeTime(before(2 * HOUR), NB)).toBe("For 2 timer siden");
+    expect(formatRelativeTime("2026-09-25T06:00:00Z", NB)).toBe("I går");
+    expect(formatRelativeTime("2026-09-23T09:12:00Z", NB)).toBe("For 3 dager siden");
+    expect(formatRelativeTime(new Date(NOW.getTime() + 5 * DAY), NB)).toBe("Om 5 dager");
+  });
+
+  test("absolute times, dates and the exact time use the catalog's layouts and names", () => {
+    expect(formatAbsoluteTime("2026-09-26T12:00:00Z", NB)).toBe("I dag kl. 14:00");
+    expect(formatAbsoluteTime("2026-09-28T06:00:00Z", NB)).toBe("man. 28. sep. kl. 08:00");
+    expect(formatDate("2027-03-31T10:00:00Z", NB)).toBe("31. mars 2027");
+    expect(formatExactTime("2026-09-23T09:12:00Z", NB)).toBe(
+      "ons. 23. sep. 2026 kl. 11:12 (Oslo-tid)",
+    );
+  });
+
+  test("keys a host leaves out stay English", () => {
+    // No Norwegian "time.weekdayTime" or Sunday name was supplied.
+    expect(formatShortTime("2026-09-27T07:00:00Z", NB)).toBe("Sun 09:00");
+  });
+
+  test("mid-sentence lowercasing spares the host's weekday and month names", () => {
+    const german = createOpenGeniText({
+      locale: "de",
+      messages: {
+        "time.yesterday": "Gestern",
+        "time.weekday.mon": "Mo.",
+        "time.month.sep": "Sept.",
+      },
+    });
+    expect(inSentence("Gestern", german)).toBe("gestern");
+    expect(inSentence("Mo. 28 Sept., 08:00", german)).toBe("Mo. 28 Sept., 08:00");
+    expect(inSentence("I går", NB.text)).toBe("i går");
+  });
+
+  test("the component reads the nearest messages provider", () => {
+    const html = renderToStaticMarkup(
+      <OpenGeniMessagesProvider locale="nb" messages={NORWEGIAN}>
+        <RelativeTime date="2026-09-25T06:00:00Z" prefix="Oppdatert" focusable={false} {...OSLO} />
+      </OpenGeniMessagesProvider>,
+    );
+    expect(html).toContain("Oppdatert i går");
+    expect(html).toContain("(Oslo-tid)");
   });
 });

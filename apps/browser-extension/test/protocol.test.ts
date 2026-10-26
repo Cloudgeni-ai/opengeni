@@ -123,6 +123,32 @@ describe("attached browser extension protocol", () => {
     ).toThrow("unknown fields");
   });
 
+  test("parses a command fenced to one debugger attachment", () => {
+    const envelope = (attachment: unknown) => ({
+      type: "command",
+      protocolVersion: 1,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      deviceId: "22222222-2222-4222-8222-222222222222",
+      connectionGeneration: "generation-1",
+      payload: {
+        type: "debugger.command",
+        tabId: "7",
+        attachment,
+        method: "DOM.enable",
+        params: {},
+      },
+    });
+    expect(parseExtensionCommand(envelope(3)).payload).toEqual({
+      type: "debugger.command",
+      tabId: "7",
+      attachment: 3,
+      method: "DOM.enable",
+      params: {},
+    });
+    for (const invalid of [0, -1, 1.5, "3"])
+      expect(() => parseExtensionCommand(envelope(invalid))).toThrow();
+  });
+
   test("parses a bounded download lookup", () => {
     const envelope = (payload: Record<string, unknown>) => ({
       type: "command",

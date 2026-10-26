@@ -151,6 +151,16 @@ describe("page actions in the menu bar", () => {
     expect(template.some((item) => item.label === "Go")).toBe(false);
   });
 
+  test("Zoom In answers to the + key as well as =", () => {
+    onPlatform("darwin");
+    const view = submenu(applicationMenuTemplate(model(null)), "View");
+    const zoomIn = view.filter((item) => item.label === "Zoom In");
+    expect(zoomIn.map((item) => [item.accelerator, item.visible ?? true])).toEqual([
+      ["CmdOrCtrl+Plus", true],
+      ["CmdOrCtrl+=", false],
+    ]);
+  });
+
   test("macOS menus use title case", () => {
     expect(macMenuLabel("Pin or unpin chat")).toBe("Pin or Unpin Chat");
     expect(macMenuLabel("Search messages")).toBe("Search Messages");

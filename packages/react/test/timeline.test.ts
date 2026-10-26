@@ -9,6 +9,10 @@ import {
 } from "../src/timeline/compaction-copy";
 import { readableWorkStatus } from "../src/timeline/work-presentation";
 import {
+  agentWorkHumanInputSummary,
+  isAgentWorkHumanInput,
+} from "../src/timeline/agent-work-human-input";
+import {
   buildTimeline,
   creditExhaustedFromEvents,
   extractSessionRef,
@@ -585,6 +589,57 @@ describe("buildTimeline", () => {
     const work = settled.find((group) => group.kind === "activity" && group.work);
     expect(work && work.kind === "activity" ? work.work?.pausedMs : null).toBe((hours - 2) * 1000);
     expect(JSON.stringify(settled)).not.toMatch(/limit reached/i);
+  });
+
+  test("a retried turn's worked time excludes the idle gap before Retry", () => {
+    reset();
+    const at = (seconds: number, value: SessionEvent): SessionEvent => ({
+      ...value,
+      occurredAt: new Date(1718000000000 + seconds * 1000).toISOString(),
+    });
+    // The attempt fails at start; the person clicks Retry about a minute later.
+    const failedAttempt = () => [
+      at(0, event("turn.queued", { turnId: "turn-1" })),
+      at(1, event("turn.started", {})),
+      at(3, event("turn.failed", { error: "Model provider unavailable" })),
+    ];
+    const retried = [
+      ...failedAttempt(),
+      at(73, event("turn.recovery.requested", { reason: "human_retry" })),
+      at(74, event("turn.started", {})),
+      at(80, event("agent.toolCall.created", { id: "t", name: "exec", arguments: {} })),
+      at(90, event("agent.toolCall.output", { id: "t", output: "ok" })),
+      at(100, event("agent.message.completed", { text: "Done", phase: "final_answer" })),
+      at(101, event("turn.completed", {})),
+    ];
+    const workOf = (events: SessionEvent[]) => {
+      const group = groupTimeline(englishText, buildTimeline(englishText, events), {
+        readableTurns: true,
+      }).find((entry) => entry.kind === "activity" && entry.work);
+      if (!group || group.kind !== "activity" || !group.work) throw new Error("no work row");
+      return { ...group, work: group.work };
+    };
+    const settled = workOf(retried);
+    // Seventy seconds between the failure and Retry are not work.
+    expect(settled.work.pausedMs).toBe(70_000);
+    const status = readableWorkStatus(englishText, settled);
+    expect(status.kind).toBe("worked");
+    expect(status.durationMs).toBe(
+      Date.parse(settled.work.endedAt!) - Date.parse(settled.work.startedAt) - 70_000,
+    );
+    expect(status.durationMs).toBeLessThan(40_000);
+
+    // While the retried attempt runs, the live clock starts after the gap too.
+    reset();
+    const running = workOf([
+      ...failedAttempt(),
+      at(73, event("turn.recovery.requested", { reason: "human_retry" })),
+      at(74, event("turn.started", {})),
+      at(80, event("agent.toolCall.created", { id: "t", name: "exec", arguments: {} })),
+    ]);
+    const live = readableWorkStatus(englishText, running);
+    expect(live.kind).toBe("working");
+    expect(Date.parse(live.since!) - Date.parse(running.work.startedAt)).toBe(70_000);
   });
 
   test("accepts every typed admission reason with its matching event semantics", () => {
@@ -1628,6 +1683,171 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("marks an answer given by an agent, such as a sub-session's parent", () => {
+    reset();
+    const items = buildTimeline(englishText, [
+      event("user.humanInputResponse", {
+        requestId: "request-agent",
+        respondedByKind: "agent_attempt",
+        response: { outcome: "answered", answers: [{ questionId: "region", values: ["eu"] }] },
+      }),
+      event("user.humanInputResponse", {
+        requestId: "request-human",
+        respondedByKind: "human",
+        response: { outcome: "answered", answers: [{ questionId: "region", values: ["us"] }] },
+      }),
+      event("user.humanInputResponse", {
+        requestId: "request-legacy",
+        response: { outcome: "answered", answers: [{ questionId: "region", values: ["ap"] }] },
+      }),
+    ]);
+
+    expect(items.map((item) => (item as HumanInputItem).answeredByAgent)).toEqual([
+      true,
+      false,
+      false,
+    ]);
+  });
+
+  test("folds a question an agent or the system answered into its turn's work details", () => {
+    const questions = [
+      {
+        id: "region",
+        kind: "single_select",
+        label: "Region",
+        prompt: "Where should it run?",
+        options: [{ id: "eu", label: "EU North" }],
+      },
+    ];
+    const turn = (turnId: string, respondedByKind: string | undefined, outcome = "answered") => [
+      event("turn.started", {}, { turnId }),
+      event(
+        "agent.toolCall.created",
+        {
+          id: `ask-${turnId}`,
+          name: "request_human_input",
+          arguments: { questions },
+        },
+        { turnId },
+      ),
+      event(
+        "session.humanInput.requested",
+        {
+          request: {
+            id: `request-${turnId}`,
+            toolCallId: `ask-${turnId}`,
+            questions,
+          },
+        },
+        { turnId },
+      ),
+      event(
+        "user.humanInputResponse",
+        {
+          requestId: `request-${turnId}`,
+          ...(respondedByKind ? { respondedByKind } : {}),
+          response:
+            outcome === "answered"
+              ? { outcome, answers: [{ questionId: "region", values: ["eu"] }] }
+              : { outcome },
+        },
+        { turnId },
+      ),
+      event("agent.message.completed", { messageId: `m-${turnId}`, text: "Done." }, { turnId }),
+      event("turn.completed", {}, { turnId }),
+    ];
+    reset();
+    const groups = groupTimeline(
+      englishText,
+      buildTimeline(englishText, [
+        ...turn("by-agent", "agent_attempt"),
+        ...turn("by-system", "system", "skipped"),
+        ...turn("skipped-by-agent", "agent_attempt", "skipped"),
+        ...turn("by-person", "human"),
+        ...turn("by-api", "api"),
+        ...turn("legacy", undefined),
+        ...turn("expired", "system", "expired"),
+      ]),
+      { readableTurns: true },
+    );
+    const topLevel = groups.flatMap((group) =>
+      group.kind === "item" && group.item.kind === "human-input" ? [group.item.turnId] : [],
+    );
+    // A system skip is a scheduled run's question nobody answered in time: the
+    // person must still see it, like an expired question.
+    expect(topLevel).toEqual(["by-system", "by-person", "by-api", "legacy", "expired"]);
+    const inWork: Record<string, HumanInputItem> = {};
+    for (const group of groups) {
+      if (group.kind !== "activity" || !group.work) continue;
+      for (const detail of group.work.details) {
+        if (detail.kind !== "item" || detail.item.kind !== "human-input") continue;
+        // Each question folds into its own turn's work, not a neighbour's.
+        expect(group.id).toBe(`work-${detail.item.turnId}`);
+        inWork[detail.item.turnId!] = detail.item;
+      }
+    }
+    expect(Object.keys(inWork)).toEqual(["by-agent", "skipped-by-agent"]);
+    expect(isAgentWorkHumanInput(inWork["by-agent"]!)).toBe(true);
+    const labels = {
+      answered: "Answered",
+      skipped: "Skipped",
+      secretSaved: (secret: { vaultName: string }) => `Saved to ${secret.vaultName}`,
+    };
+    expect(agentWorkHumanInputSummary(inWork["by-agent"]!, labels)).toBe("Region → EU North");
+    expect(agentWorkHumanInputSummary(inWork["skipped-by-agent"]!, labels)).toBe(
+      "Region → Skipped",
+    );
+  });
+
+  test("summarizes several agent answers on one line without secret values", () => {
+    const item: HumanInputItem = {
+      kind: "human-input",
+      id: "h",
+      turnId: "t",
+      requestId: "r",
+      questions: [],
+      response: { outcome: "answered", answers: [] },
+      answers: [
+        {
+          questionId: "a",
+          label: "Branch",
+          prompt: "Which branch?",
+          values: ["main", "release"],
+        },
+        {
+          questionId: "b",
+          label: "Deploy\n token",
+          prompt: "Token?",
+          values: [],
+          secret: {
+            reference: "vault-reference-placeholder",
+            username: null,
+            vaultName: "Deploy",
+            itemName: "token",
+            saveTo: "task",
+          },
+        },
+        { questionId: "c", label: "Notes", prompt: "Notes?", values: [] },
+      ],
+      answeredByAgent: true,
+      occurredAt: new Date(0).toISOString(),
+    };
+    expect(
+      agentWorkHumanInputSummary(item, {
+        answered: "Answered",
+        skipped: "Skipped",
+        secretSaved: (secret) => `Saved to ${secret.vaultName}`,
+      }),
+    ).toBe("Branch → main, release · Deploy token → Saved to Deploy · Notes → Answered");
+    expect(isAgentWorkHumanInput({ ...item, answeredByAgent: false })).toBe(false);
+    expect(
+      isAgentWorkHumanInput({
+        ...item,
+        response: { outcome: "expired" },
+      }),
+    ).toBe(false);
+  });
+
   test("projects realtime voice text while retaining expandable execution context", () => {
     reset();
     const context = [
@@ -2563,13 +2783,106 @@ describe("buildTimeline", () => {
     expect(presentTurnFailureText(englishText, recorded)).toEqual({
       summary: "Couldn’t compact conversation history",
       detail: recorded,
+      compaction: true,
     });
-    // Every other reason passes through as-is.
+    // Copy written for people passes through as-is.
     expect(presentTurnFailureText(englishText, "Model request rejected")).toEqual({
       summary: "Model request rejected",
     });
+    // A diagnostic names the given outcome and keeps its text as detail.
+    expect(
+      presentTurnFailureText(
+        englishText,
+        "connect ECONNREFUSED 10.0.0.1:443",
+        "Sandbox didn’t start",
+      ),
+    ).toEqual({ summary: "Sandbox didn’t start", detail: "connect ECONNREFUSED 10.0.0.1:443" });
     expect(presentTurnFailureText(englishText, "  ")).toBeNull();
     expect(presentTurnFailureText(englishText, undefined)).toBeNull();
+  });
+
+  test("a sandbox that didn't start names that outcome and keeps operator text behind Details", () => {
+    reset();
+    const operatorText =
+      "This compute sandbox's agent is too old: it does not support releasing command output (capabilities.op_release). Rebuild the sandbox image.";
+    const events = [
+      event("turn.started", {}),
+      event("turn.startup.phase.started", { phase: "model_preparation" }),
+      event("sandbox.operation.started", { name: "sandbox.provision" }),
+      event("sandbox.operation.failed", {
+        name: "sandbox.provision",
+        error: operatorText,
+        failureCategory: "unknown",
+        failureCode: "unknown",
+        durationMs: 1_000,
+      }),
+      // The lazy start failed inside model preparation, which fails after it.
+      event("turn.startup.phase.failed", { phase: "model_preparation", error: operatorText }),
+      event("turn.failed", { error: operatorText }),
+    ];
+    const stored = JSON.stringify(events);
+    const items = buildTimeline(englishText, events);
+    expect(items.find((item) => item.kind === "turn-end")).toMatchObject({
+      outcome: "failed",
+      failureText: "Sandbox didn’t start",
+      failureDetail: operatorText,
+    });
+    expect(
+      items.find((item) => item.kind === "startup-phase" && item.phase === "sandbox"),
+    ).toMatchObject({ status: "failed", detail: operatorText });
+    // The turn had visible startup activity: no separate notice repeats it.
+    expect(items.some((item) => item.kind === "notice")).toBe(false);
+    expect(JSON.stringify(events)).toBe(stored);
+  });
+
+  test("copy written for people stays the failure headline; diagnostic codes do not", () => {
+    reset();
+    const authored = buildTimeline(englishText, [
+      event("sandbox.operation.started", { name: "sandbox.provision" }),
+      event("sandbox.operation.failed", { name: "sandbox.provision", error: "quota" }),
+      event("turn.failed", {
+        code: "mcp_server_unavailable",
+        error: "The GitHub connection is unavailable. Reconnect it and try again.",
+      }),
+    ]);
+    expect(authored.find((item) => item.kind === "turn-end")).toEqual(
+      expect.objectContaining({
+        failureText: "The GitHub connection is unavailable. Reconnect it and try again.",
+      }),
+    );
+    expect(authored.find((item) => item.kind === "turn-end")).not.toHaveProperty("failureDetail");
+    reset();
+    const recorded = "Responses stream ended without a terminal event (response.in_progress).";
+    const diagnostic = buildTimeline(englishText, [
+      event("turn.failed", { code: "invalid_sse_terminal", error: recorded }),
+    ]);
+    expect(diagnostic.find((item) => item.kind === "turn-end")).toMatchObject({
+      failureText: "The turn stopped unexpectedly",
+      failureDetail: recorded,
+    });
+    expect(diagnostic.find((item) => item.kind === "notice")).toMatchObject({
+      text: "The turn stopped unexpectedly",
+      details: { label: "Details", value: recorded },
+    });
+  });
+
+  test("a retried attempt is not named by the previous attempt's failed sandbox start", () => {
+    reset();
+    const first = { turnAttemptId: "attempt-1" };
+    const second = { turnAttemptId: "attempt-2" };
+    const items = buildTimeline(englishText, [
+      event("turn.started", {}, first),
+      event("sandbox.operation.started", { name: "sandbox.provision" }, first),
+      event("sandbox.operation.failed", { name: "sandbox.provision", error: "boom" }, first),
+      event("turn.failed", { error: "boom" }, first),
+      event("turn.started", {}, second),
+      event("turn.failed", { error: "worker lost its lease" }, second),
+    ]);
+    const ends = items.filter((item): item is TurnEndItem => item.kind === "turn-end");
+    expect(ends.map(({ failureText, failureDetail }) => ({ failureText, failureDetail }))).toEqual([
+      { failureText: "Sandbox didn’t start", failureDetail: "boom" },
+      { failureText: "The turn stopped unexpectedly", failureDetail: "worker lost its lease" },
+    ]);
   });
 
   test("a capacity-recovery failure reads in the host's language in the timeline", () => {
@@ -2808,6 +3121,8 @@ describe("buildTimeline", () => {
       event("sandbox.operation.completed", { name: "file-resource-download" }, turn),
       event("turn.startup.phase.started", { phase: "tools" }, turn),
       event("turn.startup.phase.completed", { phase: "tools", durationMs: 350 }, turn),
+      event("turn.startup.phase.started", { phase: "history" }, turn),
+      event("turn.startup.phase.completed", { phase: "history", durationMs: 2_400 }, turn),
       event("turn.startup.phase.started", { phase: "model_preparation" }, turn),
       event("turn.startup.phase.completed", { phase: "model_preparation", durationMs: 420 }, turn),
       event("agent.model.request", { phase: "started" }, turn),
@@ -2824,12 +3139,47 @@ describe("buildTimeline", () => {
       "repository",
       "files",
       "tools",
+      "history",
       "model_preparation",
       "provider_first_byte",
     ]);
     expect(phases.every((phase) => phase.status === "complete")).toBe(true);
     expect(phases.find((phase) => phase.phase === "tools")?.durationMs).toBe(350);
+    expect(phases.find((phase) => phase.phase === "history")?.durationMs).toBe(2_400);
     expect(phases.find((phase) => phase.phase === "provider_first_byte")?.durationMs).toBe(1_250);
+  });
+
+  test("post-provision completion-only intervals preserve overlap and failure after replay", () => {
+    reset();
+    const names: StartupPhaseItem["phase"][] = [
+      "credential_resolution",
+      "credential_mint",
+      "credential_materialization",
+      "client_publication",
+      "client_readiness",
+      "credential_seed",
+      "credential_hooks",
+      "artifact_runtime",
+    ];
+    const completedAt = "2026-01-01T00:00:05.000Z";
+    const events = names.map((phase, index) => ({
+      ...event(
+        index === 4 ? "turn.startup.phase.failed" : "turn.startup.phase.completed",
+        { phase, durationMs: 2000 },
+        { turnId: "startup" },
+      ),
+      occurredAt: completedAt,
+    }));
+    const phases = buildTimeline(englishText, JSON.parse(JSON.stringify(events))).filter(
+      (item): item is StartupPhaseItem => item.kind === "startup-phase",
+    );
+    expect(phases.map((phase) => phase.phase)).toEqual(names);
+    expect(
+      phases.every(
+        (phase) => phase.startedAt === "2026-01-01T00:00:03.000Z" && phase.durationMs === 2000,
+      ),
+    ).toBe(true);
+    expect(phases[4]!.status).toBe("failed");
   });
 
   test("recovery replaces an abandoned startup attempt without leaving a stale duplicate", () => {
@@ -3117,7 +3467,7 @@ describe("buildTimeline", () => {
       event("session.status.changed", { status: "requires_action" }),
       event("session.status.changed", { status: "requires_action" }),
       event("turn.started", { triggerEventId: "evt-start" }),
-      event("turn.failed", { error: "model provider unavailable" }),
+      event("turn.failed", { code: "provider_unavailable", error: "model provider unavailable" }),
       event("turn.cancelled", {}),
     ]);
     expect(items.map((item) => item.kind)).toEqual([
@@ -3152,7 +3502,11 @@ describe("buildTimeline", () => {
     reset();
     const items = buildTimeline(englishText, [
       event("turn.completed", {}, { turnId: "turn-complete" }),
-      event("turn.failed", { error: "model provider unavailable" }, { turnId: "turn-failed" }),
+      event(
+        "turn.failed",
+        { code: "provider_unavailable", error: "model provider unavailable" },
+        { turnId: "turn-failed" },
+      ),
       event("turn.started", { triggerEventId: "evt-cancelled" }, { turnId: "turn-cancelled" }),
       event("turn.cancelled", {}, { turnId: "turn-cancelled" }),
     ]);
@@ -3177,9 +3531,12 @@ describe("buildTimeline", () => {
       event("turn.failed", { error: "model provider unavailable" }),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["tool-call", "turn-end"]);
+    // Unclassified text is a diagnostic: the chip names the outcome and keeps
+    // the recorded text as its detail.
     expect(items[1]).toMatchObject({
       outcome: "failed",
-      failureText: "model provider unavailable",
+      failureText: "The turn stopped unexpectedly",
+      failureDetail: "model provider unavailable",
     });
   });
 
@@ -3189,7 +3546,11 @@ describe("buildTimeline", () => {
       event("turn.failed", { error: "model provider unavailable" }),
     ]);
     expect(items.map((item) => item.kind)).toEqual(["turn-end", "notice"]);
-    expect(items[1]).toMatchObject({ tone: "failed", text: "model provider unavailable" });
+    expect(items[1]).toMatchObject({
+      tone: "failed",
+      text: "The turn stopped unexpectedly",
+      details: { label: "Details", value: "model provider unavailable" },
+    });
   });
 
   test("cancelled turns with activity fold interruption into turn-end instead of emitting a duplicate notice", () => {

@@ -173,7 +173,7 @@ function base64Bytes(content: string): Uint8Array<ArrayBuffer> {
  * the normal SDK client (for example behind `createSessionProxyHandler`):
  *
  * - `artifact:<file>` downloads the retained file through a short-lived URL.
- * - `sandbox:<path>` downloads when enabled by the host proxy capability.
+ * - `sandbox:<path>` downloads unless the client config reports `sandboxFiles: false`.
  *
  * Editable artifacts and Sites have no default: they need a host surface
  * (see `@opengeni/react/artifacts/*` and `@opengeni/react/sites`), so they stay

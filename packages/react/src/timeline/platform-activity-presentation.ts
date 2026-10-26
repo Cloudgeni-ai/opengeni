@@ -53,6 +53,17 @@ export const STARTUP_WAIT_TITLES = (
 const STARTUP_PHASE_TITLES = (
   t: OpenGeniText,
 ): Record<StartupPhaseItem["phase"], readonly [string, string, string, string]> => ({
+  credential_resolution: preparationTitles(t, t("timeline.startupTimings.credentialResolution")),
+  credential_mint: preparationTitles(t, t("timeline.startupTimings.credentialMint")),
+  credential_materialization: preparationTitles(
+    t,
+    t("timeline.startupTimings.credentialMaterialization"),
+  ),
+  client_publication: preparationTitles(t, t("timeline.startupTimings.clientPublication")),
+  client_readiness: preparationTitles(t, t("timeline.startupTimings.clientReadiness")),
+  credential_seed: preparationTitles(t, t("timeline.startupTimings.credentialSeed")),
+  credential_hooks: preparationTitles(t, t("timeline.startupTimings.credentialHooks")),
+  artifact_runtime: preparationTitles(t, t("timeline.startupTimings.artifactRuntime")),
   queue: [
     t("timeline.platformActivityPresentation.waitingForAWorker"),
     t("timeline.platformActivityPresentation.workerStartupFailed"),
@@ -89,6 +100,12 @@ const STARTUP_PHASE_TITLES = (
     t("timeline.platformActivityPresentation.toolConnectionInterrupted"),
     t("timeline.platformActivityPresentation.toolsReady"),
   ],
+  history: [
+    t("timeline.platformActivityPresentation.loadingConversationHistory"),
+    t("timeline.platformActivityPresentation.conversationHistoryDidnTLoad"),
+    t("timeline.platformActivityPresentation.conversationHistoryLoadingInterrupted"),
+    t("timeline.platformActivityPresentation.conversationHistoryLoaded"),
+  ],
   model_preparation: [
     t("timeline.platformActivityPresentation.preparingRuntimeAndModelRequest"),
     t("timeline.platformActivityPresentation.runtimeModelPreparationFailed"),
@@ -102,6 +119,18 @@ const STARTUP_PHASE_TITLES = (
     t("timeline.platformActivityPresentation.modelStartedResponding"),
   ],
 });
+
+function preparationTitles(
+  t: OpenGeniText,
+  phase: string,
+): readonly [string, string, string, string] {
+  return [
+    t("timeline.platformActivityPresentation.preparationRunning", { phase }),
+    t("timeline.platformActivityPresentation.preparationFailed", { phase }),
+    t("timeline.platformActivityPresentation.preparationInterrupted", { phase }),
+    t("timeline.platformActivityPresentation.preparationCompleted", { phase }),
+  ];
+}
 
 export function startupDuration(durationMs: number | null): string | null {
   if (durationMs === null || !Number.isFinite(durationMs) || durationMs < 0) return null;

@@ -25,6 +25,7 @@ import {
 import type { Hono } from "hono";
 import type { ScheduledTask } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
+import { withAgentScheduleTimeZone } from "../scheduled-task-time-zone";
 import {
   isAuthenticatedPersonAuthorization,
   requireAccessGrant,
@@ -68,6 +69,8 @@ import {
   scheduledTaskAccessSource,
   withScheduledTaskPolicyDrift,
   withScheduledTaskRunAccessFailures,
+  withScheduledTaskEvents,
+  withScheduledTaskRunEventOccurrences,
 } from "@opengeni/core";
 import type { AccessGrantAuthorization } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
@@ -198,6 +201,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     }
   }
 
+  // Event triggers are part of the automation itself, so reading them is not
+  // advisory: a read that cannot load them fails rather than hide them.
+  async function withEventsAndBlockers(tasks: ScheduledTask[]): Promise<ScheduledTask[]> {
+    return await withBlockers(await withScheduledTaskEvents(db, tasks));
+  }
+
   // Registered before `/:taskId` so the literal segment is never read as an id.
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks/attention", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -229,14 +238,12 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = authorization.grant;
     const legacy = rejectLegacyVariableSetFields(c, await readRequestJson(c));
     if ("response" in legacy) return legacy.response;
-    const rawPayload = legacy.payload;
-    const parsedPayload = CreateScheduledTaskRequest.safeParse(rawPayload);
-    if (!parsedPayload.success) {
-      throw new HTTPException(400, {
-        message: "invalid scheduled task create request",
-      });
-    }
-    const payload = parsedPayload.data;
+    // An agent's schedule without a zone uses the zone of the message that asked for it.
+    const { input: rawPayload } = await withAgentScheduleTimeZone(db, grant, legacy.payload);
+    const payload = parseRequestBody(CreateScheduledTaskRequest, rawPayload, {
+      status: 400,
+      message: "invalid scheduled task create request",
+    });
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -260,9 +267,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
+      eventSourceFetch: deps.eventSourceFetch,
     });
     await syncCreatedScheduledTask({ db, workflowClient, task });
-    return c.json(scheduledTaskForGrant(task, grant), 201);
+    const [created] = await withScheduledTaskEvents(db, [task]);
+    return c.json(scheduledTaskForGrant(created ?? task, grant), 201);
   });
 
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
@@ -295,7 +304,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       viewer.subjectId,
     );
     return c.json(
-      (await withBlockers(await withPolicyDrift(authorization, tasks))).map((task) =>
+      (await withEventsAndBlockers(await withPolicyDrift(authorization, tasks))).map((task) =>
         scheduledTaskForGrant(task, grant),
       ),
     );
@@ -347,7 +356,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     );
     const grant = authorization.grant;
     const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
-    const [decorated] = await withBlockers(await withPolicyDrift(authorization, [task]));
+    const [decorated] = await withEventsAndBlockers(await withPolicyDrift(authorization, [task]));
     return c.json(scheduledTaskForGrant(decorated ?? task, grant));
   });
 
@@ -363,12 +372,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       workspaceId,
       "scheduled_tasks:manage",
     );
-    const parsed = RefreshScheduledTaskAccessRequest.safeParse(
+    const parsed = parseRequestBody(
+      RefreshScheduledTaskAccessRequest,
       await c.req.json().catch(() => null),
+      { status: 400, message: "invalid scheduled task access refresh request" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid scheduled task access refresh request" });
-    }
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: authorization.grant.accountId,
@@ -381,12 +389,15 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       objectStorage,
       authorization,
       taskId: c.req.param("taskId"),
-      request: parsed.data,
+      request: parsed,
       permissionsRequiredByTools: permissionsRequiredByFirstPartyTools,
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });
-    const [withDrift] = await withPolicyDrift(authorization, [task]);
+    const [withDrift] = await withScheduledTaskEvents(
+      db,
+      await withPolicyDrift(authorization, [task]),
+    );
     return c.json(scheduledTaskForGrant(withDrift ?? task, authorization.grant));
   });
 
@@ -405,18 +416,21 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const body = await readRequestJson(c);
     const legacy = rejectLegacyVariableSetFields(c, body);
     if ("response" in legacy) return legacy.response;
-    const rawPayload = legacy.payload;
-    const parsedPayload = UpdateScheduledTaskRequest.safeParse(rawPayload);
-    if (!parsedPayload.success) {
-      throw new HTTPException(400, {
-        message: "invalid scheduled task update request",
-      });
-    }
+    const { input: rawPayload } = await withAgentScheduleTimeZone(
+      db,
+      grant,
+      legacy.payload,
+      existing.schedule,
+    );
+    const parsedPayload = parseRequestBody(UpdateScheduledTaskRequest, rawPayload, {
+      status: 400,
+      message: "invalid scheduled task update request",
+    });
     // `variableSetId: null` / `variableSetIds: []` still clear an old link, so a
     // task tied to a set that is gone can be fixed without recreating it.
     const payload = clearsLegacyVariableSet(body)
-      ? { ...parsedPayload.data, variableSetId: null }
-      : parsedPayload.data;
+      ? { ...parsedPayload, variableSetId: null }
+      : parsedPayload;
     const catalogSettings = (
       await resolveWorkspaceCatalogSettings(db, deps.settings, {
         accountId: grant.accountId,
@@ -435,6 +449,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
+      eventSourceFetch: deps.eventSourceFetch,
     });
     const task = await updateScheduledTaskForApi(
       db,
@@ -446,7 +461,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         : undefined,
     );
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
-    return c.json(scheduledTaskForGrant(task, grant));
+    const [updated] = await withEventsAndBlockers([task]);
+    return c.json(scheduledTaskForGrant(updated ?? task, grant));
   });
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/pause", async (c) => {
@@ -461,7 +477,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       ? await pauseScheduledTaskAsAdmin(db, workspaceId, existing.id)
       : await updateScheduledTaskForApi(db, grant, existing.id, { status: "paused" });
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
-    return c.json(scheduledTaskForGrant(task, grant));
+    const [paused] = await withEventsAndBlockers([task]);
+    return c.json(scheduledTaskForGrant(paused ?? task, grant));
   });
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/resume", async (c) => {
@@ -494,7 +511,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     });
     const task = await updateScheduledTaskForApi(db, grant, existing.id, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
-    return c.json(scheduledTaskForGrant(task, grant));
+    const [resumed] = await withEventsAndBlockers([task]);
+    return c.json(scheduledTaskForGrant(resumed ?? task, grant));
   });
 
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/trigger", async (c) => {
@@ -586,7 +604,8 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         idempotencyKey: agentRunUsageIdempotencyKey,
       });
     }
-    return c.json(scheduledTaskForGrant(task, grant), 202);
+    const [triggered] = await withScheduledTaskEvents(db, [task]);
+    return c.json(scheduledTaskForGrant(triggered ?? task, grant), 202);
   });
 
   app.delete("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId", async (c) => {
@@ -623,7 +642,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       settings: deps.settings,
       grant,
       task,
-      runs: taskRuns,
+      runs: await withScheduledTaskRunEventOccurrences(db, taskRuns),
     });
     return c.json(runs.map((run) => scheduledTaskRunForGrant(run, grant)));
   });

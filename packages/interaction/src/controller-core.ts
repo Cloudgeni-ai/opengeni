@@ -101,6 +101,9 @@ class BoundedDispatchTrace implements InteractionDispatchTrace {
   }
 }
 
+/** See InteractionDriver.connectionState. */
+export type InteractionDriverConnectionState = "connected" | "lost" | "unresponsive";
+
 type InteractionDriver<
   TCommand extends InteractionCoreCommand,
   TTarget extends InteractionCoreTarget,
@@ -111,6 +114,10 @@ type InteractionDriver<
   validate?(command: TCommand, target: TTarget): Promise<void> | void;
   validateSession?(command: TCommand): Promise<void> | void;
   dispatch(command: TCommand, trace?: InteractionDispatchTrace): Promise<TObservation | null>;
+  /** Bounded probe of the driver's connection: "connected" when the browser
+   * or computer answered, "lost" when it or the connection to it is gone,
+   * "unresponsive" when it did not answer in time. */
+  connectionState?(): Promise<InteractionDriverConnectionState>;
 };
 
 type InteractionCoreAdapter<
@@ -496,13 +503,54 @@ export class InteractionControllerCore<
       }
       return await this.settle(
         entry,
-        this.makeReceipt(command, "outcome_unknown", dispatchedAt, this.timestamp(), null, {
-          code: "controller_lost",
-          message: `${this.adapter.resourceLabel} command outcome is unknown after dispatch`,
-          retryable: false,
-        }),
+        this.makeReceipt(
+          command,
+          "outcome_unknown",
+          dispatchedAt,
+          this.timestamp(),
+          null,
+          await this.unexpectedDispatchError(error),
+        ),
       );
     }
+  }
+
+  /**
+   * The error for a dispatched command that failed in a way its driver did
+   * not classify. Its outcome is unknown either way. A typed controller error
+   * keeps its own code; anything else is controller_lost only when the driver
+   * cannot show that it is still connected, because a page or command error
+   * on a live connection is not a lost controller.
+   */
+  private async unexpectedDispatchError(error: unknown): Promise<InteractionError> {
+    const label = this.adapter.resourceLabel;
+    if (error instanceof InteractionControllerError && error.code !== "journal_full")
+      return { code: error.code, message: error.message, retryable: false };
+    let connection: InteractionDriverConnectionState = "lost";
+    try {
+      connection = (await this.driver.connectionState?.()) ?? "lost";
+    } catch {
+      // A probe that fails cannot show the connection is still there.
+    }
+    if (connection === "connected") {
+      return {
+        code: "driver_failed",
+        message: `${label} command failed unexpectedly after dispatch and its outcome is unknown; the ${label} is still connected, so check its current state before repeating the command`,
+        retryable: false,
+      };
+    }
+    if (connection === "unresponsive") {
+      return {
+        code: "driver_failed",
+        message: `${label} command failed unexpectedly after dispatch and its outcome is unknown; the ${label} did not answer a check right afterwards, so check its current state before repeating the command`,
+        retryable: false,
+      };
+    }
+    return {
+      code: "controller_lost",
+      message: `${label} command outcome is unknown after dispatch`,
+      retryable: false,
+    };
   }
 
   private assertActionObservation(observation: TObservation, command: TCommand): void {
@@ -719,6 +767,14 @@ export function recoverInteractionReceipt<TReceipt extends InteractionCoreReceip
 
 function safePredispatchError(error: unknown, resourceLabel: string): InteractionError {
   if (error instanceof InteractionControllerError && error.code !== "journal_full") {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: error.retryable,
+    };
+  }
+  // The driver knows the target is gone and why; nothing ran.
+  if (error instanceof InteractionDefiniteDriverError && error.code === "target_not_found") {
     return {
       code: error.code,
       message: error.message,

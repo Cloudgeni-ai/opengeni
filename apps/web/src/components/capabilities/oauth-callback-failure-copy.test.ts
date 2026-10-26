@@ -4,6 +4,11 @@ import {
   ATLASSIAN_NATIVE_RETIRED_REASON,
 } from "@opengeni/contracts/atlassian-native-retirement";
 
+import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
+  GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
+} from "@opengeni/contracts/google-drive-native-retirement";
+
 import { atlassianFailureMessage } from "@/components/capabilities/use-atlassian-integration";
 import { googleDriveFailureMessage } from "@/components/capabilities/use-google-drive-integration";
 import {
@@ -25,16 +30,20 @@ describe("provider OAuth callback failure copy", () => {
     });
 
     test(`${provider} keeps its own copy for provider-specific reasons`, () => {
-      expect(message("provider_denied")).toContain("not approved");
-      expect(message("account_mismatch")).toContain("same");
       if (provider === "Atlassian") {
+        expect(message("provider_denied")).toContain("not approved");
+        expect(message("account_mismatch")).toContain("same");
         // Native sync is retired; unknown failures cannot suggest configuring
         // an unavailable integration. Known callback reasons remain specific.
         for (const reason of ["http_503", null, ATLASSIAN_NATIVE_RETIRED_REASON]) {
           expect(message(reason)).toBe(ATLASSIAN_NATIVE_RETIRED_MESSAGE);
         }
       } else {
-        expect(message("http_503")).toContain("configuration");
+        expect(message("provider_denied")).toBe(oauthCallbackReasonMessage("provider_denied")!);
+        expect(message("account_mismatch")).toBe(oauthCallbackReasonMessage("account_mismatch")!);
+        for (const reason of ["http_503", null, GOOGLE_DRIVE_NATIVE_RETIRED_REASON]) {
+          expect(message(reason)).toBe(GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE);
+        }
       }
     });
   }
@@ -54,4 +63,16 @@ describe("generic OAuth callback failure copy", () => {
     expect(oauthCallbackFailureMessage(null)).toBe("Couldn't connect. Please try again.");
     expect(oauthCallbackFailureMessage("  ")).toBe("Couldn't connect. Please try again.");
   });
+});
+
+test("MCP duplicate failures give actionable guidance without raw codes", () => {
+  for (const reason of [
+    "account_mismatch",
+    "account_already_connected",
+    "account_identity_unavailable",
+  ]) {
+    const message = oauthCallbackFailureMessage(reason);
+    expect(message).not.toContain(reason);
+    expect(message.toLowerCase()).toContain("reconnect");
+  }
 });

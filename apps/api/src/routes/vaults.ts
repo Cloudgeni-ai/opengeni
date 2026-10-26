@@ -15,6 +15,7 @@ import {
   RestoreVaultFieldVersionRequest,
   RevealVaultFieldRequest,
   SetSessionVaultPolicyRequest,
+  SetVaultItemApprovalRequest,
   UpdateVaultItemRequest,
   UpdateVaultRequest,
   VAULT_ERROR_HTTP_STATUS,
@@ -23,24 +24,28 @@ import {
 } from "@opengeni/contracts";
 import {
   createVaultService,
+  getVaultItemApproval,
   isVaultError,
   requireAccessGrantAuthorization,
   requireLiteralPermission,
   requirePermission,
   requireSessionAuthorization,
+  revokeVaultItemGrant,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  setVaultItemApproval,
   VaultError,
   vaultErrorFromDatabase,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
   type VaultRequestActor,
   type VaultService,
+  type VaultServiceDeps,
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { ApiHttpError } from "../http/api-error";
-import { parseRequestJson } from "../http/request-body";
+import { parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { vaultProviderRegistryFor } from "./vault-providers";
 
 const PREFIX = "/v1/workspaces/:workspaceId";
@@ -49,6 +54,10 @@ function actorFor(authorization: AccessGrantAuthorization): VaultRequestActor {
   return {
     grant: authorization.grant,
     accountAdmin: authorization.accountGrant?.permissions.includes("account:admin") === true,
+    // An agent or personal key acting as the person resolves as their human
+    // session too; only their own sign-in counts as the person here.
+    personSignedIn:
+      authorization.canonicalManagedHumanSession || authorization.canonicalLocalHumanSession,
   };
 }
 
@@ -218,21 +227,17 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get(`${PREFIX}/vaults/:vaultId/items`, (c) =>
     vaultRoute(c, async () => {
       const { workspaceId, actor } = await authorize(c, "secrets:list");
-      const parsed = ListVaultItemsQuery.safeParse(c.req.query());
-      if (!parsed.success) {
-        throw new ApiHttpError(422, {
-          code: "validation_failed",
-          message: "Invalid vault item query.",
-          retryable: false,
-        });
-      }
+      const parsed = parseRequestQuery(ListVaultItemsQuery, c.req.query(), {
+        status: 422,
+        message: "Invalid vault item query",
+      });
       return c.json(
         // Providers let opening a linked vault refresh a stale mirror first.
         await vaultsWithProviders(actor, workspaceId).listItems(
           actor,
           workspaceId,
           c.req.param("vaultId")!,
-          parsed.data,
+          parsed,
         ),
       );
     }),
@@ -315,6 +320,54 @@ export function registerVaultRoutes(app: Hono, deps: ApiRouteDeps): void {
       // request's providers, like every other connected read and write.
       return c.json(
         await vaultsWithProviders(actor, workspaceId).moveItem(actor, workspaceId, itemId, payload),
+      );
+    }),
+  );
+
+  // Approval for each use ----------------------------------------------------
+  // Which of the item's fields an agent may use only with the acting person's
+  // approval each time, and the approvals in force. Changing either is for a
+  // signed-in person; the core refuses API keys and agents.
+
+  const approvalDeps = (): VaultServiceDeps => ({
+    db: deps.db,
+    encryptionKey: environmentsEncryptionKeyBytes(deps.settings) ?? null,
+  });
+
+  app.get(`${PREFIX}/vaults/:vaultId/items/:itemId/approval`, (c) =>
+    vaultRoute(c, async () => {
+      const { workspaceId, actor } = await authorize(c, "secrets:list");
+      const itemId = c.req.param("itemId")!;
+      await itemInVault(actor, workspaceId, c.req.param("vaultId")!, itemId);
+      return c.json(await getVaultItemApproval(approvalDeps(), actor, workspaceId, itemId));
+    }),
+  );
+
+  app.put(`${PREFIX}/vaults/:vaultId/items/:itemId/approval`, (c) =>
+    vaultRoute(c, async () => {
+      const { workspaceId, actor } = await authorize(c, "secrets:write");
+      const payload = await parseRequestJson(c, SetVaultItemApprovalRequest);
+      const itemId = c.req.param("itemId")!;
+      await itemInVault(actor, workspaceId, c.req.param("vaultId")!, itemId);
+      return c.json(
+        await setVaultItemApproval(approvalDeps(), actor, workspaceId, itemId, payload),
+      );
+    }),
+  );
+
+  app.post(`${PREFIX}/vaults/:vaultId/items/:itemId/approval/grants/:grantId/revoke`, (c) =>
+    vaultRoute(c, async () => {
+      const { workspaceId, actor } = await authorize(c, "secrets:write");
+      const itemId = c.req.param("itemId")!;
+      await itemInVault(actor, workspaceId, c.req.param("vaultId")!, itemId);
+      return c.json(
+        await revokeVaultItemGrant(
+          approvalDeps(),
+          actor,
+          workspaceId,
+          itemId,
+          c.req.param("grantId")!,
+        ),
       );
     }),
   );

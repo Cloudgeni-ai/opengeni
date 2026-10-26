@@ -37,6 +37,19 @@ export {
   type UseThisComputerResult,
 } from "./components/this-computer/use-this-computer";
 export {
+  computerUseFix,
+  computerUseNoticeText,
+  computerUsePermissionText,
+  computerUseProblemText,
+  computerUseState,
+  useComputerUse,
+  type ComputerUseControl,
+  type ComputerUseFix,
+  type ComputerUseHandlers,
+  type ComputerUseProblem,
+  type ComputerUseState,
+} from "./components/this-computer/computer-use";
+export {
   ThisComputerSetup,
   useThisComputerSetupOpen,
   type ThisComputerSetupProps,

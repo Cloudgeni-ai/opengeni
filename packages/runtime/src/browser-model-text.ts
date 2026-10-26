@@ -18,6 +18,10 @@ export type BrowserTextNode = {
   value?: string | { redacted: true; reason: string } | undefined;
   states?: readonly string[] | undefined;
   actions?: readonly string[] | undefined;
+  /** Full lengths of a name, description or value the view clipped. */
+  nameChars?: number | undefined;
+  descriptionChars?: number | undefined;
+  valueChars?: number | undefined;
 };
 
 export type BrowserTextTarget = {
@@ -135,21 +139,59 @@ function quoted(value: string): string {
 /** Longest form field value shown inline; browser_read mode=dom returns more. */
 const SHOWN_VALUE_MAX_CHARS = 2_000;
 
-function shownValue(value: string): string {
+function shownValue(value: string, valueChars: number | undefined): string {
+  if (valueChars !== undefined) return `value=${quoted(value)} valueChars=${valueChars}`;
   if (value.length <= SHOWN_VALUE_MAX_CHARS) return `value=${quoted(value)}`;
   return `value=${quoted(`${value.slice(0, SHOWN_VALUE_MAX_CHARS)}…`)} valueChars=${value.length}`;
 }
 
+/** Whether a line shows only part of a node's name, description or value. */
+function clippedText(node: BrowserTextNode): boolean {
+  return (
+    node.nameChars !== undefined ||
+    node.descriptionChars !== undefined ||
+    node.valueChars !== undefined ||
+    (typeof node.value === "string" && node.value.length > SHOWN_VALUE_MAX_CHARS)
+  );
+}
+
+/** Said once under a view whose lines clip a name, description or value, so
+ * the model knows how to read the rest. */
+const CLIPPED_TEXT_NOTE = "browser_read mode=dom with an element's ref reads it in full";
+
+function clippedNote(clippedFieldCount: number, nodes: readonly BrowserTextNode[]): string | null {
+  const clipped = nodes.filter(clippedText).length;
+  const count = Math.max(clippedFieldCount, clipped);
+  if (count === 0) return null;
+  return `${plural(count, "long field")} clipped${clipped > 0 ? `; ${CLIPPED_TEXT_NOTE}` : ""}`;
+}
+
 export function browserNodeLine(node: BrowserTextNode, allRefs: boolean, baseDepth = 0): string {
   const parts = [`${"  ".repeat(Math.max(0, node.depth - baseDepth))}- ${node.role}`];
-  if (node.name) parts.push(quoted(node.name));
-  if (allRefs || (node.actions?.length ?? 0) > 0 || !REFLESS_ROLES.has(node.role)) {
+  if (node.name) {
+    parts.push(quoted(node.name));
+    if (node.nameChars !== undefined) parts.push(`nameChars=${node.nameChars}`);
+  }
+  // A clipped line keeps its ref, which is how the rest is read.
+  if (
+    allRefs ||
+    (node.actions?.length ?? 0) > 0 ||
+    !REFLESS_ROLES.has(node.role) ||
+    clippedText(node)
+  ) {
     parts.push(`[${node.ref}]`);
   }
   if (node.value !== undefined && node.value !== "") {
-    parts.push(typeof node.value === "string" ? shownValue(node.value) : "value=<redacted>");
+    parts.push(
+      typeof node.value === "string" ? shownValue(node.value, node.valueChars) : "value=<redacted>",
+    );
   }
-  if (node.description) parts.push(`description=${quoted(node.description)}`);
+  if (node.description) {
+    parts.push(`description=${quoted(node.description)}`);
+    if (node.descriptionChars !== undefined) {
+      parts.push(`descriptionChars=${node.descriptionChars}`);
+    }
+  }
   for (const state of node.states ?? []) if (shownState(node.role, state)) parts.push(state);
   return parts.join(" ");
 }
@@ -258,7 +300,7 @@ export function browserObservationText(
     view.removedRefCount
       ? `${plural(view.removedRefCount, "element")} from your last reading ${view.removedRefCount === 1 ? "is" : "are"} gone or no longer listed`
       : null,
-    view.clippedFieldCount ? `${plural(view.clippedFieldCount, "long field")} clipped` : null,
+    clippedNote(view.clippedFieldCount ?? 0, nodes),
   ].filter((entry): entry is string => entry !== null);
   if (notes.length) lines.push(`(${notes.join("; ")})`);
   return lines.join("\n");
@@ -336,6 +378,7 @@ export function browserActionText(receipt: {
     | null
     | undefined;
   targets?: readonly BrowserTextResolvedTarget[] | undefined;
+  notes?: readonly { message: string }[] | undefined;
   observation?: BrowserTextObservation | null | undefined;
   allRefs?: boolean | undefined;
 }): string {
@@ -351,6 +394,7 @@ export function browserActionText(receipt: {
   if (receipt.targets && receipt.targets.length > 0) {
     lines.push(`Acted on: ${receipt.targets.map(resolvedTargetText).join("; ")}`);
   }
+  for (const note of receipt.notes ?? []) lines.push(`Note: ${note.message}.`);
   if (receipt.observation) {
     lines.push(browserObservationText(receipt.observation, { allRefs: receipt.allRefs === true }));
   }
@@ -386,10 +430,21 @@ export function browserSessionLine(session: {
   }`;
 }
 
-type AttachedProfileText = { id: string; name: string; profileLabel?: string | undefined };
+type AttachedProfileText = {
+  id: string;
+  name: string;
+  profileLabel?: string | undefined;
+  machine?: string | undefined;
+  onThisMachine?: boolean | undefined;
+};
 
+/** A profile with the computer it is on, so the agent can tell when it landed
+ * on another machine than the one this session runs on. */
 function attachedProfileText(profile: AttachedProfileText): string {
-  return `${quoted(profile.name)}${profile.profileLabel ? ` (${profile.profileLabel})` : ""} deviceId ${profile.id}`;
+  const machine = profile.machine
+    ? ` on ${quoted(profile.machine)}${profile.onThisMachine ? " (this session's machine)" : ""}`
+    : "";
+  return `${quoted(profile.name)}${profile.profileLabel ? ` (${profile.profileLabel})` : ""}${machine} deviceId ${profile.id}`;
 }
 
 export function browserOpenText(output: {
@@ -458,7 +513,7 @@ export function browserReadText(output: {
   for (const node of output.nodes) lines.push(browserNodeLine(node, true, base));
   const notes = [
     output.omittedMatches ? `${plural(output.omittedMatches, "match")} not shown` : null,
-    output.clippedFieldCount ? `${plural(output.clippedFieldCount, "long field")} clipped` : null,
+    clippedNote(output.clippedFieldCount, output.nodes),
   ].filter((entry): entry is string => entry !== null);
   if (notes.length) lines.push(`(${notes.join("; ")})`);
   return lines.join("\n");

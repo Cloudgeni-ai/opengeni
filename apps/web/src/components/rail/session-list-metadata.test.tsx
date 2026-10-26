@@ -30,14 +30,24 @@ describe("RailTrailingMetadata", () => {
     },
   );
 
-  test("renders only status, schedule, and date metadata that actually exists", () => {
+  test("renders only status, automation, and date metadata that actually exists", () => {
     const markup = renderToStaticMarkup(
-      <RailTrailingMetadata summary={active} scheduled relativeTime="12 Aug" />,
+      <RailTrailingMetadata summary={active} automationWait="schedule" relativeTime="12 Aug" />,
     );
 
-    expect(markup).toContain("Scheduled task");
+    expect(markup).toContain("On a schedule");
     expect(markup).toContain("Running");
     expect(markup).toContain(">12 Aug</span>");
+  });
+
+  test("a chat an event can wake says it is waiting for one", () => {
+    const markup = renderToStaticMarkup(
+      <RailTrailingMetadata summary={neutral} automationWait="event" />,
+    );
+
+    expect(markup).toContain('aria-label="Waiting for an event"');
+    expect(markup).toContain('data-automation-wait="event"');
+    expect(markup).not.toContain("On a schedule");
   });
 
   test("a held ⌘ shows the row's jump key in place of its time", () => {

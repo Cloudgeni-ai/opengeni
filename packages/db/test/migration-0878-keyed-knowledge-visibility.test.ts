@@ -159,7 +159,11 @@ test("generic recursive plans examine exact dependency rows rather than scanning
     await tx`SELECT set_config('opengeni.account_id',${fixture.accountId},true),set_config('opengeni.workspace_id',${fixture.workspaceId},true),
       set_config('opengeni.subject_id',${fixture.subjectId},true),set_config('opengeni.knowledge_actor_kind','human',true),set_config('opengeni.private_file_owner',${fixture.subjectId},true)`;
     await tx`SET LOCAL plan_cache_mode = force_generic_plan`;
-    const body = (source!.prosrc as string)
+    const statement = (source!.prosrc as string).match(
+      /^\s*BEGIN\s+RETURN QUERY\s+([\s\S]*);\s*END;\s*$/,
+    );
+    expect(statement).not.toBeNull();
+    const body = statement![1]!
       .replace(/\bp_account\b/g, "$1")
       .replace(/\bp_entries\b/g, "$2")
       .replace(/\bp_revisions\b/g, "$3")

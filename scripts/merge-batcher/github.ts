@@ -1,6 +1,8 @@
-import { createSign } from "node:crypto";
+import { createSign, randomUUID } from "node:crypto";
+import { writeAttempted, writeResolved } from "./cycle-outcome";
 import { inflateRawSync } from "node:zlib";
-import { admit, type Comment, type PullInput, type ReadyEvent } from "./evidence";
+import { type ReadyEvent } from "./evidence";
+import { admitGitHub, type HostedCheck, type RequiredCheck } from "./github-admission";
 import {
   type Config,
   type Manifest,
@@ -11,29 +13,29 @@ import {
   type FollowupRequest,
   type FollowupPull,
   type BaseCiEvidence,
+  type BatchReservation,
 } from "./model";
 import { verifyResult, type VerifiedResult } from "./result";
+import { baseJobClasses } from "./base-failure";
 import type { MainOutcome } from "./shadow-ci";
 import { join } from "node:path";
 import { DiskCache } from "./cache";
+import { retryRead, ProviderError, type ReadRetryClock } from "./read-retry";
+export { ProviderError } from "./read-retry";
 import {
   capacityDecision,
   type CapacityHold,
   digest,
-  MAX_RUNNER_RELEVANT_RUNS,
-  MAX_SCANNED_ACTIVE_RUNS,
   scanRunnerDemand,
   type RunnerScanHold,
 } from "./model";
 
 type Json = Record<string, any>; // Wire JSON is checked at the adapter boundary, not trusted as domain state.
 const HEADROOM_HOLD_REASONS: Record<RunnerScanHold, string> = {
-  "incomplete-runs": "Incomplete or oversized active workflow observation",
+  "incomplete-runs": "Incomplete or inconsistent active workflow observation",
   "invalid-run": "Invalid active run identity",
-  "batch-slot": "Another Batch CI run occupies the single candidate slot",
-  "scan-bound": `Active workflows exceed the bounded ${MAX_SCANNED_ACTIVE_RUNS}-run job scan`,
-  "runner-run-bound": `Active workflows exceed bounded ${MAX_RUNNER_RELEVANT_RUNS}-run observation (excluding proven approval-only runs)`,
-  "incomplete-jobs": "Incomplete or oversized current job observation",
+  "batch-slot": "Active Batch CI runs occupy the configured candidate slots",
+  "incomplete-jobs": "Incomplete or inconsistent current job observation",
   "unknown-job-status": "Unrecognized job status in current job observation",
   deadline: "Active workflow observation exceeded its scan deadline",
 };
@@ -48,7 +50,13 @@ const CAPACITY_HOLD_REASONS: Record<CapacityHold, string> = {
 export function isControlPlanePath(path: unknown): boolean {
   return (
     typeof path === "string" &&
-    (path === ".github/workflows/batch-ci.yml" ||
+    ([
+      ".github/workflows/batch-ci.yml",
+      ".github/workflows/pr-ci.yml",
+      ".github/workflows/pr-ci-superseded.yml",
+      ".github/workflows/merge-queue.yml",
+    ].includes(path) ||
+      path === "scripts/ci/github-pr-ci.ts" ||
       path.startsWith("scripts/ci/batch-") ||
       path.startsWith("scripts/merge-batcher/") ||
       /^scripts\/ci\/(?:impact|run-unit-shard|profile-command|shared-pg)(?:[./-]|$)/.test(path) ||
@@ -66,21 +74,24 @@ export interface PullSnapshot {
   merged: boolean;
   mergeCommitSha?: string | null;
 }
-export class ProviderError extends Error {
-  constructor(
-    readonly status: number,
-    readonly operation: string,
-    readonly retryAfterSeconds = 0,
-  ) {
-    super(`GitHub ${operation} failed (${status}); response body suppressed`);
-  }
+export interface AutoMergeState {
+  id: string;
+  headSha: string;
+  enabledAt: string | null;
 }
+// Only raised before the disable mutation transport is invoked.
+export class AutoMergePreSubmitError extends Error {}
 export class GitHubAuth {
   private cached: { token: string; expires: number } | null = null;
   constructor(
     private readonly env: Record<string, string | undefined>,
     private readonly transport: typeof fetch = fetch,
   ) {}
+  configuredAppId(): number | undefined {
+    const value = this.env.GITHUB_APP_ID;
+    const id = value && /^\d+$/.test(value) ? Number(value) : NaN;
+    return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+  }
   async token(): Promise<string> {
     if (this.env.GH_TOKEN) return this.env.GH_TOKEN;
     if (this.env.GITHUB_TOKEN) return this.env.GITHUB_TOKEN;
@@ -98,6 +109,9 @@ export class GitHubAuth {
     const message = `${b64({ alg: "RS256", typ: "JWT" })}.${b64({ iat: now - 60, exp: now + 540, iss: app })}`;
     const signature = createSign("RSA-SHA256").update(message).sign(key, "base64url");
     // Authentication only; repository mutation permissions are NOT requested in shadow.
+    // Do not explicitly request checks:read: the deployment App lacks that grant.
+    // Authenticated check reads work on this public repository; private repositories
+    // must qualify access separately. Unreadable checks remain fail-closed below.
     const permissions =
       this.env.BATCHER_MODE === "active"
         ? {
@@ -106,6 +120,7 @@ export class GitHubAuth {
             actions: "write",
             pull_requests: "write",
             issues: "write",
+            administration: "read",
           }
         : this.env.BATCHER_MODE === "shadow-ci"
           ? {
@@ -114,8 +129,15 @@ export class GitHubAuth {
               actions: "read",
               pull_requests: "read",
               issues: "read",
+              administration: "read",
             }
-          : { contents: "read", actions: "read", pull_requests: "read", issues: "read" };
+          : {
+              contents: "read",
+              actions: "read",
+              pull_requests: "read",
+              issues: "read",
+              administration: "read",
+            };
     const response = await this.transport(
       `https://api.github.com/app/installations/${installation}/access_tokens`,
       {
@@ -153,10 +175,26 @@ export class GitHubReader {
   lastHeadroom: Headroom | null = null;
   readonly cache: DiskCache;
   private blockedUntil = 0;
+  private readTransport(input: string, init: RequestInit): Promise<Response> {
+    // Each retry gets its own timeout; the enclosing inventory retains its
+    // independent 120-second fail-closed observation deadline.
+    const { signal: _signal, ...request } = init;
+    return retryRead(this.transport, input, request, this.readRetryClock).catch((error) => {
+      if (error instanceof ProviderError && error.retryAfterSeconds > 0)
+        this.blockedUntil = Math.max(
+          this.blockedUntil,
+          Date.now() + error.retryAfterSeconds * 1000,
+        );
+      throw error;
+    });
+  }
   constructor(
     readonly config: Config,
     readonly auth: GitHubAuth,
     readonly transport: typeof fetch = fetch,
+    // Tests inject a clock so mocked provider errors exercise the real
+    // backoff schedule without sleeping. Production uses the wall clock.
+    private readonly readRetryClock?: ReadRetryClock,
   ) {
     this.cache = new DiskCache(
       join(config.outputDir, `provider-cache-${digest(config.repository)}.json`),
@@ -194,14 +232,17 @@ export class GitHubReader {
       );
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("Invalid source repository");
     const token = await this.auth.token();
-    const response = await this.transport(`https://api.github.com/repos/${repository}/${path}`, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        "X-GitHub-Api-Version": "2022-11-28",
+    const response = await this.readTransport(
+      `https://api.github.com/repos/${repository}/${path}`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        signal: AbortSignal.timeout(30_000),
       },
-      signal: AbortSignal.timeout(30_000),
-    });
+    );
     this.checkRateLimit(response);
     if (!response.ok) throw new ProviderError(response.status, "read");
     return response.json() as Promise<Json | Json[]>;
@@ -253,6 +294,38 @@ export class GitHubReader {
       (comment) => typeof comment.body === "string" && comment.body.includes(marker),
     );
   }
+  async autoMergeState(number: number): Promise<AutoMergeState> {
+    const [owner, name] = this.config.repository.split("/");
+    const response = await this.readTransport("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await this.auth.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){id headRefOid autoMergeRequest{enabledAt}}}}`,
+        variables: { owner, name, number },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    this.checkRateLimit(response);
+    if (!response.ok) throw new ProviderError(response.status, "auto-merge observation");
+    const data = (await response.json()) as Json,
+      pull = data.data?.repository?.pullRequest;
+    if (
+      data.errors ||
+      typeof pull?.id !== "string" ||
+      !/^[a-f0-9]{40}$/.test(pull.headRefOid) ||
+      (pull.autoMergeRequest !== null &&
+        !Number.isFinite(Date.parse(pull.autoMergeRequest?.enabledAt)))
+    )
+      throw Error("Auto-merge observation unavailable");
+    return {
+      id: pull.id,
+      headSha: pull.headRefOid,
+      enabledAt: pull.autoMergeRequest?.enabledAt ?? null,
+    };
+  }
   async currentAttempt(run: Run): Promise<{ attempt: number; status: string }> {
     const data = (await this.get(`actions/runs/${run.id}`)) as Json;
     if (
@@ -266,11 +339,17 @@ export class GitHubReader {
       throw new Error("Retry run identity changed");
     return { attempt: data.run_attempt, status: data.status };
   }
-  async mainBusy(): Promise<boolean> {
-    this.lastHeadroom = await this.headroom();
+  async mainBusy(
+    purpose: "publish" | "land" | "observe" = "publish",
+    reservations: BatchReservation[] = [],
+  ): Promise<boolean> {
+    this.lastHeadroom = await this.headroom(purpose, reservations);
     return !this.lastHeadroom.allowed;
   }
-  async headroom(): Promise<Headroom> {
+  async headroom(
+    purpose: "publish" | "land" | "observe" = "publish",
+    reservations: BatchReservation[] = [],
+  ): Promise<Headroom> {
     const result: Headroom = {
       allowed: false,
       reason: "Configure allocated repository runner budget and full-main reserve",
@@ -284,11 +363,18 @@ export class GitHubReader {
       get: (path) => this.get(path),
       batchWorkflow: this.config.workflow,
       baseBranch: this.config.baseBranch,
+      excludePrCiDemand: true,
+      approvalCache: this.cache,
+      maxInflight: this.config.maxInflight,
+      requireFreeBatchSlot: purpose === "publish",
+      reservations,
     });
     result.scannedRuns = scan.scannedRuns;
     result.approvalOnlyRuns = scan.approvalOnlyRuns;
+    if (scan.ok) result.cachedApprovalOnlyRuns = scan.cachedApprovalOnlyRuns;
     if (!scan.ok) return { ...result, reason: HEADROOM_HOLD_REASONS[scan.hold] };
     const { mainDemand, otherDemand } = scan;
+    result.mainDemand = mainDemand;
     result.occupied = mainDemand + otherDemand;
     const decision = capacityDecision({
       mainDemand,
@@ -300,13 +386,26 @@ export class GitHubReader {
       mainReserve: this.config.mainReserve,
       providerJobLimit: this.config.providerJobLimit,
       otherRepositoryAllowance: this.config.otherRepositoryAllowance,
+      occupiedBatchSlots: scan.occupiedBatchSlots,
+      observedBatchDemand: scan.observedBatchDemand,
+      reservedBatchDemand: scan.reservedBatchDemand,
     });
     result.reservedMain = decision.reservedMain;
     result.capacity = decision.capacity;
-    result.allowed = decision.allowed;
-    result.reason = decision.capacity.hold
-      ? CAPACITY_HOLD_REASONS[decision.capacity.hold]
-      : "Observed jobs plus full-main reserve and 18 candidate slots fit the configured budget and hosted job limit";
+    // Slot one remains advisory for liveness. Speculative slots must fit the
+    // observed capacity budget; landing/observation never consume another slot.
+    result.occupiedBatchSlots = scan.occupiedBatchSlots;
+    result.capacityInformational =
+      decision.capacity.hold !== "invalid-capacity" && scan.occupiedBatchSlots === 0;
+    result.publicationBlocked =
+      scan.occupiedBatchSlots >= this.config.maxInflight ||
+      (scan.occupiedBatchSlots > 0 && decision.capacity.hold !== null);
+    result.allowed =
+      decision.capacity.hold !== "invalid-capacity" &&
+      (purpose !== "publish" || !result.publicationBlocked);
+    result.reason = result.allowed
+      ? `Batch ${purpose}; ${scan.activeBatchRuns}/${this.config.maxInflight} active provider slots; capacity observation: ${decision.capacity.hold ? CAPACITY_HOLD_REASONS[decision.capacity.hold] : "observed demand fits configured estimates"}`
+      : CAPACITY_HOLD_REASONS[decision.capacity.hold ?? "invalid-capacity"];
     return result;
   }
   async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {
@@ -343,7 +442,7 @@ export class GitHubReader {
     let cursor: string | null = null;
     for (let page = 0; page < 1000; page++) {
       const token = await this.auth.token();
-      const response = await this.transport("https://api.github.com/graphql", {
+      const response = await this.readTransport("https://api.github.com/graphql", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -406,17 +505,72 @@ export class GitHubReader {
     );
     const ready: Pull[] = [],
       excluded: { number: number; reason: string }[] = [];
+    const rules = await this.pages(`rules/branches/${encodeURIComponent(this.config.baseBranch)}`);
+    if (!Array.isArray(rules)) throw new Error("Effective branch rules unavailable");
+    if (rules.some((r) => ["workflows", "required_workflows"].includes(r.type)))
+      throw Error("Required workflow rules need explicit hosted-check mapping before admission");
+    const classic = await this.classicBranchPolicy();
+    const required: RequiredCheck[] = rules
+      .filter((r) => r.type === "required_status_checks")
+      .flatMap((r) =>
+        (r.parameters?.required_status_checks ?? []).map((c: Json) => ({
+          context: c.context,
+          integrationId: c.integration_id,
+        })),
+      );
+    required.push(
+      ...(classic?.requiredStatusChecks ?? []).map((c: Json) => ({
+        context: c.context,
+        integrationId: c.app?.databaseId ?? null,
+      })),
+    );
+    if (required.some((c) => typeof c.context !== "string" || !c.context))
+      throw new Error("Malformed required checks");
+    const reviewRequired =
+      Boolean(classic?.requiresApprovingReviews || classic?.requiresCodeOwnerReviews) ||
+      rules.some(
+        (r) =>
+          r.type === "pull_request" &&
+          (r.parameters?.required_approving_review_count > 0 ||
+            r.parameters?.require_code_owner_review ||
+            r.parameters?.require_last_push_approval),
+      );
+    const conversationResolutionRequired =
+      Boolean(classic?.requiresConversationResolution) ||
+      rules.some(
+        (r) => r.type === "pull_request" && r.parameters?.required_review_thread_resolution,
+      );
     for (const pull of pulls) {
       const number = Number(pull.number);
       const queueReady =
         Array.isArray(pull.labels) && pull.labels.some((l: Json) => l.name === "queue-ready");
-      if (!pull.auto_merge && !queueReady) {
-        excluded.push({ number, reason: "no ready signal" });
+      const autoMerge = pull.auto_merge != null;
+      if (!queueReady && !autoMerge) {
+        excluded.push({ number, reason: "auto-merge or queue-ready required" });
         continue;
       }
       let events: ReadyEvent[];
       try {
         events = await this.timeline(number);
+        if (autoMerge) {
+          // GitHub can expose a current native request with no corresponding
+          // timeline node. Bind to that request, never PR creation/read time.
+          const current = await this.autoMergeState(number);
+          if (current.headSha !== pull.head?.sha || current.enabledAt === null) {
+            excluded.push({
+              number,
+              reason: "Native auto-merge request changed during observation",
+            });
+            continue;
+          }
+          events = events.filter((event) => event.source !== "auto-merge");
+          events.push({
+            id: `auto-merge:${current.id}:${current.enabledAt}`,
+            at: current.enabledAt,
+            source: "auto-merge",
+            enabled: true,
+          });
+        }
       } catch (error) {
         // An unavailable/malformed per-PR timeline is an explicit admission exclusion.
         // Authentication/rate-limit failures abort the whole observation instead.
@@ -424,34 +578,211 @@ export class GitHubReader {
         excluded.push({ number, reason: "actual ready-event timeline unavailable" });
         continue;
       }
-      const comments = (await this.pages(`issues/${number}/comments`)).map(
-        (x): Comment => ({
-          id: String(x.id),
-          body: x.body,
-          updatedAt: x.updated_at,
-          authorAssociation: x.author_association,
-        }),
-      );
+      let checks: HostedCheck[];
+      try {
+        checks = await this.hostedChecks(pull.head?.sha ?? "");
+      } catch (error) {
+        if (error instanceof ProviderError && [404, 410].includes(error.status)) {
+          excluded.push({ number, reason: "Exact-head hosted run or job no longer readable" });
+          continue;
+        }
+        throw error;
+      }
+      const review =
+        reviewRequired || conversationResolutionRequired
+          ? await this.nativeReview(number)
+          : { decision: null, unresolved: false };
       const files = await this.pages(`pulls/${number}/files`);
       const controlPlane = files.some((file) =>
         [file.filename, file.previous_filename].some(isControlPlanePath),
       );
-      const input: PullInput = {
+      const admission = admitGitHub({
+        expectedBatcherAppId: this.auth.configuredAppId(),
         controlPlane,
         number,
         headSha: pull.head?.sha ?? "",
         headRef: pull.head?.ref ?? "",
         draft: Boolean(pull.draft),
-        autoMerge: Boolean(pull.auto_merge),
         queueReady,
+        autoMerge,
         events,
-        comments,
-      };
-      const admission = admit(input);
+        checks,
+        required,
+        reviewRequired,
+        reviewDecision: review.decision,
+        conversationResolutionRequired,
+        unresolvedThreads: review.unresolved,
+      });
       if (admission.ready) ready.push(admission.ready);
       else excluded.push({ number, reason: admission.reason });
     }
     return { ready, excluded };
+  }
+  async openPullNumbers(): Promise<number[]> {
+    const pulls = await this.pages("pulls?state=open");
+    if (pulls.some((p) => !Number.isSafeInteger(p.number) || p.number <= 0))
+      throw Error("Invalid open PR inventory");
+    return [...new Set(pulls.map((p) => p.number as number))].sort((a, b) => a - b);
+  }
+  async classicBranchPolicy(): Promise<Json | null> {
+    const [owner, name] = this.config.repository.split("/");
+    const response = await this.readTransport("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await this.auth.token()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `query ClassicBranchPolicy($owner:String!,$name:String!,$ref:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$ref){branchProtectionRule{requiresApprovingReviews requiresCodeOwnerReviews requiresConversationResolution requiredStatusChecks{context app{databaseId}}}}}}`,
+        variables: { owner, name, ref: `refs/heads/${this.config.baseBranch}` },
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    this.checkRateLimit(response);
+    if (!response.ok) throw new ProviderError(response.status, "branch protection");
+    const data = (await response.json()) as Json,
+      ref = data.data?.repository?.ref;
+    if (data.errors || !ref || !("branchProtectionRule" in ref))
+      throw Error("Classic branch protection unavailable");
+    if (ref.branchProtectionRule === null) {
+      const branch = await this.get(`branches/${encodeURIComponent(this.config.baseBranch)}`);
+      if (Array.isArray(branch) || typeof branch.protected !== "boolean")
+        throw Error("Classic protection absence is not proven by this token");
+      if (branch.protected) {
+        // protected:true includes rulesets. A null projection or REST404 alone
+        // is ambiguous; only a positive, complete empty classic inventory lifts
+        // that ambiguity. Nonempty inventories are held rather than guessing
+        // GitHub's branch-pattern matching or silently ignoring classic rules.
+        let absent = false;
+        try {
+          await this.get(`branches/${encodeURIComponent(this.config.baseBranch)}/protection`);
+        } catch (error) {
+          if (!(error instanceof ProviderError) || error.status !== 404) throw error;
+          absent = true;
+        }
+        if (!absent) throw Error("Classic protection changed during observation");
+        const inventoryResponse = await this.readTransport("https://api.github.com/graphql", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${await this.auth.token()}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query: `query ClassicProtectionInventory($owner:String!,$name:String!){repository(owner:$owner,name:$name){branchProtectionRules(first:100){totalCount nodes{id} pageInfo{hasNextPage endCursor}}}}`,
+            variables: { owner, name },
+          }),
+          signal: AbortSignal.timeout(30000),
+        });
+        this.checkRateLimit(inventoryResponse);
+        if (!inventoryResponse.ok)
+          throw new ProviderError(inventoryResponse.status, "classic protection inventory");
+        const inventoryData = (await inventoryResponse.json()) as Json;
+        const inventory = inventoryData.data?.repository?.branchProtectionRules;
+        if (
+          inventoryData.errors ||
+          !inventory ||
+          inventory.totalCount !== 0 ||
+          !Array.isArray(inventory.nodes) ||
+          inventory.nodes.length !== 0 ||
+          inventory.pageInfo?.hasNextPage !== false ||
+          inventory.pageInfo.endCursor !== null
+        )
+          throw Error("Classic protection absence is not proven by complete inventory");
+      }
+    }
+    return ref.branchProtectionRule;
+  }
+  async hostedChecks(head: string): Promise<HostedCheck[]> {
+    if (!/^[a-f0-9]{40}$/.test(head)) return [];
+    const checks = await this.pages(`commits/${head}/check-runs?filter=latest`, "check_runs");
+    const runs = new Map<number, { run: Json; jobs: Json[] }>();
+    const result: HostedCheck[] = [];
+    for (const check of checks) {
+      if (check.app?.slug !== "github-actions") continue;
+      const match = String(check.details_url ?? "").match(
+        /^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/(\d+)(?:\/|$)/,
+      );
+      if (!match) continue;
+      const id = Number(match[1]);
+      if (!runs.has(id)) {
+        const run = (await this.get(`actions/runs/${id}`)) as Json;
+        const jobs = await this.pages(
+          `actions/runs/${id}/attempts/${run.run_attempt}/jobs`,
+          "jobs",
+        );
+        runs.set(id, { run, jobs });
+      }
+      const { run, jobs } = runs.get(id)!;
+      const exactJob = jobs.find((j) =>
+        String(j.check_run_url).endsWith(`/check-runs/${check.id}`),
+      );
+      const hosted =
+        jobs.length > 0 &&
+        jobs
+          .filter((j) => j.conclusion !== "skipped")
+          .every(
+            (j) =>
+              j.runner_group_id === 0 &&
+              j.runner_group_name === "GitHub Actions" &&
+              Number.isSafeInteger(j.runner_id) &&
+              j.runner_id > 0 &&
+              Array.isArray(j.labels) &&
+              !j.labels.includes("self-hosted") &&
+              j.labels.some((l: string) => /^(ubuntu|windows|macos)-/.test(l)),
+          ) &&
+        !!exactJob &&
+        exactJob.status === "completed" &&
+        exactJob.conclusion === "success";
+      result.push({
+        id: check.id,
+        name: check.name,
+        headSha: check.head_sha,
+        status: check.status,
+        conclusion: check.conclusion,
+        appId: check.app.id,
+        appSlug: check.app.slug,
+        runId: id,
+        attempt: run.run_attempt,
+        workflow: String(run.path).split("@")[0]!,
+        runHeadSha: run.head_sha,
+        hosted,
+      });
+    }
+    return result;
+  }
+  async nativeReview(number: number): Promise<{ decision: string | null; unresolved: boolean }> {
+    const [owner, name] = this.config.repository.split("/");
+    let cursor: string | null = null,
+      unresolved = false,
+      decision: string | null = null;
+    for (let page = 0; page < 1000; page++) {
+      const response = await this.readTransport("https://api.github.com/graphql", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await this.auth.token()}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          query: `query BranchReview($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision reviewThreads(first:100,after:$cursor){nodes{isResolved} pageInfo{hasNextPage endCursor}}}}}`,
+          variables: { owner, name, number, cursor },
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      this.checkRateLimit(response);
+      if (!response.ok) throw new ProviderError(response.status, "native review");
+      const data = (await response.json()) as Json,
+        pull = data.data?.repository?.pullRequest,
+        threads = pull?.reviewThreads;
+      if (data.errors || !Array.isArray(threads?.nodes) || !threads.pageInfo)
+        throw Error("Native branch review unavailable");
+      decision = pull.reviewDecision ?? null;
+      unresolved ||= threads.nodes.some((t: Json) => t.isResolved !== true);
+      if (!threads.pageInfo.hasNextPage) return { decision, unresolved };
+      if (typeof threads.pageInfo.endCursor !== "string" || threads.pageInfo.endCursor === cursor)
+        throw Error("Review pagination stalled");
+      cursor = threads.pageInfo.endCursor;
+    }
+    throw Error("Review pagination incomplete");
   }
   async runs(manifest: Manifest, branch: string): Promise<Run[]> {
     const raw = await this.pages(
@@ -481,7 +812,7 @@ export class GitHubReader {
         }>(key);
         if (
           cached &&
-          (cached.run.outcome === "success" || cached.retryPolicyVersion === 2) &&
+          (cached.run.outcome === "success" || cached.retryPolicyVersion === 3) &&
           (attempt < count || (run.status === "completed" && cached.conclusion === run.conclusion))
         ) {
           result.push(cached.run);
@@ -509,6 +840,7 @@ export class GitHubReader {
         let trusted = false;
         let retryable = false;
         let infrastructureRetryReason: Run["infrastructureRetryReason"];
+        let failedClasses: Run["failedClasses"];
         if (status === "completed" && details.conclusion !== "cancelled") {
           const attested = await this.resultArtifact(manifest, Number(run.id), attempt);
           if (
@@ -520,6 +852,7 @@ export class GitHubReader {
             outcome = attested.outcome;
             retryable = attested.retryable;
             trusted = true;
+            failedClasses = attested.failedClasses;
             if (outcome === "infrastructure" && attested.infrastructureOnly === true)
               infrastructureRetryReason = "verified-infrastructure";
           }
@@ -553,6 +886,20 @@ export class GitHubReader {
             }
           }
         }
+        // Provider-confirmed failed jobs may be retried once even without a
+        // trusted result artifact. This grants no landing or member-blame proof.
+        if (
+          status === "completed" &&
+          ["failure", "timed_out", "cancelled"].includes(details.conclusion)
+        ) {
+          const jobs = await this.pages(`actions/runs/${run.id}/attempts/${attempt}/jobs`, "jobs");
+          if (
+            jobs.length > 0 &&
+            jobs.every((j) => j.status === "completed") &&
+            jobs.some((j) => ["failure", "timed_out"].includes(j.conclusion))
+          )
+            infrastructureRetryReason = "failed-batch";
+        }
         const verifiedRun: Run = {
           id: Number(run.id),
           attempt,
@@ -564,6 +911,7 @@ export class GitHubReader {
           trusted,
           retryable,
           ...(infrastructureRetryReason ? { infrastructureRetryReason } : {}),
+          ...(failedClasses ? { failedClasses } : {}),
           startedAt: details.run_started_at ?? null,
           completedAt: status === "completed" ? details.updated_at : null,
         };
@@ -572,7 +920,7 @@ export class GitHubReader {
           await this.cache.set(key, {
             run: verifiedRun,
             conclusion: details.conclusion,
-            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 2 }),
+            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 3 }),
           });
       }
     }
@@ -608,6 +956,42 @@ export class GitHubReader {
       };
     }
   }
+  private async baseJobs(id: number, attempt: number): Promise<Json[]> {
+    const jobs: Json[] = [];
+    const ids = new Set<number>();
+    let total: number | undefined;
+    for (let page = 1; page <= 1000; page++) {
+      const data = (await this.get(
+        `actions/runs/${id}/attempts/${attempt}/jobs?per_page=100&page=${page}`,
+      )) as Json;
+      if (
+        !Number.isSafeInteger(data.total_count) ||
+        data.total_count < 0 ||
+        !Array.isArray(data.jobs) ||
+        (total !== undefined && data.total_count !== total)
+      )
+        throw Error("Inconsistent exact-base jobs page");
+      total = data.total_count;
+      for (const job of data.jobs) {
+        if (
+          !Number.isSafeInteger(job?.id) ||
+          job.id < 1 ||
+          ids.has(job.id) ||
+          job.run_id !== id ||
+          (job.run_attempt !== undefined && job.run_attempt !== attempt)
+        )
+          throw Error("Exact-base job identity mismatch");
+        ids.add(job.id);
+        jobs.push(job);
+      }
+      if (jobs.length > total!) throw Error("Exact-base jobs exceed reported total");
+      if (data.jobs.length < 100) {
+        if (jobs.length !== total) throw Error("Incomplete exact-base jobs");
+        return jobs;
+      }
+    }
+    throw Error("Exact-base jobs pagination incomplete");
+  }
   private async readBaseCI(sha: string): Promise<BaseCiEvidence> {
     const evidence: BaseCiEvidence = {
       sha,
@@ -634,21 +1018,25 @@ export class GitHubReader {
     evidence.runId = id;
     evidence.attempt = attempt;
     const details = (await this.get(`actions/runs/${id}/attempts/${attempt}`)) as Json;
+    if (!exact(details) || Number(details.id) !== id || Number(details.run_attempt) !== attempt)
+      return { ...evidence, reason: "Exact-base CI attempt identity unavailable" };
+    const pending = ["queued", "in_progress", "waiting", "pending", "requested"].includes(
+      details.status,
+    );
     if (
-      !exact(details) ||
-      Number(details.id) !== id ||
-      Number(details.run_attempt) !== attempt ||
-      details.status !== "completed"
+      (!pending && details.status !== "completed") ||
+      (pending ? details.conclusion !== null : !["success", "failure"].includes(details.conclusion))
     )
-      return { ...evidence, reason: "Exact-base CI attempt is running or identity unavailable" };
-    if (!["success", "failure"].includes(details.conclusion))
       return {
         ...evidence,
         reason: "Exact-base CI cancelled/skipped/unknown is not policy evidence",
       };
-    if (details.conclusion === "failure") {
-      evidence.status = "red";
-      evidence.reason = "Exact-base main CI failed; no member attribution";
+    if (pending || details.conclusion === "failure") {
+      evidence.status = pending ? "classes" : "red";
+      evidence.reason = pending
+        ? "Exact-base job classes observed; whole workflow still pending"
+        : "Exact-base main CI failed; no member attribution";
+      evidence.classes = baseJobClasses(await this.baseJobs(id, attempt), id);
     } else {
       const artifacts = await this.pages(`actions/runs/${id}/artifacts`, "artifacts");
       const matches = artifacts.filter(
@@ -674,7 +1062,7 @@ export class GitHubReader {
           ...evidence,
           reason: "Full-green artifact predates current attempt or lacks timing",
         };
-      const response = await this.transport(
+      const response = await this.readTransport(
         `https://api.github.com/repos/${this.config.repository}/actions/artifacts/${artifact.id}/zip`,
         {
           headers: { Authorization: `Bearer ${await this.auth.token()}` },
@@ -687,7 +1075,9 @@ export class GitHubReader {
       if (response.status === 302) {
         const target = new URL(response.headers.get("location") ?? "");
         if (target.protocol !== "https:") return evidence;
-        download = await this.transport(target, { signal: AbortSignal.timeout(30_000) });
+        download = await this.readTransport(target.toString(), {
+          signal: AbortSignal.timeout(30_000),
+        });
       }
       if (!download.ok) {
         this.checkRateLimit(download);
@@ -730,7 +1120,7 @@ export class GitHubReader {
       !latest ||
       Number(latest.id) !== id ||
       Number(latest.run_attempt) !== attempt ||
-      latest.status !== "completed" ||
+      latest.status !== details.status ||
       latest.conclusion !== details.conclusion
     )
       return { ...evidence, status: "unknown", reason: "Main CI changed during evidence read" };
@@ -780,7 +1170,7 @@ export class GitHubReader {
       )
         continue;
       const token = await this.auth.token();
-      const response = await this.transport(
+      const response = await this.readTransport(
         `https://api.github.com/repos/${this.config.repository}/actions/artifacts/${a.id}/zip`,
         {
           headers: { Authorization: `Bearer ${token}` },
@@ -794,7 +1184,9 @@ export class GitHubReader {
         const target = new URL(response.headers.get("location") ?? "");
         if (target.protocol !== "https:") continue;
         // Never forward the repository credential to the artifact storage origin.
-        download = await this.transport(target, { signal: AbortSignal.timeout(30_000) });
+        download = await this.readTransport(target.toString(), {
+          signal: AbortSignal.timeout(30_000),
+        });
       }
       if (!download.ok) {
         this.checkRateLimit(download);
@@ -818,7 +1210,10 @@ export class GitHubReader {
 export function readResultZip(
   bytes: Uint8Array,
   allowedNames = ["batch-result.json", "result.json"],
+  maxEntryBytes = 65_536,
 ): string {
+  if (!Number.isSafeInteger(maxEntryBytes) || maxEntryBytes < 1 || maxEntryBytes > 1_000_000)
+    throw new Error("Invalid ZIP entry limit");
   if (bytes.byteLength > 1_000_000) throw new Error("Artifact too large");
   const b = Buffer.from(bytes);
   let end = -1;
@@ -847,7 +1242,7 @@ export function readResultZip(
     if (!allowedNames.includes(name)) continue;
     if (
       flags & 1 ||
-      size > 65_536 ||
+      size > maxEntryBytes ||
       compressed > 1_000_000 ||
       b.readUInt32LE(offset) !== 0x04034b50
     )
@@ -859,7 +1254,7 @@ export function readResultZip(
       compression === 0
         ? data
         : compression === 8
-          ? inflateRawSync(data, { maxOutputLength: 65_536 })
+          ? inflateRawSync(data, { maxOutputLength: maxEntryBytes })
           : null;
     if (!decoded || decoded.length !== size) throw new Error("Invalid compression");
     results.push(decoded.toString("utf8"));
@@ -900,6 +1295,8 @@ export class GitHubMutations {
     if (this.reader.config.mode !== "active")
       throw new Error("Shadow mode forbids GitHub mutations");
     const token = await this.reader.auth.token();
+    const outcomeKey = `rest:${randomUUID()}`;
+    writeAttempted(outcomeKey);
     const response = await this.reader.transport(
       `https://api.github.com/repos/${this.reader.config.repository}/${path}`,
       {
@@ -913,6 +1310,8 @@ export class GitHubMutations {
         signal: AbortSignal.timeout(30_000),
       },
     );
+    if (response.ok || [400, 401, 403, 404, 409, 422, 429].includes(response.status))
+      writeResolved(outcomeKey);
     if (!response.ok) throw new ProviderError(response.status, "mutation");
   }
   async retry(run: Run): Promise<void> {
@@ -926,6 +1325,9 @@ export class GitHubMutations {
       !Number.isSafeInteger(run.id) ||
       run.id < 1 ||
       !(
+        (run.trusted && run.outcome === "code_failure") ||
+        (run.infrastructureRetryReason === "failed-batch" &&
+          ["infrastructure", "cancelled"].includes(run.outcome)) ||
         (run.infrastructureRetryReason === "verified-infrastructure" &&
           run.trusted &&
           run.outcome === "infrastructure") ||
@@ -933,13 +1335,51 @@ export class GitHubMutations {
         (run.infrastructureRetryReason === "no-job-logs" && run.outcome === "infrastructure")
       )
     )
-      throw new Error(
-        "Only a first-attempt terminal candidate infrastructure failure may be retried",
-      );
+      throw new Error("Only a first-attempt terminal candidate failure may be retried");
     await this.post(`actions/runs/${run.id}/rerun`, {});
   }
   async announce(number: number, body: string): Promise<void> {
     await this.post(`issues/${number}/comments`, { body });
+  }
+  async disableAutoMerge(number: number, headSha: string, parkedAt: string): Promise<void> {
+    if (this.reader.config.mode !== "active") throw Error("Shadow mode forbids GitHub mutations");
+    let current: AutoMergeState;
+    try {
+      current = await this.reader.autoMergeState(number);
+    } catch (cause) {
+      throw new AutoMergePreSubmitError("Auto-merge observation failed; no mutation sent", {
+        cause,
+      });
+    }
+    if (
+      current.enabledAt === null ||
+      current.headSha !== headSha ||
+      Date.parse(current.enabledAt) > Date.parse(parkedAt)
+    )
+      return;
+    // GitHub supplies no conditional disable mutation. Re-read immediately and
+    // never replay an ambiguous submission; a later enable is a new request.
+    const token = await this.reader.auth.token();
+    const outcomeKey = `graphql-disable:${randomUUID()}`;
+    writeAttempted(outcomeKey);
+    const response = await this.reader.transport("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id}){pullRequest{id}}}`,
+        variables: { id: current.id },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if ([400, 401, 403, 404, 409, 422, 429].includes(response.status)) writeResolved(outcomeKey);
+    if (!response.ok) throw new ProviderError(response.status, "disable auto-merge");
+    const data = (await response.json()) as Json;
+    if (data.errors || data.data?.disablePullRequestAutoMerge?.pullRequest?.id !== current.id)
+      throw Error("Disable auto-merge outcome unverified");
+    writeResolved(outcomeKey);
   }
   async createFollowup(request: FollowupRequest): Promise<void> {
     const [owner, name] = request.sourceRepository.split("/");

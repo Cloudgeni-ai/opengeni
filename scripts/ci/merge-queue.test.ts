@@ -118,7 +118,9 @@ test("cheap PR entry never masquerades as combined-tree CI or duplicates the hea
     "github.event.pull_request.head.ref != 'changeset-release/main'",
   );
   expect(queue.jobs.entry.name).toContain("'PR entry (not applicable)'");
-  expect(queue.jobs.entry.steps[0].run).toContain("not test or review evidence");
+  expect(queue.jobs.entry.steps[0].run).toContain("not test evidence");
+  expect(queue.jobs.entry.steps[0].run).toContain("exact-head PR CI");
+  expect(queue.jobs.entry.steps[0].run).not.toContain("VM test evidence");
   expect(queue.jobs.plan.if).toContain("github.event_name != 'pull_request'");
   expect(queue.jobs.plan.if).toContain("queue-shadow");
   expect(queue.jobs.plan.steps.some((step: any) => step.run?.includes("bun install"))).toBe(false);
@@ -143,11 +145,9 @@ test("ordinary PR events cannot starve reconciliation or publish public alerts",
 
 test("main full CI cannot be cancelled by a new push and publishes only full exact-SHA success", () => {
   expect(ci.concurrency["cancel-in-progress"]).toBe(
-    "${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}",
+    "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
   );
-  expect(ci.concurrency.group).toContain("ci-main-push");
-  expect(ci.concurrency.group).toContain("github.event_name == 'push' && github.ref");
-  expect(ci.concurrency.group).toContain("changeset-release/main");
+  expect(ci.concurrency.group).not.toContain("ci-main-push");
   expect(ci.concurrency.group).not.toContain("queue-");
   const plan = ci.jobs.plan.steps.find((step: any) => step.id === "plan").run;
   expect(plan).toContain(
@@ -164,6 +164,119 @@ test("main full CI cannot be cancelled by a new push and publishes only full exa
   expect(workflow("merge-content").concurrency).toBeUndefined();
   expect(ci.jobs["merge-content"].steps.at(-1).run).toContain("--since-full-green");
   expect(ci.jobs["full-green"].steps[0].run).toContain("/attempts/$GITHUB_RUN_ATTEMPT");
+});
+
+/** Evaluate the checked-in `ci.yml` concurrency expressions for one event. */
+function ciConcurrency(context: {
+  event_name: string;
+  ref: string;
+  run_id: string;
+  run_attempt: string;
+  head_commit_message?: string;
+  pull_request_number?: number;
+  automation_pr_number?: string;
+  action?: string;
+}): { group: string; cancel: boolean } {
+  const compile = (expression: string) => {
+    const body = /^\$\{\{ (.+) \}\}$/su.exec(expression)?.[1];
+    if (!body) throw new Error(`not one expression: ${expression}`);
+    // Only the grammar these two expressions use is modelled: string
+    // literals, ==, &&, || and format(). Anything else must fail loudly.
+    const unmodelled = body
+      .replace(/'[^']*'/gu, "")
+      .replace(/\b(?:github|inputs)\.[a-z_.]+/gu, "")
+      .replace(/\bformat\(/gu, "")
+      .replace(/==|&&|\|\||[(),\s]/gu, "");
+    if (unmodelled) throw new Error(`Unmodelled concurrency grammar: ${unmodelled}`);
+    return new Function(
+      "github",
+      "inputs",
+      "format",
+      `return (${body.replace(/==/gu, "===")});`,
+    ) as (...args: unknown[]) => unknown;
+  };
+  const github = {
+    event_name: context.event_name,
+    ref: context.ref,
+    run_id: context.run_id,
+    run_attempt: context.run_attempt,
+    event: {
+      action: context.action,
+      head_commit: { message: context.head_commit_message ?? "" },
+      pull_request: { number: context.pull_request_number },
+    },
+  };
+  const inputs = { automation_pr_number: context.automation_pr_number };
+  const format = (template: string, ...values: unknown[]) =>
+    template.replace(/\{(\d+)\}/gu, (_m, index: string) => String(values[Number(index)]));
+  return {
+    group: String(compile(ci.concurrency.group)(github, inputs, format)),
+    cancel: compile(ci.concurrency["cancel-in-progress"])(github, inputs, format) === true,
+  };
+}
+
+test("every main push, retry and Version merge commit runs in its own non-cancelling group", () => {
+  const push = (run_id: string, run_attempt = "1", ref = "refs/heads/main", message = "fix: x") =>
+    ciConcurrency({ event_name: "push", ref, run_id, run_attempt, head_commit_message: message });
+  // Two consecutive ordinary main pushes never share a group, so a run that
+  // stays open (for example waiting for an approval) cannot hold a later push.
+  const first = push("100");
+  const second = push("101");
+  const third = push("102");
+  expect(new Set([first.group, second.group, third.group]).size).toBe(3);
+  for (const run of [first, second, third]) expect(run.cancel).toBe(false);
+  expect(first.group).toBe("ci-100-1");
+  // An explicit re-run keeps its exact run and gets its own attempt group.
+  expect(push("100", "2")).toEqual({ group: "ci-100-2", cancel: false });
+  expect(push("100", "2").group).not.toBe(first.group);
+  // Version-PR merge commits, production pushes and scheduled coverage keep
+  // their own exact-run lanes.
+  expect(push("200", "1", "refs/heads/main", "chore: version packages")).toEqual({
+    group: "ci-200-1",
+    cancel: false,
+  });
+  expect(push("201", "1", "refs/heads/main", "Merge changeset-release/main")).toEqual({
+    group: "ci-201-1",
+    cancel: false,
+  });
+  expect(push("202", "1", "refs/heads/production")).toEqual({ group: "ci-202-1", cancel: false });
+  expect(
+    ciConcurrency({
+      event_name: "schedule",
+      ref: "refs/heads/main",
+      run_id: "203",
+      run_attempt: "1",
+    }),
+  ).toEqual({ group: "ci-203-1", cancel: false });
+  // Mutable heads keep their single newest-head lane and cancel superseded work.
+  expect(
+    ciConcurrency({
+      event_name: "pull_request",
+      ref: "refs/pull/7/merge",
+      run_id: "300",
+      run_attempt: "1",
+      pull_request_number: 7,
+      action: "synchronize",
+    }),
+  ).toEqual({ group: "ci-pr-7", cancel: true });
+  expect(
+    ciConcurrency({
+      event_name: "workflow_dispatch",
+      ref: "refs/heads/main",
+      run_id: "301",
+      run_attempt: "1",
+      automation_pr_number: "42",
+    }),
+  ).toEqual({ group: "ci-301-1", cancel: false });
+  expect(
+    ciConcurrency({
+      event_name: "workflow_dispatch",
+      ref: "refs/heads/main",
+      run_id: "302",
+      run_attempt: "2",
+      automation_pr_number: "42",
+    }).group,
+  ).toBe("ci-302-2");
 });
 
 test("full-green publishes only for a non-cancelled full main push whose direct needs all succeeded", () => {

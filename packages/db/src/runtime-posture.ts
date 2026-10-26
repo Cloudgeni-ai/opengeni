@@ -43,6 +43,66 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
   "mark_automatic_session_title_fanout_failed_v1(uuid, uuid, text)",
 ] as const;
 
+/**
+ * SECURITY DEFINER routines in `opengeni_private` the runtime calls: the event
+ * trigger dispatcher's identity-only due inventory and intake retention pass
+ * (0929), the recording recovery sweep's stalled-work inventory (0930), the
+ * MCP Events subscription pump's due inventory (0932), the source feed pump's
+ * due inventory (0935), the recording retention sweep's due inventory (0946)
+ * and the lookup of whose personal machine a chat runs on (0978). Each is
+ * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
+ * EXECUTE is required, except while a routine is in
+ * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
+ */
+export const RUNTIME_DEFINER_ROUTINES = [
+  "list_due_event_trigger_tasks_v1(integer)",
+  "prune_event_intake_v1(integer, integer, integer)",
+  "list_stalled_recording_work_v1(integer)",
+  "list_due_mcp_event_subscriptions_v1(integer)",
+  "list_due_event_source_feeds_v1(integer)",
+  "list_due_recording_retention_v1(integer)",
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+] as const;
+
+/**
+ * Runtime definers whose EXECUTE is withheld for one release. A release that
+ * does not know a definer rejects a runtime EXECUTE grant on it, so the grant
+ * (and provisioning) waits until a binary that knows it is the previous
+ * release; until then readiness accepts the routine with or without runtime
+ * EXECUTE. 0937 withheld the first five and 0947 granted them; 0946 withheld
+ * the recording retention inventory and 0950 granted it. 0978 withholds the
+ * personal-machine owner lookup; until a later migration grants it, the
+ * runtime treats the lookup as unavailable and keeps the earlier behaviour.
+ */
+export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+
+/**
+ * The tables each runtime definer reads or writes as its owner. Once they all
+ * exist, the routine must exist too.
+ */
+const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
+  Record<(typeof RUNTIME_DEFINER_ROUTINES)[number], readonly string[]>
+> = {
+  "list_due_event_trigger_tasks_v1(integer)": ["scheduled_task_event_settings"],
+  "prune_event_intake_v1(integer, integer, integer)": ["event_deliveries", "inbound_events"],
+  "list_stalled_recording_work_v1(integer)": ["recording_transcript_versions", "recordings"],
+  "list_due_mcp_event_subscriptions_v1(integer)": ["mcp_event_subscriptions"],
+  "list_due_event_source_feeds_v1(integer)": ["event_source_feeds"],
+  "list_due_recording_retention_v1(integer)": [
+    "recordings",
+    "recording_transcript_versions",
+    "workspaces",
+  ],
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)": [
+    "sessions",
+    "sandboxes",
+    "enrollments",
+    "organization_memberships",
+  ],
+};
+
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
   "list_subscription_plan_maintenance_accounts(integer)";
 export const SUBSCRIPTION_PLAN_FREE_ANNIVERSARY_ROUTINE =
@@ -256,6 +316,7 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "wake_teams_route_for_session_event()",
   "sync_usage_maintenance_due()",
   "arm_usage_allowances_for_membership()",
   ...MAINTENANCE_PROBE_OWNER_ROUTINES,
@@ -294,6 +355,10 @@ const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
   // Migration 0907: the invoker-rights trigger that keeps a workspace's own
   // subscription connection serving only that workspace.
   "guard_subscription_workspace_owner_reach()",
+  // Migration 0909: the invoker-rights trigger that mirrors a message event's
+  // text into session_message_search_texts (triggers fire without the
+  // writing role holding EXECUTE).
+  "index_session_message_search_text()",
   // Migration 0716: the authority marker and compatibility guards, the
   // per-path source resolvers and the deferred compatibility check. The
   // triggers fire without the writing role holding EXECUTE.
@@ -1569,12 +1634,14 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "personal_machine_turn_consent_covers_descendant(uuid, uuid, uuid)",
   "live_session_turn_machine_consent(uuid)",
   "bind_session_attempt_machine_consent(uuid, uuid, uuid)",
+  "carry_session_attempt_machine_authorization(uuid, uuid, uuid)",
   "assert_session_attempt_machine_consent(uuid, uuid, uuid, uuid, uuid, integer, uuid, boolean, boolean)",
   "enable_organization_private_sessions_from_activation(uuid, text[])",
   "usage_allowance_members(uuid, uuid)",
   "usage_allowance_effective_period(uuid, jsonb, timestamp with time zone)",
   "count_workspace_allowance_debit()",
   "count_unbilled_model_allowance_debit()",
+  "count_unbilled_allowance_usage(uuid, uuid, text, bigint, text)",
   "capture_usage_allowance_attribution()",
   "reverse_video_allowance_refund()",
   "capture_usage_allowance_period(uuid, uuid, jsonb, timestamp with time zone)",
@@ -1636,6 +1703,7 @@ export const FORCE_RLS_TABLES = [
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
+  "automation_templates",
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
@@ -1729,6 +1797,10 @@ export const FORCE_RLS_TABLES = [
   "editable_artifacts",
   "enrollment_token_redemptions",
   "enrollments",
+  "event_deliveries",
+  "event_source_feeds",
+  "event_sources",
+  "event_triggers",
   "external_identities",
   "external_identity_links",
   "external_link_task_authorities",
@@ -1758,6 +1830,7 @@ export const FORCE_RLS_TABLES = [
   "host_mcp_turn_authorities",
   "image_generation_operations",
   "import_batches",
+  "inbound_events",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_facet_definitions",
@@ -1813,6 +1886,7 @@ export const FORCE_RLS_TABLES = [
   "managed_auth_session_set_operations",
   "managed_auth_session_sets",
   "managed_sign_in_method_operations",
+  "mcp_event_subscriptions",
   "mcp_operations",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
@@ -1884,6 +1958,20 @@ export const FORCE_RLS_TABLES = [
   "preference_registry_revisions",
   "preference_registry_snapshots",
   "private_session_create_capabilities",
+  "recording_chunks",
+  "recording_events",
+  "recording_live_segments",
+  "recording_notes",
+  "recording_people",
+  "recording_segment_edits",
+  "recording_speaker_assignments",
+  "recording_speaker_voices",
+  "recording_tracks",
+  "recording_transcript_segments",
+  "recording_transcript_versions",
+  "recording_voice_rejections",
+  "recording_voiceprints",
+  "recordings",
   "remember_knowledge_confirmation_receipts",
   "remember_knowledge_memory_materializations",
   "retained_screenshot_artifacts",
@@ -1900,6 +1988,9 @@ export const FORCE_RLS_TABLES = [
   "sandboxes",
   "scheduled_task_blocker_reviews",
   "scheduled_task_connection_authority_snapshots",
+  "scheduled_task_event_inbox",
+  "scheduled_task_event_occurrences",
+  "scheduled_task_event_settings",
   "scheduled_task_personal_resource_authorities",
   "scheduled_task_personal_resource_snapshots",
   "scheduled_task_reusable_connection_materializations",
@@ -1911,6 +2002,8 @@ export const FORCE_RLS_TABLES = [
   "scheduled_task_runs",
   "scheduled_task_schedule_outbox",
   "scheduled_tasks",
+  "secret_approval_rules",
+  "secret_use_approvals",
   "self_service_organization_setup_receipts",
   "session_admin_access",
   "session_attempt_codemode_calls",
@@ -1934,6 +2027,7 @@ export const FORCE_RLS_TABLES = [
   "session_human_input_requests",
   "session_list_snapshots",
   "session_mcp_servers",
+  "session_message_search_texts",
   "session_pending_tool_calls",
   "session_pins",
   "session_realtime_connections",
@@ -1949,6 +2043,7 @@ export const FORCE_RLS_TABLES = [
   "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
   "session_title_operations",
+  "session_turn_app_action_grants",
   "session_turn_attempts",
   "session_turn_machine_consents",
   "session_turn_startup_milestones",
@@ -1984,6 +2079,7 @@ export const FORCE_RLS_TABLES = [
   "site_runtime_rate_windows",
   "site_runtime_usage",
   "site_session_access",
+  "site_sidebar_states",
   "site_sql_databases",
   "site_sql_migrations",
   "site_sql_queries",
@@ -2036,6 +2132,12 @@ export const FORCE_RLS_TABLES = [
   "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
+  "teams_bot_inbox",
+  "teams_bot_installations",
+  "teams_bot_links",
+  "teams_bot_outbox",
+  "teams_bot_proofs",
+  "teams_bot_routes",
   "temporal_schedule_cleanup_outbox",
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
@@ -2108,6 +2210,7 @@ export const NON_RLS_RUNTIME_TABLES = [
   "auth_verifications",
   "automation_webhook_endpoints",
   "deployment_model_catalog",
+  "event_ingress_routes",
   "integration_oauth_clients",
   "managed_accounts",
   "mcp_oauth_access_tokens",
@@ -2140,6 +2243,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
+  "automation_templates",
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
@@ -2174,6 +2278,11 @@ export const RUNTIME_FULL_DML_TABLES = [
   "editable_artifact_replica_leases",
   "enrollment_token_redemptions",
   "enrollments",
+  "event_deliveries",
+  "event_ingress_routes",
+  "event_source_feeds",
+  "event_sources",
+  "event_triggers",
   "file_uploads",
   "files",
   "generated_image_artifacts",
@@ -2184,6 +2293,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "host_mcp_delegations",
   "image_generation_operations",
   "import_batches",
+  "inbound_events",
   "integration_facet_binding_owners",
   "integration_facet_bindings",
   "integration_oauth_clients",
@@ -2198,6 +2308,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "machine_metrics_series",
   "machine_removal_operations",
   "managed_accounts",
+  "mcp_event_subscriptions",
   "mcp_oauth_access_tokens",
   "mcp_oauth_authorization_codes",
   "mcp_oauth_authorization_requests",
@@ -2225,6 +2336,19 @@ export const RUNTIME_FULL_DML_TABLES = [
   "pr_review_app_registrations",
   "pr_review_managed_github_routes",
   "pr_review_repository_bindings",
+  "recording_chunks",
+  "recording_live_segments",
+  "recording_notes",
+  "recording_people",
+  "recording_segment_edits",
+  "recording_speaker_assignments",
+  "recording_speaker_voices",
+  "recording_tracks",
+  "recording_transcript_segments",
+  "recording_transcript_versions",
+  "recording_voice_rejections",
+  "recording_voiceprints",
+  "recordings",
   "retained_screenshot_artifacts",
   "rig_changes",
   "rig_versions",
@@ -2238,7 +2362,12 @@ export const RUNTIME_FULL_DML_TABLES = [
   "sandbox_workspace_mutation_admissions",
   "sandboxes",
   "scheduled_task_blocker_reviews",
+  "scheduled_task_event_inbox",
+  "scheduled_task_event_occurrences",
+  "scheduled_task_event_settings",
   "scheduled_task_schedule_outbox",
+  "secret_approval_rules",
+  "secret_use_approvals",
   "session_admin_access",
   "session_attempt_interruptions",
   "session_background_commands",
@@ -2261,6 +2390,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "session_system_update_outbox",
   "session_system_updates",
   "session_title_operations",
+  "session_turn_app_action_grants",
   "session_turn_attempts",
   "session_turns",
   "session_workflow_wake_outbox",
@@ -2287,6 +2417,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "site_runtime_rate_windows",
   "site_runtime_usage",
   "site_session_access",
+  "site_sidebar_states",
   "site_sql_databases",
   "site_sql_migrations",
   "site_sql_queries",
@@ -2326,6 +2457,12 @@ export const RUNTIME_FULL_DML_TABLES = [
   "subscription_session_bindings",
   "subscription_settings",
   "subscription_turn_failures",
+  "teams_bot_inbox",
+  "teams_bot_installations",
+  "teams_bot_links",
+  "teams_bot_outbox",
+  "teams_bot_proofs",
+  "teams_bot_routes",
   "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
@@ -2465,9 +2602,13 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
+  "recording_events",
   "session_attempt_tool_catalogs",
   "session_content_blobs",
   "session_goal_revisions",
+  // Written by the invoker-rights 0909 trigger, admitted only as an exact
+  // mirror of a visible message event.
+  "session_message_search_texts",
   "session_spawn_denials",
   "slack_shared_task_origins",
   "slack_user_link_access_request_operations",
@@ -2723,7 +2864,10 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
   ...legacyRoutines.private,
   ...OWNER_INTERNAL_PRIVATE_ROUTINES,
   ...RETIRED_PRIVATE_ROUTINES,
+  ...RUNTIME_DEFINER_ROUTINES,
 ]);
+const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
+const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -6070,6 +6214,9 @@ export function evaluateRuntimeDatabasePosture(
     if (!DECLARED_PRIVATE_ROUTINES.has(routine.name)) {
       violations.push(...unknownRoutineViolations(routine, "opengeni_private", expectedRole));
     }
+    if (RUNTIME_DEFINER_ROUTINE_NAMES.has(routine.name)) {
+      violations.push(...runtimeDefinerRoutineViolations(routine, tableByName, targetSchema));
+    }
     if (routine.name === SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE) {
       if (
         !routine.execute ||
@@ -6133,6 +6280,15 @@ export function evaluateRuntimeDatabasePosture(
         );
       }
     }
+    if (
+      routine.name === "wake_teams_route_for_session_event()" &&
+      (routine.execute ||
+        routine.publicExecute ||
+        routine.securityDefiner ||
+        routine.owner !== tableByName.get("teams_bot_routes")?.owner ||
+        !routine.configuration?.some((value) => integrationSearchPaths.includes(value)))
+    )
+      violations.push("Teams wake trigger has unsafe execution, ownership or search path");
     const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
     if (
       ["sync_usage_maintenance_due()", "arm_usage_allowances_for_membership()"].includes(
@@ -6212,12 +6368,67 @@ export function evaluateRuntimeDatabasePosture(
       DECLARED_PRIVATE_ROUTINES.has(routine.name) &&
       !routine.execute &&
       !ownerInternalRoutine &&
-      !RETIRED_PRIVATE_ROUTINES.has(routine.name)
+      !RETIRED_PRIVATE_ROUTINES.has(routine.name) &&
+      !DEFERRED_PRIVATE_ROUTINE_NAMES.has(routine.name)
     ) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
+  for (const name of RUNTIME_DEFINER_ROUTINES) {
+    if (
+      RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => tableByName.has(table)) &&
+      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
+    ) {
+      violations.push(`runtime definer ${name} is missing or ambiguous`);
+    }
+  }
 
+  return violations;
+}
+
+/**
+ * Own checks for a runtime definer: owned by its tables' owner, never PUBLIC,
+ * not reachable from triggers or other catalog objects, and a pinned
+ * search_path (0929, 0930 and 0932 pin the migration's own path with
+ * `SET search_path FROM CURRENT`) naming only the target schema,
+ * `opengeni_private`, `public`, `pg_catalog` or `$user`, with `pg_temp` allowed
+ * only last. Runtime EXECUTE is checked with the other declared routines.
+ */
+function runtimeDefinerRoutineViolations(
+  routine: RuntimeRoutinePosture,
+  tableByName: ReadonlyMap<string, { owner: string }>,
+  targetSchema: string,
+): string[] {
+  const violations: string[] = [];
+  const label = `runtime definer ${routine.name}`;
+  if (!routine.securityDefiner) violations.push(`${label} is not SECURITY DEFINER`);
+  if (routine.publicExecute !== false) violations.push(`PUBLIC can execute ${label}`);
+  if (routine.triggerCallable !== false) violations.push(`${label} is trigger-callable`);
+  if (routine.hasDependents !== false) violations.push(`${label} has catalog dependents`);
+  const tables: readonly string[] =
+    RUNTIME_DEFINER_ROUTINE_TABLES[routine.name as keyof typeof RUNTIME_DEFINER_ROUTINE_TABLES] ??
+    [];
+  const owners = tables.map((name) => tableByName.get(name)?.owner);
+  if (owners.length === 0 || owners.some((owner) => owner !== routine.owner)) {
+    violations.push(`${label} owner ${routine.owner} does not match its tables' owner`);
+  }
+  const searchPath = routine.configuration
+    ?.find((value) => value.startsWith("search_path="))
+    ?.slice("search_path=".length);
+  const entries = (searchPath ?? "")
+    .split(",")
+    .map((entry) => entry.trim().replaceAll('"', ""))
+    .filter((entry) => entry.length > 0);
+  const allowed = new Set(["$user", targetSchema, "opengeni_private", "public", "pg_catalog"]);
+  const pinned =
+    entries.length > 0 &&
+    entries[0] !== "pg_temp" &&
+    entries.every(
+      (entry, index) => allowed.has(entry) || (entry === "pg_temp" && index === entries.length - 1),
+    );
+  if (!pinned) {
+    violations.push(`${label} has no pinned search_path`);
+  }
   return violations;
 }
 

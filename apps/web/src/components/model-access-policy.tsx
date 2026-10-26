@@ -179,7 +179,7 @@ function allowedByDraft(model: WorkspaceModelCatalogModel, draft: ModelAccessPol
 /**
  * How many connected models new work could still run on: ready, allowed by
  * the draft, and not paid with credits while credits are off. Zero means new
- * chats and schedules can't start.
+ * chats and automations can't start.
  */
 export function usableModelCount(
   models: readonly WorkspaceModelCatalogModel[],
@@ -447,8 +447,8 @@ export function AllowedModelsRow({
           : creditsLeaveNothing
             ? "Opengeni credits are off and no other model can run, so new work can't start."
             : source
-              ? `The models people can pick for new chats and schedules. ${source}`
-              : "The models people can pick for new chats and schedules."
+              ? `The models people can pick for new chats and automations. ${source}`
+              : "The models people can pick for new chats and automations."
       }
       value={allowedModelsSummary(state)}
       onOpen={onEdit}
@@ -514,7 +514,7 @@ export function OpengeniCreditsSwitchRow({
         open={confirmingOff}
         onOpenChange={setConfirmingOff}
         title="Turn off Opengeni credits?"
-        description="No other model can run in this workspace, so new chats and schedules won't start until you connect a subscription or an API key."
+        description="No other model can run in this workspace, so new chats and automations won't start until you connect a subscription or an API key."
         confirmLabel="Turn off credits"
         pendingLabel="Turning off…"
         destructive={false}
@@ -820,10 +820,10 @@ export function AllowedModelsFormPage({
         {nothingUsable ? (
           <Notice tone="waiting" title="No model can run here">
             {creditsOff
-              ? "New chats and schedules won't start until you allow a model paid by a subscription or API key, connect one, or turn Opengeni credits back on."
+              ? "New chats and automations won't start until you allow a model paid by a subscription or API key, connect one, or turn Opengeni credits back on."
               : organizationScope
-                ? "Workspaces that follow this list can't start new chats or schedules until it allows at least one model."
-                : "New chats and schedules won't start until you allow at least one model."}
+                ? "Workspaces that follow this list can't start new chats or automations until it allows at least one model."
+                : "New chats and automations won't start until you allow at least one model."}
           </Notice>
         ) : null}
         {draft.mode === "selected" ? (
@@ -849,7 +849,7 @@ export function AllowedModelsFormPage({
         description={
           organizationScope
             ? `Choose which models people can pick in every workspace. A workspace can choose its own instead.`
-            : "Choose which models people can pick for new chats and schedules."
+            : "Choose which models people can pick for new chats and automations."
         }
         onClose={onClose}
         loading={state.loading && !saved}

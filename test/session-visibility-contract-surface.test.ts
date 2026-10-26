@@ -94,6 +94,13 @@ const SQL_ENTRY_POINT_ALLOWLIST = new Set([
   "packages/db/drizzle/0855_session_fork_agent_parity.sql",
   // Gives the fork row its own workflow identity; same fork bodies and locks.
   "packages/db/drizzle/0856_session_fork_workflow_identity.sql",
+  // Weakens only the membership fence in the visibility transition and fork
+  // bodies from FOR UPDATE to FOR NO KEY UPDATE; same boundary otherwise.
+  "packages/db/drizzle/0925_membership_fences_allow_key_checks.sql",
+  // Lets message forks copy marked workspace-governance developer messages at
+  // fractional positions, like 0487's Skill catalog; same fork bodies,
+  // owner-only boundary and locks.
+  "packages/db/drizzle/0980_workspace_governance_context_forks.sql",
   "packages/db/src/session-tenancy.ts",
   // Reads the owner-only foreign-authority counts for the preview and consent.
   "packages/db/src/session-visibility-work.ts",
@@ -256,4 +263,48 @@ describe("session visibility and fork product activation stays on its exact publ
     expect(doc).toContain("fork_session_content");
     expect(doc).toContain("session_list_snapshots");
   });
+});
+
+test("Teams message admission and private creation have exactly one trusted product caller", async () => {
+  const permitted = new Map([
+    [
+      "teamsConversation",
+      new Set(["apps/api/src/integrations/teams-bot.ts", "packages/core/src/domain/sessions.ts"]),
+    ],
+    [
+      "authorizeTeamsConversationAdmission",
+      new Set([
+        "packages/core/src/application/teams-private-session.ts",
+        "packages/core/src/domain/sessions.ts",
+      ]),
+    ],
+    [
+      "requireTeamsConversationProof",
+      new Set([
+        "packages/core/src/application/teams-private-session.ts",
+        "packages/db/src/teams-private-session.ts",
+      ]),
+    ],
+  ]);
+  for (const root of [
+    "apps/api/src",
+    "apps/worker/src",
+    "apps/web/src",
+    "packages/core/src",
+    "packages/db/src",
+    "packages/contracts/src",
+    "packages/sdk/src",
+    "packages/runtime/src",
+  ]) {
+    for (const file of await sourceFiles(root)) {
+      const source = await readFile(join(repo, file), "utf8");
+      for (const [marker, allowed] of permitted) {
+        if (source.includes(marker))
+          expect(
+            allowed.has(file),
+            `${file} expands the trusted Teams private-creation seam through ${marker}`,
+          ).toBe(true);
+      }
+    }
+  }
 });

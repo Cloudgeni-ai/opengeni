@@ -23,7 +23,6 @@ const legacyBrowserUnusedMethods = [
   "codexAccountUsage",
   "codexDisconnect",
   "codexStatus",
-  "codexUsage",
   "createDocumentBase",
   "createWorkspaceInstructionPolicyOnboardingProposal",
   "createOrganization",
@@ -169,10 +168,28 @@ const retiredSettingsMethods = [
   "supersedePreferenceRegistry",
 ];
 
+// The web stopped calling the native Google Drive lifecycle methods when Drive
+// became one MCP connection; they remain on the SDK for existing callers.
+const retiredGoogleDriveNativeMethods = [
+  "disconnectGoogleDriveConnection",
+  "transitionGoogleDriveLifecycle",
+];
+
 // These browser-facing account APIs landed before their separately reviewed
 // settings (#4123) and picker (#4169) UI. Keep the pending surface explicit;
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
+
+// Dictation is recorded as a recording since #6022; the resumable transcription
+// recording methods are deprecated and stay only for existing SDK callers.
+const deprecatedTranscriptionRecordingMethods = [
+  "createTranscriptionRecording",
+  "discardTranscriptionRecording",
+  "finalizeTranscriptionRecording",
+  "getTranscriptionRecording",
+  "processNextTranscriptionRecordingSegment",
+  "uploadTranscriptionRecordingChunk",
+];
 
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -239,7 +256,9 @@ describe("browser client runtime surface", () => {
         ...integrationMethods,
         ...nativeAppMethods,
         ...retiredSettingsMethods,
+        ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...deprecatedTranscriptionRecordingMethods,
       ].sort(),
     );
   });

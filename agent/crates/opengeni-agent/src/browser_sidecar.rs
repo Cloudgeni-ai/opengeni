@@ -35,6 +35,7 @@ use tokio::{
 const BROWSERD_BINARY_ENV: &str = "OPENGENI_BROWSERD_BINARY";
 const LIGHTPANDA_BINARY_ENV: &str = "OPENGENI_BROWSERD_LIGHTPANDA_BINARY";
 const COMPUTER_NATIVE_BINARY_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY";
+const COMPUTER_BACKEND_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_BACKEND";
 /// Helper file names. People see them as process names (Activity Monitor, Task
 /// Manager), so they carry no product name: an app that runs this agent under its
 /// own name shows only that name.
@@ -136,6 +137,10 @@ pub struct BrowserSidecarManager {
     http_client: reqwest::Client,
     /// Remainders of controller responses too large for one reply.
     http_spool: std::sync::Mutex<crate::browser_control_http::ResponseSpool>,
+    /// False when screen control is turned off on this computer: controllers
+    /// then start with no computer backend, so no ComputerSession can see
+    /// the screen or send input.
+    computer_control: bool,
 }
 
 impl BrowserSidecarManager {
@@ -174,7 +179,15 @@ impl BrowserSidecarManager {
             attached: std::sync::OnceLock::new(),
             http_client: crate::browser_control_http::client()?,
             http_spool: std::sync::Mutex::default(),
+            computer_control: true,
         })
+    }
+
+    /// Start controllers without a computer backend (screen control is turned
+    /// off on this computer). Browsers keep working.
+    pub fn without_computer_control(mut self) -> Self {
+        self.computer_control = false;
+        self
     }
 
     /// Share the host's admission boundary, including lost descendant cleanup.
@@ -457,6 +470,9 @@ impl BrowserSidecarManager {
         // leaves its browser daemon/profile lock behind.
         command.process_group(0);
         configure_companion_binaries(&mut command, &self.binary);
+        if !self.computer_control {
+            without_computer_backend(&mut command);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| PlatformError::from_io("start browser controller sidecar", &error))?;
@@ -559,6 +575,14 @@ fn configure_companion_binaries(command: &mut Command, browserd_binary: &Path) {
             }
         }
     }
+}
+
+/// No computer backend: the native backend with no native helper opens none,
+/// whatever the platform's default or an operator's override says.
+fn without_computer_backend(command: &mut Command) {
+    command
+        .env(COMPUTER_BACKEND_ENV, "native")
+        .env_remove(COMPUTER_NATIVE_BINARY_ENV);
 }
 
 async fn add_allowed_origins(
@@ -1516,6 +1540,31 @@ static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_control_turned_off_starts_controllers_without_a_computer_backend() {
+        let mut command = Command::new("browserd");
+        command.env(COMPUTER_NATIVE_BINARY_ENV, "/opt/computer-native");
+        without_computer_backend(&mut command);
+        let environment = command
+            .as_std()
+            .get_envs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            environment
+                .get(std::ffi::OsStr::new(COMPUTER_BACKEND_ENV))
+                .copied()
+                .flatten(),
+            Some(std::ffi::OsStr::new("native"))
+        );
+        // Removed, so neither an operator's path nor a discovered helper is used.
+        assert_eq!(
+            environment
+                .get(std::ffi::OsStr::new(COMPUTER_NATIVE_BINARY_ENV))
+                .copied(),
+            Some(None)
+        );
+    }
 
     #[cfg(unix)]
     fn idle_fixture_manager(directory: &Path, port: u16) -> BrowserSidecarManager {
