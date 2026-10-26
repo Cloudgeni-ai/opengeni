@@ -15,8 +15,6 @@ import type { ListViewState } from "@/lib/load-state";
 import { cn } from "@opengeni/react/app/lib/utils";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 
-export const CAPABILITY_FILTERS: readonly CapabilityFilter[] = ["all", "mcp", "api"];
-
 export function EnabledCapabilitiesSection({
   items,
   busyId,

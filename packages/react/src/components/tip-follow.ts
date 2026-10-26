@@ -56,12 +56,6 @@ export const TIP_FOLLOW_LINE_TAU_MS = _t(140);
  * Lower → snappier accel; higher → softer start (and slower reaction).
  */
 export const TIP_FOLLOW_ACCEL_TAU_FRAC = 0.45;
-/** @deprecated Soft-rise FLIP removed — line glue was the bug. */
-export const TIP_FOLLOW_SOFT_RISE_MS = 0;
-/** @deprecated */
-export const TIP_FOLLOW_SOFT_RISE_MAX_PX = 96;
-/** @deprecated */
-export const TIP_FOLLOW_SOFT_RISE_EASING = "cubic-bezier(0.22, 1, 0.36, 1)";
 /** Ignore sub-pixel / reflow height noise for shrink compensate. */
 export const TIP_FOLLOW_SHRINK_EPS_PX = 4;
 /** Growth speed (px/s) that saturates velocity urgency. */
@@ -323,33 +317,6 @@ export function tipFollowMaxStepPx(
 
 function targetScrollTop(scrollHeight: number, clientHeight: number): number {
   return Math.max(0, scrollHeight - clientHeight);
-}
-
-/**
- * Counter-offset for soft-rise after tip-glue: start from the mid-flight
- * translateY (if any) plus this frame's glued scroll delta, capped.
- * Shell applies translateY(from) → 0 over {@link TIP_FOLLOW_SOFT_RISE_MS}.
- */
-export function tipFollowSoftRiseFrom(
-  currentTranslateY: number,
-  gluedScrollDelta: number,
-  maxPx: number = TIP_FOLLOW_SOFT_RISE_MAX_PX,
-): number {
-  const stacked = Math.max(0, currentTranslateY) + Math.max(0, gluedScrollDelta);
-  return Math.min(maxPx, stacked);
-}
-
-/** Read live translateY from a transformed content column (mid soft-rise). */
-export function readTranslateY(el: HTMLElement): number {
-  const raw = getComputedStyle(el).transform;
-  if (!raw || raw === "none") {
-    return 0;
-  }
-  try {
-    return new DOMMatrixReadOnly(raw).m42;
-  } catch {
-    return 0;
-  }
 }
 
 /**

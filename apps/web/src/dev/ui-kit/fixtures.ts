@@ -576,18 +576,6 @@ export function variableSetById(id: string): VariableSet {
 /** Deleting this set is blocked: a schedule uses it. */
 export const blockedDeleteVariableSet: VariableSet = variableSetById("vs-aws-production");
 
-export type EnvPasteRowStatus = "new" | "duplicate" | "reserved";
-
-export interface EnvPasteRow {
-  name: string;
-  kind: VariableKind;
-  /** Plain values only; secret values are never echoed back. */
-  value?: string;
-  status: EnvPasteRowStatus;
-  /** Inline message for duplicate and reserved rows. */
-  message?: string;
-}
-
 /* ----------------------------------------------------------------------------
    Sandbox environments and repositories (referenced by other fixtures)
    -------------------------------------------------------------------------- */
