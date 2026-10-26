@@ -20,7 +20,7 @@ import {
 import type { Settings } from "@opengeni/config";
 import { createHash } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   ATLASSIAN_CREDENTIAL_LABEL,
@@ -44,7 +44,7 @@ import {
   type ConnectorDocumentDestinationSelection,
 } from "@opengeni/contracts/connector-destinations";
 import {
-  captureScheduledTaskRestoreState,
+  type ScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerWorkflowId,
   requireEnvironmentEncryption,
@@ -999,7 +999,7 @@ async function materializeSchedules(
     };
     let task;
     if (existingTask) {
-      const previous = await captureScheduledTaskRestoreState(deps.db, existingTask);
+      const previous: ScheduledTaskRestoreState = { task: existingTask };
       task = await updateScheduledTask(deps.db, input.workspaceId, existingTask.id, {
         name: `Sync ${selectedSource.kind === "jira_project" ? "Jira" : "Confluence"}: ${selectedSource.name}`,
         schedule: atlassianSchedule(selectedSource.syncCadence),
@@ -1084,7 +1084,7 @@ async function materializeSchedules(
         actor,
       });
     }
-    const previous = await captureScheduledTaskRestoreState(deps.db, task);
+    const previous: ScheduledTaskRestoreState = { task: task };
     const disabled = await updateScheduledTask(deps.db, input.workspaceId, task.id, {
       metadata: {
         ...task.metadata,
@@ -1434,7 +1434,7 @@ async function setSchedulePause(
 ): Promise<void> {
   const tasks = await listKnowledgeSourceSyncTasksForConnection(deps.db, workspaceId, connectionId);
   for (const task of tasks) {
-    const previous = await captureScheduledTaskRestoreState(deps.db, task);
+    const previous: ScheduledTaskRestoreState = { task: task };
     const control = objectRecord(task.metadata.knowledgeSourceSync);
     const updated = await updateScheduledTask(deps.db, workspaceId, task.id, {
       metadata: {

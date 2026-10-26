@@ -3233,21 +3233,3 @@ function kindToProtocol(kind: StreamKind | undefined): string {
       return "raw";
   }
 }
-
-/**
- * The selfhosted NotFound discriminator — THE load-bearing safety property
- *: for selfhosted, `agent-offline` (no responder) is NEVER a
- * provider NotFound. A user's real machine is not recreatable; if the lease saw
- * agent-offline as NotFound it would cold-create a RIVAL box (a Modal box) for
- * the user's machine. So this ALWAYS returns FALSE for selfhosted — there is no
- * "box gone, recreate it" condition. An OS-level file NotFound is an op-level
- * error the fs layer 404s; it is likewise NOT a session-recreate condition.
- *
- * `establishSandboxSessionFromEnvelope` cold-restores ONLY when the per-backend
- * NotFound discriminator returns true; returning false here guarantees the
- * selfhosted path never cold-creates a rival — the op surfaces agent_offline and
- * the caller backs off / retries.
- */
-export function isSelfhostedProviderNotFoundError(_error: unknown): false {
-  return false;
-}

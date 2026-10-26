@@ -7979,13 +7979,6 @@ function configuredCostForModel(
   return parseModelCostPolicyJson(settings.modelCostPolicyJson)[productModelId] ?? "credits";
 }
 
-export function modelCostClassForConfiguredModel(
-  _settings: Settings,
-  model: Pick<ConfiguredModel, "cost">,
-): ConfiguredModelCostClass {
-  return model.cost;
-}
-
 function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
   if (settings.openaiProvider === "azure" && !settings.azureOpenaiApiKey) {
     return { kind: "deployment", mechanism: "azure_ad_bearer" };

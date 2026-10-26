@@ -2,7 +2,7 @@ import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organizatio
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import { personalGitHubOAuthCallbackUrl, type Settings } from "@opengeni/config";
 import {
   PERSONAL_GITHUB_AUTHORIZATION_URL,

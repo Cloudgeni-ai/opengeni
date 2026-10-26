@@ -75,7 +75,7 @@ import {
   PERSONAL_OWNER_VERIFIED_STATE_CLAIM,
 } from "../connection-ownership";
 import { ApiHttpError } from "../http/api-error";
-import { connectSetupPermission, requireConnectOwnerAuthority } from "./connect-authority";
+import { connectSetupPermission, requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   DEFAULT_OAUTH_PROFILE,
   OFFICIAL_GMAIL_MCP_URL,

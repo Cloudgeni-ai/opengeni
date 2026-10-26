@@ -19,7 +19,7 @@ import {
 } from "@opengeni/contracts";
 import { createHash, randomBytes } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "./connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import {
   configuredGoogleDriveSyncLimits,
   googleDriveOAuthCallbackUrl,
@@ -66,7 +66,7 @@ import {
   integrationDefinitionProviderDomain,
 } from "@opengeni/capabilities";
 import {
-  captureScheduledTaskRestoreState,
+  type ScheduledTaskRestoreState,
   createValidatedScheduledTask,
   manualScheduledTaskTriggerWorkflowId,
   requireEnvironmentEncryption,
@@ -886,7 +886,7 @@ async function setGoogleDriveScheduleStatus(
 ): Promise<void> {
   await forEachGoogleDriveConnectionTask(deps, workspaceId, connectionId, async (task) => {
     if (knowledgeSourceScheduleControl(task).connectionPaused === (status === "paused")) return;
-    const previous = await captureScheduledTaskRestoreState(deps.db, task);
+    const previous: ScheduledTaskRestoreState = { task: task };
     const updated = await updateScheduledTask(deps.db, workspaceId, task.id, {
       metadata: {
         ...task.metadata,
@@ -1730,7 +1730,7 @@ async function materializeGoogleDriveKnowledgeSchedules(
     const schedule = googleDriveSchedule(selectedSource.syncCadence);
     let task;
     if (existingTask) {
-      const previous = await captureScheduledTaskRestoreState(deps.db, existingTask);
+      const previous: ScheduledTaskRestoreState = { task: existingTask };
       task = await updateScheduledTask(deps.db, input.workspaceId, existingTask.id, {
         name: `Sync Google Drive: ${selectedSource.name}`,
         overlapPolicy: "buffer_one",
@@ -1821,7 +1821,7 @@ async function materializeGoogleDriveKnowledgeSchedules(
         actor,
       });
     }
-    const previous = await captureScheduledTaskRestoreState(deps.db, task);
+    const previous: ScheduledTaskRestoreState = { task: task };
     const disabled = await updateScheduledTask(deps.db, input.workspaceId, task.id, {
       metadata: {
         ...task.metadata,

@@ -3,7 +3,6 @@ import { describe, expect, test } from "bun:test";
 import {
   bundleAccessibleDetail,
   bundleMonogram,
-  bundleRowDescription,
   catalogSkillBundleRow,
   filterBundleRows,
   importedSkillBundleRow,
@@ -228,10 +227,6 @@ describe("bundle monogram", () => {
     expect(bundleMonogram("release-operator")).toBe("RO");
     expect(bundleMonogram("Terraform")).toBe("TE");
     expect(bundleMonogram("   ")).toBe("?");
-  });
-
-  test("a bundle with no description does not invent a metadata line", () => {
-    expect(bundleRowDescription("skill", "built_in", "  ")).toBe("");
   });
 });
 

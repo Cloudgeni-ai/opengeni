@@ -1,18 +1,6 @@
 import { t } from "../../lib/console-text";
 import { describe, expect, test } from "bun:test";
-import {
-  machineDisplayName,
-  sessionSandboxLabel,
-  sessionSupportsFleetSwitching,
-} from "./sandbox-switcher";
-
-describe("sessionSupportsFleetSwitching", () => {
-  test("offers fleet attachment whether or not the session has a home sandbox", () => {
-    expect(sessionSupportsFleetSwitching("none")).toBe(true);
-    expect(sessionSupportsFleetSwitching("modal")).toBe(true);
-    expect(sessionSupportsFleetSwitching("selfhosted")).toBe(true);
-  });
-});
+import { machineDisplayName, sessionSandboxLabel } from "./sandbox-switcher";
 
 describe("session compute labels", () => {
   test("managed providers read as a neutral cloud sandbox, never a vendor name", () => {

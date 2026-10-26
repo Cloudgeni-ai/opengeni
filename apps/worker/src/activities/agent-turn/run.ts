@@ -92,7 +92,6 @@ import {
   providerRecoveryCountAfterModelRequestPhase,
   sandboxRouteTransitionCode,
 } from "./errors";
-import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
 
@@ -2038,7 +2037,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 if (downloadsToMaterialize.length === 0) {
                   fileMaterializationCache = "hit";
                 }
-                const runAs = sandboxRunAs(runSettings);
                 if (downloadsToMaterialize.length > 0) {
                   const materialized = await runWorkspaceMutationForSandbox(
                     sandboxState.resolvedSandbox,
@@ -2054,7 +2052,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                               true,
                             );
                           },
-                          ...(runAs ? { runAs } : {}),
                           ...(eventing.toolCancellationFenceRef.current
                             ? {
                                 commandRunner:

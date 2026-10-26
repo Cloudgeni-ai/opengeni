@@ -3428,7 +3428,6 @@ export function buildOpenGeniAgent(
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
-  const runAs = sandboxRunAs(settings);
   const agent = new SandboxAgent({
     ...baseConfig,
     baseInstructions: sandboxBaseInstructions(),
@@ -3446,7 +3445,6 @@ export function buildOpenGeniAgent(
     ),
     instructionManifest: (manifest: Manifest) =>
       manifestWithoutFileResourceEntries(manifest, resources),
-    ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(options.authorizeAttemptExecution
         ? { authorizeAttemptExecution: options.authorizeAttemptExecution }
@@ -4920,10 +4918,6 @@ function buildAgentCapabilitiesFromComposition(
     }
   }
   return caps;
-}
-
-export function sandboxRunAs(_settings: Settings): string | undefined {
-  return undefined;
 }
 
 export type PreparedAgentTools = {
@@ -10130,14 +10124,12 @@ async function runAgentStreamInternal(
       }
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
-    const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
     const resourceClient =
       fileDownloads.length > 0
         ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
             sandboxBackend: agentActiveSandboxBackend.get(agent),
             ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-            ...(runAs ? { runAs } : {}),
             ...(overrides.turnToolCancellationFence
               ? {
                   commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
@@ -10174,7 +10166,6 @@ async function runAgentStreamInternal(
     const ownedHookContext: SandboxLifecycleHookContext = {
       environment,
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-      ...(runAs ? { runAs } : {}),
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
       ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
@@ -10307,14 +10298,12 @@ async function runAgentStreamInternal(
         },
       )
     : undefined;
-  const runAs = sandboxRunAs(settings);
   const fileDownloads = sandboxFileDownloadsForAgent(agent);
   const resourceClient =
     refreshedClient && fileDownloads.length > 0
       ? withSandboxFileDownloads(refreshedClient, fileDownloads, {
           sandboxBackend: agentActiveSandboxBackend.get(agent),
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-          ...(runAs ? { runAs } : {}),
         })
       : refreshedClient;
   const credentialClient =
@@ -10363,7 +10352,6 @@ async function runAgentStreamInternal(
         {
           environment,
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
-          ...(runAs ? { runAs } : {}),
           ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
           ...(gitCredentialBindings ? { gitCredentialBindings } : {}),
           ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
@@ -10994,7 +10982,6 @@ export async function runOwnedSandboxSetup(
   await pinProvidedSessionManifestEnvironment(agent, session, {
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
   });
-  const runAs = sandboxRunAs(settings);
   const fileDownloads = sandboxFileDownloadsForAgent(agent);
   // TOKEN-BROKER (B1): per-turn provider token seeds, forwarded OFF-MANIFEST so
   // the repository-clone hook writes provider token files before the clone. The
@@ -11026,7 +11013,6 @@ export async function runOwnedSandboxSetup(
     environment,
     ...(opts.measureSetup ? { measureSetup: opts.measureSetup } : {}),
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
-    ...(runAs ? { runAs } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
     ...(ownedCodemodeTokenSeed ? { codemodeTokenSeed: ownedCodemodeTokenSeed } : {}),
@@ -11083,7 +11069,6 @@ export async function runOwnedSandboxSetup(
     const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
       sandboxBackend: agentActiveSandboxBackend.get(agent),
       ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
-      ...(runAs ? { runAs } : {}),
       ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
     });
     if (opts.preparedInput) {
