@@ -87,6 +87,78 @@ test("duplicate job page and job total drift hold", async () => {
   }
 });
 
+test("a transient count/row mismatch is re-read once before it holds", async () => {
+  for (const key of ["workflow_runs", "jobs"] as const) {
+    const source = fixture([run(1)], [{ id: 1, status: "queued" }]);
+    let skewed = 0;
+    const result = await scan(async (path) => {
+      const data = await source.get(path);
+      if (key in data && (key === "jobs") === path.includes("/jobs?") && skewed++ === 0)
+        data.total_count++;
+      return data;
+    });
+    expect(result).toMatchObject({ ok: true, scannedRuns: 1, otherDemand: 1 });
+    expect(result).not.toHaveProperty("partialJobRuns");
+    expect(skewed).toBeGreaterThan(1);
+  }
+});
+
+test("tolerant live scans use returned job rows after one re-read; run listings stay strict", async () => {
+  const jobs = Array.from({ length: 150 }, (_, i) => ({
+    id: i + 1,
+    status: i < 2 ? "queued" : "completed",
+  }));
+  const tolerant = (get: (path: string) => Promise<unknown>) =>
+    scanRunnerDemand({
+      get,
+      batchWorkflow: "batch.yml",
+      baseBranch: "main",
+      tolerateJobCountMismatch: true,
+    });
+  for (const mutation of ["over", "under", "drift", "duplicate"] as const) {
+    const source = fixture([run(1)], jobs);
+    const result = await tolerant(async (path) => {
+      const data = await source.get(path);
+      if (!path.includes("/jobs?") || !("jobs" in data)) return data;
+      if (mutation === "over") data.total_count = 400;
+      if (mutation === "under") data.total_count = 120;
+      if (mutation === "drift" && path.endsWith("page=2")) data.total_count++;
+      if (mutation === "duplicate" && path.endsWith("page=2")) data.jobs[0] = jobs[0]!;
+      return data;
+    });
+    expect(result).toMatchObject({ ok: true, scannedRuns: 1, partialJobRuns: [1] });
+    // Demand counts the distinct rows GitHub actually returned.
+    expect(result).toMatchObject({ otherDemand: 2 });
+  }
+  // Default (traffic-shadow) scans keep the strict hold.
+  const strict = fixture([run(1)], jobs);
+  expect(
+    await scan(async (path) => {
+      const data = await strict.get(path);
+      if (path.includes("/jobs?") && "jobs" in data) data.total_count = 400;
+      return data;
+    }),
+  ).toMatchObject({ ok: false, hold: "incomplete-jobs" });
+  // Run listings bound Batch slots, so their mismatch still holds when tolerant.
+  const runListing = fixture([run(1)], jobs);
+  expect(
+    await tolerant(async (path) => {
+      const data = await runListing.get(path);
+      if (path.includes("status=waiting") && "workflow_runs" in data) data.total_count++;
+      return data;
+    }),
+  ).toMatchObject({ ok: false, hold: "incomplete-runs" });
+  // Malformed job pages still hold.
+  const malformed = fixture([run(1)], jobs);
+  expect(
+    await tolerant(async (path) => {
+      const data = await malformed.get(path);
+      if (path.includes("/jobs?")) return { total_count: 1, jobs: null };
+      return data;
+    }),
+  ).toMatchObject({ ok: false, hold: "incomplete-jobs" });
+});
+
 test("same run repeated across complete passes counts once, identity drift holds", async () => {
   const source = fixture([run(1)]);
   expect(await scan(source.get)).toMatchObject({ ok: true, scannedRuns: 1 });

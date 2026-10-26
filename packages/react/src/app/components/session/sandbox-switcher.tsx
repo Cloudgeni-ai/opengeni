@@ -42,7 +42,11 @@ export {
   NO_SANDBOX_LABEL,
   sessionSandboxLabel,
 } from "../../../sandbox-label-model";
-import { machineDisplayName, sessionSandboxLabel } from "../../../sandbox-label-model";
+import {
+  machineDisplayName,
+  machineNameTwinLabel,
+  sessionSandboxLabel,
+} from "../../../sandbox-label-model";
 
 function SandboxMark({
   kind,
@@ -225,11 +229,12 @@ export function SessionRunsOnMenuBody(props: {
                     .finally(() => setMovingSandboxId(null));
                 }}
                 label={machineDisplayName(t, machine)}
-                meta={
+                meta={joinMeta(
+                  machineNameTwinLabel(t, machine, machines),
                   machine.state !== "online" && !machine.active
                     ? machineStateLabel(machine.state)
-                    : undefined
-                }
+                    : undefined,
+                )}
                 icon={
                   swapping ? (
                     <Loader2Icon className="size-4 animate-spin" />
@@ -274,6 +279,11 @@ function machineStateLabel(state: string): string {
   if (state === "reconnecting") return "Reconnecting";
   if (state === "display_unavailable") return "No display";
   return state;
+}
+
+function joinMeta(...parts: (string | undefined)[]): string | undefined {
+  const present = parts.filter((part): part is string => Boolean(part));
+  return present.length > 0 ? present.join(" · ") : undefined;
 }
 
 /**

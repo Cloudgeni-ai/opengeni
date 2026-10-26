@@ -280,6 +280,9 @@ OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
 
 The generated App configures `<baseUrl>/v1/github/oauth/callback` and requests
 **Members: read** so GitHub can expose active organization-owner membership.
+Its webhook goes to `<OPENGENI_WEBHOOK_BASE_URL>/v1/webhooks/github` when that
+is set (a console reachable only on a private network), else to
+`<baseUrl>/v1/webhooks/github`.
 Existing organization installations must approve the added permission before
 organization-owner self-service can succeed; unavailable proof fails closed.
 

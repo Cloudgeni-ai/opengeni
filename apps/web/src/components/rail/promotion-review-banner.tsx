@@ -1,6 +1,6 @@
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { authorizedWorkspaceFromList } from "@opengeni/react/app/lib/workspace-scope-context";
-import { useOpenGeniCredits } from "@/components/models/opengeni-credits-row";
+import { useOpenGeniCredits } from "@/lib/opengeni-credits";
 import { PromotionReviewNotice } from "@/components/promotion-review-notice";
 
 /** Reuses the current organization's permission-gated billing read, never an organization inventory. */
