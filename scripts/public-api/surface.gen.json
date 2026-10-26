@@ -24052,6 +24052,14 @@
         "$": "enum=[\"\\\"auto\\\"\",\"\\\"ours\\\"\"]"
       }
     },
+    "RecordingLiveProtocol": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"elevenlabs.scribe_realtime\\\"\",\"\\\"openai.realtime\\\"\"]"
+      }
+    },
     "RecordingLiveSegment": {
       "io": [
         "output"
@@ -24077,9 +24085,11 @@
         "$.audio.sampleRate": "integer!",
         "$.expiresAt": "string!",
         "$.model": "string!",
-        "$.protocol": "enum!=[\"\\\"elevenlabs.scribe_realtime\\\"\"]",
+        "$.protocol": "ref(RecordingLiveProtocol)!",
         "$.providerId": "string!",
-        "$.url": "string!"
+        "$.token": "string?",
+        "$.url": "string!",
+        "$.webrtcUrl": "string?"
       }
     },
     "RecordingMode": {
@@ -35920,6 +35930,10 @@
       "defaultSystemAudioSource": "value",
       "desktopSystemAudioSource": "value",
       "displaySystemAudioSource": "value",
+      "LiveFetch": "type",
+      "LiveMediaTrack": "type",
+      "LivePeerConnection": "type",
+      "LivePeerConnectionConstructor": "type",
       "LiveTranscriber": "type",
       "LiveTranscriberOptions": "type",
       "LiveTranscriptSegment": "type",
