@@ -1,6 +1,6 @@
 use super::runtime::{Format, cpu_model, runtime_of};
 use super::*;
-use crate::spec::Network;
+use crate::spec::{Drive, Network};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 

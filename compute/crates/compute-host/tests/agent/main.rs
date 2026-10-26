@@ -13,7 +13,7 @@ use std::time::Duration;
 use compute_core::{HostPolicy, SandboxId};
 use compute_engine::{
     CancellationToken, Completion, Engine, EngineError, ErrorKind, Found, MemoryProfile,
-    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec, Writes,
 };
 use compute_host::client::Client;
 use compute_host::protocol::{
@@ -157,6 +157,12 @@ struct World {
     unreadable_cpu: AtomicBool,
     /// While set, no VM's traffic can be read.
     unreadable_io: AtomicBool,
+    /// Bytes and calls every VM counts as written, as its VMM's writes to
+    /// its disk; the tests that write to a disk file as its guest would
+    /// add to them.
+    written: Mutex<Writes>,
+    /// While set, no VM's writes ever return; see [`Engine::settle_writes`].
+    unsettled: AtomicBool,
     /// While set, every pause moves a burst of data, as a VMM writing a
     /// snapshot does: work the host does, not the guest.
     transition_traffic: AtomicBool,
@@ -1025,6 +1031,23 @@ impl Engine for Fake {
         }
         let streamed = vm.work.lock().unwrap().io.total();
         Ok(u64::try_from(streamed.as_micros()).unwrap_or(u64::MAX))
+    }
+
+    fn writes(&self, _: &FakeVm) -> Result<Writes, EngineError> {
+        Ok(*self.world.written.lock().unwrap())
+    }
+
+    fn settle_writes(
+        &self,
+        _: &FakeVm,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let unsettled = self.world.unsettled.load(Ordering::SeqCst);
+        async move {
+            if unsettled {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        }
     }
 
     fn exited(&self, vm: &FakeVm) -> impl Future<Output = ()> + Send + 'static {

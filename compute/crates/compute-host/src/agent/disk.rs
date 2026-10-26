@@ -16,16 +16,21 @@
 //!
 //! A guest also frees space while its VM runs, since its disk takes
 //! discards: the space comes back to the host's disk, but stays the
-//! guest's to take again. So each disk is read both before and after the
-//! disk reading, and books the larger of the two (see
+//! guest's to take again. A guest may free and write at any moment, and
+//! the disk reading and the disks cannot be read at one instant, so each
+//! running disk is read after the disk reading and also books what its
+//! VMM wrote from just before that reading until every write it had
+//! started by the disk's read has returned (see
 //! [`HostAgent::disk_growth_readings`]).
 
 use std::path::Path;
+use std::time::Duration;
 
 use compute_core::{DiskSpace, Input, SandboxId};
-use compute_engine::Engine;
+use compute_engine::{Engine, Writes};
+use tokio::task::JoinSet;
 
-use crate::disk_growth;
+use crate::disk_growth::{self, Headroom};
 use crate::layout::copy_size;
 use crate::protocol::SandboxConfig;
 use crate::store::{OwnerEpoch, Store};
@@ -37,6 +42,18 @@ use crate::protocol::{Id, ImageId};
 /// directories, disk, kernel link, image files and record, with room to
 /// spare.
 const FIRST_FILES_INODES: u64 = 32;
+
+/// The most one write call may take of the host's disk beyond the bytes it
+/// writes. A file system widens a write to whole blocks at each end, XFS
+/// a write over shared blocks to whole copy-on-write extents (128 KiB by
+/// default), and each sets blocks aside for the extent map; 1 MiB covers
+/// them with room to spare.
+const WRITE_SLACK: u64 = 1 << 20;
+
+/// How long a sample waits for running VMs' writes to return (see
+/// [`Engine::settle_writes`]). A VM whose writes have not by then books
+/// all its disk may take, for that reading.
+const SETTLE_WITHIN: Duration = Duration::from_millis(100);
 
 /// Work that waits for the next disk reading to say whether the disk can
 /// take it.
@@ -52,12 +69,12 @@ pub(super) enum AfterReading {
     Fetch(ImageId, u64),
 }
 
-/// What each disk of a sandbox with a VM may still grow by, read before
-/// the disk reading of a sample, with whether its memory image was still
-/// being filled; see [`HostAgent::disk_readings`].
+/// What each sandbox with a VM had written, read just before the disk
+/// reading of a sample, with whether its memory image was still being
+/// filled; see [`HostAgent::disk_readings`].
 #[derive(Debug, Default)]
 pub(super) struct BeforeReading {
-    growth: Vec<(SandboxId, Option<u64>)>,
+    writes: Vec<(SandboxId, Option<Writes>)>,
     hydrating: Vec<Input>,
 }
 
@@ -81,20 +98,18 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         disk_growth::disk_bound(length, self.allocation_unit)
     }
 
-    /// What the disk of each sandbox with a VM may still grow by, and
-    /// whether its memory image is still being filled from object storage.
-    /// Read before the disk reading of the same sample, which then shows
-    /// what the disk grew by and what the fill wrote; the disks are read
-    /// again after it by [`Self::disk_growth_readings`].
+    /// What each sandbox with a VM has written, and whether its memory
+    /// image is still being filled from object storage. Read just before
+    /// the disk reading of the same sample, which then shows what the fill
+    /// wrote; the disks themselves are read after it, by
+    /// [`Self::disk_growth_readings`].
     pub(super) fn disk_readings(&self) -> BeforeReading {
         let mut before = BeforeReading::default();
         for (id, slot) in &self.slots {
             let Some(live) = slot.vm.as_ref() else {
                 continue;
             };
-            before
-                .growth
-                .push((*id, self.headroom(*id, &slot.paths.disk)));
+            before.writes.push((*id, self.vm_writes(*id, &live.vm)));
             before.hydrating.push(Input::Hydrating {
                 sandbox: *id,
                 hydrating: live.memory.hydrating(),
@@ -104,27 +119,85 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     }
 
     /// The readings of `before`, with what each of its disks may still
-    /// grow by read again, after the disk reading of the same sample: the
-    /// larger of the two counts. A guest writing between them took space
-    /// the disk reading shows taken, which the first reading still counts
-    /// as to come; one freeing space between them, as a trim does, gave
-    /// back space the disk reading shows free, which only the second
-    /// counts as the guest's to take again. Either way the disk is booked
-    /// for at least what it may grow by as the disk reading saw it, short
-    /// only of what its guest wrote again in the moment between that
-    /// reading and the disk's second one. A disk neither reading could
-    /// read books all it may take, its whole size, until one can.
-    pub(super) fn disk_growth_readings(&self, before: BeforeReading) -> Vec<Input> {
+    /// grow by as the disk reading of the same sample saw it.
+    ///
+    /// Each disk is read after the disk reading, which shows free any
+    /// space its guest freed until then (as a trim does), so what the disk
+    /// read counts that space as the guest's to take again. What the
+    /// guest wrote after the disk reading, the disk's read counts as taken
+    /// although the disk reading shows it free: every byte of it came
+    /// through a write call of its VMM that had not returned before the
+    /// writes of `before` were read, and had started by the disk's read.
+    /// So once every write the VMM started by then has returned, which
+    /// [`Engine::settle_writes`] waits for, a second count of the VMM's
+    /// writes counts all of them, and the disk books what they wrote, with
+    /// [`WRITE_SLACK`] per call, besides what it may grow by: never less
+    /// than it may grow by as the disk reading saw it.
+    ///
+    /// A disk that cannot be read, or whose VM's writes cannot be counted
+    /// or do not return within [`SETTLE_WITHIN`], books all it may take,
+    /// its whole bound, for this reading.
+    pub(super) async fn disk_growth_readings(&self, before: BeforeReading) -> Vec<Input> {
         let mut readings = before.hydrating;
-        for (id, first) in before.growth {
+        let mut read = Vec::new();
+        let mut settling = JoinSet::new();
+        for (id, first) in before.writes {
             let Some(slot) = self.slots.get(&id) else {
                 continue;
             };
-            let second = self.headroom(id, &slot.paths.disk);
-            let bytes = match first.max(second) {
-                Some(bytes) => bytes,
-                None => match self.records.get(crate::protocol::Id(id)) {
-                    Some(record) => self.record_size(&record).disk,
+            let whole = self
+                .records
+                .get(crate::protocol::Id(id))
+                .map(|record| self.record_size(&record).disk);
+            let headroom = self.headroom(id, &slot.paths.disk);
+            if let (Some(first), Some(headroom), Some(live)) = (first, headroom, slot.vm.as_ref()) {
+                // Sent once polled, so after the disk's read.
+                let settled = self.engine.settle_writes(&live.vm);
+                let index = read.len();
+                settling.spawn(async move { (index, settled.await) });
+                read.push((id, whole, Some((first, headroom))));
+            } else {
+                read.push((id, whole, None));
+            }
+        }
+        let mut wrote: Vec<Option<Writes>> = vec![None; read.len()];
+        let deadline = tokio::time::Instant::now() + SETTLE_WITHIN;
+        while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, settling.join_next()).await {
+            let Ok((index, settled)) = joined else {
+                continue;
+            };
+            let (id, ..) = read[index];
+            match settled {
+                Ok(()) => {
+                    wrote[index] = self
+                        .slots
+                        .get(&id)
+                        .and_then(|slot| slot.vm.as_ref())
+                        .and_then(|live| self.vm_writes(id, &live.vm));
+                }
+                Err(error) => tracing::debug!(
+                    sandbox = %crate::protocol::Id(id),
+                    %error,
+                    "could not wait for a VM's writes to return"
+                ),
+            }
+        }
+        // Those still waiting book their whole bound; their requests end.
+        settling.abort_all();
+        for ((id, whole, first), wrote) in read.into_iter().zip(wrote) {
+            let bytes = match (first, wrote) {
+                (Some((first, headroom)), Some(wrote)) => {
+                    let since = wrote.since(first);
+                    // No disk takes more than its whole bound.
+                    let most = whole.unwrap_or(0).max(headroom.bound);
+                    headroom
+                        .left
+                        .saturating_add(since.bytes)
+                        .saturating_add(since.calls.saturating_mul(WRITE_SLACK))
+                        .min(most)
+                }
+                _ => match whole {
+                    Some(whole) => whole,
                     // Gone meanwhile: nothing of it is left to book.
                     None => continue,
                 },
@@ -134,9 +207,24 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         readings
     }
 
+    /// What the VM of sandbox `id` has written, if it can be read; see
+    /// [`Engine::writes`].
+    fn vm_writes(&self, id: SandboxId, vm: &E::Vm) -> Option<Writes> {
+        self.engine
+            .writes(vm)
+            .inspect_err(|error| {
+                tracing::debug!(
+                    sandbox = %crate::protocol::Id(id),
+                    %error,
+                    "could not read what a VM has written"
+                );
+            })
+            .ok()
+    }
+
     /// What the disk file of sandbox `id` at `path` may still grow by, if
     /// it can be read; see [`disk_growth::headroom`].
-    fn headroom(&self, id: SandboxId, path: &Path) -> Option<u64> {
+    fn headroom(&self, id: SandboxId, path: &Path) -> Option<Headroom> {
         // A save writes one copy of memory only where files share extents.
         let shares = self.save_copies == 1;
         disk_growth::headroom(path, self.allocation_unit, shares)

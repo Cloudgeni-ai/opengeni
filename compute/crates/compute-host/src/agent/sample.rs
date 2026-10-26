@@ -117,7 +117,8 @@ impl DiskGauge {
     }
 
     /// Has the next sample read `available` just after `change` is made,
-    /// as what a guest does while the agent reads the disk.
+    /// as what a guest does while the agent reads the disk: the sample
+    /// reads what its VMs wrote before, and their disks after.
     pub fn give_after(&self, change: impl FnOnce() + Send + 'static, available: DiskSpace) {
         *self.lock() = Some(Next {
             available,
@@ -148,7 +149,7 @@ impl DiskGauge {
 }
 
 impl<E: Engine, S: Store> HostAgent<E, S> {
-    pub(super) fn sample(&mut self) {
+    pub(super) async fn sample(&mut self) {
         let huge = self.engine.memory_profile().pages == PageSize::Huge;
         self.available_memory = crate::host_memory::available(huge);
         #[cfg(target_os = "linux")]
@@ -183,16 +184,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         {
             batch.push(Input::Memory { available });
         }
-        // What disks may still grow by and which memory images are still
+        // What running VMs have written and which memory images are still
         // being filled, then the disk reading that shows what they took,
-        // then the disks again, for what their guests freed meanwhile.
+        // then what each disk may still grow by as that reading saw it.
         // The core ignores them without a disk policy.
         let before = self.disk_readings();
         let disk = match &self.disk_gauge {
             Some(gauge) => gauge.take(),
             None => read_disk(&self.root),
         };
-        batch.extend(self.disk_growth_readings(before));
+        batch.extend(self.disk_growth_readings(before).await);
         if let Some(available) = disk {
             batch.push(Input::Disk { available });
         }

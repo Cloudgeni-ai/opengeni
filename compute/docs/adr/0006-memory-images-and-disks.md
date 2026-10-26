@@ -71,6 +71,13 @@ restore depend on every earlier link.
   rebuilt with the feature, so clones have it. A running VM's disk books
   its whole length less what it holds alone either way, so trimming changes
   admission only for disks at rest: space a running guest frees stays booked
-  for it to write again. The agent reads each running disk both before and
-  after it reads the host's free space and books the larger, since a guest
-  can free space between the two reads.
+  for it to write again. A guest may free and write at any moment, and the
+  host's free space and its disks cannot be read at one instant, so the
+  agent reads each running disk after the free space, and also books what
+  its VMM wrote from just before the free-space reading until every write
+  it had started by the disk's read has returned (one API request: the VMM
+  answers it on the thread that does its drives' synchronous I/O), with
+  1 MiB per write call for rounding. Space a guest freed before the
+  free-space reading is then booked as its own whatever it writes after, and
+  a disk that cannot be read that way books its whole length for that
+  reading.
