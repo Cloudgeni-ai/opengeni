@@ -666,7 +666,10 @@ minutes, and consumes it once. Issuance opportunistically removes bounded
 expired/consumed rows. Existing database readiness therefore covers this path.
 Site calls do not use this approval store: their active immutable version's
 requested identities are intersected with the current viewer's live gateway and
-revalidated by the API on every direct call.
+revalidated by the API on every direct call. A saved Allow makes a connection
+tool callable from a Site, even when its provider recommends Ask. A saved Ask
+on a tool the provider allows keeps it listed and the call returns approval
+required; a tool that is still Ask by default stays hidden from Sites.
 
 Migrations `0404_mcp_oauth_authorization_server.sql` and
 `0405_tool_gateway_approval_capabilities.sql` are one drained maintenance
