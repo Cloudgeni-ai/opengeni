@@ -5458,6 +5458,7 @@ export const englishMessages = {
   "timeline.turnSummaryModel.compactions_other": "{count} conversation history compactions",
   "timeline.turnSummaryModel.compacts_one": "compacted",
   "timeline.turnSummaryModel.compacts_other": "{count} compacts",
+  "timeline.turnSummaryModel.daysHours": "{days}d {hours}h",
   "timeline.turnSummaryModel.hoursMinutes": "{hours}h {minutes}m",
   "timeline.turnSummaryModel.memoriesSaved_one": "{count} memory saved",
   "timeline.turnSummaryModel.memoriesSaved_other": "{count} memories saved",
