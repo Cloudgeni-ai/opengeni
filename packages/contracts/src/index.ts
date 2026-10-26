@@ -12041,8 +12041,20 @@ export const ScheduledTaskRunMode = /* @__PURE__ */ /* @__PURE__ */ defineSchema
 );
 export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 
+/**
+ * What a run does when the automation's previous run is still working. Only an
+ * automation that continues a chat (`existing_session`, `reusable_session`)
+ * can overlap; a run in a new chat always runs on its own, whatever the
+ * choice. `steer`, the default for new automations, hands this automation's
+ * own running turn over at its next model step, like a person's Steer, so the
+ * agent sees the new run with the work so far; a turn anyone else started
+ * still finishes first, and the run follows it. In a chat, `allow_concurrent`
+ * and `buffer_one` both deliver the run when the current turn finishes,
+ * together with anything else that waited. `skip` drops a run that finds the
+ * chat busy.
+ */
 export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.enum(["allow_concurrent", "skip", "buffer_one"]),
+  z.enum(["allow_concurrent", "skip", "buffer_one", "steer"]),
 );
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
@@ -13412,7 +13424,7 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
       .strict()
       .default({ kind: "agent_turn" }),
     runMode: ScheduledTaskRunMode.default("new_session_per_run"),
-    overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
+    overlapPolicy: ScheduledTaskOverlapPolicy.default("steer"),
     targetSessionId: z.string().uuid().nullable().optional(),
     /** Who can see it. Omitted: the organization's default for new schedules. */
     visibility: SessionVisibility.optional(),
@@ -13526,7 +13538,7 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */
       /** A schedule posting into an Only me chat is always Only me. */
       visibility: SessionVisibility.optional(),
       runMode: z.literal("existing_session").default("existing_session"),
-      overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
+      overlapPolicy: ScheduledTaskOverlapPolicy.default("steer"),
       status: ScheduledTaskStatus.default("active"),
       metadata: ScheduledTaskMetadataInput.default({}),
       /** Event triggers that also post into the chat; `once` makes this a "wake me when". */

@@ -250,6 +250,7 @@ export default function PageMeetingsSection() {
                 recordings={fixture.client}
                 liveTranscriptDefault={settings.liveTranscript === true}
                 defaultLanguage={settings.language ?? null}
+                viewerName="Ingrid Solberg"
                 meetingHref={(id) => `#meeting-${id}`}
                 onOpen={(id) => {
                   setOpenId(id);
