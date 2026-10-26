@@ -75,6 +75,11 @@ export type MeetingsListProps = {
    */
   focused?: boolean;
   /**
+   * Refresh your own state shown here too, such as whether recording is on. Called
+   * when the person pulls the list, comes back to the screen or returns to the app.
+   */
+  onRefresh?: () => unknown;
+  /**
    * Extra space below the list, such as Android's bottom safe-area inset. On iOS the
    * list already keeps clear of the bars and the home indicator, including a
    * translucent header drawn over it.
@@ -97,6 +102,7 @@ export function MeetingsList({
   recordingOff,
   header,
   focused,
+  onRefresh,
   bottomInset = 0,
 }: MeetingsListProps) {
   const msg = useOpenGeniText();
@@ -110,16 +116,22 @@ export function MeetingsList({
   const liveModel = models.liveModels.find((entry) => entry.available) ?? null;
   const refreshList = list.refresh;
   const [pulling, setPulling] = useState(false);
+  const hostRefresh = useRef(onRefresh);
+  hostRefresh.current = onRefresh;
+  const refreshAll = useCallback(
+    () => Promise.all([refreshList(), Promise.resolve(hostRefresh.current?.())]),
+    [refreshList],
+  );
 
   useEffect(() => {
-    if (focused) void refreshList();
-  }, [focused, refreshList]);
+    if (focused) void refreshAll();
+  }, [focused, refreshAll]);
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") void refreshList();
+      if (state === "active") void refreshAll();
     });
     return () => subscription.remove();
-  }, [refreshList]);
+  }, [refreshAll]);
   // A recording that just finished uploading shows up (and starts transcribing) at once.
   const finishedCount = recorder?.finished.length ?? 0;
   useEffect(() => {
@@ -145,7 +157,7 @@ export function MeetingsList({
           refreshing={pulling}
           onRefresh={() => {
             setPulling(true);
-            void list.refresh().finally(() => setPulling(false));
+            void refreshAll().finally(() => setPulling(false));
           }}
         />
       }
