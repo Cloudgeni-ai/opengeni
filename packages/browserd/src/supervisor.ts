@@ -162,9 +162,12 @@ import {
 import { BROWSER_WINDOW_PARK_IDLE_MS } from "./window-parking";
 import {
   matchReopenedTabs,
+  readBrowserTabIds,
   tabUrlHash,
   takeStoppedBrowserTabs,
+  writeBrowserTabIds,
   writeStoppedBrowserTabs,
+  type BrowserTabIdPair,
   type BrowserRelaunchedTabs,
   type BrowserRelaunchReason,
   type StoppedBrowserTab,
@@ -361,9 +364,15 @@ export type BrowserSupervisorDriver = BrowserInteractionDriver & {
   ownedProcessIdentity?(): Promise<OwnedManagedBrowserProcess | null>;
   /** Release a failed reattach transport without closing its owned browser. */
   detach?(): Promise<void>;
-  /** This browser replaced an earlier one whose tabs it reopened with new
-   * IDs; calls naming an earlier tab then say why it is gone. */
+  /** This browser replaced an earlier one and reopened its tabs: each
+   * reopened tab keeps its earlier ID, and calls naming an earlier tab that
+   * did not reopen say why it is gone. */
   noteRelaunchedTabs?(relaunched: BrowserRelaunchedTabs): void;
+  /** Give open tabs the IDs callers already hold for them (an earlier
+   * controller on the same browser gave them those IDs). */
+  adoptTabIds?(tabs: readonly BrowserTabIdPair[]): void;
+  /** The tab IDs that differ from the browser's own IDs for its tabs. */
+  adoptedTabIds?(): BrowserTabIdPair[];
   /** Ends this runtime's hold on the browser. In the person's own browser
    * (attached Chrome) it also closes the tabs the session opened and left
    * blank, and releases Chrome's debugger, however the runtime goes away. */
@@ -2511,16 +2520,32 @@ export class BrowserSupervisor {
       // The tabs the previous browser on this profile had when it was stopped
       // or let go. Every successful launch takes the record, so it never
       // outlives the launch right after the stop it describes, while a failed
-      // launch leaves it for its retry. A relaunch reopened those tabs with
-      // new IDs; a reattached browser kept them, so the record no longer
-      // applies.
+      // launch leaves it for its retry. A relaunch reopened those tabs, which
+      // keep their IDs; a reattached browser kept its tabs, so the record no
+      // longer applies, and its tabs get the IDs its last controller gave them.
       const stoppedTabs = await takeStoppedBrowserTabs(sessionDirectory);
-      if (stoppedTabs && relaunchesProfile && !restoredManifest) {
-        await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
+      const reattached =
+        recoveredReceipt !== null && recoveredReceipt.intent !== "adopt" && !relaunchesProfile;
+      let adopted = false;
+      if (reattached) {
+        adopted = await adoptRecordedTabIds(driver, sessionDirectory);
+      } else if (stoppedTabs && relaunchesProfile && !restoredManifest) {
+        adopted = await noteRelaunchedTabs(driver, stoppedTabs.reason, stoppedTabs.tabs, {
           ...(stoppedTabs.idleReleaseMinutes !== undefined
             ? { idleReleaseMinutes: stoppedTabs.idleReleaseMinutes }
             : {}),
         });
+      }
+      await recordTabIds(driver, sessionDirectory);
+      if (adopted) {
+        // Read before the tabs took their earlier IDs.
+        runtime.creationObservation = null;
+        try {
+          runtime.lastTargets = await driver.listTargets();
+          runtime.lastSnapshot = snapshotWithTargets(runtime.lastSnapshot, runtime.lastTargets);
+        } catch {
+          // The next tab list reads them.
+        }
       }
       return runtime;
     } catch (error) {
@@ -2822,8 +2847,10 @@ export class BrowserSupervisor {
     try {
       await restoreTabs(driver, snapshot.tabs);
       const currentSnapshot = await driver.runtimeSnapshot();
-      const currentTargets = await driver.listTargets();
-      await noteRelaunchedTabs(driver, reason, previousTabs, {}, currentTargets);
+      let currentTargets = await driver.listTargets();
+      if (await noteRelaunchedTabs(driver, reason, previousTabs, {}, currentTargets))
+        currentTargets = await driver.listTargets();
+      await recordTabIds(driver, runtime.sessionDirectory);
       runtime.driver = driver;
       for (const hold of runtime.presence) await this.bindPresence(runtime, hold);
       runtime.controller = this.createController(runtime, driver);
@@ -4786,22 +4813,58 @@ function stoppedTabsOf(targets: readonly BrowserTarget[]): StoppedBrowserTab[] {
     }));
 }
 
-/** Tell a relaunched browser's driver which of its tabs replaced each tab of
- * the browser before it. Best effort: a failure only leaves an old tab ID
- * unexplained. */
+/** Tell a relaunched browser's driver which of its tabs reopened each tab of
+ * the browser before it, so they keep their IDs. True when any did. Best
+ * effort: a failure only leaves an old tab ID unexplained. */
 async function noteRelaunchedTabs(
   driver: BrowserSupervisorDriver,
   reason: BrowserRelaunchReason,
   previous: readonly StoppedBrowserTab[],
   details: { idleReleaseMinutes?: number },
   current?: readonly BrowserTarget[],
-): Promise<void> {
-  if (!driver.noteRelaunchedTabs || previous.length === 0) return;
+): Promise<boolean> {
+  if (!driver.noteRelaunchedTabs || previous.length === 0) return false;
   try {
     const tabs = matchReopenedTabs(previous, current ?? (await driver.listTargets()));
     if (tabs.length > 0) driver.noteRelaunchedTabs({ reason, ...details, tabs });
+    return tabs.some((tab) => tab.replacementId !== null);
   } catch {
     // Unexplained, not failed.
+    return false;
+  }
+}
+
+/** A reattached browser's tabs take the IDs its last controller gave them,
+ * those whose tab is still open. True when any did. Best effort. */
+async function adoptRecordedTabIds(
+  driver: BrowserSupervisorDriver,
+  sessionDirectory: string,
+): Promise<boolean> {
+  if (!driver.adoptTabIds) return false;
+  try {
+    const recorded = await readBrowserTabIds(sessionDirectory);
+    if (recorded.length === 0) return false;
+    const open = new Set((await driver.listTargets()).map((target) => target.id));
+    const live = recorded.filter((pair) => open.has(pair.browserTargetId));
+    driver.adoptTabIds(live);
+    return live.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Keep the tab IDs this browser's tabs have beside its profile, for a
+ * controller that later reattaches to it; a browser without any removes an
+ * earlier browser's. Best effort. */
+async function recordTabIds(
+  driver: BrowserSupervisorDriver,
+  sessionDirectory: string,
+): Promise<void> {
+  if (!driver.adoptedTabIds) return;
+  try {
+    await writeBrowserTabIds(sessionDirectory, driver.adoptedTabIds());
+  } catch {
+    // A later reattach gives these tabs the browser's own IDs.
   }
 }
 

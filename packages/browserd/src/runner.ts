@@ -565,7 +565,7 @@ export function managedChromeArguments(input: {
     // Headless Chrome elsewhere keeps WebGL through SwiftShader, as on Linux.
     ...(!input.windowed && input.platform !== "linux" ? ["--enable-unsafe-swiftshader"] : []),
     ...(input.proxyServer ? [`--proxy-server=${input.proxyServer}`] : []),
-    ...browserLaunchArguments(input.platform, input.additional, input.windowed),
+    ...browserLaunchArguments(input.platform, input.additional),
     // Chrome's sandbox cannot start as root or inside most containers.
     ...(input.sandboxUnavailable ? ["--no-sandbox"] : []),
     ...(input.smallSharedMemory ? ["--disable-dev-shm-usage"] : []),
@@ -1712,7 +1712,6 @@ function supportedTimezone(value: string): string {
 export function browserLaunchArguments(
   platform: NodeJS.Platform,
   additional: readonly string[] = [],
-  headed = false,
 ): string[] {
   const policy = browserProfileCryptoPolicy(platform);
   const profileCryptoArgument =
@@ -1730,6 +1729,16 @@ export function browserLaunchArguments(
   if (validatedAdditional.length > 32) {
     throw new Error("too many browser launch arguments");
   }
+  // Chromium honors only the last `--enable-features` switch, so an additional
+  // one is folded into the managed switch instead of replacing it.
+  const enabledFeatures = ["CDPScreenshotNewSurface"];
+  const remainingAdditional = validatedAdditional.filter((argument) => {
+    if (!argument.startsWith("--enable-features=")) return true;
+    for (const feature of argument.slice("--enable-features=".length).split(",")) {
+      if (feature && !enabledFeatures.includes(feature)) enabledFeatures.push(feature);
+    }
+    return false;
+  });
   return [
     "--restore-last-session",
     // Compiled Chromium testing experiments can alter offscreen rendering.
@@ -1748,10 +1757,12 @@ export function browserLaunchArguments(
     // debugged. Managed browsers act for a signed-in person, and sites treat
     // that flag as a bot signal (rate-limited or refused logins).
     "--disable-blink-features=AutomationControlled",
-    // Chromium's presentation-fenced screenshot path can wait indefinitely for
-    // hidden headed tabs. Copy a freshly repainted surface without raising the
-    // browser or changing the shared desktop's active tab.
-    platform === "linux" && headed ? "--enable-features=CDPScreenshotNewSurface" : null,
+    // Chromium's presentation-fenced screenshot path waits for the redraw to
+    // be shown, which never happens for a tab another tab covers in its window
+    // (headed or headless), so captures of background agent tabs stalled.
+    // Copy a freshly repainted surface instead, without raising the browser or
+    // changing the window's active tab.
+    `--enable-features=${enabledFeatures.join(",")}`,
     platform === "linux" ? "--test-type" : null,
     // Linux machines that run managed browsers rarely have a GPU, and Chromium
     // turns WebGL off entirely on software rendering. Sites that need WebGL
@@ -1762,7 +1773,7 @@ export function browserLaunchArguments(
     platform === "linux" ? "--ignore-gpu-blocklist" : null,
     platform === "linux" ? "--enable-unsafe-swiftshader" : null,
     profileCryptoArgument,
-    ...validatedAdditional,
+    ...remainingAdditional,
   ].filter((value): value is string => value !== null);
 }
 

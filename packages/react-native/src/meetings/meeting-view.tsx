@@ -52,7 +52,11 @@ export type UseMeetingViewOptions = {
   onDeleted?: () => void;
   /** Host facts under the title, such as what the meeting belongs to. */
   details?: ReactNode;
-  /** Space below the transcript, such as the bottom safe-area inset. */
+  /**
+   * Extra space below the transcript, such as Android's bottom safe-area inset. On
+   * iOS the transcript already keeps clear of the bars and the home indicator,
+   * including a translucent header drawn over it.
+   */
   bottomInset?: number;
 };
 
@@ -194,6 +198,7 @@ export function useMeetingView({
     <>
       <ScrollView
         style={{ flex: 1, backgroundColor: c.bg }}
+        contentInsetAdjustmentBehavior="automatic"
         refreshControl={
           <RefreshControl
             refreshing={pulling}

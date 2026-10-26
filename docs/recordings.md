@@ -107,6 +107,26 @@ The pages navigate through callbacks (`onOpen`, `meetingHref`, `onBack`), so
 any router works. `@opengeni/react/testing/meetings` has an in-memory
 recordings client with meetings in every state, for previews and tests.
 
+On a phone, `@opengeni/react-native/meetings` has the same pieces for React
+Native screens:
+
+- `MeetingRecorderProvider`: mount it once above the screens. It keeps one
+  recorder going while the person moves around the app and, with the native
+  module, while the phone is locked or another app is in front. Audio is
+  written to the phone as it is captured and uploaded in the background. Pass
+  a `storeScope` per signed-in account, so unsent audio is only ever uploaded
+  with that account's credential. A host without an `OpenGeniProvider` above
+  its screens passes its SDK `client`, and `workspaceId={null}` until it
+  knows the workspace.
+- `MeetingsList`: the recorder plus the list. `useMeetingView`: one
+  meeting's transcript, player and actions, for a screen of your own.
+
+The SDK client uses the web platform's `crypto` (request ids and upload
+checksums), which Hermes doesn't have. Mount the recorder inside
+`OpenGeniReactNativeProvider`, or call `installOpenGeniReactNativeEnvironment`
+yourself for as long as it is mounted. Otherwise listing and uploading fail
+with "Property 'crypto' doesn't exist".
+
 ## Live transcript preview
 
 While a meeting is recorded, each track can also be streamed to a live speech

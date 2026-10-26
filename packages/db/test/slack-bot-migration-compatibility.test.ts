@@ -254,6 +254,8 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
       // Nor the machine-owner lookup for personal-machine chats (0978).
       "runtime definer session_machine_owner_subject_v1(uuid, uuid, uuid) is missing or ambiguous",
+      // Nor the connected-command re-arm (0984).
+      "runtime definer rearm_unanswered_connected_commands(uuid, uuid, text) is missing or ambiguous",
     ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
@@ -327,11 +329,12 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       "table teams_bot_outbox grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table teams_bot_proofs grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
       "table teams_bot_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
-      // 0978 creates the machine-owner lookup but withholds its runtime grant
-      // for one release so the previous release's posture check still passes.
-      // This old evaluator requires EXECUTE on every private routine, including
-      // the new owner-only promotion helpers. Their denial must stay intact.
+      // 0978's machine-owner lookup and 0984's connected-command re-arm
+      // withhold runtime grants for previous-release compatibility. Promotion
+      // administration also stays owner-only; the old evaluator reports each
+      // missing EXECUTE grant and those denials must remain intact.
       "runtime role lacks EXECUTE on private routine evaluate_promotion_abuse(uuid)",
+      "runtime role lacks EXECUTE on private routine rearm_unanswered_connected_commands(uuid, uuid, text)",
       "runtime role lacks EXECUTE on private routine session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "runtime role lacks EXECUTE on private routine set_promotion_decision(uuid, text, text, text, jsonb, text, bigint)",
       "runtime role lacks EXECUTE on private routine set_promotion_detector_mode(text, text)",

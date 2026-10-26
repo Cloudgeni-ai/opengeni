@@ -1820,13 +1820,41 @@ export class CuaComputerBackend implements ComputerBackend {
       (this.recentObservations.get(command.targetId) ?? []).some(
         (recent) => recent.observationId === command.expectedObservationId,
       );
+    // Keys go to the window's focused element in its latest reading. Another
+    // read of the window since the caller's (the person's viewer, a parallel
+    // read) changes nothing they land on while that reading shows the same
+    // document with the same element focused, which keeps its ref across
+    // readings of one document. With nothing focused the keys carry no
+    // element and land wherever the focus is by then, so only the latest
+    // reading fences them.
+    const fencedOn =
+      action.type === "keyboard" && observed
+        ? (this.recentObservations.get(command.targetId) ?? []).find(
+            (recent) => recent.observationId === command.expectedObservationId,
+          )
+        : undefined;
+    const sameDocument =
+      fencedOn !== undefined &&
+      this.documents.get(fencedOn) !== undefined &&
+      this.documents.get(fencedOn) === this.documents.get(observed!);
+    const keyFenced =
+      sameDocument &&
+      observed!.focusedRef !== null &&
+      fencedOn!.focusedRef === observed!.focusedRef;
     if (
       !observed ||
       !command.expectedObservationId ||
-      (observed.observationId !== command.expectedObservationId && !refFenced)
+      (observed.observationId !== command.expectedObservationId && !refFenced && !keyFenced)
     ) {
       if (this.unreadableSheets.has(command.targetId) && this.sheetHosts(target).length)
         throw await this.sheetError(target);
+      if (sameDocument && fencedOn!.focusedRef !== observed?.focusedRef)
+        throw new ComputerBackendError(
+          "observation_stale",
+          "The focused element of this window changed since that observation, so no keys were sent; observe the window again",
+          false,
+          false,
+        );
       throw new ComputerBackendError(
         "observation_stale",
         "CUA action requires the current semantic observation",

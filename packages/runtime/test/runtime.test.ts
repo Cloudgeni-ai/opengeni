@@ -3299,6 +3299,68 @@ describe("runtime event normalization", () => {
       },
     );
 
+    test("a search that reaches one of two connected accounts names the other", async () => {
+      const accountFixture = (letter: string, account: string) =>
+        connectorPolicyFixture({
+          connectorDecision: "allow",
+          serverId: `account-${letter.repeat(64)}`,
+          lazyToolTransport: "generic_dispatch",
+          accountLabel: {
+            model: `Documents — Personal: ${account}`,
+            connector: "Documents",
+            providerDomain: "docs.example.test",
+            account,
+          },
+        });
+      const alice = await accountFixture("a", "alice@example.test");
+      const bob = await accountFixture("b", "bob@example.test");
+      try {
+        const agent = buildOpenGeniAgent(alice.settings, [], {
+          lazyToolTransport: "generic_dispatch",
+          toolPreparationReady: Promise.all([alice.prepared.ready, bob.prepared.ready]).then(
+            () => undefined,
+          ),
+          mcpServers: [...alice.prepared.mcpServers, ...bob.prepared.mcpServers],
+        });
+        const model = new ScriptedModel([
+          {
+            output: [
+              scriptedFunctionCall(
+                "tool_search",
+                { query: "search documents", limit: 1 },
+                "search-call",
+              ),
+            ],
+          },
+          { outputText: "done" },
+        ]);
+        const result = await runAgentStream(
+          agent.clone({ model }),
+          "Find my notes",
+          alice.settings,
+        );
+        for await (const _event of result.toStream()) {
+          // Drain the search and the answer.
+        }
+        await result.completed;
+        const searchOutput = JSON.stringify(model.requests[1]!.input);
+        // Two accounts' identical tools tie, so the search lists compact
+        // candidates; the notice still names the account it left out.
+        expect(searchOutput).toContain('\\"schemasLoaded\\":false');
+        const reached = searchOutput.includes("Personal: alice@example.test")
+          ? ["alice", "bob"]
+          : ["bob", "alice"];
+        expect(searchOutput).toContain(
+          `These tools reach Documents (${reached[0]}@example.test). Also connected: Documents (${reached[1]}@example.test). If the request could mean those accounts too`,
+        );
+      } finally {
+        await alice.prepared.close();
+        alice.mcp.close();
+        await bob.prepared.close();
+        bob.mcp.close();
+      }
+    });
+
     test("prepared account display facts enrich event copies without changing catalog authority", async () => {
       const serverId = `account-${"a".repeat(64)}`;
       const accountLabel: McpAccountRouteLabel = {

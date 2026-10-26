@@ -417,9 +417,11 @@
         "@opengeni/contracts": "workspace:*",
         "@opengeni/interaction": "workspace:*",
         "@trycua/cua-driver": "0.37.0",
+        "ws": "8.21.1",
         "zod": "4.4.3",
       },
       "devDependencies": {
+        "@types/ws": "^8.18.1",
         "typescript": "7.0.2",
       },
     },

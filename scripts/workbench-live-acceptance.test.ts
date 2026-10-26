@@ -8,6 +8,7 @@ import type { AccessContext, WorkspaceCaptureManifest } from "@opengeni/sdk";
 import {
   createTerminalOutputProbe,
   axeManualContrastSelector,
+  findUndersizedTouchTargets,
   assertFixtureCapture,
   assertFixtureToolOutput,
   assertDedicatedCanaryEmail,
@@ -1046,6 +1047,56 @@ describe("workbench live acceptance preflight", () => {
         marker,
       ),
     ).toThrow("acceptance fixture command did not emit its exact marker");
+  });
+});
+
+describe("touch target acceptance", () => {
+  // The check runs in the page; these stand-ins give it a tiny laid-out page.
+  function judge(coveredInert: boolean) {
+    const box = (left: number) =>
+      ({ left, top: 100, width: 44, height: 32, right: left + 44, bottom: 132 }) as DOMRect;
+    const control = (label: string, left: number, inert: boolean) => {
+      const element = {
+        textContent: label,
+        getAttribute: (name: string) => (name === "aria-label" ? label : null),
+        getBoundingClientRect: () => box(left),
+        closest: (selector: string) => (selector === "[inert]" && inert ? {} : null),
+        contains: (other: unknown): boolean => other === element,
+      };
+      return element;
+    };
+    // Covered by an overlay, as the chat is under the open mobile workspace.
+    const covered = control("Session activity", 0, coveredInert);
+    // Its invisible tap area reaches 44 px around it.
+    const extended = control("Extended", 100, false);
+    // Only its 32 px painted box takes a tap.
+    const painted = control("Painted", 200, false);
+    const overlay = { contains: () => false };
+    const elementFromPoint = (x: number, y: number) => {
+      if (x < 90) return overlay;
+      if (x < 190) return extended;
+      return y >= 100 && y <= 132 ? painted : overlay;
+    };
+    const page = globalThis as Record<string, unknown>;
+    const previous = { document: page.document, getComputedStyle: page.getComputedStyle };
+    page.document = {
+      querySelectorAll: () => [covered, extended, painted],
+      elementFromPoint,
+    };
+    page.getComputedStyle = () => ({ display: "inline-flex", visibility: "visible" });
+    try {
+      return findUndersizedTouchTargets().map((target) => target.label);
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete page[name];
+        else page[name] = value;
+      }
+    }
+  }
+
+  test("judges reachable controls by what a tap reaches and skips inert content", () => {
+    expect(judge(true)).toEqual(["Painted"]);
+    expect(judge(false)).toEqual(["Session activity", "Painted"]);
   });
 });
 
