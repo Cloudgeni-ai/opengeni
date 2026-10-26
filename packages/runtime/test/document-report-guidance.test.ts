@@ -88,7 +88,10 @@ test("Office file Skills give the managed-sandbox fast path without probing", as
   const presentations = await prose("presentations");
   for (const text of [documents, presentations]) {
     expect(text).toContain(
-      "It is one reply of work: do not set a goal, look around the sandbox or search for other tools.",
+      "Making the file is one reply of work: do not set a goal for it, explore the sandbox, or search for tools other than `sandbox_file_publish`.",
+    );
+    expect(text).toContain(
+      "Publish the file with `sandbox_file_publish` and reply with a short summary and its link. If that tool is not loaded yet, load it with `tool_search` in the same batch as your first command.",
     );
     expect(text).toContain("unless an export tool already in your context lists that format");
     expect(text).not.toContain("is unavailable or does not list that format");

@@ -47,8 +47,9 @@ Skill was installed or explicitly checked out to the filesystem.
 ## Requested Word or PDF files
 
 When the user sends a Word or PDF file to be changed and returned, or asks for a
-new Word or PDF file, the file itself is the deliverable. It is one reply of
-work: do not set a goal, look around the sandbox or search for other tools.
+new Word or PDF file, the file itself is the deliverable. Making the file is one
+reply of work: do not set a goal for it, explore the sandbox, or search for
+tools other than `sandbox_file_publish`.
 Document artifacts are not exported to DOCX or PDF (unless an export tool
 already in your context lists that format), so do not load artifact tools just
 to check:

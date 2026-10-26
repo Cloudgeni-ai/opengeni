@@ -33,8 +33,9 @@ Skill was installed or explicitly checked out to the filesystem.
 ## Requested PowerPoint files
 
 When the user sends a PowerPoint file to be changed and returned, or asks for a
-new PowerPoint file, the file itself is the deliverable. It is one reply of
-work: do not set a goal, look around the sandbox or search for other tools.
+new PowerPoint file, the file itself is the deliverable. Making the file is one
+reply of work: do not set a goal for it, explore the sandbox, or search for
+tools other than `sandbox_file_publish`.
 Presentation artifacts are not exported to PPTX (unless an export tool already
 in your context lists that format), so do not load artifact tools just to check:
 
@@ -52,8 +53,10 @@ in your context lists that format), so do not load artifact tools just to check:
    `apt-get install -y --no-install-recommends libreoffice-impress
    poppler-utils` (about a minute), `soffice --headless --convert-to pdf`, then
    `pdftoppm -png -r 50`.
-4. Publish the file and reply with a short summary and its link. Do not also
-   build a native artifact of the same content.
+4. Publish the file with `sandbox_file_publish` and reply with a short summary
+   and its link. If that tool is not loaded yet, load it with `tool_search` in
+   the same batch as your first command. Do not also build a native artifact of
+   the same content.
 
 ## Edit and verify
 
