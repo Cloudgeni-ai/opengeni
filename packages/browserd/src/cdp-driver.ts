@@ -570,9 +570,10 @@ type TargetState = {
   /** Cross-origin iframes (out-of-process frames) by frame id. Each has its own
    * flattened CDP session, auto-attached from this page session. */
   oopifs: Map<string, OopifSession>;
-  /** Dedicated workers of the page and its cross-origin iframes, by session
-   * id, each with the listeners that feed its requests into the ledger. */
-  workers: Map<string, Array<() => void>>;
+  /** Dedicated workers of the page, its cross-origin iframes and other
+   * workers, by session id, each with the session it was attached from and
+   * the listeners that feed its requests into the ledger. */
+  workers: Map<string, { parentSessionId: string; unsubscribe: Array<() => void> }>;
   /** Node-level CDP calls go to this OOPIF session while one operation acts on
    * a node inside it. Input always goes to the page session. */
   nodeRoute: OopifSession | null;
@@ -867,6 +868,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   private readonly passkeys: BrowserPasskeyManager | null;
   /** Browser-level auto-attached session per page target (never the state session). */
   private readonly autoSessions = new Map<string, string>();
+  /** Listeners of each auto-attached shared worker session, by session id. */
+  private readonly sharedWorkerSessions = new Map<string, Array<() => void>>();
   /** Page target last brought to the front by this controller, when known. */
   private frontTargetId: string | null = null;
   private readonly windowParking: BrowserWindowParking | null;
@@ -2784,6 +2787,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         for (const [targetId, autoSession] of this.autoSessions) {
           if (autoSession === sessionId) this.autoSessions.delete(targetId);
         }
+        for (const stop of this.sharedWorkerSessions.get(sessionId) ?? []) stop();
+        this.sharedWorkerSessions.delete(sessionId);
         this.forgetPresentationSession(sessionId);
         this.passkeys?.detachSession(sessionId);
       }),
@@ -2798,10 +2803,12 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         waitForDebuggerOnStart: true,
         flatten: true,
         // Shared and service workers take no User-Agent from any page; they
-        // present it only through their own attachment.
+        // present it only through their own attachment. Shared workers attach
+        // in any case: a page's request for one's script finishes only on the
+        // worker's own session.
         filter: this.presentedUserAgent
           ? [{ type: "page" }, { type: "shared_worker" }, { type: "service_worker" }]
-          : [{ type: "page" }],
+          : [{ type: "page" }, { type: "shared_worker" }],
       });
     } catch (error) {
       if (error instanceof CdpTransportError) throw error;
@@ -2847,10 +2854,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // lifetime. Send both at once: a worker waiting for its debugger
       // answers the override only after it resumes.
       const presented = this.presentedUserAgentOverride();
+      if (info.type === "shared_worker" && !this.sharedWorkerSessions.has(sessionId))
+        this.sharedWorkerSessions.set(sessionId, this.finishPageRequests(connection, sessionId));
       await Promise.all([
         presented
           ? connection
               .send("Network.setUserAgentOverride", presented, { sessionId, timeoutMs: 5_000 })
+              .catch(() => undefined)
+          : undefined,
+        info.type === "shared_worker"
+          ? connection
+              .send("Network.enable", {}, { sessionId, timeoutMs: 5_000 })
               .catch(() => undefined)
           : undefined,
         resume(),
@@ -2968,6 +2982,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private forgetAutoAttachments(): void {
     this.autoSessions.clear();
+    for (const stop of [...this.sharedWorkerSessions.values()].flat()) stop();
+    this.sharedWorkerSessions.clear();
     for (const sessionId of [...this.presentationSessions.keys()])
       this.forgetPresentationSession(sessionId);
     this.frontTargetId = null;
@@ -3274,7 +3290,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     this.states.set(info.targetId, state);
     if (this.engine === "chromium") {
       try {
-        await this.attachFrameSessions(connection, state, sessionId);
+        await this.attachFrameSessions(connection, state, sessionId, state.unsubscribe);
       } catch (error) {
         // Without OOPIF sessions cross-origin frames stay opaque, as before.
         if (error instanceof CdpTransportError) throw error;
@@ -3431,6 +3447,53 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     ];
   }
 
+  /**
+   * A shared worker belongs to no single tab, yet a page's request for its
+   * script starts on the page's session and finishes on the worker's. Settle
+   * such requests in whichever tab's ledger holds them; the worker's own
+   * requests are not any tab's loading.
+   */
+  private finishPageRequests(
+    connection: BrowserCdpConnection,
+    sessionId: string,
+  ): Array<() => void> {
+    const holders = (event: { params: Record<string, unknown> }) => {
+      const requestId = stringField(event.params, "requestId");
+      if (!requestId) return [];
+      return [...this.states.values()].flatMap((state) => {
+        const request = state.requests.get(requestId);
+        return request ? [{ state, requestId, request }] : [];
+      });
+    };
+    const finish = (event: { params: Record<string, unknown> }) => {
+      for (const { state, requestId, request } of holders(event)) {
+        state.inflightRequests.delete(requestId);
+        state.failedRequests.delete(requestId);
+        state.requests.delete(requestId);
+        state.networkActivitySequence += 1;
+        if (!request.ignored && !request.stream) state.lastNetworkActivityAt = Date.now();
+      }
+    };
+    return [
+      connection.on(
+        "Network.responseReceived",
+        (event) => {
+          for (const { request } of holders(event)) request.respondedAt = Date.now();
+        },
+        sessionId,
+      ),
+      connection.on(
+        "Network.dataReceived",
+        (event) => {
+          for (const { request } of holders(event)) request.dataAt = Date.now();
+        },
+        sessionId,
+      ),
+      connection.on("Network.loadingFinished", finish, sessionId),
+      connection.on("Network.loadingFailed", finish, sessionId),
+    ];
+  }
+
   /** A cross-origin iframe's document request started on its parent's session.
    * Once the frame has stopped loading, or is gone, it can no longer be loading
    * however the frame's own session reported it. */
@@ -3447,12 +3510,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /** Page-level auto-attach: one flattened child session per cross-origin
    * (out-of-process) iframe, nested ones included. */
+  /** Auto-attaches the cross-origin frames and dedicated workers a page,
+   * frame or worker session starts. Its listeners join `owner`, the list that
+   * session's own teardown runs. */
   private async attachFrameSessions(
     connection: BrowserCdpConnection,
     state: TargetState,
     parentSessionId: string,
+    owner: Array<() => void>,
   ): Promise<void> {
-    state.unsubscribe.push(
+    owner.push(
       connection.on(
         "Target.attachedToTarget",
         (event) => void this.onFrameAttached(connection, state, parentSessionId, event.params),
@@ -3504,7 +3571,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     try {
       if (info.type === "worker" && this.states.get(state.targetId) === state) {
-        await this.onWorkerAttached(connection, state, sessionId);
+        await this.onWorkerAttached(connection, state, parentSessionId, sessionId);
         return;
       }
       if (info.type !== "iframe" || this.states.get(state.targetId) !== state) {
@@ -3566,7 +3633,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         if (loaded?.result?.value === true)
           this.finishFrameDocuments(state, new Set([info.targetId]));
       }
-      await this.attachFrameSessions(connection, state, sessionId);
+      await this.attachFrameSessions(connection, state, sessionId, oopif.unsubscribe);
     } catch {
       // A frame that navigated away or closed during setup is simply absent.
     } finally {
@@ -3578,23 +3645,31 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
 
   /** A dedicated worker's requests count toward its page's network activity,
-   * and its own script request, begun on the page's session, finishes on the
-   * worker's. The caller resumes the worker. */
+   * and its own script request, begun on its parent's session, finishes on the
+   * worker's. Workers it starts attach through its session in turn. The
+   * caller resumes the worker. */
   private async onWorkerAttached(
     connection: BrowserCdpConnection,
     state: TargetState,
+    parentSessionId: string,
     sessionId: string,
   ): Promise<void> {
-    state.workers.set(sessionId, this.trackNetwork(connection, state, sessionId, false));
+    const worker = {
+      parentSessionId,
+      unsubscribe: this.trackNetwork(connection, state, sessionId, false),
+    };
+    state.workers.set(sessionId, worker);
     await connection.send("Network.enable", {}, { sessionId, timeoutMs: 5_000 });
+    await this.attachFrameSessions(connection, state, sessionId, worker.unsubscribe);
   }
 
   private forgetFrameSession(state: TargetState, sessionId: string): void {
     const worker = state.workers.get(sessionId);
     if (worker) {
       state.workers.delete(sessionId);
-      for (const stop of worker) stop();
+      for (const stop of worker.unsubscribe.splice(0)) stop();
       this.forgetSessionRequests(state, sessionId);
+      this.forgetChildSessions(state, sessionId);
       return;
     }
     for (const oopif of [...state.oopifs.values()]) {
@@ -3605,10 +3680,20 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       for (const stop of oopif.unsubscribe.splice(0)) stop();
       this.forgetSessionRequests(state, sessionId);
       this.finishFrameDocuments(state, oopif.frameIds);
-      // Nested frames went with their parent session.
-      for (const nested of [...state.oopifs.values()]) {
-        if (nested.parentSessionId === sessionId) this.forgetFrameSession(state, nested.sessionId);
-      }
+      this.forgetChildSessions(state, sessionId);
+    }
+  }
+
+  /** Nested frames and workers go with the session that attached them; their
+   * own detach is not always reported. */
+  private forgetChildSessions(state: TargetState, parentSessionId: string): void {
+    for (const nested of [...state.oopifs.values()]) {
+      if (nested.parentSessionId === parentSessionId)
+        this.forgetFrameSession(state, nested.sessionId);
+    }
+    for (const [workerSessionId, worker] of [...state.workers]) {
+      if (worker.parentSessionId === parentSessionId)
+        this.forgetFrameSession(state, workerSessionId);
     }
   }
 
@@ -8342,7 +8427,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     for (const oopif of state.oopifs.values()) {
       for (const stop of oopif.unsubscribe.splice(0)) stop();
     }
-    for (const stop of [...state.workers.values()].flat()) stop();
+    for (const worker of state.workers.values()) {
+      for (const stop of worker.unsubscribe.splice(0)) stop();
+    }
     state.workers.clear();
     this.states.delete(targetId);
     if (!preserveFirstSeen) {

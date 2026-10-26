@@ -207,13 +207,19 @@ e2e(
         const other = `http://localhost:${url.port}`;
         if (url.pathname === "/slow") return later(3_000, "loaded");
         if (url.pathname === "/beacon") return new Response(null, { status: 204 });
-        if (url.pathname === "/slow-worker.js" || url.pathname === "/quick-worker.js")
-          return new Response(
-            url.pathname === "/slow-worker.js"
-              ? 'fetch("/slow").then((r)=>r.text()).then((t)=>postMessage("worker "+t))'
-              : 'postMessage("worker ran")',
-            { headers: { "content-type": "text/javascript" } },
-          );
+        const scripts: Record<string, string> = {
+          "/slow-worker.js":
+            'fetch("/slow").then((r)=>r.text()).then((t)=>postMessage("worker "+t))',
+          "/quick-worker.js": 'postMessage("worker ran")',
+          // A worker that starts another worker and passes its message on.
+          "/outer-worker.js":
+            'new Worker(new URL(location).searchParams.get("inner")).onmessage=(e)=>postMessage("nested "+e.data)',
+          "/shared-worker.js": 'onconnect=(e)=>e.ports[0].postMessage("shared worker ran")',
+        };
+        if (scripts[url.pathname] !== undefined)
+          return new Response(scripts[url.pathname], {
+            headers: { "content-type": "text/javascript" },
+          });
         if (url.pathname === "/poll") return new Promise<Response>(() => {});
         if (url.pathname === "/trickle") {
           // A streamed answer: a chunk every 800 ms, done after about 5 s.
@@ -270,6 +276,16 @@ e2e(
           "/framed-worker":
             '<script>new Worker("/quick-worker.js").onmessage=(e)=>{document.querySelector("output").textContent="frame "+e.data}</script>',
           "/frame-worker": `<iframe src="${other}/framed-worker"></iframe>`,
+          "/frame-workers": Array.from(
+            { length: 5 },
+            (_, index) => `<iframe src="${other}/framed-worker?${index}"></iframe>`,
+          ).join(""),
+          "/nested-worker":
+            '<script>new Worker("/outer-worker.js?inner=/slow-worker.js").onmessage=(e)=>{document.querySelector("output").textContent=e.data}</script>',
+          "/nested-quiet-worker":
+            '<script>new Worker("/outer-worker.js?inner=/quick-worker.js").onmessage=(e)=>{document.querySelector("output").textContent=e.data}</script>',
+          "/shared-worker":
+            '<script>const s=new SharedWorker("/shared-worker.js");s.port.onmessage=(e)=>{document.querySelector("output").textContent=e.data}</script>',
           "/long-poll":
             '<script>document.querySelector("output").textContent="ready";fetch("/poll")</script>',
         };
@@ -383,6 +399,40 @@ e2e(
       expect(frameWorker.receipt.notes ?? []).toEqual([]);
       await Bun.sleep(500);
       expect(await output()).toContain("frame worker ran");
+
+      // A worker's own workers, and shared workers, run and are tracked too:
+      // their script requests end on sessions of their own.
+      const nested = await idleAfter("/nested-worker");
+      expect(nested.ms).toBeGreaterThanOrEqual(2_000);
+      expect(nested.ms).toBeLessThan(8_000);
+      expect(nested.receipt.notes ?? []).toEqual([]);
+      expect(await output()).toContain("nested worker loaded");
+      const nestedQuiet = await idleAfter("/nested-quiet-worker");
+      expect(nestedQuiet.ms).toBeLessThan(5_000);
+      expect(nestedQuiet.receipt.notes ?? []).toEqual([]);
+      expect(await output()).toContain("nested worker ran");
+      const shared = await idleAfter("/shared-worker");
+      expect(shared.ms).toBeLessThan(5_000);
+      expect(shared.receipt.notes ?? []).toEqual([]);
+      expect(await output()).toContain("shared worker ran");
+
+      // Frames and their workers leave tracking with the page that had them,
+      // however often the page is loaded.
+      const tracked = () => {
+        const state = (
+          driver as unknown as {
+            states: Map<string, { oopifs: Map<string, unknown>; workers: Map<string, unknown> }>;
+          }
+        ).states.get(initial.target.id)!;
+        return { frames: state.oopifs.size, workers: state.workers.size };
+      };
+      for (let round = 0; round < 3; round += 1) {
+        await idleAfter("/frame-workers");
+        await Bun.sleep(500);
+        expect(tracked().frames).toBe(5);
+        await idleAfter("/beacons");
+        expect(tracked()).toEqual({ frames: 0, workers: 0 });
+      }
 
       // A request with no response for 10 s is taken for a long poll: the wait
       // ends after it and says so.
