@@ -34,6 +34,7 @@ export default defineConfig({
     "src/connect.ts",
     "src/sites.ts",
     "src/native-previews.ts",
+    "src/markdown-math.ts",
     "src/session-ui.ts",
     "src/machines.ts",
     "src/this-computer.ts",
