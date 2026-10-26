@@ -458,13 +458,22 @@ export function RootRouteComponent() {
 
   // A meeting being recorded keeps going while the person moves between
   // pages and workspaces, and while a dropped connection or an update shows
-  // the waiting panel: the recorder lives above all of them. An actor change
-  // still replaces it, below.
+  // the waiting panel: the recorder lives above all of them. It ends at once
+  // when they sign out or someone else signs in (the person below), and with
+  // browser accounts the actor gate also replaces it.
+  const recorderPerson = managedAuthRequired
+    ? authSession === undefined
+      ? undefined
+      : (authSession?.user.id ?? null)
+    : keyAuthRequired && !hasAccessKey
+      ? null
+      : (accessContext?.subjectId ?? undefined);
   const recordedSurface = isPublicAuthRoute ? (
     applicationSurface
   ) : (
     <ConsoleMeetingRecorderProvider
       workspaceId={routedWorkspace?.id ?? null}
+      person={recorderPerson}
       fallbackWorkspaceId={defaultWorkspaceId}
       client={client}
     >

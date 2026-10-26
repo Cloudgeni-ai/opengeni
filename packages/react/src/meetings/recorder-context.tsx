@@ -14,7 +14,9 @@
  *
  * A recording belongs to the workspace it started in and keeps going when the
  * person moves to another workspace: the recorder follows the host's current
- * workspace only while nothing is being captured.
+ * workspace only while nothing is being captured. It belongs to the person
+ * too: a host that signs people in passes them as `scope`, and a recording
+ * ends at once when they sign out or someone else signs in.
  */
 import {
   createContext,
@@ -41,11 +43,6 @@ export type MeetingRecorderStore = {
   subscribe: (listener: () => void) => () => void;
   /** Publish the recorder, and the workspace its recordings go to. */
   set: (recorder: MeetingRecorder | null, workspaceId?: string | null) => void;
-  /**
-   * The workspace the recorder's recordings go to: while one records, the
-   * workspace it started in, even after the person moved to another one.
-   */
-  workspaceId: () => string | null;
   /** Recordings whose upload finished in this tab, newest last. */
   finished: () => readonly string[];
   markFinished: (recordingId: string) => void;
@@ -57,10 +54,16 @@ export type MeetingRecorderStore = {
   /** Load the capture code. Idempotent. */
   activate: () => void;
   /**
+   * The workspace the recorder's recordings go to: while one records, the
+   * workspace it started in, even after the person moved to another one.
+   * Absent from stores made before it existed.
+   */
+  workspaceId?: () => string | null;
+  /**
    * Open a recorded meeting in its own workspace, through the host's
    * `onOpenMeeting`. False when the host gave no way to.
    */
-  openMeeting: (recordingId: string, workspaceId: string) => boolean;
+  openMeeting?: (recordingId: string, workspaceId: string) => boolean;
 };
 
 export function createMeetingRecorderStore(
@@ -139,6 +142,7 @@ async function hasLocalRecordings(): Promise<boolean> {
 
 export function MeetingRecorderProvider({
   workspaceId,
+  scope,
   client,
   onOpenMeetings,
   onOpenMeeting,
@@ -146,6 +150,13 @@ export function MeetingRecorderProvider({
 }: {
   /** The workspace recordings go to; null while the host is still finding it. */
   workspaceId: string | null;
+  /**
+   * Who records, such as the signed-in person's id, for a host that mounts
+   * this above sign-in. A new value ends a recording at once and starts a
+   * fresh recorder; null means nobody is signed in, so there is no recorder.
+   * Omit it when the host remounts the provider when the person changes.
+   */
+  scope?: string | null | undefined;
   /**
    * The SDK client the recorder uploads with, for a host that mounts this
    * above its routes without an <OpenGeniProvider> there. The provider's
@@ -188,24 +199,35 @@ export function MeetingRecorderProvider({
       cancelled = true;
     };
   }, []);
-  useDesktopMeetingRequests(store, { onOpenMeetings });
+  useDesktopMeetingRequests(store, {
+    signedOut: scope === null,
+    onOpenMeetings,
+  });
+  // A start someone asked for belongs to who was signed in then.
+  useEffect(() => {
+    store.takeStart();
+  }, [store, scope]);
   // Leaving a workspace must not end a recording made in it: the host, and
   // with it the capture, stays in the recording's workspace until it stops,
-  // then follows the host's current workspace.
+  // then follows the host's current workspace. Another person (scope) gets a
+  // fresh host at once, which ends the capture.
   const busy = useSyncExternalStore(
     store.subscribe,
     () => capturing(store.get()?.state),
     () => false,
   );
-  const [hostWorkspaceId, setHostWorkspaceId] = useState(workspaceId);
-  if (!busy && hostWorkspaceId !== workspaceId) setHostWorkspaceId(workspaceId);
+  const [host, setHost] = useState({ scope, workspaceId });
+  if (host.scope !== scope || (!busy && host.workspaceId !== workspaceId)) {
+    setHost({ scope, workspaceId });
+  }
+  const hostWorkspaceId = host.scope === scope ? host.workspaceId : workspaceId;
   return (
     <MeetingRecorderContext.Provider value={store}>
       {children}
-      {active && hostWorkspaceId ? (
+      {active && scope !== null && hostWorkspaceId ? (
         <Suspense fallback={null}>
           <LazyRecorderHost
-            key={hostWorkspaceId}
+            key={`${scope ?? ""}:${hostWorkspaceId}`}
             store={store}
             workspaceId={hostWorkspaceId}
             client={client}
@@ -224,7 +246,7 @@ const NO_FINISHED: readonly string[] = [];
  */
 function useDesktopMeetingRequests(
   store: MeetingRecorderStore,
-  navigation: { onOpenMeetings?: (() => void) | undefined },
+  navigation: { signedOut: boolean; onOpenMeetings?: (() => void) | undefined },
 ): void {
   const latest = useRef(navigation);
   useEffect(() => {
@@ -241,17 +263,21 @@ function useDesktopMeetingRequests(
     return detection.onRequest((request) => {
       const recorder = store.get();
       if (request.kind === "record") {
+        // Nobody signed in: a start kept for later would record, for whoever
+        // signs in next, a call that may be long over.
+        if (latest.current.signedOut) return;
         // Already recording shows that recording rather than start a second one.
         if (!recorder || recorder.state === "idle") store.requestStart({ title: request.title });
         latest.current.onOpenMeetings?.();
         return;
       }
       const recordingId = recorder?.recordingId ?? null;
-      const recordingWorkspaceId = store.workspaceId();
+      const recordingWorkspaceId = store.workspaceId?.() ?? null;
       if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
       void recorder.stop().then(() => {
-        if (recordingId && recordingWorkspaceId)
-          store.openMeeting(recordingId, recordingWorkspaceId);
+        if (recordingId && recordingWorkspaceId) {
+          store.openMeeting?.(recordingId, recordingWorkspaceId);
+        }
       });
     });
   }, [store]);

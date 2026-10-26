@@ -99,9 +99,11 @@ the console uses:
   meeting?"); pass `onOpenMeetings` and `onOpenMeeting` to say where those
   open. `onOpenMeeting` gets the meeting's workspace, which may not be the
   one shown, and `MeetingsListPage` uses it to open a recording made in
-  another workspace after Stop. A host without an `OpenGeniProvider` above
-  its routes passes its SDK `client`, and `workspaceId={null}` until it
-  knows the workspace.
+  another workspace after Stop. A host that mounts it above sign-in passes
+  `scope`, such as the signed-in person's id: a new value ends a recording
+  at once, and `scope={null}` (nobody signed in) records nothing. A host
+  without an `OpenGeniProvider` above its routes passes its SDK `client`,
+  and `workspaceId={null}` until it knows the workspace.
 - `MeetingsListPage`: the recorder plus the searchable list. Pass
   `externalRef` to show only the meetings that belong to something of yours,
   such as a project, and to give new recordings started there the same id;

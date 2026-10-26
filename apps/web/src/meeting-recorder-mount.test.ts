@@ -10,11 +10,14 @@ describe("Meeting recorder mount", () => {
   // ended after 8 minutes when its owner opened another workspace).
   test("lives in the root route, above the workspace shell and the waiting panels", async () => {
     const root = await source("context.tsx");
-    expect(root).toContain("<ConsoleMeetingRecorderProvider");
-    expect(root).toContain("{applicationSurface}\n    </ConsoleMeetingRecorderProvider>");
-    expect(root).toContain(
-      "<BrowserAccountsLoadingGate>{recordedSurface}</BrowserAccountsLoadingGate>",
+    expect(root).toMatch(
+      /<ConsoleMeetingRecorderProvider[^>]*>\s*\{applicationSurface\}\s*<\/ConsoleMeetingRecorderProvider>/,
     );
+    expect(root).toMatch(
+      /<BrowserAccountsLoadingGate>\s*\{recordedSurface\}\s*<\/BrowserAccountsLoadingGate>/,
+    );
+    // Above sign-in, it is told who is signed in, so sign-out ends a recording.
+    expect(root).toMatch(/<ConsoleMeetingRecorderProvider[^>]*\sperson=\{recorderPerson\}/);
     const shell = await source("routes/workspace.tsx");
     expect(shell).not.toContain("ConsoleMeetingRecorderProvider");
   });
