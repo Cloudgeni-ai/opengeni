@@ -404,6 +404,9 @@ export const embeddingMigrationTail = [
   "0982_promotion_abuse_detection.sql",
   // Calls 0345's tenancy fence routines on connected commands; replay after it.
   "0984_connected_commands_rearm_on_runner_report.sql",
+  // Patches the membership command withheld 0299 creates, by exact anchor;
+  // replay after it.
+  "0995_membership_same_role_keeps_authority.sql",
   // Rewrites keys on the withheld Knowledge tables by name; replay last.
   ...workspaceDeletionMigrationTail,
   // Builds on withheld 0275, 0345 and 0761; replay after all of them.

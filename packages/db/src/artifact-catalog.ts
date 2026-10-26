@@ -3,6 +3,10 @@ import { sql, type SQL } from "drizzle-orm";
 import { withRlsContext, type Database } from "./database";
 import type { WorkspaceArtifactViewer } from "./workspace-artifacts";
 
+/** A chat plus the most sub-sessions its lineage lists (see SESSION_TREE_DESCENDANT_LIMIT). */
+export const MAX_CATALOG_SOURCE_SESSIONS = 201;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export type ArtifactCatalogPosition = {
   key: string;
   kind: ArtifactCatalogKind;
@@ -67,18 +71,37 @@ export async function listArtifactCatalogCandidates(
     snapshotAt: string;
     after?: ArtifactCatalogPosition;
     limit: number;
+    /**
+     * Sessions whose artifacts to list, already authorized by the caller; this
+     * replaces `query.sourceSessionId`, e.g. with a chat and its sub-sessions.
+     */
+    sourceSessionIds?: readonly string[];
   },
 ): Promise<ArtifactCatalogCandidate[]> {
   if (!input.kinds.length) return [];
   if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 201)
     throw new Error("Invalid catalog candidate limit");
   const { query } = input;
-  const source = query.sourceSessionId;
+  const sources =
+    input.sourceSessionIds ?? (query.sourceSessionId ? [query.sourceSessionId] : undefined);
+  if (
+    sources &&
+    (sources.length < 1 ||
+      sources.length > MAX_CATALOG_SOURCE_SESSIONS ||
+      sources.some((id) => !UUID.test(id)))
+  )
+    throw new Error("Invalid catalog source sessions");
+  // Validated UUIDs only, so the array literal cannot carry anything else.
+  const sourceArray = sources ? sql`${`{${sources.join(",")}}`}::uuid[]` : null;
   const branches: SQL[] = [];
   if (input.kinds.includes("site"))
     branches.push(sql`
     SELECT a.id::text, 'site'::text AS kind, a.title, a.status, a.created_at, a.updated_at,
-      ${source ? sql`${source}::uuid` : sql`v.source_session_id`} AS source_session_id,
+      ${
+        sourceArray
+          ? sql`(SELECT sv.source_session_id FROM workspace_artifact_versions sv WHERE sv.workspace_id = a.workspace_id AND sv.artifact_id = a.id AND sv.source_session_id = ANY(${sourceArray}) ORDER BY sv.revision DESC LIMIT 1)`
+          : sql`v.source_session_id`
+      } AS source_session_id,
       a.current_version_id::text AS version_id, 'site'::text AS origin, a.visibility AS site_visibility
     FROM workspace_artifacts a LEFT JOIN workspace_artifact_versions v
       ON v.workspace_id = a.workspace_id AND v.artifact_id = a.id AND v.id = a.current_version_id
@@ -88,34 +111,38 @@ export async function listArtifactCatalogCandidates(
           ? sql``
           : sql` OR a.owner_subject_id = ${input.siteViewer.subjectId}::text`
       })
-      ${source ? sql`AND EXISTS (SELECT 1 FROM workspace_artifact_versions sv WHERE sv.workspace_id = a.workspace_id AND sv.artifact_id = a.id AND sv.source_session_id = ${source}::uuid)` : sql``}`);
+      ${sourceArray ? sql`AND EXISTS (SELECT 1 FROM workspace_artifact_versions sv WHERE sv.workspace_id = a.workspace_id AND sv.artifact_id = a.id AND sv.source_session_id = ANY(${sourceArray}))` : sql``}`);
   const editableKinds = input.kinds.filter((kind) =>
     ["document", "spreadsheet", "presentation"].includes(kind),
   );
   if (editableKinds.length)
     branches.push(sql`
     SELECT a.id, a.modality AS kind, a.title, a.lifecycle_state AS status, a.created_at, a.updated_at,
-      ${source ? sql`${source}::uuid` : sql`NULL::uuid`} AS source_session_id, NULL::text AS version_id, 'editable_artifact'::text AS origin, NULL::text AS site_visibility
+      ${
+        sourceArray
+          ? sql`(SELECT l.session_id FROM editable_artifact_session_links l WHERE l.account_id = a.account_id AND l.workspace_id = a.workspace_id AND l.artifact_id = a.id AND l.session_id = ANY(${sourceArray}) ORDER BY l.last_used_at DESC, l.session_id LIMIT 1)`
+          : sql`NULL::uuid`
+      } AS source_session_id, NULL::text AS version_id, 'editable_artifact'::text AS origin, NULL::text AS site_visibility
     FROM editable_artifacts a WHERE a.account_id = ${scope.accountId}::uuid AND a.workspace_id = ${scope.workspaceId}::uuid
       AND a.modality IN (${sql.join(
         editableKinds.map((kind) => sql`${kind}`),
         sql`, `,
       )})
-      ${source ? sql`AND EXISTS (SELECT 1 FROM editable_artifact_session_links l WHERE l.account_id = a.account_id AND l.workspace_id = a.workspace_id AND l.artifact_id = a.id AND l.session_id = ${source}::uuid)` : sql``}`);
+      ${sourceArray ? sql`AND EXISTS (SELECT 1 FROM editable_artifact_session_links l WHERE l.account_id = a.account_id AND l.workspace_id = a.workspace_id AND l.artifact_id = a.id AND l.session_id = ANY(${sourceArray}))` : sql``}`);
   if (input.kinds.includes("image"))
     branches.push(sql`
     SELECT f.id::text, 'image'::text AS kind, f.filename AS title, 'active'::text AS status,
       g.created_at, g.updated_at, g.session_id AS source_session_id, NULL::text AS version_id, 'generated_image'::text AS origin, NULL::text AS site_visibility
     FROM generated_image_artifacts g JOIN files f ON f.account_id = g.account_id AND f.workspace_id = g.workspace_id AND f.id = g.artifact_id
     WHERE g.account_id = ${scope.accountId}::uuid AND g.workspace_id = ${scope.workspaceId}::uuid AND g.status = 'ready' AND f.status = 'ready'
-      ${source ? sql`AND g.session_id = ${source}::uuid` : sql``}`);
+      ${sourceArray ? sql`AND g.session_id = ANY(${sourceArray})` : sql``}`);
   const publishedKinds = input.kinds.filter((kind) => kind === "file" || kind === "image");
   if (publishedKinds.length)
     branches.push(sql`
     SELECT p.file_id::text AS id, p.kind, p.title, 'active'::text AS status,
       p.published_at AS created_at, p.published_at AS updated_at, p.source_session_id, NULL::text AS version_id, 'sandbox_file'::text AS origin, NULL::text AS site_visibility
     FROM opengeni_private.list_sandbox_file_publications_pinned(${scope.accountId}::uuid, ${scope.workspaceId}::uuid,
-      ${JSON.stringify({ sourceSessionId: source, q: query.q, kinds: publishedKinds, sort: query.sort, snapshotAt: input.snapshotAt, after: input.after, limit: input.limit })}::jsonb) p`);
+      ${JSON.stringify({ sourceSessionIds: sources, q: query.q, kinds: publishedKinds, sort: query.sort, snapshotAt: input.snapshotAt, after: input.after, limit: input.limit })}::jsonb) p`);
   if (!branches.length) return [];
   const sort =
     query.sort === "title"

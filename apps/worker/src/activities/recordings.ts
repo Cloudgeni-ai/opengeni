@@ -65,6 +65,8 @@ import {
   type Database,
   type RecordingSpeakerVoice,
   type StalledRecordingWork,
+  type TrackSpeaker,
+  workspaceMemberDisplayName,
 } from "@opengeni/db";
 import {
   resolveWorkspaceRecordingSettings,
@@ -764,6 +766,26 @@ export function createRecordingActivities(
           segments.flatMap((segment) => (segment.speakerLabel ? [segment.speakerLabel] : [])),
         ).size;
         telemetry.providerCostUsd = costUsdMicros === null ? null : costUsdMicros / 1_000_000;
+        // A microphone beside computer or tab audio is the person recording.
+        const recorderLabels = plans.flatMap((plan) => (plan.fixedLabel ? [plan.fixedLabel] : []));
+        const trackSpeakers: TrackSpeaker[] = [];
+        if (recorderLabels.length > 0) {
+          const displayName = await workspaceMemberDisplayName(db, {
+            workspaceId: input.workspaceId,
+            subjectId: input.ownerSubjectId,
+          }).catch((error: unknown) => {
+            // Without a name a person can still say "It's me".
+            observability.warn("couldn't read the recording owner's name", {
+              workspaceId: input.workspaceId,
+              recordingId: input.recordingId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return null;
+          });
+          for (const label of recorderLabels) {
+            trackSpeakers.push({ label, memberSubjectId: input.ownerSubjectId, displayName });
+          }
+        }
         return await measureRecordingStage("finish", async () => {
           const creditCostMicros = charge
             ? await settleMeetingCredits({
@@ -793,6 +815,7 @@ export function createRecordingActivities(
               text: segment.text,
               words: segment.words,
             })),
+            trackSpeakers,
             voices,
           });
           telemetry.credits = creditCostMicros === null ? null : creditCostMicros / 1_000_000;

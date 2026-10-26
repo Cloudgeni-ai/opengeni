@@ -686,3 +686,54 @@ test("in Settings a first publish offers Publish without Cancel", async () => {
   expect(button(page.host, "Discard")).toBeUndefined();
   await page.unmount();
 });
+
+test("as a page of its own, a published Site's form is its Web address, and a submit says it succeeded", async () => {
+  const { client } = fakeClient();
+  let submitted = 0;
+  let back = 0;
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "none" },
+    layout: "page",
+    onSubmitted: () => (submitted += 1),
+    onBack: () => (back += 1),
+  });
+  expect(page.host.textContent).toContain("Publish to web");
+  await waitForCheck();
+  await act(async () => button(page.host, "Publish")!.click());
+  await flush();
+  expect(page.published).toHaveLength(1);
+  expect(submitted).toBe(1);
+  // Cancel goes back without publishing.
+  await act(async () => button(page.host, "Cancel")!.click());
+  expect(back).toBe(1);
+  await page.unmount();
+
+  // A refused publish stays on the form.
+  const taken = fakeClient({
+    updateSitePublication: async () => {
+      throw new OpenGeniApiError(409, JSON.stringify({ error: { code: "site_hostname_taken" } }));
+    },
+  });
+  const refused = await renderPage({
+    client: taken.client as never,
+    load: { state: "none" },
+    layout: "page",
+    onSubmitted: () => (submitted += 1),
+  });
+  await waitForCheck();
+  await act(async () => button(refused.host, "Publish")!.click());
+  await flush();
+  expect(submitted).toBe(1);
+  expect(refused.host.textContent).toContain("Another Site uses this name.");
+  await refused.unmount();
+
+  const settings = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: published() },
+    layout: "page",
+  });
+  expect(settings.host.textContent).toContain("Web address");
+  expect(settings.host.textContent).not.toContain("Publish to web");
+  await settings.unmount();
+});
