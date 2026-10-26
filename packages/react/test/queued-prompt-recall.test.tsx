@@ -519,8 +519,11 @@ describe("useQueuedPromptRecall", () => {
       return { hook, recalled };
     }
 
+    // An ordinary Send is optimistic: the row shows it as queued at once.
+    const sendingNow = () => recallComposer({ optimisticMessages: [optimistic({})] });
+
     test("is taken while the send settles, then recalls the prompt just sent", async () => {
-      const composer = recallComposer({ sending: true });
+      const composer = sendingNow();
       const { hook, recalled } = await renderPhases({ turns: [older], composer });
       // The queue row already shows the send, so the first Up is taken now.
       expect(hook.result.current).toMatchObject({ available: true, turnId: null });
@@ -535,8 +538,9 @@ describe("useQueuedPromptRecall", () => {
         turns: [older],
         composer: {
           ...composer,
-          sending: false,
-          optimisticMessages: [optimistic({ state: "queued", turnId: newer.id })],
+          optimisticMessages: [
+            optimistic({ state: "queued", turnId: newer.id, appliedQueueVersion: 2 }),
+          ],
         },
       });
       await flush();
@@ -546,8 +550,9 @@ describe("useQueuedPromptRecall", () => {
         turns: [older, newer],
         composer: {
           ...composer,
-          sending: false,
-          optimisticMessages: [optimistic({ state: "queued", turnId: newer.id })],
+          optimisticMessages: [
+            optimistic({ state: "queued", turnId: newer.id, appliedQueueVersion: 2 }),
+          ],
         },
       });
       await flushing(() => pending);
@@ -557,10 +562,86 @@ describe("useQueuedPromptRecall", () => {
       await hook.unmount();
     });
 
-    test("never pulls back an older prompt when the agent took the new one", async () => {
-      const composer = recallComposer({
-        optimisticMessages: [optimistic({ state: "sending" })],
+    test("the queue may list the prompt before the send learns its turn", async () => {
+      const composer = sendingNow();
+      const { hook, recalled } = await renderPhases({ turns: [older, newer], composer });
+      let outcome = null as QueuedPromptRecallOutcome | null;
+      const pending = hook.result.current!.recall().then((value) => {
+        outcome = value;
       });
+      await flush();
+      expect(outcome).toBeNull();
+      await hook.rerender({
+        turns: [older, newer],
+        composer: {
+          ...composer,
+          optimisticMessages: [optimistic({ state: "queued", turnId: newer.id })],
+        },
+      });
+      await flushing(() => pending);
+      expect(outcome).toBe("recalled");
+      expect(recalled).toEqual([newer.id]);
+      await hook.unmount();
+    });
+
+    test("a prompt typed and sent while Up waits is never pulled back", async () => {
+      const third = fakeTurn({ id: "third", prompt: "sent after the press" });
+      const composer = sendingNow();
+      const { hook, recalled } = await renderPhases({ turns: [older], composer });
+      let outcome = null as QueuedPromptRecallOutcome | null;
+      const pending = hook.result.current!.recall().then((value) => {
+        outcome = value;
+      });
+      await flush();
+      // Send clears the composer at once, so only the new send shows the
+      // person moved on.
+      await hook.rerender({
+        turns: [older],
+        composer: {
+          ...composer,
+          optimisticMessages: [optimistic({}), optimistic({ clientEventId: "client-2" })],
+        },
+      });
+      await flushing(() => pending);
+      await hook.rerender({
+        turns: [older, newer, third],
+        composer: {
+          ...composer,
+          optimisticMessages: [
+            optimistic({ state: "queued", turnId: newer.id }),
+            optimistic({ clientEventId: "client-2", state: "queued", turnId: third.id }),
+          ],
+        },
+      });
+      await flush();
+      expect(outcome).toBe("unavailable");
+      expect(recalled).toEqual([]);
+      expect(composer.applied).toEqual([]);
+      await hook.unmount();
+    });
+
+    test("a send that fails while Up waits leaves the composer alone", async () => {
+      const composer = sendingNow();
+      const { hook, recalled } = await renderPhases({ turns: [older], composer });
+      let outcome = null as QueuedPromptRecallOutcome | null;
+      const pending = hook.result.current!.recall().then((value) => {
+        outcome = value;
+      });
+      await flush();
+      await hook.rerender({
+        turns: [older],
+        composer: { ...composer, optimisticMessages: [optimistic({ state: "failed" })] },
+      });
+      await flushing(() => pending);
+      expect(outcome).toBe("unavailable");
+      expect(recalled).toEqual([]);
+      expect(composer.applied).toEqual([]);
+      expect(composer.values).toEqual([]);
+      await hook.unmount();
+    });
+
+    test("never pulls back an older prompt when the agent took the new one", async () => {
+      const composer = sendingNow();
       const { hook, recalled } = await renderPhases({ turns: [older], composer });
       expect(hook.result.current).toMatchObject({ available: true, turnId: null });
       let outcome = null as QueuedPromptRecallOutcome | null;
@@ -586,8 +667,8 @@ describe("useQueuedPromptRecall", () => {
       await hook.unmount();
     });
 
-    test("typing while the send settles keeps the new draft", async () => {
-      const composer = recallComposer({ sending: true });
+    test("reports already sent even after the started send leaves the composer", async () => {
+      const composer = sendingNow();
       const { hook, recalled } = await renderPhases({ turns: [older], composer });
       let outcome = null as QueuedPromptRecallOutcome | null;
       const pending = hook.result.current!.recall().then((value) => {
@@ -595,15 +676,52 @@ describe("useQueuedPromptRecall", () => {
       });
       await flush();
       await hook.rerender({
-        turns: [older, newer],
+        turns: [older],
         composer: {
           ...composer,
-          sending: false,
+          optimisticMessages: [
+            optimistic({ state: "queued", turnId: newer.id, appliedQueueVersion: 2 }),
+          ],
+        },
+      });
+      await flush();
+      expect(outcome).toBeNull();
+      // Its turn started, so the composer drops the optimistic entry.
+      await hook.rerender({ turns: [older], composer: { ...composer, optimisticMessages: [] } });
+      await flushing(() => pending);
+      expect(outcome).toBe("already_sent");
+      expect(recalled).toEqual([]);
+      expect(composer.applied).toEqual([]);
+      await hook.unmount();
+    });
+
+    test("typing while the send settles keeps the new draft", async () => {
+      const composer = sendingNow();
+      const { hook, recalled } = await renderPhases({ turns: [older], composer });
+      let outcome = null as QueuedPromptRecallOutcome | null;
+      const pending = hook.result.current!.recall().then((value) => {
+        outcome = value;
+      });
+      await flush();
+      await hook.rerender({
+        turns: [older],
+        composer: {
+          ...composer,
           value: "a new thought",
           hasDraftContent: () => true,
         },
       });
       await flushing(() => pending);
+      await hook.rerender({
+        turns: [older, newer],
+        composer: {
+          ...composer,
+          value: "a new thought",
+          hasDraftContent: () => true,
+          optimisticMessages: [optimistic({ state: "queued", turnId: newer.id })],
+        },
+      });
+      await flush();
       expect(outcome).toBe("unavailable");
       expect(recalled).toEqual([]);
       expect(composer.applied).toEqual([]);
@@ -612,7 +730,7 @@ describe("useQueuedPromptRecall", () => {
 
     test("a send that never settles drops the press", async () => {
       await withVirtualClock(async () => {
-        const composer = recallComposer({ sending: true });
+        const composer = sendingNow();
         const { hook, recalled } = await renderPhases({ turns: [older], composer });
         let outcome = null as QueuedPromptRecallOutcome | null;
         void hook.result.current!.recall().then((value) => {
@@ -628,7 +746,7 @@ describe("useQueuedPromptRecall", () => {
     });
 
     test("unmounting while the send settles ends the wait", async () => {
-      const composer = recallComposer({ sending: true });
+      const composer = sendingNow();
       const { hook, recalled } = await renderPhases({ turns: [older], composer });
       let outcome = null as QueuedPromptRecallOutcome | null;
       const pending = hook.result.current!.recall().then((value) => {
@@ -638,6 +756,26 @@ describe("useQueuedPromptRecall", () => {
       await pending;
       expect(outcome).toBe("unavailable");
       expect(recalled).toEqual([]);
+    });
+
+    test("a running Steer does not take Up, and nothing waits behind it", async () => {
+      const steering = recallComposer({ sending: true });
+      const { hook, recalled } = await renderPhases({ turns: [], composer: steering });
+      expect(hook.result.current).toMatchObject({ available: false, turnId: null });
+      let outcome = null as QueuedPromptRecallOutcome | null;
+      await flushing(async () => {
+        outcome = await hook.result.current!.recall();
+      });
+      expect(outcome).toBe("unavailable");
+      // Once the steer settles, the person's waiting prompt is recallable again.
+      await hook.rerender({ turns: [older], composer: recallComposer() });
+      expect(hook.result.current).toMatchObject({ available: true, turnId: older.id });
+      await flushing(async () => {
+        outcome = await hook.result.current!.recall();
+      });
+      expect(outcome).toBe("recalled");
+      expect(recalled).toEqual([older.id]);
+      await hook.unmount();
     });
   });
 
