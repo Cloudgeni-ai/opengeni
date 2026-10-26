@@ -352,11 +352,14 @@ async function main(): Promise<void> {
     if (saveTo !== undefined) preflightImagePath(saveTo);
     const operationId = randomUUID();
     const result = await client.call(entry.identity, argumentsValue, { operationId });
+    // An error result has no image to save; print it as the call's answer
+    // rather than as a completed call whose image could not be saved.
+    const saveImage = result.isError === true ? undefined : saveTo;
     let printed: AttemptToolResult;
     try {
       printed = await materializeCallImages(result, {
         full,
-        ...(saveTo === undefined ? {} : { saveTo }),
+        ...(saveImage === undefined ? {} : { saveTo: saveImage }),
       });
     } catch (error) {
       process.stdout.write(await imageSaveFailureOutput(result, error, operationId, full));

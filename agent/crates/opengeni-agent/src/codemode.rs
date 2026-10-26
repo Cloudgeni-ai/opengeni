@@ -255,6 +255,13 @@ async fn run_call(client: &CodemodeClient, args: CodemodeCallArgs) -> Result<(),
     }
     let operation_id = Uuid::new_v4().to_string();
     let result = client.call_as(args, operation_id.clone()).await?;
+    // An error result has no image to save; print it as the call's answer
+    // rather than as a completed call whose image could not be saved.
+    let save_image = if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        None
+    } else {
+        save_image
+    };
     let materialized = if full && save_image.is_none() {
         Ok(result.clone())
     } else {
