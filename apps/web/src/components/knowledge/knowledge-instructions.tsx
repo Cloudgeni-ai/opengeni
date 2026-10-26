@@ -312,11 +312,9 @@ export function InstructionsPage({
           ) : configured ? (
             "set in earlier settings"
           ) : null,
-          !canEdit
-            ? personal
-              ? "Only the owner can change these"
-              : "Only workspace admins can change these"
-            : null,
+          // In a Personal workspace only its owner reads this page, so a
+          // refusal note would only ever address the owner themself.
+          !canEdit && !personal ? "Only workspace admins can change these" : null,
         ]}
         actions={
           canEdit ? (

@@ -23,30 +23,35 @@ function row(subjectId: string, used: number, limit: number | null) {
 }
 
 let usage: Record<string, unknown> = {};
+// Stable across renders, as the real app context client is.
+const client = { listWorkspaceMembers: async () => [] };
+let permissions: string[] = ["workspace:read"];
+let budgetOptions: { roster: boolean; budget: boolean }[] = [];
 
 mock.module("@opengeni/react/app/app-context", () => ({
   useAppContext: () => ({
-    client: {},
+    client,
     accessContext: {
       mode: "managed",
       subjectId: viewer,
       accountGrants: [],
-      workspaceGrants: [
-        { workspaceId, accountId: organizationId, permissions: ["workspace:read"] },
-      ],
+      workspaceGrants: [{ workspaceId, accountId: organizationId, permissions }],
     },
   }),
 }));
 const budgetModule = await import("./use-workspace-budget");
 mock.module("./use-workspace-budget", () => ({
   ...budgetModule,
-  useWorkspaceBudget: () => ({
-    usage: { value: usage, error: null, loading: false },
-    allowance: { value: null, error: null, loading: false },
-    rosterDenied: false,
-    reload: async () => undefined,
-    setMemberRule: async () => undefined,
-  }),
+  useWorkspaceBudget: (_client: unknown, _workspaceId: string, options: never) => {
+    budgetOptions.push(options);
+    return {
+      usage: { value: usage, error: null, loading: false },
+      allowance: { value: null, error: null, loading: false },
+      rosterDenied: false,
+      reload: async () => undefined,
+      setMemberRule: async () => undefined,
+    };
+  },
 }));
 
 beforeAll(() => {
@@ -65,6 +70,7 @@ const { WorkspaceUsagePage, ownUsedThisMonth } = await import("./workspace-usage
 const { formatCredits } = await import("@/lib/usage-allowances");
 
 async function render(personalOrganizationLabel?: string) {
+  budgetOptions = [];
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -133,7 +139,30 @@ describe("Workspace usage page", () => {
       expect(rendered.text).toContain(`${formatCredits(31_402)} used this month`);
       expect(rendered.text).toContain("Your Personal workspace uses Solo org's credits");
       expect(rendered.text).not.toContain("Set a budget");
+      expect(budgetOptions.length).toBeGreaterThan(0);
+      for (const options of budgetOptions) {
+        expect(options).toEqual({ roster: false, budget: false });
+      }
     } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("an admin's roster with one other member never shows that member's spend as theirs", async () => {
+    permissions = ["workspace:admin"];
+    usage = {
+      period: "month",
+      workspace: { ...row("workspace", 64_000, null), subjectId: undefined },
+      members: [row("user:someone-else", 64_000, null)],
+      nextCursor: null,
+    };
+    const rendered = await render();
+    try {
+      expect(budgetOptions.at(-1)).toEqual({ roster: true, budget: true });
+      expect(rendered.text).toContain(`${formatCredits(0)} used this month`);
+      expect(rendered.text).not.toContain(`${formatCredits(64_000)} used this month`);
+    } finally {
+      permissions = ["workspace:read"];
       await rendered.unmount();
     }
   });
@@ -145,7 +174,11 @@ describe("Workspace usage page", () => {
       members: [row("user:other", 7, null), row(viewer, 5, null)],
       nextCursor: null,
     } as never;
-    expect(ownUsedThisMonth(response, viewer)).toBe(5);
-    expect(ownUsedThisMonth(response, "user:absent")).toBe(0);
+    expect(ownUsedThisMonth(response, viewer, false)).toBe(5);
+    expect(ownUsedThisMonth(response, "user:absent", false)).toBe(0);
+    const single = { ...(response as object), members: [row("user:other", 7, null)] } as never;
+    // `/usage/me` returns only the caller's row; a roster's lone row is someone else's.
+    expect(ownUsedThisMonth(single, viewer, true)).toBe(7);
+    expect(ownUsedThisMonth(single, viewer, false)).toBe(0);
   });
 });

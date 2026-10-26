@@ -47,6 +47,8 @@ export function WorkspaceUsagePage({
   });
   const names = useWorkspaceMemberNames(workspaceId, shared && isAdmin);
   const usage = budget.usage.value;
+  // `/usage/me` answers for the viewer alone; a roster read covers everyone.
+  const selfOnly = !(shared && isAdmin) || budget.rosterDenied;
   const summary = useMemo(() => (usage ? summarizeUsage(usage, viewer) : null), [usage, viewer]);
   const config = budget.allowance.value?.config ?? null;
 
@@ -103,7 +105,7 @@ export function WorkspaceUsagePage({
           }
           action={manageBudget}
         >
-          <OwnUsedThisMonth usage={usage} viewer={viewer} />
+          <OwnUsedThisMonth usage={usage} viewer={viewer} selfOnly={selfOnly} />
         </Section>
       </SectionStack>
     );
@@ -135,7 +137,7 @@ export function WorkspaceUsagePage({
             ) : null}
           </div>
         ) : (
-          <OwnUsedThisMonth usage={usage} viewer={viewer} />
+          <OwnUsedThisMonth usage={usage} viewer={viewer} selfOnly={selfOnly} />
         )}
       </Section>
 
@@ -171,19 +173,32 @@ export function WorkspaceUsagePage({
 }
 
 /** What the viewer spent this month, for when no personal limit meters it. */
-export function ownUsedThisMonth(usage: WorkspaceUsageResponse, viewer: string): number {
+export function ownUsedThisMonth(
+  usage: WorkspaceUsageResponse,
+  viewer: string,
+  selfOnly: boolean,
+): number {
   const row =
     usage.members.find((member) => member.subjectId === viewer) ??
-    // `/usage/me` returns only the caller's own row.
-    (usage.members.length === 1 ? usage.members[0] : undefined);
+    // Only `/usage/me`, which returns the caller's own row, may stand in for
+    // the viewer; a roster's single row can be someone else's.
+    (selfOnly && usage.members.length === 1 ? usage.members[0] : undefined);
   return row?.used ?? 0;
 }
 
-function OwnUsedThisMonth({ usage, viewer }: { usage: WorkspaceUsageResponse; viewer: string }) {
+function OwnUsedThisMonth({
+  usage,
+  viewer,
+  selfOnly,
+}: {
+  usage: WorkspaceUsageResponse;
+  viewer: string;
+  selfOnly: boolean;
+}) {
   return (
     <p className="py-1 text-sm text-fg-muted">
       <span className="text-2xl font-semibold tabular-nums text-fg">
-        {formatCredits(ownUsedThisMonth(usage, viewer))}
+        {formatCredits(ownUsedThisMonth(usage, viewer, selfOnly))}
       </span>{" "}
       used this month
     </p>

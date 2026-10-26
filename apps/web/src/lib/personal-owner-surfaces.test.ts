@@ -12,6 +12,7 @@ const OWNER_ADMINISTERED_SURFACES = [
   "routes/insights.tsx",
   "components/settings/settings-rail.tsx",
   "components/knowledge/knowledge-page.tsx",
+  "components/knowledge/knowledge-instructions.tsx",
   "components/settings/default-machine-row.tsx",
 ] as const;
 
