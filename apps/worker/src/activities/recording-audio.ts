@@ -7,6 +7,15 @@ import { readTail, trackRecordingProcesses } from "./recording-usage";
 export { recordingAudioContainer, type RecordingAudioContainer };
 
 /**
+ * Decode audio on its container timeline. A capture can leave small holes in
+ * its timestamps (a desktop's system audio did: 436 holes, 33 s in under
+ * 8 minutes). A plain decode closes them up, so everything timed on the
+ * decoded audio (words, speaker turns, pieces) runs early against the
+ * player. This fills each hole with silence instead, from time zero.
+ */
+export const RECORDING_TIMELINE_FILTER = "aresample=async=1:first_pts=0";
+
+/**
  * Turning a track's uploaded chunks into one seekable audio file.
  *
  * A browser MediaRecorder writes one container header and then appends
@@ -242,7 +251,7 @@ export async function prepareRecordingTrackAudio(input: {
       const delayed = runs
         .map((run, index) => {
           const delay = Math.max(0, run.startMilliseconds - first);
-          return `[${index}:a:0]aresample=48000,aformat=channel_layouts=mono,adelay=${delay}:all=1[a${index}]`;
+          return `[${index}:a:0]${RECORDING_TIMELINE_FILTER},aresample=48000,aformat=channel_layouts=mono,adelay=${delay}:all=1[a${index}]`;
         })
         .join(";");
       const mix = `${runs.map((_, index) => `[a${index}]`).join("")}amix=inputs=${runs.length}:normalize=0:dropout_transition=0[out]`;
@@ -298,12 +307,34 @@ const PIECE_OUTPUT: Record<
   flac: {
     extension: "flac",
     mimeType: "audio/flac",
-    args: ["-ac", "1", "-ar", "16000", "-c:a", "flac", "-f", "flac"],
+    args: [
+      "-af",
+      RECORDING_TIMELINE_FILTER,
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "flac",
+      "-f",
+      "flac",
+    ],
   },
   wav: {
     extension: "wav",
     mimeType: "audio/wav",
-    args: ["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav"],
+    args: [
+      "-af",
+      RECORDING_TIMELINE_FILTER,
+      "-ac",
+      "1",
+      "-ar",
+      "16000",
+      "-c:a",
+      "pcm_s16le",
+      "-f",
+      "wav",
+    ],
   },
   webm: { extension: "webm", mimeType: "audio/webm", args: ["-c:a", "copy", "-f", "webm"] },
   mp4: { extension: "m4a", mimeType: "audio/mp4", args: ["-c:a", "copy", "-f", "ipod"] },

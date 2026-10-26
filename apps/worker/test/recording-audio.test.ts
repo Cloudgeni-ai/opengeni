@@ -4,11 +4,19 @@ import {
   prepareRecordingTrackAudio,
   recordingAudioContainer,
   RecordingAudioError,
+  renderRecordingAudioPiece,
   startsAdtsFrame,
   startsContainer,
 } from "../src/activities/recording-audio";
 
-import { adtsAac, adtsFrames, ffmpegPath, hasFfmpeg, opusWebm } from "./recording-audio-fixtures";
+import {
+  adtsAac,
+  adtsFrames,
+  ffmpegPath,
+  gappedOpusWebm,
+  hasFfmpeg,
+  opusWebm,
+} from "./recording-audio-fixtures";
 
 function split(bytes: Uint8Array, parts: number): Uint8Array[] {
   const size = Math.ceil(bytes.length / parts);
@@ -169,6 +177,41 @@ describe("recording audio", () => {
       }),
     ).rejects.toMatchObject({ code: "missing_chunk" });
   });
+
+  test.skipIf(!hasFfmpeg)(
+    "a converted piece keeps the track's timeline across holes in its timestamps",
+    async () => {
+      // Ten seconds on the timeline, but only seven of audio: a plain decode
+      // would close the holes up and time every later word too early.
+      const audio = {
+        bytes: gappedOpusWebm(10, [
+          [2, 4],
+          [6, 7],
+        ]),
+        extension: "webm",
+      };
+      const seconds = (wav: Uint8Array) => (wav.byteLength - 44) / 32_000;
+      const whole = await renderRecordingAudioPiece({
+        audio,
+        startMilliseconds: 0,
+        endMilliseconds: 10_000,
+        whole: true,
+        format: "wav",
+        ffmpegPath,
+      });
+      expect(Math.abs(seconds(whole.bytes) - 10)).toBeLessThan(0.1);
+      // A cut across a hole is as long as the stretch of timeline it covers.
+      const piece = await renderRecordingAudioPiece({
+        audio,
+        startMilliseconds: 5_000,
+        endMilliseconds: 9_000,
+        whole: false,
+        format: "wav",
+        ffmpegPath,
+      });
+      expect(Math.abs(seconds(piece.bytes) - 4)).toBeLessThan(0.1);
+    },
+  );
 
   test("a track that does not start with a header is invalid", async () => {
     await expect(
