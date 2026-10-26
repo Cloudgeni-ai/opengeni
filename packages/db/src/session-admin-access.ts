@@ -542,6 +542,7 @@ export async function readTurnSenderAccess(
           and(
             eq(grants.workspaceId, input.workspaceId),
             eq(grants.subjectId, input.subjectId),
+            eq(schema.sessionTurns.workspaceId, input.workspaceId),
             eq(schema.sessionTurns.sessionId, input.sessionId),
           ),
         )
