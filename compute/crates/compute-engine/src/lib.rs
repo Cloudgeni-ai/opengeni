@@ -243,9 +243,11 @@ pub trait Engine: Send + Sync + 'static {
 
     /// What the VM's processes have written through system calls since
     /// they started: every write its VMM makes to the VM's drives counts
-    /// once the call returns, besides others an engine documents. Only
-    /// differences between readings of the same VM mean anything. Engines
-    /// that cannot tell report an error.
+    /// once the call returns, and every file page it dirties, also with no
+    /// write call (as a discard over part of a block does), counts as it is
+    /// dirtied, besides others an engine documents. Only differences
+    /// between readings of the same VM mean anything. Engines that cannot
+    /// tell report an error.
     fn writes(&self, vm: &Self::Vm) -> Result<Writes, EngineError> {
         let _ = vm;
         Err(EngineError::new(

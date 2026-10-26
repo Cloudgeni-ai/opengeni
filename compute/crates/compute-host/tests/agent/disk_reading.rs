@@ -12,7 +12,7 @@ use std::time::Duration;
 use compute_core::{DiskPolicy, DiskSpace, HostPolicy};
 use compute_engine::Writes;
 use compute_host::fleet::{LeaseGate, boot_now};
-use compute_host::protocol::{DiskStatus, Id, ImageId, SandboxConfig};
+use compute_host::protocol::{DiskStatus, Id, ImageId, LevelName, SandboxConfig};
 use compute_host::{Directory, DiskGauge, Handle, HostAgent, HostError};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
@@ -222,6 +222,8 @@ async fn awake_with_written_disk(gauge: &DiskGauge) -> (Lab, PathBuf, u64) {
             // Far enough apart that only the sample taking a reading
             // finds what each test does as it is read.
             config.sample_every = Duration::from_millis(500);
+            // Its guest is asked to write its disks out before it pauses.
+            config.restore_notice_port = Some(53);
         },
     )
     .await;
@@ -316,10 +318,76 @@ async fn space_a_guest_frees_and_takes_again_as_the_disk_is_read_stays_booked_fo
         *counted = Writes {
             bytes: counted.bytes + WRITTEN,
             calls: counted.calls + 1,
+            dirtied: counted.dirtied,
         };
     };
     let raced = read_free(&gauge, &lab, Some(Box::new(race))).await;
     assert_booked_again(written, raced);
+    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    lab.assert_clean();
+}
+
+/// A guest that frees space just before the disk reading and takes it
+/// again with no write call, as discards over part of shared blocks do
+/// (the file system copies each such block to a new one), leaves the disk
+/// holding as much as before while the reading shows the space free. The
+/// pages its VMM dirtied meanwhile are counted, so the space stays booked
+/// for it all the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_a_guest_takes_again_with_no_write_call_stays_booked_for_it() {
+    let gauge = DiskGauge::default();
+    let (lab, disk, written) = awake_with_written_disk(&gauge).await;
+
+    let world = Arc::clone(&lab.world);
+    let rewritten = disk.clone();
+    let race = move || {
+        trim(&rewritten);
+        write_again(&rewritten);
+        world.written.lock().unwrap().dirtied += WRITTEN;
+    };
+    let raced = read_free(&gauge, &lab, Some(Box::new(race))).await;
+    assert_booked_again(written, raced);
+    assert_eq!(read_free(&gauge, &lab, None).await, written);
+    lab.assert_clean();
+}
+
+/// Space a guest frees as it trims its disk before a pause stays booked
+/// for it: the pause holds the VM, so no reading of its disk comes until
+/// the pause ends, and the guest may take the space again before it
+/// pauses, or once it wakes. A reading of its disk after it woke ends
+/// that.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn space_a_guest_trims_as_it_pauses_stays_booked_for_it() {
+    let gauge = DiskGauge::default();
+    let (lab, disk, written) = awake_with_written_disk(&gauge).await;
+    let sandbox = id(1);
+
+    lab.world.syncs_held.store(true, Ordering::SeqCst);
+    let asked = lab.world.syncs.load(Ordering::SeqCst);
+    let trims = async {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lab.world.syncs.load(Ordering::SeqCst) == asked {
+            assert!(
+                Instant::now() < deadline,
+                "the pause never asked for a sync"
+            );
+            sleep(Duration::from_millis(5)).await;
+        }
+        // The guest trims as the disk reading is taken, and writes it all
+        // again before it answers.
+        let freed = disk.clone();
+        let raced = read_free(&gauge, &lab, Some(Box::new(move || trim(&freed)))).await;
+        write_again(&disk);
+        lab.world.syncs_held.store(false, Ordering::SeqCst);
+        raced
+    };
+    let (_, raced) = tokio::join!(lab.sleep_to(sandbox, LevelName::Paused), trims);
+    assert_booked_again(written, raced);
+
+    lab.wait_level(sandbox, LevelName::Paused).await;
+    lab.wake(sandbox).await;
+    lab.wait_level(sandbox, LevelName::Running).await;
+    sleep(Duration::from_millis(1100)).await;
     assert_eq!(read_free(&gauge, &lab, None).await, written);
     lab.assert_clean();
 }
