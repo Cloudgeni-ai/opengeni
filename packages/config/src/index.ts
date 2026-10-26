@@ -1031,6 +1031,20 @@ const SettingsSchema = z.object({
     .regex(/^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u, "Use provider/model, such as elevenlabs/scribe_v2")
     .optional(),
   /**
+   * The model a recorder streams to for the live transcript, as
+   * `provider/model`. Defaults to ElevenLabs Scribe v2 Realtime. With
+   * OPENGENI_SPEECH_TO_TEXT_PINNED, the live transcript goes only to the
+   * pinned provider or this model.
+   */
+  recordingLiveTranscription: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9-]+\/[A-Za-z0-9._-]+$/u,
+      "Use provider/model, such as azure-openai/gpt-4o-transcribe",
+    )
+    .optional(),
+  /**
    * One speech-to-text model for every use (meetings, dictation), as
    * `provider/model`. Workspaces then cannot pick another, and nothing else
    * hears the audio. Unset lets each workspace choose.
@@ -2748,10 +2762,18 @@ function voiceInputProviderRegistryWithIssues(settings: Settings): {
         "2025-04-01-preview";
       const apiKey = settings.voiceInputAzureApiKey ?? settings.azureOpenaiApiKey ?? null;
       const adToken = settings.voiceInputAzureAdToken ?? settings.azureOpenaiAdToken ?? null;
+      // Without a key or a fixed token, the deployment's own Microsoft Entra
+      // identity signs in to a speech deployment named for voice input, as it
+      // does for the recordings' Speech account.
+      const signsInAsDeployment =
+        Boolean(settings.voiceInputAzureEndpoint || settings.voiceInputAzureDeployment) &&
+        deploymentAzureEntraCredential(settings) !== null;
       if (
         !endpoint ||
         !deployment ||
-        (!isUsableVoiceInputSecret(apiKey) && !isUsableVoiceInputSecret(adToken))
+        (!isUsableVoiceInputSecret(apiKey) &&
+          !isUsableVoiceInputSecret(adToken) &&
+          !signsInAsDeployment)
       ) {
         continue;
       }
@@ -5504,6 +5526,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     recordingAzureSpeechEndpoint: optional("OPENGENI_RECORDING_AZURE_SPEECH_ENDPOINT"),
     recordingAzureSpeechApiKey: optional("OPENGENI_RECORDING_AZURE_SPEECH_API_KEY"),
     recordingTranscriptionDefault: optional("OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT"),
+    recordingLiveTranscription: optional("OPENGENI_RECORDING_LIVE_TRANSCRIPTION"),
     speechToTextPinned: optional("OPENGENI_SPEECH_TO_TEXT_PINNED"),
     voiceInputProviderOrder: optional("OPENGENI_VOICE_INPUT_PROVIDER_ORDER"),
     voiceInputOpenaiEnabled: optional("OPENGENI_VOICE_INPUT_OPENAI_ENABLED"),
@@ -11174,6 +11197,7 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
   }
   for (const [env, value] of [
     ["OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT", settings.recordingTranscriptionDefault],
+    ["OPENGENI_RECORDING_LIVE_TRANSCRIPTION", settings.recordingLiveTranscription],
     ["OPENGENI_SPEECH_TO_TEXT_PINNED", settings.speechToTextPinned],
   ] as const) {
     const provider = value?.split("/")[0];

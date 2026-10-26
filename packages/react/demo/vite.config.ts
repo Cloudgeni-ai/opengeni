@@ -15,6 +15,7 @@ const demoInputs = {
   fleetPolicy: resolve(__dirname, "fleet-policy.html"),
   queue: resolve(__dirname, "queue.html"),
   machines: resolve(__dirname, "machines.html"),
+  memberMachines: resolve(__dirname, "member-machines.html"),
   chromeSetupCard: resolve(__dirname, "chrome-setup-card.html"),
   workbench: resolve(__dirname, "workbench.html"),
   workbenchDock: resolve(__dirname, "workbench-dock.html"),

@@ -24054,6 +24054,14 @@
         "$": "enum=[\"\\\"auto\\\"\",\"\\\"ours\\\"\"]"
       }
     },
+    "RecordingLiveProtocol": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"elevenlabs.scribe_realtime\\\"\",\"\\\"openai.realtime\\\"\"]"
+      }
+    },
     "RecordingLiveSegment": {
       "io": [
         "output"
@@ -24079,9 +24087,11 @@
         "$.audio.sampleRate": "integer!",
         "$.expiresAt": "string!",
         "$.model": "string!",
-        "$.protocol": "enum!=[\"\\\"elevenlabs.scribe_realtime\\\"\"]",
+        "$.protocol": "ref(RecordingLiveProtocol)!",
         "$.providerId": "string!",
-        "$.url": "string!"
+        "$.token": "string?",
+        "$.url": "string!",
+        "$.webrtcUrl": "string?"
       }
     },
     "RecordingMode": {
@@ -34089,6 +34099,7 @@
       "parseRetainedWorkspaceFileReference": "value",
       "parseSandboxFileArtifactReceipt": "value",
       "parseSandboxLink": "value",
+      "parseSessionReference": "value",
       "parseSseStream": "value",
       "parseToolDisplayMetadata": "value",
       "parseWorkspaceLiveEvent": "value",
@@ -35921,6 +35932,10 @@
       "defaultSystemAudioSource": "value",
       "desktopSystemAudioSource": "value",
       "displaySystemAudioSource": "value",
+      "LiveFetch": "type",
+      "LiveMediaTrack": "type",
+      "LivePeerConnection": "type",
+      "LivePeerConnectionConstructor": "type",
       "LiveTranscriber": "type",
       "LiveTranscriberOptions": "type",
       "LiveTranscriptSegment": "type",
@@ -37511,6 +37526,7 @@
       "ModelPolicyPickerProps": "type",
       "OPEN_WORKSTREAM_CONTROL_EVENT": "value",
       "PauseButton": "value",
+      "PauseButtonSlot": "value",
       "PausedState": "value",
       "PersistVoiceRecordingChunkInput": "type",
       "PersistVoiceRecordingChunkResult": "type",
@@ -38040,6 +38056,7 @@
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
       "meetingTitle": "value",
+      "ownerLiveLaneName": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
       "speakerColorSlots": "value",

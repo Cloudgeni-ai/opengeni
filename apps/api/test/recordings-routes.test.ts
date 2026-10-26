@@ -14,6 +14,7 @@ import {
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
+import { createSpeechToTextDeployment } from "@opengeni/core/transcription-service";
 import { createApp, type AppDependencies } from "../src/app";
 import { meetingLanguage } from "../src/routes/recordings";
 
@@ -41,6 +42,8 @@ async function fixture(
   options: {
     transcription?: TranscriptionService;
     settings?: Parameters<typeof testSettings>[0];
+    /** What the deployment's speech providers call, such as Azure sign-in. */
+    speechFetch?: typeof fetch;
   } = {},
 ) {
   const [account] =
@@ -84,16 +87,25 @@ async function fixture(
     },
   };
   const started: Started[] = [];
+  const settings = testSettings({
+    productAccessMode: "configured",
+    sandboxBackend: "none",
+    publicBaseUrl: "https://opengeni.example",
+    environmentsEncryptionKey: encryptionKey.toString("base64"),
+    ...options.settings,
+  });
   const app = createApp({
     db: db.db,
     bus: new MemoryEventBus(),
-    settings: testSettings({
-      productAccessMode: "configured",
-      sandboxBackend: "none",
-      publicBaseUrl: "https://opengeni.example",
-      environmentsEncryptionKey: encryptionKey.toString("base64"),
-      ...options.settings,
-    }),
+    settings,
+    ...(options.speechFetch
+      ? {
+          speechToText: createSpeechToTextDeployment(
+            { settings, db: db.db },
+            { fetch: options.speechFetch },
+          ),
+        }
+      : {}),
     objectStorage,
     ...(options.transcription ? { transcription: options.transcription } : {}),
     workflowClient: {
@@ -716,6 +728,94 @@ describe("recording routes", () => {
       ).status;
     expect(await create({ providerId: "elevenlabs", model: "scribe_v2" })).toBe(400);
     expect(await create(pin)).toBe(201);
+  });
+
+  test("a pinned deployment streams the live preview to the Azure OpenAI deployment its operator names", async () => {
+    const minted: { url: string; authorization: string | null }[] = [];
+    const scope = await fixture({
+      settings: {
+        recordingAzureSpeechEndpoint: "https://speech.example.cognitiveservices.azure.com",
+        recordingAzureSpeechApiKey: "deployment-key",
+        speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+        recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+        voiceInputProviderOrder: "azure-openai",
+        voiceInputAzureEndpoint: "https://ai.example.cognitiveservices.azure.com",
+        voiceInputAzureDeployment: "gpt-4o-transcribe",
+        azureTenantId: "tenant",
+        azureClientId: "client",
+        azureClientSecret: "secret",
+      },
+      speechFetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        if (request.url.includes("/oauth2/")) {
+          return Response.json({ access_token: "entra", expires_in: 3_600 });
+        }
+        minted.push({ url: request.url, authorization: request.headers.get("authorization") });
+        return Response.json({
+          value: "ek_live",
+          expires_at: Math.floor(Date.now() / 1_000) + 600,
+        });
+      }) as typeof fetch,
+    });
+    const models = await scope.owner.call("GET", "/recording-models");
+    // Meetings still use only the pin; the live model is offered for the preview only.
+    expect(
+      models.body.models.map(
+        (model: {
+          providerId: string;
+          model: string;
+          capabilities: { batch: boolean; live: boolean };
+        }) => ({
+          providerId: model.providerId,
+          model: model.model,
+          batch: model.capabilities.batch,
+          live: model.capabilities.live,
+        }),
+      ),
+    ).toEqual([
+      { providerId: "azure-speech", model: "MAI-Transcribe-2", batch: true, live: false },
+      { providerId: "azure-openai", model: "gpt-4o-transcribe", batch: false, live: true },
+    ]);
+    expect(models.body).toMatchObject({
+      default: { providerId: "azure-speech", model: "MAI-Transcribe-2" },
+      pinned: true,
+    });
+    const recordingId = crypto.randomUUID();
+    await scope.owner.call("POST", "/recordings", {
+      recordingId,
+      tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
+    });
+    // Deployment-funded, so no workspace key is needed.
+    const granted = await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+      trackNumber: 0,
+    });
+    expect(granted).toMatchObject({
+      status: 201,
+      body: {
+        providerId: "azure-openai",
+        model: "gpt-4o-transcribe",
+        protocol: "openai.realtime",
+        url: "wss://ai.example.cognitiveservices.azure.com/openai/v1/realtime?intent=transcription",
+        token: "ek_live",
+        webrtcUrl: "https://ai.example.cognitiveservices.azure.com/openai/v1/realtime/calls",
+        audio: { encoding: "pcm_s16le", sampleRate: 24_000 },
+      },
+    });
+    expect(minted).toEqual([
+      {
+        url: "https://ai.example.cognitiveservices.azure.com/openai/v1/realtime/client_secrets",
+        authorization: "Bearer entra",
+      },
+    ]);
+    // Audio still never goes anywhere else.
+    expect(
+      (
+        await scope.owner.call("POST", `/recordings/${recordingId}/live-session`, {
+          trackNumber: 0,
+          providerId: "elevenlabs",
+        })
+      ).status,
+    ).toBe(400);
   });
 
   test("the live preview: a single-use grant for the recorder, text for everyone who can see it", async () => {

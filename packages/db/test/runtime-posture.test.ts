@@ -581,6 +581,18 @@ function safePosture(): RuntimeDatabasePosture {
         securityDefiner: true,
         configuration: ["search_path=pg_catalog"],
       },
+      {
+        // 0988 reads only session tables present in every current posture;
+        // its runtime grant stays deferred for previous-release compatibility.
+        name: "summarize_queued_turns_by_hold()",
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        triggerCallable: false,
+        hasDependents: false,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      },
       ...SUBSCRIPTION_M3_PRECURSOR_PRIVATE_ROUTINES.map((name) => ({
         name,
         owner: "opengeni_migrator",
@@ -3928,6 +3940,10 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
     posture.tables.push(...deferredTables.map((name) => eventTable(name, true)));
+    posture.privateRoutines = posture.privateRoutines.filter(
+      (entry) =>
+        !(runtimePosture.RUNTIME_DEFINER_ROUTINES as readonly string[]).includes(entry.name),
+    );
     posture.privateRoutines.push(
       ...runtimePosture.RUNTIME_DEFINER_ROUTINES.map((name) => routine(name, execute)),
     );
@@ -3969,10 +3985,12 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "list_due_recording_retention_v1(integer)",
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "summarize_queued_turns_by_hold()",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "summarize_queued_turns_by_hold()",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4023,6 +4041,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "list_due_recording_retention_v1(integer)",
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "summarize_queued_turns_by_hold()",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

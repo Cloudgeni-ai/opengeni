@@ -705,6 +705,16 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
   const coreClaude = billingState.isClaudeTurn
     ? (providerTurn.claudeSubscriptionCore ?? null)
     : null;
+  // A stream reader that stops on an error event (an overload, a server
+  // error) cancels the response without waiting, so the error can arrive
+  // here while the transport is still recording that request's outcome.
+  // Join this attempt's started settlements before reading any lane: an
+  // overload refused before any content, or this attempt's own interrupted
+  // request, otherwise looks unsettled and fails the turn for good instead
+  // of recovering it.
+  await Promise.all(
+    [coreCodex, coreXai, coreClaude].map((core) => core?.requests?.settlementsRecorded?.()),
+  );
   // The transport may settle an ambiguous request before the SDK throws a plain
   // HTTP error. That custody evidence must survive classification.
   //

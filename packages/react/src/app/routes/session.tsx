@@ -1987,7 +1987,17 @@ function SessionChatPane(props: {
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
-  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId);
+  const navigate = useNavigate();
+  // `session:` chat links in agent text open the chat here; ⌘/Ctrl-click opens its page.
+  const openSession = useCallback(
+    (workspaceId: string, sessionId: string) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions/$sessionId",
+        params: { workspaceId, sessionId },
+      }),
+    [navigate],
+  );
+  const resolveLink = useWorkspaceAppLinkResolver(props.session.workspaceId, openSession);
   const hostMessageContext = useHostMessageContext();
   // Live voice starts only from the current build: a tab opened before a
   // deploy reloads onto it once and resumes voice via `?realtime=`.
@@ -2467,7 +2477,6 @@ function SessionChatPane(props: {
       afterConnectionSetup,
     ],
   );
-  const navigate = useNavigate();
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
   const launchModel = launch.model;
   const launchEffort = launch.effort;

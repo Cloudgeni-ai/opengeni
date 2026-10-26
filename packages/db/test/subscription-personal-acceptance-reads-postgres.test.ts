@@ -679,6 +679,8 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
     heldBack.push(
       "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
     );
+    // 0988 adds the queued-turn hold summary over tables this schema has.
+    heldBack.push("runtime definer summarize_queued_turns_by_hold() is missing or ambiguous");
     // 0854 adds the private-file lookup.
     heldBack.push(
       "sandbox file publication capability file_private_to_another(uuid, uuid, uuid) is missing or unsafe",

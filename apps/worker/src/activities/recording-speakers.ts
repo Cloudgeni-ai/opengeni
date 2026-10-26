@@ -17,6 +17,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RECORDING_TIMELINE_FILTER } from "./recording-audio";
 import { readTail, trackRecordingProcesses } from "./recording-usage";
 
 export type RecordingSpeakersConfig = {
@@ -111,6 +112,9 @@ async function runSpeakers(
         "error",
         "-i",
         input,
+        // The track's own timeline, so turns and words line up with playback.
+        "-af",
+        RECORDING_TIMELINE_FILTER,
         "-f",
         "f32le",
         "-ac",

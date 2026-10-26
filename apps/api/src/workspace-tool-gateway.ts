@@ -1036,8 +1036,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
               defaultDecision: recommendation,
             },
           );
-          // A transport without a verified approval round trip omits any tool
-          // which could ask. Its execution still resolves the exact arguments.
+          // The filter then hides a tool that still needs approval only when
+          // its provider recommends Ask and it has no approval preflight. Its
+          // execution still resolves the exact arguments.
           return { ...definition, approval: permission.approvalRequired ? "human" : "policy" };
         },
         resolveApproval: async ({ call, entry }) => {
@@ -1081,7 +1082,11 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
           return decision;
         },
         filterDefinition: (definition) => {
-          if (!workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities)(definition))
+          if (
+            !workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities, (identity) =>
+              recommendations.get(workspaceToolGatewayIdentityKey(identity)),
+            )(definition)
+          )
             return false;
           const target = options.target;
           if (!target || "identity" in target) return true;
@@ -1140,6 +1145,8 @@ export function workspaceToolGatewayTargetServer(
 export function workspaceToolGatewayDefinitionFilter(
   settings: Pick<Settings, "allowedFirstPartyMcpTools">,
   allowedIdentities?: readonly ToolGatewayIdentity[],
+  /** The provider's own Ask/Allow recommendation, before saved choices. */
+  recommendedApproval?: (identity: ToolGatewayIdentity) => "ask" | "allow" | undefined,
 ): (definition: ToolGatewayDefinition) => boolean {
   const allowedFirstPartyTools: ReadonlySet<string> = new Set(
     settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
@@ -1154,8 +1161,13 @@ export function workspaceToolGatewayDefinitionFilter(
     ) {
       return false;
     }
+    // `approval` is the effective one: the runtime maps saved Allow/Ask
+    // choices before filtering, so a saved Allow keeps a recommended-Ask tool.
+    // A saved Ask over a recommended Allow stays listed and answers
+    // approval_required at call time instead of disappearing.
     if (
       definition.approval === "human" &&
+      recommendedApproval?.(definition.identity) !== "allow" &&
       definition.requiresProviderPreflight === true &&
       !definition.preflightCall
     ) {
