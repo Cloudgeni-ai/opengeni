@@ -2312,6 +2312,7 @@ export const englishMessages = {
   "meetings.detailPage.model": "Model",
   "meetings.detailPage.moreActionsForTitle": "More actions for {title}",
   "meetings.detailPage.nameChangeWhoThisIs": "{name}, change who this is",
+  "meetings.detailPage.namedDisplayname": "Named {displayName}",
   "meetings.detailPage.namedYou": "Named you",
   "meetings.detailPage.nameNameThisSpeaker": "{name}, name this speaker",
   "meetings.detailPage.namesArenTSuggestedIn": "Names aren't suggested in later meetings",
@@ -2331,7 +2332,10 @@ export const englishMessages = {
   "meetings.detailPage.onlyYouCanSeeThis": "Only you can see this now",
   "meetings.detailPage.preview": "Preview",
   "meetings.detailPage.rememberMyVoice": "Remember my voice",
+  "meetings.detailPage.rememberTheirVoiceAndLater":
+    "If they agree, later meetings can suggest them.",
   "meetings.detailPage.rememberValueSVoice": "Remember {value}'s voice?",
+  "meetings.detailPage.rememberVoice": "Remember voice…",
   "meetings.detailPage.rememberYourVoiceAndLater":
     "Later meetings will suggest your name when you speak.",
   "meetings.detailPage.rename": "Rename",
