@@ -61,6 +61,15 @@ function remember(key: string, value: string): void {
   }
 }
 
+/** Opens a page in the person's browser: the task pane cannot navigate away. */
+function openInBrowser(url: string): void {
+  try {
+    office().context.ui.openBrowserWindow(url);
+  } catch {
+    window.open(url, "_blank", "noopener");
+  }
+}
+
 /** The pane's own screens (sign-in, errors), in Excel's theme like the app. */
 function PaneScreen({ children }: { children: ReactNode }) {
   const theme = useOfficeTheme();
@@ -118,6 +127,43 @@ function SignIn({ onSignedIn }: { onSignedIn: (token: string) => void }) {
           {pending ? "Signing in…" : "Sign in"}
         </button>
         {error ? <p className="pane-error">{error}</p> : null}
+        <p className="pane-note">
+          New to Opengeni?{" "}
+          <button type="button" className="pane-link" onClick={() => openInBrowser(consoleUrl)}>
+            Create an account
+          </button>
+          , then come back here and sign in.
+        </p>
+      </main>
+    </PaneScreen>
+  );
+}
+
+/** A pane screen that can't show chats yet, with a way forward and a way out. */
+function PaneNotice(props: {
+  message: string;
+  error?: boolean;
+  openWeb?: boolean;
+  onRetry: () => void;
+  onSignOut: () => void;
+}) {
+  return (
+    <PaneScreen>
+      <main className="pane-center">
+        <p className={props.error ? "pane-error" : undefined}>{props.message}</p>
+        {props.openWeb ? (
+          <button type="button" className="pane-primary" onClick={() => openInBrowser(consoleUrl)}>
+            Open Opengeni
+          </button>
+        ) : null}
+        <div className="pane-actions">
+          <button type="button" className="pane-secondary" onClick={props.onRetry}>
+            Try again
+          </button>
+          <button type="button" className="pane-secondary" onClick={props.onSignOut}>
+            Sign out
+          </button>
+        </div>
       </main>
     </PaneScreen>
   );
@@ -204,6 +250,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   const [link, setLink] = useState<WorkbookLinkState>({ status: "connecting" });
   const [busy, setBusy] = useState(false);
   const [workbook, setWorkbook] = useState<OfficeWorkbookInfo | null>(null);
@@ -228,7 +275,12 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
     return () => {
       live = false;
     };
-  }, [client, onSignedOut]);
+  }, [client, onSignedOut, attempt]);
+  const retry = useCallback(() => {
+    setWorkspaces(null);
+    setLoadError(null);
+    setAttempt((count) => count + 1);
+  }, []);
 
   // The workbook joins the chosen workspace: agents there can reach it.
   useEffect(() => {
@@ -274,22 +326,17 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
   }, [client, onSignedOut]);
 
   if (loadError) {
-    return (
-      <PaneScreen>
-        <main className="pane-center">
-          <p className="pane-error">{loadError}</p>
-        </main>
-      </PaneScreen>
-    );
+    return <PaneNotice message={loadError} error onRetry={retry} onSignOut={signOut} />;
   }
   if (!workspaces) return null;
   if (!workspaceId) {
     return (
-      <PaneScreen>
-        <main className="pane-center">
-          <p>Your account has no workspace yet. Open Opengeni on the web to set one up.</p>
-        </main>
-      </PaneScreen>
+      <PaneNotice
+        message="Your account has no workspace yet. Finish setting up Opengeni on the web, then come back and try again."
+        openWeb
+        onRetry={retry}
+        onSignOut={signOut}
+      />
     );
   }
   return (
@@ -303,14 +350,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       surfaces={surfaces}
       messageContext={messageContext}
       onUnauthorized={onSignedOut}
-      openUrl={(url) => {
-        // The task pane cannot navigate away; open the browser instead.
-        try {
-          office().context.ui.openBrowserWindow(url);
-        } catch {
-          window.open(url, "_blank", "noopener");
-        }
-      }}
+      openUrl={openInBrowser}
       slots={{
         canvasBanners: <WorkbookStatus link={link} busy={busy} workbook={workbook} />,
         railFooter: (
