@@ -65,6 +65,10 @@ import {
 import type { ArtifactCatalogFilters } from "../lib/artifact-catalog";
 import type { ArtifactReturnSearch, SiteDetailTab } from "../lib/routes";
 
+// The Site view opens the same publish form through this route's code,
+// loaded when needed, so the form stays with the Site's Settings tab.
+export { SitePublishingPage } from "../components/artifacts/site-publishing-page";
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
