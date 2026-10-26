@@ -870,7 +870,8 @@ export class GitHubReader {
         throw new Error("Invalid workflow attempt count");
       for (let attempt = 1; attempt <= count; attempt++) {
         // Preserve immutable green-cache compatibility; old negative cache
-        // entries did not carry the positive infrastructure-only retry evidence.
+        // entries did not carry the positive infrastructure-only retry evidence
+        // or failed-check diagnostics.
         const key = `verified:${manifest.tipSha}:${manifest.batchId}:${run.id}:${attempt}`;
         const cached = await this.cache.get<{
           run: Run;
@@ -879,7 +880,7 @@ export class GitHubReader {
         }>(key);
         if (
           cached &&
-          (cached.run.outcome === "success" || cached.retryPolicyVersion === 3) &&
+          (cached.run.outcome === "success" || cached.retryPolicyVersion === 4) &&
           (attempt < count || (run.status === "completed" && cached.conclusion === run.conclusion))
         ) {
           result.push(cached.run);
@@ -908,6 +909,7 @@ export class GitHubReader {
         let retryable = false;
         let infrastructureRetryReason: Run["infrastructureRetryReason"];
         let failedClasses: Run["failedClasses"];
+        let diagnostics: Run["diagnostics"];
         if (status === "completed" && details.conclusion !== "cancelled") {
           const attested = await this.resultArtifact(manifest, Number(run.id), attempt);
           if (
@@ -920,6 +922,7 @@ export class GitHubReader {
             retryable = attested.retryable;
             trusted = true;
             failedClasses = attested.failedClasses;
+            diagnostics = attested.diagnostics;
             if (outcome === "infrastructure" && attested.infrastructureOnly === true)
               infrastructureRetryReason = "verified-infrastructure";
           }
@@ -979,6 +982,7 @@ export class GitHubReader {
           retryable,
           ...(infrastructureRetryReason ? { infrastructureRetryReason } : {}),
           ...(failedClasses ? { failedClasses } : {}),
+          ...(diagnostics ? { diagnostics } : {}),
           startedAt: details.run_started_at ?? null,
           completedAt: status === "completed" ? details.updated_at : null,
         };
@@ -987,7 +991,7 @@ export class GitHubReader {
           await this.cache.set(key, {
             run: verifiedRun,
             conclusion: details.conclusion,
-            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 3 }),
+            ...(verifiedRun.outcome === "success" ? {} : { retryPolicyVersion: 4 }),
           });
       }
     }

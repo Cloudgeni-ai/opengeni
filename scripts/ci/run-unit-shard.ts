@@ -15,6 +15,7 @@ import {
   fileUsesProcessGlobalTestState,
 } from "./workspace";
 import { explicitBunTestPath } from "./run-test-shard";
+import { writeDiagnostic } from "./batch-diagnostic";
 
 export type UnitTestProcess = {
   files: string[];
@@ -312,6 +313,14 @@ async function run(
   const exitCode = await child.exited;
   if (exitCode !== 0) {
     process.stderr.write(`[unit-shard] failed: exitCode=${exitCode} files=${files.join(", ")}\n`);
+    // Failing files are evidence, not proof: the batcher uses them only after
+    // an unchanged rerun reproduces the failure.
+    if (exitCode > 0 && exitCode < 128)
+      writeDiagnostic({
+        check: "unit",
+        paths: files,
+        excerpt: `unit test file failed: ${files.join(", ")}`.slice(0, 300),
+      });
   }
   return exitCode;
 }

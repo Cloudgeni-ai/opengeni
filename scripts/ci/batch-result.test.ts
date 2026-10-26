@@ -249,3 +249,62 @@ test.each([0, 1])(
     }
   },
 );
+
+test.each([
+  [1, true],
+  [124, false],
+])(
+  "CLI attaches failed-check evidence only to a code failure (exit %i)",
+  async (exit, attached) => {
+    const directory = mkdtempSync(join(tmpdir(), "batch-diagnostic-receipt-"));
+    try {
+      const output = join(directory, "receipt-source.json");
+      const script = `require("node:fs").writeFileSync(process.env.BATCH_DIAGNOSTIC_FILE, JSON.stringify({ check: "guard:public-hygiene", paths: ["docs/a.md"], excerpt: "docs/a.md:1 — label" })); process.exit(${exit});`;
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          "scripts/ci/batch-result.ts",
+          "run",
+          "--job",
+          "source",
+          "--output",
+          output,
+          "--",
+          process.execPath,
+          "-e",
+          script,
+        ],
+        {
+          stdout: "pipe",
+          stderr: "pipe",
+          env: {
+            ...process.env,
+            BATCH_ID: identity.batchId,
+            GITHUB_SHA: identity.headSha,
+            GITHUB_RUN_ID: identity.runId,
+            GITHUB_RUN_ATTEMPT: String(identity.runAttempt),
+          },
+        },
+      );
+      expect(await child.exited).toBe(exit);
+      const written = JSON.parse(readFileSync(output, "utf8")) as BatchTaskReceipt;
+      expect(written.diagnostic).toEqual(
+        attached
+          ? { check: "guard:public-hygiene", paths: ["docs/a.md"], excerpt: "docs/a.md:1 — label" }
+          : undefined,
+      );
+      // Aggregation carries the evidence into the trusted batch result.
+      const result = aggregateBatchResult(
+        identity,
+        ["plan", "source"],
+        [{ ...written, ...identity, schemaVersion: 1 }, receipt("plan")],
+        { plan: "success", source: "failure", units: "skipped" },
+      );
+      expect(result.tasks.find((task) => task.job === "source")?.diagnostic).toEqual(
+        written.diagnostic,
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);

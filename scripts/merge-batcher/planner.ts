@@ -1,5 +1,6 @@
 import {
   type BaseCiEvidence,
+  ATTRIBUTED_FAILURE,
   bindingKey,
   compareText,
   ejectionKey,
@@ -74,6 +75,46 @@ export function unseenRunHoldsSlot(
     !settledCiFinished(ledger, candidate.manifest.batchId)
   );
 }
+/** A failed guard, lint, typecheck or changeset check fails the same way again. */
+export function deterministicFailure(run: Run): boolean {
+  return run.diagnostics?.some((diagnostic) => diagnostic.check !== "unit") ?? false;
+}
+/**
+ * The one member whose merge changed a file a failed check names. Unit-test
+ * files count only after the unchanged rerun reproduced the failure; files no
+ * member or several members touched stay ambiguous and use bisection.
+ */
+export function attributeFailure(
+  candidate: Candidate,
+  run: Run,
+): {
+  member: Candidate["manifest"]["pulls"][number];
+  reason: string;
+  deterministic: boolean;
+} | null {
+  const { pulls } = candidate.manifest;
+  const changed = candidate.memberPaths;
+  if (pulls.length < 2 || changed?.length !== pulls.length) return null;
+  // Deterministic checks first; a reproduced unit failure is the weaker evidence.
+  const diagnostics = [...(run.diagnostics ?? [])].sort(
+    (a, b) => Number(a.check === "unit") - Number(b.check === "unit"),
+  );
+  for (const diagnostic of diagnostics) {
+    if (diagnostic.check === "unit" && run.attempt < 2) continue;
+    const named = new Set(diagnostic.paths);
+    const touching = pulls.flatMap((pull, index) =>
+      changed[index]!.some((path) => named.has(path)) ? [{ pull, index }] : [],
+    );
+    if (touching.length !== 1) continue;
+    const files = changed[touching[0]!.index]!.filter((path) => named.has(path));
+    return {
+      member: touching[0]!.pull,
+      deterministic: diagnostic.check !== "unit",
+      reason: `${ATTRIBUTED_FAILURE}: ${diagnostic.check} failed in Batch CI run ${run.id} attempt ${run.attempt} on ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` and ${files.length - 5} more` : ""}, changed only by this PR: \`${diagnostic.excerpt}\``,
+    };
+  }
+  return null;
+}
 export function infrastructureRetryReason(candidate: Candidate, run: Run, config: Config) {
   if (
     run.status !== "completed" ||
@@ -89,7 +130,9 @@ export function infrastructureRetryReason(candidate: Candidate, run: Run, config
   )
     return null;
   const reason = run.infrastructureRetryReason;
-  if (run.trusted && run.outcome === "code_failure") return "failed-batch";
+  // A deterministic check fails the same way again; skip the flake allowance.
+  if (run.trusted && run.outcome === "code_failure")
+    return deterministicFailure(run) ? null : "failed-batch";
   if (reason === "failed-batch" && ["infrastructure", "cancelled"].includes(run.outcome))
     return reason;
   if (reason === "verified-infrastructure" && run.trusted && run.outcome === "infrastructure")
@@ -336,12 +379,45 @@ function planCandidate(o: Observation, c: Config): Action {
       // headroom. Safety lives at the landing boundary: exact tree, tested
       // base, readiness/head rereads, fast-forward only and lease/CAS/epoch.
       if (run.trusted && run.outcome === "success") return { kind: "land", candidate: root };
+      // A failed check naming files that exactly one member changed ejects that
+      // member directly. The rest are rebuilt and tested again without it, with
+      // no rerun or bisection; descendants are invalidated, running CI preserved.
+      const attributed =
+        run.trusted && run.outcome === "code_failure" ? attributeFailure(root, run) : null;
       // A red exact base is not proof that members caused this failure. Hold
       // before retry/splitting, retaining the failed candidate and all evidence.
       // This does not claim identical fingerprints or authorize a green result.
-      if (run.trusted && run.outcome === "code_failure") {
+      // A deterministic check naming a file only one member changed does not
+      // depend on the base verdict: the base has a different version of it.
+      if (run.trusted && run.outcome === "code_failure" && !attributed?.deterministic) {
         const reason = failedBaseHold(run, root.manifest.baseSha, o.baseCI);
         if (reason) return { kind: "wait", reason };
+      }
+      if (attributed) {
+        const { mergeSha, ...pull } = attributed.member;
+        void mergeSha;
+        ledger.invalidated = [
+          ...new Set([...ledger.invalidated, ...descendants(root.manifest.batchId, o.candidates)]),
+        ];
+        ledger.ejected.push({
+          pull,
+          batchId: root.manifest.batchId,
+          reason: attributed.reason,
+          announced: false,
+        });
+        // A recovery group keeps its sequential place; a first-run batch's
+        // other members simply return to the queue.
+        if (root.manifest.recoveryOf !== null)
+          ledger.recovery.unshift({
+            batchId: root.manifest.recoveryOf,
+            pulls: root.manifest.pulls
+              .filter((member) => member.number !== pull.number)
+              .map(({ mergeSha: memberMerge, ...rest }) => {
+                void memberMerge;
+                return rest;
+              }),
+          });
+        return record("eject the member a deterministic failure names; rebuild the rest");
       }
       // A failed exact candidate gets one flake allowance before any split or
       // singleton parking. The durable retry intent prevents duplicate requests.
@@ -427,7 +503,8 @@ function planCandidate(o: Observation, c: Config): Action {
   }
   const unannounced = ledger.ejected.find((e) => !e.announced && !e.effectId);
   if (unannounced)
-    return unannounced.reason === "merge-tree conflict against candidate predecessor"
+    return unannounced.reason === "merge-tree conflict against candidate predecessor" ||
+      unannounced.reason.startsWith(ATTRIBUTED_FAILURE)
       ? { kind: "announce", ejection: unannounced }
       : {
           kind: "wait",

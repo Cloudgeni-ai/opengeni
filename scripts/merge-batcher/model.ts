@@ -69,13 +69,27 @@ export interface Run {
   infrastructureRetryReason?: InfrastructureRetryReason;
   /** Complete trusted failing task classes; absent means comparison unavailable. */
   failedClasses?: ("source" | "units")[];
+  /** Trusted failed-check evidence naming repository paths, per failed task. */
+  diagnostics?: FailureDiagnostic[];
 }
+export interface FailureDiagnostic {
+  /** Batch task: "source" or "unit-<index>". */
+  job: string;
+  /** "unit", "changesets", "typecheck", "site-runtime" or "guard:<name>". */
+  check: string;
+  paths: string[];
+  excerpt: string;
+}
+/** Ejection reason prefix for a failure attributed to one member's own files. */
+export const ATTRIBUTED_FAILURE = "deterministic CI failure attributed to this PR";
 export interface Candidate {
   manifest: Manifest;
   branch: string;
   runs: Run[];
   containedInBase: boolean;
   headRefresh?: HeadRefresh;
+  /** Files each member's merge changed in the candidate chain, aligned with manifest.pulls. */
+  memberPaths?: string[][];
 }
 export interface HeadRefresh {
   baseSha: string;

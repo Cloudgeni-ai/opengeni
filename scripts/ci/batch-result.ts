@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { errorMessage } from "@opengeni/contracts/values";
+import { parseDiagnostic, type BatchDiagnostic } from "./batch-diagnostic";
 
 export type BatchOutcome = "success" | "code_failure" | "infrastructure" | "cancelled";
 export type BatchIdentity = {
@@ -18,6 +19,8 @@ export type BatchTaskReceipt = BatchIdentity & {
   exitCode: number;
   startedAt: string;
   finishedAt: string;
+  /** Failed-check evidence for a code failure; used only for member attribution. */
+  diagnostic?: BatchDiagnostic;
 };
 
 export function classifyBatchExit(code: number): { outcome: BatchOutcome; retryable: boolean } {
@@ -163,6 +166,8 @@ if (import.meta.main) {
     const split = process.argv.indexOf("--");
     if (split < 0 || !process.argv[split + 1]) throw new Error("Missing command after --");
     const startedAt = new Date().toISOString();
+    const diagnosticFile = join(dirname(output), `batch-diagnostic-${job}.json`);
+    rmSync(diagnosticFile, { force: true });
     let interrupted = false;
     let child: ReturnType<typeof Bun.spawn> | undefined;
     for (const signal of ["SIGINT", "SIGTERM"] as const)
@@ -176,7 +181,7 @@ if (import.meta.main) {
         stdin: "inherit",
         stdout: "inherit",
         stderr: "inherit",
-        env: process.env,
+        env: { ...process.env, BATCH_DIAGNOSTIC_FILE: diagnosticFile },
       });
       exitCode = await child.exited;
     } catch (error) {
@@ -186,14 +191,23 @@ if (import.meta.main) {
     // Setup success is not test success. If a later test is killed, do not
     // leave a stale green setup receipt masquerading as that test's result.
     if (exitCode !== 0 || !process.argv.slice(0, split).includes("--failure-only")) {
+      const classified = classifyBatchExit(exitCode);
+      let diagnostic: BatchDiagnostic | null = null;
+      if (classified.outcome === "code_failure")
+        try {
+          diagnostic = parseDiagnostic(JSON.parse(readFileSync(diagnosticFile, "utf8")));
+        } catch {
+          // A failure without structured evidence stays ambiguous.
+        }
       save(output, {
         schemaVersion: 1,
         ...identity,
         job,
-        ...classifyBatchExit(exitCode),
+        ...classified,
         exitCode,
         startedAt,
         finishedAt: new Date().toISOString(),
+        ...(diagnostic ? { diagnostic } : {}),
       });
     }
     process.exit(exitCode < 0 ? 1 : exitCode);
