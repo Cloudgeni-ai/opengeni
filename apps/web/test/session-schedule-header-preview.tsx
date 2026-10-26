@@ -92,6 +92,23 @@ const manager = {
   titleSource: "user",
 } as unknown as SessionSummary;
 
+// A deeply nested chat: two earlier sessions, then a parent with a long title.
+const deepAncestors = [
+  manager,
+  {
+    id: "00000000-0000-4000-9000-000000004101",
+    workspaceId: base.workspaceId,
+    title: "Checks coordinator",
+    titleSource: "user",
+  },
+  {
+    id: "00000000-0000-4000-9000-000000004102",
+    workspaceId: base.workspaceId,
+    title: "Intermediate agent with a long descriptive title for the flaky checks",
+    titleSource: "user",
+  },
+] as unknown as SessionSummary[];
+
 const nextRun = new Date(Date.now() + 20 * 60 * 60_000);
 nextRun.setMinutes(0, 0, 0);
 
@@ -108,7 +125,13 @@ const mail = {
   eventTypes: ["message.received"],
 };
 
-const states: { label: string; session: Session; ancestors?: SessionSummary[] }[] = [
+const states: {
+  label: string;
+  session: Session;
+  ancestors?: SessionSummary[];
+  /** A narrower frame, like the chat column beside the sessions rail. */
+  frame?: string;
+}[] = [
   {
     label: "No automation",
     session: {
@@ -212,6 +235,35 @@ const states: { label: string; session: Session; ancestors?: SessionSummary[] }[
       hasUpcomingSchedules: false,
     } as Session,
   },
+  {
+    // The row is crowded: a paused workstream, a long title and a long
+    // parent title, in a frame as wide as the chat column beside the rail.
+    label: "Deep child, paused by its manager",
+    ancestors: deepAncestors,
+    frame: "max-w-[62rem]",
+    session: {
+      ...base,
+      id: "00000000-0000-4000-9000-000000004008",
+      parentSessionId: deepAncestors.at(-1)!.id,
+      title: "Deep nested agent with a long descriptive title that keeps going past the row",
+      hasSchedules: false,
+      hasUpcomingSchedules: false,
+      effectiveControl: {
+        state: "paused",
+        directState: "active",
+        primaryBlocker: {
+          kind: "session",
+          sessionId: manager.id,
+          displayName: "Release manager",
+          actor: null,
+          reason: null,
+          changedAt: null,
+          revision: 1,
+        },
+        additionalBlockerCount: 0,
+      },
+    } as Session,
+  },
 ];
 
 const root = createRootRoute({
@@ -219,11 +271,11 @@ const root = createRootRoute({
     <TooltipProvider>
       <main className="flex min-h-dvh flex-col gap-6 bg-bg px-0 py-4 text-fg sm:p-8">
         <p className="text-xs text-fg-subtle">Sample sessions. The header component is real.</p>
-        {states.map(({ label, session, ancestors = [] }) => (
+        {states.map(({ label, session, ancestors = [], frame }) => (
           <section
             key={session.id}
             data-header-state={label}
-            className="rounded-lg border border-border bg-surface"
+            className={`rounded-lg border border-border bg-surface ${frame ?? ""}`}
           >
             <p className="border-b border-border px-4 py-2 text-xs text-fg-muted">{label}</p>
             <SessionHeader
