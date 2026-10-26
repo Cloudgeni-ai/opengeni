@@ -30,11 +30,11 @@ impl<S: Store> Service<S> {
     ) -> Result<Option<ImageId>, Failure> {
         if let Some(image) = self.store.image_built(source).await? {
             // Another replica recorded it: this name uses it now too.
-            return Ok(Some(
-                self.store
-                    .record_built(source, name, image, now_ms())
-                    .await?,
-            ));
+            // Recorded, so never claimed to be forgotten.
+            return Ok(self
+                .store
+                .record_built(source, name, image, now_ms())
+                .await?);
         }
         let live: Vec<_> = self
             .view
@@ -57,10 +57,19 @@ impl<S: Store> Service<S> {
         match &answered.answer.reply {
             Reply::Preparing => Ok(None),
             Reply::Prepared { image, digest } => {
-                let kept = self
+                let Some(kept) = self
                     .store
                     .record_built(source, name, *image, now_ms())
-                    .await?;
+                    .await?
+                else {
+                    // Builds are not byte for byte the same, and a captured
+                    // disk was booted, so this is a captured image's bytes
+                    // only by accident.
+                    return Err(Failure::Busy(format!(
+                        "the image {image} host {} built is a captured one being forgotten",
+                        target.name
+                    )));
+                };
                 tracing::info!(
                     host = %target.name,
                     %source,

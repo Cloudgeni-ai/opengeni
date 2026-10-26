@@ -28,7 +28,7 @@ use crate::e2b::lifecycle::Record;
 
 pub use memory::MemoryStore;
 pub use postgres::{PostgresLead, PostgresStore};
-pub use templates::{Inserted, TemplateRow, valid_template_name};
+pub use templates::{Collector, Inserted, TEMPLATE_PREFIX, TemplateRow, valid_template_name};
 
 /// What can go wrong reading or writing the store.
 #[derive(Debug, thiserror::Error)]
@@ -331,7 +331,11 @@ pub trait Store: Send + Sync + 'static {
 
     /// Inserts a new sandbox, at the version it carries. False if one with
     /// its id exists. Refused if it names an owner the service has given
-    /// up on; see [`Write::OwnerLost`].
+    /// up on; see [`Write::OwnerLost`]. One created from a team's template
+    /// (its spec's image [`TEMPLATE_PREFIX`] then the template's id) is
+    /// inserted only while the template is there, ordered with its delete,
+    /// so the image it starts from is never forgotten under it; see
+    /// [`Write::TemplateGone`].
     fn insert(&self, row: &SandboxRow) -> impl Future<Output = Result<Write>> + Send;
 
     /// As [`Store::insert`], for `row.team`'s create request `request_id`,
@@ -447,14 +451,17 @@ pub trait Store: Send + Sync + 'static {
     /// now uses `source`. Answers the image recorded for `source`, which
     /// creates of `name` use: builds are not byte for byte the same, so the
     /// first recorded wins. Every name that uses a source is recorded, so
-    /// two names sharing one each keep it as their latest.
+    /// two names sharing one each keep it as their latest. `None`, and
+    /// nothing recorded, when `image` would be recorded but is a captured
+    /// image a collector has claimed (see [`Store::collect_image`]): it is
+    /// being forgotten, and no use of it is recorded from then on.
     fn record_built(
         &self,
         source: &str,
         name: &str,
         image: ImageId,
         at_ms: u64,
-    ) -> impl Future<Output = Result<ImageId>> + Send;
+    ) -> impl Future<Output = Result<Option<ImageId>>> + Send;
 
     /// The image of the source the name `name` was last recorded as using.
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
@@ -489,19 +496,33 @@ pub trait Store: Send + Sync + 'static {
         before_ms: u64,
     ) -> impl Future<Output = Result<Vec<ImageId>>> + Send;
 
-    /// Marks captured image `image` as being collected if it is, or if it
-    /// is still unused and has been since before `before_ms`; whether it
-    /// is being collected now. Nothing inserts a template of it from then
-    /// on.
+    /// Claims captured image `image` for `collector` to forget, if it is
+    /// still unused and has been since before `before_ms`, or another
+    /// collector's claim on it lapsed; whether `collector` holds the claim
+    /// now (as it does when it claimed it before). Ordered by the image's
+    /// record with every use recorded of it (a template, a sandbox created
+    /// from one, an image built), so none is recorded from then on, and a
+    /// claim sees every use recorded before it.
     fn collect_image(
         &self,
         image: ImageId,
         before_ms: u64,
+        collector: &Collector,
     ) -> impl Future<Output = Result<bool>> + Send;
 
-    /// Deletes the record of captured image `image`, being collected,
-    /// once object storage has forgotten it.
-    fn collected(&self, image: ImageId) -> impl Future<Output = Result<()>> + Send;
+    /// Whether the collector `collector` (its id) still holds its claim
+    /// on captured image `image`.
+    fn collecting(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Deletes the record of captured image `image` once object storage
+    /// has forgotten it, if the collector `collector` (its id) still holds
+    /// its claim on it.
+    fn collected(&self, image: ImageId, collector: &str)
+    -> impl Future<Output = Result<()>> + Send;
 }
 
 /// How a conditional write of a sandbox's row went.
@@ -516,6 +537,10 @@ pub enum Write {
     /// transaction, and this check is ordered with it, so no sandbox is
     /// left owned by a host after it was given up on.
     OwnerLost,
+    /// For an insert of a sandbox created from a team's template: the
+    /// template was deleted since the create found it. Never for a
+    /// replace.
+    TemplateGone,
 }
 
 impl Write {

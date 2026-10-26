@@ -14,14 +14,13 @@
 use std::time::Duration;
 
 use compute_protocol::host::{ErrorCode, Id, ImageId, LevelName, PriorityName, Reply, Request};
+use compute_storage::Error as StorageError;
+use compute_storage::store::ChunkStore;
 use tokio::time::{Instant, sleep};
 
 use super::{Depth, Failure, Service, host_failure, new_id, now_ms};
-use crate::store::{Inserted, Spec, Store, TemplateRow, valid_template_name};
-
-/// What a create names as its image to start from a team's template:
-/// this, then the template's id or name.
-pub const TEMPLATE_PREFIX: &str = "template/";
+pub use crate::store::TEMPLATE_PREFIX;
+use crate::store::{Collector, Inserted, Spec, Store, TemplateRow, valid_template_name};
 
 /// How long a capture may take in all: saving the sandbox, and storing
 /// its disk at the pace of the fleet's object storage.
@@ -40,6 +39,14 @@ const CAPTURE_WAIT: Duration = Duration::from_secs(30);
 pub const UNUSED_FOR: Duration = Duration::from_secs(3600);
 /// How often the images nothing uses are looked for.
 pub const COLLECT_EVERY: Duration = Duration::from_secs(600);
+/// How long a collector's claim on an image lasts before another may take
+/// the image over: far longer than forgetting one takes, so only a
+/// collector that stopped, or is held up, loses its claim; one held up
+/// finds it lost before it writes.
+const CLAIM_LASTS: Duration = Duration::from_secs(600);
+/// How often a collector reads an image's pointer again when it changed
+/// before the collector emptied it.
+const FORGET_TRIES: usize = 4;
 
 /// What a host said to a capture.
 enum Asked {
@@ -291,10 +298,11 @@ impl<S: Store> Service<S> {
     }
 
     /// Forgets the captured images nothing has used for [`UNUSED_FOR`]:
-    /// marks each as being collected, which no template is recorded over,
-    /// deletes its pointer in object storage, which a sweep then frees
-    /// the chunks of, and deletes its record. One a replica left being
-    /// collected is finished. Answers how many were forgotten.
+    /// claims each, after which no use of it is recorded, empties its
+    /// pointer in object storage, which a sweep then frees the chunks of,
+    /// and deletes its record. One whose collector's claim lapsed, as it
+    /// stopped, is taken over and finished. Answers how many were
+    /// forgotten.
     ///
     /// # Errors
     ///
@@ -304,7 +312,15 @@ impl<S: Store> Service<S> {
             return Ok(0);
         };
         let now = now_ms();
-        let before = now.saturating_sub(u64::try_from(UNUSED_FOR.as_millis()).unwrap_or(u64::MAX));
+        let ago = |duration: Duration| {
+            now.saturating_sub(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        };
+        let before = ago(UNUSED_FOR);
+        let collector = Collector {
+            id: new_id()?.to_string(),
+            at_ms: now,
+            lapsed_ms: ago(CLAIM_LASTS),
+        };
         let mut forgotten = 0;
         for image in self.store.unused_images(now, before).await? {
             // The fleet's own images are named by its settings, not the
@@ -312,17 +328,53 @@ impl<S: Store> Service<S> {
             if self.settings.images.names(image) {
                 continue;
             }
-            if !self.store.collect_image(image, before).await? {
+            if !self.store.collect_image(image, before, &collector).await? {
                 continue;
             }
-            archive
-                .forget_pointer(&image.pointer())
-                .await
-                .map_err(|error| Failure::Archive(error.to_string()))?;
-            self.store.collected(image).await?;
+            if !self.forget_image(archive, image, &collector.id).await? {
+                tracing::info!(%image, "another collector took over forgetting an image");
+                continue;
+            }
+            self.store.collected(image, &collector.id).await?;
             tracing::info!(%image, "forgot a captured image nothing uses");
             forgotten += 1;
         }
         Ok(forgotten)
+    }
+
+    /// Empties captured image `image`'s pointer for the collector
+    /// `collector` (its id), on the version it read after checking that it
+    /// still holds its claim: a later store of the image, as for a capture
+    /// recorded after another collector took over and finished, changes
+    /// the version, so the empty pointer never lands on it. Whether it
+    /// held its claim throughout.
+    async fn forget_image(
+        &self,
+        archive: &ChunkStore,
+        image: ImageId,
+        collector: &str,
+    ) -> Result<bool, Failure> {
+        let archive_failure = |error: StorageError| Failure::Archive(error.to_string());
+        for _ in 0..FORGET_TRIES {
+            let forget = archive
+                .read_to_forget(&image.pointer())
+                .await
+                .map_err(archive_failure)?;
+            if !self.store.collecting(image, collector).await? {
+                return Ok(false);
+            }
+            let Some(forget) = forget else {
+                return Ok(true);
+            };
+            match archive.forget(forget).await {
+                Ok(()) => return Ok(true),
+                // Stored again, or fenced by a sweep: read it again.
+                Err(StorageError::Superseded) => {}
+                Err(error) => return Err(archive_failure(error)),
+            }
+        }
+        Err(Failure::Archive(format!(
+            "the pointer of image {image} changed under every try to forget it"
+        )))
     }
 }

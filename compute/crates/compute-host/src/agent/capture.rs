@@ -129,7 +129,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             return Err(HostError::Awake(id));
         }
         let copied = (|| {
-            let disk = std::fs::File::open(&slot.paths.disk)?;
+            // The VMM that ran in the jail may have left a link to a host
+            // file or a pipe in the disk's place: open it as a jailed file.
+            let disk = crate::layout::open_jailed(&slot.paths.disk)?;
             let length = disk.metadata()?.len();
             remove_if_there(into)?;
             crate::layout::copy_file(&disk, into)?;

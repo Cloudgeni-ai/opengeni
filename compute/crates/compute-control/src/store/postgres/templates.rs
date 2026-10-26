@@ -1,9 +1,13 @@
 //! Templates and captured images in Postgres (see [`crate::store::Store`]).
 //!
-//! Inserting a template and marking its image as being collected both
-//! lock the image's record first, so they take turns, and each looks at
-//! what uses the image only once it holds the lock: a template committed
-//! before is seen, and one after finds the image being collected.
+//! Every use recorded of a captured image (a template, an image built,
+//! and through its template a sandbox) and a collector's claim on it take
+//! turns by locks: a template's insert and a claim lock the image's
+//! record, a built image's record locks it after inserting itself, and a
+//! sandbox's insert locks its template. A claim looks at what uses the
+//! image only once it holds the lock, so a use committed before is seen,
+//! and one after finds the image claimed (or, for a sandbox, its template
+//! gone) and is refused.
 
 use std::str::FromStr as _;
 
@@ -11,7 +15,7 @@ use compute_protocol::host::{Id, ImageId};
 use tokio_postgres::Row;
 
 use super::{PostgresStore, big, corrupt, database, small};
-use crate::store::{Inserted, Result, TemplateRow};
+use crate::store::{Collector, Inserted, Result, TemplateRow};
 
 const TEMPLATE_COLUMNS: &str =
     "team, id, name, image, source, vcpus, memory_mib, disk_mib, created_ms";
@@ -58,7 +62,8 @@ impl PostgresStore {
         .map_err(database)?;
         let collecting: bool = tx
             .query_one(
-                "select collecting from compute_captured_images where image = $1 for update",
+                "select collector is not null from compute_captured_images \
+                 where image = $1 for update",
                 &[&image],
             )
             .await
@@ -161,12 +166,12 @@ impl PostgresStore {
         let client = self.client().await?;
         // Only rows that change are written. A mark this makes as a
         // template of the image commits is cleared by the next look, and
-        // collecting looks again under the image's lock.
+        // a claim looks again under the image's lock.
         client
             .execute(
                 &format!(
                     "update compute_captured_images c set unused_ms = null \
-                     where not c.collecting and c.unused_ms is not null and {}",
+                     where c.collector is null and c.unused_ms is not null and {}",
                     used("c.image")
                 ),
                 &[],
@@ -177,7 +182,7 @@ impl PostgresStore {
             .execute(
                 &format!(
                     "update compute_captured_images c set unused_ms = $1 \
-                     where not c.collecting and c.unused_ms is null and not {}",
+                     where c.collector is null and c.unused_ms is null and not {}",
                     used("c.image")
                 ),
                 &[&big(now_ms)?],
@@ -187,7 +192,7 @@ impl PostgresStore {
         client
             .query(
                 "select image from compute_captured_images \
-                 where collecting or unused_ms < $1 order by image",
+                 where collector is not null or unused_ms < $1 order by image",
                 &[&big(before_ms)?],
             )
             .await
@@ -197,13 +202,18 @@ impl PostgresStore {
             .collect()
     }
 
-    pub(super) async fn collect_image_now(&self, image: ImageId, before_ms: u64) -> Result<bool> {
+    pub(super) async fn collect_image_now(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+        collector: &Collector,
+    ) -> Result<bool> {
         let image = image.to_string();
         let mut client = self.client().await?;
         let tx = client.transaction().await.map_err(database)?;
         let Some(found) = tx
             .query_opt(
-                "select collecting, unused_ms from compute_captured_images \
+                "select collector, claimed_ms, unused_ms from compute_captured_images \
                  where image = $1 for update",
                 &[&image],
             )
@@ -212,10 +222,20 @@ impl PostgresStore {
         else {
             return Ok(false);
         };
-        if found.get::<_, bool>(0) {
+        if let Some(holder) = found.get::<_, Option<String>>(0) {
+            if holder == collector.id {
+                return Ok(true);
+            }
+            let claimed_ms: Option<i64> = found.get(1);
+            if claimed_ms.is_some_and(|at| at >= big(collector.lapsed_ms).unwrap_or(i64::MAX)) {
+                return Ok(false);
+            }
+            // Lapsed: taken over. Nothing recorded a use of it meanwhile.
+            claim(&tx, &image, collector).await?;
+            tx.commit().await.map_err(database)?;
             return Ok(true);
         }
-        let unused_ms: Option<i64> = found.get(1);
+        let unused_ms: Option<i64> = found.get(2);
         if unused_ms.is_none_or(|since| since >= big(before_ms).unwrap_or(i64::MAX)) {
             return Ok(false);
         }
@@ -225,25 +245,58 @@ impl PostgresStore {
             .await
             .map_err(database)?
             .get(0);
-        let set = if in_use {
-            "update compute_captured_images set unused_ms = null where image = $1"
+        if in_use {
+            tx.execute(
+                "update compute_captured_images set unused_ms = null where image = $1",
+                &[&image],
+            )
+            .await
+            .map_err(database)?;
         } else {
-            "update compute_captured_images set collecting = true where image = $1"
-        };
-        tx.execute(set, &[&image]).await.map_err(database)?;
+            claim(&tx, &image, collector).await?;
+        }
         tx.commit().await.map_err(database)?;
         Ok(!in_use)
     }
 
-    pub(super) async fn collected_now(&self, image: ImageId) -> Result<()> {
+    pub(super) async fn collecting_now(&self, image: ImageId, collector: &str) -> Result<bool> {
+        Ok(self
+            .client()
+            .await?
+            .query_one(
+                "select exists (select 1 from compute_captured_images \
+                 where image = $1 and collector = $2)",
+                &[&image.to_string(), &collector],
+            )
+            .await
+            .map_err(database)?
+            .get(0))
+    }
+
+    pub(super) async fn collected_now(&self, image: ImageId, collector: &str) -> Result<()> {
         self.client()
             .await?
             .execute(
-                "delete from compute_captured_images where image = $1 and collecting",
-                &[&image.to_string()],
+                "delete from compute_captured_images where image = $1 and collector = $2",
+                &[&image.to_string(), &collector],
             )
             .await
             .map_err(database)?;
         Ok(())
     }
+}
+
+/// Records in `tx` that `collector` claims captured image `image`.
+async fn claim(
+    tx: &deadpool_postgres::Transaction<'_>,
+    image: &str,
+    collector: &Collector,
+) -> Result<()> {
+    tx.execute(
+        "update compute_captured_images set collector = $2, claimed_ms = $3 where image = $1",
+        &[&image, &collector.id, &big(collector.at_ms)?],
+    )
+    .await
+    .map_err(database)?;
+    Ok(())
 }

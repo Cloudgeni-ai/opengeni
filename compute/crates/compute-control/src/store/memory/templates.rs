@@ -1,16 +1,19 @@
 //! Templates and captured images in memory (see [`crate::store::Store`]).
+//! Every use recorded of a captured image and every claim on it happen
+//! under the store's one lock, so they take turns.
 
 use compute_protocol::host::ImageId;
 
 use super::Inner;
-use crate::store::{Inserted, TemplateRow};
+use crate::store::{Collector, Inserted, SandboxRow, TEMPLATE_PREFIX, TemplateRow};
 
 /// A captured image's record.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct Captured {
     /// Since when nothing uses it, as last noted.
     unused_ms: Option<u64>,
-    collecting: bool,
+    /// The collector that claimed it to forget it, and when.
+    claim: Option<(String, u64)>,
 }
 
 impl Inner {
@@ -23,9 +26,28 @@ impl Inner {
             || self.built.values().any(|built| *built == image)
     }
 
+    /// Whether a collector claimed captured image `image`.
+    pub(super) fn claimed(&self, image: ImageId) -> bool {
+        self.captured
+            .get(&image)
+            .is_some_and(|captured| captured.claim.is_some())
+    }
+
+    /// Whether `row` is created from a team's template that is gone.
+    pub(super) fn template_gone(&self, row: &SandboxRow) -> bool {
+        row.spec
+            .image
+            .strip_prefix(TEMPLATE_PREFIX)
+            .is_some_and(|id| {
+                !self
+                    .templates
+                    .contains_key(&(row.team.clone(), id.to_owned()))
+            })
+    }
+
     pub(super) fn insert_template(&mut self, row: &TemplateRow) -> Inserted {
         let captured = self.captured.entry(row.image).or_default();
-        if captured.collecting {
+        if captured.claim.is_some() {
             return Inserted::Collecting;
         }
         let taken = row.name.as_ref().is_some_and(|name| {
@@ -84,7 +106,7 @@ impl Inner {
             let Some(captured) = self.captured.get_mut(&image) else {
                 continue;
             };
-            if captured.collecting {
+            if captured.claim.is_some() {
                 collect.push(image);
                 continue;
             }
@@ -101,12 +123,26 @@ impl Inner {
         collect
     }
 
-    pub(super) fn collect_image(&mut self, image: ImageId, before_ms: u64) -> bool {
+    pub(super) fn collect_image(
+        &mut self,
+        image: ImageId,
+        before_ms: u64,
+        collector: &Collector,
+    ) -> bool {
         let used = self.image_used(image);
         let Some(captured) = self.captured.get_mut(&image) else {
             return false;
         };
-        if captured.collecting {
+        let claim = Some((collector.id.clone(), collector.at_ms));
+        if let Some((holder, at)) = &captured.claim {
+            if *holder == collector.id {
+                return true;
+            }
+            if *at >= collector.lapsed_ms {
+                return false;
+            }
+            // Lapsed: taken over. Nothing recorded a use of it meanwhile.
+            captured.claim = claim;
             return true;
         }
         if used {
@@ -116,16 +152,21 @@ impl Inner {
         if captured.unused_ms.is_none_or(|since| since >= before_ms) {
             return false;
         }
-        captured.collecting = true;
+        captured.claim = claim;
         true
     }
 
-    pub(super) fn collected(&mut self, image: ImageId) {
-        if self
-            .captured
-            .get(&image)
-            .is_some_and(|captured| captured.collecting)
-        {
+    pub(super) fn collecting(&self, image: ImageId, collector: &str) -> bool {
+        self.captured.get(&image).is_some_and(|captured| {
+            captured
+                .claim
+                .as_ref()
+                .is_some_and(|(holder, _)| holder == collector)
+        })
+    }
+
+    pub(super) fn collected(&mut self, image: ImageId, collector: &str) {
+        if self.collecting(image, collector) {
             self.captured.remove(&image);
         }
     }

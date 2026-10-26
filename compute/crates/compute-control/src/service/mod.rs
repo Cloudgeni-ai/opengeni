@@ -373,7 +373,8 @@ impl<S: Store> Service<S> {
                 Write::Done => return Ok((next, Some(row))),
                 // Written meanwhile, or about to be given to a host given
                 // up on meanwhile: the rules run again on the row as it is.
-                Write::Conflict | Write::OwnerLost => {}
+                // (Only an insert finds its template gone.)
+                Write::Conflict | Write::OwnerLost | Write::TemplateGone => {}
             }
         }
     }
@@ -461,6 +462,14 @@ impl<S: Store> Service<S> {
                         id,
                         why: "it changed while being created".into(),
                     });
+                }
+                // Deleted since the create found it: its image may be
+                // forgotten. Only an insert, which holds nothing yet.
+                Write::TemplateGone => {
+                    return Err(Failure::Invalid(format!(
+                        "no such template: {}",
+                        row.spec.image
+                    )));
                 }
             }
             let asked = Asked {

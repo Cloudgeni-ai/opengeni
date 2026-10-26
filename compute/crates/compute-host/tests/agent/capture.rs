@@ -129,3 +129,48 @@ async fn a_capture_needs_a_store_files_that_share_blocks_and_a_valid_key() {
     let reply = ask(&lab, sandbox, "k").await;
     assert!(refused_with(&reply, ErrorCode::Unavailable), "{reply:?}");
 }
+
+/// A VMM that ran in the sandbox's jail may leave a link to a host file,
+/// or a pipe, where its disk was: a capture copies neither.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_capture_copies_only_the_disk_itself_from_the_jail() {
+    let Some(dir) = shared_extents() else {
+        return;
+    };
+    let root = Lab::root_in(&dir);
+    let shelf = root.join("shelf");
+    let lab = Lab::start_stored(root.clone(), Arc::default(), Directory::new(&shelf)).await;
+    let sandbox = id(4);
+    lab.create(sandbox, NEVER).await;
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+
+    let disk = lab.sandbox_dir(sandbox).join("root/disk.ext4");
+    let secret = root.join("host-secret");
+    std::fs::write(&secret, b"a host file").unwrap();
+    let kept = disk.with_extension("kept");
+    std::fs::rename(&disk, &kept).unwrap();
+    std::os::unix::fs::symlink(&secret, &disk).unwrap();
+    let reply = ask(&lab, sandbox, "linked").await;
+    assert!(refused_with(&reply, ErrorCode::Internal), "{reply:?}");
+
+    std::fs::remove_file(&disk).unwrap();
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        &disk,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+    let asked = tokio::time::timeout(Duration::from_secs(5), ask(&lab, sandbox, "piped"))
+        .await
+        .expect("a pipe never holds the agent up");
+    assert!(refused_with(&asked, ErrorCode::Internal), "{asked:?}");
+
+    std::fs::remove_file(&disk).unwrap();
+    std::fs::rename(&kept, &disk).unwrap();
+    let stored = std::fs::read_dir(shelf.join("rootfs")).map_or(0, Iterator::count);
+    assert_eq!(stored, 0, "nothing was stored");
+    captured(&lab, sandbox, "whole").await;
+}

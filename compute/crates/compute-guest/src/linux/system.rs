@@ -3,11 +3,12 @@
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{log, sys};
 use crate::agent::STATE_DIR;
 use crate::cmdline::Network;
+use crate::given::GIVEN_FILE;
 use crate::identity::{self, MACHINE_ID_FILE, OWNER_FILE, SANDBOX_FILE};
 
 /// The file systems every guest gets, in order. One already mounted (the
@@ -149,35 +150,94 @@ pub fn replace(path: &str, text: &str, mode: u32) -> io::Result<()> {
 }
 
 /// The guest booted for `sandbox`: it records the id, takes its host name
-/// and, if the disk's machine identity was made for another sandbox (a
-/// template's, or none), makes a fresh one. The agent's own state goes
-/// with that identity: it is the other sandbox's (its instance lock,
-/// command spool and browser controller state, ADR 22), and this boot
-/// starts the agent only after it is gone. The owner goes last, so a
-/// failure part way is done again by the next boot.
+/// and, if the disk was made for another sandbox (a template's, or none),
+/// forgets that one (see [`forget_owner`]) and makes a fresh machine
+/// identity. This runs before anything reads what the disk keeps, so the
+/// agent and the image's command start only with what this sandbox is
+/// given. The owner goes last, so a failure part way is done again by the
+/// next boot.
 pub fn boot_identity(sandbox: &str) {
-    let owner = fs::read_to_string(OWNER_FILE).ok();
-    let result = (|| {
-        if !identity::owned_by(owner.as_deref(), sandbox) {
-            remove_tree(Path::new(STATE_DIR))?;
-            let mut bytes = [0_u8; 16];
-            io::Read::read_exact(&mut File::open("/dev/urandom")?, &mut bytes)?;
-            replace(
-                MACHINE_ID_FILE,
-                &format!("{}\n", identity::random_machine_id(&bytes)),
-                0o444,
-            )?;
-            replace(OWNER_FILE, &format!("{sandbox}\n"), 0o644)?;
-        }
-        replace(SANDBOX_FILE, &format!("{sandbox}\n"), 0o644)
-    })();
-    if let Err(error) = result {
+    let fresh_id = || {
+        let mut bytes = [0_u8; 16];
+        io::Read::read_exact(&mut File::open("/dev/urandom")?, &mut bytes)?;
+        Ok(identity::random_machine_id(&bytes))
+    };
+    if let Err(error) = own_disk(Path::new("/"), sandbox, fresh_id) {
         log(&format!("identity: {error}"));
     }
     if let Err(error) = sys::set_host_name(identity::host_name(sandbox)) {
         log(&format!("host name: {error}"));
     }
     name_self(identity::host_name(sandbox));
+}
+
+/// Makes the disk under `root` sandbox `sandbox`'s: if it was made for
+/// another, or none, forgets that one and takes the machine id `fresh_id`
+/// makes. The owner goes last.
+fn own_disk(
+    root: &Path,
+    sandbox: &str,
+    fresh_id: impl FnOnce() -> io::Result<String>,
+) -> io::Result<()> {
+    let owner = fs::read_to_string(under(root, OWNER_FILE)).ok();
+    if !identity::owned_by(owner.as_deref(), sandbox) {
+        forget_owner(root)?;
+        let machine_id = fresh_id()?;
+        write_under(root, MACHINE_ID_FILE, &format!("{machine_id}\n"), 0o444)?;
+        write_under(root, OWNER_FILE, &format!("{sandbox}\n"), 0o644)?;
+    }
+    write_under(root, SANDBOX_FILE, &format!("{sandbox}\n"), 0o644)
+}
+
+/// The guest booted with no sandbox of its own, as a template's builder
+/// does before its snapshot: a disk made for a sandbox, as an image
+/// captured from one is, forgets it (see [`forget_owner`]), and then its
+/// owner, so each sandbox started from the template begins as a new one
+/// and none starts with what that sandbox was given. Before anything
+/// reads what the disk keeps.
+pub fn boot_unowned() {
+    if let Err(error) = disown_disk(Path::new("/")) {
+        log(&format!("identity: {error}"));
+    }
+}
+
+/// Forgets the sandbox the disk under `root` was made for, if any. The
+/// owner goes last, so a failure part way is done again by the next boot.
+fn disown_disk(root: &Path) -> io::Result<()> {
+    let owner = under(root, OWNER_FILE);
+    if fs::symlink_metadata(&owner).is_err() {
+        return Ok(());
+    }
+    forget_owner(root)?;
+    remove_file(&owner)
+}
+
+/// Forgets what the disk under `root` keeps of the sandbox it was made
+/// for (ADR 22): the agent's own state (its instance lock, command spool
+/// and browser controller state) and what that sandbox's create gave it
+/// (its init, with its environment and access token), which the image's
+/// command and the agent would otherwise start with.
+fn forget_owner(root: &Path) -> io::Result<()> {
+    remove_tree(&under(root, STATE_DIR))?;
+    remove_file(&under(root, GIVEN_FILE))
+}
+
+/// The absolute path `path` under `root`.
+fn under(root: &Path, path: &str) -> PathBuf {
+    root.join(path.trim_start_matches('/'))
+}
+
+/// Replaces `path` under `root` as [`replace`] does.
+fn write_under(root: &Path, path: &str, text: &str, mode: u32) -> io::Result<()> {
+    crate::given::write_durably(&under(root, path), text.as_bytes(), mode)
+}
+
+/// Removes the file `path`, if it is there.
+fn remove_file(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// Removes the directory `path` and everything under it, if it is there.
@@ -223,7 +283,9 @@ pub fn current_sandbox() -> Option<String> {
 
 /// A notice told the guest it is `sandbox`. Takes a machine id derived
 /// from the notice's seed when it is another sandbox, or the disk's
-/// identity is not its own. The owner goes last, so a failure part way is
+/// identity is not its own. A disk still made for another sandbox, which
+/// a template's builder forgot before its snapshot, forgets it here too
+/// (see [`forget_owner`]). The owner goes last, so a failure part way is
 /// renewed again by a retry.
 pub fn renew_identity(sandbox: &str, seed_hex: &str) -> io::Result<()> {
     let owner = fs::read_to_string(OWNER_FILE).ok();
@@ -231,6 +293,12 @@ pub fn renew_identity(sandbox: &str, seed_hex: &str) -> io::Result<()> {
         && identity::owned_by(owner.as_deref(), sandbox)
     {
         return Ok(());
+    }
+    if owner
+        .as_deref()
+        .is_some_and(|owner| !owner.trim().is_empty() && owner.trim() != sandbox)
+    {
+        forget_owner(Path::new("/"))?;
     }
     let machine_id = identity::derived_machine_id(seed_hex, sandbox);
     replace(MACHINE_ID_FILE, &format!("{machine_id}\n"), 0o444)?;
@@ -270,5 +338,74 @@ mod tests {
         remove_tree(&dir).unwrap();
         assert!(!dir.exists());
         remove_tree(&dir).unwrap();
+    }
+
+    /// A root with the disk of sandbox `owner`, if any: its agent state,
+    /// what its create gave it and its machine identity.
+    fn disk_of(owner: Option<&str>) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "guest-disk-{}-{:x}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        for dir in ["etc", "run", "opengeni"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::create_dir_all(under(&root, STATE_DIR).join("spool/commands")).unwrap();
+        fs::write(under(&root, STATE_DIR).join("spool/commands/1.json"), "{}").unwrap();
+        fs::write(under(&root, GIVEN_FILE), r#"{"envVars":{"SECRET":"a"}}"#).unwrap();
+        fs::write(under(&root, MACHINE_ID_FILE), "0123\n").unwrap();
+        if let Some(owner) = owner {
+            fs::write(under(&root, OWNER_FILE), format!("{owner}\n")).unwrap();
+        }
+        root
+    }
+
+    fn rand_suffix() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn read(root: &Path, path: &str) -> Option<String> {
+        fs::read_to_string(under(root, path)).ok()
+    }
+
+    #[test]
+    fn a_disk_made_for_another_sandbox_forgets_it_and_its_init_on_boot() {
+        let root = disk_of(Some("source"));
+        own_disk(&root, "clone", || Ok("fresh".into())).unwrap();
+        assert!(!under(&root, STATE_DIR).exists(), "the agent's state goes");
+        assert_eq!(read(&root, GIVEN_FILE), None, "and the source's init");
+        assert_eq!(read(&root, MACHINE_ID_FILE).as_deref(), Some("fresh\n"));
+        assert_eq!(read(&root, OWNER_FILE).as_deref(), Some("clone\n"));
+        assert_eq!(read(&root, SANDBOX_FILE).as_deref(), Some("clone\n"));
+
+        // Booted again as its own sandbox, it keeps what it was given.
+        fs::write(under(&root, GIVEN_FILE), "{}").unwrap();
+        fs::create_dir_all(under(&root, STATE_DIR)).unwrap();
+        own_disk(&root, "clone", || panic!("its identity stays")).unwrap();
+        assert_eq!(read(&root, GIVEN_FILE).as_deref(), Some("{}"));
+        assert!(under(&root, STATE_DIR).exists());
+        assert_eq!(read(&root, MACHINE_ID_FILE).as_deref(), Some("fresh\n"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_template_builder_forgets_the_sandbox_its_disk_was_captured_from() {
+        let root = disk_of(Some("source"));
+        disown_disk(&root).unwrap();
+        assert!(!under(&root, STATE_DIR).exists());
+        assert_eq!(read(&root, GIVEN_FILE), None);
+        assert_eq!(read(&root, OWNER_FILE), None, "the owner goes last");
+        disown_disk(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        // An image no sandbox ever owned keeps what it holds.
+        let root = disk_of(None);
+        disown_disk(&root).unwrap();
+        assert!(under(&root, STATE_DIR).exists());
+        assert!(read(&root, GIVEN_FILE).is_some());
+        fs::remove_dir_all(&root).unwrap();
     }
 }

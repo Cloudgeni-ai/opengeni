@@ -1,6 +1,7 @@
 use compute_fleet::{OwnerEpoch, Stamp};
 use object_store::memory::InMemory;
 
+use super::pointers::POINTERS;
 use super::*;
 
 #[tokio::test]
@@ -31,23 +32,60 @@ async fn pointers_are_replaced_read_and_deleted() {
     );
 }
 
-/// A forgotten pointer leaves no tombstone: its name is stored again as
-/// if it had never been.
+/// A forgotten pointer reads as none and leaves no tombstone: its name is
+/// stored again as if it had never been.
 #[tokio::test]
 async fn a_forgotten_pointer_can_be_stored_again() {
     let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("p"));
+    assert!(store.read_to_forget("rootfs-a").await.unwrap().is_none());
     let first = store.begin_test("rootfs-a").await.unwrap();
     store.publish(first, b"image".to_vec()).await.unwrap();
-    store.forget_pointer("rootfs-a").await.unwrap();
-    store.forget_pointer("rootfs-a").await.unwrap();
+    let forget = store.read_to_forget("rootfs-a").await.unwrap().unwrap();
+    store.forget(forget).await.unwrap();
     assert_eq!(store.get_pointer("rootfs-a").await.unwrap(), None);
+    let again = store.read_to_forget("rootfs-a").await.unwrap().unwrap();
+    store.forget(again).await.unwrap();
     let again = store.begin_test("rootfs-a").await.unwrap();
     store.publish(again, b"image".to_vec()).await.unwrap();
     assert_eq!(
         store.get_pointer("rootfs-a").await.unwrap(),
         Some(b"image".to_vec())
     );
-    assert!(store.forget_pointer("../escape").await.is_err());
+    assert!(store.read_to_forget("../escape").await.is_err());
+    store.delete_pointer("deleted", TEST_EPOCH).await.unwrap();
+    assert!(
+        store.read_to_forget("deleted").await.unwrap().is_none(),
+        "a tombstone is not forgotten"
+    );
+}
+
+/// A forget lands only on the version it read: one held up in flight
+/// while the same image was stored again, or a sweep fenced it, is
+/// refused and leaves the pointer as it is.
+#[tokio::test]
+async fn a_forget_held_up_in_flight_never_lands_on_a_later_store() {
+    let store = ChunkStore::new(Arc::new(InMemory::new()), Path::from("p"));
+    let first = store.begin_test("rootfs-b").await.unwrap();
+    store.publish(first, b"image".to_vec()).await.unwrap();
+    let stale = store.read_to_forget("rootfs-b").await.unwrap().unwrap();
+    let fenced = store.read_to_forget("rootfs-b").await.unwrap().unwrap();
+    let key = format!("{POINTERS}/rootfs-b");
+    assert_eq!(
+        store.fence(&key).await.unwrap(),
+        Stock::Holds(b"image".to_vec())
+    );
+    let refused = store.forget(fenced).await;
+    assert!(matches!(refused, Err(Error::Superseded)), "{refused:?}");
+    let forget = store.read_to_forget("rootfs-b").await.unwrap().unwrap();
+    store.forget(forget).await.unwrap();
+    let stored = store.begin_test("rootfs-b").await.unwrap();
+    store.publish(stored, b"image".to_vec()).await.unwrap();
+    let refused = store.forget(stale).await;
+    assert!(matches!(refused, Err(Error::Superseded)), "{refused:?}");
+    assert_eq!(
+        store.get_pointer("rootfs-b").await.unwrap(),
+        Some(b"image".to_vec())
+    );
 }
 
 /// A change that read an older version never lands, and a delete

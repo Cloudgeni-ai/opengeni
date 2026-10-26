@@ -84,11 +84,12 @@ pub(super) async fn capture<S: Store>(
             ..
         })
     );
-    let template = service.capture(&team, id, name).await?;
+    let captured = service.capture(&team, id, name).await;
+    // A running sandbox runs again whatever the capture came to.
     if running && let Err(failure) = service.wake(&team, id, PriorityName::Interactive).await {
         tracing::warn!(sandbox = %id, %failure, "waking a sandbox again after its capture");
     }
-    Ok((StatusCode::CREATED, Json(template.into())))
+    Ok((StatusCode::CREATED, Json(captured?.into())))
 }
 
 pub(super) async fn list<S: Store>(

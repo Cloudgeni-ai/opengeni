@@ -17,8 +17,8 @@ use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
 
 use super::{
-    Admission, Admits, AgentRef, HostRow, Inserted, LifecycleRow, Linked, RequestRow, Result,
-    SandboxRow, Spec, Store, StoreError, TemplateRow, Write, admits, rule,
+    Admission, Admits, AgentRef, Collector, HostRow, Inserted, LifecycleRow, Linked, RequestRow,
+    Result, SandboxRow, Spec, Store, StoreError, TEMPLATE_PREFIX, TemplateRow, Write, admits, rule,
 };
 
 mod connect;
@@ -327,7 +327,10 @@ impl PostgresStore {
     /// Inserts `row`, for `row.team`'s create request `request_id` when
     /// given: then only while the request is not retired, with its row
     /// locked against [`Store::delete_retiring`], which retires it. Answers
-    /// how the write went and whether the request was live.
+    /// how the write went and whether the request was live. A sandbox
+    /// created from a team's template is inserted only while the template
+    /// is there, with its row locked against its delete, which a claim on
+    /// its image waits for.
     async fn insert_for(
         &self,
         row: &SandboxRow,
@@ -337,7 +340,7 @@ impl PostgresStore {
         // A retired request's row is locked by the delete that retires it,
         // so this waits for that delete and then reads the row again.
         let request = "request as (select 1 from compute_create_requests \
-             where team = $2 and request_id = $17 and gone_ms is null for share)";
+             where team = $2 and request_id = $18 and gone_ms is null for share)";
         let (request, live) = if request_id.is_some() {
             (
                 format!("{request}, "),
@@ -346,6 +349,7 @@ impl PostgresStore {
         } else {
             (String::new(), "")
         };
+        let template = row.spec.image.strip_prefix(TEMPLATE_PREFIX);
         let version = big(row.version)?;
         let mut params: Vec<&(dyn ToSql + Sync)> = vec![
             &fields.id,
@@ -364,6 +368,7 @@ impl PostgresStore {
             &fields.created_ms,
             &version,
             &fields.whole,
+            &template,
         ];
         if let Some(request_id) = &request_id {
             params.push(request_id);
@@ -373,13 +378,17 @@ impl PostgresStore {
             .await?
             .query_one(
                 &format!(
-                    "with {request}{}, written as ( \
+                    "with {request}{}, gone as (select true as gone where $17::text is not null \
+                     and not exists (select 1 from compute_templates \
+                     where team = $2 and id = $17::text for share)), written as ( \
                      insert into compute_sandboxes ({SANDBOX_COLUMNS}) \
                      select $1::text, $2::text, $3::jsonb, $4::jsonb, $5::bigint, $6::bigint, \
                      $7::bigint, $8::bigint, $9::bigint, $10::bigint, $11::bigint, $12::bigint, \
                      $13::text, $14::bigint, $15::bigint, $16::bigint \
-                     where not exists (select 1 from owner where lost){live} \
-                     on conflict (id) do nothing returning 1) {WRITTEN}{}",
+                     where not exists (select 1 from owner where lost) \
+                     and not exists (select 1 from gone){live} \
+                     on conflict (id) do nothing returning 1) {WRITTEN}, \
+                     exists (select 1 from gone) as gone{}",
                     owner_lost(5),
                     if request_id.is_some() {
                         ", exists (select 1 from request) as live"
@@ -392,7 +401,12 @@ impl PostgresStore {
             .await
             .map_err(database)?;
         let live = request_id.is_none() || written.get::<_, bool>("live");
-        Ok((write_of(&written), live))
+        let write = if written.get::<_, bool>("gone") {
+            Write::TemplateGone
+        } else {
+            write_of(&written)
+        };
+        Ok((write, live))
     }
 
     /// Applies a registration that meets no live one, in `tx`.
@@ -982,7 +996,7 @@ impl Store for PostgresStore {
         name: &str,
         image: ImageId,
         at_ms: u64,
-    ) -> Result<ImageId> {
+    ) -> Result<Option<ImageId>> {
         self.record_built_now(source, name, image, at_ms).await
     }
 
@@ -1010,12 +1024,21 @@ impl Store for PostgresStore {
         self.unused_images_now(now_ms, before_ms).await
     }
 
-    async fn collect_image(&self, image: ImageId, before_ms: u64) -> Result<bool> {
-        self.collect_image_now(image, before_ms).await
+    async fn collect_image(
+        &self,
+        image: ImageId,
+        before_ms: u64,
+        collector: &Collector,
+    ) -> Result<bool> {
+        self.collect_image_now(image, before_ms, collector).await
     }
 
-    async fn collected(&self, image: ImageId) -> Result<()> {
-        self.collected_now(image).await
+    async fn collecting(&self, image: ImageId, collector: &str) -> Result<bool> {
+        self.collecting_now(image, collector).await
+    }
+
+    async fn collected(&self, image: ImageId, collector: &str) -> Result<()> {
+        self.collected_now(image, collector).await
     }
 }
 

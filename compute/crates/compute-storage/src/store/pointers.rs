@@ -581,18 +581,40 @@ impl ChunkStore {
         Err(Error::Superseded)
     }
 
-    /// Deletes pointer `name` outright, leaving no tombstone, so a later
-    /// store may take the name again. Only for pointers no owner fences,
-    /// such as a sandbox image's, whose name is its content: a sandbox's
-    /// copy is deleted with [`Self::delete_pointer`]. What the pointer
-    /// named stays until a sweep finds nothing names it. Nothing to delete
-    /// is fine.
-    pub async fn forget_pointer(&self, name: &str) -> Result<()> {
+    /// Starts forgetting pointer `name`, one no owner fences, such as a
+    /// sandbox image's, whose name is its content (a sandbox's copy is
+    /// deleted with [`Self::delete_pointer`]): reads it, and returns the
+    /// change that empties it on the version read, through
+    /// [`Self::forget`]. `None` when there is nothing to forget: no
+    /// pointer, or a tombstone. The caller checks between the two that it
+    /// may still forget it; a store of the same image since, or a sweep's
+    /// fence, changes the version, so the empty one never lands on it.
+    pub async fn read_to_forget(&self, name: &str) -> Result<Option<Publication>> {
         let path = self.pointer_path(name)?;
-        match self.backend.delete(&path).await {
-            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        Ok(self
+            .read_pointer(&path)
+            .await?
+            .filter(|stored| !stored.is_tombstone())
+            .map(|stored| Publication {
+                path,
+                version: stored.version,
+                stamp: Stamp {
+                    epoch: stored.owner.epoch,
+                    save: 0,
+                },
+            }))
+    }
+
+    /// Ends forgetting a pointer (see [`Self::read_to_forget`]): replaces
+    /// it with the empty one a store begins with, under number 0, which
+    /// reads as none and names nothing, so a sweep frees what it named and
+    /// a later store of the same name publishes over it. Never deleted
+    /// outright: deletes carry no condition on every store, and one held
+    /// up in flight could land on the pointer a later store published.
+    /// Refused with [`Error::Superseded`] when the pointer changed since it
+    /// was read: read it, and check, again.
+    pub async fn forget(&self, publication: Publication) -> Result<()> {
+        self.publish(publication, Vec::new()).await
     }
 
     /// The name of the pointer a listing of [`Area::Pointers`] shows as

@@ -137,8 +137,8 @@ update compute_hosts set drained = true where state = 'draining';
 
 /// Version 6: templates saved from sandboxes (`Store::insert_template`),
 /// and every image captured for one, with since when nothing uses it and
-/// whether it is being collected; sandboxes are found by the image their
-/// config names, which tells whether one is used.
+/// which collector claimed it to forget it, when; sandboxes are found by
+/// the image their config names, which tells whether one is used.
 const MIGRATION_6: &str = "
 create table if not exists compute_templates (
     team text not null,
@@ -158,7 +158,8 @@ create index if not exists compute_templates_image on compute_templates (image);
 create table if not exists compute_captured_images (
     image text primary key,
     unused_ms bigint,
-    collecting boolean not null default false
+    collector text,
+    claimed_ms bigint
 );
 create index if not exists compute_sandboxes_image on compute_sandboxes
     ((spec -> 'config' ->> 'image'));

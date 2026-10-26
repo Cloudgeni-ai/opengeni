@@ -10,8 +10,8 @@ use std::future::Future;
 
 use compute_control::e2b::lifecycle::{OnTimeout, Record, State};
 use compute_control::store::{
-    Admission, AgentRef, Inserted, LifecycleRow, Linked, MemoryStore, PostgresStore, RequestRow,
-    SandboxRow, Spec, Store, TemplateRow, Write, replace_lifecycle,
+    Admission, AgentRef, Collector, Inserted, LifecycleRow, Linked, MemoryStore, PostgresStore,
+    RequestRow, SandboxRow, Spec, Store, TEMPLATE_PREFIX, TemplateRow, Write, replace_lifecycle,
 };
 use compute_fleet::{HostId, HostState, OwnerEpoch, Ownership, SandboxId, Sends};
 use compute_protocol::fleet::{Capacity, Held, HostInfo, Register, Renew, Verdict};
@@ -691,13 +691,13 @@ async fn images<S: Store>(store: S) {
     let first = image_id();
     assert_eq!(
         store.record_built(&old, &name, first, 1).await.unwrap(),
-        first
+        Some(first)
     );
     // Another host's build of the same OCI image is not the image recorded.
     let again = image_id();
     assert_eq!(
         store.record_built(&old, &name, again, 2).await.unwrap(),
-        first
+        Some(first)
     );
     assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
@@ -707,7 +707,7 @@ async fn images<S: Store>(store: S) {
     let next = image_id();
     assert_eq!(
         store.record_built(&new, &name, next, 3).await.unwrap(),
-        next
+        Some(next)
     );
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
     assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
@@ -721,7 +721,7 @@ async fn images<S: Store>(store: S) {
             .record_built(&old, &alias, image_id(), 4)
             .await
             .unwrap(),
-        first
+        Some(first)
     );
     assert_eq!(store.latest_built(&alias).await.unwrap(), Some(first));
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
@@ -732,7 +732,7 @@ async fn images<S: Store>(store: S) {
             .record_built(&old, &name, image_id(), 5)
             .await
             .unwrap(),
-        first
+        Some(first)
     );
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
 }
@@ -808,7 +808,10 @@ async fn a_delayed_use_does_not_undo_a_later_one() {
     // Meanwhile the name moves to a new source and rolls back to the old
     // one: the rollback is recorded by the transaction holding the row.
     let next = image_id();
-    assert_eq!(store.record_built(new, name, next, 3).await.unwrap(), next);
+    assert_eq!(
+        store.record_built(new, name, next, 3).await.unwrap(),
+        Some(next)
+    );
     holder
         .execute(
             &format!(
@@ -821,7 +824,7 @@ async fn a_delayed_use_does_not_undo_a_later_one() {
         .await
         .unwrap();
     holder.commit().await.unwrap();
-    assert_eq!(delayed.await.unwrap().unwrap(), first);
+    assert_eq!(delayed.await.unwrap().unwrap(), Some(first));
     assert_eq!(store.latest_built(name).await.unwrap(), Some(first));
 
     drop(store);
@@ -1466,7 +1469,17 @@ async fn unused<S: Store>(
     found
 }
 
-async fn collecting<S: Store>(store: S) {
+/// A collector that claims at `at_ms`, taking over claims made before
+/// `lapsed_ms`.
+fn collector(at_ms: u64, lapsed_ms: u64) -> Collector {
+    Collector {
+        id: format!("collector-{:x}", random()),
+        at_ms,
+        lapsed_ms,
+    }
+}
+
+async fn collecting<S: Store>(store: &S) {
     let team = format!("team-{:x}", random());
     let kept = template(&team, image_id(), None, 1);
     let dropped = template(&team, image_id(), None, 1);
@@ -1478,7 +1491,7 @@ async fn collecting<S: Store>(store: S) {
     // A sandbox started from a template keeps its image once the template
     // is gone; so does an image a host built, which a capture of an
     // unchanged disk can be.
-    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let (host, _) = registered(store, &register(&name(), random(), Vec::new())).await;
     let mut started = sandbox(host);
     started.team = team.clone();
     started.spec.config.image = Some(booted.image);
@@ -1494,35 +1507,37 @@ async fn collecting<S: Store>(store: S) {
     let mine = [kept.image, dropped.image, booted.image, built.image];
 
     let at = now_ms();
+    let first = collector(at, 0);
     assert_eq!(
-        unused(&store, at, at, &mine).await,
+        unused(store, at, at, &mine).await,
         Vec::new(),
         "nothing is collected as it is first found unused"
     );
     assert_eq!(
-        unused(&store, at + 10, at, &mine).await,
+        unused(store, at + 10, at, &mine).await,
         Vec::new(),
         "a later look keeps the time it was first found unused"
     );
     assert_eq!(
-        unused(&store, at + 20, at + 1, &mine).await,
+        unused(store, at + 20, at + 1, &mine).await,
         vec![dropped.image]
     );
 
+    let collects = |image: ImageId, before: u64| store.collect_image(image, before, &first);
     assert!(
-        !store.collect_image(dropped.image, at).await.unwrap(),
+        !collects(dropped.image, at).await.unwrap(),
         "not unused for long enough"
     );
     for used in [kept.image, booted.image, built.image] {
-        assert!(!store.collect_image(used, at + 1).await.unwrap());
+        assert!(!collects(used, at + 1).await.unwrap());
     }
-    assert!(!store.collect_image(image_id(), at + 1).await.unwrap());
-    assert!(store.collect_image(dropped.image, at + 1).await.unwrap());
+    assert!(!collects(image_id(), at + 1).await.unwrap());
+    assert!(collects(dropped.image, at + 1).await.unwrap());
     assert!(
-        store.collect_image(dropped.image, 0).await.unwrap(),
-        "being collected, it is finished whatever the time"
+        collects(dropped.image, 0).await.unwrap(),
+        "its collector holds its claim whatever the time"
     );
-    assert_eq!(unused(&store, at + 30, 0, &mine).await, vec![dropped.image]);
+    assert_eq!(unused(store, at + 30, 0, &mine).await, vec![dropped.image]);
 
     let late = template(&team, dropped.image, None, 2);
     assert_eq!(
@@ -1531,8 +1546,8 @@ async fn collecting<S: Store>(store: S) {
         "no template is recorded over an image being collected"
     );
     assert_eq!(store.template(&team, &late.id).await.unwrap(), None);
-    store.collected(dropped.image).await.unwrap();
-    assert_eq!(unused(&store, at + 40, at + 41, &mine).await, Vec::new());
+    store.collected(dropped.image, &first.id).await.unwrap();
+    assert_eq!(unused(store, at + 40, at + 41, &mine).await, Vec::new());
     assert_eq!(
         store.insert_template(&late).await.unwrap(),
         Inserted::Done,
@@ -1542,17 +1557,17 @@ async fn collecting<S: Store>(store: S) {
     // Unused once its sandbox is gone; then a sandbox started from it
     // before the next look keeps it, though that look is not yet taken.
     assert!(store.delete(started.id, started.version).await.unwrap());
-    assert_eq!(unused(&store, at + 50, at + 50, &mine).await, Vec::new());
+    assert_eq!(unused(store, at + 50, at + 50, &mine).await, Vec::new());
     assert_eq!(
-        unused(&store, at + 60, at + 51, &mine).await,
+        unused(store, at + 60, at + 51, &mine).await,
         vec![booted.image]
     );
     let mut again = sandbox(host);
     again.team = team.clone();
     again.spec.config.image = Some(booted.image);
     assert_eq!(store.insert(&again).await.unwrap(), Write::Done);
-    assert!(!store.collect_image(booted.image, at + 51).await.unwrap());
-    assert_eq!(unused(&store, at + 70, at + 61, &mine).await, Vec::new());
+    assert!(!collects(booted.image, at + 51).await.unwrap());
+    assert_eq!(unused(store, at + 70, at + 61, &mine).await, Vec::new());
 
     assert!(store.delete(again.id, again.version).await.unwrap());
     for row in [&kept, &late] {
@@ -1560,7 +1575,166 @@ async fn collecting<S: Store>(store: S) {
     }
 }
 
+/// An unused captured image of team `team`'s, its template deleted, found
+/// unused at `at` and so unused since before `at + 1`.
+async fn unused_image<S: Store>(store: &S, team: &str, at: u64) -> ImageId {
+    let row = template(team, image_id(), None, 1);
+    assert_eq!(store.insert_template(&row).await.unwrap(), Inserted::Done);
+    assert!(store.delete_template(team, &row.id).await.unwrap());
+    assert_eq!(unused(store, at, at, &[row.image]).await, Vec::new());
+    row.image
+}
+
+async fn claims<S: Store>(store: &S) {
+    let team = format!("team-{:x}", random());
+    let at = now_ms();
+    let image = unused_image(store, &team, at).await;
+
+    let first = collector(at + 10, at);
+    assert!(store.collect_image(image, at + 1, &first).await.unwrap());
+    assert!(store.collecting(image, &first.id).await.unwrap());
+    // Another collector neither shares the claim nor, while it lasts,
+    // takes it over.
+    let second = collector(at + 20, at + 10);
+    assert!(!store.collect_image(image, at + 1, &second).await.unwrap());
+    assert!(!store.collecting(image, &second.id).await.unwrap());
+    store.collected(image, &second.id).await.unwrap();
+    assert!(
+        store.collecting(image, &first.id).await.unwrap(),
+        "only its collector deletes its record"
+    );
+
+    // Once it lapses, another takes it over; the first, held up, finds
+    // its claim lost and deletes nothing.
+    let third = collector(at + 30, at + 11);
+    assert!(store.collect_image(image, at + 1, &third).await.unwrap());
+    assert!(!store.collecting(image, &first.id).await.unwrap());
+    assert!(store.collecting(image, &third.id).await.unwrap());
+    assert!(
+        !store.collect_image(image, at + 1, &first).await.unwrap(),
+        "a lost claim is not taken back while the new one lasts"
+    );
+    store.collected(image, &first.id).await.unwrap();
+    assert!(store.collecting(image, &third.id).await.unwrap());
+    store.collected(image, &third.id).await.unwrap();
+    assert!(!store.collecting(image, &third.id).await.unwrap());
+    assert_eq!(unused(store, at + 40, at + 41, &[image]).await, Vec::new());
+
+    // Captured again after, it is a new record: the old collectors hold
+    // nothing of it.
+    let late = template(&team, image, None, 2);
+    assert_eq!(store.insert_template(&late).await.unwrap(), Inserted::Done);
+    for old in [&first, &third] {
+        assert!(!store.collecting(image, &old.id).await.unwrap());
+        assert!(!store.collect_image(image, u64::MAX, old).await.unwrap());
+    }
+    assert!(store.delete_template(&team, &late.id).await.unwrap());
+}
+
+async fn uses_after_a_claim<S: Store>(store: &S) {
+    let team = format!("team-{:x}", random());
+    let at = now_ms();
+    let image = unused_image(store, &team, at).await;
+    let claimed = collector(at + 10, 0);
+    assert!(store.collect_image(image, at + 1, &claimed).await.unwrap());
+
+    // A build that happens to be the claimed image's bytes is not
+    // recorded, nor is a template of it.
+    let source = format!("registry.example/sandbox@sha256:{:064x}", random());
+    let name = format!("image-{:016x}", random());
+    assert_eq!(
+        store.record_built(&source, &name, image, 1).await.unwrap(),
+        None
+    );
+    assert_eq!(store.image_built(&source).await.unwrap(), None);
+    assert_eq!(store.latest_built(&name).await.unwrap(), None);
+    assert_eq!(
+        store
+            .insert_template(&template(&team, image, None, 3))
+            .await
+            .unwrap(),
+        Inserted::Collecting
+    );
+    assert!(store.collecting(image, &claimed.id).await.unwrap());
+
+    // A source recorded before keeps its image, whatever a build of it
+    // is now.
+    let other = format!("registry.example/sandbox@sha256:{:064x}", random());
+    let kept = image_id();
+    assert_eq!(
+        store.record_built(&other, &name, kept, 2).await.unwrap(),
+        Some(kept)
+    );
+    assert_eq!(
+        store.record_built(&other, &name, image, 3).await.unwrap(),
+        Some(kept)
+    );
+
+    store.collected(image, &claimed.id).await.unwrap();
+    assert_eq!(
+        store.record_built(&source, &name, image, 4).await.unwrap(),
+        Some(image),
+        "forgotten, it is recorded as any other build"
+    );
+}
+
+/// Captured images are collected only once nothing has used them for a
+/// while, by one collector at a time, which holds an image until its
+/// claim lapses, and no use of an image is recorded once one claims it.
+/// One check, its parts in turn: each look for unused images notes the
+/// time on every captured image in the store, so two at once would move
+/// each other's.
+async fn collection<S: Store>(store: S) {
+    collecting(&store).await;
+    claims(&store).await;
+    uses_after_a_claim(&store).await;
+}
+
 #[tokio::test]
 async fn captured_images_are_collected_only_once_nothing_has_used_them_for_a_while() {
-    each(collecting, collecting).await;
+    each(collection, collection).await;
+}
+
+async fn sandboxes_from_templates<S: Store>(store: S) {
+    let team = format!("team-{:x}", random());
+    let row = template(&team, image_id(), None, 1);
+    assert_eq!(store.insert_template(&row).await.unwrap(), Inserted::Done);
+    let (host, _) = registered(&store, &register(&name(), random(), Vec::new())).await;
+    let from = |id: &str| {
+        let mut created = sandbox(host);
+        created.team.clone_from(&team);
+        created.spec.image = format!("{TEMPLATE_PREFIX}{id}");
+        created.spec.config.image = Some(row.image);
+        created
+    };
+    let first = from(&row.id);
+    assert_eq!(store.insert(&first).await.unwrap(), Write::Done);
+
+    // Another team's template of the same id is not this team's.
+    let mut elsewhere = from(&row.id);
+    elsewhere.team = format!("team-{:x}", random());
+    assert_eq!(store.insert(&elsewhere).await.unwrap(), Write::TemplateGone);
+
+    assert!(store.delete_template(&team, &row.id).await.unwrap());
+    let late = from(&row.id);
+    assert_eq!(
+        store.insert(&late).await.unwrap(),
+        Write::TemplateGone,
+        "a create that found the template before its delete inserts nothing"
+    );
+    assert_eq!(store.sandbox(late.id).await.unwrap(), None);
+    let request_id = format!("request-{:x}", random());
+    let claimed = request(&late, &request_id);
+    assert_eq!(store.claim_request(&claimed).await.unwrap(), claimed);
+    assert_eq!(
+        store.insert_requested(&late, &request_id).await.unwrap(),
+        Some(Write::TemplateGone)
+    );
+    assert_eq!(store.sandbox(late.id).await.unwrap(), None);
+    assert!(store.delete(first.id, first.version).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_sandbox_is_created_from_a_template_only_while_the_template_is_there() {
+    each(sandboxes_from_templates, sandboxes_from_templates).await;
 }

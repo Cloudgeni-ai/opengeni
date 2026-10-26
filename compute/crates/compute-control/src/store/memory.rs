@@ -11,8 +11,8 @@ use compute_protocol::fleet::{Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId};
 
 use super::{
-    Admission, Admits, HostRow, Inserted, LifecycleRow, Linked, RequestRow, Result, SandboxRow,
-    Store, TemplateRow, Write, admits, rule,
+    Admission, Admits, Collector, HostRow, Inserted, LifecycleRow, Linked, RequestRow, Result,
+    SandboxRow, Store, TemplateRow, Write, admits, rule,
 };
 
 mod templates;
@@ -78,6 +78,9 @@ impl Inner {
     }
 
     fn insert(&mut self, row: &SandboxRow) -> Write {
+        if self.template_gone(row) {
+            return Write::TemplateGone;
+        }
         if self.owner_lost(row) {
             return Write::OwnerLost;
         }
@@ -694,14 +697,17 @@ impl Store for MemoryStore {
         name: &str,
         image: ImageId,
         _at_ms: u64,
-    ) -> impl Future<Output = Result<ImageId>> + Send {
+    ) -> impl Future<Output = Result<Option<ImageId>>> + Send {
         let mut inner = self.lock();
+        if !inner.built.contains_key(source) && inner.claimed(image) {
+            return ready(Ok(None));
+        }
         let recorded = *inner.built.entry(source.to_owned()).or_insert(image);
         inner
             .image_uses
             .retain(|(named, used)| named != name || used != source);
         inner.image_uses.push((name.to_owned(), source.to_owned()));
-        ready(Ok(recorded))
+        ready(Ok(Some(recorded)))
     }
 
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send {
@@ -747,12 +753,25 @@ impl Store for MemoryStore {
         &self,
         image: ImageId,
         before_ms: u64,
+        collector: &Collector,
     ) -> impl Future<Output = Result<bool>> + Send {
-        ready(Ok(self.lock().collect_image(image, before_ms)))
+        ready(Ok(self.lock().collect_image(image, before_ms, collector)))
     }
 
-    fn collected(&self, image: ImageId) -> impl Future<Output = Result<()>> + Send {
-        self.lock().collected(image);
+    fn collecting(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<bool>> + Send {
+        ready(Ok(self.lock().collecting(image, collector)))
+    }
+
+    fn collected(
+        &self,
+        image: ImageId,
+        collector: &str,
+    ) -> impl Future<Output = Result<()>> + Send {
+        self.lock().collected(image, collector);
         ready(Ok(()))
     }
 }

@@ -6,10 +6,16 @@
 //! templates, so the images nothing uses any more can be found and
 //! forgotten: an image is in use while a template, a sandbox's config or
 //! an image built from an OCI image names it. One that stays unused for
-//! a while is marked as being collected, which no template is inserted
-//! over, then forgotten in object storage, then its record deleted.
+//! a while is claimed by one collector, which nothing records a use of
+//! from then on, then forgotten in object storage, then its record
+//! deleted.
 
 use compute_protocol::host::{Id, ImageId};
+
+/// What a create names as its image to start from a team's template:
+/// this, then the template's id or name. The store records a sandbox
+/// created from one as this then the template's id.
+pub const TEMPLATE_PREFIX: &str = "template/";
 
 /// A team's template.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +47,21 @@ pub enum Inserted {
     /// Its image is being forgotten in object storage: capture it again
     /// once it is.
     Collecting,
+}
+
+/// A collector's claim on the captured images it forgets (see
+/// [`crate::store::Store::collect_image`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Collector {
+    /// Its own id, which no other collector has.
+    pub id: String,
+    /// When it claims.
+    pub at_ms: u64,
+    /// A claim another collector made before this has lapsed: that one
+    /// stopped, or is held up, and this takes the image over. Its writes
+    /// still in flight are fenced: it checks its claim after reading the
+    /// image's pointer, and empties the pointer only on the version read.
+    pub lapsed_ms: u64,
 }
 
 /// Whether template name `name` is one a create can name: 1 to 64 of

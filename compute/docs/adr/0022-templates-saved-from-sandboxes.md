@@ -38,19 +38,49 @@ without ever forgetting one a template or a create still needs.
   without it. E2B's `POST /sandboxes/{id}/snapshots`, `GET /snapshots` and
   `DELETE /templates/{id}` map onto templates, and an E2B create names one
   as its `templateID`.
-- A sandbox started from a captured disk is a new machine: the guest
-  clears the agent state an earlier sandbox left on it when the disk's
-  owner is not this sandbox, so Opengeni's agent enrolls afresh.
+- A sandbox started from a captured disk is a new machine. The guest
+  forgets the sandbox the disk was made for before anything reads what
+  the disk keeps: that sandbox's agent state (instance lock, command
+  spool, browser controller state) and what its create gave it (its init,
+  with its environment and access token), so neither the image's command
+  nor Opengeni's agent starts with them. A sandbox booted on the disk does
+  this when the disk's owner is another sandbox; a template builder,
+  booted with no sandbox, does it before its snapshot, so every ready
+  clone starts as new; a clone told it is a sandbox does it again should
+  its disk still name another.
 - The store records every captured image. An image is used while a
   template, a sandbox's config or a built image names it. A replica looks
-  every 10 minutes; an image unused for an hour is marked as being
-  collected, its pointer deleted outright (images are content-addressed,
-  so no tombstone: the same disk may be captured again), then its record.
-  A sweep (ADR 17) then frees its chunks. Inserting a template and marking
-  its image both lock the image's record first, so a template is never
-  recorded over an image being collected; that capture stores it again.
-  After recording a template the service checks the pointer is there, for
-  the capture that found it stored just as it was forgotten.
+  every 10 minutes; an image unused for an hour is claimed by one
+  collector, which empties its pointer, then deletes its record. A sweep
+  (ADR 17) then frees its chunks.
+  - Every use recorded of an image and every claim on it take turns by
+    locks, and a claim looks at the uses only once it holds its lock: a
+    template's insert and a claim lock the image's record, a built
+    image's record locks it after inserting itself, and a sandbox created
+    from a template locks the template, which a claim cannot precede
+    (the template is a use). A use recorded first keeps the image; one
+    after finds it claimed and is refused: the capture stores it again
+    once forgotten, a build that happened to be the same bytes is not
+    used (builds are not byte for byte the same and a captured disk was
+    booted, so this is an accident), and a create whose template was
+    deleted meanwhile fails as naming no template.
+  - A claim names its collector. Another collector takes it over only
+    once it lapses (10 minutes), as when its collector stopped. A
+    collector reads the pointer, then checks it still holds its claim,
+    then replaces the pointer with the empty one a store begins with, on
+    condition of the version it read; it then deletes the record only if
+    its claim still stands. A collector held up after its check finds the
+    version changed when the image was forgotten by another, or stored
+    again for a capture since, so it never empties a pointer a template
+    recorded after its claim lapsed needs. A sweep's fence also changes
+    the version: the collector reads and checks again.
+  - The pointer is emptied, never deleted: images are content-addressed,
+    so no tombstone is left (the same disk may be captured again and
+    published over it), and a delete carries no condition on every store,
+    so one held up in flight could land on a later store. The empty
+    pointer of each forgotten image stays, a few dozen bytes.
+  - After recording a template the service checks the pointer is there,
+    for the capture that found the image stored just as it was forgotten.
 
 ## Consequences
 
@@ -67,7 +97,11 @@ without ever forgetting one a template or a create still needs.
   template being recorded, the image has no record and is never forgotten.
   Capturing the same unchanged sandbox again finds the same image and
   records it; a changed one leaves the old image behind.
-- A create resolves its template's image and then records its sandbox;
-  the hour's grace covers that gap many times over.
+- A create resolves its template's image and then records its sandbox
+  under its template's lock, so a template deleted in between fails the
+  create rather than leave a sandbox naming an image being forgotten.
+- A collector that stops holding a claim leaves that image unrecorded as
+  a template for up to the claim's 10 minutes; a capture of it waits, as
+  it does for any image being forgotten.
 - Hosts of earlier releases answer a capture as an unknown request; the
   service tells the caller that host cannot capture.
