@@ -53,7 +53,10 @@ import {
   type SubscriptionCoreCodexOperationScope,
 } from "@opengeni/db";
 import {
+  InferenceRegionRestrictedError,
   MultiProviderModelProvider,
+  inferenceResidencyRequirement,
+  withInferenceResidency,
   normalizeModelCallUsage,
   runSingleModelCall,
   SingleModelCallProviderError,
@@ -244,14 +247,22 @@ export function createModelCallService(deps: ModelCallServiceDeps): ModelCallSer
         ...reasoningEffortFor(model, input.request.reasoningEffort),
         ...(input.signal ? { signal: input.signal } : {}),
       };
-      const execute = async (): Promise<SingleModelCallResult> => {
-        const binding = new MultiProviderModelProvider(settings).resolveBinding(model.id);
-        return await runSingleModelCall(
-          { client: binding.client, provider: binding.provider, modelId: binding.modelId },
-          request,
-          input.onTextDelta ? { onTextDelta: input.onTextDelta } : {},
-        );
-      };
+      // EU-only inference: resolution refuses a non-EU route, and the
+      // transport refuses any request that is not on one.
+      const execute = async (): Promise<SingleModelCallResult> =>
+        await withInferenceResidency(settings, async () => {
+          const binding = new MultiProviderModelProvider(settings).resolveBinding(model.id);
+          return await runSingleModelCall(
+            {
+              client: binding.client,
+              provider: binding.provider,
+              modelId: binding.modelId,
+              residency: inferenceResidencyRequirement(settings),
+            },
+            request,
+            input.onTextDelta ? { onTextDelta: input.onTextDelta } : {},
+          );
+        });
       let result: SingleModelCallResult;
       try {
         result =
@@ -645,6 +656,15 @@ export function publicModelCallError(error: unknown): unknown {
       type: "invalid_request_error",
       code: "unsupported_parameter",
       param: error.parameter,
+      message: error.message,
+    });
+  }
+  if (error instanceof InferenceRegionRestrictedError) {
+    return new ModelCallError({
+      status: 422,
+      type: "invalid_request_error",
+      code: "region_restricted",
+      param: "model",
       message: error.message,
     });
   }

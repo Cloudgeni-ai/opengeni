@@ -101,3 +101,40 @@ Declaration example (a registry provider in the deployment catalog):
   "models": [{ "id": "azure-eu/gpt-eu", "upstreamModelId": "gpt-eu" }]
 }
 ```
+
+## Enforcement
+
+The setting is read per workspace with `isWorkspaceEuOnly` (today it follows
+the organization). When a workspace is EU-only, every model call must run on an
+EU route, and nothing falls back to a route that is not EU.
+
+- **Settings.** `settingsWithInferenceResidency` (applied first by
+  `settingsWithModelProviderCredentials`, the overlay every run, title, model
+  call and compaction uses) sets `requiredModelGeography: "eu"` on the run's
+  settings. It is per-run only and never read from the environment. A failed
+  read throws.
+- **Resolution.** `resolveTurnModel` refuses a route whose live residency
+  record is not EU, and refuses an unlisted model instead of using the legacy
+  built-in client. The built-in fallback binding in `MultiProviderModelProvider`
+  checks the built-in model's record the same way.
+- **Transport.** Every provider adapter (OpenAI and Azure Responses and Chat,
+  Anthropic Messages, Codex, SuperGrok, gateways) sends through
+  `instrumentedModelFetch`, which checks each request before it is sent:
+  - A client built from EU settings carries the requirement, so it refuses any
+    request whose provider and request-body model are not an EU route
+    (`euModelRoutes`), wherever it is used. Clients for EU and other settings
+    are never shared through the client cache.
+  - The run's context (`withInferenceResidency`) adds the same check for
+    clients built before the setting was known. A worker turn starts with an
+    unresolved context that refuses every request until the claim binds it,
+    and an EU context never widens again.
+  - Other provider requests with a body (images, audio, files) are refused
+    under EU; reads such as model lists pass. Side features check their own
+    routes before calling.
+- **Worker.** Each attempt reads the setting again before any model call, so a
+  setting turned on after the claim still applies, and refuses a turn whose
+  resolved route is not EU.
+- **API.** The model-call API returns `422` with code `region_restricted`.
+
+A refusal is `InferenceRegionRestrictedError` (code `region_restricted`), whose
+message says the model is not supported in EU.

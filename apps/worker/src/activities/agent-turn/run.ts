@@ -50,7 +50,11 @@ import {
   type CodexRequestContext,
 } from "@opengeni/codex";
 import { codexUpstreamModelSlugs } from "@opengeni/config";
-import { withClaudeUsageObserver } from "@opengeni/runtime";
+import {
+  resolveInferenceResidency,
+  withClaudeUsageObserver,
+  withInferenceResidency,
+} from "@opengeni/runtime";
 import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
 import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
@@ -584,6 +588,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
+      resolveInferenceResidency(capabilitySettings);
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
@@ -2322,7 +2327,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             // Correlation diagnostics never affect execution or admission.
           }
-          return runAgentTurn(input, resolvedServices, span);
+          // EU-only inference: model requests are refused until the claim
+          // binds this context to the turn's settings.
+          return withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span));
         }),
       );
     } catch (error) {

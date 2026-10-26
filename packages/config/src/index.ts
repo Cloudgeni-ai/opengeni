@@ -75,6 +75,7 @@ import {
   ModelResidencyDeclaration,
   ModelResidencyV1,
   UNKNOWN_MODEL_RESIDENCY,
+  isEuResidency,
   modelResidencyClaim,
   modelResidencyRouteProblems,
 } from "@opengeni/contracts";
@@ -1164,6 +1165,10 @@ const SettingsSchema = z.object({
   // model id to residency declaration. An undeclared model uses a built-in
   // rule: Azure is unknown, never EU.
   builtinModelResidencyJson: z.string().optional(),
+  // Per-run only, never read from the environment: set by the execution
+  // overlay when the workspace is EU-only. Every model route the run resolves
+  // must then have an EU residency record. See docs/eu-only-inference.md.
+  requiredModelGeography: z.enum(["eu"]).optional(),
   // Codex (ChatGPT) subscription: when enabled, a per-workspace connected
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
@@ -8410,6 +8415,41 @@ const BuiltinModelResidencyDeclarations = z.record(
 );
 
 /** `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON`: model id to residency declaration. */
+/**
+ * Whether a route with this residency may run under the settings' residency
+ * requirement. Without a requirement every route may run; under `eu` only a
+ * route whose live record is EU may.
+ */
+export function modelRouteMeetsResidencyRequirement(
+  settings: Pick<Settings, "requiredModelGeography">,
+  residency: unknown,
+): boolean {
+  return settings.requiredModelGeography !== "eu" || isEuResidency(residency);
+}
+
+/**
+ * The routes that may carry requests under an EU requirement: provider id to
+ * the upstream model ids whose every configured route is EU. An upstream id
+ * listed by any non-EU route of the same provider is excluded.
+ */
+export function euModelRoutes(settings: Settings): ReadonlyMap<string, ReadonlySet<string>> {
+  const verdicts = new Map<string, Map<string, boolean>>();
+  for (const model of configuredModels(settings)) {
+    const provider = verdicts.get(model.providerId) ?? new Map<string, boolean>();
+    provider.set(
+      model.upstreamModelId,
+      (provider.get(model.upstreamModelId) ?? true) && isEuResidency(model.residency),
+    );
+    verdicts.set(model.providerId, provider);
+  }
+  return new Map(
+    [...verdicts].map(([providerId, models]) => [
+      providerId,
+      new Set([...models].filter(([, eu]) => eu).map(([upstreamModelId]) => upstreamModelId)),
+    ]),
+  );
+}
+
 export function parseBuiltinModelResidencyJson(
   value: string,
 ): Record<string, z.output<typeof ModelResidencyDeclaration>> {

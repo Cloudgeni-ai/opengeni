@@ -1,4 +1,11 @@
 import {
+  assertInferenceResidencyForOtherRequest,
+  assertInferenceResidencyForRequest,
+  inferenceResidencyCacheKey,
+  inferenceResidencyRequirement,
+  type InferenceResidencyRequirement,
+} from "./inference-residency";
+import {
   configuredModels,
   azureOpenAIDeploymentIdentityAvailable,
   deploymentAzureEntraCredential,
@@ -122,6 +129,7 @@ export function buildOpenAIClientFromSettings(
   settings: Settings,
   providerId: string = settings.openaiProvider,
 ): OpenAI {
+  const residency = inferenceResidencyRequirement(settings);
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
     const identityTokenSource =
@@ -157,6 +165,7 @@ export function buildOpenAIClientFromSettings(
                 ? azureEntraBearerFetch(openAIResponsesFetch(settings), identityTokenSource, false)
                 : openAIResponsesFetch(settings),
               settings.openaiResponsesWebSocketEnabled,
+              residency,
             ),
           ),
         ),
@@ -181,6 +190,7 @@ export function buildOpenAIClientFromSettings(
             providerId,
             openAIResponsesFetch(settings),
             settings.openaiResponsesWebSocketEnabled,
+            residency,
           ),
         ),
       ),
@@ -319,6 +329,7 @@ function providerClientCacheKey(
             }
           : {}),
         openaiMaxRetries: settings.openaiMaxRetries,
+        residency: inferenceResidencyCacheKey(inferenceResidencyRequirement(settings)),
         streamIdlePolicy: modelStreamIdlePolicy(settings, provider),
         ...(provider.kind === "codex-subscription"
           ? { codexResponsesWebSocket: settings.codexResponsesWebSocketEnabled }
@@ -514,6 +525,7 @@ function azureEntraRefusedResponse(): Response {
 }
 
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
+  const residency = inferenceResidencyRequirement(settings);
   if (
     (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
     !provider.apiKey?.trim()
@@ -630,6 +642,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   ? (sharedCodexWebSocketTransport() as unknown as typeof globalThis.fetch)
                   : globalThis.fetch,
                 settings.codexResponsesWebSocketEnabled,
+                residency,
               ),
             ),
           },
@@ -655,7 +668,9 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               // pre-acceptance authentication failure (401).
               maxRetries: 0,
               timeout: XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
-              fetch: xaiSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
+              fetch: xaiSubscriptionFetch(
+                instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
+              ),
             },
             {
               modelRequestPolicy: modelRequestPolicyForProvider(
@@ -704,12 +719,12 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   modelStreamIdlePolicy(settings, provider),
                   anonymousProvider
                     ? withoutAuthenticationHeaders(
-                        instrumentedModelFetch(provider.id, globalThis.fetch),
+                        instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
                       )
                     : gatewayProvider
                       ? vercelGatewayRoutingFetch(
                           provider.kind as "vercel-gateway-managed" | "vercel-gateway-workspace",
-                          instrumentedModelFetch(provider.id, globalThis.fetch),
+                          instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
                           gatewayPolicies,
                         )
                       : provider.kind === "direct-azure-organization"
@@ -722,11 +737,13 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                                 )
                               : azureApiKeyHeaderFetch(openAIResponsesFetch(settings)),
                             settings.openaiResponsesWebSocketEnabled,
+                            residency,
                           )
                         : instrumentedModelFetch(
                             provider.id,
                             openAIResponsesFetch(settings),
                             settings.openaiResponsesWebSocketEnabled,
+                            residency,
                           ),
                 ),
               ),
@@ -749,11 +766,18 @@ export function instrumentedModelFetch(
   provider: string,
   inner: typeof fetch,
   transportReportsDispatch = false,
+  /** The EU requirement of the settings this client was built from. */
+  residency: InferenceResidencyRequirement | null = null,
 ): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     if (!isModelCallFetch(input)) {
+      // Under EU-only inference, other provider endpoints that carry content
+      // (images, audio, files) are refused here; reads such as model lists pass.
+      assertInferenceResidencyForOtherRequest(provider, input, init, residency);
       return await inner(input, init);
     }
+    // EU-only inference: refuse a non-EU route before anything is sent.
+    init = await assertInferenceResidencyForRequest(provider, input, init, residency);
     const prepared = await prepareClaudeSubscriptionRequest(provider, input, init);
     init = prepared.init;
     // The attempt-local observer durably checkpoints provider dispatch before

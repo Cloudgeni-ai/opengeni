@@ -42,6 +42,7 @@ export {
   type SingleModelCallTarget,
 } from "./single-model-call";
 import { instrumentedModelFetch } from "./model-provider-client";
+import { inferenceResidencyRequirement } from "./inference-residency";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
@@ -701,6 +702,13 @@ export {
   warmCodexResponsesWebSocket,
 } from "./model-provider";
 export {
+  InferenceRegionRestrictedError,
+  currentInferenceResidency,
+  inferenceResidencyRequirement,
+  resolveInferenceResidency,
+  withInferenceResidency,
+} from "./inference-residency";
+export {
   appendWorkspaceGovernance,
   CompanyProfilePromptLimitError,
   hasActiveWorkspaceInstructionPolicy,
@@ -1261,7 +1269,12 @@ export async function generateSessionTitle(
         ? null
         : new MultiProviderModelProvider(settings).resolveBinding(modelName);
   const target: SingleModelCallTarget = binding
-    ? { client: binding.client, provider: binding.provider, modelId: binding.modelId }
+    ? {
+        client: binding.client,
+        provider: binding.provider,
+        modelId: binding.modelId,
+        residency: inferenceResidencyRequirement(settings),
+      }
     : { model: options.model! };
   const result = await runSingleModelCall(target, {
     messages: [
@@ -1470,7 +1483,12 @@ export async function summarizeForCompaction(
     const claude = new AnthropicMessagesModel(
       provider,
       model,
-      instrumentedModelFetch(provider.id, globalThis.fetch),
+      instrumentedModelFetch(
+        provider.id,
+        globalThis.fetch,
+        false,
+        inferenceResidencyRequirement(settings),
+      ),
     );
     const claudeRequest = (forbidToolCalls: boolean) =>
       anthropicCompactionRequest(input, {

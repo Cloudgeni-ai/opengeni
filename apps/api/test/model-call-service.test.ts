@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { CodexReloginRequired, type CodexUsagePayload } from "@opengeni/codex";
 import { ModelCallError } from "@opengeni/core";
-import { SingleModelCallUnsupportedError } from "@opengeni/runtime";
+import { InferenceRegionRestrictedError, SingleModelCallUnsupportedError } from "@opengeni/runtime";
 import {
   codexIncludedUsageAvailable,
   publicModelCallError,
@@ -65,6 +65,16 @@ describe("publicModelCallError", () => {
     expect(publicModelCallError(refusal)).toBe(refusal);
     const abort = new DOMException("Aborted", "AbortError");
     expect(publicModelCallError(abort)).toBe(abort);
+  });
+
+  test("a route that is not EU under EU-only maps to 422 region_restricted", () => {
+    const mapped = publicModelCallError(new InferenceRegionRestrictedError("gpt-global"));
+    expect(mapped).toMatchObject({
+      status: 422,
+      code: "region_restricted",
+      param: "model",
+    });
+    expect((mapped as ModelCallError).message).toContain("not supported in EU");
   });
 
   test("an unsupported parameter names it", () => {
