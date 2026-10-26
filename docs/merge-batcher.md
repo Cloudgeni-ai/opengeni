@@ -466,6 +466,25 @@ outcomes retain their reservation; foreign, invalidated and waiting Batch runs
 still consume provider slots. No running CI is cancelled. Only a tested root
 whose base is current main may land, with exact tree/provenance/CAS checks;
 landing consumes no additional hosted slot and does not wait for successor CI.
+
+**A tested green root lands on the next controller step regardless of runner
+headroom.** Landing fast-forwards main to the exact already-tested tip and uses
+no runner, so holding it only delays every member PR and the next publication.
+The planner therefore never returns a headroom wait for a trusted, completed,
+successful exact root run, and the executor does not reread headroom before a
+landing. This deliberately retires the former "full-main CI has priority;
+tested candidate retained without cancellation" hold: a busy, unknown,
+incomplete, overrun or misconfigured runner inventory (`mainBusy`,
+`headroom.allowed: false`, `publicationBlocked`) no longer delays a landing.
+Every landing safety check is unchanged: the exact tested commit and tree,
+tested base equal to current main, a fresh complete re-observation and replan
+that must select the same tip, final readiness, binding and source-branch head
+rereads, head-refresh equivalence, exact-attempt run provenance, fast-forward
+only main, lease epoch/owner fencing and state-ref CAS, and shadow mode never
+landing. Runner headroom still gates everything that starts CI: publication
+(rechecked at the effect boundary with the Batch slot and complete inventory)
+and the single trusted retry. A headroom read that throws (rather than
+reporting a hold) still fails the whole observation, as every other read does.
 At publication/retry, the slot budget is the union of exact published-candidate
 reservations and current provider runs, not two independent limits. A matching
 visible push run is counted once; missing, mismatched or unresolved histories
@@ -498,9 +517,10 @@ from 519 to 369 job-minutes, not make runner capacity unlimited.
 Failed or changed predecessors invalidate descendants without cancelling their
 runs. Version/control-plane barriers and sequential bisection remain unchanged.
 Full-main capacity estimates remain observable rather than reserving runners.
-Before publication, the existing single trusted retry, and landing, the reader scans current
+Before publication and the existing single trusted retry, the reader scans current
 repository runs and their latest jobs (100 entries per page, paginated through
-the reported total; incomplete observations hold). Each of the five active run statuses
+the reported total; incomplete observations hold publication and retry, never a
+tested landing). Each of the five active run statuses
 is listed twice, so a run whose status changes once during the listing (in either
 direction, for example `in_progress` to `waiting` while other jobs still run) is
 still listed; the latest active listing is used, and a run listed as `completed`
@@ -605,7 +625,8 @@ may enter GitHub's queue; a tested candidate need not wait for main capacity to
 land. `capacityInformational`
 marks this policy; `capacity.hold` retains the historical capacity heuristic for
 diagnostics, not an admission rejection. Invalid capacity configuration and
-incomplete/unknown evidence still hold. Traffic-shadow capacity comparisons
+incomplete/unknown evidence still hold publication and retry; they never hold a
+tested landing, which ignores headroom entirely. Traffic-shadow capacity comparisons
 retain their existing conservative decisions.
 
 The exact tested tree, lease/CAS, provenance, configured in-flight limit and unknown-outcome
@@ -690,7 +711,8 @@ ready subset on the exact stacked candidate tree. Its trusted, completed, latest
 run-attempt success permits landing even when full-main CI is red, missing,
 running, cancelled or unknown. This is not full-CI equivalence or release evidence.
 Full main CI remains an independent post-merge backstop. Capacity admission still
-respects observed main runner demand; main advancing still invalidates obsolete
+respects observed main runner demand for publication and retry, never for a
+tested landing; main advancing still invalidates obsolete
 candidates and requires a new exact-tree test. Legacy `baseHold` records remain
 audit history, not green-candidate admission gates.
 

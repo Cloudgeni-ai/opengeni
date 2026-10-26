@@ -228,6 +228,54 @@ describe("readiness and deterministic planning", () => {
   test("recognizes human prose exact-head VM and independent review without formal approval", () => {
     expect(admit(input()).ready?.headSha).toBe(SHA);
   });
+  test("a trusted green root lands while runner headroom is blocked; CI-starting actions stay gated", () => {
+    const active = { ...cfg, mode: "active" as const };
+    const blocked = (reason: string): NonNullable<Observation["headroom"]> => ({
+      allowed: false,
+      reason,
+      budget: 52,
+      occupied: 60,
+      reservedMain: 30,
+      candidateSlots: 18,
+      occupiedBatchSlots: cfg.maxInflight,
+      publicationBlocked: true,
+    });
+    for (const reason of [
+      "Incomplete or inconsistent active workflow observation",
+      "Active workflow observation exceeded its scan deadline",
+      "Invalid hosted job limit or other-repository allowance",
+      "Configure allocated repository runner budget and full-main reserve",
+    ]) {
+      const green = candidate();
+      green.runs = [run(green, "success")];
+      const o = { ...observation([pull(1)], [green]), mainBusy: true, headroom: blocked(reason) };
+      const landing = plan(o, active);
+      expect(landing.kind).toBe("land");
+      if (landing.kind === "land")
+        expect(landing.candidate.manifest.tipSha).toBe(green.manifest.tipSha);
+      // The same headroom still withholds publication and the single retry.
+      expect(plan({ ...o, candidates: [] }, active)).toMatchObject({
+        kind: "build",
+        publish: false,
+      });
+      const flaky = candidate();
+      flaky.runs = [run(flaky, "infrastructure")];
+      expect(plan({ ...o, candidates: [flaky] }, active)).toMatchObject({
+        kind: "wait",
+        reason: "retry requires completion evidence and an available Batch slot",
+      });
+      // Untrusted, running or mismatched evidence never lands, headroom or not.
+      for (const runs of [
+        [run(green, "success", 1, false)],
+        [{ ...run(green, "success"), status: "in_progress" as const }],
+        [{ ...run(green, "success"), headSha: "f".repeat(40) }],
+      ]) {
+        green.runs = runs;
+        expect(plan(o, active).kind).not.toBe("land");
+        expect(plan({ ...o, mainBusy: false, headroom: null }, active).kind).not.toBe("land");
+      }
+    }
+  });
   test.each([
     "Independent review failed",
     "Independent review pending",
@@ -1376,8 +1424,9 @@ describe("integration boundaries and queue-only shadow CI", () => {
       }
       c.runs = [run(c, "success")];
       expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
+      // Runner headroom never holds a tested green root: landing uses no runner.
       o.mainBusy = true;
-      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
     },
   );
   test("old recovery groups can test subsets but unannounced code blame stays held", () => {
@@ -2330,7 +2379,7 @@ describe("review regressions: observation, admission and telemetry", () => {
     };
     expect(plan(o, cfg).kind).toBe("land");
     expect(plan({ ...o, candidates: [] }, cfg).kind).toBe("build");
-    expect(plan({ ...o, mainBusy: true }, cfg).kind).toBe("wait");
+    expect(plan({ ...o, mainBusy: true }, cfg).kind).toBe("land");
     expect(plan({ ...o, ready: [] }, cfg).kind).toBe("record");
     expect(plan({ ...o, ready: [pull(1, "f".repeat(40))] }, cfg).kind).toBe("record");
     expect(plan({ ...o, baseSha: "f".repeat(40) }, cfg).kind).toBe("record");
@@ -2376,7 +2425,7 @@ describe("review regressions: observation, admission and telemetry", () => {
       { o: observation(failed.manifest.pulls, [failed]), expected: "record" },
       { o: observation([pull(1)], [retry]), expected: "retry" },
       { o: observation([pull(1)], [landed]), expected: "land" },
-      { o: { ...observation([pull(1)], [landed]), mainBusy: true }, expected: "wait" },
+      { o: { ...observation([pull(1)], [landed]), mainBusy: true }, expected: "land" },
       { o: observation([pull(1)], [pending]), expected: "wait" },
     ];
     for (const { o, expected } of scenarios) {

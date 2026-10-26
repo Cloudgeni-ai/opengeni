@@ -222,8 +222,9 @@ export class LiveReader implements Reader {
       ledger,
       observationWarnings,
       // The planner separately counts live runs and durable missing-run
-      // reservations. A full provider slot must not veto a safe root landing.
-      // Publication/retry rechecks provider capacity at the effect boundary.
+      // reservations. This headroom gates only publication and retry; the
+      // planner lands a trusted green root regardless of it. Publication/retry
+      // recheck provider capacity at the effect boundary.
       mainBusy:
         this.config.mode === "shadow"
           ? false

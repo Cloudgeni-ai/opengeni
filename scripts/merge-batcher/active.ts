@@ -414,11 +414,12 @@ export class GitHubActiveExecutor implements Executor {
     await this.options.refreshAuth?.();
     const effect = t.effect;
     if (effect.kind === "publish" || effect.kind === "land") {
+      // Only publication starts CI, so only publication rechecks the Batch slot
+      // and complete provider inventory. Landing is a fast-forward of main to
+      // the exact tested tip that uses no runner: it never waits for headroom.
       if (
-        await this.reads.mainBusy(
-          effect.kind,
-          effect.kind === "publish" ? await this.slotReservations(t.expectedLedger) : [],
-        )
+        effect.kind === "publish" &&
+        (await this.reads.mainBusy("publish", await this.slotReservations(t.expectedLedger)))
       )
         throw new ReplanRequired(
           "Batch slot or complete inventory unavailable; replan without writes",

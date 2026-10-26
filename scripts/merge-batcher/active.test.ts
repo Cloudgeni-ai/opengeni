@@ -626,7 +626,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(checked).toBe(true);
     expect(await f.git.remoteRefs(f.origin.dir)).toEqual(before);
   });
-  test("landing checks evidence without reserving another hosted slot", async () => {
+  test("landing checks evidence without any hosted-slot or headroom read", async () => {
     const f = await fixture();
     const purposes: Array<string | undefined> = [];
     // Seed the already-published candidate before simulating occupied slots.
@@ -638,8 +638,46 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     };
     expect((await f.controller().step()).action.kind).toBe("land");
     expect(purposes).toContain("observe");
-    expect(purposes).toContain("land");
+    // Landing uses no runner, so the effect boundary no longer rereads headroom.
+    expect(purposes).not.toContain("land");
     expect(purposes).not.toContain("publish");
+  });
+  test("a trusted green root lands on the next step while every headroom read is blocked", async () => {
+    const f = await fixture();
+    const manifest = await f.publish();
+    f.verdict(manifest);
+    const purposes: Array<string | undefined> = [];
+    f.api.mainBusy = async (purpose) => {
+      purposes.push(purpose);
+      f.api.lastHeadroom = {
+        allowed: false,
+        reason: "Active workflow observation exceeded its scan deadline",
+        budget: 52,
+        occupied: 60,
+        reservedMain: 30,
+        candidateSlots: 18,
+        occupiedBatchSlots: f.cfg.maxInflight,
+        publicationBlocked: true,
+      };
+      return true;
+    };
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("land");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(manifest.tipSha);
+    expect((await f.state()).ledger.landed).toContain(manifest.batchId);
+    expect(purposes.every((purpose) => purpose === "observe")).toBe(true);
+  });
+  test("blocked headroom does not bypass landing head rereads", async () => {
+    const f = await fixture();
+    const manifest = await f.publish();
+    f.verdict(manifest);
+    f.api.mainBusy = async () => true;
+    // The source branch moves after observation: landing must refuse without a write.
+    f.api.onSnapshot = () => {
+      f.api.snapshot.branchHeadSha = f.newer;
+    };
+    await expect(f.controller().step()).rejects.toThrow("Final source branch head changed");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
   });
   async function refreshedFixture() {
     const f = await fixture();
