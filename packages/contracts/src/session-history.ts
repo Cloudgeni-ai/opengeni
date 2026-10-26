@@ -109,22 +109,70 @@ export function isPresentedSessionToolName(name: unknown): boolean {
 /** The tool leaf a session runs the app's own actions through. */
 export const SESSION_EVENT_APP_ACTION_CALL_LEAF = "admin_action_call";
 
+/** The page an app action opens: buying credits, starting a subscription, or the billing portal. */
+export type PresentedAppActionPage = "credits" | "subscription" | "portal";
+
 /**
  * App actions whose call is primary output too: each opens a payment page,
  * and the chat shows it as a button that later confirms the payment, which a
  * person returning to the chat (often in a reloaded tab) needs to see.
+ * Keyed by action id, with the "METHOD /path" a call may name it by instead
+ * (as `findAppAction` accepts) and the page it opens.
  */
-export const SESSION_EVENT_PRESENTED_APP_ACTIONS = [
-  "createBillingCheckout",
-  "createSubscriptionCheckout",
-  "createBillingPortalSession",
-  "createSubscriptionPortalSession",
-] as const;
+export const SESSION_EVENT_PRESENTED_APP_ACTIONS = {
+  createBillingCheckout: { route: "POST /v1/billing/checkout", page: "credits" },
+  createSubscriptionCheckout: {
+    route: "POST /v1/billing/subscription/checkout",
+    page: "subscription",
+  },
+  createBillingPortalSession: { route: "POST /v1/billing/portal", page: "portal" },
+  createSubscriptionPortalSession: {
+    route: "POST /v1/billing/subscription/portal",
+    page: "portal",
+  },
+} as const satisfies Record<string, { route: string; page: PresentedAppActionPage }>;
+
+export type PresentedAppActionId = keyof typeof SESSION_EVENT_PRESENTED_APP_ACTIONS;
+
+/**
+ * The whitespace a call's action id is trimmed of before it's matched: ASCII
+ * only, so the history query (Postgres `btrim`) and every client agree.
+ */
+export const SESSION_EVENT_APP_ACTION_ID_SPACE = " \t\n\r\f\v";
+
+/** Every name that calls one of {@link SESSION_EVENT_PRESENTED_APP_ACTIONS}: each id and its "METHOD /path". */
+export const SESSION_EVENT_PRESENTED_APP_ACTION_NAMES: readonly string[] = Object.entries(
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+).flatMap(([id, { route }]) => [id, route]);
+
+const PRESENTED_APP_ACTION_BY_NAME: ReadonlyMap<string, PresentedAppActionId> = new Map(
+  Object.entries(SESSION_EVENT_PRESENTED_APP_ACTIONS).flatMap(([id, { route }]) => [
+    [id, id as PresentedAppActionId],
+    [route, id as PresentedAppActionId],
+  ]),
+);
+
+function trimActionId(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && SESSION_EVENT_APP_ACTION_ID_SPACE.includes(value[start]!)) start += 1;
+  while (end > start && SESSION_EVENT_APP_ACTION_ID_SPACE.includes(value[end - 1]!)) end -= 1;
+  return value.slice(start, end);
+}
+
+/**
+ * Which of {@link SESSION_EVENT_PRESENTED_APP_ACTIONS} an app action call's
+ * `id` names, by its id or its "METHOD /path"; undefined for anything else.
+ */
+export function presentedAppActionId(id: unknown): PresentedAppActionId | undefined {
+  return typeof id === "string" ? PRESENTED_APP_ACTION_BY_NAME.get(trimActionId(id)) : undefined;
+}
 
 /**
  * Whether a tool call's result is primary output: a presented tool
  * ({@link isPresentedSessionToolName}), or an app action call that runs one of
- * {@link SESSION_EVENT_PRESENTED_APP_ACTIONS}. Takes the `agent.toolCall.created`
+ * {@link SESSION_EVENT_PRESENTED_APP_ACTIONS} (its arguments' top-level `id`,
+ * see {@link presentedAppActionId}). Takes the `agent.toolCall.created`
  * payload (its `name` and `arguments`, an object or JSON text).
  */
 export function isPresentedSessionToolCall(call: unknown): boolean {
@@ -141,9 +189,6 @@ export function isPresentedSessionToolCall(call: unknown): boolean {
       return false;
     }
   }
-  const id = parsed && typeof parsed === "object" ? (parsed as { id?: unknown }).id : undefined;
-  return (
-    typeof id === "string" &&
-    (SESSION_EVENT_PRESENTED_APP_ACTIONS as readonly string[]).includes(id)
-  );
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  return presentedAppActionId((parsed as { id?: unknown }).id) !== undefined;
 }

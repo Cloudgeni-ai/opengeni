@@ -564,12 +564,31 @@ test("SQL keeps app action calls that open a payment page, like isPresentedSessi
       arguments: '{ "id" : "createBillingPortalSession" }',
     },
     { name: "opengeni__admin_action_call", arguments: '{"id":"createSubscriptionPortalSession"}' },
+    // The "METHOD /path" naming, with surrounding ASCII whitespace, as text and as an object.
+    { name: "opengeni__admin_action_call", arguments: '{"id":" POST /v1/billing/checkout\\n"}' },
+    { name: "admin_action_call", arguments: { id: "\tPOST /v1/billing/portal " } },
     // Other actions, other tools and look-alike ids stay steps.
     { name: "opengeni__admin_action_call", arguments: '{"id":"getBilling"}' },
     { name: "opengeni__admin_action_call", arguments: '{"id":"createBillingCheckoutX"}' },
     { name: "opengeni__admin_action_describe", arguments: '{"id":"createBillingCheckout"}' },
     { name: "opengeni__admin_action_call", arguments: "not json" },
     { name: "x__admin_action_callX", arguments: '{"id":"createBillingCheckout"}' },
+    // Only the top-level id counts: a nested one, a non-string one, or an array don't.
+    {
+      name: "opengeni__admin_action_call",
+      arguments: '{"id":"getBilling","body":{"id":"createBillingCheckout"}}',
+    },
+    {
+      name: "admin_action_call",
+      arguments: { id: "getBilling", body: { id: "createBillingCheckout" } },
+    },
+    { name: "opengeni__admin_action_call", arguments: '{"id":{"id":"createBillingCheckout"}}' },
+    { name: "opengeni__admin_action_call", arguments: '["createBillingCheckout"]' },
+    { name: "opengeni__admin_action_call", arguments: '"createBillingCheckout"' },
+    // Not ASCII whitespace, a NUL escape, or the path in another case: no match.
+    { name: "opengeni__admin_action_call", arguments: '{"id":"\\u00a0createBillingCheckout"}' },
+    { name: "opengeni__admin_action_call", arguments: '{"id":"createBillingCheckout\\u0000"}' },
+    { name: "opengeni__admin_action_call", arguments: '{"id":"post /v1/billing/checkout"}' },
   ];
   for (const [index, call] of calls.entries()) {
     await shared.admin`
@@ -588,7 +607,7 @@ test("SQL keeps app action calls that open a payment page, like isPresentedSessi
   const expected = calls.flatMap((call, index) =>
     isPresentedSessionToolCall(call) ? [index + 1] : [],
   );
-  expect(expected).toEqual([1, 2, 3, 4]);
+  expect(expected).toEqual([1, 2, 3, 4, 5, 6]);
   expect(kept.map((event) => event.sequence)).toEqual(expected);
 }, 120_000);
 

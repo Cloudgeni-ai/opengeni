@@ -94,7 +94,8 @@ export type SessionProxyContext = {
   /**
    * The Opengeni route in the resolved workspace this request acts on. Absent
    * only for the bootstrap reads outside the workspace (`GET /v1/workspaces`,
-   * `GET /v1/access/me`, `GET /v1/config/client`) and the user's inbox.
+   * `GET /v1/access/me`, `GET /v1/config/client`), the credits checkout read
+   * (`GET /v1/billing/checkout/{id}`) and the user's inbox.
    */
   route?: SessionProxyRoute | undefined;
 };
@@ -402,6 +403,8 @@ const SESSION_PROXY_DEFAULT_HEARTBEAT_MS = 5_000;
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+/** A Stripe Checkout session id, as the billing routes accept it. */
+const CHECKOUT_SESSION_ID = /^cs_[A-Za-z0-9_]{1,250}$/;
 /**
  * A decoded path segment the relay forwards: Opengeni paths carry ids, keys and
  * subject ids (`user:…`), so any text is allowed except empty, dot, separator
@@ -685,6 +688,31 @@ export function createSessionProxyHandler(
               chatConnections: !serverOwnsSetup,
               call,
             }),
+          );
+        }
+        if (
+          root === "billing" &&
+          rest.length === 2 &&
+          rest[0] === "checkout" &&
+          CHECKOUT_SESSION_ID.test(rest[1]!)
+        ) {
+          // A credits payment the chat confirms: one checkout of the resolved
+          // workspace's own organization, read as the user, so Opengeni checks
+          // their billing:read on that organization and that the checkout is
+          // its own. The browser can't name another organization.
+          const grant = await getSessionProxyWorkspaceGrant(client, workspaceId, call);
+          const checkoutUrl = new URL(
+            client.apiUrl(`/v1/billing/checkout/${encodeURIComponent(rest[1]!)}`),
+          );
+          checkoutUrl.searchParams.set("accountId", grant.accountId);
+          return relayResponse(
+            await client.fetchApi(checkoutUrl.toString(), {
+              method,
+              headers: forwardedHeaders(request, false),
+              signal: request.signal,
+            }),
+            heartbeatMs,
+            rejectedKeyNotice,
           );
         }
         return notAllowed();

@@ -74,6 +74,7 @@ import {
   type HostThemePreference,
 } from "../lib/host-theme";
 import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { ClientPaymentPageActivity } from "../timeline/payment-page-card";
 import { ThisComputerCard, type ThisComputerCardProps } from "./this-computer/this-computer-card";
 
 export type SessionConversationLabels = {
@@ -651,7 +652,7 @@ function ConversationView({
         />
       </Suspense>
     ) : null;
-  return (
+  const view = (
     <SingleSendWording enabled={composer.singleSend === true}>
       <div
         className={cn(
@@ -890,6 +891,9 @@ function ConversationView({
       </div>
     </SingleSendWording>
   );
+  // A payment page opened in this chat confirms its credits here, in the app
+  // and in an embed (through its session proxy) alike.
+  return <ClientPaymentPageActivity client={context.client}>{view}</ClientPaymentPageActivity>;
 }
 
 /** Neutral embedded defaults under the host's overrides; an empty phrase list keeps them. */

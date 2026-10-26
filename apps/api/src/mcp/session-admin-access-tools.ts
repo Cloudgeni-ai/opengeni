@@ -12,11 +12,12 @@ import {
   appActionChangesState,
   appActionCallCarriesSecrets,
   appActionNeedsConfirmation,
-  appActionOpensPaymentPage,
+  appActionPaymentPage,
   findAppAction,
   type ActionCatalogEntry,
 } from "@opengeni/contracts/app-actions";
 import { hasPermission } from "@opengeni/core";
+import type { PresentedAppActionPage } from "@opengeni/contracts/session-history";
 import {
   listConfirmedAppActionChanges,
   resolveSessionAppActionAuthority,
@@ -85,8 +86,15 @@ const SECRETS =
 const EXTERNAL_PERSON_SECRETS =
   "Nothing was run: this call creates, shows, copies or rotates a key, password, token or other secret, or carries one in its body, and secrets never go through the chat. Tell the person plainly that this isn't available here, without pointing them to a page.";
 
-const PAYMENT_PAGE =
-  "The chat shows the person this page as a button that opens it, and for credits confirms there once they've paid, so you needn't repeat the link. If you do share it, copy url exactly as returned, including everything after #: a retyped or shortened link doesn't open. Test-mode pages (ids starting cs_test_) are expected where the deployment takes test payments; share them like any other.";
+// What's true of each kind of page, added to its successful result.
+const EXACT_LINK =
+  "If you do share it, copy url exactly as returned, including everything after #: a retyped or shortened link doesn't open. Test-mode pages (ids starting cs_test_) are expected where the deployment takes test payments; share them like any other.";
+const PAYMENT_PAGE: Record<PresentedAppActionPage, string> = {
+  credits: `The chat shows the person this page as a button that opens it, and confirms there with their new balance once they've paid, so you needn't repeat the link. ${EXACT_LINK}`,
+  subscription: `The chat shows the person this page as a button that opens it, so you needn't repeat the link. ${EXACT_LINK}`,
+  portal:
+    "The chat shows the person this page as a button that opens it, so you needn't repeat the link. Anyone with this link can change the organization's payment method or plan until it expires, so give it only to this person, never in a shared place.",
+};
 
 const CallInput = z4.object({
   id: z4.string().min(1).max(300).describe("An action id from admin_actions_search."),
@@ -330,9 +338,10 @@ export function registerSessionAdminAccessTools(input: {
         appActionCallCarriesSecrets(entry, args.body)
       )
         return failure(isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_SECRETS : SECRETS);
-      // Opening a payment page charges nothing, so it runs without a
-      // confirmation here and in an embed alike; the page itself asks, and
-      // the route still checks that this person may pay.
+      // Opening a checkout charges nothing, so it runs without a confirmation
+      // here and in an embed alike; the page itself asks, and the route still
+      // checks that this person may pay. A billing portal link keeps both
+      // safeguards (see appActionNeedsConfirmation).
       if (authority.kind === "read_only" && entry && appActionNeedsConfirmation(entry))
         return failure(
           isExternalPerson(authority.subjectId) ? EXTERNAL_PERSON_READ_ONLY : READ_ONLY,
@@ -352,6 +361,7 @@ export function registerSessionAdminAccessTools(input: {
         });
         if (!confirmed.some((saved) => confirmedCall(saved, args))) return failure(NOT_CONFIRMED);
       }
+      const page = entry ? appActionPaymentPage(entry) : undefined;
       return await callOrganizationAction(
         reach.actAs(authority),
         {
@@ -360,7 +370,7 @@ export function registerSessionAdminAccessTools(input: {
           query: args.query,
           ...(args.body !== undefined ? { body: args.body } : {}),
         },
-        entry && appActionOpensPaymentPage(entry) ? { note: PAYMENT_PAGE } : {},
+        page ? { note: PAYMENT_PAGE[page] } : {},
       );
     },
   );

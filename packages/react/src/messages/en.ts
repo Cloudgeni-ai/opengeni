@@ -4839,7 +4839,9 @@ export const englishMessages = {
   "timeline.paymentPage.creditsAdded": "You added {amount} in credits",
   "timeline.paymentPage.creditsGotFree": "You got {amount} in free credits",
   "timeline.paymentPage.expired": "This payment page expired. Nothing was charged.",
+  "timeline.paymentPage.linkExpired": "This link has expired. Ask here for a new one.",
   "timeline.paymentPage.openBilling": "Open billing",
+  "timeline.paymentPage.opensBillingPage": "Opens your billing page in a new tab.",
   "timeline.paymentPage.opensSecurePage": "Opens a secure payment page in a new tab.",
   "timeline.paymentPage.opensSecurePageConfirms":
     "Opens a secure payment page in a new tab. Your credits show up here once you've paid.",

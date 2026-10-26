@@ -1,6 +1,10 @@
 import { ACTION_CATALOG } from "./app-action-catalog.gen";
 import type { ActionCatalogEntry } from "./app-action-catalog-types";
-import { SESSION_EVENT_PRESENTED_APP_ACTIONS } from "./session-history";
+import {
+  presentedAppActionId,
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+  type PresentedAppActionPage,
+} from "./session-history";
 
 /* ----------------------------------------------------------------------------
    App actions: every public API action, the same ones the organization MCP
@@ -66,25 +70,32 @@ export function appActionCallChangesState(args: unknown): boolean {
 
 /**
  * Actions that only open a payment page (Stripe Checkout or the billing
- * portal) and charge nothing themselves: the person pays, or doesn't, on that
- * page, which is its own confirmation. The chat shows the page as a button.
+ * portal); the chat shows the page as a button. See
+ * {@link appActionNeedsConfirmation} for which of them still ask first.
  */
 export const PAYMENT_PAGE_ACTIONS: ReadonlySet<string> = new Set(
-  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+  Object.keys(SESSION_EVENT_PRESENTED_APP_ACTIONS),
 );
 
-/** Whether the action only opens a payment page (see {@link PAYMENT_PAGE_ACTIONS}). */
-export function appActionOpensPaymentPage(entry: ActionCatalogEntry): boolean {
-  return PAYMENT_PAGE_ACTIONS.has(entry.id);
+/** The payment page the action opens (see {@link PAYMENT_PAGE_ACTIONS}), if it opens one. */
+export function appActionPaymentPage(
+  entry: ActionCatalogEntry,
+): PresentedAppActionPage | undefined {
+  const id = presentedAppActionId(entry.id);
+  return id ? SESSION_EVENT_PRESENTED_APP_ACTIONS[id].page : undefined;
 }
 
 /**
  * Whether running the action needs the person's confirmation in the chat
- * first: every change, except opening a payment page, which asks on the page
- * itself.
+ * first, and so can't run where the chat can only read: every change, except
+ * opening a checkout page. A checkout charges nothing until the person pays
+ * on it, so the page is its own confirmation. A billing portal link is
+ * different: whoever holds it can change the payment method or cancel the
+ * plan, so it keeps the confirmation.
  */
 export function appActionNeedsConfirmation(entry: ActionCatalogEntry): boolean {
-  return appActionChangesState(entry) && !appActionOpensPaymentPage(entry);
+  const page = appActionPaymentPage(entry);
+  return appActionChangesState(entry) && page !== "credits" && page !== "subscription";
 }
 
 /**
@@ -200,6 +211,9 @@ export function appActionConfirmationTitle(
       return `Change ${workspace}'s settings?`;
     case "updateOrganizationModelDefaults":
       return "Change your organization's default models?";
+    case "createBillingPortalSession":
+    case "createSubscriptionPortalSession":
+      return "Open your billing page? It can change your payment method or plan.";
     default: {
       // Name where it applies; the card's next line shows the key values.
       const target =

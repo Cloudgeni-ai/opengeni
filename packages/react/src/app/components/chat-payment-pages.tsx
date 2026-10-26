@@ -1,29 +1,26 @@
 import type { BillingCheckoutStatus } from "@opengeni/sdk";
 import { useCallback, type ReactNode } from "react";
-import { PaymentPageActivityProvider } from "../../timeline/payment-page-card";
+import {
+  ClientPaymentPageActivity,
+  PaymentPageActivityProvider,
+} from "../../timeline/payment-page-card";
 import { useAppContext } from "../app-context";
 import { notifyCreditBalanceChanged } from "../lib/credit-balance-events";
 
 /**
- * A payment page an app action opened in this chat confirms its credits in
- * place, in the app and in an embed alike, and refreshes every balance shown.
+ * The app's chat page: a payment page an app action opened confirms its
+ * credits in place through the app's client, like any conversation does
+ * through its own (see ClientPaymentPageActivity), and here also refreshes
+ * every balance the app shows.
  */
 export function ChatPaymentPages({ children }: { children: ReactNode }) {
   const { client } = useAppContext();
-  const readCheckout = useCallback(
-    (input: { checkoutSessionId: string; accountId?: string | undefined }) =>
-      client.getBillingCheckout(
-        input.checkoutSessionId,
-        input.accountId ? { accountId: input.accountId } : {},
-      ),
-    [client],
-  );
   const onCredited = useCallback((status: BillingCheckoutStatus) => {
     if (status.balance) notifyCreditBalanceChanged(status.balance.accountId);
   }, []);
   return (
-    <PaymentPageActivityProvider readCheckout={readCheckout} onCredited={onCredited}>
-      {children}
+    <PaymentPageActivityProvider onCredited={onCredited}>
+      <ClientPaymentPageActivity client={client}>{children}</ClientPaymentPageActivity>
     </PaymentPageActivityProvider>
   );
 }

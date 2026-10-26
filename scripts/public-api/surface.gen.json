@@ -134,7 +134,8 @@
       "method": "GET",
       "path": "/v1/billing/checkout/:checkoutSessionId",
       "sdk": [
-        "OpenGeniClient.getBillingCheckout"
+        "OpenGeniClient.getBillingCheckout",
+        "createSessionProxyHandler"
       ],
       "request": [],
       "response": [

@@ -70,6 +70,18 @@ test("a change without full access waits for the person, with a plain question",
   });
 });
 
+test("a billing portal link waits for the person too: it can change the payment method or plan", async () => {
+  const { seen, hooks } = wrapped("confirm");
+  await hooks.prepare(appCall("call-1", { id: "createBillingPortalSession", body: {} }));
+  expect(seen[0]!.call).toMatchObject({
+    approvalMode: "session_mcp",
+    defaultDecision: "ask",
+    reviewContext: {
+      title: "Open your billing page? It can change your payment method or plan.",
+    },
+  });
+});
+
 test("reads, full access, and whatever the API refuses run without a card", async () => {
   for (const [kind, args] of [
     ["confirm", { id: "getMyUsage" }],
@@ -79,9 +91,9 @@ test("reads, full access, and whatever the API refuses run without a card", asyn
     ["read_only", invite],
     ["confirm", { id: "createApiKey", pathParameters: { workspaceId: "ws-1" } }],
     ["unavailable", invite],
-    // Opening a payment page charges nothing: the page itself asks.
+    // Opening a checkout charges nothing: the page itself asks.
     ["confirm", { id: "createBillingCheckout", body: { amountUsd: 20 } }],
-    ["confirm", { id: "createBillingPortalSession", body: {} }],
+    ["confirm", { id: "POST /v1/billing/subscription/checkout", body: {} }],
   ] as const) {
     const { seen, hooks } = wrapped(kind);
     await hooks.prepare({ ...appCall("call-1", args), approvalMode: "session_mcp" });

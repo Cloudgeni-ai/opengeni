@@ -7,9 +7,16 @@ import {
   appActionConfirmationTitle,
   appActionHandlesSecrets,
   appActionNeedsConfirmation,
+  appActionPaymentPage,
   findAppAction,
   PAYMENT_PAGE_ACTIONS,
 } from "../src/app-actions";
+import {
+  isPresentedSessionToolCall,
+  presentedAppActionId,
+  SESSION_EVENT_PRESENTED_APP_ACTION_NAMES,
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+} from "../src/session-history";
 import {
   appActionReviewSummary,
   secretFieldName,
@@ -39,17 +46,28 @@ test("reads are told apart from changes; anything unrecognised counts as a chang
   expect(appActionCallChangesState({ id: retired!.id })).toBe(false);
 });
 
-test("opening a payment page is a change that needs no confirmation in the chat", () => {
+test("opening a checkout needs no confirmation in the chat; a billing portal link still does", () => {
   for (const id of PAYMENT_PAGE_ACTIONS) {
     const entry = findAppAction(id);
     // Every listed action exists, opens its page by POST and hands no secret over.
     expect([id, entry?.method, appActionHandlesSecrets(entry!)]).toEqual([id, "POST", false]);
-    expect(appActionNeedsConfirmation(entry!)).toBe(false);
-    expect(appActionCallNeedsConfirmation({ id, body: { amountUsd: 20 } })).toBe(false);
     expect(appActionCallChangesState({ id })).toBe(true);
+  }
+  for (const id of ["createBillingCheckout", "createSubscriptionCheckout"]) {
+    expect(appActionNeedsConfirmation(findAppAction(id)!)).toBe(false);
+    expect(appActionCallNeedsConfirmation({ id, body: { amountUsd: 20 } })).toBe(false);
+  }
+  // Whoever holds a portal link can change the payment method or cancel the plan.
+  for (const id of ["createBillingPortalSession", "createSubscriptionPortalSession"]) {
+    expect(appActionNeedsConfirmation(findAppAction(id)!)).toBe(true);
+    expect(appActionCallNeedsConfirmation({ id, body: {} })).toBe(true);
+    expect(appActionConfirmationTitle({ id, body: {} }, here)).toBe(
+      "Open your billing page? It can change your payment method or plan.",
+    );
   }
   // The same action named by its route reads the same.
   expect(appActionCallNeedsConfirmation({ id: "POST /v1/billing/checkout" })).toBe(false);
+  expect(appActionCallNeedsConfirmation({ id: "POST /v1/billing/portal" })).toBe(true);
   // A subscription change charges at once, so it still asks.
   expect(appActionCallNeedsConfirmation({ id: "upgradeBillingSubscription" })).toBe(true);
   expect(appActionCallNeedsConfirmation({ id: "createOrganizationInvitation" })).toBe(true);
@@ -57,6 +75,51 @@ test("opening a payment page is a change that needs no confirmation in the chat"
   for (const unknown of [{ id: "noSuchAction" }, {}, null, "not json"]) {
     expect(appActionCallNeedsConfirmation(unknown)).toBe(true);
   }
+});
+
+test("every name a presented app action goes by is the catalog's own, and only those match", () => {
+  for (const [id, { route, page }] of Object.entries(SESSION_EVENT_PRESENTED_APP_ACTIONS)) {
+    // The id and its "METHOD /path" are the same catalog action, as findAppAction reads them.
+    const entry = findAppAction(id);
+    expect(entry?.id).toBe(id);
+    expect(`${entry!.method} ${entry!.path}`).toBe(route);
+    expect(findAppAction(route)).toBe(entry);
+    expect(appActionPaymentPage(entry!)).toBe(page);
+    for (const name of [id, route, ` ${route}\n`, `\t${id} `]) {
+      expect<string | undefined>(presentedAppActionId(name)).toBe(id);
+      expect(
+        isPresentedSessionToolCall({ name: "admin_action_call", arguments: { id: name } }),
+      ).toBe(true);
+      expect(
+        isPresentedSessionToolCall({
+          name: "opengeni__admin_action_call",
+          arguments: JSON.stringify({ id: name }),
+        }),
+      ).toBe(true);
+    }
+  }
+  expect(SESSION_EVENT_PRESENTED_APP_ACTION_NAMES).toHaveLength(8);
+  for (const other of [
+    "getBilling",
+    "createBillingCheckoutX",
+    "post /v1/billing/checkout",
+    "\u00a0createBillingCheckout",
+    7,
+    null,
+  ]) {
+    expect(presentedAppActionId(other)).toBeUndefined();
+  }
+  // Only the arguments' own id counts.
+  expect(
+    isPresentedSessionToolCall({
+      name: "admin_action_call",
+      arguments: { id: "getBilling", body: { id: "createBillingCheckout" } },
+    }),
+  ).toBe(false);
+  expect(
+    isPresentedSessionToolCall({ name: "admin_action_call", arguments: ["createBillingCheckout"] }),
+  ).toBe(false);
+  expect(appActionPaymentPage(findAppAction("getBilling")!)).toBeUndefined();
 });
 
 test("the confirmation is a plain question built only from checked values", () => {

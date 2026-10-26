@@ -8,9 +8,11 @@ import {
   type SessionAppActionAuthority,
 } from "../src/mcp/session-admin-access-tools";
 
-/* Opening a payment page charges nothing, so the chat runs it without a
+/* Opening a checkout charges nothing, so the chat runs it without a
    confirmation, and an embed may run it too; the route still decides whether
-   this person may pay. Its result tells the agent the chat shows the page. */
+   this person may pay. A billing portal link can change the payment method or
+   plan, so it keeps both safeguards. Each result tells the agent what the chat
+   does with that kind of page. */
 
 type Handler = (args: Record<string, unknown>) => Promise<CallToolResult>;
 
@@ -33,6 +35,9 @@ function tools(authority: SessionAppActionAuthority) {
             url: "https://checkout.stripe.com/c/pay/cs_test_a1#fragment",
             amountUsd: 20,
           });
+        }
+        if (request.url.endsWith("/v1/billing/portal")) {
+          return Response.json({ url: "https://billing.stripe.com/p/session/x" });
         }
         return Response.json({ error: "forbidden" }, { status: 403 });
       },
@@ -78,6 +83,7 @@ test("a checkout runs at once, from a chat or an embed, and says the chat shows 
       body: { url: "https://checkout.stripe.com/c/pay/cs_test_a1#fragment" },
     });
     expect(parsed.note).toContain("The chat shows the person this page as a button");
+    expect(parsed.note).toContain("confirms there with their new balance");
     expect(parsed.note).toContain("cs_test_");
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       ["POST /v1/billing/checkout"],
@@ -85,26 +91,47 @@ test("a checkout runs at once, from a chat or an embed, and says the chat shows 
   }
 });
 
-test("an embed still can't change anything else, and a refused checkout carries no note", async () => {
+test("an embed still can't change anything else, nor open the billing portal", async () => {
   const { call, requests } = tools({
     kind: "read_only",
     subjectId: `user:${crypto.randomUUID()}`,
     permissions: ["workspace:read", "billing:read", "billing:manage"],
   });
-  const invite = await call({
-    id: "createOrganizationInvitation",
-    pathParameters: { organizationId: grant.accountId },
-    query: {},
-    body: { email: "anna@example.com" },
-  });
-  expect((invite.content[0] as { text: string }).text).toStartWith(
-    "Nothing was run: this chat was opened through",
-  );
+  for (const args of [
+    {
+      id: "createOrganizationInvitation",
+      pathParameters: { organizationId: grant.accountId },
+      query: {},
+      body: { email: "anna@example.com" },
+    },
+    { id: "createBillingPortalSession", pathParameters: {}, query: {} },
+    { id: "POST /v1/billing/subscription/portal", pathParameters: {}, query: {} },
+  ]) {
+    const refused = await call(args);
+    expect((refused.content[0] as { text: string }).text).toStartWith(
+      "Nothing was run: this chat was opened through",
+    );
+  }
   expect(requests).toHaveLength(0);
+});
 
+test("a billing portal link says it's only for this person, and a refused page has no note", async () => {
+  const { call } = tools({ kind: "full_access", subjectId: `user:${crypto.randomUUID()}` });
   const portal = await call({ id: "createBillingPortalSession", pathParameters: {}, query: {} });
-  expect(portal.isError).toBe(true);
-  const parsed = JSON.parse((portal.content[0] as { text: string }).text);
+  expect(portal.isError).toBeUndefined();
+  const note: string = JSON.parse((portal.content[0] as { text: string }).text).note;
+  expect(note).toContain("give it only to this person");
+  expect(note).not.toContain("like any other");
+  expect(note).not.toContain("confirms");
+
+  const refused = await call({
+    id: "createSubscriptionCheckout",
+    pathParameters: {},
+    query: {},
+    body: {},
+  });
+  expect(refused.isError).toBe(true);
+  const parsed = JSON.parse((refused.content[0] as { text: string }).text);
   expect(parsed.status).toBe(403);
   expect(parsed.note).toBeUndefined();
 });

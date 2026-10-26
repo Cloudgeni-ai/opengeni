@@ -938,7 +938,8 @@ import {
   SESSION_EVENT_RAW_DELTA_TYPES,
   SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_APP_ACTION_CALL_LEAF,
-  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+  SESSION_EVENT_APP_ACTION_ID_SPACE,
+  SESSION_EVENT_PRESENTED_APP_ACTION_NAMES,
   SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
@@ -37917,12 +37918,6 @@ const APP_ACTION_CALL_NAME_PATTERNS = [SESSION_EVENT_APP_ACTION_CALL_LEAF].flatM
   return [literal, `%\\_\\_${literal}`];
 });
 
-/**
- * Matches an app action call's arguments (JSON text) naming one of
- * SESSION_EVENT_PRESENTED_APP_ACTIONS; the ids are plain identifiers.
- */
-const PRESENTED_APP_ACTION_ARGUMENTS = `"id"[[:space:]]*:[[:space:]]*"(${SESSION_EVENT_PRESENTED_APP_ACTIONS.join("|")})"`;
-
 function sessionEventExcludeTypesFilter(
   excludeTypes: readonly SessionEventType[],
   options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
@@ -37944,6 +37939,22 @@ function sessionEventExcludeTypesFilter(
     sql`, `,
   );
   const toolName = sql`coalesce(${schema.sessionEvents.toolName}, ${schema.sessionEvents.payload} ->> 'name')`;
+  // An app action call's arguments are an object or its JSON text; only their
+  // top-level "id" counts, trimmed and matched exactly as presentedAppActionId does.
+  // Text is read as json (not jsonb) and skipped if it escapes a NUL, which
+  // Postgres can't turn into text: no stored call can make this query fail.
+  const payload = schema.sessionEvents.payload;
+  const actionId = sql`btrim(case jsonb_typeof(${payload} -> 'arguments')
+    when 'object' then ${payload} -> 'arguments' ->> 'id'
+    when 'string' then case
+      when (${payload} ->> 'arguments') is json object
+        and strpos(${payload} ->> 'arguments', ${"\\u0000"}::text) = 0
+      then (${payload} ->> 'arguments')::json ->> 'id' end
+  end, ${SESSION_EVENT_APP_ACTION_ID_SPACE}::text)`;
+  const presentedActions = sql.join(
+    SESSION_EVENT_PRESENTED_APP_ACTION_NAMES.map((name) => sql`${name}::text`),
+    sql`, `,
+  );
   return or(
     excluded,
     and(
@@ -37954,7 +37965,7 @@ function sessionEventExcludeTypesFilter(
         // arguments) are read past the name, for the action id.
         and(
           sql`${toolName} like any (array[${appActionPatterns}])`,
-          sql`${schema.sessionEvents.payload} ->> 'arguments' ~ ${PRESENTED_APP_ACTION_ARGUMENTS}`,
+          sql`${actionId} = any (array[${presentedActions}])`,
         ),
       ),
     ),

@@ -1,4 +1,9 @@
 import { normalizeMcpOutput } from "@opengeni/sdk";
+import {
+  presentedAppActionId,
+  SESSION_EVENT_PRESENTED_APP_ACTIONS,
+  type PresentedAppActionPage,
+} from "@opengeni/contracts/session-history";
 import { parseToolArgs } from "./parsers";
 import type { ToolCallItem } from "./types";
 
@@ -8,7 +13,7 @@ import type { ToolCallItem } from "./types";
  * output, like a published image.
  */
 
-export type PaymentPageKind = "credits" | "subscription" | "portal";
+export type PaymentPageKind = PresentedAppActionPage;
 
 export type PaymentPage = {
   kind: PaymentPageKind;
@@ -19,17 +24,8 @@ export type PaymentPage = {
   amountUsd?: number | undefined;
   /** The organization the call named, when it named one. */
   accountId?: string | undefined;
-};
-
-const PAYMENT_PAGE_ACTIONS: Readonly<Record<string, PaymentPageKind>> = {
-  createBillingCheckout: "credits",
-  "POST /v1/billing/checkout": "credits",
-  createSubscriptionCheckout: "subscription",
-  "POST /v1/billing/subscription/checkout": "subscription",
-  createBillingPortalSession: "portal",
-  "POST /v1/billing/portal": "portal",
-  createSubscriptionPortalSession: "portal",
-  "POST /v1/billing/subscription/portal": "portal",
+  /** When the call ran (ms since epoch), for a link that expires; unknown when absent. */
+  createdAt?: number | undefined;
 };
 
 /** The Opengeni server's own app-action tool; another server's tool of that name is not trusted. */
@@ -64,8 +60,10 @@ export function paymentPageOf(item: ToolCallItem): PaymentPage | null {
   if (item.kind !== "tool-call" || item.status !== "complete") return null;
   if (!TRUSTED_APP_ACTION_CALL_NAMES.includes(item.name)) return null;
   const args = parseToolArgs(item.arguments);
-  const kind = typeof args.id === "string" ? PAYMENT_PAGE_ACTIONS[args.id.trim()] : undefined;
-  if (!kind) return null;
+  // The same classification that keeps the call in a reloaded history.
+  const action = presentedAppActionId(args.id);
+  if (!action) return null;
+  const kind = SESSION_EVENT_PRESENTED_APP_ACTIONS[action].page;
   const output = normalizeMcpOutput(item.output);
   if (output.isError) return null;
   let result: Record<string, unknown> | null;
@@ -86,6 +84,7 @@ export function paymentPageOf(item: ToolCallItem): PaymentPage | null {
     /^cs_[A-Za-z0-9_]{1,250}$/.test(body.checkoutSessionId)
       ? body.checkoutSessionId
       : undefined;
+  const createdAt = item.occurredAt ? Date.parse(item.occurredAt) : Number.NaN;
   return {
     kind,
     url,
@@ -94,5 +93,6 @@ export function paymentPageOf(item: ToolCallItem): PaymentPage | null {
       ? { amountUsd: body.amountUsd }
       : {}),
     ...(typeof sent?.accountId === "string" ? { accountId: sent.accountId } : {}),
+    ...(Number.isFinite(createdAt) ? { createdAt } : {}),
   };
 }
