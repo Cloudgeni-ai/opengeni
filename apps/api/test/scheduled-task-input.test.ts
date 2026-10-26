@@ -25,7 +25,7 @@ describe("conversational scheduling input", () => {
     expect(resolveScheduledTaskCreateInput(schema.parse(message), sessionId)).toMatchObject({
       targetSessionId: sessionId,
       runMode: "existing_session",
-      overlapPolicy: "buffer_one",
+      overlapPolicy: "steer",
       agentConfig: { prompt: message.prompt, tools: [], resources: [], metadata: {} },
     });
   });
@@ -79,39 +79,29 @@ describe("conversational scheduling input", () => {
     });
   });
 
-  test("steer is offered with each overlap choice explained, and only for runs into a chat", () => {
+  test("each overlap choice is explained, and new automations steer by default", () => {
     const overlap = scheduledTaskCreateToolInput().shape.overlapPolicy;
     expect(overlap.unwrap().options).toEqual(["allow_concurrent", "skip", "buffer_one", "steer"]);
     for (const value of ["buffer_one", "allow_concurrent", "skip", "steer"])
       expect(overlap.description).toContain(value);
+    expect(overlap.description).toContain("steer (the default)");
 
     expect(
-      resolveScheduledTaskCreateInput({ ...message, overlapPolicy: "steer" }, sessionId),
-    ).toMatchObject({ runMode: "existing_session", overlapPolicy: "steer" });
+      resolveScheduledTaskCreateInput({ ...message, overlapPolicy: "buffer_one" }, sessionId),
+    ).toMatchObject({ runMode: "existing_session", overlapPolicy: "buffer_one" });
     const { prompt, ...base } = message;
-    expect(
-      resolveScheduledTaskCreateInput(
-        { ...base, runMode: "reusable_session", overlapPolicy: "steer", agentConfig: { prompt } },
-        sessionId,
-      ).overlapPolicy,
-    ).toBe("steer");
-    expect(() =>
-      resolveScheduledTaskCreateInput(
-        {
-          ...base,
-          runMode: "new_session_per_run",
-          overlapPolicy: "steer",
-          agentConfig: { prompt },
-        },
-        sessionId,
-      ),
-    ).toThrow("overlapPolicy steer needs an automation that continues a chat");
+    // Runs in a new chat never overlap, so every choice, the default too, is accepted there.
+    for (const runMode of ["reusable_session", "new_session_per_run"] as const)
+      expect(
+        resolveScheduledTaskCreateInput({ ...base, runMode, agentConfig: { prompt } }, sessionId)
+          .overlapPolicy,
+      ).toBe("steer");
     expect(
       UpdateScheduledTaskRequest.safeParse({
         runMode: "new_session_per_run",
         overlapPolicy: "steer",
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(UpdateScheduledTaskRequest.parse({ overlapPolicy: "steer" })).toEqual({
       overlapPolicy: "steer",
     });

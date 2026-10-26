@@ -373,13 +373,12 @@ function eventsForCreate(draft: Pick<ScheduleDraft, "events">) {
 
 /**
  * Only "one ongoing chat" and "an existing chat" can overlap a running turn,
- * so a new-chat schedule is always saved with the default overlap policy
- * (steer, for one, only exists for runs into a chat).
+ * so a new-chat schedule is always created with the default overlap policy.
  */
 export function overlapPolicyForCreate(
   draft: Pick<ScheduleDraft, "runMode" | "overlapPolicy">,
 ): ScheduleDraft["overlapPolicy"] {
-  return draft.runMode === "new_session_per_run" ? "allow_concurrent" : draft.overlapPolicy;
+  return draft.runMode === "new_session_per_run" ? "steer" : draft.overlapPolicy;
 }
 
 /** Existing chats, including one already created for a schedule, own their settings. */
@@ -568,9 +567,9 @@ export function updateRequestFromDraft(
           targetSessionId: draft.runMode === "existing_session" ? draft.targetSessionId : null,
         }
       : {}),
-    ...(overlapPolicyForCreate(initial) === overlapPolicyForCreate(draft)
+    ...(initial.overlapPolicy === draft.overlapPolicy
       ? {}
-      : { overlapPolicy: overlapPolicyForCreate(draft) }),
+      : { overlapPolicy: draft.overlapPolicy }),
     ...(initial.visibility === draft.visibility ? {} : { visibility: draft.visibility }),
     // Triggers are sent whole, and only when they changed; none removes them all.
     ...(sameEventTriggers(initial.events, draft.events)

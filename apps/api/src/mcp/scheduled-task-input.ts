@@ -14,7 +14,7 @@ const SCHEDULE_TIME_ZONE_DESCRIPTION =
   "IANA time zone the schedule's clock times are in, for example Europe/Oslo. Omit it to use the time zone of the message that asked for the schedule (an edited schedule keeps its current zone); UTC when there is none.";
 
 const OVERLAP_POLICY_DESCRIPTION =
-  "What a run does when the chat it continues is still busy. Runs in a new chat never wait, so this only matters for runs into a chat. buffer_one (allow_concurrent is the same in a chat): the run waits and starts after the current turn. skip: the run is dropped. steer: when the busy turn is this automation's own earlier run, the new run reaches it at its next step, so the agent sees the new run together with the work so far; a turn anyone else started still finishes first. New automations wait unless this is set.";
+  "What a run does when the chat it continues is still busy. Runs in a new chat never wait, so this only matters for runs into a chat. steer (the default): when the busy turn is this automation's own earlier run, the new run reaches it at its next step, so the agent sees the new run together with the work so far; a turn anyone else started finishes first, then the run starts. buffer_one (allow_concurrent is the same in a chat): the run always waits and starts after the current turn. skip: the run is dropped.";
 
 /** The overlap choice for agent tools, explained so its values can't be misread. */
 export function scheduledTaskOverlapPolicyToolInput() {

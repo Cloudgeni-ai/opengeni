@@ -12017,23 +12017,19 @@ export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 /**
  * What a run does when the automation's previous run is still working. Only an
  * automation that continues a chat (`existing_session`, `reusable_session`)
- * can overlap; a run in a new chat always runs on its own. In a chat,
- * `allow_concurrent` and `buffer_one` both deliver the run when the current
- * turn finishes, together with anything else that waited. `skip` drops a run
- * that finds the chat busy. `steer` hands this automation's own running turn
- * over at its next model step, like a person's Steer, so the agent sees the
- * new run with the work so far; a turn anyone else started still finishes
- * first.
+ * can overlap; a run in a new chat always runs on its own, whatever the
+ * choice. `steer`, the default for new automations, hands this automation's
+ * own running turn over at its next model step, like a person's Steer, so the
+ * agent sees the new run with the work so far; a turn anyone else started
+ * still finishes first, and the run follows it. In a chat, `allow_concurrent`
+ * and `buffer_one` both deliver the run when the current turn finishes,
+ * together with anything else that waited. `skip` drops a run that finds the
+ * chat busy.
  */
 export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.enum(["allow_concurrent", "skip", "buffer_one", "steer"]),
 );
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
-
-/** Run modes whose runs continue a chat, so a later run can overlap a running one. */
-export function scheduledTaskRunModeContinuesChat(runMode: ScheduledTaskRunMode): boolean {
-  return runMode !== "new_session_per_run";
-}
 
 export const ScheduledTaskTriggerType = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
   z.enum(["scheduled", "manual", "initial", "provider_event", "retry", "repair", "event"]),
@@ -13401,7 +13397,7 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
       .strict()
       .default({ kind: "agent_turn" }),
     runMode: ScheduledTaskRunMode.default("new_session_per_run"),
-    overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
+    overlapPolicy: ScheduledTaskOverlapPolicy.default("steer"),
     targetSessionId: z.string().uuid().nullable().optional(),
     /** Who can see it. Omitted: the organization's default for new schedules. */
     visibility: SessionVisibility.optional(),
@@ -13478,14 +13474,6 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
       message: "machineTarget cannot be used with an existing-session target",
     });
   }
-  if (value.overlapPolicy === "steer" && !scheduledTaskRunModeContinuesChat(value.runMode)) {
-    context.addIssue({
-      code: "custom",
-      path: ["overlapPolicy"],
-      message:
-        "overlapPolicy steer needs an automation that continues a chat (runMode existing_session or reusable_session)",
-    });
-  }
 });
 
 const CreateKnowledgeSourceSyncScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */ defineSchema(
@@ -13523,7 +13511,7 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */
       /** A schedule posting into an Only me chat is always Only me. */
       visibility: SessionVisibility.optional(),
       runMode: z.literal("existing_session").default("existing_session"),
-      overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
+      overlapPolicy: ScheduledTaskOverlapPolicy.default("steer"),
       status: ScheduledTaskStatus.default("active"),
       metadata: ScheduledTaskMetadataInput.default({}),
       /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
@@ -13667,18 +13655,6 @@ export const UpdateScheduledTaskRequest =
         code: "custom",
         path: ["targetSessionId"],
         message: "targetSessionId requires runMode=existing_session",
-      });
-    }
-    if (
-      value.overlapPolicy === "steer" &&
-      value.runMode &&
-      !scheduledTaskRunModeContinuesChat(value.runMode)
-    ) {
-      context.addIssue({
-        code: "custom",
-        path: ["overlapPolicy"],
-        message:
-          "overlapPolicy steer needs an automation that continues a chat (runMode existing_session or reusable_session)",
       });
     }
     if (value.runMode === "existing_session" && value.targetSessionId === null) {

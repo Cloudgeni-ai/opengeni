@@ -371,18 +371,18 @@ function FieldSegmented<Value extends string>(
 
 type EachRun = "new_session_per_run" | "reusable_session" | "existing_session";
 
-type IfStillRunning = "queue" | "steer" | "skip";
+type IfStillRunning = "steer" | "queue" | "skip";
 
 const IF_STILL_RUNNING_HINT: Record<IfStillRunning, string> = {
-  queue: "The new run waits, then starts when the previous one finishes.",
   steer:
     "The new run reaches the agent at its next step, so it handles both together. Anything else working in the chat, like your own message, still finishes first.",
+  queue: "The new run waits, then starts when the previous one finishes.",
   skip: "The new run is skipped. The next one runs as normal.",
 };
 
 const IF_STILL_RUNNING_SUMMARY: Record<IfStillRunning, string> = {
-  queue: "Queue if still running",
   steer: "Steer if still running",
+  queue: "Queue if still running",
   skip: "Skip if still running",
 };
 
@@ -1599,8 +1599,8 @@ function AgentScheduleForm({
                       })
                     }
                     options={[
-                      { value: "queue", label: "Queue" },
                       { value: "steer", label: "Steer" },
+                      { value: "queue", label: "Queue" },
                       { value: "skip", label: "Skip" },
                     ]}
                   />

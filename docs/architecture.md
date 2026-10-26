@@ -1470,8 +1470,9 @@ steering). A turn that a Steer replaced while it only waited (an approval, a
 question or capacity; its `turn.superseded` names `targetTurnId` or
 `targetUpdateId`) also closes quietly, and its approvals stop being
 actionable. A queued Send is unaffected and still runs after the whole turn.
-An automation that continues a chat can ask for the same handover with
-`overlapPolicy: "steer"`. While a turn that one of its runs started is still
+An automation that continues a chat gets the same handover with
+`overlapPolicy: "steer"`, the default for new automations (saved automations
+keep their choice). While a turn that one of its runs started is still
 running, its next run (a `scheduled_occurrence` update for a dispatched run of
 the same automation) counts as a waiting Steer for that turn only: the shared
 predicate behind `hasPendingSteerForTurn` matches it, so the steer watch, the

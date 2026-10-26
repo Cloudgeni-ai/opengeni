@@ -15,7 +15,6 @@ import {
   mergeResourceRefs,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_MAX_BYTES,
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES,
-  scheduledTaskRunModeContinuesChat,
 } from "@opengeni/contracts";
 import {
   resolveSessionFirstPartyMcpTools,
@@ -1729,11 +1728,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
     });
   const existingTarget = input.existing.targetSessionId;
   const nextRunMode = input.payload.runMode ?? input.existing.runMode;
-  if (nextOverlapPolicy === "steer" && !scheduledTaskRunModeContinuesChat(nextRunMode))
-    throw new HTTPException(422, {
-      message:
-        "overlapPolicy steer needs an automation that continues a chat (runMode existing_session or reusable_session)",
-    });
   const materializedReusable =
     input.existing.runMode === "reusable_session" &&
     nextRunMode === "reusable_session" &&

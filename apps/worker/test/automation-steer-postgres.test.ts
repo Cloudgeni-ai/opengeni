@@ -5,7 +5,11 @@ import {
   UpdateScheduledTaskRequest,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { createValidatedScheduledTask, validatedScheduledTaskUpdate } from "@opengeni/core";
+import {
+  createValidatedScheduledTask,
+  updateScheduledTaskForApi,
+  validatedScheduledTaskUpdate,
+} from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
@@ -112,7 +116,8 @@ type Ctx = Awaited<ReturnType<typeof fixture>>;
 
 async function automation(
   ctx: Ctx,
-  overlapPolicy: "steer" | "buffer_one" | "skip",
+  /** Undefined creates the automation with the default choice. */
+  overlapPolicy: "steer" | "buffer_one" | "skip" | undefined,
   name = "Answer new messages",
 ) {
   return await createValidatedScheduledTask({
@@ -125,7 +130,7 @@ async function automation(
       schedule: { type: "manual" },
       prompt: PROMPT,
       targetSessionId: ctx.sessionId,
-      overlapPolicy,
+      ...(overlapPolicy ? { overlapPolicy } : {}),
     }),
   });
 }
@@ -470,8 +475,10 @@ test("a paused steer automation no longer hands its running turn over", async ()
   expect(historyShape(history).slice(-1)).toEqual(["assistant"]);
 });
 
-test("steer is refused for an automation whose runs each start a new chat", async () => {
+test("new automations steer by default, and saved automations keep their choice", async () => {
   const ctx = await fixture();
+  expect((await automation(ctx, undefined)).overlapPolicy).toBe("steer");
+  // Runs in a new chat never overlap, so the default changes nothing for them.
   const perRun = await createValidatedScheduledTask({
     settings: settings(),
     db: app.db,
@@ -484,32 +491,18 @@ test("steer is refused for an automation whose runs each start a new chat", asyn
       agentConfig: { prompt: "Write the weekly report" },
     }),
   });
-  await expect(
-    validatedScheduledTaskUpdate({
-      settings: settings(),
-      db: app.db,
-      objectStorage: null,
-      grant: ctx.grant,
-      existing: perRun,
-      payload: UpdateScheduledTaskRequest.parse({ overlapPolicy: "steer" }),
-    }),
-  ).rejects.toMatchObject({ status: 422, message: STEER_NEEDS_A_CHAT });
-  // A chat automation may steer, and moving it to new chats needs another choice.
-  const chat = await automation(ctx, "steer");
-  await expect(
-    validatedScheduledTaskUpdate({
-      settings: settings(),
-      db: app.db,
-      objectStorage: null,
-      grant: ctx.grant,
-      existing: chat,
-      payload: UpdateScheduledTaskRequest.parse({
-        runMode: "new_session_per_run",
-        targetSessionId: null,
-        agentConfig: { prompt: "Write the weekly report" },
-      }),
-    }),
-  ).rejects.toMatchObject({ status: 422, message: STEER_NEEDS_A_CHAT });
+  expect(perRun.overlapPolicy).toBe("steer");
+  // An automation saved with another choice keeps it through an edit.
+  const queued = await automation(ctx, "buffer_one", "Post the daily brief");
+  const update = await validatedScheduledTaskUpdate({
+    settings: settings(),
+    db: app.db,
+    objectStorage: null,
+    grant: ctx.grant,
+    existing: queued,
+    payload: UpdateScheduledTaskRequest.parse({ prompt: "Post the daily brief, shorter" }),
+  });
+  const edited = await updateScheduledTaskForApi(app.db, ctx.grant, queued.id, update);
+  expect(edited.agentConfig.prompt).toBe("Post the daily brief, shorter");
+  expect(edited.overlapPolicy).toBe("buffer_one");
 });
-
-const STEER_NEEDS_A_CHAT = expect.stringContaining("overlapPolicy steer needs an automation");
