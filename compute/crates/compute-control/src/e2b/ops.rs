@@ -199,6 +199,8 @@ async fn template<S: Store>(front: &Front<S>, team: &str, key: &str) -> Result<T
         image: format!("{TEMPLATE_PREFIX}{}", saved.id),
         vcpus: saved.vcpus,
         memory_mib: saved.memory_mib,
+        // The captured image is as long as the disk it was captured from.
+        disk: None,
         disk_mib: saved.disk_mib,
     })
 }

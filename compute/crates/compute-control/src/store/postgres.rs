@@ -20,10 +20,10 @@ use super::{
     Admission, Admits, AgentRef, HostRow, Inserted, LifecycleRow, Linked, RequestRow, Result,
     SandboxRow, Spec, Store, StoreError, TemplateRow, Write, admits, rule,
 };
-use crate::e2b::lifecycle::Record;
 
 mod connect;
 mod images;
+mod lifecycles;
 mod schema;
 mod templates;
 
@@ -35,8 +35,6 @@ const LEADER_LOCK: i64 = 7_231_402;
 const SANDBOX_COLUMNS: &str = "id, team, spec, metadata, owner, epoch, taken, \
      unanswered_epoch, unanswered_stamp, landed_epoch, landed_host_epoch, landed_seq, \
      class, created_ms, version, whole_epoch";
-
-const LIFECYCLE_COLUMNS: &str = "id, team, record, version";
 
 const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, changed";
 
@@ -104,22 +102,6 @@ fn big(value: u64) -> Result<i64> {
 /// A `bigint` back as a `u64`.
 fn small(value: i64) -> Result<u64> {
     u64::try_from(value).map_err(corrupt)
-}
-
-/// When a lifecycle is due, as a `bigint`: never is the largest one.
-fn due(record: &Record) -> i64 {
-    i64::try_from(record.due_ms()).unwrap_or(i64::MAX)
-}
-
-fn lifecycle_row(row: &Row) -> Result<LifecycleRow> {
-    let id: String = row.get(0);
-    let Json(record): Json<Record> = row.try_get(2).map_err(corrupt)?;
-    Ok(LifecycleRow {
-        id: Id::from_str(&id).map_err(corrupt)?,
-        team: row.get(1),
-        record,
-        version: small(row.get(3))?,
-    })
 }
 
 const REQUEST_COLUMNS: &str = "team, request_id, id, digest, created_ms, gone_ms";
@@ -954,85 +936,23 @@ impl Store for PostgresStore {
     }
 
     async fn insert_lifecycle(&self, row: &LifecycleRow) -> Result<bool> {
-        let written = self
-            .client()
-            .await?
-            .execute(
-                "insert into compute_lifecycles (id, team, record, due_ms, version) \
-                 values ($1, $2, $3, $4, $5) on conflict (id) do nothing",
-                &[
-                    &row.id.to_string(),
-                    &row.team,
-                    &Json(&row.record),
-                    &due(&row.record),
-                    &big(row.version)?,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        Ok(written == 1)
+        self.insert_lifecycle_now(row).await
     }
 
     async fn lifecycle(&self, id: Id) -> Result<Option<LifecycleRow>> {
-        self.client()
-            .await?
-            .query_opt(
-                &format!("select {LIFECYCLE_COLUMNS} from compute_lifecycles where id = $1"),
-                &[&id.to_string()],
-            )
-            .await
-            .map_err(database)?
-            .as_ref()
-            .map(lifecycle_row)
-            .transpose()
+        self.lifecycle_now(id).await
     }
 
     async fn replace_lifecycle(&self, row: &LifecycleRow) -> Result<bool> {
-        let written = self
-            .client()
-            .await?
-            .execute(
-                "update compute_lifecycles set record = $2, due_ms = $3, version = version + 1 \
-                 where id = $1 and version = $4",
-                &[
-                    &row.id.to_string(),
-                    &Json(&row.record),
-                    &due(&row.record),
-                    &big(row.version)?,
-                ],
-            )
-            .await
-            .map_err(database)?;
-        Ok(written == 1)
+        self.replace_lifecycle_now(row).await
     }
 
     async fn delete_lifecycle(&self, id: Id, version: u64) -> Result<bool> {
-        let deleted = self
-            .client()
-            .await?
-            .execute(
-                "delete from compute_lifecycles where id = $1 and version = $2",
-                &[&id.to_string(), &big(version)?],
-            )
-            .await
-            .map_err(database)?;
-        Ok(deleted == 1)
+        self.delete_lifecycle_now(id, version).await
     }
 
     async fn lifecycles(&self, team: &str) -> Result<Vec<LifecycleRow>> {
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where team = $1 order by id"
-                ),
-                &[&team],
-            )
-            .await
-            .map_err(database)?
-            .iter()
-            .map(lifecycle_row)
-            .collect()
+        self.lifecycles_now(team).await
     }
 
     async fn lifecycles_due(
@@ -1041,28 +961,7 @@ impl Store for PostgresStore {
         after: Option<(u64, Id)>,
         limit: usize,
     ) -> Result<Vec<LifecycleRow>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        // The largest `bigint` is never (see `due`), so no time reaches it.
-        let now = i64::try_from(now_ms).unwrap_or(i64::MAX).min(i64::MAX - 1);
-        // Due times are never negative, so -1 comes before every row.
-        let (after_due, after_id) = after.map_or((-1, String::new()), |(due, id)| {
-            (i64::try_from(due).unwrap_or(i64::MAX), id.to_string())
-        });
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where due_ms <= $1 \
-                     and (due_ms, id collate \"C\") > ($2, $3) \
-                     order by due_ms, id collate \"C\" limit $4"
-                ),
-                &[&now, &after_due, &after_id, &limit],
-            )
-            .await
-            .map_err(database)?
-            .iter()
-            .map(lifecycle_row)
-            .collect()
+        self.lifecycles_due_now(now_ms, after, limit).await
     }
 
     async fn lifecycles_paused(
@@ -1070,22 +969,7 @@ impl Store for PostgresStore {
         after: Option<Id>,
         limit: usize,
     ) -> Result<Vec<LifecycleRow>> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let after = after.map_or_else(String::new, |id| id.to_string());
-        self.client()
-            .await?
-            .query(
-                &format!(
-                    "select {LIFECYCLE_COLUMNS} from compute_lifecycles where due_ms = $1 \
-                     and id collate \"C\" > $2 order by id collate \"C\" limit $3"
-                ),
-                &[&i64::MAX, &after, &limit],
-            )
-            .await
-            .map_err(database)?
-            .iter()
-            .map(lifecycle_row)
-            .collect()
+        self.lifecycles_paused_now(after, limit).await
     }
 
     async fn image_built(&self, source: &str) -> Result<Option<ImageId>> {
