@@ -216,6 +216,7 @@ import {
   installLazyToolRuntime,
   lazyToolRuntimeForAgent,
   restoreDirectDeferredCallArgumentTypes,
+  type ConnectedToolAccount,
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { createToolSelector } from "./tool-discovery-decision";
@@ -3644,6 +3645,25 @@ function maybeInstallLazyToolTransport(
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
     harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
+    () => {
+      // A labelled account route is a connected account: its connector, the
+      // account when the connector has several, and the kind of need it serves.
+      const accounts = new Map<string, ConnectedToolAccount>();
+      for (const server of mcpServers) {
+        if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
+          continue;
+        const route = server.connectedAccountRoute();
+        if (!route) continue;
+        const account: ConnectedToolAccount = {
+          source: server.registryId,
+          label: route.account ? `${route.connector} (${route.account})` : route.connector,
+          connector: route.connector,
+          ...(route.kind ? { kind: route.kind } : {}),
+        };
+        for (const name of server.modelToolNames()) accounts.set(name, account);
+      }
+      return accounts;
+    },
   );
 }
 
@@ -5353,6 +5373,11 @@ class DeferredPreparedMcpServer implements MCPServer {
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.preparedTarget?.toolDisplayMetadata(name);
+  }
+
+  /** The connected account this server reaches, once prepared. */
+  connectedAccountRoute(): McpAccountRouteLabel | undefined {
+    return this.preparedTarget?.connectedAccountRoute();
   }
 
   async reviewContext(toolName: string, args: Record<string, unknown>) {
@@ -8892,6 +8917,11 @@ export class PrefixedMcpServer implements MCPServer {
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
+  }
+
+  /** The connected account this server reaches, when it is an account route. */
+  connectedAccountRoute(): McpAccountRouteLabel | undefined {
+    return this.accountLabel;
   }
   /** Exact attempt-local classification, including names too long for a prefix. */
   modelToolNames(): Iterable<string> {

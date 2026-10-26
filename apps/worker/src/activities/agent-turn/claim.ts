@@ -129,6 +129,8 @@ export type ClaimTurnOk = {
   turn: SessionTurnForExecution;
   session: Awaited<ReturnType<typeof requireSession>>;
   installedApiIntegrations: readonly ApiIntegrationRuntime[];
+  /** Catalog categories of the turn's capability MCP servers, by server ID. */
+  capabilityServerCategories?: ReadonlyMap<string, string>;
   credentialSubjectId: string | undefined;
   fileAuthoritySubjectId: string | null;
   capabilitySettings: Settings;
@@ -319,6 +321,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // transaction and can be classified without conflating ordinary runtime
   // or transport failures with admission failures.
   let installedApiIntegrations: readonly ApiIntegrationRuntime[] = [];
+  const capabilityServerCategories = new Map<string, string>();
   const credentialSubjectId = credentialSubjectIdForTurnInitiator(turn);
   const fileAuthoritySubjectId = turn.initiatingHumanSubjectId ?? null;
   // Resolve the core gate once with bounded retry. Missing or disabled is
@@ -372,6 +375,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
               }),
           onResolvedApiIntegrations: (integrations) => {
             installedApiIntegrations = integrations;
+          },
+          onResolvedCapabilityServers: (servers) => {
+            for (const server of servers)
+              if (server.category) capabilityServerCategories.set(server.id, server.category);
           },
           codexApps: codexAppsDesignationRead,
         }),
@@ -929,6 +936,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       turn,
       session,
       installedApiIntegrations,
+      capabilityServerCategories,
       credentialSubjectId,
       fileAuthoritySubjectId,
       capabilitySettings,
