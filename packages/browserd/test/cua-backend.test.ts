@@ -1794,7 +1794,7 @@ describe("CUA desktop boundary", () => {
       await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
         code: "target_stale",
         message:
-          "cua:window:42:2 cannot be read through accessibility, on its own or in the window it belongs to (one of cua:window:42:1, cua:window:42:4), so its controls cannot be used from here: use another way the page or app offers, such as another sign-in method, or ask the person to finish it at the computer",
+          "cua:window:42:2 cannot be read through accessibility, so its controls cannot be used from here: use another way the app offers, or ask the person to finish it at the computer",
       });
       // The same panel with nothing else open: keys refused for the window it
       // is on do not send the caller to the panel, which cannot be read.
@@ -1802,7 +1802,8 @@ describe("CUA desktop boundary", () => {
       await backend.targets();
       await expect(backend.observe("cua:window:42:2")).rejects.toMatchObject({
         code: "target_stale",
-        message: expect.stringContaining("(one of cua:window:42:1)"),
+        message:
+          "cua:window:42:2 cannot be read through accessibility, so its controls cannot be used from here: use another way the app offers, or ask the person to finish it at the computer",
       });
       fixture.mutation = result(
         { effect: "refused", code: "window_not_key", reason: "CUA's own reason" },
@@ -1817,7 +1818,7 @@ describe("CUA desktop boundary", () => {
         code: "invalid_action",
         dispatched: false,
         message:
-          "Keys reach only the focused window of a background app, and that window (one of cua:window:42:2) cannot be read through accessibility, so none were sent and none can reach it from here: use another way the page or app offers, such as another sign-in method, or ask the person to finish it at the computer",
+          "Keys reach only the focused window of a background app, and that window (one of cua:window:42:2) cannot be read through accessibility, so no keys were sent: use another way the app offers, or ask the person to finish it at the computer",
       });
       fixture.mutation = result({ effect: "confirmed", route: "accessibility" });
       fixture.withDecoy = true;

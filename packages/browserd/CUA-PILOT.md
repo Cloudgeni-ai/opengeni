@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`a21fd935b07aeaf95649e58bd48afd96a6f185c2`: upstream `cua-driver-rs-v0.37.0`
+`8bd11ecda75cd0a4efb749d3b302a93a107187cf`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -54,6 +54,8 @@ focus instead of being refused as `window_not_key`; an Open or Save panel
 (`open-panel`, `save-panel`) drops keys posted to a background app, so keys
 stay refused there and its controls take accessibility actions. A sheet on
 another window of the app is neither read nor given keys through this window.
+Finding the window a sheet belongs to is bounded by the window read's own
+deadline; a lookup cut short adds no sheet.
 A focus read-back waits up to 300 ms, since Chrome moves the focus to a web
 control a moment after the write.
 A `run_steps` lookup or check may set `exact: true`, so its name must be the
@@ -262,7 +264,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/a21fd935b07aeaf95649e58bd48afd96a6f185c2/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/8bd11ecda75cd0a4efb749d3b302a93a107187cf/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side

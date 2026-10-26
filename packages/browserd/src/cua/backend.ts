@@ -1172,7 +1172,7 @@ export class CuaComputerBackend implements ComputerBackend {
     if (!shown.length && hosts.length && !unread)
       return new ComputerBackendError(
         "target_stale",
-        `${target.native.id} cannot be read through accessibility, on its own or in the window it belongs to (one of ${hostList}), so its controls cannot be used from here: use another way the page or app offers, such as another sign-in method, or ask the person to finish it at the computer`,
+        `${target.native.id} cannot be read through accessibility, so its controls cannot be used from here: use another way the app offers, or ask the person to finish it at the computer`,
         false,
         false,
       );
@@ -1215,7 +1215,7 @@ export class CuaComputerBackend implements ComputerBackend {
           .slice(0, 5)
           .join(
             ", ",
-          )}) cannot be read through accessibility, so none were sent and none can reach it from here: use another way the page or app offers, such as another sign-in method, or ask the person to finish it at the computer`,
+          )}) cannot be read through accessibility, so no keys were sent: use another way the app offers, or ask the person to finish it at the computer`,
         false,
         false,
       );
