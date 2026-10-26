@@ -125,6 +125,11 @@ function confirmedCall(saved: string, args: CallArgs): boolean {
  * in this chat's workspace unless the call names another, so a question about
  * "my workspace" needs no lookup first. Shown in search and describe results
  * only; the tool descriptions stay as they are.
+ *
+ * One rule for every caller, full access included: the default is stated in
+ * the results the model reads before calling, so leaving the id out picks this
+ * chat's workspace on purpose, and it never reaches anything the caller
+ * couldn't already reach by naming that workspace.
  */
 function pathParameterDefaults(workspaceId: string): { workspaceId: string } {
   return { workspaceId };

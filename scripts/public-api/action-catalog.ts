@@ -345,21 +345,85 @@ const ACCESS_GATES = new Set([
 ]);
 
 /**
+ * Timing wrappers a route may run its access check inside (`await
+ * measureInsightsPhase(observe, "auth", () => requireAccessGrant(...))`).
+ * Only these count: each always calls the work it is given, exactly once,
+ * and passes on its refusal, so the check can't be skipped. A test runs each
+ * one to keep that true; an unlisted wrapper names no permission.
+ */
+export const ACCESS_GATE_WRAPPERS: ReadonlySet<string> = new Set([
+  "measureInsightsPhase",
+  "measureSessionCreatePhase",
+]);
+
+/**
+ * Route-local access helpers that take an operation name rather than a
+ * permission (`await authorize(c, deps, "read")`), with the permission each
+ * operation needs a person in the workspace to hold first, or null for none.
+ * The usage and allowance routes (apps/api/src/routes/usage-allowances.ts):
+ * reading the workspace's usage or budget and setting a member's allowance
+ * need workspace:admin, setting the workspace budget needs an organization
+ * admin, and reading one's own usage needs nothing. Organization keys have
+ * their own way in; the route's own checks still decide. A test keeps the
+ * operations equal to that file's `Operation` type and checks that every
+ * route calling the helper gets its operation's permission.
+ */
+export const ACCESS_GATE_OPERATIONS: Readonly<
+  Record<string, Readonly<Record<string, string | null>>>
+> = {
+  authorize: {
+    read: "workspace:admin",
+    "budget-read": "workspace:admin",
+    "member-write": "workspace:admin",
+    "workspace-write": "account:admin",
+    own: null,
+  },
+};
+
+/** The permission an access-check call names: a shared gate's last argument, or a helper operation's. */
+function gateCallPermission(call: AstNode): string | null {
+  const name = calleeName(call) ?? "";
+  const args = call.arguments as AstNode[];
+  const last = args.at(-1);
+  const literal = last?.type === "Literal" && typeof last.value === "string" ? last.value : null;
+  if (literal === null) return null;
+  const operations = ACCESS_GATE_OPERATIONS[name];
+  const permission = ACCESS_GATES.has(name)
+    ? literal
+    : operations && args.length === 3 && Object.hasOwn(operations, literal)
+      ? operations[literal]!
+      : null;
+  return permission !== null && contracts.Permission.safeParse(permission).success
+    ? permission
+    : null;
+}
+
+function isGateCall(call: AstNode): boolean {
+  const name = calleeName(call) ?? "";
+  return (
+    ACCESS_GATES.has(name) ||
+    (Object.hasOwn(ACCESS_GATE_OPERATIONS, name) && (call.arguments as AstNode[]).length === 3)
+  );
+}
+
+/**
  * The permission a route requires before it does anything else: the one its
  * handler passes to a shared access check (`await requireAccessGrant(c, deps,
- * workspaceId, "sessions:read")`) in its opening declarations and statements,
- * before any branch, return or throw that could skip it. The check may open a
- * `try { } finally { }` block (no `catch` that could swallow its refusal), or
- * be what an awaited wrapper's arrow function returns (`await measure("auth",
- * () => requireAccessGrant(...))`). Every handler of the route must name the
- * same one. Anything less certain names none.
+ * workspaceId, "sessions:read")`) or the operation it passes to a listed
+ * helper (`await authorize(c, deps, "read")`), in its opening declarations
+ * and statements, before any branch, return or throw that could skip it. The
+ * check may open a `try { } finally { }` block (no `catch` that could swallow
+ * its refusal), or be what the arrow function given to a listed wrapper
+ * returns. Every handler of the route must name the same one. Anything less
+ * certain names none.
  */
 function gatePermission(sources: readonly string[]): { permission?: string } {
   const gateCall = (expression: AstNode | null | undefined): AstNode | null => {
     const call = expression?.type === "AwaitExpression" ? expression.argument : expression;
     if (call?.type !== "CallExpression") return null;
-    if (ACCESS_GATES.has(calleeName(call) ?? "")) return call;
-    if (expression?.type !== "AwaitExpression") return null;
+    if (isGateCall(call)) return call;
+    if (expression?.type !== "AwaitExpression" || !ACCESS_GATE_WRAPPERS.has(calleeName(call) ?? ""))
+      return null;
     for (const argument of call.arguments as AstNode[]) {
       if (argument.type !== "ArrowFunctionExpression" || argument.body?.type === "BlockStatement")
         continue;
@@ -384,12 +448,7 @@ function gatePermission(sources: readonly string[]): { permission?: string } {
       for (const expression of expressions) {
         const call = expression?.type === "AwaitExpression" ? gateCall(expression) : null;
         if (!call) continue;
-        const last = (call.arguments as AstNode[]).at(-1);
-        return last?.type === "Literal" &&
-          typeof last.value === "string" &&
-          contracts.Permission.safeParse(last.value).success
-          ? last.value
-          : null;
+        return gateCallPermission(call);
       }
     }
     return undefined;
@@ -405,38 +464,6 @@ function gatePermission(sources: readonly string[]): { permission?: string } {
   });
   const [first] = found;
   return first && found.every((permission) => permission === first) ? { permission: first } : {};
-}
-
-/**
- * Routes whose handler checks access through a route-local helper the source
- * reader can't follow, matched against "METHOD /path", with the workspace
- * permission a person in the workspace needs first. Usage and allowance
- * routes check it in `authorize` (apps/api/src/routes/usage-allowances.ts):
- * reading the workspace's usage or budget and setting a member's allowance
- * need workspace:admin, and setting the workspace budget needs an
- * organization admin. Reading one's own usage needs no permission. Organization
- * keys have their own way in; the route's own checks still decide.
- */
-const WORKSPACE = String.raw`\/v1\/workspaces\/(?::workspaceId|external\/:workspaceSource\/:workspaceExternalId)`;
-const MEMBER = String.raw`\/members\/(?::subjectId|external\/:memberSource\/:memberExternalId)`;
-export const ACTION_GATE_PERMISSIONS: ReadonlyArray<{ pattern: RegExp; permission: string }> = [
-  {
-    pattern: new RegExp(
-      `^(?:GET ${WORKSPACE}\\/(?:usage|allowance|allowance\\/state)|PUT ${WORKSPACE}${MEMBER}\\/allowance)$`,
-    ),
-    permission: "workspace:admin",
-  },
-  {
-    pattern: new RegExp(
-      `^(?:(?:PUT|DELETE) ${WORKSPACE}\\/allowance|POST ${WORKSPACE}\\/allowance\\/grants)$`,
-    ),
-    permission: "account:admin",
-  },
-];
-
-export function actionGatePermission(method: string, path: string): string | undefined {
-  const key = `${method} ${path}`;
-  return ACTION_GATE_PERMISSIONS.find((rule) => rule.pattern.test(key))?.permission;
 }
 
 /**
@@ -560,7 +587,7 @@ export function buildActionCatalog(
         request,
         query: inputs.queryParameters,
         retired: inputs.retired,
-        permission: inputs.permission ?? actionGatePermission(method, path),
+        permission: inputs.permission,
         response: response.length > 0 ? response : inlineResponseSchemas(method, path),
       };
     })
