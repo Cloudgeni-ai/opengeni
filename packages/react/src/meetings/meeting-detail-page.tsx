@@ -430,7 +430,13 @@ function VisibilityMenu({
 }
 
 /** A transcript version's model and the provider it runs on, by name. */
-type ModelAbout = { modelName: string; providerName: string };
+type ModelAbout = {
+  modelName: string;
+  providerName: string;
+  funding: string;
+  /** The deployment offers no other model. */
+  pinned: boolean;
+};
 
 const SPINNER = (
   <LoaderCircleIcon aria-hidden="true" className="size-4 animate-spin motion-reduce:animate-none" />
@@ -678,9 +684,16 @@ function MeetingDetailPageContent({
       const found = models.models.find(
         (candidate) => candidate.providerId === entry.providerId && candidate.model === entry.model,
       );
-      return found ? { modelName: found.name, providerName: found.providerName } : null;
+      return found
+        ? {
+            modelName: found.name,
+            providerName: found.providerName,
+            funding: found.funding,
+            pinned: models.pinned,
+          }
+        : null;
     },
-    [models.models],
+    [models.models, models.pinned],
   );
 
   const createPerson = people.create;

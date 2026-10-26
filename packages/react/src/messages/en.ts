@@ -2601,6 +2601,12 @@ export const englishMessages = {
     "This model's provider isn't connected. Try another model, or an admin can connect it in Organization settings, under Models.",
   "meetings.recordings.errorMissingProviderKeyFor":
     "{modelName} needs {providerName}, which isn't connected. Try another model, or an admin can connect {providerName} in Organization settings, under Models.",
+  "meetings.recordings.errorMissingProviderKeyForPinned":
+    "{modelName} needs {providerName}, which isn't connected. An admin can connect {providerName} in Organization settings, under Models.",
+  "meetings.recordings.errorMissingProviderKeyForDeployment":
+    "{modelName} needs {providerName}, which this deployment hasn't set up. Try another model, or ask whoever runs this deployment to set up {providerName}.",
+  "meetings.recordings.errorMissingProviderKeyForDeploymentPinned":
+    "{modelName} needs {providerName}, which this deployment hasn't set up. Ask whoever runs this deployment to set up {providerName}.",
   "meetings.recordings.errorProviderUnauthorized":
     "The transcription provider rejected its key. An admin can reconnect it in Organization settings, under Models.",
   "meetings.recordings.errorProviderQuotaExceeded":
