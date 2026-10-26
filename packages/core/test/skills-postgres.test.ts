@@ -692,18 +692,32 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
 
     // A removal never names a scope, even its Skill's own one, in either kind
     // of workspace.
-    for (const f of [sharedWorkspace, foreignOwner]) {
-      const skill = f === sharedWorkspace ? sharedSkill : foreignSkill;
+    const ownPersonalSkill = await saveSkill(client.db, {
+      ...sharedWorkspace.input,
+      skillId: crypto.randomUUID(),
+      operationId: crypto.randomUUID(),
+    });
+    for (const [f, skill, scope] of [
+      [sharedWorkspace, sharedSkill, "workspace"],
+      [foreignOwner, foreignSkill, "workspace"],
+      [sharedWorkspace, ownPersonalSkill, "user"],
+    ] as const) {
       const { accountId, workspaceId, actor, ...request } = agentRemoval(f, skill);
       await expectDatabaseGuard(
         applySkillLifecycle(
           client.db,
           { accountId, workspaceId, actor },
-          { ...request, operation: "remove", scope: "workspace" },
+          { ...request, operation: "remove", scope },
         ),
         "Skill scope is not available to this chat",
       );
-      expect(await readSkill(client.db, f.context, skill.skillId)).not.toBeNull();
+      expect(
+        await readSkill(
+          client.db,
+          { ...f.context, subjectId: f.human.actor.subjectId },
+          skill.skillId,
+        ),
+      ).not.toBeNull();
     }
 
     // Another person's personal Skill stays out of reach of the owner's chat.

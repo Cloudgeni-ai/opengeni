@@ -26,8 +26,10 @@ BEGIN
   -- 1. A removal names no destination.
   anchor := $a$    IF p_request ? 'scope' AND p_request->>'scope' IS DISTINCT FROM scope THEN
       IF NOT ((scope='user' AND p_request->>'scope'='workspace')$a$;
-  replacement := $r$    IF p_request ? 'scope' AND p_request->>'scope' IS DISTINCT FROM scope THEN
-      IF operation='remove' OR NOT ((scope='user' AND p_request->>'scope'='workspace')$r$;
+  replacement := $r$    IF operation='remove' AND p_request ? 'scope' THEN
+      RAISE EXCEPTION 'Skill scope is not available to this chat' USING ERRCODE='42501'; END IF;
+    IF p_request ? 'scope' AND p_request->>'scope' IS DISTINCT FROM scope THEN
+      IF NOT ((scope='user' AND p_request->>'scope'='workspace')$r$;
   IF cardinality(string_to_array(definition, anchor)) <> 2 THEN
     RAISE EXCEPTION 'skill_apply_lifecycle removal scope anchor drifted';
   END IF;
