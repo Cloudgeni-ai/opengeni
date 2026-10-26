@@ -5,8 +5,13 @@
 //! can be read or clicked: Accessibility answers with placeholder windows and
 //! input never reaches them. The session's own CoreGraphics dictionary is not
 //! enough to tell: after a switch to another user it can still report this
-//! session on the console and unlocked. The console device's owner and the
-//! IORegistry's `IOConsoleLocked` say what is actually on screen.
+//! session on the console and unlocked. The IORegistry root says what is
+//! actually on screen: `IOConsoleUsers` lists every logged-in session and
+//! marks the one on the console, and `IOConsoleLocked` says whether the screen
+//! shows a lock or login window. The console device's owner is only a
+//! fallback: it is the user who last logged in at the console, so a second
+//! user logged in in the background can own it while this session is on
+//! screen.
 
 /// What is on the Mac's screen, as far as this login session is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +24,45 @@ pub enum MacConsoleState {
     OtherUser,
 }
 
+/// Whose session the IORegistry's `IOConsoleUsers` marks as on the console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacConsoleSession {
+    /// This user's session; `locked` is that entry's `CGSSessionScreenIsLocked`.
+    ThisUser { locked: bool },
+    /// Another user's session.
+    OtherUser,
+    /// No session: the login window.
+    Nobody,
+}
+
+/// One entry of `IOConsoleUsers`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MacConsoleUser {
+    /// `kCGSSessionUserIDKey`.
+    pub user: u32,
+    /// `kCGSSessionOnConsoleKey`.
+    pub on_console: bool,
+    /// `CGSSessionScreenIsLocked`; false when absent.
+    pub screen_locked: bool,
+}
+
+/// Whose session `users` (the entries of `IOConsoleUsers`) marks as on the
+/// console, as seen by `user`. Sessions logged in in the background are listed
+/// too, off the console, and do not count.
+#[must_use]
+pub fn console_session(users: &[MacConsoleUser], user: u32) -> MacConsoleSession {
+    let mut on_console = users.iter().filter(|entry| entry.on_console);
+    if let Some(this) = on_console.clone().find(|entry| entry.user == user) {
+        MacConsoleSession::ThisUser {
+            locked: this.screen_locked,
+        }
+    } else if on_console.next().is_some() {
+        MacConsoleSession::OtherUser
+    } else {
+        MacConsoleSession::Nobody
+    }
+}
+
 /// The facts the console state is decided from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacConsoleFacts {
@@ -29,8 +73,12 @@ pub struct MacConsoleFacts {
     /// The IORegistry root's `IOConsoleLocked`: the screen shows a lock or
     /// login window, whichever session it belongs to.
     pub console_locked: bool,
-    /// Owner of `/dev/console`: the user whose session is on screen, or root
-    /// at the login window. `None` when it cannot be read.
+    /// Whose session `IOConsoleUsers` marks as on the console; `None` when it
+    /// cannot be read.
+    pub console_session: Option<MacConsoleSession>,
+    /// Owner of `/dev/console`: the user who last logged in at the console,
+    /// or root at the login window. `None` when it cannot be read. Used only
+    /// when `IOConsoleUsers` cannot be read.
     pub console_owner: Option<u32>,
     /// This process's user.
     pub user: u32,
@@ -46,6 +94,21 @@ pub struct MacConsoleFacts {
 /// has been verified.
 #[must_use]
 pub fn console_state(facts: &MacConsoleFacts) -> MacConsoleState {
+    let locked = |entry_locked: bool| {
+        if entry_locked || facts.session_locked || facts.console_locked {
+            MacConsoleState::Locked
+        } else {
+            MacConsoleState::Available
+        }
+    };
+    match facts.console_session {
+        Some(MacConsoleSession::ThisUser {
+            locked: entry_locked,
+        }) => return locked(entry_locked),
+        Some(MacConsoleSession::OtherUser) => return MacConsoleState::OtherUser,
+        Some(MacConsoleSession::Nobody) => return MacConsoleState::Locked,
+        None => {}
+    }
     let other_owner = facts
         .console_owner
         .is_some_and(|owner| owner != facts.user && owner != 0);
@@ -66,9 +129,112 @@ mod tests {
         session_locked: false,
         session_on_console: true,
         console_locked: false,
+        console_session: None,
         console_owner: Some(501),
         user: 501,
     };
+
+    const fn entry(user: u32, on_console: bool) -> MacConsoleUser {
+        MacConsoleUser {
+            user,
+            on_console,
+            screen_locked: false,
+        }
+    }
+
+    /// This session on screen as `IOConsoleUsers` lists it, with a second
+    /// user logged in in the background who owns `/dev/console`.
+    fn with_background_user() -> MacConsoleFacts {
+        MacConsoleFacts {
+            console_session: Some(console_session(&[entry(502, false), entry(501, true)], 501)),
+            console_owner: Some(502),
+            ..ON_SCREEN
+        }
+    }
+
+    #[test]
+    fn a_user_logged_in_in_the_background_does_not_take_the_screen() {
+        assert_eq!(
+            console_state(&with_background_user()),
+            MacConsoleState::Available
+        );
+        // Neither does this session's own dictionary, which can lag.
+        let lagging = MacConsoleFacts {
+            session_on_console: false,
+            ..with_background_user()
+        };
+        assert_eq!(console_state(&lagging), MacConsoleState::Available);
+    }
+
+    #[test]
+    fn the_registry_decides_whose_session_is_on_screen() {
+        // Another user's session on the console, whoever owns the device and
+        // whatever this session's own dictionary says.
+        for owner in [Some(501), Some(502), Some(0), None] {
+            let switched = MacConsoleFacts {
+                console_session: Some(console_session(&[entry(501, false), entry(502, true)], 501)),
+                console_owner: owner,
+                ..ON_SCREEN
+            };
+            assert_eq!(
+                console_state(&switched),
+                MacConsoleState::OtherUser,
+                "{owner:?}"
+            );
+        }
+        // No session on the console: the login window.
+        for users in [&[entry(501, false), entry(502, false)][..], &[][..]] {
+            let login_window = MacConsoleFacts {
+                console_session: Some(console_session(users, 501)),
+                ..ON_SCREEN
+            };
+            assert_eq!(console_state(&login_window), MacConsoleState::Locked);
+        }
+    }
+
+    #[test]
+    fn this_session_on_the_console_but_locked_is_locked() {
+        let locked_entry = MacConsoleFacts {
+            console_session: Some(console_session(
+                &[
+                    entry(502, false),
+                    MacConsoleUser {
+                        screen_locked: true,
+                        ..entry(501, true)
+                    },
+                ],
+                501,
+            )),
+            ..with_background_user()
+        };
+        for facts in [
+            locked_entry,
+            MacConsoleFacts {
+                console_locked: true,
+                ..with_background_user()
+            },
+            MacConsoleFacts {
+                session_locked: true,
+                ..with_background_user()
+            },
+        ] {
+            assert_eq!(console_state(&facts), MacConsoleState::Locked, "{facts:?}");
+        }
+    }
+
+    #[test]
+    fn without_the_registry_the_console_owner_decides_as_before() {
+        let fallback = MacConsoleFacts {
+            console_session: None,
+            ..with_background_user()
+        };
+        assert_eq!(console_state(&fallback), MacConsoleState::OtherUser);
+        let own = MacConsoleFacts {
+            console_session: None,
+            ..ON_SCREEN
+        };
+        assert_eq!(console_state(&own), MacConsoleState::Available);
+    }
 
     #[test]
     fn this_session_on_screen_and_unlocked_is_available() {
