@@ -181,7 +181,27 @@ describe("AttachedChromeCdpConnection", () => {
     );
 
     // Any other refusal names Chrome's reason, bounded.
+    const otherReason = "Cannot access a chrome:// URL";
     const other = await attach(
+      new AttachedBrowserBridgeError("driver_rejected", otherReason, false, {
+        extensionCode: "driver_failed",
+      }),
+    );
+    expect(other).toBeInstanceOf(InteractionControllerError);
+    expect(other).toMatchObject({ code: "resource_unavailable", retryable: false });
+    expect(other.message).toBe(
+      "Chrome would not let the Opengeni Browser extension control this tab (Cannot access a chrome:// URL); retrying will not help until that changes. Use another tab or a managed browser",
+    );
+    const long = await attach(
+      new AttachedBrowserBridgeError("driver_rejected", "界".repeat(400), false),
+    );
+    expect(Buffer.byteLength(long.message)).toBeLessThanOrEqual(
+      Buffer.byteLength(other.message) - Buffer.byteLength(otherReason) + 300,
+    );
+    expect(long.message).toContain("界…); retrying will not help");
+
+    // Another debugger (DevTools, or a racing attach) can let go: retry.
+    const debugged = await attach(
       new AttachedBrowserBridgeError(
         "driver_rejected",
         "Another debugger is already attached to the tab with id: 7.",
@@ -189,25 +209,19 @@ describe("AttachedChromeCdpConnection", () => {
         { extensionCode: "driver_failed" },
       ),
     );
-    expect(other).toBeInstanceOf(InteractionControllerError);
-    expect(other).toMatchObject({ code: "resource_unavailable", retryable: false });
-    expect(other.message).toBe(
-      "Chrome would not let the Opengeni Browser extension control this tab (Another debugger is already attached to the tab with id: 7.); retrying will not help until that changes. Use another tab or a managed browser",
+    expect(debugged).toBeInstanceOf(InteractionControllerError);
+    expect(debugged).toMatchObject({ code: "operation_conflict", retryable: true });
+    expect(debugged.message).toBe(
+      "Another debugger is attached to this tab, so the Opengeni Browser extension cannot control it right now. Try again in a moment; if it keeps happening, close DevTools for this tab or use another tab",
     );
-    const long = await attach(
-      new AttachedBrowserBridgeError("driver_rejected", "界".repeat(400), false),
-    );
-    expect(Buffer.byteLength(long.message)).toBeLessThanOrEqual(
-      Buffer.byteLength(other.message) + 300,
-    );
-    expect(long.message).toContain("界…); retrying will not help");
 
-    // A tab that is gone is not found, not a refusal.
-    const gone = await attach(
-      new AttachedBrowserBridgeError("driver_rejected", "No tab with id: 7.", false),
-    );
-    expect(gone).toBeInstanceOf(InteractionDefiniteDriverError);
-    expect(gone).toMatchObject({ code: "target_not_found" });
+    // A tab that is gone is not found, not a refusal, in both chrome.tabs'
+    // and chrome.debugger's wording.
+    for (const wording of ["No tab with id: 7.", "No tab with given id 7."]) {
+      const gone = await attach(new AttachedBrowserBridgeError("driver_rejected", wording, false));
+      expect(gone).toBeInstanceOf(InteractionDefiniteDriverError);
+      expect(gone).toMatchObject({ code: "target_not_found" });
+    }
 
     // A lost connection or timeout stays a transport failure worth retrying.
     const lost = await attach(
@@ -264,14 +278,12 @@ describe("AttachedChromeCdpConnection", () => {
     const { AgentBrowserDriver } = await import("../src/cdp-driver");
     const bridge = new FakeBridge();
     const request = bridge.request.bind(bridge);
+    let refusal = "Cannot access a chrome-extension:// URL of different extension";
     bridge.request = async <T = unknown>(payload: Readonly<Record<string, unknown>>) => {
       if (payload.type === "debugger.attach")
-        throw new AttachedBrowserBridgeError(
-          "driver_rejected",
-          "Cannot access a chrome-extension:// URL of different extension",
-          false,
-          { extensionCode: "driver_failed" },
-        );
+        throw new AttachedBrowserBridgeError("driver_rejected", refusal, false, {
+          extensionCode: "driver_failed",
+        });
       return await request<T>(payload);
     };
     const connection = new AttachedChromeCdpConnection(bridge, {
@@ -348,6 +360,25 @@ describe("AttachedChromeCdpConnection", () => {
         expect(dispatched).toMatchObject({ code: "resource_unavailable", retryable: false });
         expect((dispatched as Error).message).toContain("password managers do this");
       }
+      // Another debugger holding the tab is a definite refusal worth retrying.
+      refusal = "Another debugger is already attached to the tab with id: 7.";
+      const busy = await driver
+        .dispatch({
+          protocolVersion: 1,
+          actor: { kind: "agent", subjectId: "agent:test" },
+          operationId: crypto.randomUUID(),
+          browserSessionId,
+          controllerGeneration,
+          targetId: "7",
+          expectedTargetGeneration: "1",
+          expectedDocumentGeneration: "1",
+          expectedFrameId: "main",
+          observationMode: "none",
+          action: { type: "press", key: "Enter" },
+        })
+        .catch((error: unknown) => error);
+      expect(busy).toBeInstanceOf(InteractionDefiniteDriverError);
+      expect(busy).toMatchObject({ code: "operation_conflict", retryable: true });
       // Nothing reached the page.
       expect(bridge.commands.some((command) => String(command.method).startsWith("Input."))).toBe(
         false,

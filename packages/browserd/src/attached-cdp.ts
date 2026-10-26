@@ -1406,8 +1406,20 @@ function attachRefusal(error: unknown): unknown {
   if (!(error instanceof AttachedBrowserBridgeError) || error.code !== "driver_rejected")
     return error;
   const reason = error.message.trim();
-  if (/^No tab with id\b/u.test(reason))
+  // chrome.debugger reports a gone tab as "No tab with given id 7." and
+  // chrome.tabs as "No tab with id: 7.".
+  if (/^No (?:tab|target) with (?:given )?id\b/u.test(reason))
     return new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
+  // Another debugger (DevTools, or a second attach racing this one) can let
+  // go of the tab, so this one is worth retrying, unlike other refusals.
+  if (/^Another debugger is already attached\b/u.test(reason))
+    return new InteractionControllerError(
+      "operation_conflict",
+      "Another debugger is attached to this tab, so the Opengeni Browser extension cannot " +
+        "control it right now. Try again in a moment; if it keeps happening, close DevTools " +
+        "for this tab or use another tab",
+      true,
+    );
   // The extension's own explanation (for example, a password manager that
   // keeps adding its frame) already says what to do.
   if (error.extensionCode === "tab_unavailable" && reason.length > 0)

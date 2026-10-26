@@ -2405,10 +2405,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       // so the action definitely did not run.
       if (
         error instanceof InteractionControllerError &&
-        error.code === "resource_unavailable" &&
+        (error.code === "resource_unavailable" || error.code === "operation_conflict") &&
         (!effects || effects.state.actionEffectCount === effects.before)
       ) {
-        throw new InteractionDefiniteDriverError(error.code, error.message);
+        throw new InteractionDefiniteDriverError(error.code, error.message, error.retryable);
       }
       if (error instanceof CdpSessionDetachedError) {
         throw new InteractionOutcomeUnknownDriverError(
