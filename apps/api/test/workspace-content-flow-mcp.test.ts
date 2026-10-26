@@ -11,7 +11,11 @@ import {
   type DbClient,
   type WorkspaceContentFlowEnd,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 
@@ -39,6 +43,8 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("workspace-content-flow-mcp");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
+  // As the runtime will once 0981 grants the change function; tests turn EU-only on.
+  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl, { max: 4 });
 }, 180_000);
 

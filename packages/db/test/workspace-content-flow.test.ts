@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 
 import {
   assertWorkspaceContentExchangeAllowed,
@@ -22,6 +26,8 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("workspace-content-flow");
   if (!acquired) throw new Error("EU-only content flow tests require PostgreSQL");
   shared = acquired;
+  // As the runtime will once 0981 grants the change function; tests turn EU-only on.
+  await grantDeferredRuntimeAccess(shared.admin);
   client = createDb(shared.appUrl);
 }, 180_000);
 
@@ -161,4 +167,11 @@ test("a setting that can't be read refuses the move", async () => {
     expect(failed).toBeInstanceOf(Error);
     expect(failed).not.toBeInstanceOf(WorkspaceContentFlowRefusedError);
   }
+  // A workspace named with another organization's id has no setting to read.
+  const misnamed = { accountId: open.shared.accountId, workspaceId: eu.shared.workspaceId };
+  const failed = await refusal(
+    assertWorkspaceContentFlowAllowed(client.db, { source: misnamed, target: open.shared }),
+  );
+  expect(failed).toBeInstanceOf(Error);
+  expect(failed).not.toBeInstanceOf(WorkspaceContentFlowRefusedError);
 });
