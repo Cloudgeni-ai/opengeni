@@ -1836,6 +1836,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         recordingId,
         trackNumber: capture.trackNumber,
         ...(options.liveWebSocket ? { WebSocket: options.liveWebSocket } : {}),
+        mediaTrack: capture.stream.getAudioTracks()[0] ?? null,
         onChange: () => emit({ live: liveSnapshot() }),
       });
     }
@@ -2123,6 +2124,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       if (snapshot.state !== "recording") return;
       for (const capture of captures)
         if (capture.recorder.state === "recording") capture.recorder.pause();
+      for (const capture of captures) capture.live?.setPaused(true);
       pausedAt = performance.now();
       emit({
         state: "paused",
@@ -2137,6 +2139,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       pausedAt = null;
       for (const capture of captures)
         if (capture.recorder.state === "paused") capture.recorder.resume();
+      for (const capture of captures) capture.live?.setPaused(false);
       emit({ state: "recording", pauseReason: null });
     },
 
