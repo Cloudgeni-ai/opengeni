@@ -9,7 +9,9 @@ const workspaceRouteContracts = {
   workspaceIndexRoute: { kind: "redirect" },
   workspaceAgentRoute: { kind: "redirect" },
   workspaceRetiredPriorityRoute: { kind: "redirect" },
-  workspaceRetiredAgentsRoute: { kind: "redirect" },
+  workspaceAgentsRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentNewRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentDetailRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceSessionsRoute: {
     kind: "self-managed",
     source: "../../../packages/react/src/app/routes/sessions-index.tsx",
