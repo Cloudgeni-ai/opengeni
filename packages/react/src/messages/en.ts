@@ -3217,6 +3217,22 @@ export const englishMessages = {
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
   "native.realtime.nativeCall.voiceDisconnected": "Voice disconnected.",
   "native.realtime.nativeCall.voiceIsNotReadyYet": "Voice is not ready yet.",
+  "native.realtime.wakePhrase.copied": "Copied",
+  "native.realtime.wakePhrase.copy": "Copy",
+  "native.realtime.wakePhrase.copyAndOpenSettings": "Copy and open Settings",
+  "native.realtime.wakePhrase.copyLabel": "Copy “{text}”",
+  "native.realtime.wakePhrase.defaultPhrase": "Hey {name}",
+  "native.realtime.wakePhrase.defaultRequest": "Talk to {name}",
+  "native.realtime.wakePhrase.footnote":
+    "Works from the lock screen too; a locked phone asks you to unlock first. If nothing happens, check that Siri starts the call when you ask it: “{request}”.",
+  "native.realtime.wakePhrase.intro":
+    "Say your own phrase and a call with {name} starts, no tapping. iPhone sets this up in Settings; it takes about a minute.",
+  "native.realtime.wakePhrase.stepOpen":
+    "Open Settings, search for “Vocal Shortcuts” and tap Set Up (or Add Action), then Continue.",
+  "native.realtime.wakePhrase.stepPhrase":
+    "Type the phrase you'll say, then say it three times so iPhone learns your voice.",
+  "native.realtime.wakePhrase.stepRequest": "Choose Siri Request and paste:",
+  "native.realtime.wakePhrase.title": "Say “{phrase}”",
   "native.timeline.activity.countvalueFiles": "{countValue} files",
   "native.timeline.activity.moreMore": "+{more} more",
   "native.timeline.activity.resultsFoldedIntoModelContext":
