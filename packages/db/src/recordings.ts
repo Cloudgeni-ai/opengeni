@@ -1863,7 +1863,10 @@ async function memberPersonId(
         .limit(1)
     )[0]?.id ?? null;
   const found = await existing();
-  const displayName = input.displayName?.trim().slice(0, 200).trim();
+  const displayName = Array.from(input.displayName?.trim() ?? "")
+    .slice(0, 200)
+    .join("")
+    .trim();
   if (found || !displayName) return found;
   await tx
     .insert(schema.recordingPeople)

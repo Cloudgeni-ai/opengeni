@@ -1262,11 +1262,17 @@ function MeetingDetailPageContent({
                 <LiveTranscript
                   heading={false}
                   lines={savedLive.segments}
-                  speakerName={(trackNumber) =>
-                    (ownerName
-                      ? ownerLiveLaneName(recording.tracks, trackNumber, ownerName, msg)
-                      : null) ?? defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg)
-                  }
+                  speakerName={(trackNumber) => {
+                    const source = defaultSpeakerName(
+                      `track-${trackNumber}`,
+                      recording.tracks,
+                      msg,
+                    );
+                    return (
+                      ownerLiveLaneName(recording.tracks, trackNumber, ownerName ?? source, msg) ??
+                      source
+                    );
+                  }}
                   status={
                     savedLive.error
                       ? { text: msg("meetings.detailPage.canTLoadThePreview"), tone: "waiting" }

@@ -226,7 +226,8 @@ Opengeni, and the workspace's provider key never reaches the device:
 With a `system` track, the microphone's live text is under the recording
 owner's name (the person recording sees their own; others see the owner's
 person in the speaker directory, which starting such a recording adds them
-to) and the system track's text is under "Others". A microphone alone is
+to, or "Microphone" while no name is known) and the system track's text is
+under "Others". A microphone alone is
 named by its source, as are tracks of a recording without a `system` track.
 
 `createBrowserRecorder({ liveTranscript: true })` and
@@ -475,6 +476,12 @@ memory and storage at rates you set to your cloud's prices.
 - `PATCH …/recordings/:recordingId/speakers` names speakers (a person from the
   directory, or a plain name) and moves segments between speakers. Giving two
   labels the same person merges them.
+- `PATCH …/recordings/:recordingId/segments` corrects segment text; `null`
+  restores the original.
+- `GET …/recordings/:recordingId/tracks/:trackNumber/audio` returns a
+  short-lived link to a track's audio.
+- `GET` and `POST /v1/workspaces/:workspaceId/recording-people` read and add
+  people in the directory.
 
 With a `system` track, every new version names the microphone's speaker
 (`track-N`) after the recording's owner, as "It's me" would: their person in
@@ -482,13 +489,8 @@ the directory, added for them if they have none, named from their profile
 (else their membership label or email). It has `source: "track"` and no
 `confidence`, so it reads as known rather than as a voice suggestion. A name
 a person gave that speaker always carries over instead, through every later
+version; clearing it leaves the speaker to the owner again in the next
 version. A microphone alone keeps diarized `Speaker 1`, `Speaker 2`, ….
-- `PATCH …/recordings/:recordingId/segments` corrects segment text; `null`
-  restores the original.
-- `GET …/recordings/:recordingId/tracks/:trackNumber/audio` returns a
-  short-lived link to a track's audio.
-- `GET` and `POST /v1/workspaces/:workspaceId/recording-people` read and add
-  people in the directory.
 
 ## Notes
 

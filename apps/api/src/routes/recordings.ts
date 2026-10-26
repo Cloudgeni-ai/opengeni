@@ -504,7 +504,14 @@ export function registerRecordingRoutes(
         : undefined;
     // Computer or tab audio makes the microphone the owner, named in the live preview.
     const ownerName = recordingMicrophoneIsOwner(body.tracks)
-      ? await workspaceMemberDisplayName(db, actor).catch(() => null)
+      ? await workspaceMemberDisplayName(db, actor).catch((error: unknown) => {
+          // The recording starts regardless; the microphone stays unnamed until then.
+          observability?.warn("couldn't read the recording owner's name", {
+            workspaceId: actor.workspaceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        })
       : null;
     const result = await guard(() =>
       createRecording(db, {

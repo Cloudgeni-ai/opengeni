@@ -4029,8 +4029,9 @@ export async function workspaceMemberDisplayName(
   db: Database,
   input: { workspaceId: string; subjectId: string },
 ): Promise<string | null> {
+  // A deployment without managed profiles still has membership labels.
   const [profile] = input.subjectId.startsWith("user:")
-    ? await getManagedUserProfilesByIds(db, [input.subjectId.slice("user:".length)])
+    ? await getManagedUserProfilesByIds(db, [input.subjectId.slice("user:".length)]).catch(() => [])
     : [];
   const name = profile?.name?.trim();
   if (name) return name;
