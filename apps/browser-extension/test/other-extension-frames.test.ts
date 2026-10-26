@@ -30,12 +30,22 @@ const FRAME_REFUSAL = "Cannot access a chrome-extension:// URL of different exte
  * frame. While it does, Chrome refuses every debugger command, as it does for
  * a tab it attached to while that frame was still loading. */
 function harness(
-  options: { frameReturns?: boolean; refusal?: (method: string) => string | undefined } = {},
+  options: {
+    frameReturns?: boolean;
+    refusal?: (method: string) => string | undefined;
+    // Real timers, for removals that have to time out.
+    timers?: boolean;
+    // How many removals hang, as on a page whose renderer does not answer.
+    hangingRemovals?: number;
+    // Runs before Chrome handles each command.
+    beforeCommand?: (method: string) => Promise<void>;
+  } = {},
 ) {
   const ports: any[] = [];
   const sent: string[] = [];
   let framePresent = false;
   let removals = 0;
+  let hanging = options.hangingRemovals ?? 0;
   const tab = {
     id: 7,
     windowId: 1,
@@ -94,6 +104,7 @@ function harness(
       attach: async () => {},
       detach: async () => {},
       sendCommand: async (_source: unknown, method: string) => {
+        await options.beforeCommand?.(method);
         if (framePresent) throw new Error(FRAME_REFUSAL);
         const refusal = options.refusal?.(method);
         if (refusal) throw new Error(refusal);
@@ -104,6 +115,10 @@ function harness(
     scripting: {
       executeScript: async () => {
         removals += 1;
+        if (hanging > 0) {
+          hanging -= 1;
+          return await new Promise<never>(() => {});
+        }
         const removed = framePresent ? [PASSWORD_MANAGER] : [];
         framePresent = options.frameReturns === true;
         return [{ result: removed }];
@@ -133,8 +148,8 @@ function harness(
   new Function("chrome", "navigator", "setTimeout", "clearTimeout", worker)(
     chrome,
     { userAgent: "Chrome/153.0.0.0" },
-    () => 0,
-    () => {},
+    options.timers ? setTimeout : () => 0,
+    options.timers ? clearTimeout : () => {},
   );
   const ready = async () => {
     await flush();
@@ -157,12 +172,14 @@ function harness(
         connectionGeneration: hello.device.connectionGeneration,
         payload,
       });
-      for (let round = 0; round < 20; round++) {
+      const deadline = Date.now() + (options.timers ? 6_000 : 0);
+      for (let round = 0; round < 20 || Date.now() < deadline; round++) {
         await flush();
         const reply = port.messages.find(
           (message: any) => message.type === "command_result" && message.requestId === requestId,
         );
         if (reply) return reply;
+        if (round >= 20) await Bun.sleep(25);
       }
       return undefined;
     };
@@ -267,5 +284,62 @@ describe("another extension's frame in an attached tab", () => {
     expect(result).toMatchObject({ ok: false });
     expect(result.error.message).toContain("Cannot navigate to chrome-extension://");
     expect(h.removals()).toBe(0);
+  });
+
+  test("a removal the page never answers is given up, and the next one runs", async () => {
+    const h = harness({ timers: true, hangingRemovals: 1 });
+    const command = await h.ready();
+    const attached = await command({ type: "debugger.attach", tabId: "7" });
+    const send = () =>
+      command({
+        type: "debugger.command",
+        tabId: "7",
+        attachment: attached.payload.attachment,
+        method: "Page.getFrameTree",
+        params: {},
+      });
+    h.addFrame();
+    const given = await send();
+    expect(given).toMatchObject({ ok: false, error: { code: "tab_unavailable" } });
+    expect(given.error.message).toContain("it could not be removed");
+    // The hung removal holds nothing up: the next refusal removes the frame.
+    expect(await send()).toMatchObject({ ok: true });
+    expect(h.removals()).toBe(2);
+    expect(await command({ type: "debugger.attach", tabId: "7" })).toMatchObject({ ok: true });
+  }, 15_000);
+
+  test("a frame added again after the removal a refusal reuses is removed once more", async () => {
+    // One command is still on its way to Chrome while another's refusal
+    // removes the frame; the menu is back before Chrome handles the first.
+    let held = true;
+    let h: ReturnType<typeof harness>;
+    h = harness({
+      beforeCommand: async (method) => {
+        if (method !== "Page.getLayoutMetrics" || !held) return;
+        held = false;
+        // Hold it until the other command has run after its removal.
+        for (let i = 0; i < 1_000 && !h.sent.includes("Page.getFrameTree"); i++)
+          await Promise.resolve();
+        h.addFrame();
+      },
+    });
+    const command = await h.ready();
+    const attached = await command({ type: "debugger.attach", tabId: "7" });
+    const send = (method: string) =>
+      command({
+        type: "debugger.command",
+        tabId: "7",
+        attachment: attached.payload.attachment,
+        method,
+        params: {},
+      });
+    h.addFrame();
+    const [late, first] = await Promise.all([
+      send("Page.getLayoutMetrics"),
+      send("Page.getFrameTree"),
+    ]);
+    expect(first).toMatchObject({ ok: true });
+    expect(late).toMatchObject({ ok: true });
+    expect(h.removals()).toBe(2);
   });
 });

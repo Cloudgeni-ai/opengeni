@@ -918,6 +918,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
           throw closeTabFailure(error);
         }
         this.removeTab(targetId);
+        this.frameRefusedSessions.delete(targetId);
         return { success: true };
       }
       case "Target.attachToTarget": {
@@ -1181,6 +1182,9 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
       this.detachLocally(input.tabId, input.params.reason, { synthetic: false });
       return;
     }
+    // A closed tab's frame refusal is forgotten with it. Not on detach: the
+    // record has to outlive the attachment it ended.
+    if (input.method === "Target.targetDestroyed") this.frameRefusedSessions.delete(input.tabId);
     if (input.method === "Page.downloadWillBegin" || input.method === "Page.downloadProgress") {
       this.forwardDownloadEvent(input.method, input.params);
     }

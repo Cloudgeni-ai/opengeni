@@ -1142,6 +1142,9 @@ test("commands Chrome refuses while the tab holds another extension's frame fail
     // Once the frame is gone the tab works again: nothing was left uncertain.
     refusal = null;
     await expect(driver.observe("7")).resolves.toMatchObject({ target: { id: "7" } });
+    // The observe and its read on a new attachment, then one attach for each
+    // later call, since each was refused while its attachment started.
+    expect(bridge.commands.filter((c) => c.type === "debugger.attach")).toHaveLength(5);
   } finally {
     connection.close();
   }
