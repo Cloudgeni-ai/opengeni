@@ -11,6 +11,17 @@ const RECOVERY_MS = CONTROL_REPLY_RECOVERY_MS;
 /** How often a request still waiting for its reply checks that its agent
  * connection was not replaced. It reads Opengeni's own state, never the agent. */
 const REPLACEMENT_CHECK_MS = 1_000;
+/** The fraction by which a delivery understates its elapsed offset. Elapsed
+ * clocks on two hosts tick at slightly different rates, because time
+ * synchronization steers each host's frequency on its own (Linux bounds that
+ * steering at 500 ppm). The agent refuses an offset that would place a call
+ * after its own present, so with an exact offset a caller clock only slightly
+ * faster than the agent's made every older token unusable once the rate
+ * difference times the token's age exceeded the network round trip. A 1%
+ * understatement covers that bound twenty times. The agent then charges the
+ * call slightly more elapsed time, never less, so its delivery and exec
+ * deadlines can only come sooner. */
+const ELAPSED_RATE_ALLOWANCE = 0.01;
 
 /** The header of the empty reply a compute agent gateway publishes to a
  * request it forwarded into a session that then ended before the agent
@@ -186,15 +197,18 @@ export class ControlReplyRecovery {
         connectionCurrent,
       ).catch(() => {});
     }
-    const ageMs = Math.max(0, Math.floor(performance.now() - token.receivedAt));
+    const elapsedMs = Math.max(0, performance.now() - token.receivedAt);
+    const ageMs = Math.floor(elapsedMs * (1 - ELAPSED_RATE_ALLOWANCE));
     const delivery = `${subject}.replay.${token.id}.${ageMs}.${lifetimeMs}`;
+    // The machine's receipt now ends that much sooner, so stop retrying sooner
+    // too: a late retry should not meet an expired receipt instead of its reply.
     const reply = await this.retry(
       conn,
       subject,
       delivery,
       payload,
       timeoutMs,
-      deadline,
+      deadline - (elapsedMs - ageMs),
       readySubject,
       connectionCurrent,
     );
