@@ -11,7 +11,7 @@ import { Input } from "../../../ui/input";
 import { MENU_SURFACE_CLASS } from "../../../ui/menu-styles";
 import { containedPortal } from "../../../ui/portal-container";
 import { useAppContext } from "../../app-context";
-import { useAppAgentProfiles } from "../../lib/agent-profiles";
+import { useAgentProfilesEnabled, useAppAgentProfiles } from "../../lib/agent-profiles";
 import { useNavigate } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 
@@ -41,6 +41,13 @@ export function suggestedAgentAvatar(title: string, name: string): AgentAvatar {
  * names only this chat's agent; saving a reusable agent is one step further.
  */
 export function AgentIdentityControl({ session }: { session: Session }) {
+  // Hosts without the feature (or without navigation) never reach the hooks below.
+  const enabled = useAgentProfilesEnabled();
+  if (!enabled) return null;
+  return <AgentIdentityControlEnabled session={session} />;
+}
+
+function AgentIdentityControlEnabled({ session }: { session: Session }) {
   const id = useId();
   const context = useAppContext();
   const navigate = useNavigate();

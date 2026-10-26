@@ -18,7 +18,7 @@ import {
 } from "../../ui/dropdown-menu";
 import { userErrorText } from "../../ui/api-error";
 import { useAppContext } from "../app-context";
-import { useAppAgentProfiles } from "../lib/agent-profiles";
+import { useAgentProfilesEnabled, useAppAgentProfiles } from "../lib/agent-profiles";
 import { useNavigate } from "../lib/navigation";
 import { toast } from "../lib/toast";
 import { cn } from "../lib/utils";
@@ -152,6 +152,12 @@ function AgentMenuItem(props: {
  * the chat's agent settings) and the chat then wears its identity.
  */
 export function RunningChatAgentChip(props: { session: Session; disabled?: boolean | undefined }) {
+  const enabled = useAgentProfilesEnabled();
+  if (!enabled) return null;
+  return <RunningChatAgentChipEnabled {...props} />;
+}
+
+function RunningChatAgentChipEnabled(props: { session: Session; disabled?: boolean | undefined }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const profiles = useAppAgentProfiles();
