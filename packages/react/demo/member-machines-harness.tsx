@@ -29,7 +29,7 @@ const own: MachineView = {
 const shared: MachineView = { ...sharedMachine, scope: "workspace" };
 
 class PreviewClient extends MockOpenGeniClient {
-  override async mintEnrollToken(_workspaceId: string, input: { scope?: string }) {
+  async mintEnrollToken(_workspaceId: string, input: { scope?: string }) {
     return {
       token: "oget_preview.sig",
       expiresAt: new Date(Date.now() + 3_600_000).toISOString(),

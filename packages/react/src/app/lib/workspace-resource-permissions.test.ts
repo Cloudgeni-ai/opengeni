@@ -8,7 +8,9 @@ let rigsEnabled: boolean | undefined;
 const action = mock(async () => null);
 const refresh = mock(async () => {});
 const attach = mock(async () => true);
-let fleetMachines: Array<Record<string, unknown>> = [{ sandboxId: "machine" }];
+let fleetMachines: Array<{ sandboxId: string; enrollmentId?: string; scope?: string }> = [
+  { sandboxId: "machine" },
+];
 const machine = fleetMachines[0]!;
 mock.module("../app-context", () => ({
   useAppContext: () => ({

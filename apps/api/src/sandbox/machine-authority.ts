@@ -55,9 +55,10 @@ export const MACHINE_AUDIENCE_REFUSAL = "Only workspace admins can change who ca
 
 /**
  * The machine routes' access check: requireAccessGrantAuthorization with
- * enrollments:read, refusing a caller without it with a sentence instead of
- * the raw permission name. The permission stays inside the authorization, so
- * a refused request never provisions a first-use membership.
+ * enrollments:read, or enrollments:manage for grants that hold only that
+ * (it does not imply read), refusing a caller with neither with a sentence
+ * instead of the raw permission name. The permission stays inside the
+ * authorization, so a refused request never provisions a first-use membership.
  */
 export async function requireMachineAccessGrant(
   c: Context,
@@ -65,14 +66,19 @@ export async function requireMachineAccessGrant(
   workspaceId: string,
   permission: "enrollments:read",
 ): Promise<AccessGrantAuthorization> {
+  const missing = (error: unknown, needed: string) =>
+    error instanceof HTTPException &&
+    error.status === 403 &&
+    error.message === `missing permission: ${needed}`;
   try {
     return await requireAccessGrantAuthorization(c, deps, workspaceId, permission);
   } catch (error) {
-    if (
-      error instanceof HTTPException &&
-      error.status === 403 &&
-      error.message === `missing permission: ${permission}`
-    ) {
+    if (!missing(error, permission)) throw error;
+  }
+  try {
+    return await requireAccessGrantAuthorization(c, deps, workspaceId, "enrollments:manage");
+  } catch (error) {
+    if (missing(error, "enrollments:manage")) {
       throw new HTTPException(403, { message: NO_MACHINE_ACCESS });
     }
     throw error;
