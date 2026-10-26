@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "1a2b981f44be19f80cd4555c2dc264481235ae09355270dae51b1806ec027b8f"
+      "sha256": "499c982684b06f7a19169a3ea69785d2ca2987614a8f47a084fefa1479edea6a"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -1018,6 +1018,12 @@
       "job": "plan",
       "step": "Record dependency cache outcome",
       "sha256": "d62d858d5e25fa401e05c9dc846f4dcb3aa730f279cd7b64df76765af634124b"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "plan",
+      "step": "Select runner pool",
+      "sha256": "3992b5b5c3502cc9298f664e0e8ceb9d7acc5b4c3d5055487b00204bfb2d658f"
     },
     {
       "workflow": ".github/workflows/ci.yml",
