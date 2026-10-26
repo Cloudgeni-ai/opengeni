@@ -207,11 +207,19 @@ const FRAME_CAPTURE_TIMEOUT_MS = 2_000;
 const SCREENSHOT_CAPTURE_TIMEOUT_MS = 10_000;
 /** A person's own Chrome cannot take the managed launch switch that copies a
  * fresh surface, so a capture of a tab another tab covers in its window waits
- * for a redraw Chrome never shows. Viewport captures there give up after this
- * long with a plain reason instead of the whole capture deadline. */
+ * for a redraw Chrome never shows. Viewport captures of a tab the connection
+ * reports as not in front give up after this long with a plain reason instead
+ * of the whole capture deadline; a capture of the tab in front, however slow,
+ * is never cut short. */
 const CONNECTED_CHROME_CAPTURE_STALL_MS = 3_000;
 const CONNECTED_CHROME_CAPTURE_STALLED =
   "browser screenshot stalled: Chrome did not draw this tab within 3 s, which happens while another tab is in front of it in its window; select it with browser_tabs to capture it, or read it with browser_observe";
+/** Chromium's own reply when it has no drawn surface to capture. */
+const CAPTURE_REFUSED_BY_CHROMIUM = "Unable to capture screenshot";
+/** Retries, 25, 50 and 100 ms apart, after Chromium refuses a capture. */
+const CAPTURE_REFUSAL_RETRIES = 3;
+const CAPTURE_REFUSED =
+  "browser screenshot unavailable: Chrome could not draw this tab, which can happen while it is not shown; select it with browser_tabs to capture it, or read it with browser_observe";
 /** Longest a viewport capture waits for the compositor to present a just
  * changed emulated viewport before publishing what it has. */
 const STALE_SURFACE_SETTLE_MS = 1_500;
@@ -570,6 +578,11 @@ export type BrowserCdpConnection = {
     options?: { sessionId?: string; timeoutMs?: number; signal?: AbortSignal },
   ): Promise<T>;
   on(method: string, listener: (event: CdpEvent) => void, sessionId?: string): () => void;
+  /**
+   * Whether a tab is the one shown in its window, for transports that can
+   * tell; null when unknown.
+   */
+  tabShown?: (targetId: string) => Promise<boolean | null>;
   /**
    * Resolves once events the browser sent before this call have reached
    * listeners. Omitted by transports that deliver events in order with
@@ -2084,31 +2097,74 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                   scale: 1,
                 };
               }
+              // Only a tab Chrome does not show can wait for a redraw it never
+              // shows; a capture of the tab in front may take all it needs.
+              const stallable =
+                this.engine === "chrome" && !normalized.fullPage && (await this.tabBehind(state));
               const captureOnce = async () => {
                 const response = await this.screenshotRead(
                   "Page.captureScreenshot",
                   deadline,
                   async (timeoutMs) => {
-                    const stallBound =
-                      this.engine === "chrome" && !normalized.fullPage
-                        ? Math.min(timeoutMs, CONNECTED_CHROME_CAPTURE_STALL_MS)
-                        : timeoutMs;
-                    try {
-                      return await this.sendTarget<{ data?: unknown }>(
-                        state,
-                        "Page.captureScreenshot",
-                        capture,
-                        { timeoutMs: stallBound },
-                      );
-                    } catch (error) {
-                      if (stallBound < timeoutMs && error instanceof CdpCommandTimeoutError) {
-                        throw new InteractionControllerError(
-                          "timeout",
-                          CONNECTED_CHROME_CAPTURE_STALLED,
-                          true,
-                        );
+                    const started = Date.now();
+                    const send = async (): Promise<{ data?: unknown }> => {
+                      for (let refused = 0; ; refused += 1) {
+                        try {
+                          return await this.sendTarget<{ data?: unknown }>(
+                            state,
+                            "Page.captureScreenshot",
+                            capture,
+                            { timeoutMs: Math.max(1, timeoutMs - (Date.now() - started)) },
+                          );
+                        } catch (error) {
+                          if (
+                            !(error instanceof CdpProtocolError) ||
+                            error.message !== CAPTURE_REFUSED_BY_CHROMIUM
+                          ) {
+                            throw error;
+                          }
+                          // Chromium refuses a capture of a tab it has not drawn
+                          // yet, and that request makes it draw one, so asking
+                          // again shortly after works.
+                          if (refused < CAPTURE_REFUSAL_RETRIES) {
+                            await delay(25 * 2 ** refused);
+                            continue;
+                          }
+                          const failure = new InteractionControllerError(
+                            "resource_unavailable",
+                            CAPTURE_REFUSED,
+                            true,
+                          );
+                          failure.cause = error;
+                          throw failure;
+                        }
                       }
-                      throw error;
+                    };
+                    const sending = send();
+                    if (!stallable || timeoutMs <= CONNECTED_CHROME_CAPTURE_STALL_MS) {
+                      return await sending;
+                    }
+                    // The bound is kept here: a transport may not time its
+                    // commands out (the extension bridge does not).
+                    let stall: ReturnType<typeof setTimeout> | undefined;
+                    const stalled = new Promise<never>((_, reject) => {
+                      stall = setTimeout(
+                        () =>
+                          reject(
+                            new InteractionControllerError(
+                              "timeout",
+                              CONNECTED_CHROME_CAPTURE_STALLED,
+                              true,
+                            ),
+                          ),
+                        CONNECTED_CHROME_CAPTURE_STALL_MS,
+                      );
+                    });
+                    try {
+                      return await Promise.race([sending, stalled]);
+                    } finally {
+                      clearTimeout(stall);
+                      sending.catch(() => undefined);
                     }
                   },
                 );
@@ -5632,6 +5688,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       throw new Error("CDP returned an invalid frame tree");
     }
     return parseFrameTree(response.frameTree);
+  }
+
+  /** Whether the connection reports this tab as not the one shown in its
+   * window. Page signals cannot tell: focus emulation keeps every agent tab
+   * "visible" and drawing. Unknown counts as shown. */
+  private async tabBehind(state: TargetState): Promise<boolean> {
+    try {
+      return (await (await this.ensureConnection()).tabShown?.(state.targetId)) === false;
+    } catch {
+      return false;
+    }
   }
 
   private async screenshotRead<T>(

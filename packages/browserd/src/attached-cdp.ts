@@ -730,6 +730,12 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     };
   }
 
+  /** Whether the tab is the active one in its window, as Chrome reports it. */
+  async tabShown(targetId: string): Promise<boolean | null> {
+    const listed = await this.bridge.request<{ tabs: AttachedTab[] }>({ type: "tabs.list" });
+    return requireTabs(listed.tabs).find((tab) => tab.id === targetId)?.active ?? null;
+  }
+
   /**
    * Resolves once every debugger event the extension recorded before this
    * call has reached listeners. Events arrive by polling here, so a command
