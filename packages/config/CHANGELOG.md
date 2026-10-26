@@ -1,5 +1,44 @@
 # @opengeni/config
 
+## 5.4.2
+
+### Minor Changes
+
+- 936d9e0: Add optional Turnstile signup verification, reversible promotional-credit holds, and signature-backed repeated free-credit claim detection. Keep purchased credit and incurred usage settlement intact, with tenant-safe balance projections and owner-only audited review controls. All enforcement defaults off and requires explicit deployment configuration after every funding reader is upgraded.
+
+### Patch Changes
+
+- 23e7e1e: Installing or updating the Connected Machine agent no longer leaves a machine worse off. Both installers stage the new binary and refuse one that cannot start on the machine (exit code 8, naming its exit code, for example `0xC0000135` STATUS_DLL_NOT_FOUND on Windows) before it replaces a working agent, and report a refused machine connection as exit code 9 with the agent's exit code, leaving the running agent untouched. On Windows, an upgrade whose new agent then fails to start in the background restores and restarts the previous agent. The agent's own Windows self-update now checks the staged binary before the swap, as on Linux and macOS. Windows machines report real CPU, memory and disk metrics instead of zeros. `OPENGENI_AGENT_STABLE_VERSION` is now optional: unset, `/agent/latest/*`, the stable update manifest and automatic updates use the agent release of the control plane's own source tree (`agent/Cargo.toml`) instead of the fixed, long-outdated `0.1.54`; an API that cannot name a release answers 404 and requests no updates.
+- f884a9b: Allow the built-in Azure OpenAI provider to use an Entra app registration through
+  `OPENGENI_AZURE_OPENAI_AUTH_MODE=deployment_identity`, reusing the existing
+  `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` settings and token
+  helper. Preserve early token refresh, bearer-only requests, reasoning effort and
+  allowed models, and invalidate cached clients when the configured secret changes.
+- a57cfa8: Support keyless built-in Azure OpenAI authentication with workload or managed
+  identity and automatically refreshed Cognitive Services tokens. Preserve built-in
+  model and reasoning settings, and enable reasoning effort for organization Azure
+  OpenAI models using either API keys or Microsoft Entra ID.
+- Updated dependencies [931325b]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [01188c9]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [57cfc37]
+- Updated dependencies [96502c5]
+- Updated dependencies [5f332c1]
+- Updated dependencies [24b71c6]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/codex@5.4.0
+  - @opengeni/xai-subscription@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

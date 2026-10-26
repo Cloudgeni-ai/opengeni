@@ -1,5 +1,31 @@
 # @opengeni/ogtool
 
+## 5.4.2
+
+### Patch Changes
+
+- 1d5c8f3: `ogtool call` reads its arguments from a file with `@path` or from stdin with `-`, the same forms the native `codemode call` accepts, so large arguments no longer have to fit in one command-line argument.
+- Updated dependencies [931325b]
+- Updated dependencies [9db3491]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [01188c9]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [57cfc37]
+- Updated dependencies [96502c5]
+- Updated dependencies [5f332c1]
+- Updated dependencies [24b71c6]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/codemode@5.4.0
+
 ## 5.3.1
 
 ### Patch Changes

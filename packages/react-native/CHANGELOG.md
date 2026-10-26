@@ -1,5 +1,62 @@
 # @opengeni/react-native
 
+## 5.4.2
+
+### Minor Changes
+
+- 0408d62: When an agent asks for a connection in chat, the phone app now shows the same connect card as the web chat instead of a dead-end "needs to be reconnected" note. OAuth opens the system sign-in browser and returns to the conversation; key-based setup uses the native secure field; the card follows the setup's saved state, and the agent continues once the connection is ready. A first connection no longer says "reconnect". The card choice, setup state and sign-in window handling now live in renderer-neutral modules that the web and native cards share (`@opengeni/react/in-chat-connect-model`). Native approvals show app actions as the readable confirmation card the web shows, a settled approval shows a check instead of a warning, and question cards render their Markdown, help text and option descriptions as on the web. React Native's `AbortController` gains the standard abort reason and `signal.throwIfAborted()` when the runtime lacks them, which the connect flow relies on.
+- 6a280a7: New `@opengeni/react-native/meetings` entry, so an app can add meetings to its phone app with the same screens the Opengeni app uses. `MeetingRecorderProvider` holds one recorder above the screens (recording keeps going while the person moves around the app or locks the phone), `MeetingsList` is the meetings page with the recorder on top, and `useMeetingView` gives one meeting's transcript plus the actions for the host's own header menu. They read the client and workspace from `OpenGeniProvider`, take an `externalRef` to scope a list (and new recordings) to something in the host, and every label comes from the shared Opengeni catalog under `native.meetings.*`, so hosts translate them like the rest.
+
+### Patch Changes
+
+- 627bcd6: Meetings started without a title show a local, readable title instead of the server's UTC stand-in. `meetingTitle` is exported from `@opengeni/react/recordings`.
+- 2a29ac1: Meetings say less, more plainly. Explanations of how things work inside (versions, model words, where audio is kept, "pieces of audio") are gone; each state says the one thing that matters and what to do. While recording in the desktop app the panel just says what it records, and an unnamed meeting started on the web is named after when it starts ("Meeting, Oct 26, 12:15") instead of getting the server's "Recording 2026-10-26 11:15 UTC".
+
+  Form dialogs, confirm dialogs and detail sheets read their default Cancel, Close, Loading and Working… text from the host's messages (`formDialog.*`), so a translated product no longer shows them in English.
+
+- 26c3bc6: Meetings no longer say "Uploading" while a meeting is recorded or after Stop. Audio uploads while it records, so a meeting's page opened from Take notes now shows the recording's clock with Pause and Stop, and after Stop it reads Transcribing on the page and in the list. A paused recording reads Paused in the list, and the recorder's own line after Stop reads "Saving the rest of the audio." on web and phones. A meeting still being recorded elsewhere reads In progress; only a lost connection or a refused upload is called out. Adds `meetingHereStatus` to `@opengeni/react/recordings`; the list label for a recording in progress uses the new `meetings.recordings.inProgress` key instead of `meetings.recordings.uploading`, the recorder's `meetings.recorderPanel.uploadingCountPiecesOfAudio` and `finishingTheUpload` keys become `meetings.recorderPanel.savingTheRestOfTheAudio`, and the meeting page's unused `meetings.detailPage.uploading*` and `stillUploading` keys are removed. Hosts that translate the catalog should rename their `meetings.recordings.uploading` translation to `meetings.recordings.inProgress`, add `savingTheRestOfTheAudio` and drop the removed keys.
+- 8a9e320: The meetings list and meeting screens from `@opengeni/react-native/meetings` now let iOS keep their content clear of the navigation bar, tab bar and home indicator (`contentInsetAdjustmentBehavior="automatic"`), so they also work under a translucent header. `bottomInset` is now only extra space, such as Android's bottom safe-area inset.
+- 9e0569f: `MeetingRecorderProvider` from `@opengeni/react-native/meetings` now runs its recorder beside the screens instead of around them. A new `storeScope` or workspace starts a fresh recorder without remounting everything below it, so an app can switch account or organization without a `key` that resets its navigation. The live snapshot only re-renders the components that read it, not the whole app several times a second while recording. `workspaceId` may be `null` while the app is still finding it.
+- 6c11af5: Recording on Android 13 and later asks to post notifications right after the microphone is allowed, so the ongoing "Recording audio" notification shows, and the `recording` config plugin declares the permission. The notification and status bar now show a microphone instead of the app icon, which Android draws as a blank disc.
+- Updated dependencies [931325b]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [801743c]
+- Updated dependencies [cb5f4d7]
+- Updated dependencies [01188c9]
+- Updated dependencies [415c32b]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [ebf148a]
+- Updated dependencies [de7087a]
+- Updated dependencies [cb15454]
+- Updated dependencies [627bcd6]
+- Updated dependencies [a5a9336]
+- Updated dependencies [0da62e3]
+- Updated dependencies [2a29ac1]
+- Updated dependencies [627bcd6]
+- Updated dependencies [26c3bc6]
+- Updated dependencies [464f57b]
+- Updated dependencies [57cfc37]
+- Updated dependencies [96502c5]
+- Updated dependencies [d3d8ccf]
+- Updated dependencies [0408d62]
+- Updated dependencies [b18d187]
+- Updated dependencies [7bb67e3]
+- Updated dependencies [936d9e0]
+- Updated dependencies [5f332c1]
+- Updated dependencies [69a05bd]
+- Updated dependencies [6a280a7]
+- Updated dependencies [24b71c6]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/sdk@5.4.0
+  - @opengeni/react@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes

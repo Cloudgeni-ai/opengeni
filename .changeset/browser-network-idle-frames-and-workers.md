@@ -1,5 +1,0 @@
----
-"@opengeni/browserd": patch
----
-
-A browser `network_idle` wait now settles on pages that are done loading instead of waiting out its 30-second limit, and still waits for real loading. Requests made by cross-origin (out-of-process) iframes, by dedicated workers (including workers started by workers) and by shared workers are now tracked, so their documents and scripts count as finished when they finish. Requests the page's content never waits for no longer count: beacons and link pings, CSP reports, prefetches, media streaming, the manifest, the browser's own icon fetch, and blob: and data: URLs. A response whose body has had no data for 3 seconds, and a request with no response after 10 seconds (a long poll), stop counting, so a slow download or a streamed answer that keeps sending still counts. When one of those two cutoffs is what let the wait end, the action receipt says so in a `network_busy` note. The 30-second limit and the existing note for a page whose network never went quiet are unchanged. The short settle after a click or other action uses the same rules.
