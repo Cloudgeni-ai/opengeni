@@ -171,10 +171,10 @@ export async function refreshManagedPasskeyStorageGrant(
           to_regprocedure('mutate_managed_passkey(text, text, jsonb)'), 'EXECUTE'),
       false
     ) as granted`);
-  const rows = (Array.isArray(result) ? result : (result as { rows: unknown[] }).rows) as {
+  const grantRows = (Array.isArray(result) ? result : (result as { rows: unknown[] }).rows) as {
     granted: boolean | null;
   }[];
-  const granted = rows[0]?.granted === true;
+  const granted = grantRows[0]?.granted === true;
   passkeyStorageGrants.set(db, { granted, checkedAt: Date.now() });
   return granted;
 }
