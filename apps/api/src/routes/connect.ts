@@ -798,6 +798,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               workspaceId,
               capabilityId: values.capabilityId,
               payload: { config: {}, metadata: {}, headers: {} },
+              mcpServerLogoStorage: deps.objectStorage,
             });
             return {
               commit: async (tx, current) => {
@@ -1095,6 +1096,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
                   ownership: attempt.ownership,
                   headers: credentialHeaders,
                   ...(deps.mcpCapabilityProbe ? { probe: deps.mcpCapabilityProbe } : {}),
+                  logoStorage: deps.objectStorage,
                 });
               } catch {
                 // No credential/catalog write has occurred. Settle this exact
