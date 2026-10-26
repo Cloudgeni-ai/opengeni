@@ -80,6 +80,8 @@ function MeetingNotesContent({
     <Notepad
       note={notes.notepad}
       prominent={capturing}
+      // Alone under the Notes heading while recording, it needs no second heading.
+      labelHidden={capturing && !notes.notes}
       save={(body) => notes.save("notepad", body)}
     />
   );
@@ -275,10 +277,12 @@ type NotepadStatus = "idle" | "saving" | "saved" | "failed";
 function Notepad({
   note,
   prominent,
+  labelHidden,
   save,
 }: {
   note: RecordingNote | null;
   prominent: boolean;
+  labelHidden: boolean;
   save: (body: string) => Promise<RecordingNote>;
 }) {
   const msg = useOpenGeniText();
@@ -330,22 +334,32 @@ function Notepad({
     [],
   );
 
+  const statusText = (
+    <span role="status" aria-live="polite" className="text-xs leading-4 text-fg-muted">
+      {status === "saving"
+        ? msg("meetings.notes.notepadSaving")
+        : status === "saved"
+          ? msg("meetings.notes.notepadSaved")
+          : status === "failed"
+            ? msg("meetings.notes.notepadFailed")
+            : null}
+    </span>
+  );
+
   return (
     <div className="grid gap-2">
-      <div className="flex items-baseline justify-between gap-3">
-        <label htmlFor={id} className="text-sm leading-5 font-medium text-fg">
+      {labelHidden ? (
+        <label htmlFor={id} className="sr-only">
           {msg("meetings.notes.notepad")}
         </label>
-        <span role="status" aria-live="polite" className="text-xs leading-4 text-fg-muted">
-          {status === "saving"
-            ? msg("meetings.notes.notepadSaving")
-            : status === "saved"
-              ? msg("meetings.notes.notepadSaved")
-              : status === "failed"
-                ? msg("meetings.notes.notepadFailed")
-                : null}
-        </span>
-      </div>
+      ) : (
+        <div className="flex items-baseline justify-between gap-3">
+          <label htmlFor={id} className="text-sm leading-5 font-medium text-fg">
+            {msg("meetings.notes.notepad")}
+          </label>
+          {statusText}
+        </div>
+      )}
       <TextArea
         id={id}
         rows={prominent ? 6 : 3}
@@ -361,6 +375,7 @@ function Notepad({
         }}
         onBlur={() => flush(draft)}
       />
+      {labelHidden ? <div className="flex min-h-4 justify-end">{statusText}</div> : null}
       {status === "failed" ? (
         <button
           type="button"

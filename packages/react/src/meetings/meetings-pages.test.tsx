@@ -150,9 +150,7 @@ describe("Meetings list", () => {
       expect(found).toContain("Weekly product sync");
       expect(found).not.toContain("Transcript failed");
       await search("zzz");
-      expect(view.container.textContent).toContain(
-        "Search finds words in meeting titles and transcripts.",
-      );
+      expect(view.container.textContent).toContain("Searches titles and transcripts.");
     } finally {
       await view.unmount();
     }
@@ -391,7 +389,7 @@ describe("Meeting page", () => {
     try {
       await waitForText(view.container, "Lea Haugen");
       const text = view.container.textContent ?? "";
-      expect(text).toContain("Suggested from their voice");
+      expect(text).toContain("Suggested by voice");
       const notThem = view.container.querySelector<HTMLButtonElement>(
         '[aria-label="Not Lea Haugen"]',
       );
@@ -399,7 +397,7 @@ describe("Meeting page", () => {
       await act(async () => notThem!.click());
       await settle(400);
       const after = view.container.textContent ?? "";
-      expect(after).not.toContain("Suggested from their voice");
+      expect(after).not.toContain("Suggested by voice");
       expect(after).toContain("Speaker 3");
       expect(after).toContain("Who spoke? 2 speakers have no name yet.");
     } finally {
@@ -440,7 +438,7 @@ describe("Meeting page", () => {
     );
     try {
       await waitForText(view.container, "The audio was deleted on");
-      expect(view.container.textContent).toContain("keeps audio only for a set time");
+      expect(view.container.textContent).toContain("retention setting");
       const again = [...view.container.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Transcribe again",
       );
@@ -680,7 +678,7 @@ describe("Live transcript", () => {
         }),
       );
       text = view.container.textContent ?? "";
-      expect(text).toContain("no connection");
+      expect(text).toContain("Offline");
       expect(text).not.toContain("Transcribing.");
     } finally {
       await view.unmount();
@@ -787,7 +785,7 @@ describe("Live transcript", () => {
       const text = view.container.textContent ?? "";
       expect(text).toContain("Not finished yet");
       expect(text).toContain("In progress");
-      expect(text).toContain("this page updates by itself");
+      expect(text).toContain("still being recorded on another device");
       // Someone else's microphone isn't "You".
       expect(text).toContain("Microphone");
       expect(text).not.toContain("You0:04");
@@ -882,8 +880,8 @@ describe("Live transcript", () => {
     const text = liveUnavailableText([
       { error: { code: "quota_exceeded", message: "The live transcript stopped" } },
     ]);
-    expect(text).toContain("no credit left");
-    expect(text).toContain("still recorded and transcribed");
+    expect(text).toContain("out of credit");
+    expect(text).toContain("You still get the transcript");
     expect(liveUnavailableText([{ error: null }])).not.toContain("  ");
   });
 

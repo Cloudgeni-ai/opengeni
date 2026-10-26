@@ -327,7 +327,7 @@ describe("transcript turns", () => {
 
 test("error codes from the worker and providers read as plain advice", () => {
   expect(transcriptErrorText("missing_provider_key")).toContain("Organization settings");
-  expect(transcriptErrorText("provider_quota_exceeded")).toContain("no credit left");
+  expect(transcriptErrorText("provider_quota_exceeded")).toContain("out of credit");
   expect(transcriptErrorText("something_new")).toContain("Try again");
 });
 
