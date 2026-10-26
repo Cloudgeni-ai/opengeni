@@ -608,12 +608,12 @@ export async function scanRunnerDemand(input: {
       }
     }
   }
+  const partialJobRuns: number[] = [];
   let mainDemand = 0,
     otherDemand = 0,
     runnerRelevantRuns = 0,
     mainQueuedJobs = 0;
   const preFanoutMainRuns: number[] = [];
-  const partialJobRuns: number[] = [];
   let latestMain: { id: number; jobs: unknown[] } | null = null;
   // Bound independent read-only job observations without serializing provider
   // latency across the entire inventory. Pagination within each run remains
