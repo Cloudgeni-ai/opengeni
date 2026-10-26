@@ -75,6 +75,17 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // Markdown syntax-tree helpers build their node tests with
+              // `convert` at module load (for example mdast's phrasing test).
+              // The markdown renderer and its lazy math plugins share them,
+              // so keep the dependency-free predicate builder in a leaf chunk
+              // that never sits in a cycle with the chunks that call it.
+              name: "unist-util-is",
+              test: /[\\/]unist-util-is[\\/]/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // The TOTP parser the answer form uses for secret questions
               // pulls in hashing; the lazy sub-session request card would
               // otherwise fold it into a chunk the entry loads.

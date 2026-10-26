@@ -497,7 +497,8 @@ export const englishMessages = {
   "automations.rows.sentAgain_one": "Sent again once",
   "automations.rows.sentAgain_other": "Sent again {count} times",
   "automations.rows.type": "Type",
-  "automations.run.error.accessUnavailable": "The access it was set up with is no longer valid.",
+  "automations.run.error.accessUnavailable":
+    "The access it was saved with has changed. Save it again to approve it with your current access.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
@@ -659,6 +660,10 @@ export const englishMessages = {
   "automations.wait.chip.event": "Waiting on {source}",
   "automations.wait.chip.more_other": "{count} more",
   "automations.wait.chip.nextRun": "Next: {time}",
+  "automations.wait.details.heading": "This chat's automations",
+  "automations.wait.details.more_one": "{count} more automation is waiting too",
+  "automations.wait.details.more_other": "{count} more automations are waiting too",
+  "automations.wait.details.open": "Click to see or change them",
   "automations.wait.event": "Waiting for an event",
   "automations.wait.eventFrom": "Waiting for {event}",
   "automations.wait.eventOrNextRun": "Waiting for {event}. Next run: {time}",
@@ -2232,6 +2237,7 @@ export const englishMessages = {
   "markdown.matchInMessageSourceExcerpt":
     "Match in message source · Excerpt stays in place when Find closes",
   "markdown.openArtifact": "Open artifact",
+  "markdown.openChat": "Open chat",
   "markdown.openFile": "Open file",
   "markdown.openPath": "Open {path}",
   "markdown.openPathAtLineLine": "Open {path} at line {line}",
@@ -2239,6 +2245,7 @@ export const englishMessages = {
   "markdown.previewIncomplete": "Preview incomplete",
   "markdown.previewUnavailable": "(preview unavailable)",
   "markdown.showFormattedMessage": "Show formatted message",
+  "markdown.thisChatNeedsAWorkspace": "This chat link needs a workspace-aware host to open",
   "markdown.thisArtifactNeedsAWorkspace": "This artifact needs a workspace-aware host to open",
   "markdown.thisFileNeedsAWorkspace": "This file needs a workspace-aware host to open",
   "markdown.thisLinkIsUnavailable": "This link is unavailable",
@@ -2432,9 +2439,11 @@ export const englishMessages = {
   "meetings.liveTranscript.liveTranscript": "Live transcript",
   "meetings.liveTranscript.liveTranscriptText": "Live transcript text",
   "meetings.liveTranscript.now": "now",
+  "meetings.liveTranscript.others": "Others",
   "meetings.liveTranscript.preview": "· preview",
   "meetings.liveTranscript.reconnectingTheLiveTextThe":
     "Reconnecting live text. Recording continues.",
+  "meetings.liveTranscript.you": "You",
   "meetings.notes.cancel": "Cancel",
   "meetings.notes.changedMeanwhile":
     "Someone else changed these notes while you were editing. Saving replaces their changes.",
@@ -3208,6 +3217,22 @@ export const englishMessages = {
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
   "native.realtime.nativeCall.voiceDisconnected": "Voice disconnected.",
   "native.realtime.nativeCall.voiceIsNotReadyYet": "Voice is not ready yet.",
+  "native.realtime.wakePhrase.copied": "Copied",
+  "native.realtime.wakePhrase.copy": "Copy",
+  "native.realtime.wakePhrase.copyAndOpenSettings": "Copy and open Settings",
+  "native.realtime.wakePhrase.copyLabel": "Copy “{text}”",
+  "native.realtime.wakePhrase.defaultPhrase": "Hey {name}",
+  "native.realtime.wakePhrase.defaultRequest": "Talk to {name}",
+  "native.realtime.wakePhrase.footnote":
+    "Works from the lock screen too; a locked phone asks you to unlock first. If nothing happens, check that Siri starts the call when you ask it: “{request}”.",
+  "native.realtime.wakePhrase.intro":
+    "Say your own phrase and a call with {name} starts, no tapping. iPhone sets this up in Settings; it takes about a minute.",
+  "native.realtime.wakePhrase.stepOpen":
+    "Open Settings, search for “Vocal Shortcuts” and tap Set Up (or Add Action), then Continue.",
+  "native.realtime.wakePhrase.stepPhrase":
+    "Type the phrase you'll say, then say it three times so iPhone learns your voice.",
+  "native.realtime.wakePhrase.stepRequest": "Choose Siri Request and paste:",
+  "native.realtime.wakePhrase.title": "Say “{phrase}”",
   "native.timeline.activity.countvalueFiles": "{countValue} files",
   "native.timeline.activity.moreMore": "+{more} more",
   "native.timeline.activity.resultsFoldedIntoModelContext":
@@ -5467,6 +5492,7 @@ export const englishMessages = {
   "timeline.turnSummaryModel.compactions_other": "{count} conversation history compactions",
   "timeline.turnSummaryModel.compacts_one": "compacted",
   "timeline.turnSummaryModel.compacts_other": "{count} compacts",
+  "timeline.turnSummaryModel.daysHours": "{days}d {hours}h",
   "timeline.turnSummaryModel.hoursMinutes": "{hours}h {minutes}m",
   "timeline.turnSummaryModel.memoriesSaved_one": "{count} memory saved",
   "timeline.turnSummaryModel.memoriesSaved_other": "{count} memories saved",

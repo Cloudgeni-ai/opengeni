@@ -810,13 +810,35 @@ describe("Live transcript", () => {
       const text = view.container.textContent ?? "";
       expect(text).toContain("Not finished yet");
       expect(text).toContain("still being recorded on another device");
-      // Someone else's microphone isn't "You".
-      expect(text).toContain("Microphone");
+      // Beside tab audio the microphone is the person recording, by name, and
+      // the tab audio is everyone else.
+      expect(text).toContain("Ingrid Solberg");
+      expect(text).toContain("Others");
+      expect(text).not.toContain("Microphone");
       expect(text).not.toContain("You0:04");
       expect(view.container.querySelector('[role="log"]')).not.toBeNull();
     } finally {
       await view.unmount();
     }
+  });
+
+  test("the person recording reads their own name on the microphone's live text", async () => {
+    const { liveSpeakerName } = await import("./recorder-panel");
+    const withTab = {
+      tracks: [
+        { trackNumber: 0, source: "microphone" as const },
+        { trackNumber: 1, source: "system" as const },
+      ],
+      systemAudioKind: "tab" as const,
+    } as unknown as Parameters<typeof liveSpeakerName>[0];
+    expect(liveSpeakerName(withTab, 0, undefined, "Ingrid Solberg")).toBe("Ingrid Solberg");
+    expect(liveSpeakerName(withTab, 1, undefined, "Ingrid Solberg")).toBe("Others");
+    expect(liveSpeakerName(withTab, 0)).toBe("You");
+    const micOnly = {
+      tracks: [{ trackNumber: 0, source: "microphone" as const }],
+      systemAudioKind: null,
+    } as unknown as Parameters<typeof liveSpeakerName>[0];
+    expect(liveSpeakerName(micOnly, 0, undefined, "Ingrid Solberg")).toBe("Microphone");
   });
 
   test("the recorder bar keeps live text and its cost in its options menu", async () => {

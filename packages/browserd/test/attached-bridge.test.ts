@@ -223,6 +223,42 @@ describe("AttachedBrowserBridgeClient", () => {
       await fixture.close();
     }
   });
+
+  test("keeps the extension's own code on a refusal it explains", async () => {
+    const fixture = await bridgeFixture((socket, messages) => {
+      const request = messages.find((message) => message.type === "request");
+      if (!request) return;
+      writeFrame(socket, {
+        type: "response",
+        protocolVersion: 1,
+        requestId: request.requestId,
+        deviceId: request.deviceId,
+        connectionGeneration: GENERATION,
+        ok: false,
+        error: {
+          code: "tab_unavailable",
+          message: "synthetic refusal",
+          retryable: false,
+        },
+      });
+    });
+    try {
+      const client = await AttachedBrowserBridgeClient.connect({
+        deviceId: DEVICE_ID,
+        connectionGeneration: GENERATION,
+        authorityFile: fixture.authorityFile,
+      });
+      try {
+        await expect(client.request({ type: "debugger.attach", tabId: "7" })).rejects.toMatchObject(
+          { code: "driver_rejected", extensionCode: "tab_unavailable", retryable: false },
+        );
+      } finally {
+        client.close();
+      }
+    } finally {
+      await fixture.close();
+    }
+  });
 });
 
 type JsonRecord = Record<string, unknown>;

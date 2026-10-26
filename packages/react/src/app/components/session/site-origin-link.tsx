@@ -22,7 +22,12 @@ export function SiteOriginLink({
       className="inline-flex shrink-0 items-center gap-1 rounded px-1 py-1 text-xs text-fg-muted hover:bg-surface-2 hover:text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-accent"
     >
       <PanelsTopLeftIcon aria-hidden="true" className="size-3.5" />
-      {!compact && <span className="max-w-40 truncate">{origin.title}</span>}
+      {/* Narrow chat headers keep the icon; its name says which Site. */}
+      {!compact && (
+        <span className="max-w-40 truncate max-sm:hidden @max-[34rem]/titlebar:hidden">
+          {origin.title}
+        </span>
+      )}
     </Link>
   );
 }

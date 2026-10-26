@@ -5843,7 +5843,9 @@ const MISSING_SESSION_HINT_LIMIT = 5;
 
 /** The API found no session of this kind with the requested id. Read from the
  * API's own refusal in the response body, never the display message: a hint
- * already added to it lists session names, which could contain any text. */
+ * already added to it lists session names, which could contain any text.
+ * Opening a browser linked to a computer that does not exist is refused as
+ * "Linked ComputerSession not found". */
 function isMissingSessionError(
   error: unknown,
   kind: InteractionSessionKind,
@@ -5851,7 +5853,7 @@ function isMissingSessionError(
   return (
     error instanceof OpenGeniApiError &&
     error.status === 404 &&
-    new RegExp(`(?:^|: )${kind} not found\\b`, "u").test(apiRefusalText(error))
+    new RegExp(`(?:^|: )(?:Linked )?${kind} not found\\b`, "u").test(apiRefusalText(error))
   );
 }
 
@@ -5896,7 +5898,7 @@ function missingSessionError(
   const parameter = kind === "BrowserSession" ? "browserSessionId" : "computerSessionId";
   const nearMiss = stillListed ? null : nearMissSession(requestedId, listed);
   const sentNote = stillListed
-    ? ` ${requestedId} was listed as open in this chat a moment ago, so it may have just ended or restarted.`
+    ? ` ${requestedId} was listed as open in this chat a moment ago, so it may have just ended.`
     : nearMiss
       ? ` The ${parameter} you sent, ${requestedId}, is not ${nearMiss.id}: they differ in ${nearMiss.difference} character${nearMiss.difference === 1 ? "" : "s"}.`
       : "";

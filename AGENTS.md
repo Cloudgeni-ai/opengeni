@@ -849,6 +849,11 @@ candidate. Version PRs always occupy their own batch.
 
 Queue-green is not release-green. Releases require full main CI on the exact
 released tip, with verified Version ancestry and matching image provenance.
+A batcher landing whose exact tree passed a trusted Batch CI attempt satisfies
+main CI by attestation: its test lanes are skipped, while artifacts, images and
+receipts still run (`scripts/ci/batch-attestation.ts`). Version PR, control-plane
+and CI-definition landings never attest, and release admission refuses attested
+receipts, so a released tip always has the full suite.
 The required batch suite is plan/source/impact-selected units/Batch ready on the
 exact stacked candidate tree. Its verified latest-attempt success may land even
 when full-main CI is red or unknown; full main CI remains an independent backstop,

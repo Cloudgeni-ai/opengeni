@@ -46,7 +46,7 @@ import { Input } from "../ui/input";
 import { Notice } from "../ui/notice";
 import { cn } from "../app/lib/utils";
 
-import { defaultMeetingTitle, formatClock } from "../recordings";
+import { defaultMeetingTitle, formatClock, ownerLiveLaneName } from "../recordings";
 import type { MeetingRecorder } from "./recorder-context";
 import { LiveTranscript, liveStatus, type LiveTranscriptLine } from "./live-transcript";
 import { DETECT_LANGUAGE, meetingLanguageOptions } from "./meeting-languages";
@@ -280,14 +280,26 @@ function trackLabel(
   return msg("meetings.recorderPanel.audio");
 }
 
-/** Who a track's live text is from, named like its level meter. */
+/**
+ * Who a track's live text is from. Beside computer or tab audio the
+ * microphone is the person recording (`ownerName`, else "You") and the other
+ * track is "Others". A microphone alone may pick up a whole room, so it is
+ * named like its level meter.
+ */
 export function liveSpeakerName(
   recorder: Pick<MeetingRecorder, "tracks" | "systemAudioKind">,
   trackNumber: number,
   msg: OpenGeniText = defaultText,
+  ownerName?: string | null,
 ): string {
+  const owned = ownerLiveLaneName(
+    recorder.tracks,
+    trackNumber,
+    ownerName?.trim() || msg("meetings.liveTranscript.you"),
+    msg,
+  );
+  if (owned) return owned;
   const source = recorder.tracks.find((track) => track.trackNumber === trackNumber)?.source;
-  // The level meters' names: a microphone may pick up a whole room, so not "You".
   return trackLabel(source ?? "", recorder.systemAudioKind, msg);
 }
 
@@ -409,7 +421,13 @@ function RecordingTitle({ recorder }: { recorder: MeetingRecorder }) {
   );
 }
 
-function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
+function RecorderLiveTranscript({
+  recorder,
+  viewerName,
+}: {
+  recorder: MeetingRecorder;
+  viewerName: string | null;
+}) {
   const msg = useOpenGeniText();
   const live = recorder.live;
   const lines = useMemo(() => recorderLiveLines({ live: live ?? null }), [live]);
@@ -432,7 +450,7 @@ function RecorderLiveTranscript({ recorder }: { recorder: MeetingRecorder }) {
       className="mt-4 border-t border-border pt-4"
       lines={lines}
       partials={live.map((track) => ({ trackNumber: track.trackNumber, text: track.partial }))}
-      speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg)}
+      speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg, viewerName)}
       status={status}
       empty={
         recorder.state === "paused"
@@ -574,6 +592,7 @@ function RecorderPanelContent({
   autoStart = null,
   externalRef = null,
   notice = null,
+  viewerName = null,
 }: {
   /** Null while the capture code loads. */
   recorder: MeetingRecorder | null;
@@ -599,6 +618,8 @@ function RecorderPanelContent({
   externalRef?: string | null | undefined;
   /** A short line shown before every start, such as a reminder to tell the people present. */
   notice?: ReactNode;
+  /** The person recording's name, for their microphone's live text beside computer or tab audio. */
+  viewerName?: string | null | undefined;
 }) {
   const msg = useOpenGeniText();
   const titleId = useId();
@@ -702,7 +723,7 @@ function RecorderPanelContent({
             {line}
           </p>
         ) : null}
-        <RecorderLiveTranscript recorder={recorder} />
+        <RecorderLiveTranscript recorder={recorder} viewerName={viewerName} />
       </section>
     );
   }
