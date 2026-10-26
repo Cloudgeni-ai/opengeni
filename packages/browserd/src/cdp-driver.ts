@@ -9778,7 +9778,9 @@ const DESCRIBE_HELPER = `
 // no part shows. shutOut: the page keeps the target from taking pointer input
 // from outside the target itself, so it is missing from every stack without
 // being cut off: it is inert or inside an inert element, an open modal (a
-// showModal() dialog, or a fullscreen element) does not hold it, or its
+// showModal() dialog, or a fullscreen element) does not hold it (including
+// the modal on top at its centre, stacked over its own or inside an open
+// shadow root), or its
 // pointer-events: none comes from a container (a modal library setting it on
 // the body). What is on top over it then covers it, as #6170 reported. A
 // target that sets pointer-events: none on itself is not shut out.
@@ -9799,6 +9801,15 @@ const SHOWN_PART_HELPER = `
     try {
       const modals = Array.from(target.ownerDocument.querySelectorAll(":modal"));
       if (modals.length && !modals.some((modal) => owns(modal, target))) return true;
+      // The modal on top, when it does not hold the target: one stacked over
+      // the target's own modal (a confirm opened from a dialog), or one in an
+      // open shadow root, which the document's query does not reach.
+      const box = target.getBoundingClientRect();
+      const over = topHit(target, box.left + box.width / 2, box.top + box.height / 2);
+      for (let node = over; node instanceof Element; node = flatParent(node)) {
+        const modal = node.matches(":modal") ? node : node.shadowRoot?.querySelector(":modal");
+        if (modal && !owns(modal, target)) return true;
+      }
     } catch {}
     const view = target.ownerDocument.defaultView || window;
     if (view.getComputedStyle(target).pointerEvents !== "none") return false;

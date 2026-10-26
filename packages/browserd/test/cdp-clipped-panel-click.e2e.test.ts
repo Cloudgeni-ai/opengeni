@@ -412,3 +412,68 @@ e2e(
   },
   60_000,
 );
+
+// A confirm opened from a dialog, stacked over the dialog that holds the
+// target, and a modal dialog inside a component's open shadow root: the
+// document's own query for an open modal finds the first dialog in one and
+// nothing in the other, but each is on top over the target.
+const STACKED = fixture([
+  "<!doctype html><title>Stacked</title>",
+  "<style>",
+  "body{margin:0;font:14px sans-serif}",
+  "#outside{position:absolute;left:40px;top:40px;width:160px;height:40px}",
+  "#first{width:300px;height:160px;margin:0;left:40px;top:120px}",
+  "#second{width:200px;height:80px;margin:0;left:500px;top:300px}",
+  "</style>",
+  '<button id="outside">Outside</button>',
+  '<dialog id="first" aria-label="First"><button id="inner">Inner</button></dialog>',
+  '<dialog id="second" aria-label="Second">Discard changes?</dialog>',
+  '<x-dialog id="host"></x-dialog>',
+  "<script>",
+  "globalThis.log=[];",
+  'for (const id of ["outside","inner"]) document.getElementById(id).addEventListener("click",()=>log.push(id));',
+  'document.getElementById("host").attachShadow({mode:"open"}).innerHTML = \'<dialog style="width:200px;height:80px;margin:0;left:500px;top:300px">Shadow</dialog>\';',
+  "</script>",
+]);
+
+e2e(
+  "a target under a stacked modal or a modal in an open shadow root is covered at its center",
+  async () => {
+    await withSession(STACKED, async ({ evaluate, click }) => {
+      const css = (selector: string) =>
+        ({ type: "click", locator: { kind: "css", selector } }) as const;
+
+      // The target's own dialog is open, with a confirm opened over it.
+      await evaluate(
+        'document.getElementById("first").showModal(); document.getElementById("second").showModal()',
+      );
+      const stacked = await click(css("#inner"));
+      expect(stacked.state).not.toBe("completed");
+      expect(stacked.error?.message).toContain(
+        'browser element is covered by dialog "Second" at its center',
+      );
+      // Closing the confirm leaves the target's own dialog on top.
+      await evaluate('document.getElementById("second").close()');
+      const inner = await click(css("#inner"));
+      expect(inner.error ?? null).toBeNull();
+      expect(inner.state).toBe("completed");
+      await evaluate('document.getElementById("first").close()');
+
+      // A component's modal dialog, inside its open shadow root.
+      await evaluate(
+        'document.getElementById("host").shadowRoot.querySelector("dialog").showModal()',
+      );
+      const shadowed = await click(css("#outside"));
+      expect(shadowed.state).not.toBe("completed");
+      expect(shadowed.error?.message).toContain(
+        "browser element is covered by x-dialog at its center",
+      );
+      await evaluate('document.getElementById("host").shadowRoot.querySelector("dialog").close()');
+      const outside = await click(css("#outside"));
+      expect(outside.error ?? null).toBeNull();
+      expect(outside.state).toBe("completed");
+      expect(await evaluate("log")).toEqual(["inner", "outside"]);
+    });
+  },
+  60_000,
+);
