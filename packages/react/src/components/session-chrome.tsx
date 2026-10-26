@@ -393,6 +393,62 @@ export function countOptimisticQueuedMessages(
 }
 
 /**
+ * Steer on a just-sent message the chip shows before the server has confirmed
+ * it. Steer needs the queued turn's id and version, which arrive with the next
+ * queue read, so the click is taken at once and carried out when that exact
+ * message lands in the queue. It is dropped, never retargeted, when the send
+ * fails, is withdrawn or dismissed, or the agent starts the message first.
+ */
+function useDeferredQueuedSteer({
+  messages,
+  optimisticQueued,
+  queuedTurnIds,
+  steerTurn,
+}: {
+  messages: readonly ComposerOptimisticMessage[] | undefined;
+  optimisticQueued: readonly ComposerOptimisticMessage[];
+  queuedTurnIds: ReadonlySet<string>;
+  steerTurn: UseTurnQueueResult["steerTurn"];
+}) {
+  const [pending, setPending] = useState<{ clientEventId: string; turnId: string | null } | null>(
+    null,
+  );
+  const steerRef = useRef(steerTurn);
+  steerRef.current = steerTurn;
+  useEffect(() => {
+    if (!pending) return;
+    const message = (messages ?? []).find(
+      (candidate) => candidate.clientEventId === pending.clientEventId,
+    );
+    // Gone means the turn started or was withdrawn; failed means nothing waits.
+    if (!message || message.state === "failed") {
+      setPending(null);
+      return;
+    }
+    const turnId = message.turnId ?? null;
+    if (turnId && queuedTurnIds.has(turnId)) {
+      setPending(null);
+      void steerRef.current(turnId);
+      return;
+    }
+    const stillPlacing = optimisticQueued.some(
+      (candidate) => candidate.clientEventId === pending.clientEventId,
+    );
+    if (!stillPlacing) {
+      // The queue read caught up without it waiting there: already started.
+      setPending(null);
+      return;
+    }
+    if (turnId !== pending.turnId) setPending({ ...pending, turnId });
+  }, [messages, optimisticQueued, pending, queuedTurnIds]);
+  return {
+    request: (clientEventId: string) => setPending({ clientEventId, turnId: null }),
+    isPending: (clientEventId: string) => pending?.clientEventId === clientEventId,
+    isPendingTurn: (turnId: string) => pending?.turnId === turnId,
+  };
+}
+
+/**
  * First uncontrolled segment. An existing authoritative queue opens itself
  * when the host did not pick another default; optimistic-only occupancy
  * stays collapsed so a live Send does not shove a drawer under the pointer.
@@ -613,6 +669,12 @@ function SessionChromeView({
   const canMutateQueue = !readOnly && composer !== undefined;
   // One Send: nothing to choose, so waiting messages offer no Steer.
   const canSteerQueued = canMutateQueue && composer?.singleSend !== true;
+  const deferredSteer = useDeferredQueuedSteer({
+    messages: composer?.optimisticMessages,
+    optimisticQueued,
+    queuedTurnIds,
+    steerTurn: queue.steerTurn,
+  });
 
   const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));
   const goalState = record
@@ -964,21 +1026,38 @@ function SessionChromeView({
 
   const open = active !== null;
   // Collapsed queue chip shows the latest queued message so a Send that lands
-  // in the queue is visible without opening the list; Steer acts on that
-  // message once the server has confirmed it.
+  // in the queue is visible without opening the list. Steer on a message the
+  // server has not confirmed yet is taken at once and carried out when it lands.
   const latestOptimisticQueued = optimisticQueued[optimisticQueued.length - 1];
   const latestQueuedTurn = queuedTurns[queuedTurns.length - 1];
-  const queuePeek: { text: string | null; turnId: string | null } | null =
+  const queuePeek: {
+    text: string | null;
+    turnId: string | null;
+    /** Unconfirmed send shown in the chip; Steer on it is deferred. */
+    pending: ComposerOptimisticMessage | null;
+  } | null =
     queueLoadError || queue.mutationError
       ? null
       : latestOptimisticQueued
-        ? { text: latestOptimisticQueued.text.trim() || null, turnId: null }
+        ? {
+            text: latestOptimisticQueued.text.trim() || null,
+            turnId: null,
+            pending: latestOptimisticQueued,
+          }
         : latestQueuedTurn
           ? {
               text: queuedTurnPresentation(t, latestQueuedTurn).text.trim() || null,
               turnId: latestQueuedTurn.id,
+              pending: null,
             }
           : null;
+  const queuePeekSteering = queuePeek
+    ? queuePeek.pending
+      ? deferredSteer.isPending(queuePeek.pending.clientEventId)
+      : queuePeek.turnId !== null &&
+        (queue.mutationFor(queuePeek.turnId) === "steer" ||
+          deferredSteer.isPendingTurn(queuePeek.turnId))
+    : false;
 
   if (signals.length === 0 && !stopping) return null;
 
@@ -1279,15 +1358,21 @@ function SessionChromeView({
                             text={t("sessionChrome.steer")}
                             tip={<QueueSteerTip />}
                             disabled={
-                              !queuePeek.turnId ||
-                              queue.mutating ||
-                              Boolean(queue.mutationFor(queuePeek.turnId))
+                              queuePeek.pending
+                                ? queuePeek.pending.state === "failed" || queuePeekSteering
+                                : !queuePeek.turnId ||
+                                  queue.mutating ||
+                                  Boolean(queue.mutationFor(queuePeek.turnId))
                             }
                             onClick={() => {
-                              if (queuePeek.turnId) void queue.steerTurn(queuePeek.turnId);
+                              if (queuePeek.pending) {
+                                deferredSteer.request(queuePeek.pending.clientEventId);
+                              } else if (queuePeek.turnId) {
+                                void queue.steerTurn(queuePeek.turnId);
+                              }
                             }}
                           >
-                            {queuePeek.turnId && queue.mutationFor(queuePeek.turnId) === "steer" ? (
+                            {queuePeekSteering ? (
                               <Loader2Icon className="size-3 animate-og-spin" />
                             ) : (
                               <CornerDownRightIcon className="size-3" />

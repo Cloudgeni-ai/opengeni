@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { TimelineAnnotation } from "@opengeni/sdk";
+import type { SessionTurn, TimelineAnnotation } from "@opengeni/sdk";
 import { act } from "react";
 
 import {
@@ -13,7 +13,7 @@ import {
 } from "../src/components/session-chrome";
 import { formatClockTime } from "../src/lib/format";
 import { sessionInputWait } from "../src/session-list-model";
-import type { ComposerState } from "../src/hooks/use-composer";
+import type { ComposerOptimisticMessage, ComposerState } from "../src/hooks/use-composer";
 import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
@@ -2334,5 +2334,133 @@ describe("SessionChrome wait status", () => {
       expect(target.className).toContain("pointer-coarse:min-h-8");
       expect(target.className).not.toContain("pointer-coarse:min-h-11");
     }
+  });
+});
+
+describe("Steer on a just-sent queued message", () => {
+  const SENT_TURN_ID = "33333333-3333-4333-8333-333333333333";
+  const sentTurn = fakeTurn({ id: SENT_TURN_ID, prompt: "Also check the models page" });
+
+  function sent(overrides: Partial<ComposerOptimisticMessage> = {}): ComposerOptimisticMessage {
+    return {
+      clientEventId: "client-send-steer-1",
+      delivery: "send",
+      destination: "queue",
+      text: "Also check the models page",
+      annotations: [],
+      resources: [],
+      occurredAt: new Date().toISOString(),
+      state: "sending",
+      ...overrides,
+    };
+  }
+
+  function steerButton(): HTMLButtonElement {
+    return mounted!.container.querySelector<HTMLButtonElement>('[data-analytics-action="steer"]')!;
+  }
+
+  function render(
+    message: ComposerOptimisticMessage,
+    turns: SessionTurn[],
+    steered: string[],
+    version = 1,
+  ) {
+    return (
+      <SessionChrome
+        queue={queue({
+          queue: turns,
+          snapshot: { version } as UseTurnQueueResult["snapshot"],
+          steerTurn: async (turnId) => {
+            steered.push(turnId);
+            return true;
+          },
+        })}
+        composer={composer({ optimisticMessages: [message] })}
+      />
+    );
+  }
+
+  test("is usable as soon as the message shows as queued, and steers it once it lands", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')?.textContent,
+    ).toContain("1 queued");
+    expect(steerButton().disabled).toBe(false);
+    await act(async () => steerButton().click());
+    // Taken at once: the chip shows it is working, but nothing is sent yet.
+    expect(steerButton().querySelector(".animate-og-spin")).not.toBeNull();
+    expect(steered).toEqual([]);
+    // Accepted by the server, but the queue read has not caught up.
+    await mounted.rerender(
+      render(sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }), [], steered),
+    );
+    expect(steered).toEqual([]);
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [sentTurn],
+        steered,
+        2,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([SENT_TURN_ID]);
+    // Never twice, even as the queue keeps re-rendering.
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [sentTurn],
+        steered,
+        2,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([SENT_TURN_ID]);
+  });
+
+  test("a send that fails is never steered", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    await mounted.rerender(render(sent({ state: "failed", error: "Not sent" }), [], steered));
+    await flush();
+    expect(steered).toEqual([]);
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    expect(
+      mounted.container.querySelector("[data-optimistic-queue-message]")?.textContent,
+    ).toContain("Not sent");
+  });
+
+  test("a failed send offers no Steer", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent({ state: "failed" }), [], steered));
+    expect(steerButton().disabled).toBe(true);
+  });
+
+  test("a message the agent started first is not steered, and an older one is never steered instead", async () => {
+    const steered: string[] = [];
+    const older = fakeTurn({
+      id: "44444444-4444-4444-8444-444444444444",
+      prompt: "older queued prompt",
+    });
+    mounted = await renderComponent(render(sent(), [older], steered));
+    await act(async () => steerButton().click());
+    // The queue read at version 2 no longer has it: the agent took it.
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [older],
+        steered,
+        2,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([]);
+    expect(steerButton().querySelector(".animate-og-spin")).toBeNull();
   });
 });
