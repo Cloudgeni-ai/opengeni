@@ -720,6 +720,10 @@ describe.skipIf(!realDb)("0726 personal acceptance reads", () => {
       "model_call_fact_reconciliation_progress",
       "organization_plans",
       "plan_credit_periods",
+      // 0981–0982 promotion decisions and verified machine proofs are withheld.
+      "promotion_decisions",
+      "promotion_enforcement",
+      "promotion_machine_proofs",
       // 0792 (schedule blocker reviews) is also a later runtime/protected table.
       "scheduled_task_blocker_reviews",
       // 0909 message search text.

@@ -1593,6 +1593,14 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
+          // 0981-0982: two read-only funding projections and append-only machine proof.
+          (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
+            ? 3
+            : tables === RUNTIME_READ_ONLY_TABLES
+              ? 2
+              : tables === RUNTIME_READ_INSERT_TABLES
+                ? 1
+                : 0) +
           // 0790 adds the four Site platform usage tables (FORCE RLS, full runtime DML):
           // one workspace-isolated, three deployment-global behind the platform lane.
           (tables === FORCE_RLS_TABLES ||
@@ -1985,6 +1993,7 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.
@@ -1997,6 +2006,7 @@ describe("runtime database posture evaluator", () => {
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          3 + // 0981-0982 promotional funding and signed machine evidence.
           2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           1 + // 0725 organization privacy preferences.

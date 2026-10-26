@@ -11796,7 +11796,10 @@
         "$.balanceMicros": "integer!",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.generalBalanceMicros": "integer?",
+        "$.heldCreditMicros": "integer?",
+        "$.heldGeneralCreditMicros": "integer?",
         "$.plan": "ref(BillingPlanBalance)? null",
+        "$.promotionDecision": "enum?=[\"\\\"denied\\\"\",\"\\\"eligible\\\"\",\"\\\"held\\\"\",\"\\\"verification_required\\\"\"]",
         "$.promotionalCredits": "array?",
         "$.promotionalCredits[]": "ref(PromotionalCreditBalance)",
         "$.updatedAt": "string!"
@@ -13410,6 +13413,7 @@
         "$.auth|mode=managedSession.mode": "const!=[\"\\\"managedSession\\\"\"]",
         "$.auth|mode=managedSession.newSignupsEnabled": "boolean!",
         "$.auth|mode=managedSession.session": "const!=[\"\\\"cookie\\\"\"]",
+        "$.auth|mode=managedSession.signupChallengeSiteKey": "string?",
         "$.auth|mode=managedSession.socialProviders": "array!",
         "$.auth|mode=managedSession.socialProviders[]": "ref(ManagedSignInProvider)",
         "$.azureOpenAIDeploymentIdentity": "boolean?",
@@ -23680,6 +23684,7 @@
         "$.eligibleModelIds": "array!",
         "$.eligibleModelIds[]": "string",
         "$.grantId": "string!",
+        "$.held": "boolean?",
         "$.label": "string!",
         "$.planCredit": "boolean?",
         "$.remainingMicros": "integer!"

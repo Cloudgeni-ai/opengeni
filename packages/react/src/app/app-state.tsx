@@ -181,9 +181,17 @@ export type AppStateHost = Readonly<{
     password: string;
     rememberMe?: boolean;
   }) => Promise<unknown>;
-  signUpEmail: (input: { name: string; email: string; password: string }) => Promise<unknown>;
+  signUpEmail: (input: {
+    name: string;
+    email: string;
+    password: string;
+    signupChallengeToken?: string;
+  }) => Promise<unknown>;
   signOutManaged: () => Promise<unknown>;
-  startManagedSocialSignIn: (provider: "google" | "github") => Promise<void>;
+  startManagedSocialSignIn: (
+    provider: "google" | "github",
+    signupChallengeToken?: string,
+  ) => Promise<void>;
   configureManagedActorEpoch: (epoch: string | null) => void;
   getStoredAccessKey: () => string | null;
   setStoredAccessKey: (value: string) => void;
@@ -2128,7 +2136,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
 
   async function handleManagedAuth(
     mode: "signin" | "signup",
-    input: { name: string; email: string; password: string },
+    input: { name: string; email: string; password: string; signupChallengeToken?: string },
   ) {
     invalidatePrincipalWorkspaceState({
       preservePendingSlackLink: preserveSlackLinkForManagedAuth(mode, slackLink.phase()),
@@ -2174,6 +2182,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   }
 
   async function handleManagedSessionSetSignup(input: {
+    signupChallengeToken?: string;
     name: string;
     email: string;
     password: string;
@@ -2192,12 +2201,15 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     });
   }
 
-  async function handleManagedSocialAuth(provider: "google" | "github") {
+  async function handleManagedSocialAuth(
+    provider: "google" | "github",
+    signupChallengeToken?: string,
+  ) {
     invalidatePrincipalWorkspaceState({
       preservePendingSlackLink: preserveSlackLinkForManagedAuth("signin", slackLink.phase()),
     });
     beginSocialLoginAnalytics(provider);
-    await startManagedSocialSignIn(provider);
+    await startManagedSocialSignIn(provider, signupChallengeToken);
   }
 
   async function handleManagedSignOut() {

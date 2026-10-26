@@ -284,6 +284,11 @@ export function RootRouteComponent() {
                     onSubmit={async (_mode, input) => await handleManagedSessionSetSignup(input)}
                     emailVerificationRequired={managedEmailVerificationRequired}
                     newSignupsEnabled={managedNewSignupsEnabled}
+                    signupChallengeSiteKey={
+                      clientConfig?.auth.mode === "managedSession"
+                        ? clientConfig.auth.signupChallengeSiteKey
+                        : undefined
+                    }
                   />
                 ) : undefined
               }
@@ -297,6 +302,11 @@ export function RootRouteComponent() {
               onSubmit={handleManagedAuth}
               emailVerificationRequired={managedEmailVerificationRequired}
               newSignupsEnabled={managedNewSignupsEnabled}
+              signupChallengeSiteKey={
+                clientConfig?.auth.mode === "managedSession"
+                  ? clientConfig.auth.signupChallengeSiteKey
+                  : undefined
+              }
               socialProviders={managedSocialProviders}
               onSocialSubmit={handleManagedSocialAuth}
             />

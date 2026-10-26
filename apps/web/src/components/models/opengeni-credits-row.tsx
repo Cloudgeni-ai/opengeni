@@ -11,7 +11,7 @@ import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/ret
 import { CREDIT_BALANCE_CHANGED } from "@opengeni/react/app/lib/credit-balance-events";
 import { invalidateSharedQueries, useSharedQuery } from "@opengeni/react/app/lib/shared-query";
 import { creditBalanceSplitLabel } from "@opengeni/react/app/lib/credit-coverage";
-import type { ClientConfig } from "@opengeni/react/app/types";
+import type { BillingSummary, ClientConfig } from "@opengeni/react/app/types";
 
 /* ----------------------------------------------------------------------------
    Opengeni credits in Settings > Models: on a deployment that bills credits,
@@ -35,6 +35,8 @@ export interface OpenGeniCredits {
   balanceLabel: string | null;
   /** Billing admins: the row opens organization Billing. */
   canOpenBilling: boolean;
+  /** Public funding status, available only to an authorized billing reader. */
+  promotionDecision?: BillingSummary["balance"]["promotionDecision"];
 }
 
 export function useOpenGeniCredits(organizationId: string | undefined): OpenGeniCredits {
@@ -66,9 +68,12 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
           label = `${formatMoneyMicros(remaining, currency)} plan credit · ${formatMoneyMicros(balanceMicros - remaining, currency)} other credit`;
         }
       }
-      return { label };
+      return { label, promotionDecision: billing.balance.promotionDecision };
     },
-    { enabled: canRead, staleTimeMs: 300_000 },
+    // Operator reviews do not emit this browser's credit-change event. The
+    // shared cache uses one visible-page timer per client/account, suspends
+    // hidden tabs, and revalidates stale data when they become visible again.
+    { enabled: canRead, staleTimeMs: 60_000, pollIntervalMs: 60_000 },
   );
   useEffect(() => {
     const changed = (event: Event) => {
@@ -82,6 +87,7 @@ export function useOpenGeniCredits(organizationId: string | undefined): OpenGeni
     visible,
     balanceLabel: balance.error ? null : (balance.data?.label ?? null),
     canOpenBilling: canManage,
+    promotionDecision: canRead && !balance.error ? balance.data?.promotionDecision : undefined,
   };
 }
 

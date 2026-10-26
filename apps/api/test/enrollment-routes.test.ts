@@ -238,8 +238,27 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
             ...extra,
           }),
         });
+      // Submitted public keys and forged signatures are not possession evidence.
+      expect(
+        await admin`select * from promotion_machine_proofs where enrollment_id=${enrollment.id}`,
+      ).toHaveLength(0);
+      expect((await request(expired, now, generateKeyPairSync("ed25519").privateKey)).status).toBe(
+        401,
+      );
+      expect(
+        await admin`select * from promotion_machine_proofs where enrollment_id=${enrollment.id}`,
+      ).toHaveLength(0);
       const response = await request();
       expect(response.status).toBe(200);
+      const proofs =
+        await admin`select * from promotion_machine_proofs where enrollment_id=${enrollment.id}`;
+      expect(proofs).toHaveLength(1);
+      expect(proofs[0]!.account_id).toBe(accountId);
+      expect(proofs[0]!.credential_generation).toBe(enrollment.credentialGeneration);
+      await request();
+      expect(
+        await admin`select * from promotion_machine_proofs where enrollment_id=${enrollment.id}`,
+      ).toHaveLength(1);
       expect(response.headers.get("cache-control")).toBe("no-store");
       const { credentials } = await response.json();
       const renewed = await verifyEnrollmentBearer(SIGNING_SECRET, credentials.bearer);
