@@ -37438,6 +37438,7 @@
       "ModelPolicyPickerProps": "type",
       "OPEN_WORKSTREAM_CONTROL_EVENT": "value",
       "PauseButton": "value",
+      "PauseButtonSlot": "value",
       "PausedState": "value",
       "PersistVoiceRecordingChunkInput": "type",
       "PersistVoiceRecordingChunkResult": "type",
