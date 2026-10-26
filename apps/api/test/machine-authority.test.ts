@@ -4,6 +4,7 @@ import type { AccessGrantAuthorization } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 import {
   machineScopeRefusal,
+  requireMachineAudienceAuthority,
   requireMachineScopeAuthority,
 } from "../src/sandbox/machine-authority";
 
@@ -79,7 +80,8 @@ describe("Connected Machine scope rule", () => {
   });
 
   test("credentials acting for a person and machine principals keep the old refusal", () => {
-    const refusal = "Sign in to Opengeni to connect a machine that only you can use.";
+    const refusal =
+      "Only you can connect a machine for yourself, signed in to Opengeni; a key, agent or app acting for you needs permission to manage machines.";
     for (const caller of [
       // A delegated bearer acting for the person, without enrollments:manage.
       authorization({ permissions: ["enrollments:read"], signedIn: false, delegated: true }),
@@ -105,7 +107,10 @@ describe("Connected Machine scope rule", () => {
       }),
     ]) {
       expect(machineScopeRefusal(caller, "user", "connect")).toBe(refusal);
-      expect(machineScopeRefusal(caller, "workspace", "connect")).not.toBeNull();
+      // Only a signed-in person is pointed at Only me.
+      expect(machineScopeRefusal(caller, "workspace", "connect")).toBe(
+        "Only workspace admins can connect a machine for the whole workspace.",
+      );
     }
     // A cookie whose grant is not the person's own subject is not the owner.
     expect(
@@ -132,5 +137,11 @@ describe("Connected Machine scope rule", () => {
     expect((thrown as HTTPException).status).toBe(403);
     expect((thrown as HTTPException).message).not.toContain("missing permission");
     expect(() => requireMachineScopeAuthority(member, "user", "connect")).not.toThrow();
+    expect(() => requireMachineAudienceAuthority(member)).toThrow(
+      "Only workspace admins can change who can use a machine.",
+    );
+    expect(() =>
+      requireMachineAudienceAuthority(authorization({ permissions: ["enrollments:manage"] })),
+    ).not.toThrow();
   });
 });

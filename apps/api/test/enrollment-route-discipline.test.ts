@@ -90,7 +90,7 @@ describe("M5 enrollment route discipline", () => {
   test("the USER routes call requireAccessGrant BEFORE any parse", () => {
     for (const route of USER_ROUTES) {
       const body = handlerBody(routesSrc, route.method, route.path);
-      const grantAt = body.indexOf("requireAccessGrant");
+      const grantAt = body.search(/require(Machine)?AccessGrant/);
       expect(grantAt, `${route.path} must call requireAccessGrant`).toBeGreaterThanOrEqual(0);
       const parseAt = Math.min(
         ...[".parse(", ".safeParse(", "parseRequestBody(", "parseRequestJson("]
@@ -108,8 +108,7 @@ describe("M5 enrollment route discipline", () => {
     // Every writer authorizes enrollments:read first, then asks the one scope
     // rule (Only me for every teammate, workspace needs enrollments:manage,
     // organization also account:admin) before it changes anything.
-    const gate =
-      /requireAccessGrantAuthorization\(\s*c,\s*deps,\s*workspaceId,\s*"enrollments:read",?\s*\)/;
+    const gate = /requireMachineAccessGrant\(c, deps, workspaceId, "enrollments:read"\)/;
     const approve = handlerBody(
       routesSrc,
       "post",
@@ -157,9 +156,7 @@ describe("M5 enrollment route discipline", () => {
     // The read permission is checked inside the authorization itself, so a
     // request that lacks it never provisions a first-use membership before its
     // 403; the scope rule then decides before anything is minted.
-    expect(token).toMatch(
-      /requireAccessGrantAuthorization\(\s*c,\s*deps,\s*workspaceId,\s*"enrollments:read",?\s*\)/,
-    );
+    expect(token).toMatch(/requireMachineAccessGrant\(c, deps, workspaceId, "enrollments:read"\)/);
     expect(token).toContain(
       'requireMachineScopeAuthority(authorization, personal ? "user" : "workspace", "connect")',
     );
@@ -200,5 +197,42 @@ describe("M5 enrollment route discipline", () => {
     expect(body.includes("requireAccessGrant("), "exchange must NOT user-authenticate").toBe(false);
     expect(body).toContain("parseRequestBody(");
     expect(body).toContain("status: 400");
+  });
+
+  test("per-machine changes ask the scope rule before they change anything", () => {
+    const machinesSrc = readFileSync(resolve(here, "..", "src", "routes", "machines.ts"), "utf8");
+    for (const [method, path, change] of [
+      [
+        "patch",
+        "/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy",
+        "updateEnrollmentOperationPolicy(",
+      ],
+      [
+        "post",
+        "/v1/workspaces/:workspaceId/machines/:enrollmentId/screen-control",
+        "enableMachineScreenControl(",
+      ],
+      [
+        "post",
+        "/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings",
+        "openMachinePrivacySettings(",
+      ],
+      [
+        "post",
+        "/v1/workspaces/:workspaceId/machines/:enrollmentId/update",
+        "getLiveEnrollmentConnection(",
+      ],
+    ] as const) {
+      const body = handlerBody(machinesSrc, method, path);
+      expect(body, path).toContain(
+        'requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read")',
+      );
+      const rule = body.indexOf("requireMachineScopeAuthority(authorization,");
+      expect(rule, path).toBeGreaterThan(body.indexOf("requireScopedEnrollment("));
+      expect(rule, path).toBeLessThan(body.indexOf(change));
+    }
+    // Who can use a machine stays with machine managers.
+    const audience = machinesSrc.slice(machinesSrc.indexOf("async function requireAudienceCaller"));
+    expect(audience.slice(0, 800)).toContain("requireMachineAudienceAuthority(authorization)");
   });
 });

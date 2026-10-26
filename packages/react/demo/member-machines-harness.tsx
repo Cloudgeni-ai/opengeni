@@ -61,10 +61,12 @@ function Preview() {
       ({
         client,
         accessContext: {
+          mode: "managed",
           subjectId: "user:kari",
           workspaceGrants: [
             {
               workspaceId: WORKSPACE_ID,
+              subjectId: "user:kari",
               principalKind: "human_session",
               permissions: ["sessions:read", "sessions:control", "enrollments:read"],
             },

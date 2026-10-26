@@ -58,9 +58,12 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
-import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
+import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { requireMachineScopeAuthority } from "../sandbox/machine-authority";
+import {
+  requireMachineAccessGrant,
+  requireMachineScopeAuthority,
+} from "../sandbox/machine-authority";
 import {
   approveDeviceEnrollment,
   denyDeviceEnrollment,
@@ -339,12 +342,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // The LOUD CONSENT step. requireAccessGrant BEFORE the Zod parse.
   app.post("/v1/workspaces/:workspaceId/enrollments/device/approve", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const rawBody = await c.req.json().catch(() => null);
@@ -413,15 +411,10 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // a non-pending code → denied:false.
   app.post("/v1/workspaces/:workspaceId/enrollments/device/deny", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
-    requireMachineScopeAuthority(authorization, "user", "connect");
     assertSelfhostedEnabled();
+    requireMachineScopeAuthority(authorization, "user", "connect");
     const parsed = parseRequestBody(
       DeviceEnrollmentDenyRequest,
       await c.req.json().catch(() => null),
@@ -451,12 +444,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     // The read permission is part of the authorization, so a request that lacks
     // it is refused before any first-use workspace membership is provisioned.
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     // All fields are optional/defaulted, so an empty POST body is valid (default
@@ -532,12 +520,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   // ── POST /workspaces/:workspaceId/enrollments/:id/revoke (user-authed) ──────
   app.post("/v1/workspaces/:workspaceId/enrollments/:enrollmentId/revoke", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const parsed = parseRequestBody(RemoveEnrollmentRequest, await c.req.json().catch(() => ({})), {

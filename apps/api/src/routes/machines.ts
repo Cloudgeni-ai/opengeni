@@ -50,7 +50,6 @@ import {
   grantHasAgentAttemptAuthority,
   mayStartOnlyMe,
   requireAccessGrant,
-  requireAccessGrantAuthorization,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
@@ -79,7 +78,11 @@ import {
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 import { parseRequestBody, parseRequestJson } from "../http/request-body";
 import { requireFullAccessIfAgent } from "../http/acting-person";
-import { requireMachineScopeAuthority } from "../sandbox/machine-authority";
+import {
+  requireMachineAccessGrant,
+  requireMachineAudienceAuthority,
+  requireMachineScopeAuthority,
+} from "../sandbox/machine-authority";
 
 // The supported series windows → milliseconds. An unknown/absent window defaults
 // to 1h (the default). Bounded so a caller cannot request an unbounded
@@ -202,12 +205,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // concurrency fence so two operators cannot silently overwrite each other.
   app.patch("/v1/workspaces/:workspaceId/machines/:enrollmentId/operation-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
@@ -254,17 +252,12 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // person's full access, is refused: the change decides who else can use the
   // machine.
   async function requireAudienceCaller(c: Context, workspaceId: string) {
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     // Narrowing to Only me or sharing with the workspace changes who else can
     // use the machine, so it stays with workspace machine managers.
-    requireMachineScopeAuthority(authorization, "workspace", "change");
+    requireMachineAudienceAuthority(authorization);
     if (grantHasAgentAttemptAuthority(grant)) {
       throw new HTTPException(403, {
         message:
@@ -331,12 +324,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // connected_machine_enable_screen_control tool). No request body.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/screen-control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
@@ -366,12 +354,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // only flips the switch for Opengeni. Opening a pane grants nothing.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/privacy-settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");
@@ -399,12 +382,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // successor Hello drive the durable state to completion.
   app.post("/v1/workspaces/:workspaceId/machines/:enrollmentId/update", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "enrollments:read",
-    );
+    const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     const enrollmentId = c.req.param("enrollmentId");

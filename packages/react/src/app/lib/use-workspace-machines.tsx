@@ -17,13 +17,18 @@ const emptySeries = async (): Promise<MetricSample[]> => [];
 
 /**
  * The signed-in person themself, not a key, a delegated credential or an
- * agent. Mirrors the API's rule for Only me machines; the API still decides.
+ * agent: an Opengeni account (`user:`) or the local install's person (`dev`).
+ * Mirrors the API's rule for Only me machines; the API still decides.
  */
 export function isSignedInPerson(context: AccessContext | null, workspaceId: string): boolean {
-  const grant = context?.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+  if (!context || context.credential) return false;
+  const person =
+    context.mode === "local" ? context.subjectId === "dev" : context.subjectId.startsWith("user:");
+  const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
   return Boolean(
+    person &&
     grant &&
-    !context?.credential &&
+    grant.subjectId === context.subjectId &&
     grant.principalKind === "human_session" &&
     grant.metadata?.delegated !== true &&
     !grant.serviceInitiator,

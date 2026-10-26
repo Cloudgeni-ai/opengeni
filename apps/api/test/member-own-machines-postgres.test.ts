@@ -102,7 +102,12 @@ async function teamWithMachines() {
   return { accountId, workspaceId, owner, member, colleague, workspaceMachine, colleagueMachine };
 }
 
-async function joinAsMember(accountId: string, workspaceId: string, label: string) {
+async function joinAsMember(
+  accountId: string,
+  workspaceId: string,
+  label: string,
+  permissions: Permission[] = MEMBER_PERMISSIONS,
+) {
   const human = await signedInHuman(label);
   const personalWorkspaceId = crypto.randomUUID();
   await shared!.admin`
@@ -118,7 +123,7 @@ async function joinAsMember(accountId: string, workspaceId: string, label: strin
   await shared!.admin`
     insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
     values (${accountId}, ${workspaceId}, ${human.subject}, 'member',
-      ${shared!.admin.json(MEMBER_PERMISSIONS)})`;
+      ${shared!.admin.json(permissions)})`;
   return human;
 }
 
@@ -362,6 +367,32 @@ describe("a Member connects and changes their own Only me machine", () => {
     );
     expect(updated.status).toBe(200);
     expect((await enrollmentRow(own.enrollmentId)).policyRevision).toBe(1);
+    // The other changes reach their own checks on the Member's machine (it has
+    // no live agent here), past the permission refusal.
+    for (const [method, action, body] of [
+      ["POST", "screen-control", {}],
+      ["POST", "update", {}],
+      ["POST", "privacy-settings", { pane: "accessibility" }],
+    ] as const) {
+      const response = await call(
+        team.member.cookie,
+        method,
+        `${machines}/${own.enrollmentId}/${action}`,
+        body,
+      );
+      expect([403, 404], `${action}: ${await response.clone().text()}`).not.toContain(
+        response.status,
+      );
+    }
+    // Who can use a machine stays with workspace machine managers, even one's own.
+    expect(
+      await refusal(
+        await call(team.member.cookie, "POST", `${machines}/${own.enrollmentId}/audience/preview`, {
+          audience: "workspace",
+        }),
+        403,
+      ),
+    ).toContain("Only workspace admins can change who can use a machine.");
 
     expect(
       await refusal(
@@ -522,9 +553,21 @@ describe("a Member connects and changes their own Only me machine", () => {
       { memoryMaxBytes: null, memoryHighBytes: null, expectedRevision: 0 },
     );
     expect(changed.status).toBe(403);
-    expect(await changed.text()).toContain(
-      "Sign in to Opengeni to change a machine that only you can use.",
-    );
+    expect(await changed.text()).toContain("Only you can change your own machine");
     expect((await enrollmentRow(own.enrollmentId)).policyRevision).toBe(0);
+
+    // Someone who can't see the workspace's machines gets a sentence too.
+    const viewer = await joinAsMember(team.accountId, team.workspaceId, "viewer", [
+      "workspace:read",
+      "sessions:read",
+    ]);
+    expect(
+      await refusal(
+        await call(viewer.cookie, "POST", `/v1/workspaces/${team.workspaceId}/enrollments/token`, {
+          scope: "user",
+        }),
+        403,
+      ),
+    ).toContain("You don't have access to this workspace's machines.");
   }, 180_000);
 });

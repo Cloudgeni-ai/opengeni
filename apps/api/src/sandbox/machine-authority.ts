@@ -18,7 +18,12 @@
 // Keys, services and agents acting as themselves are refused as before.
 
 import type { ResourceAuthorityScope } from "@opengeni/contracts";
-import { hasPermission, type AccessGrantAuthorization } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessGrantAuthorization,
+  type AccessGrantAuthorization,
+} from "@opengeni/core";
+import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isPersonalConnectionOwnerPrincipal } from "../connection-ownership";
 
@@ -28,12 +33,13 @@ const NO_MACHINE_ACCESS = "You don't have access to this workspace's machines.";
 
 const REFUSALS: Record<ResourceAuthorityScope, Record<MachineAction, string>> = {
   user: {
-    connect: "Sign in to Opengeni to connect a machine that only you can use.",
-    change: "Sign in to Opengeni to change a machine that only you can use.",
+    connect:
+      "Only you can connect a machine for yourself, signed in to Opengeni; a key, agent or app acting for you needs permission to manage machines.",
+    change:
+      "Only you can change your own machine, signed in to Opengeni; a key, agent or app acting for you needs permission to manage machines.",
   },
   workspace: {
-    connect:
-      "Only workspace admins can connect a machine for the whole workspace. Choose Only me to connect your own.",
+    connect: "Only workspace admins can connect a machine for the whole workspace.",
     change: "Only workspace admins can change a machine shared with the whole workspace.",
   },
   organization: {
@@ -41,6 +47,37 @@ const REFUSALS: Record<ResourceAuthorityScope, Record<MachineAction, string>> = 
     change: "Only organization admins can change a machine shared with the whole organization.",
   },
 };
+
+const CHOOSE_ONLY_ME = " Choose Only me to connect your own.";
+
+/** Who can use a machine is decided by workspace machine managers. */
+export const MACHINE_AUDIENCE_REFUSAL = "Only workspace admins can change who can use a machine.";
+
+/**
+ * The machine routes' access check: requireAccessGrantAuthorization with
+ * enrollments:read, refusing a caller without it with a sentence instead of
+ * the raw permission name. The permission stays inside the authorization, so
+ * a refused request never provisions a first-use membership.
+ */
+export async function requireMachineAccessGrant(
+  c: Context,
+  deps: Parameters<typeof requireAccessGrantAuthorization>[1],
+  workspaceId: string,
+  permission: "enrollments:read",
+): Promise<AccessGrantAuthorization> {
+  try {
+    return await requireAccessGrantAuthorization(c, deps, workspaceId, permission);
+  } catch (error) {
+    if (
+      error instanceof HTTPException &&
+      error.status === 403 &&
+      error.message === `missing permission: ${permission}`
+    ) {
+      throw new HTTPException(403, { message: NO_MACHINE_ACCESS });
+    }
+    throw error;
+  }
+}
 
 /** The signed-in person themself, whose permissions are their own membership's. */
 export function isSignedInMachineOwner(authorization: AccessGrantAuthorization): boolean {
@@ -72,7 +109,12 @@ export function machineScopeRefusal(
     if (!isSignedInMachineOwner(authorization)) return REFUSALS.user[action];
     return read ? null : NO_MACHINE_ACCESS;
   }
-  if (!manage) return REFUSALS[scope][action];
+  if (!manage) {
+    // Point a signed-in teammate at what they can do instead.
+    return scope === "workspace" && action === "connect" && isSignedInMachineOwner(authorization)
+      ? REFUSALS.workspace.connect + CHOOSE_ONLY_ME
+      : REFUSALS[scope][action];
+  }
   if (
     scope === "organization" &&
     authorization.accountGrant?.permissions.includes("account:admin") !== true
@@ -90,4 +132,11 @@ export function requireMachineScopeAuthority(
 ): void {
   const refusal = machineScopeRefusal(authorization, scope, action);
   if (refusal) throw new HTTPException(403, { message: refusal });
+}
+
+/** Changing who can use a machine stays with workspace machine managers. */
+export function requireMachineAudienceAuthority(authorization: AccessGrantAuthorization): void {
+  if (!holds(authorization, "enrollments:manage")) {
+    throw new HTTPException(403, { message: MACHINE_AUDIENCE_REFUSAL });
+  }
 }

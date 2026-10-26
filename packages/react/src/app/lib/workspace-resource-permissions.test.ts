@@ -2,7 +2,7 @@ import { expect, mock, test } from "bun:test";
 
 let permissions: string[] = [];
 let grantShape: Record<string, unknown> = {};
-let credential: unknown;
+let contextShape: Record<string, unknown> = {};
 let machineEnabled: boolean | undefined;
 let rigsEnabled: boolean | undefined;
 const action = mock(async () => null);
@@ -13,8 +13,10 @@ const machine = fleetMachines[0]!;
 mock.module("../app-context", () => ({
   useAppContext: () => ({
     accessContext: {
+      mode: "managed",
+      subjectId: "user:kari",
       workspaceGrants: [{ workspaceId: "workspace", permissions, ...grantShape }],
-      ...(credential ? { credential } : {}),
+      ...contextShape,
     },
   }),
 }));
@@ -111,7 +113,7 @@ test("a signed-in Member connects and changes only their own Only me machines", 
   const shared = { sandboxId: "shared", enrollmentId: "shared", scope: "workspace" };
   fleetMachines = [own, shared];
   permissions = ["enrollments:read", "sessions:read"];
-  grantShape = { principalKind: "human_session" };
+  grantShape = { subjectId: "user:kari", principalKind: "human_session" };
   let machines = useWorkspaceMachines();
   expect(machines.canManage).toBe(false);
   expect(machines.canConnect).toBe(true);
@@ -123,15 +125,24 @@ test("a signed-in Member connects and changes only their own Only me machines", 
   await machines.updateOperationPolicy("own", {} as never);
   await machines.remove("own");
   expect(action).toHaveBeenCalledTimes(2);
+  contextShape = { mode: "local", subjectId: "dev" };
+  grantShape = { subjectId: "dev", principalKind: "human_session" };
+  expect(useWorkspaceMachines().canConnect).toBe(true);
 
+  const person = { subjectId: "user:kari", principalKind: "human_session" };
   for (const shape of [
-    { grant: { principalKind: "human_session", metadata: { delegated: true } } },
-    { grant: { principalKind: "human_session", serviceInitiator: { kind: "service" } } },
-    { grant: { principalKind: "api_key" } },
-    { grant: { principalKind: "human_session" }, credential: { kind: "api_key" } },
+    { grant: { ...person, metadata: { delegated: true } } },
+    { grant: { ...person, serviceInitiator: { kind: "service" } } },
+    { grant: { ...person, principalKind: "api_key" } },
+    { grant: person, context: { credential: { kind: "workspace_api_key" } } },
+    {
+      grant: { ...person, subjectId: "external_user:kari" },
+      context: { subjectId: "external_user:kari" },
+    },
+    { grant: { ...person, subjectId: "dev" }, context: { mode: "managed", subjectId: "dev" } },
   ]) {
     grantShape = shape.grant;
-    credential = shape.credential;
+    contextShape = shape.context ?? {};
     machines = useWorkspaceMachines();
     expect(machines.canConnect).toBe(false);
     expect(machines.canManageMachine(own as never)).toBe(false);
@@ -139,6 +150,6 @@ test("a signed-in Member connects and changes only their own Only me machines", 
   }
   expect(action).toHaveBeenCalledTimes(2);
   grantShape = {};
-  credential = undefined;
+  contextShape = {};
   fleetMachines = [machine];
 });
