@@ -3,6 +3,10 @@
 // that person can see: their own Only me recordings and everything shared
 // with the workspace. Transcripts are given as compact speaker-named lines
 // with people's corrections applied, in parts a model can page through.
+// Opengeni's own meeting-summary chat is fenced to the one meeting it was
+// started for: it cannot search, every other meeting is not found, and it
+// writes only the first notes or its own. An Only me summary reads that
+// meeting as its owner.
 import {
   defaultRecordingSpeakerName,
   RECORDING_NOTE_MAX_BYTES,
@@ -12,7 +16,7 @@ import {
   type RecordingSpeaker,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
-import { siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
+import { creationInitiatorForGrant, siteViewerForGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
   getManagedUserProfilesByIds,
   getRecording,
@@ -22,6 +26,7 @@ import {
   listRecordingNotes,
   listRecordings,
   listRecordingTranscriptVersions,
+  meetingSummarySessionScope,
   RecordingConflictError,
   RecordingNotFoundError,
   saveRecordingNote,
@@ -169,12 +174,37 @@ function failure(json: JsonResult, code: string, message: string) {
 export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
   const { server, deps, grant, sessionId, authorize, json } = input;
 
-  /** The person the agent acts for; without one it sees only shared meetings. */
-  async function actor(): Promise<RecordingActor> {
+  /**
+   * The person the agent acts for; without one it sees only shared meetings.
+   * `only` is the one meeting a meeting-summary chat may reach.
+   */
+  async function actor(): Promise<RecordingActor & { only: string | null }> {
     await authorize();
+    const summary = await meetingSummarySessionScope(deps.db, {
+      workspaceId: grant.workspaceId,
+      sessionId,
+      createdByActor: creationInitiatorForGrant(grant).actor ?? null,
+    });
+    if (summary?.ownerSubjectId) {
+      return {
+        workspaceId: grant.workspaceId,
+        subjectId: summary.ownerSubjectId,
+        only: summary.recordingId,
+      };
+    }
     const viewer = await siteViewerForGrant(deps.db, grant);
-    return { workspaceId: grant.workspaceId, subjectId: viewer.subjectId ?? grant.subjectId };
+    return {
+      workspaceId: grant.workspaceId,
+      subjectId: viewer.subjectId ?? grant.subjectId,
+      only: summary?.recordingId ?? null,
+    };
   }
+
+  const notVisible = () =>
+    json({
+      found: false,
+      message: "No meeting with this id is visible to the person you act for.",
+    });
 
   server.registerTool(
     "meetings_search",
@@ -215,6 +245,13 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         return failure(json, "invalid_cursor", "Pass nextCursor exactly as it was returned.");
       }
       const who = await actor();
+      if (who.only) {
+        return failure(
+          json,
+          "not_allowed",
+          "This chat writes the notes of one meeting; read it with meeting_read.",
+        );
+      }
       const page = await listRecordings(deps.db, {
         ...who,
         query: request.query?.trim() || undefined,
@@ -264,7 +301,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
     "meeting_read",
     {
       description:
-        'Read a recorded meeting the person you act for can see: its details, speakers, notes and transcript, as lines like "[12:31] Ingrid Solberg: …" with names and corrections applied. The notepad is what people jotted down during the meeting; the notes are its written-up summary, with their revision for meeting_notes_save. Long transcripts come in parts: pass nextCursor to continue, or from and to (such as "12:00" and "1:05:00") to read one stretch. While a meeting is still being recorded, the lines are its rough live preview if one is on.',
+        'Read a recorded meeting the person you act for can see: its details, speakers (each with its label, and its personId when it is a person from the workspace), notes and transcript, as lines like "[12:31] Ingrid Solberg: …" with names and corrections applied. The notepad is what people jotted down during the meeting; the notes are its written-up summary, with their revision for meeting_notes_save. Long transcripts come in parts: pass nextCursor to continue, or from and to (such as "12:00" and "1:05:00") to read one stretch. While a meeting is still being recorded, the lines are its rough live preview if one is on.',
       inputSchema: {
         meetingId: z.uuid().describe("A meeting id from meetings_search."),
         from: z
@@ -301,16 +338,12 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         return failure(json, "invalid_time", 'Give from and to as "m:ss" or "h:mm:ss".');
       }
       const who = await actor();
+      if (who.only && who.only !== request.meetingId) return notVisible();
       let recording: Recording;
       try {
         recording = await getRecording(deps.db, { ...who, recordingId: request.meetingId });
       } catch (error) {
-        if (error instanceof RecordingNotFoundError) {
-          return json({
-            found: false,
-            message: "No meeting with this id is visible to the person you act for.",
-          });
-        }
+        if (error instanceof RecordingNotFoundError) return notVisible();
         throw error;
       }
       // Details come with the first part only; later parts carry just lines.
@@ -432,6 +465,21 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         return failure(json, "notes_too_long", "Notes can be at most 256 KiB; shorten them.");
       }
       const who = await actor();
+      if (who.only && who.only !== request.meetingId) return notVisible();
+      // A summary chat writes the first notes and may revise only its own,
+      // whatever revision it passes; the revision check below then refuses
+      // anyone's save in between.
+      if (who.only && request.expectedRevision > 0) {
+        const notes = (await listRecordingNotes(deps.db, { ...who, recordingId: who.only })).find(
+          (note) => note.kind === "notes",
+        );
+        if (notes?.revision !== request.expectedRevision || notes.updatedBy.sessionId !== sessionId)
+          return failure(
+            json,
+            "notes_changed",
+            "Someone else saved these notes; leave them as they are.",
+          );
+      }
       try {
         const saved = await saveRecordingNote(deps.db, {
           ...who,
@@ -443,13 +491,14 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
         });
         return json({ saved: true, revision: saved.revision });
       } catch (error) {
-        if (error instanceof RecordingNotFoundError) {
-          return json({
-            found: false,
-            message: "No meeting with this id is visible to the person you act for.",
-          });
-        }
+        if (error instanceof RecordingNotFoundError) return notVisible();
         if (error instanceof RecordingConflictError && error.code === "notes_changed") {
+          if (who.only)
+            return failure(
+              json,
+              "notes_changed",
+              "Someone else saved these notes; leave them as they are.",
+            );
           const current = (
             await listRecordingNotes(deps.db, { ...who, recordingId: request.meetingId })
           ).find((note) => note.kind === "notes");
@@ -488,6 +537,7 @@ export function registerMeetingTools(input: RegisterMeetingToolsInput): void {
       visibility: recording.visibility === "private" ? "only_me" : "workspace",
       ...(owner ? { recordedBy: owner.name ?? owner.email } : {}),
       speakers: speakers.map((speaker) => ({
+        label: speaker.label,
         name: speaker.name,
         ...(speaker.personId ? { personId: speaker.personId } : {}),
         ...(speaker.source === "suggested" ? { suggested: true } : {}),

@@ -12,6 +12,7 @@ import { knowledgeContextForAccess } from "./knowledge";
 import {
   getSessionEvent,
   getSessionRetryReceiptInTransaction,
+  meetingSummarySessionScope,
   setSessionModelInTransaction,
   withWorkspaceSessionActivityRls,
   retryFailedSessionInTransaction,
@@ -996,6 +997,8 @@ export async function createAndStartSessionWithOutcome(input: {
   accountId: string;
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
+  /** Internal proof for the built-in meeting summary; see `@opengeni/db` createSession. */
+  meetingSummary?: { recordingId: string; ownerSubjectId: string };
   initialMessage: string;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
@@ -1302,6 +1305,7 @@ export async function createAndStartSessionWithOutcome(input: {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           visibility: input.visibility ?? "workspace_shared",
+          ...(input.meetingSummary ? { meetingSummary: input.meetingSummary } : {}),
           initialMessage: input.initialMessage,
           initialModelContext: input.modelContext ?? null,
           resources: input.resources,
@@ -1415,6 +1419,7 @@ export async function createAndStartSessionWithOutcome(input: {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         visibility: input.visibility ?? "workspace_shared",
+        ...(input.meetingSummary ? { meetingSummary: input.meetingSummary } : {}),
         initialMessage: input.initialMessage,
         initialModelContext: input.modelContext ?? null,
         resources: input.resources,
@@ -5209,6 +5214,23 @@ function sessionToolPolicyCeiling(
 }
 
 /**
+ * A built-in meeting-summary chat keeps exactly its meeting tools for its
+ * whole life (docs/recordings.md, "Built-in summary"); the database refuses
+ * the same change.
+ */
+async function refuseMeetingSummaryToolChange(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  if (await meetingSummarySessionScope(db, { workspaceId, sessionId })) {
+    throw new HTTPException(409, {
+      message: "A meeting notes chat keeps only its meeting tools.",
+    });
+  }
+}
+
+/**
  * Replace the durable session tool policy. The target and its parent (when
  * present) are locked by the DB event-writer helper, and the update/event are
  * committed under one version-fenced transaction. An already claimed turn
@@ -5231,6 +5253,7 @@ export async function updateSessionToolPolicy(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
 
   const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
@@ -5621,6 +5644,7 @@ export async function updateSessionAgent(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
   const workspace = await requireWorkspace(deps.db, grant.workspaceId);
   const goal = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
@@ -5889,6 +5913,7 @@ export async function updateSessionSkills(
     surface: "core",
   });
   requirePermission(grant, "sessions:control");
+  await refuseMeetingSummaryToolChange(deps.db, grant.workspaceId, sessionId);
   let skills: SessionSkill[];
   try {
     skills = SessionSkills.parse(request.skills);

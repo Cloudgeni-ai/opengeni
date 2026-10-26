@@ -247,6 +247,12 @@ import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
+import {
+  MEETING_SUMMARY_POLICY_ROLE,
+  MEETING_SUMMARY_RECORDING_METADATA_KEY,
+  MEETING_SUMMARY_SUBJECT_ID,
+  MEETING_SUMMARY_TOOLS,
+} from "./recordings";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
   db: Database,
   workspaceId: string,
@@ -18992,6 +18998,59 @@ export async function scheduledTaskViewerSubject(
 }
 
 /**
+ * The one meeting a built-in meeting-summary chat may read and write
+ * (recordings.ts), or null for every other chat. Only an exact live attempt
+ * of an Only me summary reads as its owner, the meeting's owner whom
+ * `createSession` proved; a workspace summary reads as no one, so it sees
+ * only shared meetings.
+ */
+export async function meetingSummarySessionScope(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    createdByActor?: AgentSessionCreationActor | null;
+  },
+): Promise<{ recordingId: string; ownerSubjectId: string | null } | null> {
+  return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [session] = await tx
+      .select({
+        createdByKind: schema.sessions.createdByKind,
+        createdBySubjectId: schema.sessions.createdBySubjectId,
+        policyRole: schema.sessions.policyRole,
+        metadata: schema.sessions.metadata,
+        visibility: schema.sessions.visibility,
+        ownerSubjectId: schema.sessions.ownerSubjectId,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    if (!session) return null;
+    const recordingId = session.metadata[MEETING_SUMMARY_RECORDING_METADATA_KEY];
+    if (
+      session.createdByKind !== "service" ||
+      session.createdBySubjectId !== MEETING_SUMMARY_SUBJECT_ID ||
+      session.policyRole !== MEETING_SUMMARY_POLICY_ROLE ||
+      typeof recordingId !== "string"
+    ) {
+      return null;
+    }
+    const exactAttempt = input.createdByActor?.sessionId === input.sessionId;
+    if (exactAttempt) await frozenSessionCreatorForInsert(tx, input);
+    return {
+      recordingId,
+      ownerSubjectId:
+        exactAttempt && session.visibility === "user_private" ? session.ownerSubjectId : null,
+    };
+  });
+}
+
+/**
  * Admin view of other people's Only me schedules: owner, cadence, status, last
  * run and the last 30 days of usage. Never the name, prompt, settings or runs.
  */
@@ -29661,6 +29720,82 @@ async function frozenSessionCreatorForInsert(
   return await frozenInitiatorForCommandActor(tx, input.workspaceId, input.createdByActor);
 }
 
+/**
+ * The built-in meeting summary's fence at creation. A session is one when it
+ * carries the internal proof, or claims to be one by its creator, policy
+ * role or metadata; then it must be exactly Opengeni's own chat for one
+ * meeting: started by the meeting-summary service with no parent or shared
+ * sandbox, no computer, resources, Skills or other servers, and only the
+ * meeting_read and meeting_notes_save tools. Only me is for the owner of an
+ * Only me meeting; a shared meeting gets a workspace chat.
+ */
+async function assertMeetingSummarySessionShape(
+  tx: Database,
+  input: SessionCreateInput,
+  frozen: FrozenTurnInitiator,
+): Promise<void> {
+  const servicePrincipal =
+    frozen.initiator.kind === "service" &&
+    frozen.initiator.subjectId === MEETING_SUMMARY_SUBJECT_ID;
+  const claimed =
+    input.meetingSummary !== undefined ||
+    servicePrincipal ||
+    input.policyRole === MEETING_SUMMARY_POLICY_ROLE ||
+    Object.hasOwn(input.metadata ?? {}, MEETING_SUMMARY_RECORDING_METADATA_KEY);
+  if (!claimed) return;
+  const proof = input.meetingSummary;
+  const tools = new Set(input.firstPartyMcpTools ?? []);
+  const exact =
+    proof !== undefined &&
+    servicePrincipal &&
+    !input.createdByActor &&
+    !input.parentSessionId &&
+    !input.sandboxGroupId &&
+    input.policyRole === MEETING_SUMMARY_POLICY_ROLE &&
+    input.metadata?.[MEETING_SUMMARY_RECORDING_METADATA_KEY] === proof.recordingId &&
+    input.createIdempotencyKey?.startsWith(`${MEETING_SUMMARY_SUBJECT_ID}:`) === true &&
+    input.sandboxBackend === "none" &&
+    input.resources.length === 0 &&
+    (input.skills ?? []).length === 0 &&
+    (input.bundledSkillIds ?? []).length === 0 &&
+    (input.selectedInstalledSkillIds ?? []).length === 0 &&
+    (input.mcpServers ?? []).length === 0 &&
+    (input.personalConnectionDelegations ?? []).length === 0 &&
+    (input.variableSetIds ?? []).length === 0 &&
+    !input.variableSetId &&
+    !input.rigId &&
+    (input.tools ?? []).every((tool) => tool.kind === "mcp" && tool.id === "opengeni") &&
+    tools.size === MEETING_SUMMARY_TOOLS.length &&
+    MEETING_SUMMARY_TOOLS.every((tool) => tools.has(tool));
+  if (!exact) {
+    throw new Error(
+      "A meeting summary chat is Opengeni's own, for one meeting, with only its tools",
+    );
+  }
+  const onlyMe = input.visibility === "user_private";
+  if (onlyMe) await setSubjectRlsContext(tx, proof.ownerSubjectId);
+  const [recording] = await tx
+    .select({ id: schema.recordings.id })
+    .from(schema.recordings)
+    .where(
+      and(
+        eq(schema.recordings.workspaceId, input.workspaceId),
+        eq(schema.recordings.id, proof.recordingId),
+        eq(schema.recordings.purpose, "meeting"),
+        eq(schema.recordings.visibility, onlyMe ? "user_private" : "workspace_shared"),
+        ...(onlyMe ? [eq(schema.recordings.ownerSubjectId, proof.ownerSubjectId)] : []),
+      ),
+    )
+    .limit(1);
+  if (!recording) {
+    throw new Error(
+      onlyMe
+        ? "An Only me meeting summary is for that meeting's owner"
+        : "A workspace meeting summary is for a meeting shared with the workspace",
+    );
+  }
+}
+
 async function setScheduledTaskAuthorityRlsContext(
   tx: Database,
   frozen: FrozenTurnInitiator,
@@ -29687,6 +29822,12 @@ export type SessionCreateInput = {
   requestedSessionId?: string;
   /** Internal ordinary source-run proof; never accepted from session HTTP input. */
   scheduledSourceRunId?: string;
+  /**
+   * Internal proof for the built-in meeting summary (recordings.ts); never
+   * accepted from session HTTP input. Only me for the meeting's owner when
+   * `visibility` is `user_private`.
+   */
+  meetingSummary?: { recordingId: string; ownerSubjectId: string };
   accountId: string;
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
@@ -30495,6 +30636,7 @@ async function createSessionInTransaction(
 
   // Do not run mutable creator validation before keyed denial replay above.
   const frozenCreator = await frozenSessionCreatorForInsert(tx, input);
+  await assertMeetingSummarySessionShape(tx, input, frozenCreator);
   // A subject creator resolves their own current pool. A creator that is not a
   // subject (service, organization API key, bridge) has no exact human, so it
   // resolves the organization or workspace pool and never a personal pool.
@@ -30606,6 +30748,11 @@ async function createSessionInTransaction(
           throw new Error("Private source session requires its accepted owning-human run");
         }
         owner = scheduledOwner;
+        await setSubjectRlsContext(tx, owner);
+      } else if (input.meetingSummary) {
+        // A meeting summary is Only me for the meeting's owner;
+        // assertMeetingSummarySessionShape proved it is their Only me meeting.
+        owner = input.meetingSummary.ownerSubjectId;
         await setSubjectRlsContext(tx, owner);
       } else if (frozenCreator.initiator.kind !== "subject" || !owner) {
         throw new Error("Private session creation requires a top-level managed human");
