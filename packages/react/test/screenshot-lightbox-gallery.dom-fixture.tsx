@@ -206,6 +206,15 @@ describe("LightboxProvider gallery", () => {
   test("the caption is backdrop too, and Escape still closes", async () => {
     const first = await openLoneImage(600, 400);
     try {
+      // Selecting the caption's text is a drag across it; that keeps the viewer open.
+      const caption = document.querySelector("figcaption")!;
+      const range = document.createRange();
+      range.selectNodeContents(caption);
+      document.getSelection()!.removeAllRanges();
+      document.getSelection()!.addRange(range);
+      await clickAt(caption, 0, 0);
+      expect(first.open()).toBe(true);
+      document.getSelection()!.removeAllRanges();
       await clickAt(document.querySelector("figcaption")!, 0, 0);
       expect(first.open()).toBe(false);
     } finally {

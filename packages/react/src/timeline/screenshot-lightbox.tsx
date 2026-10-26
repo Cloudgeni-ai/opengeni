@@ -110,8 +110,9 @@ function isLightboxBackdrop(target: EventTarget | null, content: Element): boole
 
 /**
  * The open lightbox covers the whole window, so in a desktop shell (Electron)
- * no part of it may move the window: draggable title bars underneath, such as
- * the session header, otherwise keep capturing presses through it, which
+ * no part of it may move the window. Painting over a drag area does not cancel
+ * it; only an explicit no-drag does. Without it, draggable title bars underneath,
+ * such as the session header, keep capturing presses through the lightbox, which
  * swallowed the lower half of the close button and the backdrop beside it.
  * Browsers ignore this property.
  */
@@ -406,7 +407,13 @@ function LightboxRoot({ children }: { children: ReactNode }) {
                   onClick={(event) => {
                     const pressed = pressedBackdrop.current;
                     pressedBackdrop.current = false;
-                    if (pressed && isLightboxBackdrop(event.target, event.currentTarget)) {
+                    // Selecting caption text is a drag across the backdrop; keep it open.
+                    const selection = event.currentTarget.ownerDocument.getSelection();
+                    if (
+                      pressed &&
+                      (!selection || selection.isCollapsed) &&
+                      isLightboxBackdrop(event.target, event.currentTarget)
+                    ) {
                       close();
                     }
                   }}

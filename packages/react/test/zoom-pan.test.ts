@@ -38,6 +38,12 @@ describe("zoom geometry", () => {
     // Zoomed past fit with the buttons: a click goes back to fit, smaller.
     const stepped = zoomTo(smallFit, 3, { x: 500, y: 400 }, small, viewport);
     expect(clickZoomDirection(stepped, small, viewport)).toBe("out");
+
+    // Fitted at exactly actual size: a click goes to 200%.
+    const exact = { width: 500, height: 400 };
+    const exactFit = fitView(exact, { width: 532, height: 432 });
+    expect(exactFit.scale).toBe(1);
+    expect(clickZoomDirection(exactFit, exact, { width: 532, height: 432 })).toBe("in");
   });
 
   test("fitting shrinks large images and enlarges small ones at most 2x", () => {

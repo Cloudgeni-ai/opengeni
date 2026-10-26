@@ -114,7 +114,7 @@ html[data-desktop="windows"] main [data-slot="content-page"]:not([data-slot="con
    where Windows draws its caption buttons over the page. They move left of
    them, so the viewer's own close is never under the window's close. */
 html[data-desktop="windows"] [data-lightbox-controls] {
-  right: calc(var(--og-caption-buttons-width) + 0.75rem);
+  right: max(1.5rem, calc(var(--og-caption-buttons-width) + 0.75rem));
 }
 
 html[data-desktop="macos"],
