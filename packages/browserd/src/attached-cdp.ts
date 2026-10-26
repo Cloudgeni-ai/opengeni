@@ -885,10 +885,15 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         this.assertAttachAllowed(targetId);
         const detachEpoch = this.tabDetachEpochs.get(targetId) ?? 0;
         const streamBreaks = this.streamBreaks;
-        const attached = await this.bridge.request<{ attachment?: unknown }>({
-          type: "debugger.attach",
-          tabId: targetId,
-        });
+        let attached: { attachment?: unknown };
+        try {
+          attached = await this.bridge.request<{ attachment?: unknown }>({
+            type: "debugger.attach",
+            tabId: targetId,
+          });
+        } catch (error) {
+          throw attachRefusal(error);
+        }
         if (Number.isSafeInteger(attached?.attachment) && (attached.attachment as number) > 0)
           this.tabAttachments.set(targetId, attached.attachment as number);
         else this.tabAttachments.delete(targetId);
@@ -1386,6 +1391,64 @@ function closeTabFailure(error: unknown): unknown {
       false,
     );
   return error;
+}
+
+// Chrome's refusal to debug a tab while it holds another extension's page,
+// as older extensions relay it unchanged.
+const OTHER_EXTENSION_FRAME_REFUSAL = "chrome-extension://";
+const ATTACH_REFUSAL_REASON_MAX_BYTES = 300;
+
+/** Why Chrome or the extension would not let this session debug a tab. A
+ * refusal is the reply to this attach, so nothing is left in flight, and it
+ * stays the same until the page or the browser changes: report it as a
+ * definite failure that says what to do, never as a read to retry. */
+function attachRefusal(error: unknown): unknown {
+  if (!(error instanceof AttachedBrowserBridgeError) || error.code !== "driver_rejected")
+    return error;
+  const reason = error.message.trim();
+  if (/^No tab with id\b/u.test(reason))
+    return new InteractionDefiniteDriverError("target_not_found", "browser target does not exist");
+  // The extension's own explanation (for example, a password manager that
+  // keeps adding its frame) already says what to do.
+  if (error.extensionCode === "tab_unavailable" && reason.length > 0)
+    return new InteractionControllerError(
+      "resource_unavailable",
+      boundedReason(reason, 1_024),
+      false,
+    );
+  if (reason.includes(OTHER_EXTENSION_FRAME_REFUSAL))
+    return new InteractionControllerError(
+      "resource_unavailable",
+      "Another browser extension has added its own frame to this page (password managers do " +
+        "this for their inline menu), and Chrome does not let the Opengeni Browser extension " +
+        "control a tab while it has one. Update the Opengeni Browser extension, turn off that " +
+        "extension's inline menu for this site, or use a managed browser",
+      false,
+    );
+  return new InteractionControllerError(
+    "resource_unavailable",
+    `Chrome would not let the Opengeni Browser extension control this tab (${boundedReason(
+      reason || "no reason given",
+      ATTACH_REFUSAL_REASON_MAX_BYTES,
+    )}); retrying will not help until that changes. Use another tab or a managed browser`,
+    false,
+  );
+}
+
+/** At most `maxBytes` UTF-8 bytes of `text`, cut on a code point, with an
+ * ellipsis when cut. */
+function boundedReason(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let kept = "";
+  let bytes = 0;
+  const limit = maxBytes - Buffer.byteLength("…");
+  for (const character of text) {
+    const size = Buffer.byteLength(character);
+    if (bytes + size > limit) break;
+    kept += character;
+    bytes += size;
+  }
+  return `${kept}…`;
 }
 
 /** chrome.debugger rejects the commands it was still handling when Chrome

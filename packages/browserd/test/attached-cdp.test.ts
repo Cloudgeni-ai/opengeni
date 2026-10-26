@@ -116,6 +116,149 @@ describe("AttachedChromeCdpConnection", () => {
     gone.close();
   });
 
+  test("reports Chrome refusing to debug a tab as a definite failure that says what to do", async () => {
+    const refusing = (failure: Error) => {
+      const bridge = new FakeBridge();
+      const request = bridge.request.bind(bridge);
+      bridge.request = async <T = unknown>(payload: Readonly<Record<string, unknown>>) => {
+        if (payload.type === "debugger.attach") {
+          bridge.commands.push({ ...payload });
+          throw failure;
+        }
+        return await request<T>(payload);
+      };
+      return {
+        bridge,
+        connection: new AttachedChromeCdpConnection(bridge, {
+          browserName: "Chrome",
+          browserVersion: "151.0.0.0",
+        }),
+      };
+    };
+    const attach = async (failure: Error) => {
+      const { bridge, connection } = refusing(failure);
+      try {
+        const error = await connection
+          .send("Target.attachToTarget", { targetId: "7" })
+          .catch((caught: unknown) => caught);
+        expect(bridge.commands.map((command) => command.type)).toContain("debugger.attach");
+        return error as Error & { code?: unknown; retryable?: unknown };
+      } finally {
+        connection.close();
+      }
+    };
+
+    // An older extension relays Chrome's refusal while a password manager's
+    // inline menu frame is in the page unchanged.
+    const frame = await attach(
+      new AttachedBrowserBridgeError(
+        "driver_rejected",
+        "Cannot access a chrome-extension:// URL of different extension",
+        false,
+        { extensionCode: "driver_failed" },
+      ),
+    );
+    expect(frame).toBeInstanceOf(InteractionControllerError);
+    expect(frame).toMatchObject({ code: "resource_unavailable", retryable: false });
+    expect(frame.message).toBe(
+      "Another browser extension has added its own frame to this page (password managers do this for their inline menu), and Chrome does not let the Opengeni Browser extension control a tab while it has one. Update the Opengeni Browser extension, turn off that extension's inline menu for this site, or use a managed browser",
+    );
+
+    // A newer extension explains its refusal itself; keep its words.
+    const explained = await attach(
+      new AttachedBrowserBridgeError(
+        "driver_rejected",
+        "A password manager keeps adding its own frame to this page; turn off its inline menu",
+        false,
+        { extensionCode: "tab_unavailable" },
+      ),
+    );
+    expect(explained).toBeInstanceOf(InteractionControllerError);
+    expect(explained).toMatchObject({ code: "resource_unavailable", retryable: false });
+    expect(explained.message).toBe(
+      "A password manager keeps adding its own frame to this page; turn off its inline menu",
+    );
+
+    // Any other refusal names Chrome's reason, bounded.
+    const other = await attach(
+      new AttachedBrowserBridgeError(
+        "driver_rejected",
+        "Another debugger is already attached to the tab with id: 7.",
+        false,
+        { extensionCode: "driver_failed" },
+      ),
+    );
+    expect(other).toBeInstanceOf(InteractionControllerError);
+    expect(other).toMatchObject({ code: "resource_unavailable", retryable: false });
+    expect(other.message).toBe(
+      "Chrome would not let the Opengeni Browser extension control this tab (Another debugger is already attached to the tab with id: 7.); retrying will not help until that changes. Use another tab or a managed browser",
+    );
+    const long = await attach(
+      new AttachedBrowserBridgeError("driver_rejected", "界".repeat(400), false),
+    );
+    expect(Buffer.byteLength(long.message)).toBeLessThanOrEqual(
+      Buffer.byteLength(other.message) + 300,
+    );
+    expect(long.message).toContain("界…); retrying will not help");
+
+    // A tab that is gone is not found, not a refusal.
+    const gone = await attach(
+      new AttachedBrowserBridgeError("driver_rejected", "No tab with id: 7.", false),
+    );
+    expect(gone).toBeInstanceOf(InteractionDefiniteDriverError);
+    expect(gone).toMatchObject({ code: "target_not_found" });
+
+    // A lost connection or timeout stays a transport failure worth retrying.
+    const lost = await attach(
+      new AttachedBrowserBridgeError("transport_failed", "attached browser bridge closed", true),
+    );
+    expect(lost).toBeInstanceOf(CdpTransportError);
+  });
+
+  test("an observation of a tab Chrome will not debug fails with the refusal, not a retry", async () => {
+    const { AgentBrowserDriver } = await import("../src/cdp-driver");
+    const bridge = new FakeBridge();
+    const request = bridge.request.bind(bridge);
+    bridge.request = async <T = unknown>(payload: Readonly<Record<string, unknown>>) => {
+      if (payload.type === "debugger.attach")
+        throw new AttachedBrowserBridgeError(
+          "driver_rejected",
+          "Cannot access a chrome-extension:// URL of different extension",
+          false,
+          { extensionCode: "driver_failed" },
+        );
+      return await request<T>(payload);
+    };
+    const connection = new AttachedChromeCdpConnection(bridge, {
+      browserName: "Chrome",
+      browserVersion: "151",
+    });
+    const driver = new AgentBrowserDriver({
+      browserSessionId: crypto.randomUUID(),
+      controllerGeneration: "attach-refusal-test",
+      targetLifecycle: "cdp",
+      runner: {
+        async run<T>(args: readonly string[]): Promise<T> {
+          if (args[0] === "get") return { cdpUrl: "opengeni-attached://local" } as T;
+          return {} as T;
+        },
+      },
+      connect: async () => connection,
+    });
+    try {
+      const failure = await driver.observe("7").catch((error: unknown) => error);
+      // Before, this was a CDP protocol error that the controller answered as
+      // a retryable "browser observation unavailable".
+      expect(failure).not.toBeInstanceOf(CdpProtocolError);
+      expect(failure).toBeInstanceOf(InteractionControllerError);
+      expect(failure).toMatchObject({ code: "resource_unavailable", retryable: false });
+      expect((failure as Error).message).toContain("password managers do this");
+    } finally {
+      await driver.close().catch(() => undefined);
+      connection.close();
+    }
+  });
+
   test("reports a tab's download browser-wide with the file Chrome saved", async () => {
     const commands: Array<Record<string, unknown>> = [];
     let polls = 0;
