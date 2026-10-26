@@ -333,6 +333,7 @@ function browserSessionFromRows(
     engine: row.engine,
     engineVersion: row.engineVersion,
     headless: row.headless,
+    ...(row.display === "window" || row.display === "offscreen" ? { display: row.display } : {}),
     identityId: row.identityId,
     baseRevisionId: row.baseRevisionId,
     networkRouteId: row.networkRouteId,
@@ -1507,6 +1508,8 @@ export async function activateBrowserSession(
     browserSessionId: string;
     controller: InteractionControllerBinding;
     engineVersion: string | null;
+    /** How the controller launched this headed browser, when it reports it. */
+    display?: "window" | "offscreen" | null;
   },
 ): Promise<BrowserSessionMutationResponseValue> {
   return await withRlsContext(
@@ -1564,6 +1567,7 @@ export async function activateBrowserSession(
             controllerGeneration: input.controller.controllerGeneration,
             placementInstanceId: input.controller.placementInstanceId,
             engineVersion: input.engineVersion,
+            display: input.display ?? null,
             controllerHeartbeatAt: now,
             lastUsedAt: now,
             failureCode: null,

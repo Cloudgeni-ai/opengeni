@@ -246,6 +246,57 @@ function checkpointArtifact(
 }
 
 describe("durable BrowserSession lifecycle", () => {
+  test("records the display the controller launched a headed browser with", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const activate = async (display?: "window" | "offscreen" | null) => {
+      const operationId = crypto.randomUUID();
+      const prepared = await prepareBrowserSessionCreate(client.db, {
+        ...createInput(scope, operationId),
+        headless: false,
+      });
+      const controllerGeneration = crypto.randomUUID();
+      await dispatchBrowserSessionOperation(client.db, {
+        ...scope,
+        operationId,
+        browserSessionId: prepared.session.id,
+        controllerGeneration,
+      });
+      const input = {
+        ...scope,
+        operationId,
+        browserSessionId: prepared.session.id,
+        controller: {
+          controllerId: "browserd:test",
+          controllerGeneration,
+          placementInstanceId: "placement:test",
+        },
+        engineVersion: null,
+        ...(display === undefined ? {} : { display }),
+      };
+      const activated = await activateBrowserSession(client.db, input);
+      // A replayed activation answers with the same recorded display.
+      const replayed = await activateBrowserSession(client.db, input);
+      expect(replayed.operation.replayed).toBe(true);
+      expect(replayed.session).toEqual(activated.session);
+      const read = await getBrowserSession(client.db, {
+        ...scope,
+        browserSessionId: prepared.session.id,
+      });
+      expect(read).toEqual(activated.session);
+      return activated.session;
+    };
+
+    const offscreen = await activate("offscreen");
+    expect(offscreen).toMatchObject({ headless: false, display: "offscreen" });
+    expect((await activate("window")).display).toBe("window");
+    // A controller that does not report it leaves the display unknown, not
+    // a claimed window.
+    for (const display of [undefined, null] as const) {
+      expect("display" in (await activate(display))).toBe(false);
+    }
+  });
+
   test("lists idle saveable browsers on one controller instance, least recently used first", async () => {
     if (!available) return;
     const scope = await fixture();

@@ -191,6 +191,11 @@ export class ManagedBrowserRunner {
   /** Set when this managed browser shares the machine's network because
    * isolating it is unavailable here; shown once to the agent at launch. */
   readonly networkNotice: string | null;
+  /** How a headed browser shows on the machine: in a native window, or
+   * offscreen with none. Null for a headless browser. It follows the same
+   * decision as the launch arguments, so it never claims a window Chrome was
+   * not given. */
+  readonly display: ManagedBrowserDisplay | null;
   readonly proxyCredentials: ManagedBrowserProxyCredentials | null;
   private readonly profileDirectory: string;
   private readonly workingDirectory: string;
@@ -258,6 +263,7 @@ export class ManagedBrowserRunner {
     this.chromeStderrDone = browserLaunch?.stderrDone ?? null;
     this.browserScope = browserLaunch?.scope ?? null;
     this.networkNotice = browserLaunch?.networkNotice ?? null;
+    this.display = managedBrowserDisplay(options);
   }
 
   static async create(options: ManagedBrowserRunnerOptions): Promise<ManagedBrowserRunner> {
@@ -1627,8 +1633,22 @@ async function boundedProcessOutput(
 }
 
 /** Whether this managed browser opens a native window. */
-function windowedBrowser(options: ManagedBrowserRunnerOptions): boolean {
+function windowedBrowser(
+  options: Pick<ManagedBrowserRunnerOptions, "headed" | "offscreen">,
+): boolean {
   return options.headed && options.offscreen !== true;
+}
+
+/** Where a headed managed browser is shown. */
+export type ManagedBrowserDisplay = "window" | "offscreen";
+
+/** The display a launch with these options gets: the same choice that adds
+ * or leaves out --headless=new in managedChromeArguments. */
+export function managedBrowserDisplay(
+  options: Pick<ManagedBrowserRunnerOptions, "headed" | "offscreen">,
+): ManagedBrowserDisplay | null {
+  if (!options.headed) return null;
+  return windowedBrowser(options) ? "window" : "offscreen";
 }
 
 /** Chrome's environment: only the machine basics a browser needs, the

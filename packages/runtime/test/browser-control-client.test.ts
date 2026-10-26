@@ -1296,6 +1296,54 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("returns the display the controller launched a headed browser with, dropping unknown values", async () => {
+    const browserSessionId = randomUUID();
+    const controllerGeneration = "controller-1";
+    const observation = browserObservation(browserTarget(browserSessionId, controllerGeneration));
+    let display: unknown;
+    const server = Bun.serve({
+      port: 0,
+      async fetch() {
+        return success(
+          {
+            browserSessionId,
+            controllerGeneration,
+            observation,
+            ...(display === undefined ? {} : { display }),
+          },
+          201,
+        );
+      },
+    });
+    const placement = await localPlacement({ placementPrivateWrites: true });
+    try {
+      const client = new BrowserControlClient(placement.session, {
+        adminToken,
+        port: server.port,
+      });
+      const create = async () =>
+        await client.createSession({
+          browserSessionId,
+          controllerGeneration,
+          tokenGeneration: 1,
+          controlToken,
+          viewToken,
+          headed: true,
+        });
+      display = "offscreen";
+      expect((await create()).display).toBe("offscreen");
+      display = "window";
+      expect((await create()).display).toBe("window");
+      // An older controller reports nothing; anything else is not trusted.
+      for (const value of [undefined, "headless", 1, null]) {
+        display = value;
+        expect("display" in (await create())).toBe(false);
+      }
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("drives the typed placement protocol without putting credentials in shell commands", async () => {
     const browserSessionId = randomUUID();
     const workspaceId = randomUUID();

@@ -709,6 +709,7 @@ export function registerBrowserSessionRoutes(
                   placementInstanceId: placement.placementInstanceId,
                 },
                 engineVersion: null,
+                display: launch.result?.display ?? null,
               });
               stages.mark("activate");
               return activated;
@@ -2830,6 +2831,9 @@ export function registerBrowserSessionRoutes(
                 tokenGeneration: record.tokenGeneration,
               });
               let client: BrowserControlClient | undefined;
+              const resumed: {
+                result: Awaited<ReturnType<BrowserControlClient["createSession"]>> | null;
+              } = { result: null };
               try {
                 // The heartbeat covers everything after dispatch, including
                 // provisioning the controller.
@@ -2862,7 +2866,7 @@ export function registerBrowserSessionRoutes(
                       prepared.session.headless,
                       linkedComputer !== null,
                     );
-                    return await client.createSession({
+                    resumed.result = await client.createSession({
                       browserSessionId,
                       controllerGeneration,
                       tokenGeneration: record.tokenGeneration,
@@ -2873,6 +2877,7 @@ export function registerBrowserSessionRoutes(
                       ...(networkRoute ? { networkRoute } : {}),
                       restore: restore!,
                     });
+                    return resumed.result;
                   },
                 );
               } catch (error) {
@@ -2938,6 +2943,7 @@ export function registerBrowserSessionRoutes(
                   placementInstanceId: placement.placementInstanceId,
                 },
                 engineVersion: null,
+                display: resumed.result?.display ?? null,
               });
             },
           );

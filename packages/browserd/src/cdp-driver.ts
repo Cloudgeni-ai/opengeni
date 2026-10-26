@@ -437,6 +437,9 @@ export type BrowserCommandRunner = {
   readonly reattachedOwnedProcess?: OwnedManagedBrowserProcess | null;
   /** A plain line for the agent about how this browser was launched. */
   readonly networkNotice?: string | null;
+  /** How a headed managed browser shows on its machine: in a native window or
+   * offscreen with none. Absent for headless, remote and attached browsers. */
+  readonly display?: "window" | "offscreen" | null;
   /** Credentials for the launch's proxy. They never reach the browser's
    * argv or environment; the driver answers the proxy's challenges. */
   readonly proxyCredentials?: { username: string; password: string } | null;
@@ -802,6 +805,9 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
   }
   get networkNotice(): string | null {
     return this.runner.networkNotice ?? null;
+  }
+  get display(): "window" | "offscreen" | null {
+    return this.runner.display ?? null;
   }
   /** The load error of the page start() opened and kept on the browser's
    * error page (keepTabOnLoadError), such as net::ERR_CONNECTION_REFUSED. */

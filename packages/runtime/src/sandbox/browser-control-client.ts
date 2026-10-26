@@ -298,6 +298,9 @@ export type PlacementBrowserSession = PlacementBrowserSessionReference & {
   targets?: BrowserTargetValue[];
   /** A plain line about how the controller launched this browser. */
   notice?: string;
+  /** How a headed managed browser shows on its machine as launched: in a
+   * native window, or offscreen with none. An older controller omits it. */
+  display?: "window" | "offscreen";
 };
 
 export type PlacementComputerSessionReference = {
@@ -836,6 +839,7 @@ export class BrowserControlClient {
       observation: BrowserObservation.parse(data.observation),
       ...creationTargets(data.targets, returnedReference),
       ...creationNotice(data.notice),
+      ...creationDisplay(data.display),
     };
   }
 
@@ -3161,6 +3165,12 @@ function creationNotice(value: unknown): { notice?: string } {
   if (typeof value !== "string") return {};
   const notice = value.replace(/\s+/gu, " ").trim();
   return notice.length > 0 && notice.length <= 1_024 ? { notice } : {};
+}
+
+/** The launched display is a report, not authority: anything but a known
+ * value is dropped, as from an older controller that sends none. */
+function creationDisplay(value: unknown): { display?: "window" | "offscreen" } {
+  return value === "window" || value === "offscreen" ? { display: value } : {};
 }
 
 function parseComputerReference(value: unknown): PlacementComputerSessionReference {

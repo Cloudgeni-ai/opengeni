@@ -1402,6 +1402,26 @@ describe("BrowserSession route discipline", () => {
     expect(binding).toContain("isMissingLinkedComputerControllerSession(error)");
   });
 
+  test("records the display the controller launched with on create and resume, never the requested mode", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const activations = [...source.matchAll(/await activateBrowserSession\(deps\.db, \{/gu)];
+    expect(activations).toHaveLength(2);
+    const createStart = source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"');
+    const create = source.slice(createStart, source.indexOf("app.get(", createStart));
+    const createActivation = create.slice(create.indexOf("await activateBrowserSession("));
+    expect(createActivation.slice(0, createActivation.indexOf("});"))).toContain(
+      "display: launch.result?.display ?? null,",
+    );
+    const resumeStart = source.indexOf("resumed.result = await client.createSession(");
+    expect(resumeStart).toBeGreaterThan(0);
+    const resumeActivation = source.slice(
+      source.indexOf("await activateBrowserSession(", resumeStart),
+    );
+    expect(resumeActivation.slice(0, resumeActivation.indexOf("});"))).toContain(
+      "display: resumed.result?.display ?? null,",
+    );
+  });
+
   test("uses linked and native displays without bootstrapping a standalone desktop", async () => {
     expect(
       browserNeedsStandaloneDisplayStack({

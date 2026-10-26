@@ -12610,6 +12610,7 @@
         "$.controller": "ref(InteractionControllerBinding)! null",
         "$.createdAt": "string!",
         "$.createdBySubjectId": "string!",
+        "$.display": "enum?=[\"\\\"offscreen\\\"\",\"\\\"window\\\"\"]",
         "$.driverId": "string!",
         "$.engine": "enum!=[\"\\\"chrome\\\"\",\"\\\"chromium\\\"\",\"\\\"external\\\"\",\"\\\"firefox\\\"\",\"\\\"lightpanda\\\"\",\"\\\"webkit\\\"\"]",
         "$.engineVersion": "string! null",
