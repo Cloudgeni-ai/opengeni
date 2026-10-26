@@ -11,6 +11,7 @@ import {
   RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
   resolveWorkspaceVoiceInputEnabled,
+  recordingMicrophoneIsOwner,
   resolveWorkspaceRecordingSettings,
   SaveRecordingNoteRequest,
   UpdateRecordingRequest,
@@ -46,6 +47,7 @@ import {
   getRecordingTrackPreparedObject,
   getRecordingTranscriptPage,
   getWorkspace,
+  workspaceMemberDisplayName,
   listRecordingChunks,
   listRecordingLiveSegments,
   listRecordingNotes,
@@ -77,7 +79,7 @@ import { userContentSignedGetUrlOptions } from "../http/user-content";
 import {
   createSpeechToTextDeployment,
   dictationProviders,
-  speechToTextModelFor,
+  meetingModelFor,
   speechToTextServesMeetings,
   type SpeechToTextDeployment,
 } from "@opengeni/core/transcription-service";
@@ -208,18 +210,25 @@ export function registerRecordingRoutes(
 
   /**
    * The deployment's pinned model, else the request's, else the workspace's
-   * default, else the deployment default. A pinned deployment refuses any
-   * other model a request names.
+   * default, else the first model this workspace can use (meetingModelFor).
+   * A pinned deployment refuses any other model a request names.
    */
   async function transcriptionChoice(
-    workspaceId: string,
+    actor: { workspaceId: string; accountId: string; subjectId: string },
     requested: RecordingTranscriptionRequest,
   ): Promise<{ providerId: string; model: string; options: RecordingTranscriptionOptions }> {
-    const workspace = await getWorkspace(db, workspaceId);
+    const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
-    const defaults = speechToTextModelFor(deployment, "meeting", settings.transcription)!;
-    const providerId = requested.providerId ?? defaults.providerId;
-    const model = requested.model ?? (requested.providerId ? undefined : defaults.model);
+    // A request that names its provider takes no default, not even its model.
+    const defaults = requested.providerId
+      ? null
+      : await meetingModelFor(deployment, settings.transcription, {
+          accountId: actor.accountId,
+          workspaceId: actor.workspaceId,
+          subjectId: actor.subjectId,
+        });
+    const providerId = requested.providerId ?? defaults!.providerId;
+    const model = requested.model ?? defaults?.model;
     const pinnedAway =
       deployment.pinned !== null &&
       (providerId !== deployment.pinned.providerId ||
@@ -319,7 +328,7 @@ export function registerRecordingRoutes(
     const choice =
       recording.purpose === "dictation"
         ? await dictationChoice(actor)
-        : await transcriptionChoice(actor.workspaceId, requested);
+        : await transcriptionChoice(actor, requested);
     const provider = registry.get(choice.providerId);
     const spec = provider?.models.find((candidate) => candidate.model === choice.model);
     if (
@@ -484,7 +493,7 @@ export function registerRecordingRoutes(
     await admitRecordingUsage(actor);
     const workspace = await getWorkspace(db, actor.workspaceId);
     const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
-    if (body.transcription) await transcriptionChoice(actor.workspaceId, body.transcription);
+    if (body.transcription) await transcriptionChoice(actor, body.transcription);
     const language = meetingLanguage(body.transcription?.language, settings);
     const transcription =
       body.transcription || language
@@ -493,6 +502,17 @@ export function registerRecordingRoutes(
             ...(language ? { language } : {}),
           }
         : undefined;
+    // Computer or tab audio makes the microphone the owner, named in the live preview.
+    const ownerName = recordingMicrophoneIsOwner(body.tracks)
+      ? await workspaceMemberDisplayName(db, actor).catch((error: unknown) => {
+          // The recording starts regardless; the microphone stays unnamed until then.
+          observability?.warn("couldn't read the recording owner's name", {
+            workspaceId: actor.workspaceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        })
+      : null;
     const result = await guard(() =>
       createRecording(db, {
         ...actor,
@@ -504,6 +524,7 @@ export function registerRecordingRoutes(
         metadata: body.metadata,
         tracks: body.tracks,
         transcription,
+        ownerName,
       }),
     );
     if (result.recording.purpose !== "meeting") {
@@ -945,11 +966,11 @@ export function registerRecordingRoutes(
   app.get("/v1/workspaces/:workspaceId/recording-models", async (c) => {
     const actor = await actorFor(c, "sessions:read");
     const workspace = await getWorkspace(db, actor.workspaceId);
-    const defaults = speechToTextModelFor(
+    const defaults = await meetingModelFor(
       deployment,
-      "meeting",
       resolveWorkspaceRecordingSettings(workspace?.settings).transcription,
-    )!;
+      { accountId: actor.accountId, workspaceId: actor.workspaceId, subjectId: actor.subjectId },
+    );
     const offered = deployment.pinned
       ? [registry.get(deployment.pinned.providerId)!]
       : [...registry.values()];
@@ -1000,7 +1021,13 @@ export function registerRecordingRoutes(
       : preferred
         ? { providerId: preferred.id, model: preferred.model.model }
         : null;
-    return c.json({ models, default: defaults, dictationDefault, pinned: !!deployment.pinned });
+    return c.json({
+      models,
+      default: defaults,
+      dictationDefault,
+      pinned: !!deployment.pinned,
+      language: resolveWorkspaceRecordingSettings(workspace?.settings).language ?? null,
+    });
   });
 
   /**

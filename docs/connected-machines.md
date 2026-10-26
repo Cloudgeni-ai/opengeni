@@ -74,7 +74,12 @@ the caller's retry budget reads wall time: clock skew, jumps and corrections do
 not poison this transport. The call offset is elapsed caller time since receiving
 the batch, anchored at the receiver's issuance time. This conservatively includes
 return-path latency in the call budget, but not idle prefetch age. Future offsets
-are refused. Receipt expiry is the earlier of the batch deadline and the fixed
+are refused. Because the two hosts' elapsed clocks tick at slightly different
+rates, the caller understates the offset by 1%: a caller clock running a little
+faster than the receiver's would otherwise produce future offsets for older
+tokens. The understatement only makes the receiver charge more elapsed time, so
+deadlines come sooner, never later; the caller stops retrying the delivery by the
+same amount sooner. Receipt expiry is the earlier of the batch deadline and the fixed
 call offset plus lifetime. Streamed exec uses its existing relative timeout from
 that same call offset; delivery or retries cannot reset the deadline.
 The absolute exec deadline remains only for legacy one-shot peers. This does not
@@ -214,6 +219,21 @@ its inventory is asked again on a later pass, as when it is offline, and when
 the reconciler cannot read which kind of runner it is, it leaves the command
 for a later pass and records nothing. A Connected Machine never sleeps, so its
 answered queries continue on each pass as before.
+
+A runner lists only operations it knows, so a command whose start never
+reached it (sent while it was offline), or that it no longer holds, would
+never be reported and would stay running forever. So when a Connected Machine
+runner reports its inventory again, the first page of each report makes the
+running commands left to that exact process due again (outcome
+`runner_reported`). The next reconciler pass asks the runner, which is
+talking: an operation it does not know answers lost and the command settles
+lost, never as a success; one it runs continues as before. A compute runner's
+report does not do this, since its running commands are never polled.
+Migration 0984 creates the database function behind this with its runtime
+grant withheld for one release (see
+[expand/contract migrations](migrations-expand-contract.md)), and makes the
+commands already stuck this way due once while it runs. Until a later
+migration grants it, a report skips the re-arm.
 
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses

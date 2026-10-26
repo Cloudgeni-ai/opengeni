@@ -1,5 +1,5 @@
 import type { HumanInputQuestion, HumanInputSecretSaveTo } from "@opengeni/sdk";
-import { useEffect, useRef, useState, type ComponentRef } from "react";
+import { useEffect, useRef, useState, type ComponentRef, type RefObject } from "react";
 import { Pressable, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
 import { Icon } from "./icon";
@@ -12,7 +12,9 @@ import {
   secretUsernameTraits,
   type SecretDraft,
   type SecretFieldMessages,
+  type SecretInputTraits,
 } from "./secret-field-model";
+import { useInlineInputFocus } from "./inline-input-focus";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /* ----------------------------------------------------------------------------
@@ -126,48 +128,21 @@ export function SecretQuestionField({
           <Button label={messages.undo} variant="ghost" disabled={disabled} onPress={undo} />
         </View>
       ) : (
-        <View
-          style={{ ...valueFrame, flexDirection: "row", alignItems: "center", paddingLeft: 10 }}
-        >
-          <Icon name="lock" size={14} color={c["fg-subtle"]} />
-          <TextInput
-            ref={input}
-            testID={`secret-input-${question.id}`}
-            accessibilityLabel={question.label ?? question.prompt}
-            accessibilityHint={spec?.looksLike ? messages.looksLike(spec.looksLike) : undefined}
-            editable={!disabled}
-            secureTextEntry={!revealed}
-            textContentType={traits.textContentType}
-            autoComplete={traits.autoComplete}
-            importantForAutofill={traits.importantForAutofill}
-            keyboardType={traits.keyboardType}
-            passwordRules={traits.passwordRules}
-            autoCorrect={traits.autoCorrect}
-            autoCapitalize={traits.autoCapitalize}
-            spellCheck={traits.spellCheck}
-            returnKeyType="done"
-            onChangeText={change}
-            placeholder={messages.placeholder[traits.mode]}
-            placeholderTextColor={c["fg-subtle"]}
-            style={{ ...text, flex: 1, minHeight: 42, paddingHorizontal: 8 }}
-          />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={revealed ? messages.hide : messages.show}
-            accessibilityState={{ disabled }}
-            disabled={disabled}
-            onPress={() => setRevealed((value) => !value)}
-            style={({ pressed }) => ({
-              width: 44,
-              height: 42,
-              alignItems: "center",
-              justifyContent: "center",
-              opacity: pressed ? 0.6 : 1,
-            })}
-          >
-            <Icon name={revealed ? "eye-off" : "eye"} size={16} color={c["fg-muted"]} />
-          </Pressable>
-        </View>
+        <SecureValueInput
+          inputRef={input}
+          testID={`secret-input-${question.id}`}
+          accessibilityLabel={question.label ?? question.prompt}
+          accessibilityHint={spec?.looksLike ? messages.looksLike(spec.looksLike) : undefined}
+          editable={!disabled}
+          traits={traits}
+          placeholder={messages.placeholder[traits.mode]}
+          onChangeText={change}
+          invalid={Boolean(error)}
+          revealed={revealed}
+          onRevealedChange={setRevealed}
+          showLabel={messages.show}
+          hideLabel={messages.hide}
+        />
       )}
 
       {error ? (
@@ -238,6 +213,118 @@ export function SecretQuestionField({
           <Text style={{ ...note, color: c["fg-subtle"] }}>{messages.vaultHint(spec.vault)}</Text>
         ) : null}
       </View>
+    </View>
+  );
+}
+
+export interface SecureValueInputProps {
+  inputRef?: RefObject<ComponentRef<typeof TextInput> | null> | undefined;
+  testID?: string | undefined;
+  accessibilityLabel: string;
+  accessibilityHint?: string | undefined;
+  editable: boolean;
+  traits: SecretInputTraits;
+  placeholder: string;
+  /** Receives every keystroke; keep it in a ref, never in React state. */
+  onChangeText: (value: string) => void;
+  onSubmitEditing?: (() => void) | undefined;
+  returnKeyType?: "done" | "next" | undefined;
+  invalid?: boolean | undefined;
+  revealed: boolean;
+  onRevealedChange: (revealed: boolean) => void;
+  showLabel: string;
+  hideLabel: string;
+}
+
+/**
+ * The secure value field: a lock, an uncontrolled `TextInput` with the
+ * platform's secure entry and autofill traits, and a show / hide toggle. The
+ * value never enters React state. Secret questions and in-chat key setup share it.
+ */
+export function SecureValueInput({
+  inputRef,
+  testID,
+  accessibilityLabel,
+  accessibilityHint,
+  editable,
+  traits,
+  placeholder,
+  onChangeText,
+  onSubmitEditing,
+  returnKeyType = "done",
+  invalid,
+  revealed,
+  onRevealedChange,
+  showLabel,
+  hideLabel,
+}: SecureValueInputProps) {
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  // In a timeline card the conversation keeps this field above the keyboard.
+  const frame = useRef<ComponentRef<typeof View>>(null);
+  const focus = useInlineInputFocus(() => frame.current);
+  return (
+    <View
+      ref={frame}
+      style={{
+        minHeight: 44,
+        borderRadius: theme.radius.sm,
+        borderWidth: 1,
+        borderColor: invalid ? c["status-failed"] : c.border,
+        backgroundColor: c["surface-1"],
+        flexDirection: "row",
+        alignItems: "center",
+        paddingLeft: 10,
+      }}
+    >
+      <Icon name="lock" size={14} color={c["fg-subtle"]} />
+      <TextInput
+        ref={inputRef}
+        testID={testID}
+        accessibilityLabel={accessibilityLabel}
+        accessibilityHint={accessibilityHint}
+        editable={editable}
+        secureTextEntry={!revealed}
+        textContentType={traits.textContentType}
+        autoComplete={traits.autoComplete}
+        importantForAutofill={traits.importantForAutofill}
+        keyboardType={traits.keyboardType}
+        passwordRules={traits.passwordRules}
+        autoCorrect={traits.autoCorrect}
+        autoCapitalize={traits.autoCapitalize}
+        spellCheck={traits.spellCheck}
+        returnKeyType={returnKeyType}
+        onSubmitEditing={onSubmitEditing}
+        onChangeText={onChangeText}
+        onFocus={focus.onFocus}
+        onBlur={focus.onBlur}
+        placeholder={placeholder}
+        placeholderTextColor={c["fg-subtle"]}
+        style={{
+          ...fontStyle(theme),
+          fontSize: theme.size.sm,
+          color: c.fg,
+          flex: 1,
+          minHeight: 42,
+          paddingHorizontal: 8,
+        }}
+      />
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={revealed ? hideLabel : showLabel}
+        accessibilityState={{ disabled: !editable }}
+        disabled={!editable}
+        onPress={() => onRevealedChange(!revealed)}
+        style={({ pressed }) => ({
+          width: 44,
+          height: 42,
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: pressed ? 0.6 : 1,
+        })}
+      >
+        <Icon name={revealed ? "eye-off" : "eye"} size={16} color={c["fg-muted"]} />
+      </Pressable>
     </View>
   );
 }

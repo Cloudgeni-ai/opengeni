@@ -8,6 +8,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
+import { olderBrowserControllerMessage } from "./browser-controller-compatibility";
 import {
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_NOTES_VERSION,
@@ -624,15 +625,22 @@ export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
 }
 
-function browserControllerCompatibilityError(feature: string): BrowserControlRequestError {
+function browserControllerCompatibilityError(
+  feature: string,
+  controllerInAgent: boolean,
+): BrowserControlRequestError {
   return new BrowserControlRequestError(409, {
     code: "unsupported",
-    message: `browser controller does not support ${feature}; update the placement's controller image to match this release`,
+    // A controller embedded in the Opengeni agent updates with that agent;
+    // only image-backed placements have a controller image.
+    message: controllerInAgent
+      ? `browser controller does not support ${feature}; it runs in an older Opengeni agent, and updating the agent adds support`
+      : `browser controller does not support ${feature}; update the placement's controller image to match this release`,
     retryable: false,
   });
 }
 
-/** The controller's route table rejected a request before dispatch: its image
+/** The controller's route table rejected a request before dispatch: its release
  *  predates this route. Distinct from a missing target or session. */
 function isLegacyRouteMiss(error: unknown): boolean {
   return (
@@ -744,6 +752,13 @@ export class BrowserControlClient {
     this.port = boundedPort(options.port ?? BROWSER_CONTROL_PORT);
     this.timeoutMs = boundedTimeout(options.timeoutMs ?? 60_000);
     this.nativeAuthority = options.nativeAuthority;
+  }
+
+  /** True when the controller ships inside the placement's Opengeni agent
+   *  (connected machines, attached devices, compute sandboxes) rather than a
+   *  controller image pinned to this release. */
+  controllerRunsInAgent(): boolean {
+    return typeof this.session.ensureBrowserControl === "function";
   }
 
   async addAllowedOrigins(origins: readonly string[]): Promise<readonly string[]> {
@@ -1991,7 +2006,11 @@ export class BrowserControlSessionClient {
     } catch (error) {
       // A controller older than browser recording has no such route; say so
       // instead of surfacing a bare "route not found".
-      if (isLegacyRouteMiss(error)) throw browserControllerCompatibilityError("browser recording");
+      if (isLegacyRouteMiss(error))
+        throw browserControllerCompatibilityError(
+          "browser recording",
+          this.parent.controllerRunsInAgent(),
+        );
       throw error;
     }
     return BrowserRecordingSummary.parse(data);
@@ -2233,7 +2252,10 @@ export class BrowserControlSessionClient {
       // Protocol v1 predates focused DOM reads. Distinguish that exact legacy
       // route response from a missing target/session; neither is safe to retry.
       if (isLegacyRouteMiss(error)) {
-        throw browserControllerCompatibilityError("focused DOM reads");
+        throw browserControllerCompatibilityError(
+          "focused DOM reads",
+          this.parent.controllerRunsInAgent(),
+        );
       }
       throw error;
     }
@@ -2319,13 +2341,22 @@ export class BrowserControlSessionClient {
       // This command already passed the release's schema. The controller's
       // exact parser rejection proves a schema mismatch, not invalid tool use.
       // Do not replay the action, restart the controller, or lose live tabs.
+      // The controller parses before it runs anything, so nothing ran; name the
+      // newer option it did not know.
       if (
         error instanceof BrowserControlRequestError &&
         error.status === 400 &&
         error.error.code === "invalid_action" &&
         error.error.message === "browser action is invalid"
       ) {
-        throw browserControllerCompatibilityError("this browser action");
+        throw new BrowserControlRequestError(409, {
+          code: "unsupported",
+          message: olderBrowserControllerMessage(
+            parsed.action,
+            this.parent.controllerRunsInAgent(),
+          ),
+          retryable: false,
+        });
       }
       throw error;
     }

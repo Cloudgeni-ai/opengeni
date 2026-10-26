@@ -100,6 +100,12 @@ before the workers to avoid that window; nothing is stored wrongly either way.
 Once no API image older than 0527 can run, a later rolling migration drops
 `session_events_meaningful_attention_idx` (the 0503 index) and its schema entry.
 
+## Signup and free-credit abuse controls
+
+See [signup abuse protection](signup-abuse-protection.md) for Turnstile configuration,
+rolling migrations 0981–0982, operator review, and default-off automatic holds.
+Funding enforcement requires every API and worker reader to be upgraded first.
+
 ## Verified signup trial runtime switch (0521)
 
 **Current behavior after 0845:** new verified signup receipts carry zero money

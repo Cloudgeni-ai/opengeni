@@ -68,6 +68,7 @@ export type BrowserTextObservation = {
       | undefined;
     removedRefCount?: number | undefined;
     clippedFieldCount?: number | undefined;
+    unreadNodeCount?: number | undefined;
   };
 };
 
@@ -303,6 +304,11 @@ export function browserObservationText(
     clippedNote(view.clippedFieldCount ?? 0, nodes),
   ].filter((entry): entry is string => entry !== null);
   if (notes.length) lines.push(`(${notes.join("; ")})`);
+  if (view.unreadNodeCount && view.sourceKind !== "diff") {
+    lines.push(
+      `Partial outline: the page is too large to read whole, and at least ${plural(view.unreadNodeCount, "element")} ${view.unreadNodeCount === 1 ? "was" : "were"} not read. It lists the page's structure and the part on screen; scroll to bring other parts into it.`,
+    );
+  }
   return lines.join("\n");
 }
 

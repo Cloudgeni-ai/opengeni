@@ -228,6 +228,54 @@ describe("readiness and deterministic planning", () => {
   test("recognizes human prose exact-head VM and independent review without formal approval", () => {
     expect(admit(input()).ready?.headSha).toBe(SHA);
   });
+  test("a trusted green root lands while runner headroom is blocked; CI-starting actions stay gated", () => {
+    const active = { ...cfg, mode: "active" as const };
+    const blocked = (reason: string): NonNullable<Observation["headroom"]> => ({
+      allowed: false,
+      reason,
+      budget: 52,
+      occupied: 60,
+      reservedMain: 30,
+      candidateSlots: 18,
+      occupiedBatchSlots: cfg.maxInflight,
+      publicationBlocked: true,
+    });
+    for (const reason of [
+      "Incomplete or inconsistent active workflow observation",
+      "Active workflow observation exceeded its scan deadline",
+      "Invalid hosted job limit or other-repository allowance",
+      "Configure allocated repository runner budget and full-main reserve",
+    ]) {
+      const green = candidate();
+      green.runs = [run(green, "success")];
+      const o = { ...observation([pull(1)], [green]), mainBusy: true, headroom: blocked(reason) };
+      const landing = plan(o, active);
+      expect(landing.kind).toBe("land");
+      if (landing.kind === "land")
+        expect(landing.candidate.manifest.tipSha).toBe(green.manifest.tipSha);
+      // The same headroom still withholds publication and the single retry.
+      expect(plan({ ...o, candidates: [] }, active)).toMatchObject({
+        kind: "build",
+        publish: false,
+      });
+      const flaky = candidate();
+      flaky.runs = [run(flaky, "infrastructure")];
+      expect(plan({ ...o, candidates: [flaky] }, active)).toMatchObject({
+        kind: "wait",
+        reason: "retry requires completion evidence and an available Batch slot",
+      });
+      // Untrusted, running or mismatched evidence never lands, headroom or not.
+      for (const runs of [
+        [run(green, "success", 1, false)],
+        [{ ...run(green, "success"), status: "in_progress" as const }],
+        [{ ...run(green, "success"), headSha: "f".repeat(40) }],
+      ]) {
+        green.runs = runs;
+        expect(plan(o, active).kind).not.toBe("land");
+        expect(plan({ ...o, mainBusy: false, headroom: null }, active).kind).not.toBe("land");
+      }
+    }
+  });
   test.each([
     "Independent review failed",
     "Independent review pending",
@@ -669,9 +717,13 @@ describe("controller isolation and fencing", () => {
     fencedSideEffects: true,
     reason: "test provider",
   };
-  test("shadow builds locally but never calls a write adapter, even if supplied", async () => {
+  test("shadow builds despite ready conflicts and never stages or writes notices", async () => {
     const f = await fixture();
-    const o = { ...observation([pull(1, f.first)]), baseSha: f.base };
+    const o = {
+      ...observation([pull(1, f.first)]),
+      baseSha: f.base,
+      conflicts: [{ number: 2, headSha: "a".repeat(40) }],
+    };
     let writes = 0;
     const controller = new Controller(
       { ...cfg, outputDir: join(f.root, "stage") },
@@ -680,6 +732,9 @@ describe("controller isolation and fencing", () => {
       "shadow",
       {
         capabilities,
+        prepareLedger: () => {
+          throw Error("shadow must not stage effects");
+        },
         transact: async () => {
           writes++;
         },
@@ -689,6 +744,7 @@ describe("controller isolation and fencing", () => {
     const r = await controller.step();
     expect(r.manifest?.pulls[0]!.headSha).toBe(f.first);
     expect(writes).toBe(0);
+    expect((await controller.step()).action.kind).toBe("build");
     expect(await f.git.remoteRefs(f.origin.dir)).toEqual(before);
     const saved = JSON.parse(await readFile(join(f.root, "stage", "stage.json"), "utf8"));
     expect(saved.result.manifest.tipSha).toBe(r.manifest!.tipSha);
@@ -1368,8 +1424,9 @@ describe("integration boundaries and queue-only shadow CI", () => {
       }
       c.runs = [run(c, "success")];
       expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
+      // Runner headroom never holds a tested green root: landing uses no runner.
       o.mainBusy = true;
-      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("wait");
+      expect(plan(o, { ...cfg, mode: "active" }).kind).toBe("land");
     },
   );
   test("old recovery groups can test subsets but unannounced code blame stays held", () => {
@@ -1579,11 +1636,23 @@ describe("integration boundaries and queue-only shadow CI", () => {
     );
     expect(await f.git.inspect(m.tipSha)).toEqual(m);
   });
-  test("control-plane changes are singleton barriers and require explicit review prose", () => {
+  test("control-plane heads run alone when oldest but do not underfill preceding ordinary batches", () => {
     const p = { ...pull(2), controlPlane: true };
     expect(bindingKey(p)).not.toBe(bindingKey(pull(2)));
-    expect(fifo([pull(1), p, pull(3)], 16).map((x) => x.number)).toEqual([1]);
+    expect(fifo([pull(1), p, pull(3)], 16).map((x) => x.number)).toEqual([1, 3]);
     expect(fifo([p, pull(3)], 16)).toEqual([p]);
+    const queue = [pull(5), pull(1), p, pull(4), pull(3)];
+    const selected = fifo(queue, 3);
+    expect(selected.map((x) => x.number)).toEqual([1, 3, 4]);
+    expect(
+      fifo(
+        queue.filter((x) => !selected.some((chosen) => chosen.number === x.number)),
+        3,
+      ),
+    ).toEqual([p]);
+    const version = { ...pull(4), headRef: "changeset-release/main" };
+    expect(fifo([pull(5), version, p, pull(3), pull(1)], 16).map((x) => x.number)).toEqual([1, 3]);
+    expect(fifo([version, pull(5)], 16)).toEqual([version]);
     const input: PullInput = {
       number: 2,
       headSha: p.headSha,
@@ -2322,7 +2391,7 @@ describe("review regressions: observation, admission and telemetry", () => {
     };
     expect(plan(o, cfg).kind).toBe("land");
     expect(plan({ ...o, candidates: [] }, cfg).kind).toBe("build");
-    expect(plan({ ...o, mainBusy: true }, cfg).kind).toBe("wait");
+    expect(plan({ ...o, mainBusy: true }, cfg).kind).toBe("land");
     expect(plan({ ...o, ready: [] }, cfg).kind).toBe("record");
     expect(plan({ ...o, ready: [pull(1, "f".repeat(40))] }, cfg).kind).toBe("record");
     expect(plan({ ...o, baseSha: "f".repeat(40) }, cfg).kind).toBe("record");
@@ -2368,7 +2437,7 @@ describe("review regressions: observation, admission and telemetry", () => {
       { o: observation(failed.manifest.pulls, [failed]), expected: "record" },
       { o: observation([pull(1)], [retry]), expected: "retry" },
       { o: observation([pull(1)], [landed]), expected: "land" },
-      { o: { ...observation([pull(1)], [landed]), mainBusy: true }, expected: "wait" },
+      { o: { ...observation([pull(1)], [landed]), mainBusy: true }, expected: "land" },
       { o: observation([pull(1)], [pending]), expected: "wait" },
     ];
     for (const { o, expected } of scenarios) {

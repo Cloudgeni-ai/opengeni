@@ -21,8 +21,11 @@ import {
   interactivePreviewKind,
   type InteractivePreviewKind,
 } from "@opengeni/react/native-previews";
+import { prepareMathMarkdown } from "@opengeni/react/markdown-math";
 import { Icon } from "./icon";
 import { isStandaloneLinkGroup, soleTextGroupOf } from "./markdown-standalone-links";
+import { DisplayMath, InlineMath } from "./markdown-math";
+import { markdownItMath } from "./markdown-math-parser";
 import { withAlpha as withAlphaColor } from "./primitives";
 import type { NativeMarkdownRenderer } from "./message-timeline";
 import {
@@ -43,6 +46,14 @@ import { useNativeTimelineMessages } from "./messages";
 const PARSER = (() => {
   const parser = MarkdownIt({ typographer: false, linkify: true });
   parser.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
+  return parser;
+})();
+
+/** The same parser plus `$$` math, used only for messages that contain math. */
+const MATH_PARSER = (() => {
+  const parser = MarkdownIt({ typographer: false, linkify: true });
+  parser.linkify.set({ fuzzyLink: false, fuzzyEmail: false });
+  parser.use(markdownItMath);
   return parser;
 })();
 
@@ -600,6 +611,33 @@ function webRules(
         <MarkdownImage key={node.key} src={src} alt={alt} />
       );
     },
+    // `$$…$$` math (messages with math only; see MATH_PARSER).
+    math_inline: (node, _children, _parent, styles, inheritedStyles = {}) => {
+      const inherited = inheritedStyles as TextStyle;
+      const body = styles.body as TextStyle;
+      return (
+        <InlineMath
+          key={node.key}
+          tex={typeof node.content === "string" ? node.content : ""}
+          fontSize={inherited.fontSize ?? body.fontSize ?? theme.size.md}
+          lineHeight={inherited.lineHeight ?? body.lineHeight}
+          color={String(inherited.color ?? body.color ?? theme.colors.fg)}
+          fallbackStyle={styles.code_inline as TextStyle}
+        />
+      );
+    },
+    math_block: (node, _children, _parent, styles) => {
+      const body = styles.body as TextStyle;
+      return (
+        <DisplayMath
+          key={node.key}
+          tex={typeof node.content === "string" ? node.content : ""}
+          fontSize={body.fontSize ?? theme.size.md}
+          color={String(body.color ?? theme.colors.fg)}
+          fallbackStyle={styles.code_block as TextStyle}
+        />
+      );
+    },
   };
 }
 
@@ -736,6 +774,7 @@ function MarkdownImage({ src, alt }: { src: string; alt: string }) {
 function TrimmedMarkdown({
   text,
   tone,
+  textStyle,
   streaming,
   onLinkPress,
   onCopy,
@@ -743,13 +782,18 @@ function TrimmedMarkdown({
 }: {
   text: string;
   tone: "body" | "muted";
+  textStyle?: TextStyle | undefined;
   streaming: boolean;
   onLinkPress?: ((url: string) => boolean) | undefined;
   onCopy?: ((text: string) => void) | undefined;
   media: MarkdownMediaOptions & MarkdownLinkOptions;
 }) {
   const theme = useNativeTimelineTheme();
-  const styles = useMemo(() => webMarkdownStyles(theme, tone), [theme, tone]);
+  const math = useMemo(() => prepareMathMarkdown(text), [text]);
+  const styles = useMemo(() => {
+    const base = webMarkdownStyles(theme, tone);
+    return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
+  }, [theme, tone, textStyle]);
   const rules = useMemo(() => webRules(theme, tone, onCopy, media), [theme, tone, onCopy, media]);
   const openTail = useMemo(
     () => (media.renderInteractiveBlock ? trailingOpenFence(text) : null),
@@ -760,12 +804,12 @@ function TrimmedMarkdown({
     <View style={{ marginBottom: -10 }}>
       <FenceStateContext.Provider value={fenceState}>
         <Markdown
-          markdownit={PARSER}
+          markdownit={math.hasMath ? MATH_PARSER : PARSER}
           style={styles}
           rules={rules}
           {...(onLinkPress ? { onLinkPress } : {})}
         >
-          {text}
+          {math.hasMath ? math.text : text}
         </Markdown>
       </FenceStateContext.Provider>
     </View>
@@ -795,11 +839,12 @@ export function createWebMarkdownRenderer(
     renderInteractiveBlock: options.renderInteractiveBlock,
     renderLink: options.renderLink,
   };
-  return (text, { tone, streaming }): ReactNode =>
+  return (text, { tone, streaming, textStyle }): ReactNode =>
     text.trim() ? (
       <TrimmedMarkdown
         text={text}
         tone={tone}
+        textStyle={textStyle}
         streaming={streaming === true}
         onLinkPress={onLinkPress}
         onCopy={options.onCopy}

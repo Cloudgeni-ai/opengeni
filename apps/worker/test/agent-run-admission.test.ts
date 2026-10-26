@@ -4,7 +4,7 @@ import * as opengeniCore from "@opengeni/core";
 import { testSettings } from "@opengeni/testing/settings";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { metadataWithTurnExecutionPolicyV1 } from "@opengeni/contracts";
-import { agentRunAdmissionDenial } from "../src/activities/agent-run-admission";
+import { agentRunAdmissionDenial } from "@opengeni/core";
 import { createGoalActivities, goalRunBudgetBlocked } from "../src/activities/goals";
 import type { ControlActivityServices } from "../src/activities/types";
 import { checkLimit } from "@opengeni/core";
@@ -17,7 +17,7 @@ const ACCOUNT = "00000000-0000-4000-8000-000000000001";
 const WORKSPACE = "00000000-0000-4000-8000-000000000002";
 
 function mockZeroBalance(): () => void {
-  const spy = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+  const spy = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
     accountId: ACCOUNT,
     balanceMicros: 0,
     currency: "usd",
@@ -94,7 +94,9 @@ describe("worker agent-run admission funding", () => {
   });
 
   test("API, run admission and between-call admission all respect eligible models", async () => {
-    const balance = spyOn(opengeniDb, "getBillingBalance").mockResolvedValue({
+    // Keep model eligibility projection real while stubbing the database boundary:
+    // getSpendableCreditBalance now evaluates abuse evidence in an RLS transaction.
+    const ledgerBalance = {
       accountId: ACCOUNT,
       balanceMicros: 100,
       generalBalanceMicros: 0,
@@ -109,7 +111,13 @@ describe("worker agent-run admission funding", () => {
           eligibleModelIds: ["gpt-6-luna"],
         },
       ],
-    });
+    };
+    const balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockImplementation(
+      async (_db, _accountId, usage) => ({
+        ...ledgerBalance,
+        balanceMicros: opengeniDb.spendableCreditMicros(ledgerBalance, usage),
+      }),
+    );
     const codex = spyOn(opengeniDb, "isCodexBilledTurn").mockResolvedValue(false);
     const services = {
       db: {} as opengeniDb.Database,
@@ -138,6 +146,11 @@ describe("worker agent-run admission funding", () => {
         });
         if (allowed) await expect(check).resolves.toBe(7);
         else await expect(check).rejects.toThrow("insufficient workspace credits");
+        expect(balance.mock.calls.slice(-3).map((call) => call.slice(0, 3))).toEqual([
+          [services.db, ACCOUNT, model],
+          [services.db, ACCOUNT, model],
+          [services.db, ACCOUNT, model],
+        ]);
       }
     } finally {
       balance.mockRestore();

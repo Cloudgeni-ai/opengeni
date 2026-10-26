@@ -29,6 +29,10 @@
       "types": "./src/main/mac-login-agent.ts",
       "default": "./src/main/mac-login-agent.ts"
     },
+    "./system-audio": {
+      "types": "./src/main/system-audio.ts",
+      "default": "./src/main/system-audio.ts"
+    },
     "./preload": {
       "types": "./src/preload/content.ts",
       "default": "./src/preload/content.ts"
@@ -36,6 +40,10 @@
     "./preload/welcome": {
       "types": "./src/preload/welcome.ts",
       "default": "./src/preload/welcome.ts"
+    },
+    "./preload/system-audio": {
+      "types": "./src/preload/system-audio.ts",
+      "default": "./src/preload/system-audio.ts"
     }
   },
   "publishConfig": {

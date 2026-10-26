@@ -61,7 +61,6 @@ import {
   SandboxLeaseTransitionError,
   waitWhileLeaseWarming,
   type Database,
-  type LeaseHolderKind,
 } from "@opengeni/db";
 import {
   captureWorkspaceArchiveForStorage,
@@ -109,9 +108,6 @@ import {
   persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "./sandbox-archive-storage";
-
-// Re-exported for callers that just want the ack-kind union.
-export type ResumeHolderKind = LeaseHolderKind;
 
 /**
  * The durable identity of a turn holding a shared sandbox lease.

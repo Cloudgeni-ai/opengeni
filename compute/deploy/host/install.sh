@@ -39,8 +39,9 @@
 #     guard if they are not running, and restarts the agent
 #
 # An upgrade is the same command with a newer bundle. Restarting the agent
-# leaves its VMs running (ADR 9); the guard is never restarted, because the
-# watchdog resets the machine when it ends. See docs/operations.md.
+# leaves its VMs running (ADR 9); a guard running another binary is handed
+# over to this one's, which picks up the watchdog well inside its timeout.
+# See docs/operations.md.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -231,8 +232,29 @@ if [ -n "$start" ]; then
   /opt/compute/current/compute-host-certificate
   systemctl start compute-host-certificate.timer
   systemctl start compute-host-setup.service
-  # Started once, never restarted (see compute-guard.service).
-  systemctl is-active -q compute-guard.service || systemctl start compute-guard.service
+  # The guard runs the binary it was started from, so one running any
+  # other file, of another release or replaced in this one, is handed over
+  # to this one's by restarting it, once systemd keeps its watchdog open
+  # (see compute-guard.service): the new guard takes it over. A guard of a
+  # release before that store closes the watchdog as it ends, which feeds
+  # it at whatever moment that is, so it runs on until the host starts
+  # again or is replaced. Files are told apart by device and inode, which a
+  # replaced binary's path does not change. The agent, restarted with the
+  # guard, joins once the new guard is ready.
+  if ! systemctl is-active -q compute-guard.service; then
+    systemctl start compute-guard.service
+  else
+    guard_pid=$(systemctl show -p MainPID --value compute-guard.service)
+    guard_runs=$(stat -L -c %d:%i "/proc/$guard_pid/exe" 2>/dev/null || true)
+    if [ "$guard_runs" != "$(stat -L -c %d:%i /opt/compute/current/compute-host)" ]; then
+      if [ "$(systemctl show -p NFileDescriptorStore --value compute-guard.service)" -ge 1 ] 2>/dev/null; then
+        log "handing the guard over to release $version"
+        systemctl restart compute-guard.service
+      else
+        log "the guard of an earlier release keeps the watchdog itself: it runs on until the host starts again or is replaced"
+      fi
+    fi
+  fi
   systemctl restart compute-host.service
   for _ in $(seq 60); do
     if /opt/compute/current/compute-host status >/dev/null 2>&1; then

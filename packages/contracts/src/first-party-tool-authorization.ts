@@ -39,9 +39,12 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   knowledge_get: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_browse: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_retain_file: { sessionRequired: true, allOf: ["documents:search", "files:read"] },
-  // Recorded meetings, read as the person the session works for.
+  // Recorded meetings, read as the person the session works for. Saving notes
+  // follows the meeting: it succeeds only on a meeting that person can see,
+  // like knowledge writes, and never needs session orchestration rights.
   meetings_search: { sessionRequired: true, allOf: ["sessions:read"] },
   meeting_read: { sessionRequired: true, allOf: ["sessions:read"] },
+  meeting_notes_save: { sessionRequired: true, allOf: ["sessions:read"] },
   knowledge_retain_message: { sessionRequired: true, allOf: ["documents:search", "sessions:read"] },
   knowledge_save: { sessionRequired: true, allOf: ["documents:search"] },
   knowledge_archive: { sessionRequired: true, allOf: ["documents:search"] },

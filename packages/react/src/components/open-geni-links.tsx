@@ -8,6 +8,10 @@ export type { OpenGeniLinkTarget };
  * How the host opens one Opengeni object an agent linked in chat Markdown.
  *
  * - `{ href }` renders a real link (new tab) — use it for a host page URL.
+ * - `{ href, open }` renders a real link to an in-app page: a plain click runs
+ *   `open` (client-side navigation in the same view), while modified clicks
+ *   (⌘/Ctrl, Shift, middle button) keep the browser's own handling of `href`,
+ *   such as a new tab, or the external browser in a desktop shell.
  * - `{ open }` renders a button that runs the action (download, open a panel,
  *   client-side navigation) with loading and retry states.
  * - `null` / `undefined` means "not handled here": the next resolver is asked,
@@ -15,7 +19,7 @@ export type { OpenGeniLinkTarget };
  *   never as a navigation that would 404 inside the host.
  */
 export type OpenGeniLinkResolution =
-  | { href: string; open?: undefined }
+  | { href: string; open?: (() => void) | undefined }
   | { open: () => void | Promise<void>; href?: undefined };
 
 export type OpenGeniLinkResolver = (
@@ -43,7 +47,7 @@ export type OpenGeniHostLink = {
 /**
  * Draw a host-owned link in agent Markdown. Return `undefined` to keep the
  * default rendering (web links open in a new tab; other schemes are shown as
- * unavailable). Opengeni object links (`artifact:`, `sandbox:`) never reach
+ * unavailable). Opengeni object links (`artifact:`, `sandbox:`, `session:`) never reach
  * it; use {@link OpenGeniLinkResolver} for those.
  */
 export type OpenGeniLinkRenderer = (link: OpenGeniHostLink) => ReactNode | undefined;

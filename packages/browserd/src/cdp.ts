@@ -1,9 +1,50 @@
+import { WebSocket as SizedWebSocket } from "ws";
+
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 10 * 60_000;
 const MAX_PENDING_COMMANDS = 4_096;
 const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
 const MAX_COMMAND_BYTES = 4 * 1024 * 1024;
+/** Bytes of a refused message read to tell which command or event it was:
+ * Chromium writes a response's id, and an event's method, first. */
+const REFUSED_MESSAGE_HEAD_BYTES = 256;
+/**
+ * The largest frame the socket itself takes. Above this a WebSocket client
+ * errors the whole socket before any message handler runs, so it is far above
+ * MAX_MESSAGE_BYTES: a larger message is still refused one by one (see
+ * acceptMessage) instead of ending the connection. Bun's global WebSocket
+ * cannot raise its fixed 128 MiB limit, which a full-page screenshot or one
+ * console message of a single large page can pass; its built-in ws client
+ * takes this bound (at most 2^31 - 1).
+ */
+const MAX_FRAME_BYTES = 2 ** 31 - 1;
+
+/** The part of a WebSocket a CdpConnection uses. */
+export type CdpSocket = {
+  binaryType: string;
+  readonly readyState: number;
+  send(data: string): void;
+  close(): void;
+  addEventListener(
+    type: "open" | "message" | "close" | "error",
+    // oxlint-disable-next-line typescript/no-explicit-any -- DOM and ws event types differ.
+    listener: (event: any) => void,
+    options?: { once?: boolean },
+  ): void;
+  removeEventListener(
+    type: "open" | "message" | "close" | "error",
+    // oxlint-disable-next-line typescript/no-explicit-any -- DOM and ws event types differ.
+    listener: (event: any) => void,
+  ): void;
+};
+
+function sizedWebSocket(url: string): CdpSocket {
+  return new SizedWebSocket(url, {
+    maxPayload: MAX_FRAME_BYTES,
+    perMessageDeflate: false,
+  }) as unknown as CdpSocket;
+}
 
 export type CdpEvent = {
   method: string;
@@ -15,7 +56,7 @@ export type CdpConnectOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
   allowRemote?: boolean;
-  createWebSocket?: (url: string) => WebSocket;
+  createWebSocket?: (url: string) => CdpSocket;
 };
 
 export type CdpSendOptions = {
@@ -41,6 +82,38 @@ export class CdpTransportError extends Error {
     this.name = "CdpTransportError";
   }
 }
+
+/**
+ * One response the connection would not accept: larger than its byte bound,
+ * or not a JSON object. Only the command it answers fails; the connection
+ * and every other command and target carry on.
+ */
+export class CdpResponseRefusedError extends Error {
+  constructor(
+    readonly method: string,
+    readonly reason: "too_large" | "invalid",
+    readonly bytes: number,
+    bound = MAX_MESSAGE_BYTES,
+  ) {
+    super(
+      reason === "too_large"
+        ? `CDP ${method} response of ${bytes} bytes is larger than its ${bound}-byte bound`
+        : `CDP ${method} returned a response that is not valid JSON`,
+    );
+    this.name = "CdpResponseRefusedError";
+  }
+}
+
+/** A message the connection dropped without failing: an event (or a late
+ * response) that was too large or not valid JSON. */
+export type CdpDroppedMessage = {
+  /** The event's method, or null for a response or an unrecognizable message. */
+  method: string | null;
+  reason: "too_large" | "invalid";
+  bytes: number;
+  /** The flattened target session the message was for, when it says. */
+  sessionId?: string;
+};
 
 export class CdpCommandTimeoutError extends CdpTransportError {
   constructor(
@@ -79,10 +152,13 @@ export class CdpConnection {
   private messageTail: Promise<void> = Promise.resolve();
   private failure: CdpTransportError | null = null;
   private readonly disconnectListeners = new Set<() => void>();
+  private readonly droppedListeners = new Set<(message: CdpDroppedMessage) => void>();
+  /** Messages dropped since the connection opened; see CdpDroppedMessage. */
+  droppedMessageCount = 0;
 
-  private constructor(private readonly socket: WebSocket) {
+  private constructor(private readonly socket: CdpSocket) {
     socket.binaryType = "arraybuffer";
-    socket.addEventListener("message", (event) => {
+    socket.addEventListener("message", (event: { data: string | ArrayBuffer | Blob }) => {
       this.messageTail = this.messageTail
         .then(async () => {
           await this.acceptMessage(event.data);
@@ -103,7 +179,7 @@ export class CdpConnection {
     validateEndpoint(endpoint, options.allowRemote === true);
     const timeoutMs = boundedTimeout(options.timeoutMs, DEFAULT_CONNECT_TIMEOUT_MS);
     if (options.signal?.aborted) throw new CdpTransportError("CDP connection was aborted");
-    const socket = (options.createWebSocket ?? ((url) => new WebSocket(url)))(endpoint);
+    const socket = (options.createWebSocket ?? sizedWebSocket)(endpoint);
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         socket.close();
@@ -274,6 +350,14 @@ export class CdpConnection {
     };
   }
 
+  /** Called for every message the connection drops instead of failing. */
+  onDroppedMessage(listener: (message: CdpDroppedMessage) => void): () => void {
+    this.droppedListeners.add(listener);
+    return () => {
+      this.droppedListeners.delete(listener);
+    };
+  }
+
   close(): void {
     if (
       this.socket.readyState === WebSocket.OPEN ||
@@ -285,17 +369,36 @@ export class CdpConnection {
   }
 
   private async acceptMessage(data: string | ArrayBuffer | Blob): Promise<void> {
+    // One message the connection cannot take (a whole accessibility tree of
+    // a very large page, a console message logging megabytes) must not end
+    // the connection, which carries every tab: it fails only the command it
+    // answers, or is dropped and counted when it is an event.
+    const bytes =
+      typeof data === "string"
+        ? Buffer.byteLength(data)
+        : data instanceof ArrayBuffer
+          ? data.byteLength
+          : data.size;
+    if (bytes > MAX_MESSAGE_BYTES) {
+      this.refuse(data, "too_large", bytes);
+      return;
+    }
     const text =
       typeof data === "string"
         ? data
         : data instanceof ArrayBuffer
           ? Buffer.from(data).toString("utf8")
           : await data.text();
-    if (Buffer.byteLength(text) > MAX_MESSAGE_BYTES) {
-      throw new Error("oversized CDP message");
+    let message: unknown;
+    try {
+      message = JSON.parse(text);
+    } catch {
+      message = null;
     }
-    const message: unknown = JSON.parse(text);
-    if (!isRecord(message)) throw new Error("invalid CDP message");
+    if (!isRecord(message)) {
+      this.refuse(text, "invalid", bytes);
+      return;
+    }
     if (typeof message.id === "number") {
       const pending = this.pending.get(message.id);
       if (!pending) return;
@@ -346,6 +449,35 @@ export class CdpConnection {
     }
   }
 
+  /** Fail the one command a refused message answers, or drop the event. */
+  private refuse(
+    data: string | ArrayBuffer | Blob,
+    reason: "too_large" | "invalid",
+    bytes: number,
+  ): void {
+    const fields = refusedMessageFields(data);
+    const pending = fields.id === null ? undefined : this.pending.get(fields.id);
+    if (fields.id !== null && pending) {
+      this.settlePending(fields.id);
+      pending.reject(new CdpResponseRefusedError(pending.method, reason, bytes));
+      return;
+    }
+    this.droppedMessageCount += 1;
+    const message: CdpDroppedMessage = {
+      method: fields.id === null ? fields.method : null,
+      reason,
+      bytes,
+      ...(fields.sessionId === null ? {} : { sessionId: fields.sessionId }),
+    };
+    for (const listener of this.droppedListeners) {
+      try {
+        listener(message);
+      } catch {
+        // Observers cannot corrupt protocol dispatch.
+      }
+    }
+  }
+
   private settlePending(id: number): void {
     const pending = this.pending.get(id);
     if (!pending) return;
@@ -362,6 +494,7 @@ export class CdpConnection {
       pending.reject(error);
     }
     this.listeners.clear();
+    this.droppedListeners.clear();
     for (const listener of this.disconnectListeners) {
       try {
         listener();
@@ -415,4 +548,105 @@ function boundedMessage(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type RefusedMessageFields = {
+  id: number | null;
+  method: string | null;
+  sessionId: string | null;
+};
+
+const RESPONSE_HEAD = /^\s*\{\s*"id"\s*:\s*(\d{1,15})\s*[,}]/u;
+const EVENT_HEAD = /^\s*\{\s*"method"\s*:\s*"([A-Za-z0-9_.]{1,128})"/u;
+const SESSION_TAIL = /,\s*"sessionId"\s*:\s*"([A-Za-z0-9_-]{1,128})"\s*\}\s*$/u;
+
+/**
+ * The top-level id, method and session id of a message the connection would
+ * not take, without parsing all of it. Chromium writes a response's id (or an
+ * event's method) first and a flattened session id last, so the ends answer
+ * it at once; any other key order (or a message cut short or corrupted after
+ * its fields) falls back to a scan of the top-level keys that skips every
+ * nested value without building it.
+ */
+export function refusedMessageFields(data: string | ArrayBuffer | Blob): RefusedMessageFields {
+  // Chromium sends text frames, so a binary or blob message is not one of
+  // its replies and is only counted.
+  if (typeof data !== "string") return { id: null, method: null, sessionId: null };
+  const head = data.slice(0, REFUSED_MESSAGE_HEAD_BYTES);
+  const tail = data.slice(-REFUSED_MESSAGE_HEAD_BYTES);
+  const id = RESPONSE_HEAD.exec(head)?.[1];
+  const method = id ? undefined : EVENT_HEAD.exec(head)?.[1];
+  if (id || method) {
+    return {
+      id: id ? Number(id) : null,
+      method: method ?? null,
+      sessionId: SESSION_TAIL.exec(tail)?.[1] ?? null,
+    };
+  }
+  return scanTopLevelFields(data);
+}
+
+/** Top-level id, method and sessionId of a JSON object text, read by one pass
+ * that skips nested values; whatever was found before an error is kept. */
+function scanTopLevelFields(text: string): RefusedMessageFields {
+  const found: RefusedMessageFields = { id: null, method: null, sessionId: null };
+  let index = 0;
+  const space = () => {
+    while (index < text.length && " \t\r\n".includes(text[index]!)) index += 1;
+  };
+  // A string from its opening quote; the value when it is short, else null.
+  const string = (): string | null => {
+    const start = (index += 1);
+    while (index < text.length && text[index] !== '"') index += text[index] === "\\" ? 2 : 1;
+    if (index >= text.length) throw new Error("unterminated string");
+    index += 1;
+    const raw = text.slice(start, index - 1);
+    return raw.length <= 128 && !raw.includes("\\") ? raw : null;
+  };
+  const skipValue = () => {
+    let depth = 0;
+    do {
+      space();
+      const char = text[index];
+      if (char === undefined) throw new Error("unterminated value");
+      if (char === '"') {
+        string();
+      } else if (char === "{" || char === "[") {
+        depth += 1;
+        index += 1;
+      } else if (char === "}" || char === "]") {
+        depth -= 1;
+        index += 1;
+      } else if (char === "," || char === ":") index += 1;
+      else while (index < text.length && !",:]} \t\r\n".includes(text[index]!)) index += 1;
+    } while (depth > 0);
+  };
+  try {
+    space();
+    if (text[index] !== "{") return found;
+    index += 1;
+    for (;;) {
+      space();
+      if (text[index] !== '"') return found;
+      const key = string();
+      space();
+      if (text[index] !== ":") return found;
+      index += 1;
+      space();
+      const start = index;
+      if (key === "id" && /[0-9]/u.test(text[index] ?? "")) {
+        skipValue();
+        const id = Number(text.slice(start, index));
+        if (Number.isSafeInteger(id)) found.id = id;
+      } else if ((key === "method" || key === "sessionId") && text[index] === '"') {
+        const value = string();
+        if (value !== null) found[key] = value;
+      } else skipValue();
+      space();
+      if (text[index] !== ",") return found;
+      index += 1;
+    }
+  } catch {
+    return found;
+  }
 }

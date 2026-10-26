@@ -216,7 +216,10 @@ test("custom MCP setup retains discovery failures and can retry into sign-in", a
   );
   try {
     await flush();
-    expect(document.querySelector('[role="alert"]')?.textContent).toContain("HTTP 403");
+    // The provider's raw response stays out of the card.
+    const alert = document.querySelector('[role="alert"]')?.textContent ?? "";
+    expect(alert).toContain("Could not determine how to sign in. Try again.");
+    expect(alert).not.toContain("HTTP 403");
     const retry = [...document.querySelectorAll("button")].find(
       (button) => button.textContent === "Retry",
     );
@@ -1058,9 +1061,86 @@ test("a failed conversation attach never continues the agent's request", async (
     await actRun(() => use!.click());
     await flush();
     expect(h.calls).toEqual(["updateSessionToolPolicy"]);
-    expect(document.querySelector('[role="alert"]')?.textContent ?? "").toContain(
-      "Version conflict",
+    // The server's text stays out of the card; the person gets its plain line.
+    const alert = document.querySelector('[role="alert"]')?.textContent ?? "";
+    expect(alert).toContain("Connection setup could not finish. Try again.");
+    expect(alert).not.toContain("Version conflict");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a network or API failure on first load shows only the card's plain line", async () => {
+  const failures: Array<[string, () => Promise<never>]> = [
+    ["Network request failed", async () => Promise.reject(new Error("Network request failed"))],
+    [
+      "upstream 502 from capability service",
+      async () =>
+        Promise.reject(
+          Object.assign(new TypeError("upstream 502 from capability service"), { status: 502 }),
+        ),
+    ],
+  ];
+  for (const [raw, listCapabilities] of failures) {
+    const client = {
+      listCapabilities,
+      getSession: async () => ({ toolPolicy: { mode: "explicit" }, tools: [] }),
+      connectTransport: () => ({}),
+    } as unknown as OpenGeniClient;
+    const view = await renderComponent(
+      <McpConnectionCard
+        client={client}
+        workspaceId="workspace"
+        sessionId="session"
+        capabilityId="service"
+        name="Example service"
+        returnUrl="https://host.example/"
+        dialogOnly
+      />,
     );
+    try {
+      await flush();
+      const text = document.body.textContent ?? "";
+      expect(text).toContain("Couldn't load connection details.");
+      expect(text).not.toContain(raw);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("a server's sign-in inspection message stays out of the card", async () => {
+  const custom = {
+    ...item,
+    enabled: false,
+    authKind: null,
+    connectionRef: null,
+  } as unknown as CapabilityCatalogItem;
+  const client = {
+    listCapabilities: async () => ({ items: [custom] }),
+    getSession: async () => ({ toolPolicy: { mode: "explicit" }, tools: [] }),
+    inspectMcpAuthentication: async () => ({
+      kind: "unknown",
+      message: "probe of internal endpoint returned 418",
+    }),
+    connectTransport: () => ({}),
+  } as unknown as OpenGeniClient;
+  const view = await renderComponent(
+    <McpConnectionCard
+      client={client}
+      workspaceId="workspace"
+      sessionId="session"
+      capabilityId="service"
+      name="Example service"
+      returnUrl="https://host.example/"
+      dialogOnly
+    />,
+  );
+  try {
+    await flush();
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Could not determine how to sign in. Try again.");
+    expect(text).not.toContain("probe of internal endpoint");
   } finally {
     await view.unmount();
   }

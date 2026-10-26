@@ -63,6 +63,7 @@ import {
   getPendingDeviceEnrollmentRequestByUserCode,
   getPendingDeviceEnrollmentRequestByUserCodeGlobal,
   PersonalMachineConnectedElsewhereError,
+  recordMachinePromotionProof,
   type Database,
   type DeviceEnrollmentRequestRecord,
   type EnrollmentOs,
@@ -145,6 +146,11 @@ export async function renewEnrollmentCredentials(
   } catch {
     return null;
   }
+  await recordMachinePromotionProof(services.db, {
+    workspaceId: enrollment.workspaceId,
+    enrollmentId: enrollment.id,
+    credentialGeneration: enrollment.credentialGeneration,
+  });
   // A concurrent revoke/re-enrollment still wins: issued credentials retain the
   // captured generation, which the control-plane claim rechecks transactionally.
   return buildEnrollmentCredentials(services, {

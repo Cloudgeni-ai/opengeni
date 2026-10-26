@@ -1150,6 +1150,12 @@ async fn a_hand_off_during_a_removal_is_told_to_try_again() {
         let handle = one.handle.clone();
         async move { handle.remove(sandbox, None).await }
     });
+    // The removal is under way once the host no longer lists the sandbox;
+    // a hand-off sent before it reached the host would just be done.
+    one.wait_until(&format!("{sandbox} being removed"), |status| {
+        status.sandboxes.iter().all(|listed| listed.id != sandbox)
+    })
+    .await;
     let mut busy = 0;
     loop {
         match hand_off(&one, sandbox, 1).await {

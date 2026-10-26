@@ -69,6 +69,20 @@ enabling it changes no session's backend.
    in place, recording their version. It also takes two Postgres advisory
    locks (7231401 for its schema, and its leader lock); keep them free in
    a shared database.
+   Its connections give up on a database the network stops answering:
+   5 s to reach it, 10 s to open a connection in all, 15 s for data left
+   unacknowledged, and keepalives after a minute idle, under the idle
+   limit of cloud NAT gateways and load balancers. A connection string
+   can choose other values (`connect_timeout`, `tcp_user_timeout`,
+   `keepalives_idle`, `keepalives_interval`, `keepalives_retries`) but
+   not turn the bounds off: a zero for one of the four durations, and a
+   `keepalives_idle` of exactly 7200 (the library's default, which reads
+   as unset), get the bound. `keepalives=0` still turns keepalives off,
+   and `keepalives_retries=0` is kept as given. A
+   replica that has read no hosts from the database for a lease term
+   cannot tell which hosts renew: it answers creates and wakes 503
+   `unavailable` ("has not read its hosts from the store"), not
+   `no_capacity`.
 2. **Its keys.** API keys are `team key` lines in a Secret
    (`computeControl.keys.existingSecret`, entry `keys`); the service
    stores their digests at every start. Make one key for Opengeni's team
@@ -312,9 +326,10 @@ installs three units:
   and fails only if still short), no transparent huge pages,
   the software watchdog (3 s, `nowayout`) where the machine has no
   hardware one, and no suspend;
-- `compute-guard.service`, started once and never restarted: it stops
-  every VM when the host's lease runs out, and the watchdog resets the
-  machine if the guard itself ends;
+- `compute-guard.service`, never restarted on failure: it stops every VM
+  when the host's lease runs out, and the watchdog resets the machine if
+  the guard itself ends. An upgrade hands it over to the new release's
+  guard (below);
 - `compute-host.service`, the agent, which checks before every start that
   the mounted state volume is the recorded one and that its certificate,
   Firecracker, kernel and base image are there (`check-host`), and runs
@@ -401,7 +416,10 @@ authority alone for agent links.
   before this option ignores it and leaves those sandboxes `left`.
   `POST /v1/sandboxes/<id>/move` takes
   `"awake": true` too. `POST /v1/hosts/<name>/undrain` takes the host
-  back.
+  back. A drained host stays drained until then, even if it is given up
+  on meanwhile (its lease lapsed, or it was fenced) and registers again:
+  it comes back draining, so a host on its way out never takes new
+  sandboxes.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,
   `gcloud compute instance-groups managed delete-instances` so the group
   does not replace it). Never delete a host that still owns sandboxes: the
@@ -809,9 +827,8 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   count was even when it began and the guard still writes the same after
   it ended. A guard that cannot write the file logs `the guard could not
   write its freeze count` once, and until it can, no check counts.
-  A guard from before the count keeps none, and then no check counts:
-  since an upgrade never restarts the guard, a host upgraded in place
-  finds stopped guests only from its next boot. It also
+  A guard from before the count keeps none, and then no check counts
+  until the host runs a guard that does. It also
   needs the host to be able to ask the VMM for the connection at all: a
   host that cannot reach a VM's vsock socket, as when it is out of
   descriptors, logs `could not check the guest` and counts nothing
@@ -853,8 +870,27 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   `--config`, the installed
   configuration stays):
   it installs the release beside the old ones, points
-  `/opt/compute/current` at it and restarts the agent alone; the guard is
-  never restarted. Old releases stay under `/opt/compute/releases`;
+  `/opt/compute/current` at it and restarts the agent; VMs keep running.
+  A guard running another binary (of another release, or one replaced
+  in this one) is handed over to this one's by restarting its service.
+  Opening or closing the watchdog feeds it (it stays armed), so the guard
+  opens it only at a step that may feed it and has systemd keep it open
+  in the service's file descriptor store (`systemd-analyze fdstore
+  compute-guard.service` shows it); it is ready only once systemd does. A
+  guard that ends, however it ends, then does not close it, and the new
+  guard takes it over from the store within milliseconds and goes on from
+  what the lease file and the freezer show (the watchdog resets the
+  machine if it does not within its 3 s). A guard of a release before
+  the store keeps the watchdog itself and would close it at whatever
+  moment it ended, so it is not handed over: it runs on until the host
+  starts again from a template naming a release with the store (see
+  below) or is replaced by a host made from one.
+  Installing such an earlier release over a later one (a rollback)
+  installs its unit, which keeps no descriptors, so systemd drops the
+  stored one; the running guard then keeps the watchdog itself, like an
+  earlier release's guard, until the host starts again.
+  Without the hand-over, a fix to the guard would reach a host only at
+  its next boot. Old releases stay under `/opt/compute/releases`;
   remove one once no pager runs from it (`fuser
   /opt/compute/releases/<version>/compute-host`). On GCP, set the new
   bundle in Terraform and apply it, so hosts created from then on install

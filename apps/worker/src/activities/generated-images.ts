@@ -598,29 +598,6 @@ function compactGeneratedImageRunStateItems(
   return serializedReceipt ? serialized : compacted;
 }
 
-export function collectGeneratedImageRunStateArtifactReceipts(
-  serialized: string,
-  target: Map<string, GeneratedImageReceipt> = new Map(),
-): Map<string, GeneratedImageReceipt> {
-  try {
-    const value: unknown = JSON.parse(serialized);
-    if (!value || typeof value !== "object" || Array.isArray(value)) return target;
-    visitRunStateProtocolItems(value as Record<string, unknown>, (items) => {
-      collectGeneratedImageArtifactReceipts(items, target);
-    });
-    visitRunStateItemWrappers(value as Record<string, unknown>, (wrappers) => {
-      for (const wrapper of wrappers) {
-        if (isRecord(wrapper) && isRecord(wrapper.rawItem)) {
-          collectGeneratedImageArtifactReceipts([wrapper.rawItem], target);
-        }
-      }
-    });
-  } catch {
-    // A provider-owned or legacy state format is opaque to this collector.
-  }
-  return target;
-}
-
 export function generatedImageReceiptFromUnknown(value: unknown): GeneratedImageReceipt | null {
   if (typeof value === "string" && value.length <= 4_096) {
     try {

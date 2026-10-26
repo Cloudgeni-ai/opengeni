@@ -24,14 +24,13 @@ export { isCapturing, useMeetingRecorder, type MeetingRecorder };
 
 export function MeetingRecorderProvider({ children }: { children: ReactNode }) {
   const { account, client, workspaceId } = useAccount();
-  if (!account || !workspaceId) return <>{children}</>;
-  // A new account is a new client and a new store: start a fresh recorder.
+  // A new account is a new client and a new store: the provider starts a fresh
+  // recorder for it, and the screens below stay as they are.
   return (
     <SharedRecorderProvider
-      key={account.id}
       client={client}
-      workspaceId={workspaceId}
-      storeScope={account.id}
+      workspaceId={account && workspaceId ? workspaceId : null}
+      {...(account ? { storeScope: account.id } : {})}
     >
       {children}
     </SharedRecorderProvider>

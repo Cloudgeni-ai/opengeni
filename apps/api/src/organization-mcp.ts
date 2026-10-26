@@ -11,7 +11,10 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   type OrganizationAccessPolicy,
 } from "@opengeni/contracts";
-import { stampDelegatedHumanAuthorization } from "@opengeni/core";
+import {
+  stampDelegatedHumanAuthorization,
+  stampWorkspacePersonAuthorization,
+} from "@opengeni/core";
 import { z } from "zod";
 
 import {
@@ -53,6 +56,32 @@ const MAX_RESPONSE_BYTES = 256 * 1024;
 /** Room left for the status, truncation note and hint around a trimmed body. */
 const RESULT_ENVELOPE_BYTES = 2 * 1024;
 const STREAM_READ_MS = 2_000;
+
+/**
+ * Someone who uses Opengeni through another product (an external user of the
+ * organization, for example a person in an embedded chat) acts in exactly one
+ * workspace, with no organization-level authority. Their one workspace, or
+ * null for anyone else.
+ */
+export function externalPersonWorkspace(caller: OrganizationMcpCaller): string | null {
+  if (caller.kind !== "person" || !caller.subjectId.startsWith("external_user:")) return null;
+  const scope = caller.access.workspaceScope;
+  return scope.kind === "selected" && scope.workspaceIds.length === 1
+    ? scope.workspaceIds[0]!
+    : null;
+}
+
+/** Whether an action works inside one named workspace, all an external person can reach. */
+export function actionInOneWorkspace(entry: ActionCatalogEntry): boolean {
+  return (
+    entry.path === "/v1/workspaces/:workspaceId" ||
+    entry.path.startsWith("/v1/workspaces/:workspaceId/")
+  );
+}
+
+/** Shown when a 401 or 403 answers an external person: this app doesn't offer it. */
+const EXTERNAL_PERSON_REFUSED_HINT =
+  "This isn't available to this person here. Tell them plainly, without pointing them to a page.";
 
 export const OrganizationActionSearchInput = z
   .object({
@@ -214,7 +243,13 @@ const DESCRIPTIONS = new Map(
   CALLABLE_ACTIONS.map((entry) => [entry.id, actionDescription(entry)] as const),
 );
 
-export function searchActions(input: { query: string; limit: number; offset: number }) {
+export function searchActions(input: {
+  query: string;
+  limit: number;
+  offset: number;
+  /** Only actions the caller can reach at all, when they can reach fewer than all. */
+  reachable?: (entry: ActionCatalogEntry) => boolean;
+}) {
   // Singular and plural match ("workspace" finds listWorkspaces).
   const stem = (word: string) =>
     word.endsWith("ies") ? `${word.slice(0, -3)}y` : word.replace(/(?<!s)s$/u, "");
@@ -250,7 +285,10 @@ export function searchActions(input: { query: string; limit: number; offset: num
       score: score + (plural && score > 0 && name[0] === "list" ? 0.5 : 0),
       size: name.length,
     };
-  }).filter((candidate) => wanted.length === 0 || candidate.score > 0);
+  }).filter(
+    (candidate) =>
+      (input.reachable?.(candidate.entry) ?? true) && (wanted.length === 0 || candidate.score > 0),
+  );
   scored.sort(
     (left, right) =>
       right.score - left.score ||
@@ -324,7 +362,12 @@ export async function callOrganizationAction(
   const outcome = await runOrganizationAction(context, input);
   return "refused" in outcome
     ? outcome.refused
-    : await toolResult(outcome.response, outcome.entry, input.query);
+    : await toolResult(
+        outcome.response,
+        outcome.entry,
+        input.query,
+        outcome.externalPerson === true,
+      );
 }
 
 /**
@@ -335,12 +378,31 @@ export async function callOrganizationAction(
 export async function runOrganizationAction(
   context: OrganizationActionContext,
   input: z.infer<typeof OrganizationActionCallInput>,
-): Promise<{ response: Response; entry: ActionCatalogEntry } | { refused: CallToolResult }> {
+): Promise<
+  | { response: Response; entry: ActionCatalogEntry; externalPerson?: true }
+  | { refused: CallToolResult }
+> {
   const entry = findAppAction(input.id);
   if (!entry) return { refused: failure(`No action "${input.id}". Search for it first.`) };
   if (entry.browserOnly) return { refused: browserOnly(entry) };
   if (entry.retired) return { refused: retired(entry) };
   const reads = entry.method === "GET" || entry.method === "HEAD";
+  const externalWorkspace = externalPersonWorkspace(context.caller);
+  if (context.caller.kind === "person" && context.caller.subjectId.startsWith("external_user:")) {
+    // Decided before any request, in one step: anything outside this person's
+    // one workspace can never succeed for them.
+    if (
+      !externalWorkspace ||
+      !actionInOneWorkspace(entry) ||
+      input.pathParameters.workspaceId !== externalWorkspace
+    ) {
+      return {
+        refused: failure(
+          `Nothing was run: this person uses Opengeni through another product, so app actions reach only this chat's workspace (workspaceId ${externalWorkspace ?? "unavailable"}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`,
+        ),
+      };
+    }
+  }
   if (
     context.caller.kind === "person" &&
     appActionChangesState(entry) &&
@@ -386,20 +448,34 @@ export async function runOrganizationAction(
     redirect: "manual",
   });
   if (context.caller.kind === "person") {
-    stampDelegatedHumanAuthorization(request, {
-      organizationId: context.caller.accountId,
-      subjectId: context.caller.subjectId,
-      permissions: context.caller.access.permissions,
-      workspaceScope: context.caller.access.workspaceScope,
-    });
+    if (externalWorkspace) {
+      stampWorkspacePersonAuthorization(request, {
+        organizationId: context.caller.accountId,
+        workspaceId: externalWorkspace,
+        subjectId: context.caller.subjectId,
+        permissions: context.caller.access.permissions,
+      });
+    } else {
+      stampDelegatedHumanAuthorization(request, {
+        organizationId: context.caller.accountId,
+        subjectId: context.caller.subjectId,
+        permissions: context.caller.access.permissions,
+        workspaceScope: context.caller.access.workspaceScope,
+      });
+    }
   }
-  return { response: await context.dispatch(request), entry };
+  return {
+    response: await context.dispatch(request),
+    entry,
+    ...(externalWorkspace ? { externalPerson: true } : {}),
+  };
 }
 
 async function toolResult(
   response: Response,
   entry: ActionCatalogEntry,
   query: z.infer<typeof OrganizationActionCallInput>["query"],
+  externalPerson: boolean,
 ): Promise<CallToolResult> {
   const status = response.status;
   const location = response.headers.get("location");
@@ -436,7 +512,9 @@ async function toolResult(
     if (truncated && !trimmed)
       result.truncated = { returnedBytes: MAX_RESPONSE_BYTES, totalBytes: bytes.byteLength };
   }
-  if (
+  if ((status === 401 || status === 403) && externalPerson) {
+    result.hint = EXTERNAL_PERSON_REFUSED_HINT;
+  } else if (
     (status === 401 || status === 403) &&
     /human|browser|cookie|same-origin/i.test(JSON.stringify(result.body ?? ""))
   ) {

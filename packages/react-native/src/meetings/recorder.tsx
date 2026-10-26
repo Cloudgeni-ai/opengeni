@@ -7,9 +7,23 @@
  * background. Unsent audio is kept per `storeScope` (the signed-in account) and
  * only ever uploaded with that account's client; recordings the app could not
  * finish (killed, offline) finish the next time that account is active.
+ *
+ * The recorder runs in a host beside the screens, not around them: a new
+ * `storeScope` or workspace starts a fresh recorder without remounting the
+ * screens below, and the live snapshot, which changes several times a second
+ * while recording, re-renders only the components that read it.
  */
 import { useRecorder, type UseRecorderResult } from "@opengeni/react/recordings";
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { useNativeRecorderPlatform, type NativeRecorderPlatformOptions } from "../recordings";
 
 export type MeetingRecorder = UseRecorderResult & {
@@ -17,19 +31,64 @@ export type MeetingRecorder = UseRecorderResult & {
   finished: readonly string[];
 };
 
-const MeetingRecorderContext = createContext<MeetingRecorder | null>(null);
+type RecorderStore = {
+  get: () => MeetingRecorder | null;
+  subscribe: (listener: () => void) => () => void;
+  set: (recorder: UseRecorderResult) => void;
+  /** Stop showing this recorder, unless another has replaced it already. */
+  release: (recorder: UseRecorderResult) => void;
+  markFinished: (recordingId: string) => void;
+};
+
+function createRecorderStore(): RecorderStore {
+  let recorder: UseRecorderResult | null = null;
+  let finished: readonly string[] = [];
+  let snapshot: MeetingRecorder | null = null;
+  const listeners = new Set<() => void>();
+  const publish = () => {
+    snapshot = recorder ? { ...recorder, finished } : null;
+    for (const listener of listeners) listener();
+  };
+  return {
+    get: () => snapshot,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    set: (next) => {
+      if (next === recorder) return;
+      recorder = next;
+      publish();
+    },
+    release: (previous) => {
+      if (previous !== recorder) return;
+      recorder = null;
+      publish();
+    },
+    markFinished: (recordingId) => {
+      finished = [...finished.filter((id) => id !== recordingId), recordingId];
+      publish();
+    },
+  };
+}
+
+const MeetingRecorderContext = createContext<RecorderStore | null>(null);
 
 export type MeetingRecorderProviderProps = NativeRecorderPlatformOptions & {
   /** The SDK client recordings upload with. The provider's client otherwise. */
   client?: object;
-  /** The workspace recordings are made in. The provider's workspace otherwise. */
-  workspaceId?: string;
+  /**
+   * The workspace recordings are made in. The provider's workspace when
+   * omitted; null while the host is still finding it (no recorder until then).
+   */
+  workspaceId?: string | null;
   children: ReactNode;
 };
 
 /**
- * Hold one recorder for everything below. Give it a new `key` when the account
- * changes: a new account is a new client and a new store, so a fresh recorder.
+ * Hold one recorder for everything below. When the account changes, pass its
+ * client and a new `storeScope`: the recorder for the old account stops
+ * capturing and finishes its uploads, and a fresh one starts for the new one.
  */
 export function MeetingRecorderProvider({
   client,
@@ -37,25 +96,59 @@ export function MeetingRecorderProvider({
   children,
   ...platformOptions
 }: MeetingRecorderProviderProps) {
+  const store = useMemo(createRecorderStore, []);
+  return (
+    <MeetingRecorderContext.Provider value={store}>
+      {children}
+      {workspaceId === null ? null : (
+        <RecorderHost
+          key={`${platformOptions.storeScope ?? ""}\n${workspaceId ?? ""}`}
+          store={store}
+          {...(client ? { client } : {})}
+          {...(workspaceId ? { workspaceId } : {})}
+          {...platformOptions}
+        />
+      )}
+    </MeetingRecorderContext.Provider>
+  );
+}
+
+/** Runs the recorder and publishes it to the provider's store; renders nothing. */
+function RecorderHost({
+  store,
+  client,
+  workspaceId,
+  ...platformOptions
+}: NativeRecorderPlatformOptions & {
+  store: RecorderStore;
+  client?: object;
+  workspaceId?: string;
+}) {
   const platform = useNativeRecorderPlatform(platformOptions);
-  const [finished, setFinished] = useState<readonly string[]>([]);
   const recorder = useRecorder({
     ...(client ? { client } : {}),
     ...(workspaceId ? { workspaceId } : {}),
     platform,
-    onFinished: (recordingId) =>
-      setFinished((previous) => [...previous.filter((id) => id !== recordingId), recordingId]),
+    onFinished: (recordingId) => store.markFinished(recordingId),
   });
-  // The recorder's result is new on each of its updates, so this changes exactly then.
-  const value = useMemo(() => ({ ...recorder, finished }), [recorder, finished]);
-  return (
-    <MeetingRecorderContext.Provider value={value}>{children}</MeetingRecorderContext.Provider>
-  );
+  const published = useRef(recorder);
+  useLayoutEffect(() => {
+    published.current = recorder;
+    store.set(recorder);
+  });
+  // A host for another account may already have published its own recorder.
+  useEffect(() => () => store.release(published.current), [store]);
+  return null;
 }
 
-/** The live recorder, or null outside a {@link MeetingRecorderProvider}. */
+/** The live recorder, or null outside a {@link MeetingRecorderProvider} or before it is ready. */
 export function useMeetingRecorder(): MeetingRecorder | null {
-  return useContext(MeetingRecorderContext);
+  const store = useContext(MeetingRecorderContext);
+  return useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    store?.get ?? nullSnapshot,
+    nullSnapshot,
+  );
 }
 
 /** True while capture holds the microphone. */
@@ -64,4 +157,12 @@ export function isCapturing(recorder: MeetingRecorder | null): boolean {
   return (
     state === "starting" || state === "recording" || state === "paused" || state === "stopping"
   );
+}
+
+function noopSubscribe(): () => void {
+  return () => {};
+}
+
+function nullSnapshot(): null {
+  return null;
 }

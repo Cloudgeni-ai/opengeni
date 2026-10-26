@@ -2729,6 +2729,10 @@ BEGIN
       END LOOP;
     END IF;
     FOREACH routine_signature IN ARRAY ARRAY[
+      'set_promotion_decision(uuid,text,text,text,jsonb,text,bigint)',
+      'set_promotion_enforcement(boolean,text,text,boolean)',
+      'evaluate_promotion_abuse(uuid)',
+      'set_promotion_detector_mode(text,text)',
       'wake_teams_route_for_session_event()',
       'sync_usage_maintenance_due()',
       'arm_usage_allowances_for_membership()',

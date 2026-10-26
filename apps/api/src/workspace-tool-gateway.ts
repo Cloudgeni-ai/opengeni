@@ -26,7 +26,6 @@ import {
   toolPolicyActionName,
   isSecretReferenceError,
   type AccessGrant,
-  type ToolGatewayCatalog,
   type ToolGatewayIdentity,
   type ToolRef,
   type ToolGatewayTarget,
@@ -1624,10 +1623,6 @@ async function inMemoryMcpRegistration(
       invalidateToolsCache: async () => undefined,
     },
   };
-}
-
-export function toolGatewayCatalogResponse(catalog: ToolGatewayCatalog): ToolGatewayCatalog {
-  return catalog;
 }
 
 export function workspaceToolGatewayDeclarations(

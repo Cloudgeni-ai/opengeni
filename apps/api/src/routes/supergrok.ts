@@ -44,7 +44,7 @@ import { HTTPException } from "hono/http-exception";
 import { projectClientModel } from "../model-catalog";
 import { readXaiCoreStatus } from "../xai-subscription-core";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { requireConnectOwnerAuthority } from "../integrations/connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 import { databaseUnavailableHttpError } from "../http/api-error";
 import { requirePrivateSubscriptionHuman } from "./subscription-pool-access";
 import { parseRequestBody } from "../http/request-body";

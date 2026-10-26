@@ -84,6 +84,7 @@ import {
   type SubscriptionCoreProvider,
 } from "./provider";
 import { readSubscriptionProviderCutoverState } from "../subscription-core-repository";
+import { usageReadTransportJoin } from "../usage-read-transport";
 import { recordSubscriptionUsageReading } from "./usage-reading";
 
 /** Who reads the connection, and in which context. */
@@ -140,13 +141,16 @@ const ORGANIZATION_MEMBERSHIP_LOCK_TIMEOUT = "5s";
 const ADMINISTERED_READ_MAX_BYTES = 1024 * 1024;
 const nativeFetch: SubscriptionCoreFetch = fetch;
 
-/** The join of an injected transport; null for native fetch; throws for any other. */
+/**
+ * The join of an injected transport; null for native fetch (also behind the
+ * API's request tracing); throws for any other.
+ */
 function joinedTransport(fetchImpl: SubscriptionCoreFetch) {
-  if (fetchImpl === nativeFetch) return null;
-  const candidate = fetchImpl as Partial<SubscriptionCoreAdministeredJoinedFetch>;
-  if (typeof candidate.abortAndJoin !== "function")
-    throw new Error("An administered usage read requires an abort-and-join transport");
-  return candidate.abortAndJoin.bind(fetchImpl);
+  return usageReadTransportJoin(
+    fetchImpl,
+    nativeFetch,
+    "An administered usage read requires an abort-and-join transport",
+  );
 }
 
 class NotVisible extends Error {}

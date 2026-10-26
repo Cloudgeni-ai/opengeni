@@ -19,6 +19,9 @@
 //! `align` reads `alignment.onnx` (Omnilingual ASR CTC) and
 //! `alignment-tokens.txt` from the same directory, and a JSON array of the
 //! transcript's words from `--words`.
+//!
+//! `diarize` and `embed` use [`SPEAKER_THREADS`] threads unless `--threads`
+//! says otherwise (fewer on a smaller machine); `align` uses every core.
 
 // Frame and speaker arithmetic reads more clearly with explicit indices.
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
@@ -88,13 +91,19 @@ impl Args {
             .ok_or(format!("give --models DIR or --{name} FILE"))?;
         Ok(PathBuf::from(dir).join(format!("{name}.onnx")))
     }
-    fn threads(&self) -> Result<usize> {
-        Ok(self
-            .get("threads")?
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
-            .max(1))
+    /// `--threads`, else `default` capped at the machine's cores.
+    fn threads(&self, default: usize) -> Result<usize> {
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+        Ok(self.get("threads")?.unwrap_or(default.min(cores)).max(1))
     }
 }
+
+/// Speaker detection's threads when `--threads` is not given. More threads
+/// finish a meeting little sooner but cost much more CPU and memory: on a
+/// 30 minute meeting, 4 threads take 47 s and 128 CPU-seconds, all 32 threads
+/// 21 s and 304 CPU-seconds. It runs alongside a transcription provider that
+/// takes about as long, so the extra speed rarely shows.
+const SPEAKER_THREADS: usize = 4;
 
 fn read_audio(args: &Args) -> Result<Vec<f32>> {
     match args.values.get("input") {
@@ -159,7 +168,7 @@ struct DiarizeOutput<'a> {
 
 fn run_diarize(args: &Args) -> Result<String> {
     let started = Instant::now();
-    let threads = args.threads()?;
+    let threads = args.threads(SPEAKER_THREADS)?;
     let env = ort::init()
         .with_name("opengeni-speakers")
         .build()
@@ -209,7 +218,7 @@ struct Voice {
 /// One voice vector per label: its speech, in pieces of up to ten seconds,
 /// embedded and averaged.
 fn run_embed(args: &Args) -> Result<String> {
-    let threads = args.threads()?;
+    let threads = args.threads(SPEAKER_THREADS)?;
     let file = args
         .values
         .get("segments")
@@ -286,7 +295,7 @@ struct AlignOutput {
 /// Word timings for a transcript that came without them.
 fn run_align(args: &Args) -> Result<String> {
     let started = Instant::now();
-    let threads = args.threads()?;
+    let threads = args.threads(usize::MAX)?;
     let file = args.values.get("words").ok_or("--words FILE is needed")?;
     let words: Vec<String> = serde_json::from_slice(
         &std::fs::read(file).map_err(|error| format!("reading {file}: {error}"))?,

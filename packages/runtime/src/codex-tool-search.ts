@@ -8,8 +8,6 @@ import {
   mcpSerializedSizeBytes,
 } from "./mcp-network";
 
-/** The prefix Opengeni's PrefixedMcpServer stamps on codex_apps connector tools. */
-export const CODEX_APPS_TOOL_PREFIX = "codex_apps__";
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 20;
 
@@ -133,12 +131,39 @@ function interactionToolName(name: string): string | null {
 const CUA_TOOL_PREFIX = "cua_";
 const CUA_WORKING_SET: readonly string[] = ["cua_get_window_state", "cua_run_steps"];
 
+/**
+ * Connecting a missing integration always takes both catalog steps: find it,
+ * then show its Connect card with the returned ID. They load together, so the
+ * card is never one more search away. Only the first-party server's tools.
+ */
+const INTEGRATION_SETUP_FAMILY: readonly string[] = [
+  "capability_catalog_search",
+  "capability_authorization_request",
+].map((name) => `${HARNESS_CONTROL_MCP_SERVER_ID}${MCP_TOOL_NAME_SEPARATOR}${name}`);
+
+/** The tool that shows an integration's Connect card. */
+export const INTEGRATION_CARD_TOOL_NAME = INTEGRATION_SETUP_FAMILY[1]!;
+/** The tool that searches the integration catalog. */
+export const INTEGRATION_CATALOG_TOOL_NAME = INTEGRATION_SETUP_FAMILY[0]!;
+
+/** The integration setup tools present in this authorized pool, in family order. */
+export function integrationSetupToolNames(pool: readonly Tool[]): string[] {
+  return INTEGRATION_SETUP_FAMILY.filter((name) =>
+    pool.some((tool) => tool.type === "function" && (tool as { name?: unknown }).name === name),
+  );
+}
+
+/** True for either integration setup tool. */
+export function isIntegrationSetupToolName(name: string): boolean {
+  return INTEGRATION_SETUP_FAMILY.includes(name);
+}
+
 /** The other members of every family a disclosed tool belongs to, in family order. */
 function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], pool: T[]): T[] {
   const disclosedShort = new Set(
     disclosed.map((tool) => interactionToolName(tool.name)).filter((name) => name !== null),
   );
-  const wanted = [
+  const wantedShort = [
     ...INTERACTION_TOOL_FAMILIES.filter((family) =>
       family.some((member) => disclosedShort.has(member)),
     ).flat(),
@@ -146,10 +171,19 @@ function familyCompanions<T extends Tool & { name: string }>(disclosed: T[], poo
       ? CUA_WORKING_SET
       : []),
   ];
+  const disclosedNames = new Set(disclosed.map((tool) => tool.name));
+  const wanted = [
+    ...wantedShort
+      .filter((member) => !disclosedShort.has(member))
+      .map((member) => `${INTERACTION_MCP_SERVER_ID}${MCP_TOOL_NAME_SEPARATOR}${member}`),
+    ...(INTEGRATION_SETUP_FAMILY.some((name) => disclosedNames.has(name))
+      ? INTEGRATION_SETUP_FAMILY
+      : []),
+  ];
   const companions: T[] = [];
-  for (const member of wanted) {
-    if (disclosedShort.has(member)) continue;
-    const tool = pool.find((candidate) => interactionToolName(candidate.name) === member);
+  for (const name of wanted) {
+    if (disclosedNames.has(name)) continue;
+    const tool = pool.find((candidate) => candidate.name === name);
     if (tool && !companions.includes(tool)) companions.push(tool);
   }
   return companions;

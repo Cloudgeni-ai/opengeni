@@ -71,7 +71,7 @@ export {
   type SpanKind,
   type TraceContext,
 } from "./trace-context";
-export { traceClientCalls, traceFetch } from "./client-spans";
+export { traceClientCalls, traceFetch, tracedFetchTarget } from "./client-spans";
 export {
   analyzeCpuSamples,
   captureCpuSamplingProfile,

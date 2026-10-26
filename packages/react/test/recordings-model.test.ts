@@ -15,8 +15,11 @@ import {
   formatDuration,
   groupTranscriptTurns,
   languageName,
+  meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -135,7 +138,7 @@ describe("formatting", () => {
 });
 
 describe("meetingPhase", () => {
-  test("capturing is uploading, whatever the transcript", () => {
+  test('capturing keeps its compatible "uploading" kind, whatever the transcript', () => {
     expect(meetingPhase(recordingWith("capturing", null)).kind).toBe("uploading");
   });
 
@@ -151,6 +154,65 @@ describe("meetingPhase", () => {
   test("a failed version or recording is failed", () => {
     expect(meetingPhase(recordingWith("failed", version("failed"))).kind).toBe("failed");
     expect(meetingPhase(recordingWith("failed", null)).kind).toBe("failed");
+  });
+});
+
+describe("meeting status", () => {
+  // The audio uploads while it records, so nothing the list or the meeting
+  // page says about a recording in progress is "Uploading".
+  test("a recording still capturing reads In progress, never Uploading", () => {
+    expect(meetingStatusLabel(meetingPhase(recordingWith("capturing", null)))).toEqual({
+      label: "In progress",
+      tone: "progress",
+    });
+  });
+
+  const upload = (overrides: Record<string, unknown> = {}) =>
+    ({
+      recordingId: "r1",
+      created: true,
+      pendingChunks: 1,
+      pendingBytes: 4_000,
+      uploading: true,
+      retryingAfterError: null,
+      failed: null,
+      finalized: false,
+      discarded: false,
+      ...overrides,
+    }) as const;
+
+  test("this device knows it is recording, paused, or stopped and transcribing", () => {
+    const here = (state: string, overrides = {}, online = true) =>
+      meetingHereStatus(
+        { state: state as "recording", recordingId: "r1", upload: upload(overrides) },
+        "r1",
+        online,
+      );
+    expect(here("recording")).toBe("recording");
+    expect(here("paused")).toBe("paused");
+    // After Stop the last few seconds of audio are on their way, then transcription starts.
+    expect(here("stopping")).toBe("transcribing");
+    expect(here("stopped", { finalized: true, pendingChunks: 0 })).toBe("transcribing");
+    // Only a connection problem or a refusal keeps it from transcribing.
+    expect(here("stopping", {}, false)).toBe("waiting_for_connection");
+    expect(here("stopping", { retryingAfterError: "Failed to fetch" })).toBe(
+      "waiting_for_connection",
+    );
+    expect(here("stopped", { failed: { code: "not_found", message: "Not found" } })).toBe(
+      "upload_failed",
+    );
+    expect(here("stopped", { discarded: true })).toBeNull();
+    // Capture failed before Stop: nothing is transcribing until it's recovered.
+    expect(here("failed")).toBeNull();
+    expect(here("failed", { finalized: true, pendingChunks: 0 })).toBe("transcribing");
+  });
+
+  test("another meeting, or no recorder, is left to the server's state", () => {
+    expect(meetingHereStatus(null, "r1")).toBeNull();
+    expect(
+      meetingHereStatus({ state: "recording", recordingId: "r2", upload: upload() }, "r1"),
+    ).toBeNull();
+    expect(meetingHereStatus({ state: "idle", recordingId: "r1", upload: null }, "r1")).toBeNull();
   });
 });
 
@@ -220,6 +282,14 @@ describe("speakers", () => {
     expect(defaultSpeakerName("track-4", tracks)).toBe("Track 5");
   });
 
+  test("beside computer audio the live microphone is the person recording, the rest is Others", () => {
+    expect(ownerLiveLaneName(tracks, 0, "Maja Berg")).toBe("Maja Berg");
+    expect(ownerLiveLaneName(tracks, 1, "Maja Berg")).toBe("Others");
+    // A microphone alone is named by its source as before.
+    const micOnly = tracks.filter((track) => track.source === "microphone");
+    expect(ownerLiveLaneName(micOnly, 0, "Maja Berg")).toBeNull();
+  });
+
   test("a label is named only by a person or a name someone gave it", () => {
     expect(speakerIsNamed("speaker_0", speakers)).toBe(true);
     expect(speakerIsNamed("speaker_1", speakers)).toBe(false);
@@ -267,7 +337,7 @@ describe("transcript turns", () => {
 
 test("error codes from the worker and providers read as plain advice", () => {
   expect(transcriptErrorText("missing_provider_key")).toContain("Organization settings");
-  expect(transcriptErrorText("provider_quota_exceeded")).toContain("no credit left");
+  expect(transcriptErrorText("provider_quota_exceeded")).toContain("out of credit");
   expect(transcriptErrorText("something_new")).toContain("Try again");
 });
 
@@ -277,7 +347,7 @@ test("a host's catalog and locale reach every label the helpers make", () => {
     messages: {
       "meetings.recordings.durationSeconds": "{seconds}\u00a0sek",
       "meetings.recordings.durationHoursMinutes": "{hours}\u00a0t {minutes}\u00a0min",
-      "meetings.recordings.uploading": "Laster opp",
+      "meetings.recordings.inProgress": "Pågår",
       "meetings.recordings.speakerNumber": "Taler {number}",
       "meetings.recordings.microphone": "Mikrofon",
       "meetings.recordings.unknownSpeaker": "Ukjent taler",
@@ -287,7 +357,7 @@ test("a host's catalog and locale reach every label the helpers make", () => {
   });
   expect(formatDuration(45_000, msg)).toBe("45\u00a0sek");
   expect(formatDuration(65 * 60_000, msg)).toBe("1\u00a0t 5\u00a0min");
-  expect(meetingStatusLabel({ kind: "uploading" }, msg)?.label).toBe("Laster opp");
+  expect(meetingStatusLabel({ kind: "uploading" }, msg)?.label).toBe("Pågår");
   expect(speakerDisplayName("t1_speaker_3", [], tracks, msg)).toBe("Taler 4");
   expect(speakerDisplayName(null, [], tracks, msg)).toBe("Ukjent taler");
   expect(defaultSpeakerName("track-0", tracks, msg)).toBe("Mikrofon");
@@ -296,4 +366,17 @@ test("a host's catalog and locale reach every label the helpers make", () => {
   // Language names follow the locale and start upper case, as a label does.
   expect(languageName("nob", "nb")).toBe("Norsk bokmål");
   expect(languageName("en", "nb")).toBe("Engelsk");
+});
+
+test("a meeting started without a title shows as a recorder would have named it", () => {
+  const startedAt = "2026-10-26T11:15:40.000Z";
+  const named = defaultMeetingTitle(new Date(startedAt));
+  expect(defaultMeetingTitle(new Date(2026, 9, 23, 14, 5))).toBe("Meeting, 23 Oct, 14:05");
+  expect(meetingTitle({ title: "Recording 2026-10-26 11:15 UTC", startedAt })).toBe(named);
+  expect(meetingTitle({ title: "  ", startedAt })).toBe(named);
+  // Its own title, or the stand-in for another time, stays as it is.
+  expect(meetingTitle({ title: "Weekly sync", startedAt })).toBe("Weekly sync");
+  expect(meetingTitle({ title: "Recording 2026-10-25 11:15 UTC", startedAt })).toBe(
+    "Recording 2026-10-25 11:15 UTC",
+  );
 });

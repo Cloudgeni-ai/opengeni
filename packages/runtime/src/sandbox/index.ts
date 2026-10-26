@@ -618,7 +618,6 @@ export {
   SelfhostedWorkspaceRootChangedError,
   SelfhostedSandboxClient,
   buildSelfhostedBackendSession,
-  isSelfhostedProviderNotFoundError,
   setSelfhostedApplyDiff,
   SELFHOSTED_DEFAULT_TIMEOUT_MS,
   SELFHOSTED_RELAY_STREAM_PATH,

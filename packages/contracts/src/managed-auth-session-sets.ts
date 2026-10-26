@@ -179,6 +179,7 @@ export const StartManagedAuthSocialTransactionRequest = /* @__PURE__ */ defineSc
   ManagedAuthOperationIdentity.extend({
     transactionId: primitives.uuid,
     provider: ManagedAuthSocialProvider,
+    signupChallengeToken: z.string().max(2048).optional(),
     /**
      * Optional untrusted first-touch campaign tokens, used only by the
      * content-free sign-up acquisition counter when this start creates a new

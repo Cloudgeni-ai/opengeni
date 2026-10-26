@@ -41,11 +41,12 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
     return { type: "sourceFile", filePath: path.join(nativeKitRoot, entry.default) };
   }
   if (moduleName.startsWith("@opengeni/")) {
-    return context.resolveRequest(
-      { ...context, originModulePath: nativeKitOrigin },
-      moduleName,
-      platform,
-    );
+    // The app reaches workspace packages through the native kit; a workspace package
+    // resolves its own dependencies (for example `@opengeni/react` uses `@opengeni/connect`).
+    const origin = context.originModulePath.startsWith(appRoot)
+      ? nativeKitOrigin
+      : context.originModulePath;
+    return context.resolveRequest({ ...context, originModulePath: origin }, moduleName, platform);
   }
   if (singletons.test(moduleName) && !context.originModulePath.startsWith(appRoot)) {
     return context.resolveRequest(

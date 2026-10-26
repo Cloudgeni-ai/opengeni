@@ -48,6 +48,16 @@ const GENERIC_QUERY_TERMS = new Set(words("tool capability operation details ava
 const isResourceTerm = (token: string) =>
   !OPERATIONS.some((group) => group.has(token)) && !GENERIC_QUERY_TERMS.has(token);
 
+/**
+ * Whether text is a single word the ranker reads as an operation or generic
+ * word ("Send", "Make", "tool"), not a resource: as an integration name in a
+ * query it is far more often the verb than the product.
+ */
+export function isOperationWord(text: string): boolean {
+  const tokens = words(text);
+  return tokens.length === 1 && !isResourceTerm(tokens[0]!);
+}
+
 type Field = { frequencies: Map<string, number>; length: number };
 type Document = {
   tool: Tool;
