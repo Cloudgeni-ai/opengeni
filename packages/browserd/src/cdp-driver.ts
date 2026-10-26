@@ -6950,6 +6950,7 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     if (requireHit && !(await this.hitsAtCenter(state, backendDOMNodeId))) {
       const revealed =
         (await this.revealFromStickyCover(state, backendDOMNodeId, frameId)) ??
+        (await this.visiblePartPoint(state, backendDOMNodeId)) ??
         (await this.revealByHover(state, backendDOMNodeId, frameId, point));
       if (!revealed) {
         const cover = await this.coveringElement(state, backendDOMNodeId);
@@ -6957,7 +6958,8 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
           "invalid_action",
           cover
             ? `browser element is covered by ${cover} at its center`
-            : "browser element is covered or not pointer-actionable",
+            : ((await this.unreachableReason(state, backendDOMNodeId)) ??
+                "browser element is covered or not pointer-actionable"),
           true,
         );
       }
@@ -7004,6 +7006,82 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   private async hitsAtCenter(state: TargetState, backendDOMNodeId: number): Promise<boolean> {
     return (await this.callOnNode(state, backendDOMNodeId, HIT_TEST_FUNCTION, [])) === true;
+  }
+
+  /**
+   * A target whose center lies outside the window or outside a container's
+   * clip (a header the page slides up as its content scrolls, a row cut off
+   * at a panel's edge) can still show part of itself, which is where a person
+   * clicks. Only used when nothing else is at the center: a target covered by
+   * another element keeps that refusal. Returns a point on the visible part
+   * that reaches the target, or null.
+   */
+  private async visiblePartPoint(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<{ x: number; y: number } | null> {
+    const fractions = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      VISIBLE_PART_FUNCTION,
+      [],
+    ).catch(() => null);
+    if (!Array.isArray(fractions) || fractions.length !== 2) return null;
+    const [fx, fy] = fractions;
+    if (typeof fx !== "number" || typeof fy !== "number") return null;
+    if (!(fx >= 0 && fx <= 1 && fy >= 0 && fy <= 1)) return null;
+    return await this.borderBoxPoint(state, backendDOMNodeId, fx, fy);
+  }
+
+  /** The point at the given fractions of a node's border box, in the same
+   * coordinates as centerPoint (the box follows the node's transforms). */
+  private async borderBoxPoint(
+    state: TargetState,
+    backendDOMNodeId: number,
+    fx: number,
+    fy: number,
+  ): Promise<{ x: number; y: number } | null> {
+    const result = await this.sendTarget<{ model?: unknown }>(state, "DOM.getBoxModel", {
+      backendNodeId: backendDOMNodeId,
+    }).catch(() => null);
+    if (!result || !isRecord(result.model) || !Array.isArray(result.model.border)) return null;
+    const quad = result.model.border.filter(
+      (value): value is number => typeof value === "number" && Number.isFinite(value),
+    );
+    if (quad.length < 8) return null;
+    // Corners: top-left, top-right, bottom-right, bottom-left.
+    const [x1, y1, x2, y2, x4, y4] = [quad[0]!, quad[1]!, quad[2]!, quad[3]!, quad[6]!, quad[7]!];
+    const offset = state.nodeRoute
+      ? await this.frameOffset(state, state.nodeRoute)
+      : { x: 0, y: 0 };
+    return {
+      x: offset.x + x1 + fx * (x2 - x1) + fy * (x4 - x1),
+      y: offset.y + y1 + fx * (y2 - y1) + fy * (y4 - y1),
+    };
+  }
+
+  /** Why a target nothing else covers still cannot take the pointer, as a
+   * refusal that says what to do instead; null when no reason is known. */
+  private async unreachableReason(
+    state: TargetState,
+    backendDOMNodeId: number,
+  ): Promise<string | null> {
+    const reason = await this.callOnNode(
+      state,
+      backendDOMNodeId,
+      UNREACHABLE_REASON_FUNCTION,
+      [],
+    ).catch(() => null);
+    switch (reason) {
+      case "pointer-events":
+        return "browser element does not take pointer input (pointer-events: none); press Enter on it or use another control";
+      case "outside":
+        return "browser element is out of view: nothing is at its center, which lies outside the window; scroll the page or panel back to it, or use another control";
+      case "clipped":
+        return "browser element is out of view: only its own container is at its center, where it is clipped or hidden; scroll the page or panel back to it, or use another control";
+      default:
+        return null;
+    }
   }
 
   /** A short role-and-label description of what receives pointer input at the
@@ -9641,6 +9719,66 @@ const COVER_DESCRIPTION_FUNCTION = `function() {
   const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
   if (!hit || owns(element, hit) || owns(hit, element)) return null;
   return describe(hit);
+}`;
+
+// The part of the target inside its window, as fractions of its border box
+// at a point there that reaches the target, nearest its centre; null when no
+// such point exists or something other than its own container is at its
+// centre. Its centre can be outside the window or a container's clip while
+// the rest of it shows.
+const VISIBLE_PART_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  ${HIT_HELPERS}
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const centre = topHit(element, cx, cy);
+  if (centre && !owns(centre, element)) return null;
+  const viewport = element.ownerDocument.documentElement;
+  const width = viewport.clientWidth || innerWidth;
+  const height = viewport.clientHeight || innerHeight;
+  // One pixel in from every edge, so rounding cannot put the press beside it.
+  const left = Math.max(rect.left, 0) + 1;
+  const right = Math.min(rect.right, width) - 1;
+  const top = Math.max(rect.top, 0) + 1;
+  const bottom = Math.min(rect.bottom, height) - 1;
+  if (right <= left || bottom <= top) return null;
+  const steps = [0.5, 0.25, 0.75, 0, 1];
+  const points = [];
+  for (const sy of steps) {
+    for (const sx of steps) {
+      const x = left + (right - left) * sx;
+      const y = top + (bottom - top) * sy;
+      points.push({ x, y, distance: (x - cx) ** 2 + (y - cy) ** 2 });
+    }
+  }
+  points.sort((a, b) => a.distance - b.distance);
+  for (const point of points) {
+    const hit = topHit(element, point.x, point.y);
+    if (hit && owns(element, hit)) {
+      return [(point.x - rect.left) / rect.width, (point.y - rect.top) / rect.height];
+    }
+  }
+  return null;
+}`;
+
+// Why a target that nothing else covers takes no pointer input:
+// "pointer-events" (pointer-events: none on it or inherited from a container),
+// "outside" (nothing is at its centre, which is outside the window),
+// "clipped" (its own container is on top at its centre: clipped by an
+// overflow edge or hidden there), or null.
+const UNREACHABLE_REASON_FUNCTION = `function() {
+  const element = this instanceof Element ? this : this.parentElement;
+  if (!(element instanceof Element) || !element.isConnected) return null;
+  ${HIT_HELPERS}
+  if (getComputedStyle(element).pointerEvents === "none") return "pointer-events";
+  const rect = element.getBoundingClientRect();
+  const hit = topHit(element, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!hit) return "outside";
+  if (!owns(element, hit) && owns(hit, element)) return "clipped";
+  return null;
 }`;
 
 // Guards one pointer click on the target. Hit-testing happens before input is
