@@ -219,10 +219,11 @@ const CONNECTED_CHROME_CAPTURE_STALLED =
   "browser screenshot stalled: Chrome did not draw this tab within 3 s, which happens while another tab is in front of it in its window; select it with browser_tabs to capture it, or read it with browser_observe";
 /** Chromium's own reply when it has no drawn surface to capture. */
 const CAPTURE_REFUSED_BY_CHROMIUM = "Unable to capture screenshot";
-/** Retries, 25, 50 and 100 ms apart, after Chromium refuses a capture. */
-const CAPTURE_REFUSAL_RETRIES = 3;
+/** Longest pause between captures Chromium refuses; pauses start at 25 ms
+ * and double up to this until the attempt's bound. */
+const CAPTURE_REFUSAL_MAX_PAUSE_MS = 200;
 const CAPTURE_REFUSED =
-  "browser screenshot unavailable: Chrome could not draw this tab, which can happen while it is not shown; select it with browser_tabs to capture it, or read it with browser_observe";
+  "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe";
 /** Longest a viewport capture waits for the compositor to present a just
  * changed emulated viewport before publishing what it has. */
 const STALE_SURFACE_SETTLE_MS = 1_500;
@@ -2139,10 +2140,14 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
                           throw error;
                         }
                         // Chromium refuses a capture of a tab it has not drawn
-                        // yet, and that request makes it draw one, so asking
-                        // again shortly after works, while time is left.
-                        const pause = 25 * 2 ** refused;
-                        if (refused < CAPTURE_REFUSAL_RETRIES && Date.now() + pause < until) {
+                        // yet: one not shown draws on the next request, and one
+                        // still loading (for example restored at launch) draws
+                        // within a few seconds, so ask again while time is left.
+                        const pause = Math.min(
+                          CAPTURE_REFUSAL_MAX_PAUSE_MS,
+                          25 * 2 ** Math.min(refused, 3),
+                        );
+                        if (Date.now() + pause < until) {
                           await delay(pause);
                           continue;
                         }

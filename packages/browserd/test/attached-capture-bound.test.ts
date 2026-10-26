@@ -210,13 +210,33 @@ test("a capture Chrome refuses for an undrawn tab is asked again", async () => {
   expect(captures).toBe(3);
 });
 
-test("a capture Chrome keeps refusing fails with a plain reason", async () => {
-  const { outcome, captures } = await capture({ inFront: true, refuses: () => true });
+test("a capture Chrome refuses while the tab loads works once it is drawn", async () => {
+  // Such as a tab restored at launch, which Chrome draws about 2 s later.
+  let first: number | undefined;
+  const { outcome, elapsed, captures } = await capture({
+    inFront: true,
+    refuses: () => performance.now() - (first ??= performance.now()) < 2_000,
+  });
+  expect(outcome).toMatchObject({ targetId: "7", width: 1, height: 1 });
+  expect(elapsed).toBeGreaterThanOrEqual(1_950);
+  expect(elapsed).toBeLessThan(2_500);
+  // Pauses grow to 200 ms, so a long refusal is not asked about every 25 ms.
+  expect(captures).toBeLessThan(16);
+}, 20_000);
+
+test("a capture Chrome keeps refusing fails with a plain reason at the deadline", async () => {
+  const { outcome, elapsed, captures, capturesLater } = await capture({
+    inFront: true,
+    refuses: () => true,
+  });
   expect(outcome).toMatchObject({
     code: "resource_unavailable",
     retryable: true,
     message:
-      "browser screenshot unavailable: Chrome could not draw this tab, which can happen while it is not shown; select it with browser_tabs to capture it, or read it with browser_observe",
+      "browser screenshot unavailable: Chrome has not drawn this tab, which happens while it is hidden or still loading; select it with browser_tabs to capture it, or read it with browser_observe",
   });
-  expect(captures).toBe(4);
-});
+  expect(elapsed).toBeGreaterThan(9_500);
+  expect(elapsed).toBeLessThan(10_500);
+  expect(captures).toBeGreaterThan(4);
+  expect(capturesLater).toBe(captures);
+}, 30_000);
