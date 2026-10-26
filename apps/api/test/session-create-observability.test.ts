@@ -5,7 +5,11 @@ import { readFileSync } from "node:fs";
 import { parseSync } from "oxc-parser";
 import { currentTraceContext, withTraceContext, type Span } from "@opengeni/observability";
 import { measureSessionCreatePhase } from "../src/session-create-observability";
-import { SITE_FRAME_HEADER, siteFrameBodyRefusal } from "@opengeni/contracts/site-session-http";
+import {
+  SITE_FRAME_HEADER,
+  siteFrameBodyRefusal,
+  withoutFileResources,
+} from "@opengeni/contracts/site-session-http";
 import { currentSiteViewerRlsContext } from "@opengeni/db";
 import {
   currentSiteSessionOrigin,
@@ -82,7 +86,7 @@ function productionRoute() {
       withEffectivePolicy, measureSessionCreatePhase,
       currentSiteSessionOrigin, currentSiteViewerRlsContext,
       siteFrameBodyRefusal, readSessionResponsePair, sessionUsageLimitForRead, isAgentActingAsPerson,
-      SITE_FRAME_HEADER, hasPermission, siteViewConversationContext } = ports;
+      SITE_FRAME_HEADER, hasPermission, siteViewConversationContext, withoutFileResources } = ports;
     ${code}
     return handler;
   `,
@@ -144,6 +148,7 @@ function routeFixture() {
     currentSiteSessionOrigin,
     currentSiteViewerRlsContext,
     siteFrameBodyRefusal,
+    withoutFileResources,
     SITE_FRAME_HEADER,
     // The Site view's first-message context is for people who may publish.
     hasPermission: () => false,
