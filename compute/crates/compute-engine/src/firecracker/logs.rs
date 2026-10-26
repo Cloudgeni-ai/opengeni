@@ -1,4 +1,6 @@
-//! What a guest last wrote to its serial console.
+//! A VM's logs: its guest's serial console, which is the VMM's standard
+//! output, and the VMM's own log; and what the guest last wrote on its
+//! console.
 //!
 //! Firecracker on x86 gives a guest no way to power off, so Linux halts
 //! instead, as it does for a halt: it stops its processors and its VM runs
@@ -9,12 +11,18 @@
 //! of it (such as its balloon's statistics, every few seconds), so after
 //! a halt the guest's last line is followed by the VMM's.
 
-use std::fs::File;
+use std::fs::{self, File};
+use std::future::Future;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::error::{EngineError, ErrorKind};
 
 /// The VMM's standard output in the VM's logs: its guest's serial console.
 pub(super) const CONSOLE_LOG: &str = "console.log";
+
+/// The VMM's own log file in the VM's logs.
+const VMM_LOG: &str = "vmm.log";
 
 /// How much of the console's end is read for the guest's last line: some
 /// minutes of the VMM's lines after it. The host trims long logs only from
@@ -29,11 +37,46 @@ const HALTED: [&str; 2] = [
     "reboot: Power off not available: System halted instead",
 ];
 
+/// Opens a launch's console and VMM log in the logs directory `dir`,
+/// which it makes if it is missing, each a [`fresh`] file.
+pub(super) fn open(dir: &Path) -> io::Result<(File, File)> {
+    fs::create_dir_all(dir)?;
+    Ok((fresh(&dir.join(CONSOLE_LOG))?, fresh(&dir.join(VMM_LOG))?))
+}
+
+/// A new, empty file at `path` for a launch's log. A new file rather than
+/// the old one emptied: the host trims long logs from their start while
+/// VMs run, and a trim measured on the old file must never punch out what
+/// the new launch writes into the same file.
+fn fresh(path: &Path) -> io::Result<File> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    File::options().write(true).create_new(true).open(path)
+}
+
+/// Whether VM `name`'s guest said it halted, on its console at `console`
+/// (see [`says_halted`]). The file is read in a blocking task, never on
+/// the caller's thread.
+pub(super) fn halted(
+    console: PathBuf,
+    name: String,
+) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
+    const OP: &str = "halted";
+    async move {
+        tokio::task::spawn_blocking(move || says_halted(&console, &name))
+            .await
+            .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+            .map_err(|error| EngineError::io(OP, error))
+    }
+}
+
 /// Whether the last line the guest of VM `name` wrote on the console kept
 /// at `path` is its kernel saying it halted. Only the last, and only once
 /// it is finished: a guest that wrote anything after, or is still writing
 /// its line, is not halted. Reads at most [`TAIL`] bytes.
-pub(super) fn says_halted(path: &Path, name: &str) -> io::Result<bool> {
+fn says_halted(path: &Path, name: &str) -> io::Result<bool> {
     let mut file = File::open(path)?;
     let length = file.metadata()?.len();
     file.seek(SeekFrom::Start(length.saturating_sub(TAIL)))?;
@@ -207,5 +250,37 @@ mod tests {
 
         std::fs::write(&path, "").unwrap();
         assert!(!says_halted(&path, NAME).unwrap());
+    }
+
+    #[test]
+    fn a_late_trim_of_the_last_log_spares_the_new_one() {
+        use std::io::Write;
+        use std::os::unix::fs::FileExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VMM_LOG);
+        fs::write(&path, vec![b'o'; 64 << 10]).unwrap();
+        // The trimmer opens and measures the old log...
+        let trimming = File::options().write(true).open(&path).unwrap();
+        let measured = trimming.metadata().unwrap().len();
+        // ...a new launch starts its log meanwhile...
+        let mut launched = fresh(&path).unwrap();
+        launched.write_all(b"new launch\n").unwrap();
+        // ...and the trim lands on what it measured.
+        let zeros = vec![0; usize::try_from(measured).unwrap()];
+        trimming.write_all_at(&zeros, 0).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new launch\n");
+    }
+
+    #[test]
+    fn a_launch_opens_both_logs_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        drop(open(&logs).unwrap());
+        fs::write(logs.join(CONSOLE_LOG), "old console").unwrap();
+        fs::write(logs.join(VMM_LOG), "old log").unwrap();
+        drop(open(&logs).unwrap());
+        assert_eq!(fs::read(logs.join(CONSOLE_LOG)).unwrap(), b"");
+        assert_eq!(fs::read(logs.join(VMM_LOG)).unwrap(), b"");
     }
 }
