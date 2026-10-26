@@ -361,7 +361,8 @@ readback separately from any Manual-fallback merge.
 
 Version commit subjects retain literal `changeset-release/main` for the existing
 non-coalescing main-CI lane. PRs touching `.github/workflows/batch-ci.yml`,
-`scripts/ci/batch-*` or `scripts/merge-batcher/**` are also singleton barriers.
+`scripts/ci/batch-*` or `scripts/merge-batcher/**` are also singletons: one runs
+alone once it is oldest, and ordinary PRs may fill batches past it.
 The same rule covers `scripts/ci/impact*`, `run-unit-shard*`, `profile-command*`,
 `shared-pg*`, `packages/testing/src/shared-pg.ts` and `.bun-version`, including
 renamed previous paths.

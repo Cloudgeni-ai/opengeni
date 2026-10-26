@@ -1626,6 +1626,36 @@ describe("integration boundaries and queue-only shadow CI", () => {
     input.comments[0]!.body += " Control-plane changes explicitly reviewed.";
     expect(admit(input).ready?.controlPlane).toBe(true);
   });
+  test("planner waits for preceding ordinary work before selecting a skipped control-plane head", () => {
+    const first = pull(1),
+      control = { ...pull(2), controlPlane: true },
+      third = pull(3);
+    const settings = { ...cfg, maxBatchSize: 3, maxInflight: 2, speculationDepth: 2 };
+    const o = observation([first, control, third]);
+    expect(plan(o, settings)).toMatchObject({
+      kind: "build",
+      spec: { pulls: [first, third], predecessor: null },
+    });
+
+    const preceding = candidate([first, third]);
+    preceding.runs = [{ ...run(preceding, "success"), status: "in_progress" }];
+    o.candidates = [preceding];
+    expect(plan(o, settings)).toEqual({
+      kind: "wait",
+      reason: "Version waits for preceding batches",
+    });
+
+    preceding.runs = [run(preceding, "success")];
+    expect(plan(o, settings)).toEqual({ kind: "land", candidate: preceding });
+    o.baseSha = preceding.manifest.tipSha;
+    preceding.containedInBase = true;
+    o.ledger.landed.push(preceding.manifest.batchId);
+    expect(plan(o, settings)).toMatchObject({
+      kind: "build",
+      publish: true,
+      spec: { baseSha: preceding.manifest.tipSha, pulls: [control], predecessor: null },
+    });
+  });
   test("atomic push grants force semantics only to state, never main", async () => {
     const f = await fixture();
     let command: string[] = [];
