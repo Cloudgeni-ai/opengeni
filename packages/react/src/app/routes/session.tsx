@@ -3864,6 +3864,7 @@ function SessionChatPane(props: {
                 effectiveControl={composer.effectiveControl}
                 queuedAheadCount={props.queue.queue.length}
                 queuedRecall={queuedRecall}
+                running={usageLimitTreeActive}
                 canControlWorkspace={workspacePermissions.includes("workspace:admin")}
                 controlLinks={{
                   workspaceHref: `/workspaces/${props.session.workspaceId}`,

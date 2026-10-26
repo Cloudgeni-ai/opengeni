@@ -102,6 +102,7 @@ export type ComposerDelivery = Pick<
   | "singleSend"
   | "alternateSend"
   | "sendAlternate"
+  | "working"
   | "steer"
   | "sending"
   | "canSend"
@@ -172,7 +173,11 @@ export type UseChatComposerControllerOptions = {
   messages?: Partial<ChatComposerMessages> | undefined;
   /** Run control presentation. Defaults to `pause`. */
   runControl?: ComposerRunControl | undefined;
-  /** A response is in progress; shows the Stop control under `runControl="stop"`. */
+  /**
+   * A response is in progress; shows the Stop control under `runControl="stop"`.
+   * Under `pause` it keeps Pause available while this conversation is idle,
+   * for example while work it started is still running.
+   */
   running?: boolean | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back for editing. */
   queuedRecall?: ComposerQueuedRecall | undefined;
@@ -267,6 +272,39 @@ export function applyComposerTextareaHeight(
  * delivery guards, keyboard routing, command interception, drag/drop, focus,
  * confirmation, and feedback state used by both the preset and primitives.
  */
+/**
+ * How long working controls stay after the work stops. Between a turn and the
+ * queued message that follows it, the session and its queue settle through
+ * separate updates; this keeps Pause and the Send wording from blinking
+ * across that gap, and still clears them soon after the agent is done.
+ */
+const WORKING_CONTROLS_LINGER_MS = 1_000;
+
+/**
+ * `value`, but a `true` that just ended stays `true` for `lingerMs`. The
+ * falling edge is derived during render, so no frame paints the cleared
+ * state before the linger starts; the rising edge is immediate.
+ */
+function useLingeringTrue(value: boolean, lingerMs: number): boolean {
+  const [state, setState] = useState({ value, lingering: false });
+  let current = state;
+  if (state.value !== value) {
+    current = { value, lingering: state.value && !value };
+    setState(current);
+  }
+  const { lingering } = current;
+  const currentValue = current.value;
+  useEffect(() => {
+    if (!lingering || currentValue) return;
+    const timer = setTimeout(
+      () => setState((latest) => (latest.value ? latest : { value: false, lingering: false })),
+      lingerMs,
+    );
+    return () => clearTimeout(timer);
+  }, [currentValue, lingering, lingerMs]);
+  return current.value || current.lingering;
+}
+
 export function useChatComposerController({
   delivery,
   draft,
@@ -290,6 +328,15 @@ export function useChatComposerController({
   const commands = useMemo(() => commandsProp ?? defaultCommands(t), [commandsProp, t]);
   const formatError = useErrorMessage();
   const singleSend = delivery.singleSend === true;
+  // Queue, Steer and Pause only mean something while the agent works; when
+  // nothing runs or waits the composer just sends. A delivery that does not
+  // report `working` keeps the working controls, as before.
+  const deliveryWorking = delivery.working ?? true;
+  const working = useLingeringTrue(deliveryWorking, WORKING_CONTROLS_LINGER_MS);
+  const workstreamWorking = useLingeringTrue(
+    deliveryWorking || running,
+    WORKING_CONTROLS_LINGER_MS,
+  );
   const messages = useMemo(
     () => ({
       ...defaultChatComposerMessages(singleSend ? singleSendText(t) : t),
@@ -812,6 +859,10 @@ export function useChatComposerController({
     submit,
     busySend: delivery.busySend ?? "queue",
     singleSend,
+    /** The agent works here (a turn runs or messages wait); Send uses its working wording. */
+    working,
+    /** This conversation or work it started is running; Pause is offered. */
+    workstreamWorking,
     alternateSend: delivery.sendAlternate ? (delivery.alternateSend ?? null) : null,
     submittingMode,
     handleKeyDown,
@@ -1362,7 +1413,8 @@ export const PauseButton = forwardRef<HTMLButtonElement, ComposerPauseButtonProp
       controller.runControl !== "pause" ||
       !controller.effectiveControl ||
       controller.paused ||
-      !controller.hasControl
+      !controller.hasControl ||
+      !controller.workstreamWorking
     )
       return null;
     const busy = controller.pausing || controller.resuming;
@@ -1555,9 +1607,11 @@ export const SendButton = forwardRef<HTMLButtonElement, ComposerSendButtonProps>
         ? controller.messages.annotationNotesRequired
         : controller.paused
           ? controller.messages.sendAndResumeTitle
-          : controller.busySend === "steer"
-            ? (controller.messages.steerSendTitle ?? controller.messages.sendTitle)
-            : controller.messages.sendTitle);
+          : !controller.working
+            ? (controller.messages.idleSendTitle ?? controller.messages.sendTitle)
+            : controller.busySend === "steer"
+              ? (controller.messages.steerSendTitle ?? controller.messages.sendTitle)
+              : controller.messages.sendTitle);
     return (
       <ComposerTip tip={tip}>
         <button

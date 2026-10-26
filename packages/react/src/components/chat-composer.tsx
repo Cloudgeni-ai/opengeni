@@ -108,12 +108,17 @@ export type ChatComposerProps = {
   /** Partial overrides for all composer-owned visible and accessible copy. */
   messages?: Partial<ChatComposerMessages> | undefined;
   /**
-   * Run control: `pause` (default) shows the workstream Pause control and
-   * paused strip; `stop` shows Stop only while `running`, and the next message
-   * continues a stopped conversation; `none` shows neither.
+   * Run control: `pause` (default) shows the workstream Pause control while
+   * the agent works (or `running`) and the paused strip; `stop` shows Stop
+   * only while `running`, and the next message continues a stopped
+   * conversation; `none` shows neither.
    */
   runControl?: ComposerRunControl | undefined;
-  /** A response is in progress (drives the Stop control). */
+  /**
+   * A response is in progress (drives the Stop control). Under `pause` it
+   * keeps Pause available while the conversation itself is idle, for
+   * example while work it started is still running.
+   */
   running?: boolean | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back (`useQueuedPromptRecall`). */
   queuedRecall?: ComposerQueuedRecall | undefined;

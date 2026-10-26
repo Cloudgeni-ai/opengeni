@@ -58,6 +58,8 @@ export function ConsoleComposer(props: {
   usageRefreshKey?: unknown | undefined;
   /** Up in an empty composer pulls the latest waiting prompt back for editing. */
   queuedRecall?: ComposerQueuedRecall | undefined;
+  /** Work this session started is running; keeps Pause available while it is idle. */
+  running?: boolean | undefined;
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
@@ -73,6 +75,7 @@ export function ConsoleComposer(props: {
         effectiveControl={props.effectiveControl}
         queuedAheadCount={props.queuedAheadCount}
         queuedRecall={props.queuedRecall}
+        running={props.running === true}
         canControlWorkspace={props.canControlWorkspace}
         controlLinks={props.controlLinks}
         placeholder={props.placeholder}

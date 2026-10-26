@@ -790,3 +790,82 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     ).toBeNull();
   });
 });
+
+describe("ChatComposer while the agent is idle", () => {
+  const active: EffectiveSessionControl = {
+    state: "active",
+    controlVersion: 0,
+    controlEtag: "active",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const spy = () => ({ sends: [] as string[], pauses: 0, resumes: 0 });
+  const pauseButton = () =>
+    mounted!.container.querySelector<HTMLButtonElement>('button[data-analytics-action="pause"]');
+  const sendButton = () =>
+    mounted!.container.querySelector<HTMLButtonElement>('button[data-analytics-action="send"]');
+  const wait = async (ms: number) =>
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, ms)));
+
+  test("nothing running: no Pause, no Queue or Steer, and Send just sends", async () => {
+    const state = { ...composer(spy()), working: false, alternateSend: null };
+    mounted = await renderComponent(<ChatComposer composer={state} effectiveControl={active} />);
+    expect(pauseButton()).toBeNull();
+    expect(mounted.container.querySelector("[data-og-composer-alternate-send]")).toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+    expect(sendButton()?.getAttribute("aria-label")).toBe("Send message");
+  });
+
+  test("while the agent works, Pause and the queue wording are offered", async () => {
+    const state = { ...composer(spy()), working: true };
+    mounted = await renderComponent(<ChatComposer composer={state} effectiveControl={active} />);
+    expect(pauseButton()).not.toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe(
+      "Queue message (Enter); steer with Cmd/Ctrl+Enter",
+    );
+  });
+
+  test("an idle conversation whose started work still runs keeps Pause, with plain Send", async () => {
+    const state = { ...composer(spy()), working: false };
+    mounted = await renderComponent(
+      <ChatComposer composer={state} effectiveControl={active} running />,
+    );
+    expect(pauseButton()).not.toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+  });
+
+  test("a delivery that does not report working keeps the working controls", async () => {
+    mounted = await renderComponent(
+      <ChatComposer composer={composer(spy())} effectiveControl={active} />,
+    );
+    expect(pauseButton()).not.toBeNull();
+  });
+
+  test("the switch to idle does not blink between a turn and the message after it", async () => {
+    const base = composer(spy());
+    const render = (working: boolean) => (
+      <ChatComposer composer={{ ...base, working }} effectiveControl={active} />
+    );
+    mounted = await renderComponent(render(true));
+    expect(pauseButton()).not.toBeNull();
+    // The turn ends; the queued message starts a moment later.
+    await mounted.rerender(render(false));
+    expect(pauseButton()).not.toBeNull();
+    await wait(200);
+    await mounted.rerender(render(true));
+    expect(pauseButton()).not.toBeNull();
+    await wait(1_100);
+    expect(pauseButton()).not.toBeNull();
+    // Done for real: the working controls leave soon after.
+    await mounted.rerender(render(false));
+    expect(pauseButton()).not.toBeNull();
+    await wait(1_100);
+    expect(pauseButton()).toBeNull();
+    expect(sendButton()?.getAttribute("title")).toBe("Send message (Enter)");
+  });
+});
