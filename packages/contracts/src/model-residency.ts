@@ -171,6 +171,98 @@ export function modelResidencyProblems(residency: {
   return problems;
 }
 
+/** Bedrock inference profile prefixes that route outside the EU. */
+export const NON_EU_BEDROCK_PROFILE_PREFIXES: readonly string[] = Object.freeze([
+  "us.",
+  "us-gov.",
+  "apac.",
+  "jp.",
+  "au.",
+  "ca.",
+  "global.",
+]);
+
+/**
+ * Hosts that route globally or process outside the EU. An EU claim on a route
+ * whose endpoint is one of these exact hosts is wrong. Exact match only:
+ * `eu.api.openai.com`, for example, is a different endpoint.
+ */
+export const NON_EU_MODEL_HOSTS: readonly string[] = Object.freeze([
+  "ai-gateway.vercel.sh",
+  "api.anthropic.com",
+  "api.openai.com",
+  "api.x.ai",
+  "chatgpt.com",
+  "openrouter.ai",
+]);
+
+function hostOf(baseUrl: string): string | null {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Problems that make an EU claim wrong for the route it is declared on: a
+ * Bedrock upstream id with a non-EU inference profile prefix, a Bedrock
+ * geographic profile that is not `eu.`, or an endpoint on a known global host.
+ * Every resolver applies it. Names only ever reject a claim, never grant one.
+ */
+export function modelResidencyRouteProblems(
+  residency: { geography: ModelProcessingGeography; deploymentType: ModelDeploymentType },
+  route: { upstreamModelId?: string | null | undefined; baseUrl?: string | null | undefined },
+): { path: string[]; message: string }[] {
+  if (residency.geography !== "eu") return [];
+  const problems: { path: string[]; message: string }[] = [];
+  const upstreamModelId = route.upstreamModelId ?? "";
+  if (residency.deploymentType.startsWith("bedrock_")) {
+    const prefix = NON_EU_BEDROCK_PROFILE_PREFIXES.find((candidate) =>
+      upstreamModelId.startsWith(candidate),
+    );
+    if (prefix) {
+      problems.push({
+        path: ["upstreamModelId"],
+        message: `${upstreamModelId} is a ${prefix} inference profile, which routes outside the EU`,
+      });
+    } else if (
+      residency.deploymentType === "bedrock_geo_profile" &&
+      !upstreamModelId.startsWith("eu.")
+    ) {
+      problems.push({
+        path: ["upstreamModelId"],
+        message: `an eu bedrock_geo_profile needs an eu. inference profile, not ${upstreamModelId}`,
+      });
+    }
+  }
+  const host = route.baseUrl ? hostOf(route.baseUrl) : null;
+  if (host && NON_EU_MODEL_HOSTS.includes(host)) {
+    problems.push({
+      path: ["baseUrl"],
+      message: `${host} routes outside the EU, so a route on it cannot be declared eu`,
+    });
+  }
+  return problems;
+}
+
+/** The fields that move processing; evidence text and dates do not. */
+export function modelResidencyClaim(residency: {
+  geography: ModelProcessingGeography;
+  deploymentType: ModelDeploymentType;
+  regions: readonly string[];
+}): {
+  geography: ModelProcessingGeography;
+  deploymentType: ModelDeploymentType;
+  regions: string[];
+} {
+  return {
+    geography: residency.geography,
+    deploymentType: residency.deploymentType,
+    regions: [...new Set(residency.regions)].sort(),
+  };
+}
+
 export const ModelResidencyV1 = /* @__PURE__ */ defineSchema(() =>
   z
     .object({

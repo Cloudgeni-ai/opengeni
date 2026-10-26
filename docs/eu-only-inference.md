@@ -35,21 +35,30 @@ Rules:
 - An Azure or Bedrock `eu` claim must list its regions, and every region must
   be on the code-owned EEA (plus Switzerland) list for that cloud
   (`EU_AZURE_REGIONS`, `EU_AWS_REGIONS`). The United Kingdom is not in the EEA.
-  An `eu` claim on a Bedrock `bedrock_geo_profile` whose upstream id does not
-  start with `eu.` counts as unknown. Names only ever reject a claim, never
-  grant one.
+- An `eu` claim must also fit its route (`modelResidencyRouteProblems`): a
+  Bedrock upstream id with a non-EU inference profile prefix (`us.`,
+  `us-gov.`, `apac.`, `jp.`, `au.`, `ca.`, `global.`), a `bedrock_geo_profile`
+  whose id does not start with `eu.`, or an endpoint on a known global host
+  (`NON_EU_MODEL_HOSTS`, exact host match) is rejected when the configuration
+  is loaded, and counts as unknown wherever else it is resolved. Names only
+  ever reject a claim, never grant one.
 - Operators declare residency only on deployment registry providers
   (`kind` `api-key` or `anonymous`), in `OPENGENI_MODEL_PROVIDERS_JSON` or the
   database catalog's `registryProviders`: `residency` on the provider applies to
   its models, and `residency` on a model overrides it. Operator evidence is
-  `operator_declaration` or `provider_documentation`. Residency is part of the
-  transport: in database catalog mode the host `OPENGENI_MODEL_PROVIDERS_JSON`
-  entry that owns the endpoint must declare exactly the same residency as the
-  database document, for the provider and each model, or the catalog is
-  refused.
+  `operator_declaration` or `provider_documentation`.
+- Residency is part of the transport. In database catalog mode the host
+  `OPENGENI_MODEL_PROVIDERS_JSON` entry that owns an `api-key` provider's
+  endpoint supplies its residency. The database document must make the same
+  claim (geography, deployment type and regions) for each model; evidence and
+  dates come from the host, so re-verifying never needs a database change. A
+  one-sided or different claim makes that provider's routes unknown (and logs
+  a warning) without failing the rest of the catalog. For `anonymous`
+  providers the database document owns the endpoint and its residency.
 - Each built-in OpenAI or Azure model is its own deployment, so
   `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` maps model ids to declarations
-  (`{"gpt-eu": {...}}`). An undeclared built-in model uses the rule below.
+  (`{"gpt-eu": {...}}`). An undeclared built-in model uses the rule below, and
+  a key that is not a configured built-in model logs a warning at startup.
 - Every other provider kind uses a code-owned rule with `built_in_rule`
   evidence and cannot declare its own: Codex, SuperGrok and Claude
   subscriptions, the Anthropic API, OpenAI API keys (`api.openai.com`), Vercel

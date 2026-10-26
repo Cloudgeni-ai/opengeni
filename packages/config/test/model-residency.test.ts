@@ -168,36 +168,84 @@ describe("model residency", () => {
     }
   });
 
-  test("an EU claim on a non-EU Bedrock profile id counts as unknown", () => {
-    const bedrock = {
-      geography: "eu",
-      deploymentType: "bedrock_geo_profile",
-      regions: ["eu-central-1"],
-      evidence: {
-        source: "provider_documentation",
-        reference: "AWS Bedrock eu. profiles",
-        verifiedAt: null,
-      },
+  test("an EU claim its route contradicts counts as unknown and is refused at load", () => {
+    const bedrock = (deploymentType: "bedrock_geo_profile" | "bedrock_regional") =>
+      ({
+        geography: "eu",
+        deploymentType,
+        regions: ["eu-central-1"],
+        evidence: {
+          source: "provider_documentation",
+          reference: "AWS Bedrock eu. profiles",
+          verifiedAt: null,
+        },
+      }) as const;
+    const eu = (
+      deploymentType: "bedrock_geo_profile" | "bedrock_regional",
+      upstreamModelId: string,
+      baseUrl?: string,
+    ) =>
+      isEuResidency(
+        registryModelResidency(
+          { kind: "api-key", residency: bedrock(deploymentType), baseUrl },
+          { upstreamModelId },
+        ),
+      );
+    expect(eu("bedrock_geo_profile", "us.anthropic.claude-sonnet")).toBe(false);
+    expect(eu("bedrock_geo_profile", "anthropic.claude-sonnet")).toBe(false);
+    expect(eu("bedrock_geo_profile", "eu.anthropic.claude-sonnet")).toBe(true);
+    // Any Bedrock claim, not only geo profiles.
+    expect(eu("bedrock_regional", "global.anthropic.claude-sonnet-4-5")).toBe(false);
+    expect(eu("bedrock_regional", "apac.anthropic.claude-sonnet")).toBe(false);
+    expect(eu("bedrock_regional", "anthropic.claude-sonnet")).toBe(true);
+    // A known global host cannot carry an EU claim; a distinct EU host can.
+    const providerDefault = {
+      ...euDataZone,
+      deploymentType: "provider_default",
+      regions: [],
     } as const;
-    expect(
+    const onHost = (baseUrl: string) =>
       isEuResidency(
         registryModelResidency(
-          { kind: "api-key", residency: bedrock },
-          { upstreamModelId: "us.anthropic.claude-sonnet" },
+          { kind: "api-key", residency: providerDefault, baseUrl },
+          { upstreamModelId: "model" },
         ),
+      );
+    expect(onHost("https://openrouter.ai/api/v1")).toBe(false);
+    expect(onHost("https://api.openai.com/v1")).toBe(false);
+    expect(onHost("https://eu.api.openai.com/v1")).toBe(true);
+    // Configuration with such a claim is refused when it is loaded.
+    expect(() =>
+      parseModelProvidersJson(
+        JSON.stringify([
+          {
+            id: "router",
+            api: "chat",
+            baseUrl: "https://openrouter.ai/api/v1",
+            apiKey: "key",
+            residency: providerDefault,
+            models: [{ id: "router/model", upstreamModelId: "model" }],
+          },
+        ]),
       ),
-    ).toBe(false);
-    expect(
-      isEuResidency(
-        registryModelResidency(
-          { kind: "api-key", residency: bedrock },
-          { upstreamModelId: "eu.anthropic.claude-sonnet" },
-        ),
+    ).toThrow(/routes outside the EU/u);
+    expect(() =>
+      parseModelProvidersJson(
+        JSON.stringify([
+          {
+            id: "bedrock",
+            api: "anthropic-messages",
+            baseUrl: "https://bedrock-proxy.example.eu/v1",
+            apiKey: "key",
+            residency: bedrock("bedrock_regional"),
+            models: [{ id: "bedrock/sonnet", upstreamModelId: "global.anthropic.claude-sonnet" }],
+          },
+        ]),
       ),
-    ).toBe(true);
+    ).toThrow(/inference profile/u);
   });
 
-  test("the database catalog must declare the same residency as the host transport", () => {
+  test("the host transport supplies residency; a different database claim makes it unknown", () => {
     const hostSettings = (residency: { provider?: unknown; model?: unknown }) =>
       withEnv(
         { OPENGENI_OPENAI_API_KEY: "sk-test", OPENGENI_MODEL_PROVIDERS_JSON: registry(residency) },
@@ -211,23 +259,74 @@ describe("model residency", () => {
         ({ apiKey: _apiKey, ...provider }: Record<string, unknown>) => provider,
       ),
     });
-    // Host declares EU, the database is silent: refused, not silently unknown.
-    expect(() =>
+    const gptEu = (settings: ReturnType<typeof getSettings>) =>
+      configuredModels(settings).find((model) => model.id === "azure-eu/gpt-eu")?.residency;
+    const quietly = <T>(fn: () => T): T => {
+      const warn = console.warn;
+      console.warn = () => {};
+      try {
+        return fn();
+      } finally {
+        console.warn = warn;
+      }
+    };
+    // Host declares EU, the database is silent: unknown, and the catalog still loads.
+    const hostOnly = quietly(() =>
       applyModelCatalogDocument(hostSettings({ provider: euDataZone }), document({})),
-    ).toThrow(/same residency/u);
-    // The database declares EU on a transport the host never vouched for: refused.
-    expect(() =>
-      applyModelCatalogDocument(hostSettings({}), document({ model: euDataZone })),
-    ).toThrow(/same residency/u);
-    const agreed = applyModelCatalogDocument(
-      hostSettings({ model: euDataZone }),
-      document({ model: euDataZone }),
     );
-    expect(
-      isEuResidency(
-        configuredModels(agreed).find((model) => model.id === "azure-eu/gpt-eu")?.residency,
+    expect(gptEu(hostOnly)).toEqual(UNKNOWN_MODEL_RESIDENCY);
+    // The database declares EU on a transport the host never vouched for: unknown.
+    const databaseOnly = quietly(() =>
+      applyModelCatalogDocument(hostSettings({}), document({ model: euDataZone })),
+    );
+    expect(gptEu(databaseOnly)).toEqual(UNKNOWN_MODEL_RESIDENCY);
+    // The same claim agrees; re-verified evidence and reordered regions are the same claim.
+    const agreed = applyModelCatalogDocument(
+      hostSettings({ model: { ...euDataZone, regions: ["swedencentral", "germanywestcentral"] } }),
+      document({
+        model: {
+          ...euDataZone,
+          regions: ["germanywestcentral", "swedencentral", "swedencentral"],
+          evidence: { ...euDataZone.evidence, reference: "older text", verifiedAt: "2026-01-01" },
+        },
+      }),
+    );
+    expect(isEuResidency(gptEu(agreed))).toBe(true);
+    // Evidence comes from the host.
+    expect(gptEu(agreed)?.evidence.reference).toBe(euDataZone.evidence.reference);
+    // Claims compare per model: a provider-level host claim matches a database
+    // claim only where the database makes it too. Here the sibling model has
+    // none in the database, so the whole provider is unknown.
+    const levels = quietly(() =>
+      applyModelCatalogDocument(
+        hostSettings({ provider: euDataZone }),
+        document({ model: euDataZone }),
       ),
-    ).toBe(true);
+    );
+    expect(gptEu(levels)).toEqual(UNKNOWN_MODEL_RESIDENCY);
+    const providerLevels = applyModelCatalogDocument(
+      hostSettings({ provider: euDataZone }),
+      document({ provider: euDataZone }),
+    );
+    expect(isEuResidency(gptEu(providerLevels))).toBe(true);
+  });
+
+  test("a built-in declaration for a model that is not configured warns at startup", () => {
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      withEnv(
+        {
+          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON: JSON.stringify({ "gpt-typo": euDataZone }),
+        },
+        () => getSettings(),
+      );
+    } finally {
+      console.warn = warn;
+    }
+    expect(warnings.some((message) => message.includes("gpt-typo"))).toBe(true);
   });
 
   test("non-operator provider kinds cannot declare their own residency", () => {

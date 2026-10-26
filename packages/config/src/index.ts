@@ -75,6 +75,8 @@ import {
   ModelResidencyDeclaration,
   ModelResidencyV1,
   UNKNOWN_MODEL_RESIDENCY,
+  modelResidencyClaim,
+  modelResidencyRouteProblems,
 } from "@opengeni/contracts";
 import type { CodeSearchDeploymentPolicy } from "@opengeni/contracts/code-search";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
@@ -3522,6 +3524,22 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
+    if (operatorDeclaresResidency(provider.kind)) {
+      provider.models.forEach((model, index) => {
+        const declared = model.residency ?? provider.residency;
+        if (!declared) return;
+        for (const problem of modelResidencyRouteProblems(declared, {
+          upstreamModelId: model.upstreamModelId ?? model.id,
+          baseUrl: provider.baseUrl,
+        })) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["models", index, "residency"],
+            message: problem.message,
+          });
+        }
+      });
+    }
     if (!operatorDeclaresResidency(provider.kind)) {
       if (provider.residency !== undefined) {
         ctx.addIssue({
@@ -4037,24 +4055,35 @@ function deploymentRegistryProvidersWithHostCredentials(
         `database model catalog provider ${provider.id} does not match its host-authorized transport`,
       );
     }
-    // Where the transport processes data is part of the transport: the host
-    // configuration that owns the endpoint must declare the same residency as
-    // the database document, for the provider and for every listed model.
+    // Where the transport processes data is part of the transport, so the
+    // host configuration that owns the endpoint supplies it. The database
+    // document must make the same claim (geography, deployment type and
+    // regions) for every listed model; evidence and dates come from the host.
+    // A one-sided or different claim makes this provider's routes unknown, so
+    // never EU, without failing the rest of the catalog.
     const hostModels = new Map(host.models.map((model) => [model.id, model]));
-    const residencyMismatch =
-      canonicalJson(provider.residency ?? null) !== canonicalJson(host.residency ?? null) ||
-      provider.models.some(
-        (model) =>
-          canonicalJson(model.residency ?? null) !==
-          canonicalJson(hostModels.get(model.id)?.residency ?? null),
-      );
-    if (residencyMismatch) {
-      throw new Error(
-        `database model catalog provider ${provider.id} does not declare the same residency as its host-authorized transport`,
+    const residencyClaim = (declaration: z.output<typeof ModelResidencyDeclaration> | undefined) =>
+      declaration ? canonicalJson(modelResidencyClaim(declaration)) : null;
+    const residencyAgrees = provider.models.every(
+      (model) =>
+        residencyClaim(model.residency ?? provider.residency) ===
+        residencyClaim(hostModels.get(model.id)?.residency ?? host.residency),
+    );
+    if (!residencyAgrees) {
+      console.warn(
+        `database model catalog provider ${provider.id} does not make the same residency claim as its host-authorized transport; its routes are treated as unknown`,
       );
     }
+    const { residency: _databaseResidency, ...providerWithoutResidency } = provider;
     return {
-      ...provider,
+      ...providerWithoutResidency,
+      ...(residencyAgrees && host.residency !== undefined ? { residency: host.residency } : {}),
+      models: provider.models.map(({ residency: _modelResidency, ...model }) => {
+        const hostResidency = hostModels.get(model.id)?.residency;
+        return residencyAgrees && hostResidency !== undefined
+          ? { ...model, residency: hostResidency }
+          : model;
+      }),
       ...(host.defaultHeaders === undefined ? {} : { defaultHeaders: host.defaultHeaders }),
       ...(host.defaultQuery === undefined ? {} : { defaultQuery: host.defaultQuery }),
       ...(host.publicDefaultHeaderNames === undefined
@@ -8094,6 +8123,7 @@ function normalizedResidencyDeclaration(
  */
 export function registryModelResidency(
   provider: Pick<InternalRegistryProvider, "kind"> & {
+    baseUrl?: string | undefined;
     residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
   },
   model: {
@@ -8107,14 +8137,13 @@ export function registryModelResidency(
       const declared = model.residency ?? provider.residency;
       if (!declared) return UNKNOWN_MODEL_RESIDENCY;
       const residency = normalizedResidencyDeclaration(declared);
-      // A Bedrock geographic inference profile id names its geography; an EU
-      // claim on a us., apac. or global. profile is wrong, so it counts as
-      // unknown. Names only ever reject a claim, never grant one.
-      const upstreamModelId = model.upstreamModelId ?? "";
+      // An EU claim that its own route contradicts (a non-EU Bedrock profile,
+      // a known global host) counts as unknown. Boot validation reports it.
       if (
-        residency.geography === "eu" &&
-        residency.deploymentType === "bedrock_geo_profile" &&
-        !upstreamModelId.startsWith("eu.")
+        modelResidencyRouteProblems(residency, {
+          upstreamModelId: model.upstreamModelId,
+          baseUrl: provider.baseUrl,
+        }).length > 0
       ) {
         return UNKNOWN_MODEL_RESIDENCY;
       }
@@ -11825,7 +11854,15 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
   if (settings.builtinModelResidencyJson !== undefined) {
-    parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson);
+    const declared = parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson);
+    // A misspelled key would leave the intended model unknown without a sign.
+    const builtinIds = new Set([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]);
+    const unmatched = Object.keys(declared).filter((modelId) => !builtinIds.has(modelId));
+    if (unmatched.length > 0) {
+      console.warn(
+        `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declares models that are not configured built-in models: ${unmatched.join(", ")}`,
+      );
+    }
   }
   if (
     settings.productAccessMode === "configured" &&
