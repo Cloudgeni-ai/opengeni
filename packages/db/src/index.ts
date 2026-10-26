@@ -37638,6 +37638,62 @@ type LineageIdRow = {
   cycle: boolean;
 };
 
+/** Descendants a lineage read lists: depth 5 and this many rows at most. */
+export const SESSION_TREE_DESCENDANT_LIMIT = 200;
+
+/**
+ * Descendants of a session, shallower before deeper and newest first within a
+ * level, so a long fleet loses its oldest grandchildren first. Returns one row
+ * more than the limit when there are more.
+ */
+async function selectSessionDescendantRows(
+  scopedDb: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<LineageIdRow[]> {
+  return (await scopedDb.execute(sql<LineageIdRow>`
+    with recursive descendants(id, parent_session_id, created_at, depth, path) as (
+      select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and child.parent_session_id = ${sessionId}
+      union all
+      select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
+      from ${schema.sessions} child
+      join descendants on child.parent_session_id = descendants.id
+      where child.workspace_id = ${workspaceId}
+        and descendants.depth < 5
+        and not child.id = any(descendants.path)
+    )
+    select id, parent_session_id as "parentSessionId", depth, path, false as cycle
+    from descendants
+    order by depth, created_at desc, id desc
+    limit ${SESSION_TREE_DESCENDANT_LIMIT + 1}
+  `)) as LineageIdRow[];
+}
+
+/**
+ * A session and the descendants its lineage lists, in that order, or null when
+ * the session is not visible in the workspace. Ids only: callers authorize
+ * each session before using it.
+ */
+export async function listSessionTreeIds(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string[] | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rootRows = await scopedDb.execute<{ id: string }>(sql`
+      select id from ${schema.sessions}
+      where ${schema.sessions.workspaceId} = ${workspaceId} and ${schema.sessions.id} = ${sessionId}
+      limit 1
+    `);
+    if (rootRows.length === 0) return null;
+    const rows = await selectSessionDescendantRows(scopedDb, workspaceId, sessionId);
+    return [sessionId, ...rows.slice(0, SESSION_TREE_DESCENDANT_LIMIT).map((row) => row.id)];
+  });
+}
+
 /**
  * Read the full lineage slice around a session. Every recursive step carries
  * workspace_id as a hard predicate; a foreign parent/child id is invisible even
@@ -37654,7 +37710,7 @@ export async function getSessionLineage(
   workspaceId: string,
   sessionId: string,
 ): Promise<SessionLineage | null> {
-  const descendantLimit = 200;
+  const descendantLimit = SESSION_TREE_DESCENDANT_LIMIT;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
     // withWorkspaceRls (getSession opens its own scoped transaction, which
@@ -37703,25 +37759,7 @@ export async function getSessionLineage(
     }
     const ancestorRows = ancestorLineageRows.filter((row) => row.depth > 0);
 
-    const childRows = (await scopedDb.execute(sql<LineageIdRow>`
-      with recursive descendants(id, parent_session_id, created_at, depth, path) as (
-        select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
-        from ${schema.sessions} child
-        where child.workspace_id = ${workspaceId}
-          and child.parent_session_id = ${sessionId}
-        union all
-        select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
-        from ${schema.sessions} child
-        join descendants on child.parent_session_id = descendants.id
-        where child.workspace_id = ${workspaceId}
-          and descendants.depth < 5
-          and not child.id = any(descendants.path)
-      )
-      select id, parent_session_id as "parentSessionId", depth, path, false as cycle
-      from descendants
-      order by depth, created_at desc, id desc
-      limit ${descendantLimit + 1}
-    `)) as LineageIdRow[];
+    const childRows = await selectSessionDescendantRows(scopedDb, workspaceId, sessionId);
     const truncated = childRows.length > descendantLimit;
     const descendantRows = truncated ? childRows.slice(0, descendantLimit) : childRows;
 
