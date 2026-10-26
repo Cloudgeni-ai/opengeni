@@ -12539,6 +12539,19 @@
 :where(.og-root).og-markdown-settle,:where(.og-root) .og-markdown-settle {
   animation: var(--animate-og-markdown-settle);
 }
+:where(.og-root).og-markdown-body .katex,:where(.og-root) .og-markdown-body .katex {
+  font-size: 1.08em;
+}
+:where(.og-root).og-markdown-body .katex-display,:where(.og-root) .og-markdown-body .katex-display {
+  margin: 0.75em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25em 0;
+}
+:where(.og-root).og-markdown-body .katex-error,:where(.og-root) .og-markdown-body .katex-error {
+  font-family: var(--og-font-mono, ui-monospace, monospace);
+  font-size: 0.9em;
+}
 @keyframes og-enter {
   from {
     opacity: 0;

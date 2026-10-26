@@ -37745,6 +37745,11 @@
       "UseMachinesResult": "type",
       "WINDOW_LABEL": "value"
     },
+    "@opengeni/react/markdown-math": {
+      "mayContainMath": "value",
+      "PreparedMathMarkdown": "type",
+      "prepareMathMarkdown": "value"
+    },
     "@opengeni/react/meetings": {
       "createMeetingRecorderStore": "value",
       "DeleteMeetingDialog": "value",
