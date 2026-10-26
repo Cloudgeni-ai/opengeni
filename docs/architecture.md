@@ -2915,7 +2915,9 @@ content API/SDK and replayable lifecycle. See [`skills-lifecycle.md`](skills-lif
   vault and write its reference, or a `[masked <kind>]` marker when capture is
   not possible. Known-value and shape masking supersede the 5 August 2026
   "keep content exact" decision for these two cases, approved on 26 October
-  2026.
+  2026. A workspace admin can remove a known secret or a built-in secret
+  shape from chosen sessions' stored history afterwards; see
+  docs/secrets.md, "Removing secrets from stored history".
 - **Tool visibility is not permission.** Session selection, capability state,
   connection ownership, action policy, approval, exact attempt, and live
   provider authority all participate in execution.

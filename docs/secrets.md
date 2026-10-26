@@ -845,6 +845,147 @@ For local development, `OPENGENI_ONEPASSWORD_FAKE_TOKENS=1` enables the
 in-memory fake provider tokens `ops_fake_healthy` and `ops_fake_sync_error`.
 Managed runtimes refuse to start with it set.
 
+## Removing secrets from stored history
+
+A secret that already reached a session's stored history (pasted into a
+message, printed by a command, or resolved into a hand-off before references
+were kept) stays there until it is removed. A workspace owner or admin removes
+it with `POST /v1/workspaces/:workspaceId/secret-redactions`:
+
+```json
+{
+  "sessionIds": ["…"],
+  "includeDescendants": true,
+  "match": { "reference": "Vault/Item/field" },
+  "dryRun": true
+}
+```
+
+- `match` is either a vault reference, written with or without its braces,
+  or built-in patterns:
+  `{ "patterns": [{ "kind": "url_password", "hosts": ["db.example.com"] }, { "kind": "github_token" }] }`.
+  `url_password` finds the password in `scheme://user:password@host` URLs, for
+  every host or only the hosts named; `github_token` finds GitHub token
+  shapes, including one inside a longer URL password. Both use the masking
+  module's own matchers, so a reference finds its
+  value in every form masking recognizes (as written, JSON-escaped,
+  percent-encoded and base64) and the patterns find exactly the shapes masking
+  catches.
+- A reference's value is read in memory for matching only. It is never
+  returned, logged or written to the audit event. The caller needs
+  `workspace:admin`; a reference also needs permission to use that item
+  (`secrets:use`, which workspace owners and admins hold unless a grant with
+  explicit permissions leaves it out). A value shorter than masking searches
+  for (8 characters, not counting surrounding whitespace) answers 422, so a
+  run can never rewrite everything; so does a value holding `[redacted: …]`
+  text, since that part may be a kept marker.
+  Every named session (and descendant) must be one the caller may change; one
+  that is not answers 404.
+- Each match becomes `[redacted: <reference or kind>]`, for example
+  `[redacted: secret:Vault/Item/field]` or `[redacted: url_password]`. The
+  marker names the reference without its braces, so it can never resolve back
+  into the value. Everything else in the text stays exact.
+- `dryRun: true` counts without changing anything. Running the same request
+  again is safe: markers are never matched, so the second run finds nothing.
+  A later run with another reference never rewrites a marker an earlier run
+  wrote, even when its value appears in that marker's label. Text that only
+  looks like a marker (a label the scrub never writes) is searched like any
+  text; text typed exactly like a reference marker
+  (`[redacted: secret:Vault/Item/field]`) is kept as is, like a real one.
+  Run patterns before references for the same sessions: once a URL's
+  username is replaced, `url_password` no longer recognizes that URL.
+- The response has counts only, per table and per session (`rowsMatched`,
+  `rowsChanged`, `matches`), the places still `pending` (below) and any
+  `failures` by table and error code. A failure never stops the run; run it
+  again to retry. `mirror_row_unreadable` means a search-mirror row still could
+  not be decoded after the run rebuilt it from its event, so it could not be
+  checked. `cell_not_rewritten` means a matched copy is still stored (it
+  changed under the run, a check refused the edit, or something still refers
+  to a matched content blob).
+- A session with a turn in progress is skipped (failure `session_active`):
+  the turn could write the text again from memory. So is a session being
+  moved to long-term storage (`session_archiving`): its export could keep the
+  old copy. A dry run still counts both. Run again once it is idle or
+  archived. Every write also takes the session's ordinary writer lock and
+  rechecks this. Before the archive pass, every session listed as live is
+  read again: one archived during the run has its archive scrubbed too, and
+  one still being moved is reported as `session_archiving`.
+- An audit event (`session.secret_history.redacted`, or
+  `session.secret_history.counted` for a dry run) records the match label,
+  sessions and totals, and is written even when the run stops part way
+  (`outcome: "failed"`).
+
+What is rewritten: every stored copy in the chosen sessions: the session row
+(title, first message, instructions, metadata), turns (prompts, model context
+and the frozen goal), timeline events and the message search mirror, model
+history, pending tool calls, realtime entries and projections, model-request
+snapshots and the content blobs they point to, code-mode calls, background
+commands, machine inputs (scheduled ones included) and their outbox,
+human-input requests, run states, command receipts, unsent composer drafts,
+connector action reviews, feedback comments and context, session list
+snapshots, goals and goal revisions, task notes, MCP operation results, host
+export payloads and the history repair audit, and, for a session in
+long-term storage, its archive bundle and transcript
+(docs/session-storage-lifecycle.md, "Removing secrets from the archive").
+Each table is read in bounded pages, one transaction per page, under the
+caller's row-level security; a cell is rewritten only while it still holds
+what was read, so a concurrent writer is never overwritten. JSON keys are
+never rewritten, only string values. Content blobs are content-addressed: a
+model request is redacted whole (a secret can straddle two body chunks), then
+re-encoded into new blobs, and every old blob nothing refers to any more is
+deleted, along with any other unreferenced blob of the session created at
+least ten minutes ago (a chunk a failed earlier run left behind may hold part
+of a split secret). Those deletions count in the blobs' `rowsChanged` only,
+so it can be higher than `rowsMatched`. The search mirror is rebuilt from the
+scrubbed events, and its `rowsChanged` counts the rows rebuilt. The patterns
+scan a very large cell in windows cut at whitespace or quotes, so a long cell
+is searched whole.
+
+Goal text, goal revisions, a turn's frozen goal, task notes, the search
+mirror, machine inputs, content blobs (and so the model-request snapshots
+that keep their content in them), MCP results, host export payloads, the
+repair audit and the archive manifest are written only through two owner
+routines (1091). The cell writer re-reads each cell, checks it belongs to the
+named session, and accepts only text that is the old text with spans
+replaced by `[redacted: …]` markers; goal text keeps its length limit. The
+guards on immutable records (goals, frozen goals, settled MCP results,
+scheduled occurrences, archived sessions) let only that writer through, by a
+capability row it holds for its own transaction. Their runtime grant follows
+one release later, as for every new private routine
+(docs/migrations-expand-contract.md); until then the response lists those
+places in `pending` and still counts what it can read. Run the request again
+once they are granted.
+
+Not covered, by design or for now:
+
+- Other sessions that copied the text: a fork or a session that received it
+  in a message is its own session; name it too. `includeDescendants` follows
+  child sessions up to 64 levels deep.
+- Document inspection receipts stay immutable; they hold artifact
+  observations, not conversation text.
+- Inbox items and phone push records keep their own copies of a reply's
+  first lines, a question's prompt and choices, an approval's title, a
+  paused goal's reason and the agent's notifications; push records also
+  copy the chat's title. The scrub does not rewrite them. Push records are
+  deleted a week after they are delivered or given up on.
+- Opengeni's Slack inbox keeps the text of incoming Slack messages, and a
+  message the agent posts as the Opengeni Slack bot is saved with its text
+  before it is sent and kept until the chat or the Slack connection is
+  deleted.
+- An MCP operation's `receipt_digest` is not recomputed after its result is
+  rewritten, so re-settling that exact operation later reports a conflict
+  instead of replaying.
+- Files, artifacts, recordings, screenshots, Knowledge, workspace files,
+  sandbox disks, provider-side stored responses, and logs or telemetry
+  outside Opengeni's database and archive. Rotate a credential that reached
+  any of these, or a model provider.
+
+Masking (parts B and C of the credential work) keeps new copies out; this
+removes old ones. Both supersede, for those two cases only, the 5 August 2026
+decision to keep all stored content exact without heuristic redaction: known
+secret values and a narrow set of high-precision secret shapes are now masked
+or removed. Everything else stays exact.
+
 ## HTTP API
 
 All routes are under `/v1/workspaces/:workspaceId`.
@@ -866,6 +1007,7 @@ All routes are under `/v1/workspaces/:workspaceId`.
 | `PUT /vault-providers/connections/:connectionId/credentials` | Reconnect without changing linked vault identities |
 | `POST /vault-providers/connections/:connectionId/verify` | Finish pending setup using saved credentials, without replaying a bootstrap token |
 | `DELETE /vault-providers/connections/:connectionId` | Unlink locally and revoke stored access; never delete upstream items |
+| `POST /secret-redactions` | Remove a secret from chosen sessions' stored history (admin; counts only) |
 
 Errors use `{error, message, details?}` with the codes in `VaultErrorCode`
 (`packages/contracts/src/vaults.ts`).

@@ -22386,6 +22386,7 @@ export * from "./governed-learning-evaluator";
 export * from "./governed-learning-activation";
 export * from "./knowledge";
 export * from "./task-notes";
+export * from "./session-secret-redaction";
 export * from "./canonical-human-identities";
 export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
