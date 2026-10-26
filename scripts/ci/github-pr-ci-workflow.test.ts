@@ -92,9 +92,7 @@ test("required aggregate covers docs and every selected job at exact head", () =
   expect(jobs.fast.if).toBeUndefined();
   const commands = jobs.fast.steps.map((s: any) => s.run ?? "").join("\n");
   expect(commands).toContain("run-typecheck-plan.ts");
-  expect(commands).not.toContain("run-guards-plan.ts");
   expect(commands).not.toContain("--exclude generated-fonts");
-  expect(commands).not.toContain("--exclude lint");
   expect(readFileSync("scripts/ci/impact.ts", "utf8")).toContain('"generated-fonts"');
   for (const name of ["fast"]) {
     expect(jobs[name]["runs-on"]).toBe("ubuntu-latest");
@@ -109,6 +107,37 @@ test("required aggregate covers docs and every selected job at exact head", () =
   expect(units.env.OPENGENI_REQUIRE_REAL_DB).toBe("1");
   expect(units.run).toContain("batch-setup.ts postgres");
   expect(units.run).toContain("run-unit-shard.ts");
+});
+
+test("PR fast checks run Batch's cheap source contracts before they can cost a batch", () => {
+  const { steps } = workflow("pr-ci").jobs.fast;
+  const index = (text: string) => steps.findIndex((s: any) => (s.run ?? "").includes(text));
+  const changesets = steps[index("scripts/ci/changeset-plan.ts")];
+  expect(changesets.run).toContain("set -euo pipefail");
+  expect(changesets.run).toContain("bun scripts/generate-site-browser-runtime.ts --check");
+  expect(changesets.if).toBeUndefined();
+  expect(changesets["continue-on-error"]).toBeUndefined();
+  // Cheapest checks first; every one runs before the selected unit files.
+  expect(index("bun install --frozen-lockfile")).toBeLessThan(index("changeset-plan.ts"));
+  expect(index("changeset-plan.ts")).toBeLessThan(index("bun run lint"));
+  expect(index("run-guards-plan.ts")).toBeLessThan(index("run-unit-shard.ts"));
+  // The same shared verdict is Batch's source contract, not a second copy.
+  const batch = readFileSync("scripts/ci/batch-source.ts", "utf8");
+  expect(batch).toContain('from "./changeset-plan"');
+  expect(batch).toContain('"scripts/generate-site-browser-runtime.ts", "--check"');
+
+  // Guards: exactly Batch's deferrals, plus lint (its own step above) and the
+  // ~20s subscription-contract scan. Any other new guard runs on PRs too.
+  const guards = steps[index("run-guards-plan.ts")];
+  expect(guards.if).toBeUndefined();
+  expect(guards.run).toContain('--plan "$RUNNER_TEMP/pr-plan/pr-plan.json"');
+  const excluded = (text: string) =>
+    [...text.matchAll(/--exclude"?,?\s*"?([a-z-]+)/g)].map((m) => m[1]);
+  const batchExcluded = excluded(batch.slice(batch.indexOf("run-guards-plan.ts")));
+  expect(batchExcluded.sort()).toEqual(["example-builds", "publish-closure", "sdk-compat"]);
+  expect(excluded(guards.run).sort()).toEqual(
+    [...batchExcluded, "lint", "subscription-contract"].sort(),
+  );
 });
 
 test("write-capable supersession handler executes trusted base only on a new PR push", () => {

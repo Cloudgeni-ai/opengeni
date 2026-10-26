@@ -554,8 +554,15 @@ PR CI uses per-PR concurrency with cancellation enabled: a newer run supersedes
 the same PR, not an unrelated PR, main or Batch run. Explicit dispatch uses its
 PR-number input for the same group. Planning, one fast-check job and the final
 aggregate run sequentially; the fast-check job has a hard 15-minute timeout and
-covers lint, impacted types and at most
+covers Batch's seconds-cheap source contracts, lint, impacted types and at most
 40 unit files from directly touched workspace packages, not transitive dependents.
+The cheap source contracts are the shared pending-changeset release plan
+(`scripts/ci/changeset-plan.ts`, also used by Batch: an unknown package, a mixed
+ignored/not-ignored changeset or an ignored-only plan fails the PR), the committed
+Site runtime check, and the impact plan's guards except lint (its own step),
+`subscription-contract` (about 20 seconds) and the output-producing guards Batch
+also defers. A broken changeset or stale public API snapshot therefore fails its
+own PR instead of a batch of up to 15.
 Changed unit files are prioritized, then paths are ordered deterministically.
 Broad workflow/root/toolchain impact explicitly selects no admission units and
 defers full coverage to Batch CI. Release-note `.changeset/` files alone do not

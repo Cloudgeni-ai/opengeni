@@ -81,12 +81,27 @@ jobs:
           bun-version-file: .bun-version
       - name: Install contract dependencies
         run: bun install --frozen-lockfile
+      # Seconds-cheap Batch source contracts run here first, so a PR cannot
+      # fail a whole batch on them (same scripts as batch-source.ts).
+      - name: Check pending changesets and committed Site runtime
+        run: |
+          set -euo pipefail
+          bun scripts/ci/changeset-plan.ts
+          bun scripts/generate-site-browser-runtime.ts --check
       - name: Fast lint gate
         run: bun run lint
       - uses: actions/download-artifact@v4
         with:
           name: pr-impact-plan
           path: ${{ runner.temp }}/pr-plan
+      # Batch's guard set, minus lint (run above), the output-producing guards
+      # Batch also defers, and subscription-contract (its legacy-runtime scan
+      # alone takes ~20s), which stays Batch-only.
+      - name: Check cheap impacted source guards
+        run: >-
+          bun scripts/ci/run-guards-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
+          --exclude lint --exclude subscription-contract
+          --exclude publish-closure --exclude sdk-compat --exclude example-builds
       - name: Check affected types
         run: bun scripts/ci/run-typecheck-plan.ts --plan "$RUNNER_TEMP/pr-plan/pr-plan.json"
       - name: Test every selected unit file

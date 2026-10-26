@@ -82,7 +82,7 @@
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "51d5273fd5cb8c0e364575c0bd6e9ecbb0502cfe479aaf9126d2e6af3d68cf90"
+      "sha256": "16ca8ce1cce01001b92877c9043bf9c52411d488f07209604a24a4717b756968"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
@@ -1510,6 +1510,18 @@
       "job": "fast",
       "step": "Check affected types",
       "sha256": "7ff9667365af5aac5786b314c47d7e0d8bb04d7e8ecbce3c257fd69eb59841b8"
+    },
+    {
+      "workflow": ".github/workflows/pr-ci.yml",
+      "job": "fast",
+      "step": "Check cheap impacted source guards",
+      "sha256": "8eccefc15c35cc8a202900d6db8807b871022c4d67ab987186d366350b272d15"
+    },
+    {
+      "workflow": ".github/workflows/pr-ci.yml",
+      "job": "fast",
+      "step": "Check pending changesets and committed Site runtime",
+      "sha256": "ccbd01abb8277fb0eb2f7825a8f8f3aaf557ef8a7a44f4f8341e8f3f9917c02d"
     },
     {
       "workflow": ".github/workflows/pr-ci.yml",
