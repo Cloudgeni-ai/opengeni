@@ -1190,9 +1190,6 @@
 :where(.og-root).-mx-3,:where(.og-root) .-mx-3 {
     margin-inline: calc(var(--spacing) * -3);
   }
-:where(.og-root).mx-0\.5,:where(.og-root) .mx-0\.5 {
-    margin-inline: calc(var(--spacing) * 0.5);
-  }
 :where(.og-root).mx-1,:where(.og-root) .mx-1 {
     margin-inline: calc(var(--spacing) * 1);
   }
@@ -2290,6 +2287,9 @@
 :where(.og-root).max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\],:where(.og-root) .max-w-\[min\(18rem\,calc\(100vw-1\.5rem\)\)\] {
     max-width: min(18rem, calc(100vw - 1.5rem));
   }
+:where(.og-root).max-w-\[min\(22rem\,calc\(100vw-16px\)\)\],:where(.og-root) .max-w-\[min\(22rem\,calc\(100vw-16px\)\)\] {
+    max-width: min(22rem, calc(100vw - 16px));
+  }
 :where(.og-root).max-w-\[min\(24rem\,60vw\)\],:where(.og-root) .max-w-\[min\(24rem\,60vw\)\] {
     max-width: min(24rem, 60vw);
   }
@@ -2412,6 +2412,9 @@
   }
 :where(.og-root).flex-1,:where(.og-root) .flex-1 {
     flex: 1;
+  }
+:where(.og-root).flex-\[1_1_0\%\],:where(.og-root) .flex-\[1_1_0\%\] {
+    flex: 1 1 0%;
   }
 :where(.og-root).flex-\[1_1_5rem\],:where(.og-root) .flex-\[1_1_5rem\] {
     flex: 1 1 5rem;
@@ -7912,6 +7915,14 @@
       }
     }
   }
+:where(.og-root).focus-visible\:ring-ring\/55,:where(.og-root) .focus-visible\:ring-ring\/55 {
+    &:focus-visible {
+      --tw-ring-color: var(--color-ring);
+      @supports (color: color-mix(in lab, red, red)) {
+        --tw-ring-color: color-mix(in oklab, var(--color-ring) 55%, transparent);
+      }
+    }
+  }
 :where(.og-root).focus-visible\:ring-white\/50,:where(.og-root) .focus-visible\:ring-white\/50 {
     &:focus-visible {
       --tw-ring-color: color-mix(in srgb, #fff 50%, transparent);
@@ -9195,11 +9206,6 @@
       height: calc(var(--spacing) * 11);
     }
   }
-:where(.og-root).max-sm\:min-h-11,:where(.og-root) .max-sm\:min-h-11 {
-    @media (width < 40rem) {
-      min-height: calc(var(--spacing) * 11);
-    }
-  }
 :where(.og-root).max-sm\:w-auto,:where(.og-root) .max-sm\:w-auto {
     @media (width < 40rem) {
       width: auto;
@@ -10167,14 +10173,29 @@
       display: inline;
     }
   }
+:where(.og-root).\@max-\[34rem\]\/titlebar\:hidden,:where(.og-root) .\@max-\[34rem\]\/titlebar\:hidden {
+    @container titlebar (width < 34rem) {
+      display: none;
+    }
+  }
 :where(.og-root).\@max-\[34rem\]\/titlebar\:hidden\!,:where(.og-root) .\@max-\[34rem\]\/titlebar\:hidden\! {
     @container titlebar (width < 34rem) {
       display: none !important;
     }
   }
+:where(.og-root).\@max-\[34rem\]\/titlebar\:inline-flex\!,:where(.og-root) .\@max-\[34rem\]\/titlebar\:inline-flex\! {
+    @container titlebar (width < 34rem) {
+      display: inline-flex !important;
+    }
+  }
 :where(.og-root).\@max-\[34rem\]\/titlebar\:min-w-8\!,:where(.og-root) .\@max-\[34rem\]\/titlebar\:min-w-8\! {
     @container titlebar (width < 34rem) {
       min-width: calc(var(--spacing) * 8) !important;
+    }
+  }
+:where(.og-root).\@max-\[34rem\]\/titlebar\:shrink-0\!,:where(.og-root) .\@max-\[34rem\]\/titlebar\:shrink-0\! {
+    @container titlebar (width < 34rem) {
+      flex-shrink: 0 !important;
     }
   }
 :where(.og-root).\@max-\[34rem\]\/titlebar\:justify-center,:where(.og-root) .\@max-\[34rem\]\/titlebar\:justify-center {
