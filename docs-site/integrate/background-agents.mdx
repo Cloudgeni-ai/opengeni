@@ -56,14 +56,13 @@ Runs in a new chat (`new_session_per_run`) never wait, so the choice only matter
 
 A scheduled task can also run when something happens: give it `events`, and each event that matches one of its triggers starts a run. Events come from an **event source**:
 
-| Source                                               | Events come from                                                                                                                                   |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{ kind: "mcp", serverId }`                          | An MCP connection whose server offers [MCP Events](https://modelcontextprotocol.io). Opengeni subscribes while an automation listens.              |
-| `{ kind: "webhook", adapter: "standard" }`           | Your backend, signed with [Standard Webhooks](https://www.standardwebhooks.com). Opengeni generates the secret.                                    |
-| `{ kind: "webhook", adapter: "linear" \| "sentry" }` | Linear or Sentry, with the URL and signing secret pasted in once.                                                                                  |
-| `{ kind: "webhook", adapter: "custom", format }`     | Any other app's webhooks, read as `format` describes: how they are signed, where the event type is, and whether one delivery holds several events. |
-| `{ kind: "github" }`, `{ kind: "slack" }`            | The deployment's GitHub App or Slack bot, set up automatically.                                                                                    |
-| `{ kind: "gmail" }`                                  | A person's Gmail connection, read while an automation listens.                                                                                     |
+| Source                                           | Events come from                                                                                                                                                                              |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{ kind: "mcp", serverId }`                      | An MCP connection whose server offers [MCP Events](https://modelcontextprotocol.io). Opengeni subscribes while an automation listens.                                                         |
+| `{ kind: "webhook", adapter: "standard" }`       | Your backend, signed with [Standard Webhooks](https://www.standardwebhooks.com). Opengeni generates the secret.                                                                               |
+| `{ kind: "webhook", adapter: "custom", format }` | Any other app's webhooks, read as `format` describes: how they are signed, where the event type is, and whether one delivery holds several events. Linear, Sentry and Tailscale have presets. |
+| `{ kind: "github" }`, `{ kind: "slack" }`        | The deployment's GitHub App or Slack bot, set up automatically.                                                                                                                               |
+| `{ kind: "gmail" }`                              | A person's Gmail connection, read while an automation listens.                                                                                                                                |
 
 Event triggers are on when `clientConfig.eventTriggers.enabled` is true (`OPENGENI_EVENT_TRIGGERS_ENABLED` on the deployment).
 
@@ -95,7 +94,16 @@ await og.createScheduledTask(workspaceId, {
 
 Your backend sends `{ "type": "ticket.created", "timestamp": "…", "data": { … } }` with the `webhook-id`, `webhook-timestamp` and `webhook-signature` headers; any Standard Webhooks library signs it. Each run gets the events that started it. Redelivered events (same `webhook-id`) are ignored, and the agent treats event data as untrusted input.
 
-An app with its own webhook format needs no code: describe the format on a `custom` source and paste the app's secret. `signature.scheme` is `standard_webhooks`, `hmac_sha256` (the body's HMAC in a header, hex or base64, after an optional prefix), `timestamped_hmac_sha256` (`t=<unix seconds>,v1=<hex>` over `"<t>.<body>"`), or `token` (a shared secret in a header). The other fields are dot paths into each event, or headers. Tailscale, for example:
+An app with its own webhook format needs no code: describe the format on a `custom` source and paste the app's secret. `signature.scheme` is one of:
+
+- `standard_webhooks`.
+- `hmac_sha256`: the body's HMAC in a header, hex or base64, after an optional prefix. Add `signedContent`, such as `"v0:{header:X-Request-Timestamp}:{body}"`, when the app signs more than the body.
+- `timestamped_hmac_sha256`: `t=<unix seconds>,v1=<hex>` over `"<t>.<body>"`.
+- `token`: a shared secret in a header.
+- `ed25519`: the app's signature, checked with its public key as the secret. It also takes `signedContent`.
+- `url_token`: for apps that can't sign. The secret goes in the address as `?token=<secret>`, and it must be at least 24 letters, digits, `-`, `_`, `.` or `~`.
+
+The other fields are dot paths into each event, or headers. `summary`, `subject`, `url`, `actor`, `eventId` and `occurredAt` also take a list of paths, where the first with text wins. `type` can join `parts`, `freshness` refuses old deliveries, and `actorKind` says which actors are people. Linear, Sentry and Tailscale have presets that Automations and agents offer by name. Agents add webhook sources with the `event_sources_create_webhook` tool. Tailscale, spelled out:
 
 ```ts
 const { source } = await og.createEventSource(workspaceId, {

@@ -7,6 +7,7 @@ import {
   InboundEventSummary,
   ScheduledTask as ScheduledTaskSchema,
   ScheduledTaskRun as ScheduledTaskRunSchema,
+  webhookFormatOfPreset,
 } from "@opengeni/contracts";
 import type {
   EventDelivery,
@@ -68,7 +69,8 @@ const github = source(1, { kind: "github", name: "Acme on GitHub" });
 const slack = source(2, { kind: "slack", name: "Acme Slack", lastDeliveryAt: at(3) });
 const linear = source(3, {
   kind: "webhook",
-  adapter: "linear",
+  adapter: "custom",
+  format: webhookFormatOfPreset("linear"),
   name: "Linear",
   status: "blocked",
   statusReason: "Paste the signing secret Linear shows for this webhook.",

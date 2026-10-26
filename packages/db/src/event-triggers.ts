@@ -1,4 +1,5 @@
 import {
+  currentWebhookAdapter,
   DEFAULT_EVENT_RUNS_PER_HOUR,
   EventCondition,
   InboundEventSummary,
@@ -118,13 +119,18 @@ function storedWebhookFormat(value: unknown): WebhookFormat | null {
 }
 
 function mapSource(row: SourceRow, routeId: string | null): EventSourceRecord {
+  // A source stored as `linear` or `sentry` reads as custom with that preset.
+  const webhook = currentWebhookAdapter({
+    adapter: (row.adapter as WebhookEventAdapter | null) ?? null,
+    format: storedWebhookFormat(row.webhookFormat),
+  });
   return {
     id: row.id,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     kind: row.kind as EventSourceKind,
-    adapter: (row.adapter as WebhookEventAdapter | null) ?? null,
-    format: storedWebhookFormat(row.webhookFormat),
+    adapter: webhook.adapter,
+    format: webhook.format,
     name: row.name,
     ownerSubjectId: row.ownerSubjectId,
     visibility: row.visibility as EventSourceVisibility,
@@ -492,7 +498,8 @@ export async function updateEventSource(
           ? { status: patch.status, ...storedStatusReason(patch.status, patch.statusReason) }
           : {}),
         ...(patch.secretEncrypted !== undefined ? { secretEncrypted: patch.secretEncrypted } : {}),
-        ...(patch.format !== undefined ? { webhookFormat: patch.format } : {}),
+        // A format makes the source custom, including one stored as `linear` or `sentry`.
+        ...(patch.format !== undefined ? { webhookFormat: patch.format, adapter: "custom" } : {}),
         updatedAt: sql`now()`,
       })
       .where(

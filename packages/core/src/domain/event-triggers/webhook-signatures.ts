@@ -1,10 +1,19 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  createHmac,
+  createPublicKey,
+  randomBytes,
+  timingSafeEqual,
+  verify as verifySignature,
+  type KeyObject,
+} from "node:crypto";
+import type { WebhookSignedContentPart } from "@opengeni/contracts";
 
 /**
  * Webhook signature schemes event sources use: Standard Webhooks (used by
  * Opengeni's own format, Svix-based apps and MCP Events webhook delivery), an
- * HMAC-SHA256 of the raw body (Linear, Sentry and many others), a timestamped
- * `t=…,v1=…` HMAC-SHA256 (Stripe, Tailscale) and a shared token.
+ * HMAC-SHA256 of the raw body or of a layout around it (Linear, Sentry, Slack
+ * and many others), a timestamped `t=…,v1=…` HMAC-SHA256 (Stripe, Tailscale),
+ * Ed25519 (Discord), a shared token in a header, and a secret in the URL.
  */
 
 /** Standard Webhooks rejects deliveries signed more than this long ago or ahead. */
@@ -138,6 +147,30 @@ function bodyHmac(secret: string, body: Uint8Array | string): Buffer {
   return createHmac("sha256", Buffer.from(secret, "utf8")).update(bodyBytes(body)).digest();
 }
 
+/**
+ * The exact bytes an app signed: the layout's literal text, header values and
+ * raw body, in order. Without a layout, the body alone.
+ */
+export function webhookSignedBytes(input: {
+  layout: readonly WebhookSignedContentPart[] | null;
+  headers: Headers;
+  body: Uint8Array;
+}): { ok: true; bytes: Uint8Array } | { ok: false; reason: string } {
+  if (!input.layout) return { ok: true, bytes: input.body };
+  const chunks: Uint8Array[] = [];
+  for (const part of input.layout) {
+    if (part.kind === "body") chunks.push(input.body);
+    else if (part.kind === "text") chunks.push(Buffer.from(part.text, "utf8"));
+    else {
+      const value = input.headers.get(part.header);
+      if (value === null)
+        return { ok: false, reason: `Missing ${headerLabel(part.header)} header` };
+      chunks.push(Buffer.from(value, "utf8"));
+    }
+  }
+  return { ok: true, bytes: Buffer.concat(chunks) };
+}
+
 /** What the value of a header names when the header is absent or wrong. */
 function headerLabel(header: string): string {
   return header.replace(
@@ -147,8 +180,9 @@ function headerLabel(header: string): string {
 }
 
 /**
- * Verify an HMAC-SHA256 of the raw body, keyed with the secret's UTF-8 bytes,
- * in hex or base64 after an optional prefix such as `sha256=`.
+ * Verify an HMAC-SHA256 of the raw body (or of the signed bytes a layout
+ * makes of it), keyed with the secret's UTF-8 bytes, in hex or base64 after an
+ * optional prefix such as `sha256=`.
  */
 export function verifyBodyHmac(input: {
   secret: string;
@@ -159,22 +193,40 @@ export function verifyBodyHmac(input: {
   prefix: string;
 }): { ok: true } | { ok: false; reason: string } {
   const name = headerLabel(input.header);
+  const provided = signatureBytes(input, 32);
+  if (!provided.ok) return provided;
+  return provided.bytes && constantTimeEqual(provided.bytes, bodyHmac(input.secret, input.body))
+    ? { ok: true }
+    : { ok: false, reason: `The ${name} header does not match the signing secret` };
+}
+
+/**
+ * A signature header's bytes: present, after its prefix, and `length` bytes
+ * in hex or base64 (standard or URL-safe). `bytes` is null when it is
+ * malformed, which the caller reports as not matching.
+ */
+function signatureBytes(
+  input: { header: string; value: string | null; encoding: "hex" | "base64"; prefix: string },
+  length: number,
+): { ok: true; bytes: Buffer | null } | { ok: false; reason: string } {
+  const name = headerLabel(input.header);
   const value = input.value?.trim() ?? "";
   if (!value) return { ok: false, reason: `Missing ${name} header` };
   if (input.prefix && !value.startsWith(input.prefix)) {
     return { ok: false, reason: `The ${name} header does not start with "${input.prefix}"` };
   }
   const encoded = value.slice(input.prefix.length);
-  const valid =
-    input.encoding === "hex"
-      ? /^[0-9a-fA-F]{64}$/u.test(encoded)
-      : /^[A-Za-z0-9+/_-]{43}={0,1}$/u.test(encoded);
-  const provided = valid
-    ? Buffer.from(encoded.replace(/-/gu, "+").replace(/_/gu, "/"), input.encoding)
-    : null;
-  return provided && constantTimeEqual(provided, bodyHmac(input.secret, input.body))
-    ? { ok: true }
-    : { ok: false, reason: `The ${name} header does not match the signing secret` };
+  if (input.encoding === "hex") {
+    return {
+      ok: true,
+      bytes: new RegExp(`^[0-9a-fA-F]{${length * 2}}$`, "u").test(encoded)
+        ? Buffer.from(encoded, "hex")
+        : null,
+    };
+  }
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/u.test(encoded)) return { ok: true, bytes: null };
+  const bytes = Buffer.from(encoded.replace(/-/gu, "+").replace(/_/gu, "/"), "base64");
+  return { ok: true, bytes: bytes.byteLength === length ? bytes : null };
 }
 
 /** The header value `verifyBodyHmac` accepts. Used by tests and test deliveries. */
@@ -269,6 +321,85 @@ export function verifyHeaderToken(input: {
       createHmac("sha256", "token").update(input.secret).digest(),
     );
   return matched ? { ok: true } : { ok: false, reason: `The ${name} header is not the secret` };
+}
+
+/**
+ * Verify a secret sent in the webhook address's query, as `?<parameter>=<secret>`,
+ * for apps that can't sign their deliveries.
+ */
+export function verifyUrlToken(input: {
+  secret: string;
+  parameter: string;
+  query: URLSearchParams;
+}): { ok: true } | { ok: false; reason: string } {
+  const provided = input.query.get(input.parameter);
+  if (provided === null) {
+    return { ok: false, reason: `The address has no ?${input.parameter}= secret` };
+  }
+  return constantTimeEqual(
+    createHmac("sha256", "token").update(provided).digest(),
+    createHmac("sha256", "token").update(input.secret).digest(),
+  )
+    ? { ok: true }
+    : { ok: false, reason: `The address's ?${input.parameter}= is not the secret` };
+}
+
+/** The DER prefix of an Ed25519 SubjectPublicKeyInfo, before the 32 key bytes. */
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/**
+ * An app's Ed25519 public key as the source's secret holds it: 32 bytes in
+ * hex or base64, or a PEM public key. Null when it is none of these.
+ */
+export function ed25519PublicKey(secret: string): KeyObject | null {
+  const value = secret.trim();
+  let raw: Buffer | null = null;
+  if (/^[0-9a-fA-F]{64}$/u.test(value)) raw = Buffer.from(value, "hex");
+  else if (/^[A-Za-z0-9+/_-]{43}={0,1}$/u.test(value)) {
+    raw = Buffer.from(value.replace(/-/gu, "+").replace(/_/gu, "/"), "base64");
+  }
+  try {
+    const key = raw
+      ? createPublicKey({
+          key: Buffer.concat([ED25519_SPKI_PREFIX, raw]),
+          format: "der",
+          type: "spki",
+        })
+      : value.startsWith("-----BEGIN PUBLIC KEY-----")
+        ? createPublicKey(value)
+        : null;
+    return key?.asymmetricKeyType === "ed25519" ? key : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Verify an Ed25519 signature in a header (hex or base64, after an optional
+ * prefix) over the signed bytes, with the app's public key as the secret.
+ */
+export function verifyEd25519(input: {
+  publicKey: string;
+  header: string;
+  value: string | null;
+  signed: Uint8Array;
+  encoding: "hex" | "base64";
+  prefix: string;
+}): { ok: true } | { ok: false; reason: string } {
+  const name = headerLabel(input.header);
+  const key = ed25519PublicKey(input.publicKey);
+  if (!key) return { ok: false, reason: "The source's secret is not an Ed25519 public key" };
+  const provided = signatureBytes(input, 64);
+  if (!provided.ok) return provided;
+  let valid = false;
+  try {
+    valid = provided.bytes !== null && verifySignature(null, input.signed, key, provided.bytes);
+  } catch {
+    valid = false;
+  }
+  return valid
+    ? { ok: true }
+    : { ok: false, reason: `The ${name} header is not a valid signature from the app's key` };
 }
 
 function constantTimeEqual(left: Buffer, right: Buffer): boolean {

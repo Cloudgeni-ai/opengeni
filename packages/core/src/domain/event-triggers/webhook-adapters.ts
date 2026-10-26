@@ -1,15 +1,22 @@
 import {
+  currentWebhookAdapter,
   EventTypeName,
+  parseWebhookSignedContent,
   type EventActorKind,
   type WebhookEventAdapter,
   type WebhookFormat,
+  type WebhookSignatureFormat,
+  type WebhookTextPaths,
+  type WebhookValueSource,
 } from "@opengeni/contracts";
 import {
   verifyBodyHmac,
+  verifyEd25519,
   verifyHeaderToken,
-  verifyHexBodyHmac,
   verifyStandardWebhook,
   verifyTimestampedHmac,
+  verifyUrlToken,
+  webhookSignedBytes,
 } from "./webhook-signatures";
 import {
   firstText,
@@ -37,6 +44,8 @@ export type WebhookAdapterDefinition = {
     secret: string;
     headers: Headers;
     body: Uint8Array;
+    /** The webhook address's query, for a secret sent in it. */
+    query?: URLSearchParams;
     nowSeconds?: number;
   }): WebhookAdapterVerification;
   read(input: { headers: Headers; body: Uint8Array; receivedAt: Date }): WebhookAdapterReading;
@@ -70,23 +79,6 @@ function eventType(value: string): string {
     throw new WebhookBodyError(`"${oneLine(value, 80)}" is not a usable event type`);
   return parsed.data;
 }
-
-function objectAt(value: unknown, path: string): Record<string, unknown> | null {
-  const found = readPath(value, path);
-  return found !== null && typeof found === "object" && !Array.isArray(found)
-    ? (found as Record<string, unknown>)
-    : null;
-}
-
-const PAST_TENSE: Record<string, string> = {
-  create: "created",
-  update: "updated",
-  remove: "removed",
-  delete: "deleted",
-  restore: "restored",
-  archive: "archived",
-  unarchive: "unarchived",
-};
 
 /** Standard Webhooks: `{ type, timestamp, data }`, signed with an Opengeni secret. */
 const standardAdapter: WebhookAdapterDefinition = {
@@ -135,147 +127,135 @@ const standardAdapter: WebhookAdapterDefinition = {
   },
 };
 
-/** Linear webhooks: `Linear-Signature` over the raw body, `webhookTimestamp` in ms. */
-const linearAdapter: WebhookAdapterDefinition = {
-  retainedHeaders: ["linear-delivery", "linear-event"],
-  verify({ secret, headers, body, nowSeconds }) {
-    if (!verifyHexBodyHmac({ secret, signature: headers.get("linear-signature"), body })) {
-      return { ok: false, reason: "The Linear-Signature header does not match the signing secret" };
-    }
-    let payload: Record<string, unknown>;
-    try {
-      payload = parseJsonObject(body);
-    } catch (error) {
-      return { ok: false, reason: (error as Error).message };
-    }
-    const sentAt = parseEventTime(payload.webhookTimestamp);
-    const now = (nowSeconds ?? Date.now() / 1000) * 1000;
-    if (!sentAt || Math.abs(now - sentAt.getTime()) > 60_000) {
-      return { ok: false, reason: "The webhookTimestamp is more than a minute from now" };
-    }
-    const delivery = headers.get("linear-delivery");
-    return { ok: true, deliveryKey: delivery ? `linear-delivery:${delivery.slice(0, 200)}` : null };
-  },
-  read({ body, receivedAt }) {
-    const payload = parseJsonObject(body);
-    const resource = typeof payload.type === "string" ? payload.type : null;
-    const action = typeof payload.action === "string" ? payload.action : null;
-    if (!resource || !action) throw new WebhookBodyError('The body has no "type" and "action"');
-    const type = eventType(`${resource}.${action}`);
-    const data = objectAt(payload, "data") ?? {};
-    const identifier = firstText(data, ["identifier", "issue.identifier"]);
-    const title =
-      firstText(data, ["title", "name", "issue.title", "label.name"]) ??
-      (typeof data.body === "string" ? oneLine(data.body, 160) : null);
-    const actorType = firstText(payload, ["actor.type"]);
-    const actorName = firstText(payload, ["actor.name", "actor.email"]);
-    const actorKind: EventActorKind =
-      actorType === null ? "unknown" : actorType === "user" ? "person" : "bot";
-    return {
-      kind: "events",
-      events: [
-        {
-          // `webhookId` names the webhook, not the delivery; deliveries are
-          // deduplicated by their Linear-Delivery header instead.
-          externalId: null,
-          type,
-          occurredAt: parseEventTime(payload.createdAt) ?? receivedAt,
-          subject: identifier ?? firstText(data, ["id"]),
-          summary: [
-            `${resource} ${PAST_TENSE[action] ?? action}`,
-            [identifier, title].filter(Boolean).join(" "),
-          ]
-            .filter(Boolean)
-            .join(": "),
-          url: firstText(payload, ["url"]),
-          actor: { kind: actorKind, name: actorName },
-          data: {
-            ...payload,
-            // Linear repeats its own delivery bookkeeping in every body.
-            webhookId: undefined,
-            webhookTimestamp: undefined,
-          },
-        },
-      ],
-    };
-  },
-};
-
-/** Sentry integration webhooks: `Sentry-Hook-Signature` with the client secret. */
-const sentryAdapter: WebhookAdapterDefinition = {
-  retainedHeaders: ["sentry-hook-resource", "request-id"],
-  verify({ secret, headers, body }) {
-    if (!verifyHexBodyHmac({ secret, signature: headers.get("sentry-hook-signature"), body })) {
-      return {
-        ok: false,
-        reason: "The Sentry-Hook-Signature header does not match the client secret",
-      };
-    }
-    const requestId = headers.get("request-id");
-    return { ok: true, deliveryKey: requestId ? `request-id:${requestId.slice(0, 200)}` : null };
-  },
-  read({ headers, body, receivedAt }) {
-    const payload = parseJsonObject(body);
-    const resource = headers.get("sentry-hook-resource");
-    const action = typeof payload.action === "string" ? payload.action : null;
-    if (!resource || !action) {
-      throw new WebhookBodyError('The delivery has no Sentry-Hook-Resource header or "action"');
-    }
-    const type = eventType(`${resource}.${action}`);
-    const data = objectAt(payload, "data") ?? {};
-    const title = firstText(data, [
-      "issue.title",
-      "error.title",
-      "event.title",
-      "description_title",
-      "metric_alert.title",
-      "comment",
-    ]);
-    const shortId = firstText(data, ["issue.shortId", "issue.short_id"]);
-    const actorType = firstText(payload, ["actor.type"]);
-    return {
-      kind: "events",
-      events: [
-        {
-          externalId: null,
-          type,
-          occurredAt:
-            parseEventTime(
-              readPath(data, "issue.lastSeen") ??
-                readPath(data, "event.datetime") ??
-                readPath(data, "error.datetime"),
-            ) ?? receivedAt,
-          subject: shortId ?? firstText(data, ["issue.id", "event.issue_id", "error.issue_id"]),
-          summary: [
-            `${resource.replace(/_/gu, " ")} ${action}`,
-            [shortId, title].filter(Boolean).join(" "),
-          ]
-            .filter(Boolean)
-            .join(": "),
-          url: firstText(data, [
-            "issue.web_url",
-            "event.web_url",
-            "error.web_url",
-            "metric_alert.web_url",
-            "web_url",
-          ]),
-          actor: {
-            kind: actorType === null ? "unknown" : actorType === "user" ? "person" : "bot",
-            name: firstText(payload, ["actor.name"]),
-          },
-          data: payload,
-        },
-      ],
-    };
-  },
-};
-
 /** One custom delivery may hold at most this many events. */
 export const CUSTOM_WEBHOOK_EVENTS_MAX = 100;
 
-/** A text value at a path: a non-empty string or a number. */
-function textAt(value: unknown, path: string | undefined): string | null {
-  return path === undefined ? null : firstText(value, [path]);
+/** A text value at a path, or at the first of several paths that holds one. */
+function textAt(value: unknown, paths: WebhookTextPaths | undefined): string | null {
+  if (paths === undefined) return null;
+  return firstText(value, typeof paths === "string" ? [paths] : paths);
+}
+
+/** The first of the paths that holds a time. */
+function timeAt(value: unknown, paths: WebhookTextPaths | undefined): Date | null {
+  for (const path of paths === undefined ? [] : typeof paths === "string" ? [paths] : paths) {
+    const time = sendTime(readPath(value, path));
+    if (time) return time;
+  }
+  return null;
+}
+
+/** An ISO time, or Unix seconds or milliseconds as a number or a string of digits. */
+function sendTime(value: unknown): Date | null {
+  if (typeof value === "string" && /^\d{9,13}$/u.test(value.trim())) {
+    return parseEventTime(Number(value.trim()));
+  }
+  return parseEventTime(value);
+}
+
+type Verified = { ok: true; deliveryKey: string | null } | { ok: false; reason: string };
+
+/** Check a delivery's signature as the format's scheme says. */
+function verifyCustomSignature(
+  signature: WebhookSignatureFormat,
+  input: {
+    secret: string;
+    headers: Headers;
+    body: Uint8Array;
+    query: URLSearchParams;
+    nowSeconds?: number | undefined;
+  },
+): Verified {
+  const { secret, headers, body, nowSeconds } = input;
+  switch (signature.scheme) {
+    case "standard_webhooks": {
+      const verified = verifyStandardWebhook({
+        secret,
+        headers,
+        body,
+        ...(nowSeconds !== undefined ? { nowSeconds } : {}),
+      });
+      return verified.ok ? { ok: true, deliveryKey: `webhook-id:${verified.webhookId}` } : verified;
+    }
+    case "url_token":
+      return withoutKey(
+        verifyUrlToken({ secret, parameter: signature.parameter, query: input.query }),
+      );
+    case "token":
+      return withoutKey(
+        verifyHeaderToken({
+          secret,
+          header: signature.header,
+          value: headers.get(signature.header),
+          prefix: signature.prefix,
+        }),
+      );
+    case "timestamped_hmac_sha256":
+      return withoutKey(
+        verifyTimestampedHmac({
+          secret,
+          header: signature.header,
+          value: headers.get(signature.header),
+          body,
+          toleranceSeconds: signature.toleranceSeconds,
+          ...(nowSeconds !== undefined ? { nowSeconds } : {}),
+        }),
+      );
+    case "hmac_sha256":
+    case "ed25519": {
+      const layout = signature.signedContent
+        ? parseWebhookSignedContent(signature.signedContent)
+        : null;
+      if (typeof layout === "string") return { ok: false, reason: layout };
+      const signed = webhookSignedBytes({ layout, headers, body });
+      if (!signed.ok) return signed;
+      const header = {
+        header: signature.header,
+        value: headers.get(signature.header),
+        encoding: signature.encoding,
+        prefix: signature.prefix,
+      };
+      return withoutKey(
+        signature.scheme === "hmac_sha256"
+          ? verifyBodyHmac({ secret, body: signed.bytes, ...header })
+          : verifyEd25519({ publicKey: secret, signed: signed.bytes, ...header }),
+      );
+    }
+  }
+}
+
+function withoutKey(result: { ok: true } | { ok: false; reason: string }): Verified {
+  return result.ok ? { ok: true, deliveryKey: null } : result;
+}
+
+/** Refuse a delivery whose send time is missing or too far from now. */
+function checkFreshness(
+  freshness: WebhookFormat["freshness"],
+  headers: Headers,
+  body: Uint8Array,
+  nowSeconds: number | undefined,
+): Verified {
+  if (!freshness) return { ok: true, deliveryKey: null };
+  const where = "header" in freshness ? `the ${freshness.header} header` : `"${freshness.path}"`;
+  const sentAt = sendTime(
+    "header" in freshness
+      ? headers.get(freshness.header)
+      : readPath(parseJsonOrNull(body), freshness.path),
+  );
+  if (!sentAt) return { ok: false, reason: `The delivery has no send time in ${where}` };
+  const now = (nowSeconds ?? Date.now() / 1000) * 1000;
+  if (Math.abs(now - sentAt.getTime()) > freshness.toleranceSeconds * 1000) {
+    return {
+      ok: false,
+      reason: `The send time in ${where} is more than ${freshness.toleranceSeconds} seconds from now`,
+    };
+  }
+  return { ok: true, deliveryKey: null };
+}
+
+/** The event type's sources: one, or each of the parts it is joined from. */
+function typeSources(type: WebhookFormat["type"]) {
+  return "parts" in type ? type.parts : [type];
 }
 
 /**
@@ -284,52 +264,23 @@ function textAt(value: unknown, path: string | undefined): string | null {
  * list of events.
  */
 function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
-  const headerNames = [format.type, format.deliveryId].flatMap((source) =>
+  const headerNames = [...typeSources(format.type), format.deliveryId].flatMap((source) =>
     source && "header" in source ? [source.header.toLowerCase()] : [],
   );
   return {
     retainedHeaders: [...new Set(headerNames)],
-    verify({ secret, headers, body, nowSeconds }) {
-      const signature = format.signature;
-      let deliveryKey: string | null = null;
-      if (signature.scheme === "standard_webhooks") {
-        const verified = verifyStandardWebhook({
-          secret,
-          headers,
-          body,
-          ...(nowSeconds !== undefined ? { nowSeconds } : {}),
-        });
-        if (!verified.ok) return verified;
-        deliveryKey = `webhook-id:${verified.webhookId}`;
-      } else {
-        const value = headers.get(signature.header);
-        const verified =
-          signature.scheme === "hmac_sha256"
-            ? verifyBodyHmac({
-                secret,
-                header: signature.header,
-                value,
-                body,
-                encoding: signature.encoding,
-                prefix: signature.prefix,
-              })
-            : signature.scheme === "timestamped_hmac_sha256"
-              ? verifyTimestampedHmac({
-                  secret,
-                  header: signature.header,
-                  value,
-                  body,
-                  toleranceSeconds: signature.toleranceSeconds,
-                  ...(nowSeconds !== undefined ? { nowSeconds } : {}),
-                })
-              : verifyHeaderToken({
-                  secret,
-                  header: signature.header,
-                  value,
-                  prefix: signature.prefix,
-                });
-        if (!verified.ok) return verified;
-      }
+    verify({ secret, headers, body, query, nowSeconds }) {
+      const verified = verifyCustomSignature(format.signature, {
+        secret,
+        headers,
+        body,
+        query: query ?? new URLSearchParams(),
+        nowSeconds,
+      });
+      if (!verified.ok) return verified;
+      // Only a signed delivery's send time can be trusted.
+      const fresh = checkFreshness(format.freshness, headers, body, nowSeconds);
+      if (!fresh.ok) return fresh;
       // The app's own delivery id keeps a retried delivery once; without one,
       // the body's hash does.
       const id = format.deliveryId
@@ -337,7 +288,10 @@ function customAdapter(format: WebhookFormat): WebhookAdapterDefinition {
           ? headers.get(format.deliveryId.header)?.trim() || null
           : textAt(parseJsonOrNull(body), format.deliveryId.path)
         : null;
-      return { ok: true, deliveryKey: id ? `delivery-id:${id.slice(0, 200)}` : deliveryKey };
+      return {
+        ok: true,
+        deliveryKey: id ? `delivery-id:${id.slice(0, 200)}` : verified.deliveryKey,
+      };
     },
     read({ headers, body, receivedAt }) {
       const payload = parseJson(body);
@@ -376,6 +330,28 @@ function parseJsonOrNull(body: Uint8Array): unknown {
   }
 }
 
+/** One piece of an event's type, from a header, a path or a fixed value. */
+function typePart(
+  source: WebhookFormat["type"] | WebhookValueSource,
+  item: unknown,
+  headers: Headers,
+): string {
+  const text =
+    "value" in source
+      ? source.value
+      : "header" in source
+        ? headers.get(source.header)?.trim() || null
+        : "path" in source
+          ? textAt(item, source.path)
+          : null;
+  if (text) return text;
+  throw new WebhookBodyError(
+    "header" in source
+      ? `The delivery has no ${source.header} header for its event type`
+      : `An event has no "${"path" in source ? source.path : ""}" for its type`,
+  );
+}
+
 function customEvent(
   format: WebhookFormat,
   item: unknown,
@@ -387,41 +363,30 @@ function customEvent(
       format.batch ? "An event in the list is not a JSON object" : "The body is not a JSON object",
     );
   }
-  const source = format.type;
-  const typeText =
-    "value" in source
-      ? source.value
-      : "header" in source
-        ? headers.get(source.header)?.trim() || null
-        : textAt(item, source.path);
-  if (!typeText) {
-    throw new WebhookBodyError(
-      "header" in source
-        ? `The delivery has no ${source.header} header for its event type`
-        : `An event has no "${"path" in source ? source.path : ""}" for its type`,
-    );
-  }
-  const type = eventType(typeText);
-  const occurredAt = format.occurredAt ? readPath(item, format.occurredAt) : undefined;
+  const type = eventType(
+    "parts" in format.type
+      ? format.type.parts.map((part) => typePart(part, item, headers)).join(format.type.separator)
+      : typePart(format.type, item, headers),
+  );
   return {
     externalId: textAt(item, format.eventId)?.slice(0, 200) ?? null,
     type,
-    occurredAt: parseEventTime(occurredAt) ?? receivedAt,
+    occurredAt: timeAt(item, format.occurredAt) ?? receivedAt,
     subject: textAt(item, format.subject),
     summary: textAt(item, format.summary) ?? type,
     url: textAt(item, format.url),
-    // A custom app's actor field is a name; it doesn't say whether it is a
-    // person or a bot.
-    actor: { kind: "unknown", name: textAt(item, format.actor) },
+    actor: { kind: actorKind(format.actorKind, item), name: textAt(item, format.actor) },
     data: item,
   };
 }
 
-const NAMED_ADAPTERS: Record<Exclude<WebhookEventAdapter, "custom">, WebhookAdapterDefinition> = {
-  standard: standardAdapter,
-  linear: linearAdapter,
-  sentry: sentryAdapter,
-};
+/** A person when the format's actor kind says so, else a bot; unknown without one. */
+function actorKind(rule: WebhookFormat["actorKind"], item: unknown): EventActorKind {
+  if (!rule) return "unknown";
+  const value = textAt(item, rule.path);
+  if (value === null) return "unknown";
+  return rule.person.includes(value) ? "person" : "bot";
+}
 
 /** A custom source stored without its format: every delivery is refused. */
 const unformattedAdapter: WebhookAdapterDefinition = {
@@ -432,14 +397,18 @@ const unformattedAdapter: WebhookAdapterDefinition = {
   },
 };
 
-/** How a webhook source verifies and reads deliveries: its adapter, with its format when custom. */
+/**
+ * How a webhook source verifies and reads deliveries: Opengeni's own format,
+ * or its custom format. A source stored as `linear` or `sentry` reads with
+ * that app's preset.
+ */
 export function webhookAdapterFor(source: {
   adapter: WebhookEventAdapter | null;
   format: WebhookFormat | null;
 }): WebhookAdapterDefinition {
-  const adapter = source.adapter ?? "standard";
-  if (adapter !== "custom") return NAMED_ADAPTERS[adapter];
-  return source.format ? customAdapter(source.format) : unformattedAdapter;
+  const current = currentWebhookAdapter(source);
+  if (current.adapter !== "custom") return standardAdapter;
+  return current.format ? customAdapter(current.format) : unformattedAdapter;
 }
 
 /** The retained headers of a delivery, lower-cased, for replay. */

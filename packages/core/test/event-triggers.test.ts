@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createHmac } from "node:crypto";
+import { createHmac, generateKeyPairSync, sign } from "node:crypto";
 import {
   EVENT_DATA_MAX_BYTES,
   SCHEDULED_OCCURRENCE_EVENT_DATA_MAX_BYTES,
@@ -7,6 +7,7 @@ import {
   type InboundEvent,
   WebhookFormat,
   type WebhookFormatInput,
+  webhookFormatOfPreset,
 } from "@opengeni/contracts";
 import {
   boundEvent,
@@ -202,108 +203,129 @@ describe("webhook adapters", () => {
     ).toThrow(WebhookBodyError);
   });
 
-  test("linear adapter verifies the signature and timestamp and names Issue.create", () => {
-    const adapter = webhookAdapterFor({ adapter: "linear", format: null });
-    const secret = "lin_wh_secret_value";
-    const payload = {
-      action: "create",
-      type: "Issue",
-      createdAt: "2026-10-24T09:59:30.000Z",
-      actor: { id: "u1", type: "user", name: "Ada" },
-      url: "https://linear.app/acme/issue/ENG-42/fix-login",
-      data: {
-        id: "issue-uuid",
-        identifier: "ENG-42",
-        title: "Fix login",
-        priority: 2,
-      },
-      webhookId: "webhook-config-id",
-      webhookTimestamp: receivedAt.getTime() - 5_000,
-    };
-    const body = encoder.encode(JSON.stringify(payload));
-    const headers = headersOf({
-      "linear-signature": signHexBodyHmac(secret, body),
-      "linear-delivery": "delivery-1",
-      "linear-event": "Issue",
-    });
-    expect(
-      adapter.verify({
-        secret,
-        headers,
-        body,
-        nowSeconds: receivedAt.getTime() / 1000,
-      }),
-    ).toEqual({
-      ok: true,
-      deliveryKey: "linear-delivery:delivery-1",
-    });
-    expect(
-      adapter.verify({
-        secret,
-        headers,
-        body,
-        nowSeconds: receivedAt.getTime() / 1000 + 120,
-      }).ok,
-    ).toBe(false);
-    expect(
-      adapter.verify({
-        secret: "other",
-        headers,
-        body,
-        nowSeconds: receivedAt.getTime() / 1000,
-      }).ok,
-    ).toBe(false);
-    const reading = adapter.read({ headers, body, receivedAt });
-    if (reading.kind !== "events") throw new Error("expected events");
-    const [event] = reading.events;
-    expect(event).toMatchObject({
-      externalId: null,
-      type: "Issue.create",
-      subject: "ENG-42",
-      summary: "Issue created: ENG-42 Fix login",
-      actor: { kind: "person", name: "Ada" },
-    });
-    expect(event?.data.webhookId).toBeUndefined();
-  });
-
-  test("sentry adapter names the resource and action from the header", () => {
-    const adapter = webhookAdapterFor({ adapter: "sentry", format: null });
-    const secret = "sentry-client-secret";
-    const body = encoder.encode(
-      JSON.stringify({
-        action: "created",
-        actor: { type: "application", name: "Sentry" },
+  // A source stored as `linear` (before the presets) reads with Linear's preset.
+  for (const stored of [
+    { adapter: "linear" as const, format: null },
+    { adapter: "custom" as const, format: webhookFormatOfPreset("linear") },
+  ]) {
+    test(`Linear's preset (${stored.adapter}) verifies the signature and timestamp and names Issue.create`, () => {
+      const adapter = webhookAdapterFor(stored);
+      const secret = "lin_wh_secret_value";
+      const payload = {
+        action: "create",
+        type: "Issue",
+        createdAt: "2026-10-24T09:59:30.000Z",
+        actor: { id: "u1", type: "user", name: "Ada" },
+        url: "https://linear.app/acme/issue/ENG-42/fix-login",
         data: {
-          issue: {
-            id: "123",
-            shortId: "API-7",
-            title: "TypeError: x is undefined",
-            web_url: "https://acme.sentry.io/issues/123/",
-            lastSeen: "2026-10-24T09:58:00.000Z",
-          },
+          id: "issue-uuid",
+          identifier: "ENG-42",
+          title: "Fix login",
+          priority: 2,
         },
-      }),
-    );
-    const headers = headersOf({
-      "sentry-hook-signature": signHexBodyHmac(secret, body),
-      "sentry-hook-resource": "issue",
-      "request-id": "req-1",
+        webhookId: "webhook-config-id",
+        webhookTimestamp: receivedAt.getTime() - 5_000,
+      };
+      const body = encoder.encode(JSON.stringify(payload));
+      const headers = headersOf({
+        "linear-signature": signHexBodyHmac(secret, body),
+        "linear-delivery": "delivery-1",
+        "linear-event": "Issue",
+      });
+      expect(
+        adapter.verify({
+          secret,
+          headers,
+          body,
+          nowSeconds: receivedAt.getTime() / 1000,
+        }),
+      ).toEqual({
+        ok: true,
+        deliveryKey: "delivery-id:delivery-1",
+      });
+      expect(
+        adapter.verify({
+          secret,
+          headers,
+          body,
+          nowSeconds: receivedAt.getTime() / 1000 + 120,
+        }).ok,
+      ).toBe(false);
+      expect(
+        adapter.verify({
+          secret: "other",
+          headers,
+          body,
+          nowSeconds: receivedAt.getTime() / 1000,
+        }).ok,
+      ).toBe(false);
+      const reading = adapter.read({ headers, body, receivedAt });
+      if (reading.kind !== "events") throw new Error("expected events");
+      const [event] = reading.events;
+      expect(event).toMatchObject({
+        externalId: null,
+        type: "Issue.create",
+        subject: "ENG-42",
+        summary: "Fix login",
+        url: "https://linear.app/acme/issue/ENG-42/fix-login",
+        occurredAt: new Date("2026-10-24T09:59:30.000Z"),
+        actor: { kind: "person", name: "Ada" },
+      });
+      expect(adapter.retainedHeaders).toEqual(["linear-delivery"]);
     });
-    expect(adapter.verify({ secret, headers, body })).toEqual({
-      ok: true,
-      deliveryKey: "request-id:req-1",
+  }
+
+  for (const stored of [
+    { adapter: "sentry" as const, format: null },
+    { adapter: "custom" as const, format: webhookFormatOfPreset("sentry") },
+  ]) {
+    test(`Sentry's preset (${stored.adapter}) names the resource and action from the header`, () => {
+      const adapter = webhookAdapterFor(stored);
+      const secret = "sentry-client-secret";
+      const body = encoder.encode(
+        JSON.stringify({
+          action: "created",
+          actor: { type: "application", name: "Sentry" },
+          data: {
+            issue: {
+              id: "123",
+              shortId: "API-7",
+              title: "TypeError: x is undefined",
+              web_url: "https://acme.sentry.io/issues/123/",
+              lastSeen: "2026-10-24T09:58:00.000Z",
+            },
+          },
+        }),
+      );
+      const headers = headersOf({
+        "sentry-hook-signature": signHexBodyHmac(secret, body),
+        "sentry-hook-resource": "issue",
+        "request-id": "req-1",
+      });
+      expect(adapter.verify({ secret, headers, body })).toEqual({
+        ok: true,
+        deliveryKey: "delivery-id:req-1",
+      });
+      expect(adapter.verify({ secret: "other", headers, body }).ok).toBe(false);
+      const reading = adapter.read({ headers, body, receivedAt });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events[0]).toMatchObject({
+        type: "issue.created",
+        subject: "API-7",
+        summary: "TypeError: x is undefined",
+        url: "https://acme.sentry.io/issues/123/",
+        actor: { kind: "bot", name: "Sentry" },
+        occurredAt: new Date("2026-10-24T09:58:00.000Z"),
+      });
+      expect(() =>
+        adapter.read({
+          headers: headersOf({ "request-id": "req-2" }),
+          body,
+          receivedAt,
+        }),
+      ).toThrow("The delivery has no Sentry-Hook-Resource header for its event type");
     });
-    const reading = adapter.read({ headers, body, receivedAt });
-    if (reading.kind !== "events") throw new Error("expected events");
-    expect(reading.events[0]).toMatchObject({
-      type: "issue.created",
-      subject: "API-7",
-      summary: "issue created: API-7 TypeError: x is undefined",
-      url: "https://acme.sentry.io/issues/123/",
-      actor: { kind: "bot", name: "Sentry" },
-      occurredAt: new Date("2026-10-24T09:58:00.000Z"),
-    });
-  });
+  }
 
   describe("custom adapter", () => {
     const now = 1_800_000_000;
@@ -567,6 +589,194 @@ describe("webhook adapters", () => {
         ok: false,
         reason: "This custom webhook has no format yet",
       });
+    });
+
+    test("a signed-content layout with the timestamp header, checked for freshness (Slack's format)", () => {
+      const adapter = custom({
+        signature: {
+          scheme: "hmac_sha256",
+          header: "X-Slack-Signature",
+          prefix: "v0=",
+          signedContent: "v0:{header:X-Slack-Request-Timestamp}:{body}",
+        },
+        freshness: { header: "X-Slack-Request-Timestamp", toleranceSeconds: 300 },
+        type: { path: "event.type" },
+        eventId: "event_id",
+      });
+      const secret = "8f742231b10e8888abcd99yyyzzz85a5";
+      const body = JSON.stringify({ event_id: "Ev1", event: { type: "app_mention" } });
+      const slackHeaders = (timestamp: number, signed = body) =>
+        headersOf({
+          "x-slack-request-timestamp": String(timestamp),
+          "x-slack-signature": `v0=${createHmac("sha256", secret)
+            .update(`v0:${timestamp}:${signed}`)
+            .digest("hex")}`,
+        });
+      const verify = (headers: Headers, nowSeconds = now) =>
+        adapter.verify({ secret, headers, body: encoder.encode(body), nowSeconds });
+      expect(verify(slackHeaders(now))).toEqual({ ok: true, deliveryKey: null });
+      // The timestamp is part of what was signed, so changing it breaks the signature.
+      const moved = slackHeaders(now);
+      moved.set("x-slack-request-timestamp", String(now + 1));
+      expect(verify(moved).ok).toBe(false);
+      expect(verify(slackHeaders(now, `${body} `)).ok).toBe(false);
+      expect(verify(slackHeaders(now - 600), now)).toEqual({
+        ok: false,
+        reason:
+          "The send time in the X-Slack-Request-Timestamp header is more than 300 seconds from now",
+      });
+      const missing = slackHeaders(now);
+      missing.delete("x-slack-request-timestamp");
+      expect(verify(missing)).toEqual({
+        ok: false,
+        reason: "Missing X-Slack-Request-Timestamp header",
+      });
+      const reading = adapter.read({
+        headers: slackHeaders(now),
+        body: encoder.encode(body),
+        receivedAt,
+      });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events[0]).toMatchObject({ type: "app_mention", externalId: "Ev1" });
+    });
+
+    test("Ed25519 signatures over the timestamp and body, with the app's public key (Discord's format)", () => {
+      const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+      const raw = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
+      const adapter = custom({
+        signature: {
+          scheme: "ed25519",
+          header: "X-Signature-Ed25519",
+          signedContent: "{header:X-Signature-Timestamp}{body}",
+        },
+        freshness: { header: "X-Signature-Timestamp" },
+        type: { path: "type" },
+      });
+      const body = JSON.stringify({ type: "message.created", id: "m1" });
+      const headers = headersOf({
+        "x-signature-timestamp": String(now),
+        "x-signature-ed25519": sign(null, Buffer.from(`${now}${body}`), privateKey).toString("hex"),
+      });
+      const verify = (secret: string, delivered = body) =>
+        adapter.verify({ secret, headers, body: encoder.encode(delivered), nowSeconds: now });
+      for (const key of [
+        raw.toString("hex"),
+        raw.toString("base64"),
+        publicKey.export({ format: "pem", type: "spki" }).toString(),
+      ]) {
+        expect(verify(key)).toEqual({ ok: true, deliveryKey: null });
+      }
+      expect(verify(raw.toString("hex"), `${body} `)).toEqual({
+        ok: false,
+        reason: "The X-Signature-Ed25519 header is not a valid signature from the app's key",
+      });
+      const other = generateKeyPairSync("ed25519").publicKey;
+      expect(
+        verify(other.export({ format: "der", type: "spki" }).subarray(-32).toString("hex")).ok,
+      ).toBe(false);
+      expect(verify("not-a-key")).toEqual({
+        ok: false,
+        reason: "The source's secret is not an Ed25519 public key",
+      });
+    });
+
+    test("a secret in the address's query, for an app that can't sign", () => {
+      const adapter = custom({
+        signature: { scheme: "url_token", parameter: "key" },
+        type: { value: "monitor.triggered" },
+        summary: ["result.summary", "goal"],
+        eventId: "run_id",
+      });
+      const secret = "u3T9kq2LxP0wZ7vN4bC8yR1d";
+      const body = encoder.encode(JSON.stringify({ run_id: "run_1", goal: "Price drops" }));
+      const verify = (query: string) =>
+        adapter.verify({
+          secret,
+          headers: new Headers(),
+          body,
+          query: new URLSearchParams(query),
+        });
+      expect(verify(`key=${secret}`)).toEqual({ ok: true, deliveryKey: null });
+      expect(verify(`key=${secret}x`)).toEqual({
+        ok: false,
+        reason: "The address's ?key= is not the secret",
+      });
+      expect(verify(`token=${secret}`)).toEqual({
+        ok: false,
+        reason: "The address has no ?key= secret",
+      });
+      const reading = adapter.read({ headers: new Headers(), body, receivedAt });
+      if (reading.kind !== "events") throw new Error("expected events");
+      expect(reading.events[0]).toMatchObject({
+        type: "monitor.triggered",
+        externalId: "run_1",
+        summary: "Price drops",
+      });
+    });
+
+    test("a type joined from parts, fallback paths, a body send time and the actor's kind", () => {
+      const adapter = custom({
+        signature: { scheme: "token", header: "X-Token" },
+        freshness: { path: "sent_at", toleranceSeconds: 60 },
+        type: { parts: [{ header: "X-Resource" }, { path: "change" }], separator: ":" },
+        subject: ["order.number", "order.id"],
+        occurredAt: ["order.updated", "order.created"],
+        actor: ["by.name", "by.login"],
+        actorKind: { path: "by.kind", person: ["member", "owner"] },
+      });
+      const event = (by: Record<string, unknown> | null, sentAt: unknown = now * 1000) =>
+        encoder.encode(
+          JSON.stringify({
+            sent_at: sentAt,
+            change: "paid",
+            order: { id: 7, created: "2026-10-24T09:00:00.000Z" },
+            ...(by ? { by } : {}),
+          }),
+        );
+      const headers = headersOf({ "x-token": "s3cret-token", "x-resource": "order" });
+      const verify = (body: Uint8Array) =>
+        adapter.verify({ secret: "s3cret-token", headers, body, nowSeconds: now });
+      expect(verify(event(null)).ok).toBe(true);
+      expect(verify(event(null, new Date(now * 1000).toISOString())).ok).toBe(true);
+      expect(verify(event(null, now - 120))).toEqual({
+        ok: false,
+        reason: 'The send time in "sent_at" is more than 60 seconds from now',
+      });
+      expect(verify(event(null, "soon"))).toEqual({
+        ok: false,
+        reason: 'The delivery has no send time in "sent_at"',
+      });
+      const read = (by: Record<string, unknown> | null) => {
+        const reading = adapter.read({ headers, body: event(by), receivedAt });
+        if (reading.kind !== "events") throw new Error("expected events");
+        return reading.events[0];
+      };
+      expect(read({ kind: "member", login: "ada" })).toMatchObject({
+        type: "order:paid",
+        subject: "7",
+        occurredAt: new Date("2026-10-24T09:00:00.000Z"),
+        actor: { kind: "person", name: "ada" },
+      });
+      expect(read({ kind: "integration", name: "Zap" })?.actor).toEqual({
+        kind: "bot",
+        name: "Zap",
+      });
+      expect(read(null)?.actor).toEqual({ kind: "unknown", name: null });
+      expect(adapter.retainedHeaders).toEqual(["x-resource"]);
+    });
+
+    test("a signed-content layout holds {body} once and names headers in its other braces", () => {
+      const layout = (signedContent: string) =>
+        WebhookFormat.safeParse({
+          signature: { scheme: "hmac_sha256", header: "X-Signature", signedContent },
+          type: { path: "type" },
+        }).success;
+      expect(layout("v0:{header:X-Timestamp}:{body}")).toBe(true);
+      expect(layout("{header:X-Timestamp}.{header:X-Id}")).toBe(false);
+      expect(layout("{body}{body}")).toBe(false);
+      expect(layout("{body}:{timestamp}")).toBe(false);
+      expect(layout("{body}:{header:not a header}")).toBe(false);
+      expect(layout("{body}}")).toBe(false);
     });
   });
 });

@@ -15,12 +15,60 @@ after its instructions.
    the ones that need no setup: MCP servers the user is signed in to that offer
    events, their Gmail, and This workspace for meetings. A `readyToAdd` id works
    wherever a source id does; the user's source is added the first time it is
-   used. If the app the user means is in neither list, tell them: a person adds
-   webhook, GitHub and Slack sources in Automations. Do not build a workaround
-   such as polling on a schedule unless they ask for one.
+   used. If the app the user means is in neither list and it sends webhooks,
+   add it yourself with `event_sources_create_webhook` (below). A person adds
+   GitHub and Slack sources in Automations. Do not build a workaround such as
+   polling on a schedule unless they ask for one.
 2. `event_sources_list` with a `sourceId` lists that source's event types and the
    fields conditions can match. Pick the narrowest type, for example
    `pull_request.opened` rather than every pull request event.
+
+## Add a webhook source
+
+`event_sources_create_webhook` adds any app that sends JSON webhooks. Pass
+`preset` for `linear`, `sentry` or `tailscale`. For any other app, read its
+webhook docs and write `format`:
+
+- `signature`, how the app proves a delivery is its own:
+  - `{ "scheme": "standard_webhooks" }`: `webhook-id`, `webhook-timestamp` and
+    `webhook-signature` headers with a `whsec_` secret (Svix-based apps).
+  - `{ "scheme": "hmac_sha256", "header": "X-Hub-Signature-256", "prefix": "sha256=" }`:
+    an HMAC-SHA256 of the body, `"encoding": "hex"` (default) or `"base64"`.
+    When the app signs more than the body, add `signedContent`, such as
+    `"v0:{header:X-Request-Timestamp}:{body}"`.
+  - `{ "scheme": "timestamped_hmac_sha256", "header": "Stripe-Signature" }`: a
+    `t=…,v1=…` header over `<t>.<body>`.
+  - `{ "scheme": "token", "header": "X-Gitlab-Token" }`: the secret itself in
+    a header, after an optional `prefix` such as `"Bearer "`.
+  - `{ "scheme": "ed25519", "header": "X-Signature-Ed25519", "signedContent": "{header:X-Signature-Timestamp}{body}" }`:
+    the secret is the app's public key.
+  - `{ "scheme": "url_token" }` only for an app that can't sign at all: the
+    secret goes in the address as `?token=…` (`parameter` renames it).
+- `type`, the event type: `{ "path": "type" }`, `{ "header": "X-Event-Key" }`,
+  `{ "value": "page.changed" }` when every delivery is the same, or
+  `{ "parts": [{ "header": "X-Resource" }, { "path": "action" }] }`, joined
+  with `.`.
+- Optional: `deliveryId` (a `header` or `path`) so retries are kept once;
+  `eventId`; `occurredAt`; `summary`, `subject`, `url` and `actor` (a path, or
+  a list of paths where the first with text wins); `actorKind`, such as
+  `{ "path": "actor.type", "person": ["user"] }`; `freshness`, such as
+  `{ "header": "X-Timestamp", "toleranceSeconds": 300 }`, when the app sends a
+  timestamp, so old deliveries can't be sent again; `batch` (`{}` or
+  `{ "path": "events" }`) when one delivery holds a list of events.
+
+Paths are dot paths into the JSON body, such as `data.issue.title`. A tool
+error says what is wrong with a format.
+
+Pass `signingSecret` as a saved secret's reference (`secret_save` first), never
+the value: the secret the app shows or that you set in the app, or its public
+key. For `url_token`, generate one with `secret_save` (32 characters, no
+symbols). Give the app the returned `registerUrl`; for `url_token`, replace
+`<secret>` with the same reference. Then have the app send a test and check
+`event_sources_list` with the `sourceId`: `recentDeliveries` says whether each
+delivery was accepted and why not, and `eventTypes` shows the types it has
+seen. Fix the format with `event_sources_update` until deliveries are
+accepted. Apps that send form bodies, or that need a challenge answered when
+the URL is registered, can't be added this way.
 
 ## Wake this chat
 

@@ -5,6 +5,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  webhookFormatOfPreset,
   type ScheduledTask,
 } from "@opengeni/contracts";
 import {
@@ -20,6 +21,7 @@ import {
   findAppEventSource,
   getEventOccurrenceForRun,
   getEventRunOccurrence,
+  getEventSource,
   getNestedAgentDepthDeploymentPolicy,
   getScheduledTask,
   getScheduledTaskEvents,
@@ -39,6 +41,7 @@ import {
   retireExhaustedScheduledTask,
   reviewScheduledTaskBlockers,
   setScheduledTaskEvents,
+  updateEventSource,
   updateScheduledTask,
   withWorkspaceRls,
   type DbClient,
@@ -353,6 +356,52 @@ describe("event sources", () => {
         statusReason: { code: "awaiting_secret", text: "Paste the signing secret" },
       }),
     ).rejects.toThrow();
+  });
+
+  test("a Linear or Sentry source stored before presets reads as a custom webhook with that preset", async () => {
+    const space = await workspace();
+    const legacy = async (adapter: "linear" | "sentry") =>
+      (
+        await createEventSource(client.db, {
+          accountId: space.accountId,
+          workspaceId: space.workspaceId,
+          createdBySubjectId: space.subjectId,
+          kind: "webhook",
+          adapter,
+          name: adapter,
+          ownerSubjectId: space.subjectId,
+          visibility: "private",
+          status: "blocked",
+          statusReason: { code: "awaiting_secret", text: "Paste the signing secret" },
+        })
+      ).source;
+    const linear = await legacy("linear");
+    const sentry = await legacy("sentry");
+    const reformatted = await legacy("linear");
+    const stored = async (id: string) => {
+      const [row] = await shared!.admin<{ adapter: string; webhook_format: unknown }[]>`
+        select adapter, webhook_format from event_sources where id = ${id}`;
+      return row!;
+    };
+    expect(await stored(linear.id)).toEqual({ adapter: "linear", webhook_format: null });
+
+    // Every reader sees the preset's format; a later release rewrites the row.
+    for (const [source, preset] of [
+      [linear, "linear"],
+      [sentry, "sentry"],
+    ] as const) {
+      expect(source).toMatchObject({ adapter: "custom", format: webhookFormatOfPreset(preset) });
+      expect(await getEventSource(client.db, space.workspaceId, source.id)).toMatchObject({
+        adapter: "custom",
+        format: webhookFormatOfPreset(preset),
+      });
+    }
+    // Writing a format stores the source as custom.
+    const format = { ...webhookFormatOfPreset("linear"), summary: "data.title" };
+    expect(
+      await updateEventSource(client.db, space.workspaceId, reformatted.id, { format }),
+    ).toMatchObject({ adapter: "custom", format });
+    expect(await stored(reformatted.id)).toEqual({ adapter: "custom", webhook_format: format });
   });
 
   test("the route table keeps no provider identity", async () => {

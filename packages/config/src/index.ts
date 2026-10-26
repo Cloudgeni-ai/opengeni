@@ -6107,10 +6107,13 @@ const EDITABLE_ARTIFACT_EXPORT_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "editable_artifact_export_status",
 ];
 
-/** Tools that read event sources and events; they exist only where event triggers run. */
+/** Tools for event sources and events; they exist only where event triggers run. */
 const EVENT_TRIGGER_TOOLS: readonly FirstPartyMcpToolNameType[] = [
   "event_sources_list",
   "events_get",
+  "event_sources_create_webhook",
+  "event_sources_update",
+  "event_sources_delete",
 ];
 
 /**

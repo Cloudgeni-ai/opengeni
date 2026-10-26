@@ -13,6 +13,7 @@ import type {
 import {
   isEventStatusReasonCode,
   WEBHOOK_FORMAT_PRESETS,
+  webhookPresetOf,
   type EventStatusReasonCode,
   type WebhookFormatPreset,
 } from "@opengeni/contracts/event-triggers";
@@ -147,8 +148,8 @@ export function isEventSourceChoice(value: unknown): value is EventSourceChoice 
 }
 
 /**
- * Apps whose own webhook a person pastes a URL into: Linear and Sentry have
- * their own adapters, the others are custom webhooks made with the app's preset.
+ * Apps whose own webhook a person pastes a URL into: each is a custom webhook
+ * made with the app's preset.
  */
 const APP_WEBHOOK_CHOICES = ["linear", "sentry", "tailscale"] as const;
 type AppWebhookChoice = (typeof APP_WEBHOOK_CHOICES)[number];
@@ -158,32 +159,38 @@ function isAppWebhookChoice(value: unknown): value is AppWebhookChoice {
 }
 
 /** The custom webhook preset each app choice is made with. */
-const PRESET_OF: Partial<Record<AppWebhookChoice, WebhookFormatPreset>> = {
+const PRESET_OF: Record<AppWebhookChoice, WebhookFormatPreset> = {
+  linear: "linear",
+  sentry: "sentry",
   tailscale: "tailscale",
 };
 
 /** The facts about a source that say which choice it is. */
 export type EventSourceChoiceSubject = Pick<EventSource, "kind" | "adapter"> & {
-  format?: { preset?: string | undefined } | null | undefined;
+  format?:
+    | {
+        preset?: string | undefined;
+        signature?: { scheme: string; parameter?: string | undefined } | undefined;
+      }
+    | null
+    | undefined;
 };
 
 /**
- * The choice a source is: its kind, its app for a Linear or Sentry webhook or a
- * custom one made with an app's preset, else a webhook.
+ * The choice a source is: its kind, its app for a custom webhook made with an
+ * app's preset (or a server's older `linear` or `sentry` adapter), else a
+ * webhook.
  */
 export function eventSourceChoiceOf(source: EventSourceChoiceSubject): EventSourceChoice {
   if (source.kind !== "webhook") return source.kind;
-  if (source.adapter === "custom") {
-    const preset = source.format?.preset;
-    return isAppWebhookChoice(preset) && PRESET_OF[preset] !== undefined ? preset : "webhook";
-  }
-  return isAppWebhookChoice(source.adapter) ? source.adapter : "webhook";
+  const { preset } = webhookPresetOf({ adapter: source.adapter, preset: source.format?.preset });
+  return isAppWebhookChoice(preset) ? preset : "webhook";
 }
 
 export const WEBHOOK_ADAPTER_OF: Partial<Record<EventSourceChoice, WebhookEventAdapter>> = {
   webhook: "standard",
-  linear: "linear",
-  sentry: "sentry",
+  linear: "custom",
+  sentry: "custom",
   tailscale: "custom",
 };
 
@@ -372,15 +379,35 @@ export function pastedWebhookSetup(
   if (source.kind !== "webhook") return null;
   const app = eventSourceChoiceOf(source);
   if (!isAppWebhookChoice(app)) {
-    // Any other app's webhook: the same two steps, in that app's settings.
-    return source.adapter === "custom"
-      ? {
-          app: t("automations.paste.custom.app"),
-          secretName: t("automations.paste.custom.secretName"),
-          urlStep: t("automations.paste.custom.urlStep"),
-          secretStep: t("automations.paste.custom.secretStep"),
-        }
-      : null;
+    if (source.adapter !== "custom") return null;
+    // Any other app's webhook: the same two steps, in that app's settings,
+    // worded for how it proves a delivery is its own.
+    const signature = source.format?.signature;
+    const scheme = signature?.scheme;
+    if (scheme === "url_token") {
+      return {
+        app: t("automations.paste.custom.app"),
+        secretName: t("automations.paste.urlToken.secretName"),
+        urlStep: t("automations.paste.urlToken.urlStep", {
+          parameter: signature?.parameter ?? "token",
+        }),
+        secretStep: t("automations.paste.urlToken.secretStep"),
+      };
+    }
+    if (scheme === "ed25519") {
+      return {
+        app: t("automations.paste.custom.app"),
+        secretName: t("automations.paste.publicKey.secretName"),
+        urlStep: t("automations.paste.custom.urlStep"),
+        secretStep: t("automations.paste.publicKey.secretStep"),
+      };
+    }
+    return {
+      app: t("automations.paste.custom.app"),
+      secretName: t("automations.paste.custom.secretName"),
+      urlStep: t("automations.paste.custom.urlStep"),
+      secretStep: t("automations.paste.custom.secretStep"),
+    };
   }
   return { app: eventSourceChoiceName(t, app), ...APP_PASTE_STEPS[app](t) };
 }

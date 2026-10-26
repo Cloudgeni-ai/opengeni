@@ -1,16 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
-import type {
-  ParsedCreateEventSourceRequest,
-  CreateEventSourceResponse,
-  EventDelivery,
-  EventSource,
-  EventTypeDescriptor,
-  ParsedSendTestEventRequest,
-  SendTestEventResponse,
-  UpdateEventSourceRequest,
-  WebhookEventAdapter,
-  WebhookFormat,
+import {
+  currentWebhookAdapter,
+  type ParsedCreateEventSourceRequest,
+  type CreateEventSourceResponse,
+  type EventDelivery,
+  type EventSource,
+  type EventTypeDescriptor,
+  type ParsedSendTestEventRequest,
+  type SendTestEventResponse,
+  type UpdateEventSourceRequest,
+  type WebhookFormat,
 } from "@opengeni/contracts";
 import {
   createEventSource,
@@ -70,7 +70,11 @@ import {
   McpServerWithoutEventsError,
 } from "./mcp-event-types";
 import { serverOffersMcpEvents } from "./mcp-events-protocol";
-import { generateStandardWebhookSecret, standardWebhookSecretKey } from "./webhook-signatures";
+import {
+  ed25519PublicKey,
+  generateStandardWebhookSecret,
+  standardWebhookSecretKey,
+} from "./webhook-signatures";
 import { eventSourceWebhookUrl } from "./webhook-url";
 
 /**
@@ -228,10 +232,15 @@ export async function createEventSourceForViewer(
     });
   }
   const key = requireEncryptionKey(input.settings);
-  const generated = request.adapter === "standard" ? generateStandardWebhookSecret() : null;
+  // `linear` and `sentry` are older names for a custom webhook with that preset.
+  const { adapter, format } = currentWebhookAdapter({
+    adapter: request.adapter,
+    format: request.format ?? null,
+  });
+  const generated = adapter === "standard" ? generateStandardWebhookSecret() : null;
   const secret = generated ?? request.signingSecret;
   if (request.signingSecret !== undefined) {
-    assertSecretFitsFormat(request.signingSecret, request.format ?? null);
+    assertSecretFitsFormat(request.signingSecret, format);
   }
   // A workspace-level caller owns nothing, so its sources are the workspace's.
   const owner = input.viewer.subjectId;
@@ -240,8 +249,8 @@ export async function createEventSourceForViewer(
     workspaceId: input.workspaceId,
     createdBySubjectId: input.createdBySubjectId,
     kind: "webhook",
-    adapter: request.adapter,
-    ...(request.adapter === "custom" && request.format ? { format: request.format } : {}),
+    adapter: adapter ?? "standard",
+    ...(adapter === "custom" && format ? { format } : {}),
     name: request.name,
     ownerSubjectId: owner,
     visibility: owner === null ? "workspace" : request.visibility,
@@ -249,7 +258,7 @@ export async function createEventSourceForViewer(
     // the URL, so a source without one waits, blocked, until it is pasted.
     ...(secret
       ? { secretEncrypted: encryptEnvironmentValue(key, secret) }
-      : { status: "blocked" as const, statusReason: awaitingSecretReason(request.adapter) }),
+      : { status: "blocked" as const, statusReason: awaitingSecretReason(format) }),
   });
   return {
     source: eventSourceForClient(source, input.baseUrl),
@@ -257,14 +266,31 @@ export async function createEventSourceForViewer(
   };
 }
 
-const PASTED_WEBHOOK_APPS: Partial<Record<WebhookEventAdapter, string>> = {
+/** Apps whose preset names them in the "paste the secret" reason. */
+const PRESET_APP_NAMES: Record<string, string> = {
   linear: "Linear",
   sentry: "Sentry",
+  tailscale: "Tailscale",
 };
 
-/** Why a pasted webhook waits: the sending app's secret is not pasted yet. */
-function awaitingSecretReason(adapter: WebhookEventAdapter): EventStatusReason {
-  const app = PASTED_WEBHOOK_APPS[adapter];
+/** Why a pasted webhook waits: the sending app's secret or key is not pasted yet. */
+function awaitingSecretReason(format: WebhookFormat | null): EventStatusReason {
+  const app =
+    format?.preset && Object.hasOwn(PRESET_APP_NAMES, format.preset)
+      ? PRESET_APP_NAMES[format.preset]
+      : undefined;
+  if (format?.signature.scheme === "ed25519") {
+    return eventStatusReason(
+      "awaiting_secret",
+      "Paste the public key the app shows for its webhooks. Until then its deliveries are refused.",
+    );
+  }
+  if (format?.signature.scheme === "url_token") {
+    return eventStatusReason(
+      "awaiting_secret",
+      "Set the secret the address carries. Until then its deliveries are refused.",
+    );
+  }
   return eventStatusReason(
     "awaiting_secret",
     app
@@ -273,11 +299,29 @@ function awaitingSecretReason(adapter: WebhookEventAdapter): EventStatusReason {
   );
 }
 
-/** A Standard Webhooks app signs with a `whsec_` secret; any other secret could never verify. */
+/**
+ * A Standard Webhooks app signs with a `whsec_` secret, and an Ed25519 one
+ * with a key pair whose public key is the secret; any other value could never
+ * verify. A secret in the webhook address must be long and URL-safe.
+ */
 function assertSecretFitsFormat(secret: string, format: WebhookFormat | null): void {
   if (format?.signature.scheme === "standard_webhooks" && !standardWebhookSecretKey(secret)) {
     throw new HTTPException(422, {
       message: "This app signs with Standard Webhooks, so its secret starts with whsec_",
+    });
+  }
+  if (format?.signature.scheme === "ed25519" && !ed25519PublicKey(secret)) {
+    throw new HTTPException(422, {
+      message:
+        "This app signs with Ed25519, so its secret is the app's public key: 32 bytes in hex or base64, or a PEM public key",
+    });
+  }
+  // The address carries this secret as it is, so it must be long and need no
+  // escaping there.
+  if (format?.signature.scheme === "url_token" && !/^[A-Za-z0-9._~-]{24,}$/u.test(secret)) {
+    throw new HTTPException(422, {
+      message:
+        "This secret goes in the webhook address, so it must be at least 24 letters, digits, '-', '_', '.' or '~'",
     });
   }
 }
@@ -514,6 +558,8 @@ export async function receiveEventWebhook(input: {
   routeId: string;
   headers: Headers;
   body: Uint8Array;
+  /** The address's query, for an app that sends its secret there. Never stored. */
+  query?: URLSearchParams;
   receivedAt?: Date;
 }): Promise<WebhookIntakeResult> {
   if (!eventTriggersEnabled(input.settings)) return { outcome: "not_found" };
@@ -545,6 +591,7 @@ export async function receiveEventWebhook(input: {
         ),
         headers: input.headers,
         body: input.body,
+        ...(input.query ? { query: input.query } : {}),
         nowSeconds: receivedAt.getTime() / 1000,
       })
     : ({ ok: false, reason: "No signing secret yet: paste the one the app shows" } as const);

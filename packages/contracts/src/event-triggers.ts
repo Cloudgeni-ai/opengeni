@@ -31,9 +31,10 @@ export type EventSourceKind = z.infer<typeof EventSourceKind>;
 
 /**
  * How a webhook endpoint verifies and reads deliveries: `standard` is
- * Opengeni's own format (Standard Webhooks with an Opengeni secret), `linear`
- * and `sentry` are those apps' webhooks, and `custom` reads any other app's
- * webhooks as the source's `format` describes.
+ * Opengeni's own format (Standard Webhooks with an Opengeni secret), and
+ * `custom` reads any app's webhooks as the source's `format` describes.
+ * `linear` and `sentry` are older names for `custom` with that app's preset:
+ * a request may still use them, and sources made with them read as `custom`.
  */
 export const WEBHOOK_EVENT_ADAPTERS = ["standard", "linear", "sentry", "custom"] as const;
 export const WebhookEventAdapter = /* @__PURE__ */ defineSchema(() =>
@@ -63,18 +64,84 @@ export const WebhookValueSource = /* @__PURE__ */ defineSchema(() =>
 );
 export type WebhookValueSource = z.infer<typeof WebhookValueSource>;
 
+/** A query parameter name, such as `token`. */
+export const WebhookQueryParameter = /* @__PURE__ */ defineSchema(() =>
+  z.string().regex(/^[A-Za-z0-9_.~-]{1,64}$/u, "A query parameter name such as token"),
+);
+
+/**
+ * The exact bytes an app signs, when it is more than the body: the raw body
+ * as `{body}` (exactly once) and a request header's value as `{header:Name}`,
+ * around literal text. Slack's is `v0:{header:X-Slack-Request-Timestamp}:{body}`.
+ */
+export const WebhookSignedContent = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .min(6)
+    .max(200)
+    .superRefine((layout, context) => {
+      const parts = parseWebhookSignedContent(layout);
+      if (typeof parts === "string") context.addIssue({ code: "custom", message: parts });
+    }),
+);
+
+/** One piece of a signed-content layout: literal text, the raw body, or a header's value. */
+export type WebhookSignedContentPart =
+  | { kind: "text"; text: string }
+  | { kind: "body" }
+  | { kind: "header"; header: string };
+
+const SIGNED_CONTENT_TOKEN = /\{([^{}]*)\}/gu;
+const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/u;
+
+/**
+ * The pieces of a signed-content layout, or why it is not one: `{body}` must
+ * appear exactly once, and every other `{…}` must name a header.
+ */
+export function parseWebhookSignedContent(layout: string): WebhookSignedContentPart[] | string {
+  const parts: WebhookSignedContentPart[] = [];
+  let bodies = 0;
+  let last = 0;
+  for (const match of layout.matchAll(SIGNED_CONTENT_TOKEN)) {
+    const text = layout.slice(last, match.index);
+    if (/[{}]/u.test(text)) return "Braces may only wrap {body} or {header:Name}";
+    if (text) parts.push({ kind: "text", text });
+    const token = match[1] ?? "";
+    if (token === "body") {
+      bodies += 1;
+      parts.push({ kind: "body" });
+    } else if (token.startsWith("header:") && HEADER_NAME_PATTERN.test(token.slice(7))) {
+      parts.push({ kind: "header", header: token.slice(7) });
+    } else {
+      return `{${token}} is neither {body} nor {header:Name}`;
+    }
+    last = (match.index ?? 0) + match[0].length;
+  }
+  const rest = layout.slice(last);
+  if (/[{}]/u.test(rest)) return "Braces may only wrap {body} or {header:Name}";
+  if (rest) parts.push({ kind: "text", text: rest });
+  if (bodies !== 1) return "The signed content must hold {body} exactly once";
+  return parts;
+}
+
 /**
  * How a custom webhook proves it came from the app, always over the exact raw
  * body and with the source's secret:
  * - `standard_webhooks`: Standard Webhooks (`webhook-id`, `webhook-timestamp`,
  *   `webhook-signature`) with a `whsec_` secret, as Svix-based apps send.
  * - `hmac_sha256`: the HMAC-SHA256 of the body in `header`, hex or base64,
- *   after an optional `prefix` such as `sha256=`.
+ *   after an optional `prefix` such as `sha256=`. With `signedContent`, of
+ *   that layout instead of the body alone.
  * - `timestamped_hmac_sha256`: a `t=<unix seconds>,v1=<hex>` header whose
  *   signature is the HMAC-SHA256 of `<t>.<body>`, as Stripe and Tailscale
  *   send; deliveries signed more than `toleranceSeconds` away are refused.
  * - `token`: the secret itself in `header`, after an optional `prefix` such
  *   as `Bearer ` (a shared token, as GitLab sends).
+ * - `ed25519`: an Ed25519 signature in `header` over the body, or over
+ *   `signedContent`; the source's secret is the app's public key (hex, base64
+ *   or PEM), as Discord sends.
+ * - `url_token`: for apps that can't sign: the secret in the webhook address's
+ *   query, as `?<parameter>=<secret>`.
  */
 export const WebhookSignatureFormat = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("scheme", [
@@ -85,6 +152,7 @@ export const WebhookSignatureFormat = /* @__PURE__ */ defineSchema(() =>
         header: WebhookHeaderName,
         encoding: z.enum(["hex", "base64"]).default("hex"),
         prefix: z.string().max(32).default(""),
+        signedContent: WebhookSignedContent.optional(),
       })
       .strict(),
     z
@@ -99,6 +167,21 @@ export const WebhookSignatureFormat = /* @__PURE__ */ defineSchema(() =>
         scheme: z.literal("token"),
         header: WebhookHeaderName,
         prefix: z.string().max(32).default(""),
+      })
+      .strict(),
+    z
+      .object({
+        scheme: z.literal("ed25519"),
+        header: WebhookHeaderName,
+        encoding: z.enum(["hex", "base64"]).default("hex"),
+        prefix: z.string().max(32).default(""),
+        signedContent: WebhookSignedContent.optional(),
+      })
+      .strict(),
+    z
+      .object({
+        scheme: z.literal("url_token"),
+        parameter: WebhookQueryParameter.default("token"),
       })
       .strict(),
   ]),
@@ -208,6 +291,16 @@ export const EventTypeName = /* @__PURE__ */ defineSchema(() =>
 );
 
 /**
+ * A text value read from an event: a JSON path, or a list of paths where the
+ * first that holds text wins (apps put the same thing in different places
+ * for different events).
+ */
+export const WebhookTextPaths = /* @__PURE__ */ defineSchema(() =>
+  z.union([WebhookJsonPath, z.array(WebhookJsonPath).min(1).max(8)]),
+);
+export type WebhookTextPaths = z.infer<typeof WebhookTextPaths>;
+
+/**
  * How a custom webhook source reads another app's deliveries. Paths are read
  * in each event: the body, or each item of the list `batch` names.
  */
@@ -221,30 +314,77 @@ export const WebhookFormat = /* @__PURE__ */ defineSchema(() =>
         .optional(),
       signature: WebhookSignatureFormat,
       /**
+       * A send time the delivery must be close to, so an old delivery can't
+       * be sent again: an ISO time or Unix seconds or milliseconds at a body
+       * `path` or in a `header`. Checked after the signature.
+       */
+      freshness: z
+        .union([
+          z
+            .object({
+              path: WebhookJsonPath,
+              toleranceSeconds: z.number().int().min(30).max(3600).default(300),
+            })
+            .strict(),
+          z
+            .object({
+              header: WebhookHeaderName,
+              toleranceSeconds: z.number().int().min(30).max(3600).default(300),
+            })
+            .strict(),
+        ])
+        .optional(),
+      /**
        * Present when one delivery holds several events: the body is a JSON
        * list of them, or holds one at `path`. Absent: the body is one event.
        */
       batch: z.object({ path: WebhookJsonPath.optional() }).strict().optional(),
-      /** The event type: a path or header, or one `value` for every delivery. */
+      /**
+       * The event type: a path or header, one `value` for every delivery, or
+       * `parts` joined with `separator` (such as a header's `issue` and the
+       * body's `created` as `issue.created`).
+       */
       type: z.union([
         z.object({ path: WebhookJsonPath }).strict(),
         z.object({ header: WebhookHeaderName }).strict(),
         z.object({ value: EventTypeName }).strict(),
+        z
+          .object({
+            parts: z.array(WebhookValueSource).min(2).max(4),
+            separator: z
+              .string()
+              .max(4)
+              .regex(/^[\x21-\x7e]*$/u)
+              .default("."),
+          })
+          .strict(),
       ]),
       /** The delivery's id, so a retried delivery is kept once; else the body's hash. */
       deliveryId: WebhookValueSource.optional(),
       /** Each event's own id, so an event delivered twice runs automations once. */
-      eventId: WebhookJsonPath.optional(),
+      eventId: WebhookTextPaths.optional(),
       /** When it happened: an ISO time or Unix seconds or milliseconds. */
-      occurredAt: WebhookJsonPath.optional(),
+      occurredAt: WebhookTextPaths.optional(),
       /** A one-line description; the event type when absent. */
-      summary: WebhookJsonPath.optional(),
+      summary: WebhookTextPaths.optional(),
       /** What it is about, such as a device or order name. */
-      subject: WebhookJsonPath.optional(),
+      subject: WebhookTextPaths.optional(),
       /** A link to it in the app. */
-      url: WebhookJsonPath.optional(),
+      url: WebhookTextPaths.optional(),
       /** Who did it. */
-      actor: WebhookJsonPath.optional(),
+      actor: WebhookTextPaths.optional(),
+      /**
+       * Whether the actor is a person: the values at `path` that mean a
+       * person, such as `user`; any other value means a bot. Without it, the
+       * actor's kind is unknown.
+       */
+      actorKind: z
+        .object({
+          path: WebhookJsonPath,
+          person: z.array(z.string().min(1).max(64)).min(1).max(8),
+        })
+        .strict()
+        .optional(),
     })
     .strict(),
 );
@@ -256,6 +396,59 @@ export type WebhookFormatInput = z.input<typeof WebhookFormat>;
  * A custom source made with one is the same as one that spells it out.
  */
 export const WEBHOOK_FORMAT_PRESETS = {
+  /**
+   * Linear: `Linear-Signature` over the body, a `webhookTimestamp` (ms)
+   * within a minute, and `<type>.<action>` such as `Issue.create`.
+   */
+  linear: {
+    preset: "linear",
+    signature: { scheme: "hmac_sha256", header: "Linear-Signature" },
+    freshness: { path: "webhookTimestamp", toleranceSeconds: 60 },
+    type: { parts: [{ path: "type" }, { path: "action" }] },
+    deliveryId: { header: "Linear-Delivery" },
+    occurredAt: "createdAt",
+    summary: ["data.title", "data.name", "data.issue.title", "data.label.name", "data.body"],
+    subject: ["data.identifier", "data.issue.identifier", "data.id"],
+    url: "url",
+    actor: ["actor.name", "actor.email"],
+    actorKind: { path: "actor.type", person: ["user"] },
+  },
+  /**
+   * Sentry integration webhooks: `Sentry-Hook-Signature` with the client
+   * secret, and the `Sentry-Hook-Resource` header's resource with the body's
+   * action, such as `issue.created`.
+   */
+  sentry: {
+    preset: "sentry",
+    signature: { scheme: "hmac_sha256", header: "Sentry-Hook-Signature" },
+    type: { parts: [{ header: "Sentry-Hook-Resource" }, { path: "action" }] },
+    deliveryId: { header: "Request-ID" },
+    occurredAt: ["data.issue.lastSeen", "data.event.datetime", "data.error.datetime"],
+    summary: [
+      "data.issue.title",
+      "data.error.title",
+      "data.event.title",
+      "data.description_title",
+      "data.metric_alert.title",
+      "data.comment",
+    ],
+    subject: [
+      "data.issue.shortId",
+      "data.issue.short_id",
+      "data.issue.id",
+      "data.event.issue_id",
+      "data.error.issue_id",
+    ],
+    url: [
+      "data.issue.web_url",
+      "data.event.web_url",
+      "data.error.web_url",
+      "data.metric_alert.web_url",
+      "data.web_url",
+    ],
+    actor: "actor.name",
+    actorKind: { path: "actor.type", person: ["user"] },
+  },
   /** Tailscale: a JSON list of events, signed `t=…,v1=…` over `<t>.<body>`. */
   tailscale: {
     preset: "tailscale",
@@ -268,8 +461,54 @@ export const WEBHOOK_FORMAT_PRESETS = {
     url: "data.url",
     actor: "data.actor",
   },
-} as const satisfies Record<string, WebhookFormatInput>;
+} satisfies Record<string, WebhookFormatInput>;
 export type WebhookFormatPreset = keyof typeof WEBHOOK_FORMAT_PRESETS;
+export const WEBHOOK_FORMAT_PRESET_NAMES = Object.keys(
+  WEBHOOK_FORMAT_PRESETS,
+) as WebhookFormatPreset[];
+
+/** Whether `name` is a preset this version knows. */
+export function isWebhookFormatPreset(name: unknown): name is WebhookFormatPreset {
+  return typeof name === "string" && Object.hasOwn(WEBHOOK_FORMAT_PRESETS, name);
+}
+
+/** A preset's format, parsed with its defaults. */
+export function webhookFormatOfPreset(preset: WebhookFormatPreset): WebhookFormat {
+  return WebhookFormat.parse(WEBHOOK_FORMAT_PRESETS[preset]);
+}
+
+/**
+ * A webhook source as one of the two adapters: `standard`, or `custom` with
+ * its format. A source stored with an older adapter name (`linear`,
+ * `sentry`) reads as `custom` with that app's preset.
+ */
+export function currentWebhookAdapter(source: {
+  adapter: WebhookEventAdapter | null;
+  format: WebhookFormat | null;
+}): { adapter: "standard" | "custom" | null; format: WebhookFormat | null } {
+  if (source.adapter === "linear" || source.adapter === "sentry") {
+    return { adapter: "custom", format: source.format ?? webhookFormatOfPreset(source.adapter) };
+  }
+  return { adapter: source.adapter, format: source.format };
+}
+
+/**
+ * Which webhook something names, for telling whether a source is the one a
+ * template wants: `standard`, or `custom` with its preset (null for a format
+ * written out by hand). The older `linear` and `sentry` are custom with that
+ * preset.
+ */
+export function webhookPresetOf(input: {
+  adapter?: WebhookEventAdapter | null | undefined;
+  preset?: string | null | undefined;
+}): { adapter: "standard" | "custom"; preset: string | null } {
+  if (input.adapter === "linear" || input.adapter === "sentry") {
+    return { adapter: "custom", preset: input.adapter };
+  }
+  return input.adapter === "custom"
+    ? { adapter: "custom", preset: input.preset ?? null }
+    : { adapter: "standard", preset: null };
+}
 
 export const EventSourceMcpBinding = /* @__PURE__ */ defineSchema(() =>
   z

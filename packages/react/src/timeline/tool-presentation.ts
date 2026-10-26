@@ -967,6 +967,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Scheduled tasks
   checkSchedules: "calendar",
   checkEvents: "calendar",
+  changeEventSource: "calendar",
   createSchedule: "calendar",
   updateSchedule: "calendar",
   runSchedule: "calendar",

@@ -482,6 +482,9 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
   scheduled_task_runs_list: "schedules",
   event_sources_list: "schedules",
   events_get: "schedules",
+  event_sources_create_webhook: "schedules",
+  event_sources_update: "schedules",
+  event_sources_delete: "schedules",
 
   artifacts_list: "artifacts",
   artifacts_get_source: "artifacts",

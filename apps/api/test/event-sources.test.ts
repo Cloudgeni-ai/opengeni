@@ -603,7 +603,10 @@ describe("event sources", () => {
     });
     expect(waiting.status).toBe(201);
     const pending = (await f.json(waiting)).source;
+    // `linear` is the older name for a custom webhook with Linear's preset.
     expect(pending).toMatchObject({
+      adapter: "custom",
+      format: { preset: "linear", signature: { scheme: "hmac_sha256" } },
       status: "blocked",
       visibility: "private",
       awaitingSigningSecret: true,
@@ -696,7 +699,7 @@ describe("event sources", () => {
     expect(events[0]).toMatchObject({
       type: "Issue.create",
       subject: "ENG-42",
-      summary: "Issue created: ENG-42 Checkout is slow",
+      summary: "Checkout is slow",
       actor: { kind: "person", name: "Ada" },
     });
   });
@@ -745,7 +748,7 @@ describe("event sources", () => {
         signature: { scheme: "timestamped_hmac_sha256", toleranceSeconds: 300 },
       },
     });
-    expect(pending.statusReason).toContain("Paste the webhook's signing secret");
+    expect(pending.statusReason).toContain("Paste the signing secret Tailscale shows");
     // The preset names the app's documented event types before any arrive.
     const presetTypes = await f.json(
       await f.app.request(`${f.sources}/${pending.id}/event-types`, { headers: f.owner.headers }),
@@ -896,12 +899,169 @@ describe("agent tools", () => {
       const update = tools.find((tool) => tool.name === "scheduled_tasks_update")!;
       expect(names.includes("event_sources_list")).toBe(enabled);
       expect(names.includes("events_get")).toBe(enabled);
+      expect(names.includes("event_sources_create_webhook")).toBe(enabled);
       expect("events" in (create.inputSchema.properties ?? {})).toBe(enabled);
       expect("events" in (update.inputSchema.properties ?? {})).toBe(enabled);
       expect(create.inputSchema.required?.includes("schedule") ?? false).toBe(!enabled);
       expect(create.description?.includes("event_sources_list")).toBe(enabled);
       await close();
     }
+    // Adding and changing sources needs scheduled_tasks:manage.
+    const runner = await agent(on, on.owner.subjectId, {}, ["scheduled_tasks:run"]);
+    const runnerTools = (await runner.client.listTools()).tools.map((tool) => tool.name);
+    expect(runnerTools).toContain("event_sources_list");
+    for (const name of [
+      "event_sources_create_webhook",
+      "event_sources_update",
+      "event_sources_delete",
+    ]) {
+      expect(runnerTools).not.toContain(name);
+    }
+    await runner.close();
+  });
+
+  test("an agent adds any app's webhook, checks what arrived, and changes or removes it", async () => {
+    const f = await fixture({ enabled: true });
+    const owner = await agent(f, f.owner.subjectId);
+    const send = async (address: string, body: unknown) => {
+      const url = new URL(address);
+      return await f.app.request(`${url.pathname}${url.search}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    };
+
+    expect(await owner.call("event_sources_create_webhook", { name: "Watcher" })).toEqual({
+      error: expect.stringContaining("Pass either preset or format"),
+    });
+    expect(
+      await owner.call("event_sources_create_webhook", {
+        name: "Watcher",
+        format: { signature: { scheme: "rot13" }, type: { path: "event" } },
+      }),
+    ).toEqual({ error: expect.stringContaining("The format is not valid") });
+
+    // An app that can't sign: the secret travels in the address it posts to.
+    const format = {
+      signature: { scheme: "url_token" },
+      type: { path: "event" },
+      eventId: "id",
+      summary: ["title", "message"],
+    };
+    expect(
+      await owner.call("event_sources_create_webhook", {
+        name: "Page watcher",
+        format,
+        signingSecret: "short-secret",
+      }),
+    ).toEqual({ error: expect.stringContaining("at least 24 letters") });
+    const token = randomBytes(24).toString("hex");
+    const created = await owner.call("event_sources_create_webhook", {
+      name: "Page watcher",
+      format,
+      signingSecret: token,
+    });
+    expect(created).toEqual({
+      source: {
+        id: expect.any(String),
+        name: "Page watcher",
+        kind: "webhook",
+        status: "active",
+      },
+      registerUrl: expect.stringMatching(
+        /^https:\/\/opengeni\.example\/.+\/[0-9a-f-]+\?token=<secret>$/u,
+      ),
+      note: expect.stringContaining("same secret reference"),
+    });
+    expect(JSON.stringify(created)).not.toContain(token);
+    const sourceId = created.source.id as string;
+    const address = created.registerUrl.replace("<secret>", token) as string;
+
+    const change = { event: "page.changed", id: "chg_1", message: "Prices changed" };
+    expect((await send(address, change)).status).toBe(200);
+    expect((await send(address.replace(token, "x".repeat(48)), change)).status).toBe(401);
+    expect((await send(address.replace(/\?.*$/u, ""), change)).status).toBe(401);
+
+    const described = await owner.call("event_sources_list", { sourceId });
+    expect(described.source).toMatchObject({
+      id: sourceId,
+      webhookUrl: address.replace(/\?.*$/u, ""),
+      format: { signature: { scheme: "url_token", parameter: "token" } },
+    });
+    expect(JSON.stringify(described)).not.toContain(token);
+    expect(described.eventTypes.map((type: { type: string }) => type.type)).toEqual([
+      "page.changed",
+    ]);
+    expect(described.recentDeliveries).toHaveLength(3);
+    expect(
+      described.recentDeliveries.find(
+        (delivery: { status: string }) => delivery.status === "accepted",
+      ),
+    ).toMatchObject({ eventTypes: ["page.changed"] });
+    expect(
+      described.recentDeliveries.filter(
+        (delivery: { status: string }) => delivery.status === "rejected",
+      ),
+    ).toHaveLength(2);
+
+    // Another member neither sees nor changes the owner's private source.
+    const other = await agent(f, f.other.subjectId);
+    expect(await other.call("event_sources_update", { sourceId, name: "Mine" })).toEqual({
+      error: expect.stringContaining("Event source not found"),
+    });
+    expect(await other.call("event_sources_delete", { sourceId })).toEqual({
+      error: expect.stringContaining("Event source not found"),
+    });
+
+    // A format change is checked like a new one, and against the kept secret.
+    expect(
+      await owner.call("event_sources_update", { sourceId, format: { type: { path: "event" } } }),
+    ).toEqual({ error: expect.stringContaining("The format is not valid") });
+    expect(
+      await owner.call("event_sources_update", {
+        sourceId,
+        format: { ...format, signature: { scheme: "url_token", parameter: "key" } },
+        visibility: "workspace",
+      }),
+    ).toMatchObject({
+      source: { id: sourceId, status: "active" },
+      registerUrl: expect.stringMatching(/\?key=<secret>$/u),
+    });
+    expect((await send(address.replace("?token=", "?key="), change)).status).toBe(200);
+
+    // A preset fills the format in; without its secret the source waits.
+    const linear = await owner.call("event_sources_create_webhook", {
+      name: "Linear",
+      preset: "linear",
+    });
+    expect(linear).toMatchObject({
+      source: {
+        preset: "linear",
+        status: "blocked",
+        statusReason: expect.stringContaining("Linear"),
+      },
+      registerUrl: expect.stringMatching(/^https:\/\/opengeni\.example\//u),
+    });
+    expect(
+      await owner.call("event_sources_update", {
+        sourceId: linear.source.id,
+        signingSecret: "lin_wh_0123456789abcdef",
+      }),
+    ).toMatchObject({ source: { preset: "linear", status: "active" } });
+    expect(
+      (await owner.call("event_sources_list", { sourceId: linear.source.id })).eventTypes.map(
+        (type: { type: string }) => type.type,
+      ),
+    ).toContain("Issue.create");
+
+    expect(await owner.call("event_sources_delete", { sourceId })).toEqual({ deleted: sourceId });
+    expect(
+      (await owner.call("event_sources_list", {})).sources.map(
+        (source: { id: string }) => source.id,
+      ),
+    ).toEqual([linear.source.id]);
+    await Promise.all([owner.close(), other.close()]);
   });
 
   test("an agent finds a source, sets up a trigger without a schedule, and reads what a run carried", async () => {

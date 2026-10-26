@@ -136,7 +136,8 @@ describe("template sources", () => {
   const linear = source({
     id: "a1000000-0000-4000-8000-000000000003",
     kind: "webhook",
-    adapter: "linear",
+    adapter: "custom",
+    format: { preset: "linear" } as EventSource["format"],
     name: "Linear",
   });
 
@@ -151,8 +152,21 @@ describe("template sources", () => {
       ]),
     ).toBe(sharedGithub.id);
     expect(
+      automationTemplateSourceId({ kind: "webhook", adapter: "custom", preset: "linear" }, [
+        github,
+        linear,
+      ]),
+    ).toBe(linear.id);
+    // A template saved before presets names Linear by its older adapter.
+    expect(
       automationTemplateSourceId({ kind: "webhook", adapter: "linear" }, [github, linear]),
     ).toBe(linear.id);
+    // Any other custom webhook is not Linear's.
+    expect(
+      automationTemplateSourceId({ kind: "webhook", adapter: "custom", preset: "linear" }, [
+        { ...linear, format: { preset: "tailscale" } as EventSource["format"] },
+      ]),
+    ).toBe("");
     expect(
       automationTemplateSourceId({ kind: "github" }, [{ ...github, status: "disabled" }]),
     ).toBe("");

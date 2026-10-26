@@ -250,6 +250,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   events_get: {
     anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"],
   },
+  event_sources_create_webhook: { allOf: ["scheduled_tasks:manage"] },
+  event_sources_update: { allOf: ["scheduled_tasks:manage"] },
+  event_sources_delete: { allOf: ["scheduled_tasks:manage"] },
   slack_bot_list_channels: { allOf: ["connections:read"] },
   slack_bot_search: { allOf: ["connections:read"] },
   slack_bot_channel_history: { allOf: ["connections:read"] },
