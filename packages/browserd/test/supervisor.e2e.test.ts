@@ -412,6 +412,118 @@ recoveryE2e(
 );
 
 recoveryE2e(
+  "tabs showing the same page never take each other's IDs when the browser relaunches",
+  async () => {
+    const directory = await mkdtemp("/tmp/ogb-duplicate-tabs-e2e-");
+    const rootDirectory = join(directory, "state");
+    // Each tab keeps its own marker in sessionStorage, which the browser
+    // restores per tab, and then shows the same /dup URL as the others.
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        const path = new URL(request.url).pathname;
+        const script = path.startsWith("/mark/")
+          ? `sessionStorage.setItem("marker", ${JSON.stringify(path.slice(6))}); location.replace("/dup");`
+          : `document.title = "Tab " + (sessionStorage.getItem("marker") ?? "none");`;
+        return new Response(
+          `<!doctype html><title>Loading</title><h1>Duplicate</h1><script>${script}</script>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      },
+    });
+    const base = `http://127.0.0.1:${server.port}`;
+    let clock = Date.now();
+    const options = {
+      ...reference(),
+      headed: false,
+      initialUrl: `${base}/mark/A`,
+      ...(process.env.OPENGENI_BROWSER_EXECUTABLE
+        ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
+        : {}),
+      workingRuntimeAuthority: {
+        tokenGeneration: 1,
+        placementDigest: "a".repeat(64),
+        controlDigest: "b".repeat(64),
+        viewDigest: "c".repeat(64),
+      },
+    };
+    const profile = join(rootDirectory, "sessions", options.browserSessionId, "profile");
+    const supervisor = await openManagedRecoverySupervisor(rootDirectory, {
+      idleReleaseMs: 60_000,
+      now: () => clock,
+    });
+    const markedTabs = async (expected: number) => {
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const targets = await supervisor.listTargets(options);
+        if (
+          targets.length === expected &&
+          targets.every(
+            (target) => target.url === `${base}/dup` && /^Tab [ABC]$/u.test(target.title),
+          )
+        )
+          return targets;
+        if (Date.now() > deadline)
+          throw new Error(`tabs never showed their markers: ${JSON.stringify(targets)}`);
+        await Bun.sleep(50);
+      }
+    };
+    let relaunchedPid: number | undefined;
+    try {
+      const a = await supervisor.createSession(options);
+      await supervisor.openTarget(options, `${base}/mark/B`);
+      await supervisor.openTarget(options, `${base}/mark/C`);
+      const before = await markedTabs(3);
+      const markerOf = new Map(before.map((target) => [target.id, target.title]));
+      expect(markerOf.get(a.observation.target.id)).toBe("Tab A");
+      // The agent's selected tab is not the browser's last opened one.
+      await supervisor.selectTarget(options, a.observation.target.id);
+      const browserPid = await chromiumProfilePid(profile);
+      clock += 61_000;
+      expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+      await waitForProcessExit(browserPid);
+
+      const { initialUrl: _initialUrl, ...recoveryOptions } = options;
+      await supervisor.createSession({ ...recoveryOptions, recoverExistingWorkingDirectory: true });
+      relaunchedPid = await chromiumProfilePid(profile);
+      const after = await markedTabs(3);
+      // No earlier ID may name another tab's page: an ID either still shows
+      // its own tab or reads as replaced.
+      for (const [id, marker] of markerOf) {
+        const reopened = after.find((target) => target.id === id);
+        if (reopened) expect(reopened.title).toBe(marker);
+        const observed: BrowserObservation | Error = await supervisor
+          .observe(options, id)
+          .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+        if (observed instanceof Error) {
+          expect(observed).toMatchObject({ code: "target_not_found" });
+          expect(observed.message).toContain("and this tab was replaced");
+        } else {
+          expect(observed.target.title).toBe(marker);
+        }
+      }
+      // Three tabs showing one URL can't be told apart, so none kept its ID.
+      expect(after.filter((target) => markerOf.has(target.id))).toEqual([]);
+      await supervisor.endSession(options, { removeState: true });
+      await waitForProcessExit(relaunchedPid);
+    } catch (error) {
+      if (relaunchedPid) {
+        try {
+          process.kill(relaunchedPid, "SIGKILL");
+        } catch {}
+      }
+      throw error;
+    } finally {
+      await supervisor.close();
+      server.stop(true);
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+  90_000,
+);
+
+recoveryE2e(
   "a browser handed off at shutdown is stopped by the next controller once idle and relaunches with its tabs",
   async () => {
     const directory = await mkdtemp("/tmp/ogb-detached-release-e2e-");

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isBlankTabUrl } from "./cdp-driver";
@@ -67,7 +67,7 @@ export async function writeStoppedBrowserTabs(
   record: StoppedBrowserTabsRecord,
 ): Promise<void> {
   const path = join(sessionDirectory, RECORD_NAME);
-  const temporary = `${path}.${process.pid}.tmp`;
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   const bounded = { ...record, tabs: record.tabs.slice(0, MAX_STOPPED_BROWSER_TABS) };
   await writeFile(temporary, JSON.stringify(bounded), { mode: 0o600 });
   await rename(temporary, path);
@@ -122,9 +122,11 @@ function parseStoppedBrowserTabs(value: unknown): StoppedBrowserTabsRecord | nul
 
 /**
  * Pair each tab of the stopped browser with the reopened tab showing the same
- * page. Tabs are matched by exact URL, each reopened tab at most once, the
- * previously selected tab first so it gets the reopened selected tab when
- * several show the same page. Blank tabs never match. A stopped tab whose ID
+ * page, by exact URL. A pair decides which tab an ID names from then on, so it
+ * is made only when exactly one stopped tab and exactly one reopened tab show
+ * that URL: tabs sharing a URL can't be told apart (the browser reopens them in
+ * its own order, and its selected tab need not be the one the agent selected),
+ * so none of them is paired. Blank tabs never match. A stopped tab whose ID
  * still exists is the same tab (the browser kept running) and is left out.
  */
 export function matchReopenedTabs(
@@ -135,29 +137,23 @@ export function matchReopenedTabs(
     .filter((target) => target.kind === "page" || target.kind === "popup")
     .map((target) => ({ ...target, urlHash: tabUrlHash(target.url) }));
   const live = new Set(pages.map((target) => target.id));
-  const used = new Set<string>();
-  const ordered = [
-    ...stopped.filter((tab) => tab.selected),
-    ...stopped.filter((tab) => !tab.selected),
-  ];
-  const matches = new Map<string, string | null>();
-  for (const tab of ordered) {
-    if (live.has(tab.targetId) || matches.has(tab.targetId)) continue;
-    const candidates = pages.filter(
-      (target) =>
-        tab.urlHash !== null &&
-        target.urlHash === tab.urlHash &&
-        !used.has(target.id) &&
-        !stopped.some((s) => s.targetId === target.id),
-    );
-    const match =
-      candidates.find((target) => target.selected === tab.selected) ?? candidates[0] ?? null;
-    if (match) used.add(match.id);
-    matches.set(tab.targetId, match?.id ?? null);
+  const stoppedIds = new Set(stopped.map((tab) => tab.targetId));
+  const gone: StoppedBrowserTab[] = [];
+  for (const tab of stopped) {
+    if (!live.has(tab.targetId) && !gone.some((seen) => seen.targetId === tab.targetId))
+      gone.push(tab);
   }
-  return stopped
-    .filter((tab) => matches.has(tab.targetId))
-    .map((tab) => ({ targetId: tab.targetId, replacementId: matches.get(tab.targetId) ?? null }));
+  const reopenedPages = pages.filter((target) => !stoppedIds.has(target.id));
+  return gone.map((tab) => {
+    if (tab.urlHash === null) return { targetId: tab.targetId, replacementId: null };
+    const sameStopped = gone.filter((other) => other.urlHash === tab.urlHash);
+    const sameReopened = reopenedPages.filter((target) => target.urlHash === tab.urlHash);
+    return {
+      targetId: tab.targetId,
+      replacementId:
+        sameStopped.length === 1 && sameReopened.length === 1 ? sameReopened[0]!.id : null,
+    };
+  });
 }
 
 /** A tab ID callers hold and the browser's own ID for the open tab it names. */
@@ -191,7 +187,7 @@ export async function writeBrowserTabIds(
       browserTargetId,
     })),
   };
-  const temporary = `${path}.${process.pid}.tmp`;
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, JSON.stringify(record), { mode: 0o600 });
   await rename(temporary, path);
 }

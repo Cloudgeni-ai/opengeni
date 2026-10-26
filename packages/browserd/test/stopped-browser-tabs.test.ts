@@ -36,18 +36,33 @@ test("each stopped tab maps to the reopened tab showing its page", () => {
   ]);
 });
 
-test("tabs showing the same page pair up once each, the selected one with the selected one", () => {
+test("tabs showing the same page never pair, as they can't be told apart", () => {
   const url = "https://same.example.test/";
   expect(
     matchReopenedTabs(
-      [stoppedTab("old-1", url), stoppedTab("old-2", url, true), stoppedTab("old-3", url)],
-      [page("new-1", url), page("new-2", url, true)],
+      [
+        stoppedTab("old-1", url),
+        stoppedTab("old-2", url, true),
+        stoppedTab("old-3", url),
+        stoppedTab("old-unique", "https://unique.example.test/"),
+      ],
+      [
+        page("new-1", url),
+        page("new-2", url, true),
+        page("new-3", url),
+        page("new-unique", "https://unique.example.test/"),
+      ],
     ),
   ).toEqual([
-    { targetId: "old-1", replacementId: "new-1" },
-    { targetId: "old-2", replacementId: "new-2" },
+    { targetId: "old-1", replacementId: null },
+    { targetId: "old-2", replacementId: null },
     { targetId: "old-3", replacementId: null },
+    { targetId: "old-unique", replacementId: "new-unique" },
   ]);
+  // One stopped tab, two reopened tabs showing its page: still ambiguous.
+  expect(
+    matchReopenedTabs([stoppedTab("old", url, true)], [page("new-1", url), page("new-2", url)]),
+  ).toEqual([{ targetId: "old", replacementId: null }]);
 });
 
 test("a tab whose ID still exists is the same tab and is not reported", () => {
