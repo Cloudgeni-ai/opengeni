@@ -41,6 +41,7 @@ import {
   type VaultFieldKind,
 } from "./contract";
 import {
+  BitwardenCryptoError,
   decryptOptional,
   encryptString,
   sha256B64,
