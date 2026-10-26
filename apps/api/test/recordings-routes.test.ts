@@ -671,6 +671,9 @@ describe("recording routes", () => {
     expect(
       models.body.models.find((model: { providerId: string }) => model.providerId === "openai"),
     ).toMatchObject({ model: "gpt-transcribe", capabilities: { wordTimestamps: false } });
+    // With no ElevenLabs key here, meetings default to the model this
+    // workspace can use rather than one that would fail.
+    expect(models.body.default).toEqual({ providerId: "openai", model: "gpt-transcribe" });
     expect(
       (
         await scope.owner.call("POST", "/recordings", {
