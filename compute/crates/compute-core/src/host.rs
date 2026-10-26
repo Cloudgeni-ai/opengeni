@@ -1366,10 +1366,16 @@ impl Host {
         slot.queued = None;
         // The engine lets the balloon go before the VM pauses, but may not
         // manage to, and a restored VM has the balloon its image had: it
-        // is set again once the VM runs.
+        // is set again once the VM runs. A balloon its VM confirmed let go
+        // stays known so: letting it go again changes nothing, a new VM
+        // process starts with a clean slate anyway, and a step declined
+        // before its work began, such as an idle pause while a command
+        // runs, does not have it set again each time it is tried.
         slot.balloon = None;
-        slot.balloon_sent = None;
-        slot.balloon_taken = None;
+        if slot.balloon_taken != Some(0) {
+            slot.balloon_sent = None;
+            slot.balloon_taken = None;
+        }
         if admission::needs_memory(step) {
             slot.room = WakeRoom::Admitted;
             // A wake from object storage writes its local copy from now
