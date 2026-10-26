@@ -51,7 +51,8 @@ tool calls.
    <script>
      const entries = createOpenGeniSiteClient().data.collection("entries");
      // await entries.insert({ systolic: 128, diastolic: 82, date: "2026-10-26" });
-     // const { records } = await entries.list({ sort: [{ field: "$createdAt", direction: "desc" }], limit: 200 });
+    // const { records, nextCursor } = await entries.list({ sort: [{ field: "$createdAt", direction: "desc" }], limit: 200 });
+    // pass { cursor: nextCursor } to load older entries (a "Show more" button).
      // each record is { id, data, ... }; render record.data with textContent.
    </script>
    ```
@@ -64,9 +65,10 @@ tool calls.
 5. Save it as in "Publish one immutable version", with `requestedTools: []`
    and no source upload: its HTML is the editable source. If it keeps
    entries, then call `opengeni__site_data_define_collection` with the Site
-   id and the same collection name: `per_viewer` for each person's own
-   entries (add `privateRecords: true` for health or other personal data),
-   `append_only` for a form that collects answers.
+  id, the same collection name and `accessMode`: `per_viewer` for each
+  person's own entries (add `privateRecords: true` for health or other
+  personal data), `append_only` for a form that collects answers. Skip
+  `jsonSchema`; check values in the page.
 6. Reply with the link as soon as it is saved, in the person's words: what
    it does and how to use it. The link opens for workspace members only.
    When the person wants others to open it (family, customers, "on their
@@ -196,8 +198,8 @@ that is its setting, not a broken link, so tell the person their visitors
 sign in first instead of reporting sharing as broken.
 
 A published Site is a public web page. Never put secrets, tokens or private
-data in its HTML. An invited or public app that uses Site Data, Site SQL,
-workspace tools or an embedded agent also needs
+data in its HTML. An invited or public Site that keeps entries in Site Data,
+or an app that uses Site SQL, workspace tools or an embedded agent, also needs
 `references/publish-to-web.md`.
 
 ## Apps
