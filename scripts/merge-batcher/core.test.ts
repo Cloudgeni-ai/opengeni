@@ -2271,7 +2271,8 @@ describe("review regressions: observation, admission and telemetry", () => {
     for (let i = 0; i < 7; i++) {
       const start = lists;
       const o = await make().observe();
-      expect(lists - start).toBeLessThanOrEqual(9);
+      // Once its queued snapshot is cached, the late ref is re-read every pass.
+      expect(lists - start).toBeLessThanOrEqual(detected ? 10 : 9);
       if (
         o.candidates
           .find((c) => c.branch === historical[0]!.branch)
@@ -2294,6 +2295,36 @@ describe("review regressions: observation, admission and telemetry", () => {
     const action = plan(o, settings);
     expect(action.kind).toBe("build");
     if (action.kind === "build") expect(action.publish).toBe(false);
+  });
+  test("a settled batch last seen running is re-read every pass and frees its slot when its run ends", async () => {
+    const root = await mkdtemp(join(tmpdir(), "merge-batcher-settled-running-"));
+    roots.push(root);
+    const settings = { ...cfg, mode: "active" as const, outputDir: root };
+    const old = candidate([pull(1)]);
+    let status: Run["status"] = "in_progress";
+    let reads = 0;
+    class Reader extends GitHubReader {
+      override async runs() {
+        reads++;
+        return [{ ...run(old, "code_failure"), status }];
+      }
+    }
+    const reader = new Reader(settings, new GitHubAuth({}));
+    // Observed while live: the run was still going when the batch was invalidated.
+    await reader.observedRuns(old.manifest, old.branch, false);
+    status = "completed";
+    // Not in this pass's historical sample, yet the running snapshot is re-read.
+    const runs = await reader.observedRuns(old.manifest, old.branch, true, false);
+    expect(runs.map((r) => r.status)).toEqual(["completed"]);
+    expect(reads).toBe(2);
+    // A terminal snapshot backs off again.
+    await reader.observedRuns(old.manifest, old.branch, true, false);
+    expect(reads).toBe(2);
+    const o = observation([pull(2)], [{ ...old, runs }]);
+    o.ledger.invalidated.push(old.manifest.batchId);
+    const action = plan(o, settings);
+    expect(action.kind).toBe("build");
+    if (action.kind === "build") expect(action.publish).toBe(true);
   });
   test("landed unknown history ages across restart, needs explicit recovery, and late runs reserve again", async () => {
     const root = await mkdtemp(join(tmpdir(), "merge-batcher-landed-history-"));
