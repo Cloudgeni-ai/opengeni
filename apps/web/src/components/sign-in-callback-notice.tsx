@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { accountContactEmail } from "@opengeni/contracts/managed-sign-in-methods";
 import { Button } from "@opengeni/react/ui/button";
 import { Notice } from "@opengeni/react/ui/notice";
 import {
@@ -95,7 +96,9 @@ export function SignInCallbackNotice({
         )}
         {ownReceipt && userId === null ? (
           <p className="mt-1">
-            Sign in again as {ownReceipt.email} with a remaining sign-in method to continue.
+            {accountContactEmail(ownReceipt.email)
+              ? `Sign in again as ${ownReceipt.email} with a remaining sign-in method to continue.`
+              : "Sign in again with a remaining passkey to continue."}
           </p>
         ) : null}
       </Notice>

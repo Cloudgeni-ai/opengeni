@@ -2189,6 +2189,13 @@ const SettingsSchema = z.object({
   // email verification, and invitation-bound account setup keep working. Read
   // at startup; the 0585 runtime switch pauses sign-ups without a restart.
   managedAuthNewSignupsEnabled: EnvBoolean.default(true),
+  // Lets a person create a managed account with only a passkey: no email
+  // address and no password. Off by default, because such an account has no
+  // email to verify, invite, notify or recover through; the deployment's
+  // sign-up switches, signup challenge and email allowlist still apply (an
+  // allowlist refuses passkey-only accounts). Passkey sign-in, and adding a
+  // passkey to an existing account, need no setting.
+  managedAuthPasskeySignUpEnabled: EnvBoolean.default(false),
   // Unset retains environment-based verification (required outside local).
   managedAuthRequireEmailVerification: EnvBoolean.optional(),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
@@ -5978,6 +5985,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apnsPrivateKey: optional("OPENGENI_APNS_PRIVATE_KEY"),
     fcmServiceAccountJson: optional("OPENGENI_FCM_SERVICE_ACCOUNT_JSON"),
     managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
+    managedAuthPasskeySignUpEnabled: optional("OPENGENI_MANAGED_AUTH_PASSKEY_SIGNUP_ENABLED"),
     managedAuthRequireEmailVerification: optional(
       "OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION",
     ),

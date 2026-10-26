@@ -1381,6 +1381,50 @@ start the matching release. Do not restart an older API that exposes the raw
 provider-management routes. This feature does not authorize changing the
 deployment's configured browser session-set mode.
 
+### Managed passkey sign-in
+
+Managed deployments in the legacy browser session-set mode offer passkey
+(WebAuthn) sign-in on any trusted browser origin served over HTTPS or from
+`localhost`. The relying party is that origin's hostname, so a passkey made on
+one public hostname does not sign in on another. Migration 0998 is rolling: it
+adds `auth_passkeys` and the `mutate_managed_passkey` routine, and counts a
+passkey as a usable sign-in method.
+
+Passkeys ship in two releases. The previous release's readiness check refuses
+runtime access to a table and routine it doesn't know, so 0998 withholds both
+from the runtime role and provisioning keeps them withheld; until then the
+server offers no passkeys (client config reports `passkeySignIn: false`) and
+the sign-in-method routes refuse passkey changes. A later migration grants
+them once a release containing 0998 is the previous release, and passkeys turn
+on by themselves within a minute of that grant. Granting them by hand does not
+stick: provisioning revokes them again.
+
+- Anyone signed in can add passkeys under their sign-in methods and sign in
+  with one instead of a password. Removing the last usable method is refused as
+  before.
+- `OPENGENI_MANAGED_AUTH_PASSKEY_SIGNUP_ENABLED` (default `false`) also lets a
+  new person create an account with only a name and a passkey, with no email
+  address or password. It applies only while new sign-ups are open (both
+  sign-up switches above), no `OPENGENI_ALLOWED_USER_EMAILS` allowlist is set
+  and the signup challenge, when enabled, passes. Such an account has no email
+  address, so it gets no sign-in notices or password resets; its passkeys are
+  its only way in, and its last passkey can't be removed. Recommend that these
+  people add a second passkey.
+- Before enabling passkey-only accounts, settle the public hostname and the
+  session-set mode. Passkeys belong to the hostname they were made on and are
+  offered only in the legacy session-set mode, so moving the deployment to
+  another hostname or switching session-set modes leaves passkey-only accounts
+  with no way to sign in and no email address to recover through.
+- Removing a passkey signs the person out everywhere, as a password change
+  does: sessions don't record which passkey opened them, so ending all of them
+  is the only way to shut out a removed passkey.
+- Ceremonies are single use, expire after five minutes and are bound to the
+  origin that started them. Requests for new ceremonies are rate limited per
+  client address. Credentials are stored as public keys only; the signature
+  counter only moves forward.
+
+The dual and broker session-set modes do not offer passkeys yet.
+
 ### Password sign-up email verification
 
 `OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION` optionally overrides the

@@ -13412,6 +13412,8 @@
         "$.auth|mode=managedSession.emailVerificationRequired": "boolean!",
         "$.auth|mode=managedSession.mode": "const!=[\"\\\"managedSession\\\"\"]",
         "$.auth|mode=managedSession.newSignupsEnabled": "boolean!",
+        "$.auth|mode=managedSession.passkeySignIn": "boolean!",
+        "$.auth|mode=managedSession.passkeySignUp": "boolean!",
         "$.auth|mode=managedSession.session": "const!=[\"\\\"cookie\\\"\"]",
         "$.auth|mode=managedSession.signupChallengeSiteKey": "string?",
         "$.auth|mode=managedSession.socialProviders": "array!",

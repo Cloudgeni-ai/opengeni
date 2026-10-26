@@ -242,6 +242,7 @@ export {
   type SubscriptionCoreCodexRefreshResult,
 } from "./subscription-core-codex-bindings";
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
+import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 export const getScheduledTaskClaudeProviderAccountAuthoritySnapshot = (
@@ -2709,7 +2710,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
   },
 ): Promise<ManagedAccessProvisioningResult> {
   const subjectId = `user:${input.userId}`;
-  const subjectLabel = input.email || input.name;
+  const subjectLabel = accountContactEmail(input.email) || input.name;
   return await db.transaction(async (tx) => {
     const txDb = tx as unknown as Database;
     await setSubjectRlsContext(txDb, subjectId);
