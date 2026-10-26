@@ -505,7 +505,6 @@ export function automationCreateRequest(
       schedule,
       prompt,
       targetSessionId: destination.sessionId,
-      overlapPolicy: "buffer_one",
       ...eventsForCreate(draft),
     };
   }

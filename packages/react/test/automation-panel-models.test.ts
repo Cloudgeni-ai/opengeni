@@ -262,7 +262,6 @@ describe("automation drafts", () => {
       schedule: { type: "manual" },
       prompt: "Check the orders",
       targetSessionId: SESSION_ID,
-      overlapPolicy: "buffer_one",
       events: {
         triggers: [
           {
