@@ -11,7 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
@@ -181,51 +181,136 @@ export async function checkoutTemplateDbName(packagesDir: string): Promise<strin
     hasher.update(await readFile(join(migrationsDir, file)));
     hasher.update("\0");
   }
-  for (const directory of await templateSourceDirectories(packagesDir)) {
-    for (const file of await sourceFiles(join(packagesDir, directory))) {
-      hasher.update(`${directory}/${file}`);
-      hasher.update("\0");
-      hasher.update(await readFile(join(packagesDir, directory, file)));
-      hasher.update("\0");
-    }
+  for (const file of await templateSourceFiles(packagesDir)) {
+    hasher.update(file);
+    hasher.update("\0");
+    hasher.update(await readFile(join(packagesDir, file)));
+    hasher.update("\0");
   }
   return `${TEMPLATE_DB_PREFIX}${hasher.digest("hex").slice(0, 12)}`;
 }
 
+/** What a template build loads: the migration runner and role provisioning. */
+const TEMPLATE_ENTRY_POINTS = ["db/src/migrate.ts", "db/src/provision-roles.ts"];
+const SCANNABLE_SOURCE = /\.(?:[cm]?[jt]sx?)$/u;
+
 /**
- * The `src` directories (relative to `packages/`) of @opengeni/db and every
- * workspace package it depends on, directly or not: everything the migration
- * runner and role provisioning can load. Hashing whole directories also
- * covers files they read or import dynamically.
+ * The files (relative to `packages/`, sorted) a template build can load: the
+ * static and literal dynamic import closure of the migration runner and role
+ * provisioning across workspace packages, plus every non-test file under
+ * `db/src` (which also covers files it reads at runtime). Other files, and
+ * packages the build never imports, do not affect the template name, so
+ * editing them does not force a rebuild. A workspace import that cannot be
+ * resolved precisely pulls in that
+ * package's whole `src`, erring toward a new template rather than a stale one.
  */
-export async function templateSourceDirectories(packagesDir: string): Promise<string[]> {
-  const byName = new Map<string, { directory: string; dependencies: string[] }>();
+export async function templateSourceFiles(packagesDir: string): Promise<string[]> {
+  const packages = new Map<string, { directory: string; manifest: PackageManifest }>();
   for (const entry of (await readdir(packagesDir)).sort()) {
     try {
       const manifest = JSON.parse(
         await readFile(join(packagesDir, entry, "package.json"), "utf8"),
-      ) as { name?: unknown; dependencies?: Record<string, unknown> };
+      ) as PackageManifest;
       if (typeof manifest.name !== "string") continue;
-      byName.set(manifest.name, {
-        directory: entry,
-        dependencies: Object.entries(manifest.dependencies ?? {})
-          .filter(([, version]) => typeof version === "string" && version.startsWith("workspace:"))
-          .map(([name]) => name),
-      });
+      packages.set(manifest.name, { directory: entry, manifest });
     } catch {
       // not a package
     }
   }
-  const seen = new Set<string>();
-  const pending = ["@opengeni/db"];
+  const isFile = async (relative: string) =>
+    (await statPath(join(packagesDir, relative)).catch(() => null))?.isFile() === true;
+  const files = new Set<string>();
+  const scanned = new Set<string>();
+  const pending: string[] = [];
+  const add = (relative: string) => {
+    files.add(relative);
+    if (scanned.has(relative)) return;
+    scanned.add(relative);
+    pending.push(relative);
+  };
+  const addTree = async (directory: string) => {
+    for (const file of await sourceFiles(join(packagesDir, directory))) add(`${directory}/${file}`);
+  };
+  // Hashed, but only followed where the build actually imports them.
+  for (const file of await sourceFiles(join(packagesDir, "db/src"))) files.add(`db/src/${file}`);
+  for (const entry of TEMPLATE_ENTRY_POINTS) if (await isFile(entry)) add(entry);
+
+  const resolveFile = async (base: string): Promise<string | null> => {
+    const candidates = [
+      base,
+      `${base}.ts`,
+      `${base}.tsx`,
+      `${base}/index.ts`,
+      base.replace(/\.[cm]?js$/u, ".ts"),
+      base.replace(/\.[cm]?js$/u, ".tsx"),
+    ];
+    for (const candidate of candidates) if (await isFile(candidate)) return candidate;
+    return null;
+  };
+  const resolveWorkspace = async (specifier: string): Promise<void> => {
+    const match = /^(@[^/]+\/[^/]+|[^@./][^/]*)(\/.*)?$/u.exec(specifier);
+    const target = match ? packages.get(match[1]!) : undefined;
+    // External dependencies and the harness itself are not template inputs.
+    if (!target || target.manifest.name === "@opengeni/testing") return;
+    const subpath = match![2] ? `.${match![2]}` : ".";
+    const exported = exportTarget(target.manifest, subpath);
+    const resolved = exported
+      ? await resolveFile(posix.join(target.directory, exported))
+      : await resolveFile(posix.join(target.directory, "src", subpath));
+    if (resolved) add(resolved);
+    else await addTree(`${target.directory}/src`);
+  };
+
   while (pending.length > 0) {
-    const name = pending.pop()!;
-    // The harness itself is not a template input.
-    if (seen.has(name) || name === "@opengeni/testing" || !byName.has(name)) continue;
-    seen.add(name);
-    pending.push(...byName.get(name)!.dependencies);
+    const file = pending.pop()!;
+    if (!SCANNABLE_SOURCE.test(file)) continue;
+    let imports: { path: string }[];
+    try {
+      const code = await readFile(join(packagesDir, file), "utf8");
+      imports = new Bun.Transpiler({
+        loader: file.endsWith("x") ? "tsx" : "ts",
+      }).scanImports(code);
+    } catch {
+      continue; // still hashed; it just adds no imports
+    }
+    for (const { path: specifier } of imports) {
+      if (specifier.startsWith(".")) {
+        const resolved = await resolveFile(posix.join(posix.dirname(file), specifier));
+        if (resolved && !resolved.startsWith("..")) add(resolved);
+      } else if (!specifier.startsWith("node:") && !specifier.startsWith("bun:")) {
+        await resolveWorkspace(specifier);
+      }
+    }
   }
-  return [...seen].map((name) => `${byName.get(name)!.directory}/src`).sort();
+  return [...files].sort();
+}
+
+type PackageManifest = {
+  name?: unknown;
+  main?: unknown;
+  exports?: unknown;
+};
+
+/** The file a package export maps `subpath` (`.` or `./x`) to, if declared. */
+function exportTarget(manifest: PackageManifest, subpath: string): string | null {
+  const pick = (value: unknown): string | null => {
+    if (typeof value === "string") return value;
+    if (value && typeof value === "object") {
+      const conditions = value as Record<string, unknown>;
+      for (const key of ["bun", "import", "default", "types"]) {
+        const picked = pick(conditions[key]);
+        if (picked) return picked;
+      }
+    }
+    return null;
+  };
+  const exports = manifest.exports;
+  if (typeof exports === "string") return subpath === "." ? exports : null;
+  if (exports && typeof exports === "object") {
+    const picked = pick((exports as Record<string, unknown>)[subpath]);
+    if (picked) return picked;
+  }
+  return subpath === "." && typeof manifest.main === "string" ? manifest.main : null;
 }
 
 /** Non-test files under `root`, as sorted `/`-separated relative paths. */
@@ -1463,7 +1548,9 @@ async function probeContainerSpec(): Promise<{ id: string; spec: string } | null
 //   database are never candidates.
 // - Templates carry a last-used stamp written by each clone. A template idle
 //   for `templateMinIdleMs` outside the `templateKeep` most recently used, or
-//   idle for `templateRetentionMs`, is pruned; one only the reaper has stamped
+//   idle for `templateRetentionMs`, is pruned (outside the most recent ones
+//   after only `templatePressureIdleMs` once there are more than
+//   `templateSoftCap` templates); one only the reaper has stamped
 //   (an older checkout's) after `templateReaperStampRetentionMs`. At most
 //   `maxTemplateDrops` go per pass, never the templates this checkout uses. A
 //   clone whose template vanished rebuilds it (cloneFromTemplate), and the
@@ -1714,6 +1801,13 @@ export type ReapOptions = {
   templateKeep?: number;
   /** Idle time after which a template outside the most recent `templateKeep` goes. */
   templateMinIdleMs?: number;
+  /**
+   * Above this many templates, one outside the most recent `templateKeep`
+   * goes after `templatePressureIdleMs` instead, so a burst of new templates
+   * cannot fill the disk while waiting out `templateMinIdleMs`.
+   */
+  templateSoftCap?: number;
+  templatePressureIdleMs?: number;
   maxDrops?: number;
   deadlineMs?: number;
   now?: () => number;
@@ -1736,6 +1830,8 @@ export const DEFAULT_TEMPLATE_REAPER_STAMP_RETENTION_MS = 2 * 24 * 60 * 60_000;
 export const DEFAULT_MAX_TEMPLATE_DROPS = 5;
 export const DEFAULT_FOREIGN_IDLE_WINDOW_MS = 6 * 60 * 60_000;
 export const DEFAULT_TEMPLATE_MIN_IDLE_MS = 6 * 60 * 60_000;
+export const DEFAULT_TEMPLATE_SOFT_CAP = 20;
+export const DEFAULT_TEMPLATE_PRESSURE_IDLE_MS = 60 * 60_000;
 
 type DatabaseRow = {
   oid: string;
@@ -1796,7 +1892,9 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
       if (row.datistemplate) continue;
       // A template-named database that is not (or no longer) marked as a
       // template: a crashed build or a prune interrupted after unmarking.
-      // Builds hold a connection throughout, so the idle rule covers it.
+      // A build in progress opens separate connections with short gaps
+      // between them, but each one starts a new session, so the idle rule
+      // (no new session across the whole window) still never drops it.
       const unmarkedTemplate = isTemplateDatabaseName(row.datname, templatePrefix);
       if (!unmarkedTemplate && !isPerTestDatabaseName(row.datname, scopePrefix, templatePrefix)) {
         continue;
@@ -1897,6 +1995,8 @@ export async function reapOrphanedTestDatabases(options: ReapOptions): Promise<R
           options.templateMinIdleMs ?? DEFAULT_TEMPLATE_MIN_IDLE_MS,
           options.templateRetentionMs ?? DEFAULT_TEMPLATE_RETENTION_MS,
         ),
+        softCap: options.templateSoftCap ?? DEFAULT_TEMPLATE_SOFT_CAP,
+        pressureIdleMs: options.templatePressureIdleMs ?? DEFAULT_TEMPLATE_PRESSURE_IDLE_MS,
         withLock: options.withTemplateLock ?? ((fn) => fn()),
         now,
         deadline,
@@ -1922,6 +2022,8 @@ async function pruneStaleTemplates(
     maxDrops: number;
     keep: number;
     minIdleMs: number;
+    softCap: number;
+    pressureIdleMs: number;
     withLock: <T>(fn: () => Promise<T>) => Promise<T>;
     now: () => number;
     deadline: number;
@@ -1946,7 +2048,17 @@ async function pruneStaleTemplates(
       .slice(0, context.keep)
       .map(({ row }) => row.datname),
   );
-  const prunable: { row: DatabaseRow; lastUsedAt: number }[] = [];
+  // Under pressure (many templates, for example agents iterating on code the
+  // template depends on), idle non-recent templates go much sooner.
+  const harnessMinIdleMs =
+    templates.length > context.softCap
+      ? Math.min(context.minIdleMs, context.pressureIdleMs)
+      : context.minIdleMs;
+  const prunable: {
+    row: DatabaseRow;
+    lastUsedAt: number;
+    minIdleMs: number;
+  }[] = [];
   for (const { row, stamp } of templates) {
     if (context.protectedTemplates.has(row.datname)) continue;
     if (!stamp) {
@@ -1961,19 +2073,23 @@ async function pruneStaleTemplates(
       continue;
     }
     const idle = context.now() - stamp.lastUsedAt;
-    const stale =
+    const minIdleMs =
       stamp.by === "reaper"
-        ? idle >= context.reaperStampRetentionMs
-        : idle >= context.retentionMs || (!recent.has(row.datname) && idle >= context.minIdleMs);
-    if (stale) prunable.push({ row, lastUsedAt: stamp.lastUsedAt });
+        ? context.reaperStampRetentionMs
+        : recent.has(row.datname)
+          ? context.retentionMs
+          : Math.min(harnessMinIdleMs, context.retentionMs);
+    if (idle >= minIdleMs) prunable.push({ row, lastUsedAt: stamp.lastUsedAt, minIdleMs });
   }
   // Longest idle first, a few per pass: each drop briefly holds the lock that
   // every test acquisition on this machine takes.
   prunable.sort((left, right) => left.lastUsedAt - right.lastUsedAt);
-  for (const { row, lastUsedAt } of prunable.slice(0, context.maxDrops)) {
+  for (const { row, lastUsedAt, minIdleMs } of prunable.slice(0, context.maxDrops)) {
     if (context.now() > context.deadline) break;
     try {
-      const dropped = await context.withLock(() => dropTemplate(sql, row, lastUsedAt, context));
+      const dropped = await context.withLock(() =>
+        dropTemplate(sql, row, lastUsedAt, { ...context, minIdleMs }),
+      );
       if (dropped) result.templatesDropped.push(row.datname);
     } catch (error) {
       result.errors.push(`${row.datname}: ${short(error)}`);

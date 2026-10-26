@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "@opengeni/db/schema";
 import { executeMigrationFile, migrate } from "../../packages/db/src/migrate";
+import { DB_RETAINED_COMMENT, quoteIdent, quoteLiteral } from "@opengeni/testing/shared-pg";
 import { BENCH_CLUSTER_NAME } from "./auth";
 import {
   createSession,
@@ -421,6 +422,11 @@ export async function reconcileApprovedFixture(
       );
     } else if (existing.owner !== "postgres")
       throw new Error("Unexpected existing fixture clone owner");
+    // Kept across runs on purpose (CREATE DATABASE ... TEMPLATE does not copy
+    // the source's comment): tell the test harness's reaper to leave it.
+    await control
+      .unsafe(`COMMENT ON DATABASE ${quoteIdent(database)} IS ${quoteLiteral(DB_RETAINED_COMMENT)}`)
+      .catch(() => undefined);
     await save("cloned");
     const ownerUrl = new URL(maintenance);
     ownerUrl.pathname = `/${database}`;

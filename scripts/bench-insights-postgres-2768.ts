@@ -448,6 +448,8 @@ async function main() {
       throw new Error(
         "Retained fixture belongs to another approved backend; reconcile/upgrade explicitly first",
       );
+    // A fixture seeded before retention markers existed: mark it now.
+    await retainTestDatabase(state.database).catch(() => undefined);
     maintenance.pathname = `/${state.database}`;
     admin = postgres(maintenance.toString(), { max: 2, prepare: false });
     const app = new URL(maintenance);

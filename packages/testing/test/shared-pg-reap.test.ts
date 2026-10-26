@@ -34,7 +34,7 @@ import {
   quoteIdent,
   quoteLiteral,
   reapOrphanedTestDatabases,
-  templateSourceDirectories,
+  templateSourceFiles,
   templateStampComment,
 } from "../src/shared-pg";
 
@@ -133,10 +133,15 @@ describe("naming scheme", () => {
 
 test("checkouts at different paths with the same inputs share a template", async () => {
   const packages = join(root, "packages");
-  const sources = await templateSourceDirectories(packages);
-  expect(sources).toContain("db/src");
-  expect(sources).toContain("contracts/src");
-  expect(sources).not.toContain("testing/src");
+  const files = await templateSourceFiles(packages);
+  expect(files).toContain("db/src/migrate.ts");
+  expect(files).toContain("db/src/provision-roles.ts");
+  expect(files.some((file) => file.startsWith("contracts/src/"))).toBe(true);
+  // Only what the build loads: not the harness, and not packages (or files)
+  // outside the migration runner's import closure.
+  expect(files.some((file) => file.startsWith("testing/"))).toBe(false);
+  expect(files.some((file) => file.startsWith("web/") || file.startsWith("worker/"))).toBe(false);
+  const sources = [...new Set(files.map((file) => file.split("/").slice(0, 2).join("/")))];
   const directory = await mkdtemp(join(tmpdir(), "og-template-name-"));
   try {
     // A checkout elsewhere: same manifests, sources linked rather than copied.
@@ -159,14 +164,15 @@ test("checkouts at different paths with the same inputs share a template", async
     expect(await checkoutTemplateDbName(first)).toBe(name);
     expect(await checkoutTemplateDbName(second)).toBe(name);
     // A change to anything the migration runner can load is a new template,
-    // including files beyond migrate.ts and provision-roles.ts themselves.
+    // including files in other packages it imports.
     await rm(join(second, "config/src"));
     await cp(join(packages, "config/src"), join(second, "config/src"), { recursive: true });
     expect(await checkoutTemplateDbName(second)).toBe(name);
-    const [file] = (await readdir(join(second, "config/src"))).filter((entry) =>
-      entry.endsWith(".ts"),
-    );
-    await appendFile(join(second, "config/src", file!), "\n");
+    // A file it never loads changes nothing.
+    await writeFile(join(second, "config/src", "unrelated-new-file.ts"), "export {};\n");
+    expect(await checkoutTemplateDbName(second)).toBe(name);
+    const file = files.find((entry) => entry.startsWith("config/src/") && entry.endsWith(".ts"));
+    await appendFile(join(second, file!), "\n");
     expect(await checkoutTemplateDbName(second)).not.toBe(name);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -220,30 +226,46 @@ describe("reaping a real cluster", () => {
     const url = new URL(blank.databaseUrl);
     url.pathname = "/postgres";
     adminUrl = url.toString();
-    admin = postgres(adminUrl, { max: 2, onnotice: () => undefined });
+    admin = postgres(adminUrl, { max: 4, onnotice: () => undefined });
     directory = await mkdtemp(join(tmpdir(), "og-reap-"));
   }, 120_000);
 
   afterAll(async () => {
-    if (admin) {
-      const leftovers = await admin<{ datname: string; datistemplate: boolean }[]>`
-        SELECT datname, datistemplate FROM pg_database WHERE starts_with(datname, ${scope})`;
-      for (const { datname, datistemplate } of leftovers) {
-        if (datistemplate) {
-          await admin`UPDATE pg_database SET datistemplate = false WHERE datname = ${datname}`;
+    try {
+      if (directory) await rm(directory, { recursive: true, force: true });
+      if (admin) {
+        const sql = admin;
+        const leftovers = await sql<{ datname: string; datistemplate: boolean }[]>`
+          SELECT datname, datistemplate FROM pg_database WHERE starts_with(datname, ${scope})`;
+        // Each drop waits for a checkpoint; a few at a time keeps this short.
+        const queue = [...leftovers];
+        await Promise.all(
+          Array.from({ length: 4 }, async () => {
+            for (let next = queue.shift(); next; next = queue.shift()) {
+              try {
+                if (next.datistemplate) {
+                  await sql`UPDATE pg_database SET datistemplate = false WHERE datname = ${next.datname}`;
+                }
+                await sql.unsafe(
+                  `DROP DATABASE IF EXISTS ${quoteIdent(next.datname)} WITH (FORCE)`,
+                );
+              } catch (error) {
+                console.warn(`could not drop ${next.datname}: ${String(error)}`);
+              }
+            }
+          }),
+        );
+        const roles = await sql<{ rolname: string }[]>`
+          SELECT rolname FROM pg_roles WHERE starts_with(rolname, ${scope})`;
+        for (const { rolname } of roles) {
+          await sql.unsafe(`DROP ROLE IF EXISTS ${quoteIdent(rolname)}`).catch(() => undefined);
         }
-        await admin.unsafe(`DROP DATABASE IF EXISTS ${quoteIdent(datname)} WITH (FORCE)`);
       }
-      const roles = await admin<{ rolname: string }[]>`
-        SELECT rolname FROM pg_roles WHERE starts_with(rolname, ${scope})`;
-      for (const { rolname } of roles) {
-        await admin.unsafe(`DROP ROLE IF EXISTS ${quoteIdent(rolname)}`);
-      }
-      await admin.end();
+    } finally {
+      await admin?.end().catch(() => undefined);
+      await blank?.release();
     }
-    await blank?.release();
-    if (directory) await rm(directory, { recursive: true, force: true });
-  }, 120_000);
+  }, 300_000);
 
   async function createDatabase(name: string, comment?: string): Promise<string> {
     await admin!.unsafe(`CREATE DATABASE ${quoteIdent(name)}`);
@@ -490,6 +512,37 @@ describe("reaping a real cluster", () => {
       const second = await reap(options);
       expect(second.templatesDropped).toEqual([idle]);
       for (const kept of [newest, settling, legacyInUse]) expect(await exists(kept)).toBe(true);
+    },
+    DB_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "prunes idle templates sooner once there are more than the soft cap",
+    async () => {
+      if (!admin) return;
+      const { templatePrefix, reap } = subScope("p");
+      const now = Date.now();
+      const hour = 60 * 60_000;
+      const make = (idleMs: number, by: "harness" | "reaper" = "harness") =>
+        createTemplate(`${templatePrefix}${hex12()}`, templateStampComment(now - idleMs, by));
+      const newest = await make(2 * hour);
+      const a = await make(2 * hour + 1000);
+      const b = await make(3 * hour);
+      const legacy = await make(3 * hour, "reaper");
+      const options = {
+        templateKeep: 1,
+        templateMinIdleMs: 6 * hour,
+        templatePressureIdleMs: hour,
+        maxTemplateDrops: 5,
+      };
+      // Under the cap the 6-hour rule applies: nothing is idle long enough.
+      const relaxed = await reap({ ...options, templateSoftCap: 10 });
+      expect(relaxed.templatesDropped).toEqual([]);
+      const pressed = await reap({ ...options, templateSoftCap: 2 });
+      expect(pressed.errors).toEqual([]);
+      expect(pressed.templatesDropped).toEqual([b, a]);
+      // The most recent one, and an older checkout's, keep their own clocks.
+      for (const kept of [newest, legacy]) expect(await exists(kept)).toBe(true);
     },
     DB_TEST_TIMEOUT_MS,
   );

@@ -783,10 +783,12 @@ The harness also reaps databases that killed or crashed test runs left behind:
 a detached background pass, at most every five minutes, drops per-test
 `og_<label>_<12 hex>` databases whose recorded owner process is gone (or, for
 unowned ones, that stayed idle with no connections for 15 minutes) and migrated
-templates idle for 6 hours beyond the 10 most recently used, never with FORCE
+templates idle for 6 hours beyond the 10 most recently used (1 hour once there
+are more than 20 templates), never with FORCE
 and never failing a test. Call `retainTestDatabase` for a database you keep on
 purpose. Template names depend only on the contents of the migrations and the
-sources `@opengeni/db` loads, so worktrees with the same inputs share one. Notes
+files the migration runner and role provisioning load, so worktrees with the
+same inputs share one. Notes
 go to `reaper.log` beside the harness lock state; `OPENGENI_TEST_PG_REAP=0`
 turns it off (it is off under `CI`). See the header of
 `packages/testing/src/shared-pg.ts`.
