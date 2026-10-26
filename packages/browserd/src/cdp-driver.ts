@@ -2488,6 +2488,16 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             )
           : new InteractionDefiniteDriverError("tab_not_responding", TAB_NOT_RESPONDING_MESSAGE);
       }
+      // A tab the browser will not let us control (an attached tab Chrome
+      // refuses to debug) fails before any input when nothing was sent yet,
+      // so the action definitely did not run.
+      if (
+        error instanceof InteractionControllerError &&
+        (error.code === "resource_unavailable" || error.code === "operation_conflict") &&
+        (!effects || effects.state.actionEffectCount === effects.before)
+      ) {
+        throw new InteractionDefiniteDriverError(error.code, error.message, error.retryable);
+      }
       if (error instanceof CdpSessionDetachedError) {
         throw new InteractionOutcomeUnknownDriverError(
           "outcome_unknown",
@@ -5335,6 +5345,10 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
         await this.navigateHistory(state, action.direction);
         return;
       case "activate":
+        // Bringing the tab to the front is the action's effect: once sent, a
+        // later failure (a refused reattach, an unresponsive tab) leaves its
+        // outcome unknown rather than definitely not run.
+        state.actionEffectCount += 1;
         await (
           await this.ensureConnection()
         ).send("Target.activateTarget", {
