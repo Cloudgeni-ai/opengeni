@@ -2,4 +2,4 @@
 "@opengeni/browserd": patch
 ---
 
-Linux computer use accepts the same key names as macOS and Windows (F1 to F24, Insert, PrintScreen, ContextMenu, CapsLock, NumLock, ScrollLock and Pause) and a modifier pressed on its own, such as Super. The first pointer action after observing a native Linux or macOS computer no longer fails as a stale frame when the screen has not changed: the frame of the screenshot an observation returns stays the helper's newest frame.
+Linux computer use accepts more key names: F1 to F24, Insert, PrintScreen, ContextMenu, ScrollLock and Pause, and a modifier pressed on its own, such as Super. A function key the X11 layout lacks (F13 to F24 on most layouts) is bound to a spare keycode for one complete press and restored afterwards. CapsLock and NumLock stay refused, because a lock left on silently changes later typed text. The first pointer action after observing a native Linux or macOS computer no longer fails as a stale frame when the screen has not changed: the frame of the screenshot an observation returns stays the helper's newest frame.
