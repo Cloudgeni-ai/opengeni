@@ -1084,11 +1084,13 @@ export function isOpenGeniMcpProtocolOnlyMessage(message: unknown): boolean {
 
 /**
  * The grant of the person an in-chat setup card is for, as their chat sees it.
- * For an agent, that is the person who sent its turn's message, with what their
- * sign-in could do when it was accepted (frozen with the turn: an embed's token
- * narrows it, and their own workspace counts without a membership); a turn
- * accepted before that was recorded falls back to their membership. Any other
- * caller is the person, with this request's own (already effective) grant.
+ * For an agent, that is the human it acts for, with what their sign-in could
+ * do when they sent this turn's message, or their latest message in this chat
+ * for a turn the platform started for them (frozen with each message: an
+ * embed's token narrows it, and their own workspace counts without a
+ * membership). Without such a message it falls back to their membership. Any
+ * other caller is the person, with this request's own (already effective)
+ * grant.
  */
 async function connectingPersonGrant(
   db: ApiRouteDeps["db"],
@@ -1114,11 +1116,11 @@ async function connectingPersonGrant(
   const sent = await readTurnSenderAccess(db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    sessionId,
     turnId: claims.turnId,
+    subjectId: initiatingHumanSubjectId,
   });
-  if (sent && sent.subjectId === initiatingHumanSubjectId) {
-    return { permissions: sent.permissions, permissionMode: "explicit" };
-  }
+  if (sent) return { permissions: sent.permissions, permissionMode: "explicit" };
   return await getWorkspaceGrant(db, initiatingHumanSubjectId, grant.workspaceId);
 }
 
@@ -7237,9 +7239,10 @@ function registerCapabilityDiscoveryTools(
       // same rule. When it says they can't connect here, the agent must not
       // send them to it. The person is the human this agent acts for, with
       // the access their chat has: what their sign-in could do when they sent
-      // this turn's message (an embed's token narrows it, and their own
-      // workspace counts without a membership), else their membership.
-      // Without either there is nothing to say beyond the card.
+      // this turn's message, or their latest one here for a turn the platform
+      // started (an embed's token narrows it, and their own workspace counts
+      // without a membership), else their membership. Without either there is
+      // nothing to say beyond the card.
       const person = await connectingPersonGrant(deps.db, grant, sessionId);
       const personCannotConnect =
         person !== null && inChatCapabilitySetup(person, item.id, item).kind === "unavailable";

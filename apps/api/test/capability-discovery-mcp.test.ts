@@ -800,6 +800,10 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       // What the person's sign-in could do when they sent this turn's message,
       // frozen with the turn (an embed's token narrows it).
       sent?: string[],
+      // Sent with an earlier message in this chat: this turn is one the
+      // platform started for them (a wake-up, a child's result, a goal
+      // continuation), which records no grant of its own.
+      sentEarlier = false,
     ) => {
       // The human this agent acts for: a member with exactly these
       // permissions, or (null) someone in their own workspace with no
@@ -813,11 +817,47 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       }
       const attempt = await seedAttempt(false, undefined, person);
       if (sent) {
-        await shared!.admin`
-          INSERT INTO session_turn_app_action_grants
-            (turn_id, account_id, workspace_id, subject_id, changes, permissions)
-          VALUES (${attempt.turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${person},
-            'none', ${sent}::text[])`;
+        if (sentEarlier) {
+          const [earlier] = await shared!.admin<{ id: string }[]>`
+            INSERT INTO session_turns (
+              account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+              status, position, prompt, model, reasoning_effort, sandbox_backend,
+              execution_generation, initiator_kind, initiator_subject_id, initiator_context
+            ) VALUES (
+              ${workspace.accountId}, ${workspace.workspaceId}, ${attempt.sessionId}, gen_random_uuid(),
+              ${`capability-wf-${crypto.randomUUID()}`}, 'completed', 1, 'Check my email',
+              'gpt-5.6-sol', 'medium', 'none', 1, 'subject', ${person}, '{"accepted":true}'::jsonb
+            ) RETURNING id`;
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${earlier!.id}, ${workspace.accountId}, ${workspace.workspaceId}, ${person},
+              'none', ${sent}::text[])`;
+          // Someone else's later message in the same chat never stands in for them.
+          const [other] = await shared!.admin<{ id: string }[]>`
+            INSERT INTO session_turns (
+              account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+              status, position, prompt, model, reasoning_effort, sandbox_backend,
+              execution_generation, initiator_kind, initiator_subject_id, initiator_context
+            ) VALUES (
+              ${workspace.accountId}, ${workspace.workspaceId}, ${attempt.sessionId}, gen_random_uuid(),
+              ${`capability-wf-${crypto.randomUUID()}`}, 'completed', 2, 'Hello',
+              'gpt-5.6-sol', 'medium', 'none', 1, 'subject', 'user:someone-else',
+              '{"accepted":true}'::jsonb
+            ) RETURNING id`;
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${other!.id}, ${workspace.accountId}, ${workspace.workspaceId},
+              'user:someone-else', 'none',
+              ${[...conversation, "connections:personal"]}::text[])`;
+        } else {
+          await shared!.admin`
+            INSERT INTO session_turn_app_action_grants
+              (turn_id, account_id, workspace_id, subject_id, changes, permissions)
+            VALUES (${attempt.turnId}, ${workspace.accountId}, ${workspace.workspaceId}, ${person},
+              'none', ${sent}::text[])`;
+        }
       }
       const server = buildOpenGeniMcpServer(
         { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
@@ -887,6 +927,15 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
     // access still decides, either way.
     expect(await request(null, conversation)).toMatchObject({ message: cannotConnect });
     expect(await request(null, [...conversation, "connections:personal"])).toMatchObject({
+      message: connectCard,
+    });
+    // A turn the platform started for them decides from their latest message
+    // in this chat, the same way.
+    expect(
+      await request([...conversation, "connections:personal"], conversation, true),
+    ).toMatchObject({ message: cannotConnect });
+    expect(await request(null, conversation, true)).toMatchObject({ message: cannotConnect });
+    expect(await request(null, [...conversation, "connections:personal"], true)).toMatchObject({
       message: connectCard,
     });
   }, 60_000);

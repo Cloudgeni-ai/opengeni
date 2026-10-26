@@ -20,7 +20,16 @@ const olderBeginRequest = z
   })
   .strict();
 
-function olderServer() {
+const validationFailed = (message: string) =>
+  Response.json(
+    { error: { code: "validation_failed", message, retryable: false } },
+    { status: 400 },
+  );
+
+/** `answer` replaces the server's reply to one begin (by its index) when it returns one. */
+function olderServer(
+  answer: (body: Record<string, unknown>, index: number) => Response | undefined = () => undefined,
+) {
   const begins: Record<string, unknown>[] = [];
   const client = new OpenGeniClient({
     baseUrl: "https://older.invalid",
@@ -29,6 +38,8 @@ function olderServer() {
       expect(new URL(String(url)).pathname).toBe("/v1/workspaces/workspace/connect/attempts");
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       begins.push(body);
+      const answered = answer(body, begins.length - 1);
+      if (answered) return answered;
       const parsed = olderBeginRequest.safeParse(body);
       if (!parsed.success) {
         const issues = parsed.error.issues.map((issue) => ({
@@ -94,17 +105,38 @@ test("a popup sign-in still begins against a server that predates popup endings"
   expect(controller.getSnapshot().error).toBeNull();
 });
 
-test("other validation failures are not retried", async () => {
-  const { transport, begins } = olderServer();
+test("a refusal that doesn't name finishInPopup is not retried", async () => {
+  const { transport, begins } = olderServer(() =>
+    validationFailed("Invalid request body: providerId: Unknown provider"),
+  );
   const controller = new ConnectController(transport, "workspace");
   await expect(
     controller.begin({
       providerId: "mcp-oauth",
       ownership: "personal",
       returnUrl: "https://host.example/chat",
+      finishInPopup: true,
       idempotencyKey: "begin-once",
-      reconnectAccountId: 7 as unknown as string,
     }),
-  ).rejects.toThrow();
+  ).rejects.toThrow("Unknown provider");
   expect(begins).toHaveLength(1);
+});
+
+test("a retry that fails too ends after the second begin with its error", async () => {
+  // The older server refuses the field, then refuses the retry for another reason.
+  const { transport, begins } = olderServer((_body, index) =>
+    index === 1 ? validationFailed("Invalid request body: returnUrl: Not allowed") : undefined,
+  );
+  const controller = new ConnectController(transport, "workspace");
+  await expect(
+    controller.begin({
+      providerId: "mcp-oauth",
+      ownership: "personal",
+      returnUrl: "https://host.example/chat",
+      finishInPopup: true,
+      idempotencyKey: "begin-once",
+    }),
+  ).rejects.toThrow("returnUrl: Not allowed");
+  expect(begins).toHaveLength(2);
+  expect(begins[1]).not.toHaveProperty("finishInPopup");
 });
