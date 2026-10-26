@@ -73,8 +73,9 @@ enabling it changes no session's backend.
    5 s to reach it, 10 s to open a connection in all, 15 s for data left
    unacknowledged, and keepalives after a minute idle, under the idle
    limit of cloud NAT gateways and load balancers. A connection string
-   can set each (`connect_timeout`, `tcp_user_timeout`,
-   `keepalives_idle`, `keepalives_interval`, `keepalives_retries`). A
+   can choose other values (`connect_timeout`, `tcp_user_timeout`,
+   `keepalives_idle`, `keepalives_interval`, `keepalives_retries`) but
+   not turn the bounds off: a zero gets the default bound. A
    replica that has read no hosts from the database for a lease term
    cannot tell which hosts renew: it answers creates and wakes 503
    `unavailable` ("has not read its hosts from the store"), not

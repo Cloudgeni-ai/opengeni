@@ -21,19 +21,25 @@ pub(super) const OPEN_WITHIN: Duration = Duration::from_secs(10);
 const UNACKNOWLEDGED_WITHIN: Duration = Duration::from_secs(15);
 /// After this long without traffic a connection is probed, every
 /// [`KEEPALIVE_EVERY`], and counts as broken once [`KEEPALIVE_PROBES`] go
-/// unanswered. Well under the idle limit of cloud NAT gateways and load
-/// balancers (four minutes on some); the library's own default is two
-/// hours.
+/// unanswered, or on Linux once probes have gone unanswered for
+/// [`UNACKNOWLEDGED_WITHIN`], whichever comes first: about 70 s for an
+/// idle connection whose path went away. Well under the idle limit of
+/// cloud NAT gateways and load balancers (four minutes on some); the
+/// library's own default is two hours.
 const KEEPALIVE_AFTER: Duration = Duration::from_secs(60);
 const KEEPALIVE_EVERY: Duration = Duration::from_secs(10);
 const KEEPALIVE_PROBES: u32 = 3;
-/// The keepalive idle time a connection string that names none gets.
+/// The keepalive idle time a connection string that names none gets, which
+/// counts as unset.
 const LIBRARY_KEEPALIVE_AFTER: Duration = Duration::from_secs(2 * 60 * 60);
 
-/// `config` with the network bounds above wherever it names none: a
-/// connection string can still set each (`connect_timeout`,
-/// `tcp_user_timeout`, `keepalives_idle`, `keepalives_interval`,
-/// `keepalives_retries`, or `keepalives=0`).
+/// `config` with the network bounds above wherever it sets none. The
+/// connections are always bounded: a connection string can choose other
+/// values (`connect_timeout`, `tcp_user_timeout`, `keepalives_idle`,
+/// `keepalives_interval`, `keepalives_retries`), but not none at all. A
+/// zero there, which the library reads as unset, and a keepalive idle time
+/// of exactly the library's two hours both get the bound; `keepalives=0`
+/// still turns keepalives off.
 pub(super) fn bounded(mut config: tokio_postgres::Config) -> tokio_postgres::Config {
     if config.get_connect_timeout().is_none() {
         config.connect_timeout(CONNECT_WITHIN);
@@ -97,6 +103,22 @@ mod tests {
             Some(Duration::from_secs(4))
         );
         assert_eq!(config.get_keepalives_retries(), Some(7));
+    }
+
+    /// Connections are always bounded: a zero, which the library reads as
+    /// unset, and the library's own two-hour idle time get the bounds.
+    #[test]
+    fn a_connection_string_cannot_turn_the_bounds_off() {
+        let config = bounded(
+            tokio_postgres::Config::from_str(
+                "host=db.example dbname=fleet connect_timeout=0 tcp_user_timeout=0 \
+                 keepalives_idle=7200",
+            )
+            .unwrap(),
+        );
+        assert_eq!(config.get_connect_timeout(), Some(&CONNECT_WITHIN));
+        assert_eq!(config.get_tcp_user_timeout(), Some(&UNACKNOWLEDGED_WITHIN));
+        assert_eq!(config.get_keepalives_idle(), KEEPALIVE_AFTER);
     }
 
     /// A database that accepts connections and then says nothing, as a
