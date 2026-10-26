@@ -680,6 +680,296 @@ async function automaticBrowserRecoveryFixture() {
   }
 }
 
+test("an agent's wait tells only the running browsers it holds, without using or starting anything", async () => {
+  const directory = await mkdtemp("/tmp/og-api-wait-hold-");
+  const script = join(directory, "synthetic-wait-hold.ts");
+  await writeFile(script, `(${waitHoldFixture.toString()})()`, { mode: 0o600 });
+  const child = Bun.spawn([process.execPath, "--no-env-file", script, routeUrl.href], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const results = JSON.parse(stdout);
+    expect(results).toEqual([
+      {
+        scenario: "waiting",
+        // Only the running browser the session created or is using, used
+        // within the cap, is held; the cold box is never started for it.
+        records: ["held", "cold-box"],
+        authorizations: ["session.read", "session.read"],
+        routed: 1,
+        leaseReads: ["cold-box", "cold-box"],
+        holds: [
+          {
+            browser: "held",
+            exactAuthority: true,
+            body: { controllerGeneration: "generation-held", until: results[0].deadline },
+          },
+        ],
+        touched: 0,
+        deadline: results[0].deadline,
+      },
+      {
+        scenario: "machine-moved",
+        records: ["held", "cold-box"],
+        authorizations: ["session.read", "session.read"],
+        routed: 0,
+        leaseReads: ["cold-box", "cold-box"],
+        holds: [],
+        touched: 0,
+        deadline: results[1].deadline,
+      },
+    ]);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
+
+/** Arms a wait for one agent session that holds several browsers, in a
+ * separate process against a fake controller, recording what it reaches. */
+async function waitHoldFixture() {
+  const routeHref = process.argv[2]!;
+  const apiDirectory = new URL("..", routeHref).pathname;
+  const resolveFromApi = (name: string) => Bun.resolveSync(name, apiDirectory);
+  const { mock } = await import("bun:test");
+  const { randomUUID } = await import("node:crypto");
+  const { Hono } = (await import(resolveFromApi("hono"))) as typeof import("hono");
+  const db = (await import(resolveFromApi("@opengeni/db"))) as typeof import("@opengeni/db");
+  const core = (await import(resolveFromApi("@opengeni/core"))) as typeof import("@opengeni/core");
+  const { testSettings: fixtureSettings } = (await import(
+    resolveFromApi("@opengeni/testing")
+  )) as typeof import("@opengeni/testing");
+  const authority = await import(new URL("../browser-controller-authority.ts", routeHref).href);
+  const accountId = randomUUID(),
+    workspaceId = randomUUID(),
+    waitingSessionId = randomUUID(),
+    otherSessionId = randomUUID(),
+    machineId = randomUUID(),
+    instanceId = randomUUID(),
+    sandboxGroupId = randomUUID(),
+    rootSecret = "synthetic-controller-authority";
+  const grant = {
+    accountId,
+    workspaceId,
+    subjectId: "synthetic-agent",
+    permissions: ["sessions:control"],
+  };
+  const machinePlacement = { kind: "connected_machine", sandboxId: machineId };
+  const boxPlacement = { kind: "sandbox_group", sandboxGroupId };
+  const ids: Record<string, string> = {};
+  const names = new Map<string, string>();
+  for (const name of ["held", "observed", "stale", "suspended", "cold-box"]) {
+    ids[name] = randomUUID();
+    names.set(ids[name]!, name);
+  }
+  const now = Date.now();
+  const browser = (
+    name: string,
+    relationship: string,
+    minutesSinceUse: number,
+    lifecycle = "active",
+  ) => {
+    const lastUsedAt = new Date(now - minutesSinceUse * 60_000).toISOString();
+    return {
+      id: ids[name],
+      workspaceId,
+      lifecycle,
+      placement: name === "cold-box" ? boxPlacement : machinePlacement,
+      controller:
+        lifecycle === "active"
+          ? {
+              controllerId: "opengeni-browserd",
+              controllerGeneration: `generation-${name}`,
+              placementInstanceId: instanceId,
+            }
+          : null,
+      lastUsedAt,
+      associations: [
+        {
+          sessionId: waitingSessionId,
+          turnId: null,
+          attemptId: null,
+          relationship,
+          actorSubjectId: "synthetic-agent",
+          lastUsedAt,
+        },
+        {
+          sessionId: otherSessionId,
+          turnId: null,
+          attemptId: null,
+          relationship: "created",
+          actorSubjectId: "synthetic-agent",
+          lastUsedAt,
+        },
+      ],
+    };
+  };
+  const browsers = [
+    browser("held", "created", 12),
+    browser("observed", "observing", 12),
+    // Unused for longer than the hold cap.
+    browser("stale", "using", 61),
+    browser("suspended", "created", 12, "suspended"),
+    browser("cold-box", "using", 12),
+  ];
+  let scenario = "waiting";
+  let records: string[] = [];
+  let authorizations: string[] = [];
+  let routed = 0;
+  let leaseReads: string[] = [];
+  let touched = 0;
+  let holds: Array<Record<string, unknown>> = [];
+  mock.module(resolveFromApi("@opengeni/db"), () => ({
+    ...db,
+    listBrowserSessions: async (_db: unknown, input: { associatedSessionId?: string }) => ({
+      revision: 1,
+      sessions: input.associatedSessionId === waitingSessionId ? browsers : [],
+    }),
+    getBrowserSessionControlRecord: async (_db: unknown, input: { browserSessionId: string }) => {
+      const session = browsers.find((item) => item.id === input.browserSessionId)!;
+      records.push(names.get(input.browserSessionId)!);
+      return {
+        sourceSessionId: otherSessionId,
+        tokenGeneration: 1,
+        controllerHostSandboxGroupId: session.placement === boxPlacement ? sandboxGroupId : null,
+        deviceWorkspaceId: null,
+        networkRouteAuthority: null,
+        session: {
+          ...session,
+          driverId: "opengeni.cdp.v1",
+          engine: "chromium",
+          headless: true,
+          linkedComputerSessionId: null,
+          networkRouteId: null,
+        },
+      };
+    },
+    readLease: async () => {
+      leaseReads.push("cold-box");
+      return null;
+    },
+    getSession: async () => ({
+      id: otherSessionId,
+      workspaceId,
+      activeSandboxId: scenario === "machine-moved" ? randomUUID() : machineId,
+    }),
+    touchBrowserSessionController: async () => {
+      touched += 1;
+      return true;
+    },
+  }));
+  mock.module(resolveFromApi("@opengeni/core"), () => ({
+    ...core,
+    requireSessionAuthorization: async (
+      _deps: unknown,
+      _grant: unknown,
+      input: { operation: string },
+    ) => {
+      authorizations.push(input.operation);
+      return {};
+    },
+  }));
+  const expectedAdmin = authority.deriveBrowserControllerAdminToken({
+    rootSecret,
+    accountId,
+    workspaceId,
+    placement: machinePlacement,
+    placementInstanceId: instanceId,
+  });
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const [, , , browserSessionId, route] = new URL(request.url).pathname.split("/");
+      if (request.method !== "POST" || route !== "wait-hold") {
+        return Response.json({ protocolVersion: 1, ok: false }, { status: 500 });
+      }
+      holds.push({
+        browser: names.get(browserSessionId!),
+        exactAuthority: request.headers.get("authorization") === `Bearer ${expectedAdmin}`,
+        body: await request.json(),
+      });
+      return Response.json({ protocolVersion: 1, ok: true, data: { held: true } });
+    },
+  });
+  const channelHref = new URL("../sandbox/channel-a.ts", routeHref).href;
+  const channel = await import(channelHref);
+  const routedChannel = async (
+    _services: unknown,
+    _context: unknown,
+    callback: (handle: unknown) => Promise<unknown>,
+  ) => {
+    routed += 1;
+    return await callback({
+      routingSession: {
+        prime: async () => ({
+          kind: "selfhosted",
+          sandboxId: machineId,
+          providerInstanceId: instanceId,
+          session: {
+            resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+          },
+        }),
+      },
+    });
+  };
+  mock.module(channelHref, () => ({
+    ...channel,
+    withChannelARead: routedChannel,
+    withChannelA: routedChannel,
+  }));
+  const { registerBrowserSessionRoutes } = await import(routeHref);
+  const { holdBrowsersForWait } = registerBrowserSessionRoutes(new Hono(), {
+    settings: fixtureSettings({ delegationSecret: rootSecret }),
+    db: {},
+    bus: {},
+  } as never);
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const results = [];
+    for (const next of ["waiting", "machine-moved"]) {
+      scenario = next;
+      records = [];
+      authorizations = [];
+      routed = 0;
+      leaseReads = [];
+      touched = 0;
+      holds = [];
+      const deadline = new Date(Date.now() + 25 * 60_000);
+      await holdBrowsersForWait({
+        grant,
+        sessionId: waitingSessionId,
+        deadline,
+        signal: AbortSignal.timeout(10_000),
+      });
+      results.push({
+        scenario: next,
+        records: records.sort().reverse(),
+        authorizations,
+        routed,
+        leaseReads,
+        holds,
+        touched,
+        deadline: deadline.toISOString(),
+      });
+    }
+    console.log(JSON.stringify(results));
+  } finally {
+    console.warn = originalWarn;
+    await server.stop(true);
+  }
+}
+
 function readyFile(id = FILE_ID): FileAsset {
   return {
     id,

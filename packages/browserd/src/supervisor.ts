@@ -31,6 +31,7 @@ import type {
 import { RECENT_USE_UPDATE_HOLD_MS, type UpdateBlocker } from "./update-admission";
 import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
+  BROWSER_WAIT_HOLD_MAX_MS,
   BrowserDownloadExportRequest,
   BrowserRevisionMaterialization as BrowserRevisionMaterializationSchema,
   NetworkRouteConsistency,
@@ -498,6 +499,9 @@ type Runtime = {
   recording: BrowserRecording | null;
   /** When a request last reached this browser (supervisor clock). */
   lastUsedAt: number;
+  /** The deadline of a deliberate wait by the agent session using this
+   * browser (supervisor clock), or null; see `waitHoldEnds`. */
+  waitHoldUntil: number | null;
   lifecycle: "active" | "recovering" | "reconfiguring" | "capturing" | "captured" | "ending";
 };
 
@@ -818,7 +822,10 @@ export class BrowserSupervisor {
       )
         continue;
       if (this.closed) break;
-      if (record.lastUsedAt > idleBefore) {
+      if (
+        record.lastUsedAt > idleBefore ||
+        this.now() < waitHoldEnds(record.lastUsedAt, record.waitHoldUntil ?? null)
+      ) {
         waiting += 1;
         continue;
       }
@@ -2471,6 +2478,7 @@ export class BrowserSupervisor {
         presence: new Set(),
         recording: null,
         lastUsedAt: this.now(),
+        waitHoldUntil: null,
       };
       runtime.controller = this.createController(runtime, driver);
       // Startup and tab restoration are a use of the browser: nothing may park
@@ -3396,6 +3404,25 @@ export class BrowserSupervisor {
     return runtime;
   }
 
+  /**
+   * Keeps a browser through a deliberate wait by the agent session using it:
+   * the control plane sends the wait's deadline when the agent starts
+   * waiting, and the idle release leaves the browser running, page state and
+   * all, until that deadline (see `waitHoldEnds` for the cap). This is not a
+   * use of the browser: its idle time still counts from its last request.
+   * A deadline already past clears the hold. A browser this controller does
+   * not hold is left alone, never launched for this. Returns whether the
+   * browser is held.
+   */
+  holdForWait(reference: BrowserSessionReference, until: number): boolean {
+    const runtime = this.sessions.get(reference.browserSessionId);
+    if (!runtime || runtime.options.controllerGeneration !== reference.controllerGeneration) {
+      return false;
+    }
+    runtime.waitHoldUntil = until > this.now() ? until : null;
+    return this.now() < waitHoldEnds(runtime.lastUsedAt, runtime.waitHoldUntil);
+  }
+
   /** Keep the tabs a managed browser has as its controller stops it or lets
    * it go, so a browser launched on its profile later can say what became of
    * each. Best effort: without the record a missing tab is only unexplained. */
@@ -3487,6 +3514,7 @@ export class BrowserSupervisor {
           // A live view, recording or request still open at shutdown is a use
           // that has not ended yet, so the successor's idle time starts now.
           lastUsedAt: runtime.presence.size > 0 ? this.now() : runtime.lastUsedAt,
+          ...(runtime.waitHoldUntil !== null ? { waitHoldUntil: runtime.waitHoldUntil } : {}),
           process: runtime.workingReceipt.process,
         });
       } catch (error) {
@@ -3885,6 +3913,7 @@ function idleReleasable(runtime: Runtime, idleBefore: number, now: number): bool
   return (
     (transport === "managed" || transport === "attached_chrome") &&
     runtime.lastUsedAt <= idleBefore &&
+    now >= waitHoldEnds(runtime.lastUsedAt, runtime.waitHoldUntil) &&
     runtime.presence.size === 0 &&
     runtime.recording?.summary().state !== "recording" &&
     runtime.recovery === null &&
@@ -3895,6 +3924,17 @@ function idleReleasable(runtime: Runtime, idleBefore: number, now: number): bool
       ? runtime.lifecycle === "active" && runtime.driver.isTerminal?.() !== true
       : hasPreservableWorkingRuntime(runtime))
   );
+}
+
+/**
+ * Until when a deliberate wait keeps a browser past the idle release time:
+ * the wait's deadline, but never more than `BROWSER_WAIT_HOLD_MAX_MS` after
+ * the browser's last use, so repeated waits cannot keep a browser nobody
+ * uses. Without a wait, never (negative infinity).
+ */
+export function waitHoldEnds(lastUsedAt: number, waitHoldUntil: number | null): number {
+  if (waitHoldUntil === null) return Number.NEGATIVE_INFINITY;
+  return Math.min(waitHoldUntil, lastUsedAt + BROWSER_WAIT_HOLD_MAX_MS);
 }
 
 /** Whether the browser is still receiving a download. A store that cannot be

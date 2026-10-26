@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import postgres from "postgres";
-import { BROWSER_PROFILE_ARTIFACT_FORMAT } from "@opengeni/contracts";
+import { BROWSER_PROFILE_ARTIFACT_FORMAT, BROWSER_WAIT_HOLD_MAX_MS } from "@opengeni/contracts";
 import {
   browserDeadlineCheckpoint,
   claimSessionWorkForAttempt,
@@ -16,6 +16,7 @@ import {
   initializeSessionStartAtomically,
   MANAGED_BROWSER_SESSION_CAPABILITIES,
   prepareBrowserSessionResume,
+  releaseIdleInteractionHolders,
   touchBrowserSessionController,
   type Database,
   type DbClient,
@@ -327,6 +328,30 @@ async function idleFor(f: Fixture, minutes: number) {
     where id = ${f.leaseId}`;
 }
 
+/** The agent session behind the browser arms an input wait (wait_for_input)
+ * for `minutes`, after its turn finished. */
+async function agentWaits(
+  f: Fixture,
+  minutes: number,
+  relationship: "created" | "using" | "observing" = "created",
+) {
+  await admin`insert into browser_session_associations (account_id, workspace_id,
+      browser_session_id, session_id, relationship, actor_subject_id)
+    values (${f.accountId}, ${f.workspaceId}, ${f.browserId}, ${f.sessionId}, ${relationship},
+      'fixture-agent')`;
+  await admin`update sessions set input_wait_turn_id = ${f.turnId},
+      input_wait_until = now() + ${`${minutes} minutes`}::interval,
+      input_wait_reason = 'Waiting for a reply in the page.', input_wait_set_at = now()
+    where id = ${f.sessionId}`;
+}
+
+/** Whether the reaper's listing offers the box for an idle release. */
+async function idleCandidate(f: Fixture) {
+  const rows = await admin<{ sandbox_group_id: string }[]>`
+    select sandbox_group_id from opengeni_private.list_idle_interaction_leases(100, ${IDLE_MS})`;
+  return rows.some((row) => row.sandbox_group_id === f.sandboxGroupId);
+}
+
 async function state(f: Fixture) {
   const [lease] = await admin<
     { liveness: string; refcount: number; drainable: boolean; holders_changed_at: Date }[]
@@ -502,6 +527,63 @@ describe("idle browser and desktop release", () => {
     expect(current.browser.lifecycle).toBe("active");
     expect(current.computer.lifecycle).toBe("active");
     expect(current.lease.liveness).toBe("warm");
+  }, 60_000);
+
+  test("an agent waiting with its browser keeps the box until the wait ends", async () => {
+    const f = await fixture();
+    await idleFor(f, 16);
+    await agentWaits(f, 30);
+    // Not even a candidate: the sweep's listing skips the box.
+    expect(await idleCandidate(f)).toBe(false);
+    await sweep();
+    let current = await state(f);
+    expect(current.browser.lifecycle).toBe("active");
+    expect(current.computer.lifecycle).toBe("active");
+    expect(current.holders).toHaveLength(2);
+    expect(current.lease.liveness).toBe("warm");
+
+    // The release decision re-checks the hold on its own, whatever listed
+    // the box.
+    expect(
+      await releaseIdleInteractionHolders(db, {
+        accountId: f.accountId,
+        workspaceId: f.workspaceId,
+        sandboxGroupId: f.sandboxGroupId,
+        idleMs: IDLE_MS,
+        browserCheckpoints: true,
+      }),
+    ).toBeNull();
+    expect((await state(f)).browser.lifecycle).toBe("active");
+
+    // The wait is over (its deadline passed or new input retired it): the
+    // browser is idle again and is saved and released as usual.
+    await admin`update sessions set input_wait_until = now() - interval '1 second'
+      where id = ${f.sessionId}`;
+    expect(await idleCandidate(f)).toBe(true);
+    await sweep();
+    current = await state(f);
+    expect(current.browser.lifecycle).toBe("suspending");
+    expect(current.computer.lifecycle).toBe("lost");
+  }, 60_000);
+
+  test("a wait cannot keep a browser unused for longer than the hold cap", async () => {
+    const f = await fixture();
+    await idleFor(f, BROWSER_WAIT_HOLD_MAX_MS / 60_000 + 1);
+    await agentWaits(f, 30);
+    expect(await idleCandidate(f)).toBe(true);
+    await sweep();
+    const current = await state(f);
+    expect(current.browser.lifecycle).toBe("suspending");
+    expect(current.computer.lifecycle).toBe("lost");
+  }, 60_000);
+
+  test("a waiting session that only observed the browser does not keep it", async () => {
+    const f = await fixture();
+    await idleFor(f, 16);
+    await agentWaits(f, 30, "observing");
+    expect(await idleCandidate(f)).toBe(true);
+    await sweep();
+    expect((await state(f)).browser.lifecycle).toBe("suspending");
   }, 60_000);
 
   test("a failed idle save releases the browser without a second attempt", async () => {

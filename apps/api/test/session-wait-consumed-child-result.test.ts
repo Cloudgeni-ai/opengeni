@@ -29,7 +29,7 @@ import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
-import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { buildOpenGeniMcpServer, type McpServerOptions } from "../src/mcp/server";
 
 const AGENT_PERMISSIONS: Permission[] = ["sessions:read", "sessions:control", "sessions:create"];
 
@@ -326,7 +326,7 @@ async function deliverIdleResult(ws: Workspace, child: Attempt): Promise<void> {
   }
 }
 
-function agentMcp(ws: Workspace, attempt: Attempt) {
+function agentMcp(ws: Workspace, attempt: Attempt, options: McpServerOptions = {}) {
   const grant: AccessGrant = {
     accountId: ws.accountId,
     workspaceId: ws.workspaceId,
@@ -341,7 +341,7 @@ function agentMcp(ws: Workspace, attempt: Attempt) {
       firstPartyMcpTools: [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
     },
   };
-  return buildOpenGeniMcpServer(routeDeps(), grant);
+  return buildOpenGeniMcpServer(routeDeps(), grant, options);
 }
 
 /** How the worker's gateway marks a direct model call to the first-party server. */
@@ -979,4 +979,32 @@ describe("a held wait and a goal-owned child's continuation", () => {
       });
     });
   }
+});
+
+describe("an armed wait keeps the session's browsers", () => {
+  test("arming a wait tells the session's browsers its deadline, without delaying the wait", async () => {
+    const ws = await workspace();
+    const agent = await start(ws, "Keep my place in the support queue.");
+    const holds: Array<{ sessionId: string; deadline: string; workspaceId: string }> = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const server = agentMcp(ws, agent, {
+      holdBrowsersForWait: async ({ grant, sessionId, deadline }) => {
+        holds.push({ sessionId, deadline: deadline.toISOString(), workspaceId: grant.workspaceId });
+        // A controller that never answers does not hold up the wait.
+        await held;
+      },
+    });
+    const waited = await callTool(server, "wait_for_input", {
+      reason: "Waiting for my turn in the queue.",
+      timeoutSeconds: 600,
+    });
+    expect(waited.status).toBe("waiting_for_input");
+    expect(holds).toEqual([
+      { sessionId: agent.sessionId, deadline: waited.deadlineAt, workspaceId: ws.workspaceId },
+    ]);
+    release();
+  });
 });

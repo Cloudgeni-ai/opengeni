@@ -2005,6 +2005,7 @@ export function createAppComposition(deps: AppDependencies): {
         reads.handOffToToolDispatch();
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
+          holdBrowsersForWait: browserSessionRoutes.holdBrowsersForWait,
           appActions: sessionScope
             ? {
                 access: {
@@ -2349,7 +2350,7 @@ export function createAppComposition(deps: AppDependencies): {
       }),
     log: (event, fields) => console.warn(event, fields),
   });
-  registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
+  const browserSessionRoutes = registerBrowserSessionRoutes(app, routeDeps, { interactionSecrets });
   registerComputerSessionRoutes(app, routeDeps, { interactionSecrets });
   registerDocumentRoutes(app, routeDeps);
   registerKnowledgeRoutes(app, routeDeps);

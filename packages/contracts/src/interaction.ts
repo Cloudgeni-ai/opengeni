@@ -3305,6 +3305,16 @@ export const BrowserSessionHeartbeatResponse = /* @__PURE__ */ defineSchema(() =
 );
 export type BrowserSessionHeartbeatResponse = z.infer<typeof BrowserSessionHeartbeatResponse>;
 
+/**
+ * The longest a browser is kept after its last use while an agent session
+ * using it deliberately waits (an armed input wait). A browser normally stops
+ * after a few unused minutes; a wait keeps it, page state and all, until the
+ * wait's deadline or this long after the browser's last use, whichever comes
+ * first. Anchoring the cap on the last use means repeated waits cannot keep a
+ * browser nobody uses.
+ */
+export const BROWSER_WAIT_HOLD_MAX_MS = 60 * 60_000;
+
 const resolvedTargetRole = /* @__PURE__ */ defineSchema(() => z.string().min(1).max(64));
 const resolvedTargetText = /* @__PURE__ */ defineSchema(() =>
   primitives.nonEmptyString.max(INTERACTION_MAX_RESOLVED_TARGET_TEXT),

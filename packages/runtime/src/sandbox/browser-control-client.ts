@@ -911,6 +911,37 @@ export class BrowserControlClient {
     }
   }
 
+  /**
+   * Tells the controller that the agent session using this browser is
+   * deliberately waiting until `until`, so its idle release keeps the browser
+   * running until then (capped by the controller). Advisory: it never
+   * launches, recovers or counts as a use of the browser. Returns whether the
+   * controller holds the browser; false when it no longer runs this exact
+   * generation or predates holds (an older agent or controller image, which
+   * keeps its plain idle release).
+   */
+  async holdForWait(reference: PlacementBrowserSessionReference, until: Date): Promise<boolean> {
+    const binding = parseReference(reference);
+    let data: unknown;
+    try {
+      data = await this.requestJson({
+        method: "POST",
+        path: `/v1/browser-sessions/${binding.browserSessionId}/wait-hold`,
+        token: this.adminToken,
+        body: { controllerGeneration: binding.controllerGeneration, until: until.toISOString() },
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return false;
+      throw error;
+    }
+    if (!isRecord(data) || typeof data.held !== "boolean") {
+      throw new BrowserControlProtocolError(
+        "browser controller returned malformed wait hold receipt",
+      );
+    }
+    return data.held;
+  }
+
   async endComputerSession(
     reference: PlacementComputerSessionReference,
     options: { removeState: boolean },

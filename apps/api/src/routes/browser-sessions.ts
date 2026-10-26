@@ -21,6 +21,7 @@ import {
   BROWSER_CONTROL_PROTOCOL_VERSION,
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_STATE_ARTIFACT_CONTENT_TYPE,
+  BROWSER_WAIT_HOLD_MAX_MS,
   AttachedBrowserDevice,
   AttachedBrowserDeviceListResponse,
   BrowserActionCommand,
@@ -322,11 +323,48 @@ type BrowserPlacement = {
   attachedDeviceWorkspaceId?: string;
 };
 
+/**
+ * Tells the controllers of the browsers an agent session holds that the
+ * session is deliberately waiting until `deadline` (see
+ * `BrowserControlClient.holdForWait`). Best effort: a browser it cannot reach
+ * keeps its plain idle release.
+ */
+export type HoldBrowsersForWait = (input: {
+  grant: AccessGrant;
+  sessionId: string;
+  deadline: Date;
+  signal: AbortSignal;
+}) => Promise<void>;
+
+/**
+ * The browsers a deliberate wait by `sessionId` keeps: running ones the
+ * session created or is using (not ones it only observed), used within
+ * `BROWSER_WAIT_HOLD_MAX_MS`. The same rule decides whether a sandbox box
+ * holding such a browser is idle.
+ */
+export function browsersHeldByWait(
+  sessions: readonly BrowserSessionValue[],
+  sessionId: string,
+  now: number,
+): BrowserSessionValue[] {
+  return sessions.filter(
+    (session) =>
+      session.lifecycle === "active" &&
+      session.controller !== null &&
+      Date.parse(session.lastUsedAt) > now - BROWSER_WAIT_HOLD_MAX_MS &&
+      session.associations.some(
+        (association) =>
+          association.sessionId === sessionId &&
+          (association.relationship === "created" || association.relationship === "using"),
+      ),
+  );
+}
+
 export function registerBrowserSessionRoutes(
   app: Hono,
   deps: ApiRouteDeps,
   options: { interactionSecrets?: InteractionSecretsPort | null } = {},
-): void {
+): { holdBrowsersForWait: HoldBrowsersForWait } {
   const interactionSecrets = options.interactionSecrets ?? null;
   const channelServices = {
     db: deps.db,
@@ -5230,6 +5268,95 @@ export function registerBrowserSessionRoutes(
       record.controllerHostSandboxGroupId,
     );
   }
+
+  /**
+   * When an agent session arms an input wait, the browsers it holds keep
+   * running, page state and all, until the wait's deadline (capped by
+   * `BROWSER_WAIT_HOLD_MAX_MS` after their last use) instead of stopping as
+   * idle after a few minutes. Advisory and best effort: it never launches,
+   * recovers or counts as a use of a browser, never starts a sandbox, and a
+   * browser it cannot reach keeps its plain idle release.
+   */
+  async function holdBrowsersForWait(input: Parameters<HoldBrowsersForWait>[0]): Promise<void> {
+    const listed = await listBrowserSessions(deps.db, {
+      accountId: input.grant.accountId,
+      workspaceId: input.grant.workspaceId,
+      associatedSessionId: input.sessionId,
+      includeTerminal: false,
+    });
+    await Promise.all(
+      browsersHeldByWait(listed.sessions, input.sessionId, Date.now()).map(async (browser) => {
+        try {
+          await holdBrowserForWait(input, browser.id);
+        } catch (error) {
+          console.warn("browser.wait_hold_failed", {
+            workspaceId: input.grant.workspaceId,
+            browserSessionId: browser.id,
+            failure: interactionFailure(error),
+          });
+        }
+      }),
+    );
+  }
+
+  async function holdBrowserForWait(
+    input: Parameters<HoldBrowsersForWait>[0],
+    browserSessionId: string,
+  ): Promise<void> {
+    const { grant, deadline, signal } = input;
+    const workspaceId = grant.workspaceId;
+    const record = await getBrowserSessionControlRecord(deps.db, {
+      accountId: grant.accountId,
+      workspaceId,
+      browserSessionId,
+    });
+    await authorizeSourceSession(deps, grant, record.sourceSessionId, "session.read");
+    const binding = record.session.controller;
+    if (record.session.lifecycle !== "active" || !binding) return;
+    const hold = async (placement: BrowserPlacement): Promise<void> => {
+      // Never touches the browser's own last use: the cap counts from it.
+      await connectController(deps, grant, record, placement).holdForWait(
+        { browserSessionId, controllerGeneration: binding.controllerGeneration },
+        deadline,
+      );
+    };
+    const cached = await cachedBrowserPlacement(record);
+    if (cached) return await hold(cached);
+    const placement = record.session.placement;
+    if (placement.kind === "sandbox_group" || placement.kind === "external_provider") {
+      // Only a box that is already running: a hold never starts one.
+      const sandboxGroupId = record.controllerHostSandboxGroupId;
+      const lease = sandboxGroupId
+        ? await readLease(deps.db, record.session.workspaceId, sandboxGroupId)
+        : null;
+      if (
+        !lease ||
+        (lease.liveness !== "warm" && lease.liveness !== "draining") ||
+        lease.instanceId !== binding.placementInstanceId
+      ) {
+        return;
+      }
+    }
+    const sourceSession = await requireSourceSession(deps, workspaceId, record.sourceSessionId);
+    if (
+      placement.kind === "connected_machine" &&
+      sourceSession.activeSandboxId !== placement.sandboxId
+    ) {
+      return;
+    }
+    await withBrowserPlacement(
+      sourceSession,
+      grant,
+      placement,
+      record.deviceWorkspaceId,
+      binding.placementInstanceId,
+      "browser.read",
+      signal,
+      hold,
+    );
+  }
+
+  return { holdBrowsersForWait };
 }
 
 function sourcePlacementChangedApiError(interactionResource: "browser_session"): ApiHttpError {

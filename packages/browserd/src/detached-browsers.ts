@@ -17,6 +17,10 @@ export type DetachedBrowserRecord = {
   /** When a request last reached the browser before it was handed off
    * (milliseconds since the epoch on the supervisor clock). */
   lastUsedAt: number;
+  /** The deadline of a deliberate wait by the browser's agent session that
+   * keeps it past the idle release time (see `waitHoldEnds`), if any. Older
+   * controllers ignore it and stop the browser by `lastUsedAt` alone. */
+  waitHoldUntil?: number;
   process: OwnedManagedBrowserProcess;
 };
 
@@ -100,6 +104,9 @@ function parseDetachedBrowserRecord(text: string): DetachedBrowserRecord | null 
     version: 1,
     browserSessionId: record.browserSessionId,
     lastUsedAt: record.lastUsedAt,
+    ...(typeof record.waitHoldUntil === "number" && Number.isFinite(record.waitHoldUntil)
+      ? { waitHoldUntil: record.waitHoldUntil }
+      : {}),
     process: {
       pid: owned.pid,
       birth: owned.birth,

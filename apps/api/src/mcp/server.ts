@@ -204,6 +204,7 @@ import {
   sessionFleetContextForCaller,
 } from "../sandbox/agent-fleet-context";
 import { editableArtifactActorForGrant } from "../routes/editable-artifacts";
+import type { HoldBrowsersForWait } from "../routes/browser-sessions";
 import { readOnlySessionRefusal } from "../routes/session-history-imports";
 import { vaultProviderRegistryFor } from "../routes/vault-providers";
 import { registerKnowledgeEntryTools } from "./knowledge-entries";
@@ -450,6 +451,12 @@ export type McpServerOptions = {
     | { access: SessionAdminAccessDispatch; startedByPerson: boolean; fullAccess: boolean }
     | null
     | undefined;
+  /**
+   * Keeps the browsers a session holds through the input wait it arms, so
+   * they are not stopped as idle mid-wait. Set by the API route; absent, a
+   * wait leaves browsers to their plain idle release.
+   */
+  holdBrowsersForWait?: HoldBrowsersForWait | null | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -1238,7 +1245,7 @@ export function buildOpenGeniMcpServer(
   // available with sessions:control even when goals:manage is intentionally
   // absent.
   if (sessionId !== null) {
-    registerGoalTools(server, deps, grant, sessionId, json);
+    registerGoalTools(server, deps, grant, sessionId, json, options.holdBrowsersForWait ?? null);
   }
   // Agent learning controls authoring at the accepted-attempt write boundary.
   // Reading existing Knowledge and Skills remains available when authoring is Off.
@@ -3122,6 +3129,7 @@ function registerGoalTools(
   grant: AccessGrant,
   sessionId: string,
   json: (value: unknown) => { content: Array<{ type: "text"; text: string }> },
+  holdBrowsersForWait: HoldBrowsersForWait | null,
 ): void {
   const boundedGoalToolString = (maxBytes: number, field: string, purpose: string) =>
     z4
@@ -3383,6 +3391,22 @@ function registerGoalTools(
         },
       );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+      if (holdBrowsersForWait) {
+        // Off the tool result's path: the wait is armed whatever the browsers'
+        // controllers say, and a lost hold only leaves the plain idle release.
+        void holdBrowsersForWait({
+          grant,
+          sessionId,
+          deadline: new Date(deadlineAt),
+          signal: AbortSignal.timeout(30_000),
+        }).catch((error: unknown) => {
+          console.warn("browser.wait_hold_failed", {
+            workspaceId: grant.workspaceId,
+            sessionId,
+            error: error instanceof Error ? error.name : "unknown",
+          });
+        });
+      }
       return json({
         status: "waiting_for_input",
         deadlineAt,

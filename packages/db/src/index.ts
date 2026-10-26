@@ -122,6 +122,7 @@ export {
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
 import {
+  BROWSER_WAIT_HOLD_MAX_MS,
   CAPABILITY_SETUP_COMPLETED_NAME_MAX_CHARS,
   capabilitySetupCompletedSummary,
   type CapabilitySetupContinuationSkipReason,
@@ -54705,6 +54706,13 @@ const INTERACTION_HOLDER_RESOURCE =
  * operation counts too. Interventions waiting for a person do not: a wait is
  * not use (see `sandboxGroupIdleForCommandContainmentTx`).
  *
+ * One kind of wait does keep a browser: an agent session that created or is
+ * using it and is deliberately waiting (an armed input wait) keeps it, page
+ * state and all, until the wait ends, but never longer than
+ * `BROWSER_WAIT_HOLD_MAX_MS` after the browser's last use. The browser's own
+ * controller keeps it by the same rule; `list_idle_interaction_leases`
+ * (migration 0988) skips such boxes.
+ *
  * When every browser and desktop on the box, and the whole sandbox group by
  * the general idle rule, have been unused for `idleMs` (the sandbox idle
  * grace), all are released at once. A checkpoint-capable browser gets the
@@ -54850,7 +54858,18 @@ export async function releaseIdleInteractionHolders(
       tx,
       sql`
       select id, lifecycle, controller_generation,
-        coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true) as idle,
+        (coalesce(greatest(last_used_at, controller_heartbeat_at) < ${idleBefore}, true)
+          and not exists (
+            select 1 from browser_session_associations association
+            join sessions waiting on waiting.id = association.session_id
+              and waiting.workspace_id = association.workspace_id
+            where association.workspace_id = browser_sessions.workspace_id
+              and association.browser_session_id = browser_sessions.id
+              and association.relationship in ('created', 'using')
+              and waiting.input_wait_until > now()
+              and browser_sessions.last_used_at
+                > now() - (${BROWSER_WAIT_HOLD_MAX_MS}::bigint * interval '1 millisecond')
+          )) as idle,
         (placement_kind = 'sandbox_group'
           and controller_host_sandbox_group_id = ${input.sandboxGroupId}
           and placement_instance_id = ${lease.instance_id}

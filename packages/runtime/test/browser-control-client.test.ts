@@ -743,6 +743,49 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("tells the controller about a wait's deadline, and treats a controller without holds as not holding", async () => {
+    const reference = { browserSessionId: randomUUID(), controllerGeneration: "controller-1" };
+    const until = new Date("2030-01-01T00:30:00.000Z");
+    const bodies: unknown[] = [];
+    let reply: Response | null = null;
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        expect(request.method).toBe("POST");
+        expect(new URL(request.url).pathname).toBe(
+          `/v1/browser-sessions/${reference.browserSessionId}/wait-hold`,
+        );
+        expect(request.headers.get("authorization")).toBe(`Bearer ${adminToken}`);
+        bodies.push(await request.json());
+        return reply ?? success({ held: true });
+      },
+    });
+    const client = new BrowserControlClient(
+      {
+        resolveExposedPort: async () => ({ host: "127.0.0.1", port: server.port, tls: false }),
+        exec: async () => {
+          throw new Error("must preserve the existing controller");
+        },
+      },
+      { adminToken },
+    );
+    try {
+      expect(await client.holdForWait(reference, until)).toBe(true);
+      expect(bodies).toEqual([
+        { controllerGeneration: "controller-1", until: "2030-01-01T00:30:00.000Z" },
+      ]);
+      reply = success({ held: false });
+      expect(await client.holdForWait(reference, until)).toBe(false);
+      // An older controller has no such route; it keeps its plain idle release.
+      reply = failure(404, "resource_not_found", "route not found");
+      expect(await client.holdForWait(reference, until)).toBe(false);
+      reply = failure(403, "permission_denied", "admin token rejected");
+      await expect(client.holdForWait(reference, until)).rejects.toMatchObject({ status: 403 });
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("uses the old observation route only when an active controller lacks target state", async () => {
     const browserSessionId = randomUUID();
     const controllerGeneration = "controller-1";

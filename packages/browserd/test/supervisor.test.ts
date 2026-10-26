@@ -27,6 +27,7 @@ import {
   type BrowserWorkingRuntimeReceipt,
 } from "../src/working-runtime-journal";
 import { RECENT_USE_UPDATE_HOLD_MS } from "../src/update-admission";
+import { BROWSER_WAIT_HOLD_MAX_MS } from "@opengeni/contracts";
 import type { SqliteInteractionOperationJournal } from "../src/operation-journal";
 import {
   adoptionPaths,
@@ -3273,6 +3274,101 @@ describe("same-working-directory controller restart", () => {
   });
 
   const RELAUNCH_FIXTURE_URL = "https://page.example.test/";
+
+  test("an agent's deliberate wait keeps its idle browser until the wait's deadline, capped from its last use", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        idleReleaseMs: 10 * 60_000,
+        now: () => clock,
+        inspectOwnedProcess: async () => processState,
+        assertProfileUnused: async () => undefined,
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          close: async () => {
+            closes++;
+            processState = "exited";
+          },
+          detach: async () => undefined,
+        }),
+      });
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const session = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        await supervisor.listTargets(session);
+        const lastUse = clock;
+        // A hold for another generation, or one already past, holds nothing.
+        expect(
+          supervisor.holdForWait({ ...session, controllerGeneration: "other" }, clock + 60_000),
+        ).toBe(false);
+        expect(supervisor.holdForWait(session, clock - 1)).toBe(false);
+        // The agent waits 25 minutes, well past the 10 idle minutes.
+        expect(supervisor.holdForWait(session, lastUse + 25 * 60_000)).toBe(true);
+        clock = lastUse + 24 * 60_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        expect(closes).toBe(0);
+        // The wait ended without the browser being used: the plain idle
+        // release applies again, so it stops on the next sweep.
+        clock = lastUse + 25 * 60_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+        expect(closes).toBe(1);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
+  test("repeated waits cannot keep a browser longer than the hold cap after its last use", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const supervisor = await BrowserSupervisor.open({
+        rootDirectory,
+        idleReleaseMs: 10 * 60_000,
+        now: () => clock,
+        inspectOwnedProcess: async () => processState,
+        assertProfileUnused: async () => undefined,
+        createDriver: async (context) => ({
+          ...fakeDriver(context),
+          ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+          close: async () => {
+            processState = "exited";
+          },
+          detach: async () => undefined,
+        }),
+      });
+      try {
+        await supervisor.createSession({ ...options, recoverExistingWorkingDirectory: true });
+        const session = {
+          browserSessionId: options.browserSessionId,
+          controllerGeneration: options.controllerGeneration,
+        };
+        await supervisor.listTargets(session);
+        const lastUse = clock;
+        // Two 40-minute waits back to back; neither hold is a use.
+        expect(supervisor.holdForWait(session, clock + 40 * 60_000)).toBe(true);
+        clock += 39 * 60_000;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        clock += 60_000;
+        expect(supervisor.holdForWait(session, clock + 40 * 60_000)).toBe(true);
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        clock = lastUse + BROWSER_WAIT_HOLD_MAX_MS - 1;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([]);
+        clock = lastUse + BROWSER_WAIT_HOLD_MAX_MS;
+        expect(await supervisor.releaseIdleBrowsers()).toEqual([options.browserSessionId]);
+      } finally {
+        await supervisor.close();
+      }
+    });
+  });
+
   /** A supervisor whose drivers each have their own tab IDs and report what a
    * relaunch tells them about the tabs of the browser before. */
   const relaunchFixture = async (rootDirectory: string, clock: () => number) => {
@@ -3582,6 +3678,67 @@ describe("same-working-directory controller restart", () => {
         expect(recovered.browserSessionId).toBe(options.browserSessionId);
         expect(contexts.at(-1)!.profileDirectory).toBe(contexts[0]!.profileDirectory);
         expect(contexts.at(-1)!.allowOwnedProcessLaunch).toBe(true);
+      } finally {
+        await second.close();
+      }
+    });
+  });
+
+  test("a browser held by an agent's wait at shutdown is handed off and kept by the successor until the wait ends", async () => {
+    await withWorkingCrashFixture(async ({ options, rootDirectory }) => {
+      let closes = 0,
+        detaches = 0,
+        clock = 1_000_000;
+      let processState: "live" | "exited" = "live";
+      const stopped: string[] = [];
+      const open = () =>
+        BrowserSupervisor.open({
+          rootDirectory,
+          idleReleaseMs: 60_000,
+          now: () => clock,
+          inspectOwnedProcess: async () => processState,
+          assertProfileUnused: async () => undefined,
+          stopEndedProcess: async (profileDirectory) => {
+            stopped.push(profileDirectory);
+            processState = "exited";
+          },
+          createDriver: async (context) => ({
+            ...fakeDriver(context),
+            ownedProcessIdentity: async () => syntheticOwnedProcess(context),
+            close: async () => {
+              closes++;
+              processState = "exited";
+            },
+            detach: async () => {
+              detaches++;
+            },
+          }),
+        });
+      const first = await open();
+      await first.createSession({ ...options, recoverExistingWorkingDirectory: true });
+      const session = {
+        browserSessionId: options.browserSessionId,
+        controllerGeneration: options.controllerGeneration,
+      };
+      expect(first.holdForWait(session, clock + 20 * 60_000)).toBe(true);
+      // Unused for 5 minutes, past its idle time, but its agent is waiting:
+      // handed off with its page state rather than stopped.
+      clock += 5 * 60_000;
+      await first.close();
+      expect({ closes, detaches }).toEqual({ closes: 0, detaches: 1 });
+      const sessionDirectory = join(rootDirectory, "sessions", options.browserSessionId);
+      expect(
+        JSON.parse(await readFile(join(sessionDirectory, "detached-browser.json"), "utf8")),
+      ).toMatchObject({ lastUsedAt: 1_000_000, waitHoldUntil: 1_000_000 + 20 * 60_000 });
+
+      const second = await open();
+      try {
+        clock = 1_000_000 + 20 * 60_000 - 1;
+        expect(await second.releaseDetachedBrowsers()).toEqual([]);
+        expect(stopped).toEqual([]);
+        clock += 1;
+        expect(await second.releaseDetachedBrowsers()).toEqual([options.browserSessionId]);
+        expect(stopped).toEqual([join(sessionDirectory, "profile")]);
       } finally {
         await second.close();
       }
