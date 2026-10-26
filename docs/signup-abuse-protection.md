@@ -10,7 +10,9 @@ The managed browser signup boundary supports Cloudflare Turnstile. Enable it wit
 `OPENGENI_SIGNUP_CHALLENGE_ENABLED=true`, a site key, a secret key, and explicit
 comma-separated `OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES`. The stock console receives
 only the public site key. Test keys are rejected outside local/test environments.
-Self-hosted installations default to disabled.
+Self-hosted installations default to disabled. Managed deployment artifact generation
+preserves all four settings in the private runtime Secret and reports missing
+keys/hostnames when enabled; the secret key never enters generated Helm values.
 
 `apps/api/src/auth/signup-challenge.ts` verifies tokens with Siteverify before
 password hashing or new-user creation. The response must match the `signup`

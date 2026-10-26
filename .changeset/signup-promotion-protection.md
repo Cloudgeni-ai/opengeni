@@ -2,6 +2,7 @@
 "@opengeni/config": minor
 "@opengeni/contracts": minor
 "@opengeni/db": minor
+"@opengeni/deployment": minor
 "@opengeni/react": minor
 "@opengeni/sdk": minor
 ---
