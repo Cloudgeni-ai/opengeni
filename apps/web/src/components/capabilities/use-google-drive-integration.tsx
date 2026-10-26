@@ -1,3 +1,4 @@
+import googleDriveLogo from "@/assets/integration-logos/google-drive.png";
 import { oauthCallbackReasonMessage } from "@opengeni/react/app/lib/oauth-callback-messages";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -10,8 +11,7 @@ import type { ConnectionMetadata } from "@opengeni/react/app/types";
 import type { IntegrationAdapter } from "./use-api-integration-accounts";
 import { request as apiRequest } from "@/api";
 
-export const GOOGLE_DRIVE_LOGO_URL =
-  "https://www.gstatic.com/images/branding/productlogos/drive_2026/v2/web-64dp/logo_drive_2026_color_2x_web_64dp.png";
+export const GOOGLE_DRIVE_LOGO_URL = googleDriveLogo;
 export const GOOGLE_DRIVE_DEFINITION_ID = "google-drive";
 
 /** Historical account removal only. Google Drive MCP uses ordinary connector setup. */

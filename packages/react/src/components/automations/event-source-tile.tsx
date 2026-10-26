@@ -75,7 +75,6 @@ export function EventSourceTile({
     <LogoTile
       size={size}
       src={src}
-      fit="contain"
       name={Glyph ? source.name : eventSourceChoiceName(t, choice)}
       icon={Glyph ? <Glyph /> : undefined}
       className={className}
