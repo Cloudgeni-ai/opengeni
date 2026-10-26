@@ -1,5 +1,28 @@
 # Modular prompt changelog
 
+Search shows its candidates on native routes. No prompt or tool description
+text changes. On native search routes (OpenAI/Azure Responses and Codex) a
+`tool_search` that found no single clear match used to load nothing, and the
+model saw only "No matching tools found", even where the generic route lists
+the same ranked tools as compact candidates. It then browsed `tool_list`
+groups, costing extra requests. Such a search still loads no schemas, but a
+developer message right after its result now lists the candidates the
+generic output lists: `No tool was loaded because none clearly matches.
+Closest candidates, not loaded:` then one line per candidate (`- name: ` and
+the same 160-character preview `tool_list` shows), then `Load the ones that
+fit by exact names with query:'', or search again in other words.` That is
+166 bytes plus the candidate lines, at most the search's limit of them, and
+only on a search that loaded nothing; a search nothing ranks for still shows
+nothing. Those candidates count as shown for the once-per-turn
+`connectedAccounts` notice, which a load by exact name can now carry too, so
+loading Gmail tools after browsing a group still names Outlook Mail. With
+several accounts of one connector, each tool's `Account: … Use only this
+account…` first line no longer counts as its capability sentence when ranking
+(the same tool ranks the same with or without it), and compact previews
+(`tool_list`, generic candidates and the new list) read `Account: <label>.`
+then the tool's own text instead of being cut inside the account guidance.
+Tool descriptions themselves are unchanged.
+
 Several connected accounts. No prompt or tool description text changes for
 the common case. When the person has more than one connected account (for
 example Gmail and Outlook Mail) that serve the same need, the first

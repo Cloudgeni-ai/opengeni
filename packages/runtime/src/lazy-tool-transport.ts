@@ -242,6 +242,20 @@ export function connectedAccountsNotice(
 }
 
 /**
+ * A native search that loads nothing but ranked candidates lists them here,
+ * as the generic output lists compact candidates: a native search output
+ * carries loaded tools only, so without this it reads as "no matching tools".
+ */
+export function rankedCandidatesNotice(
+  candidates: readonly { name: string; description: string }[],
+): string {
+  const listed = candidates
+    .map(({ name, description }) => `- ${name}${description ? `: ${description}` : ""}`)
+    .join("\n");
+  return `No tool was loaded because none clearly matches. Closest candidates, not loaded:\n${listed}\nLoad the ones that fit by exact names with query:'', or search again in other words.`;
+}
+
+/**
  * The exact (not spelling-approximate) capability_catalog_search matches whose
  * next step is a Connect card the person completes themselves (connect or add
  * credentials), not one a workspace admin must enable. Accepts the MCP content
@@ -766,11 +780,16 @@ export class LazyToolRuntime {
     signal?.throwIfAborted();
     const { query, names, limit } = parseSearchArgs(rawArguments);
     if (names !== undefined) {
-      return {
+      const loaded: GenericSearchMarker = {
         version: 2,
         output: this.genericSearchOutput(rawArguments),
         tools: structuredClone(this.searchDisclosure(rawArguments)),
       };
+      // Loading one account's tools by exact name (after browsing a group,
+      // say) names the person's other accounts once per turn, as a ranked
+      // search reaching that account does.
+      const accounts = this.connectedAccountsNotice(loaded);
+      return accounts ? this.withNotice(loaded, "connectedAccounts", accounts) : loaded;
     }
     const pool = this.searchableTools(this.currentTools);
     this.searchIndex ??= new ToolSearchIndex(pool);
@@ -803,12 +822,13 @@ export class LazyToolRuntime {
           ? [INTEGRATION_CARD_TOOL_NAME]
           : []
       ).filter((name) => !chosen.includes(name));
-    const result = await this.rankedSearch(
+    const ranked = await this.rankedSearch(
       rawArguments,
       { query, limit, named, clear, strongest },
       setupFor,
       signal,
     );
+    const result = this.withRankedCandidates(ranked);
     const connectable = await lookup;
     const withConnectable = connectable.length
       ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
@@ -832,9 +852,10 @@ export class LazyToolRuntime {
     if (this.connectedAccountsNamed || !this.connectedAccounts) return undefined;
     const accounts = this.connectedAccounts();
     if (!accounts.size) return undefined;
-    // Native search outputs carry only loaded definitions, never candidates.
+    // Native search outputs carry only loaded definitions. A native search
+    // that loads nothing shows its compact candidates in its notice instead.
     const listed =
-      (this.transport === "generic_dispatch"
+      (this.transport === "generic_dispatch" || !result.tools?.length
         ? (JSON.parse(result.output) as { tools?: { name?: unknown }[] }).tools
         : result.tools) ?? [];
     const shown = new Map<string, ConnectedToolAccount>();
@@ -861,6 +882,25 @@ export class LazyToolRuntime {
     if (!others.length) return undefined;
     this.connectedAccountsNamed = true;
     return connectedAccountsNotice(reached, others);
+  }
+
+  /**
+   * On a native route a search that loads nothing would read as "no matching
+   * tools" even where ranking found candidates the generic output lists. Its
+   * notice lists those candidates instead, loading no schemas, so the model
+   * can load the right ones by exact name.
+   */
+  private withRankedCandidates(result: GenericSearchMarker): GenericSearchMarker {
+    if (this.transport === "generic_dispatch" || result.tools?.length) return result;
+    const candidates =
+      (JSON.parse(result.output) as { tools?: { name: string; description: string }[] }).tools ??
+      [];
+    if (!candidates.length) return result;
+    const notice = rankedCandidatesNotice(candidates);
+    return {
+      ...result,
+      notice: result.notice === undefined ? notice : `${result.notice}\n${notice}`,
+    };
   }
 
   private async connectableIntegrations(

@@ -74,12 +74,48 @@ function field(text: string): Field {
   return { frequencies, length: tokens.length };
 }
 
+const ACCOUNT_LINE_GUIDANCE =
+  "Use only this account; if the intended account for a write is unclear, ask before calling.";
+
+/**
+ * A connected-account tool's description when the turn has several accounts
+ * of its connector: a first line naming the account, then the tool's own text.
+ */
+export function withAccountLine(account: string, description: string | undefined): string {
+  return `Account: ${account}. ${ACCOUNT_LINE_GUIDANCE}\n${description ?? ""}`.trimEnd();
+}
+
+/** The account a withAccountLine description names, and the tool's own text. */
+function splitAccountLine(description: string): { account?: string; own: string } {
+  const lineEnd = description.indexOf("\n");
+  const line = lineEnd < 0 ? description : description.slice(0, lineEnd);
+  const suffix = `. ${ACCOUNT_LINE_GUIDANCE}`;
+  if (!line.startsWith("Account: ") || !line.endsWith(suffix)) return { own: description };
+  return {
+    account: line.slice("Account: ".length, -suffix.length),
+    own: lineEnd < 0 ? "" : description.slice(lineEnd + 1),
+  };
+}
+
+/**
+ * A short preview of a tool's description: the account it reaches, if the
+ * description names one, then the tool's own text, so a cut preview still
+ * says what the tool does rather than repeating the account guidance.
+ */
+export function descriptionPreview(description: string, maxCharacters: number): string {
+  const { account, own } = splitAccountLine(description);
+  const text = account === undefined ? description : `Account: ${account}. ${own}`.trimEnd();
+  return Array.from(text).slice(0, maxCharacters).join("");
+}
+
 function document(tool: Tool): Document {
   if (tool.type !== "function") throw new Error("Only function tools are searchable");
   // Transport routing hashes are not capability words. Keep readable namespaces.
   const separator = tool.name.lastIndexOf("__");
   const name = separator < 0 ? tool.name : tool.name.slice(separator + 2);
-  const description = tool.description ?? "";
+  // Ranking reads past the account line, so the same tool ranks the same
+  // whether or not the turn has several accounts of its connector.
+  const description = splitAccountLine(tool.description ?? "").own;
   const lead = description.split(/(?<=[.!?])\s|\n/, 1)[0] ?? "";
   const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties;
   const fields = [
