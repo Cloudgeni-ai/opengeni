@@ -443,6 +443,12 @@ export const englishMessages = {
   "automations.panel.whereNewChat":
     "Starts a new chat each run, with the workspace's default tools and the owner's access.",
   "automations.panel.whereOtherChat": "Continues a chat.",
+  "automations.paste.custom.app": "the app",
+  "automations.paste.custom.secretName": "signing secret",
+  "automations.paste.custom.secretStep":
+    "Paste the secret the app shows for this webhook, or the one you set there.",
+  "automations.paste.custom.urlStep":
+    "In the app's webhook settings, add an endpoint with this URL and pick the events you want.",
   "automations.paste.linear.secretName": "signing secret",
   "automations.paste.linear.secretStep":
     "Linear then shows the webhook's signing secret. Copy it and paste it here.",
@@ -453,6 +459,11 @@ export const englishMessages = {
     "Sentry then shows the integration's client secret. Copy it and paste it here.",
   "automations.paste.sentry.urlStep":
     "In Sentry, open Settings, then Custom Integrations, and create an internal integration with this webhook URL. Turn on the issue and alert events you want.",
+  "automations.paste.tailscale.secretName": "webhook secret",
+  "automations.paste.tailscale.secretStep":
+    "Tailscale then shows the webhook secret once. Copy it and paste it here.",
+  "automations.paste.tailscale.urlStep":
+    "In the Tailscale admin console, open Settings, then Webhooks, and add an endpoint with this URL. Pick the events you want, such as new devices and policy changes.",
   "automations.picker.addEvent": "Add an event",
   "automations.picker.cantReceive": "{product} can't receive this one.",
   "automations.picker.choose": "Choose an event",
@@ -557,6 +568,8 @@ export const englishMessages = {
     "Mentions, messages and reactions in channels the {product} bot is in.",
   "automations.source.status.blocked": "Needs attention",
   "automations.source.status.off": "Off",
+  "automations.source.tailscale.description":
+    "New devices, approvals, expiring keys, and policy and user changes. You paste a webhook URL into Tailscale once.",
   "automations.source.webhook.description":
     "Anything that can send a signed webhook, using the Standard Webhooks format.",
   "automations.source.webhook.name": "Your own app",

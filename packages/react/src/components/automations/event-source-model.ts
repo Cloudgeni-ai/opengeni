@@ -12,7 +12,9 @@ import type {
 } from "@opengeni/sdk";
 import {
   isEventStatusReasonCode,
+  WEBHOOK_FORMAT_PRESETS,
   type EventStatusReasonCode,
+  type WebhookFormatPreset,
 } from "@opengeni/contracts/event-triggers";
 
 import type { OpenGeniText } from "../../messages/runtime";
@@ -24,6 +26,7 @@ export type EventSourceChoice =
   | "webhook"
   | "linear"
   | "sentry"
+  | "tailscale"
   | "github"
   | "slack"
   | "gmail"
@@ -54,6 +57,7 @@ const CHOICE_FACTS: readonly EventSourceChoiceFacts[] = [
   { choice: "gmail", providerDomain: "mail.google.com", setup: "automatic", audience: "personal" },
   { choice: "linear", providerDomain: "linear.app", setup: "paste", audience: "choice" },
   { choice: "sentry", providerDomain: "sentry.io", setup: "paste", audience: "choice" },
+  { choice: "tailscale", providerDomain: "tailscale.com", setup: "paste", audience: "choice" },
   { choice: "mcp", providerDomain: null, setup: "automatic", audience: "personal" },
   { choice: "webhook", providerDomain: null, setup: "paste", audience: "choice" },
 ];
@@ -83,6 +87,8 @@ export function eventSourceChoiceName(t: OpenGeniText, choice: EventSourceChoice
       return "Linear";
     case "sentry":
       return "Sentry";
+    case "tailscale":
+      return "Tailscale";
     case "mcp":
       return t("automations.source.mcp.name");
     case "webhook":
@@ -106,6 +112,8 @@ function choiceDescription(t: OpenGeniText, choice: EventSourceChoice): string {
       return t("automations.source.linear.description");
     case "sentry":
       return t("automations.source.sentry.description");
+    case "tailscale":
+      return t("automations.source.tailscale.description");
     case "mcp":
       return t("automations.source.mcp.description");
     case "webhook":
@@ -138,30 +146,62 @@ export function isEventSourceChoice(value: unknown): value is EventSourceChoice 
   return CHOICE_FACTS.some((entry) => entry.choice === value);
 }
 
-export function eventSourceChoiceOf(
-  source: Pick<EventSource, "kind" | "adapter">,
-): EventSourceChoice {
+/**
+ * Apps whose own webhook a person pastes a URL into: Linear and Sentry have
+ * their own adapters, the others are custom webhooks made with the app's preset.
+ */
+const APP_WEBHOOK_CHOICES = ["linear", "sentry", "tailscale"] as const;
+type AppWebhookChoice = (typeof APP_WEBHOOK_CHOICES)[number];
+
+function isAppWebhookChoice(value: unknown): value is AppWebhookChoice {
+  return APP_WEBHOOK_CHOICES.includes(value as AppWebhookChoice);
+}
+
+/** The custom webhook preset each app choice is made with. */
+const PRESET_OF: Partial<Record<AppWebhookChoice, WebhookFormatPreset>> = {
+  tailscale: "tailscale",
+};
+
+/** The facts about a source that say which choice it is. */
+export type EventSourceChoiceSubject = Pick<EventSource, "kind" | "adapter"> & {
+  format?: { preset?: string | undefined } | null | undefined;
+};
+
+/**
+ * The choice a source is: its kind, its app for a Linear or Sentry webhook or a
+ * custom one made with an app's preset, else a webhook.
+ */
+export function eventSourceChoiceOf(source: EventSourceChoiceSubject): EventSourceChoice {
   if (source.kind !== "webhook") return source.kind;
-  return source.adapter === "linear" || source.adapter === "sentry" ? source.adapter : "webhook";
+  if (source.adapter === "custom") {
+    const preset = source.format?.preset;
+    return isAppWebhookChoice(preset) && PRESET_OF[preset] !== undefined ? preset : "webhook";
+  }
+  return isAppWebhookChoice(source.adapter) ? source.adapter : "webhook";
 }
 
 export const WEBHOOK_ADAPTER_OF: Partial<Record<EventSourceChoice, WebhookEventAdapter>> = {
   webhook: "standard",
   linear: "linear",
   sentry: "sentry",
+  tailscale: "custom",
 };
 
 /** A stand-in source of the chosen kind, for its tile before one exists. */
 export function eventSourceSubjectOfChoice(
   t: OpenGeniText,
   choice: EventSourceChoice,
-): Pick<EventSource, "kind" | "adapter" | "name" | "mcp"> {
+): Pick<EventSource, "kind" | "adapter" | "name" | "mcp"> & {
+  format: { preset: string } | null;
+} {
   const adapter = WEBHOOK_ADAPTER_OF[choice] ?? null;
+  const preset = isAppWebhookChoice(choice) ? PRESET_OF[choice] : undefined;
   return {
     kind: adapter
       ? "webhook"
-      : (choice as Exclude<EventSourceChoice, "webhook" | "linear" | "sentry">),
+      : (choice as Exclude<EventSourceChoice, "webhook" | AppWebhookChoice>),
     adapter,
+    format: preset ? { preset } : null,
     name: eventSourceChoiceName(t, choice),
     mcp: null,
   };
@@ -179,12 +219,9 @@ export function eventSourceAddLabel(t: OpenGeniText, choice: EventSourceChoice):
  * "GitHub", "Linear webhook", "Webhook", "MCP server", "Workspace events": the
  * kind, not the name.
  */
-export function eventSourceKindLabel(
-  t: OpenGeniText,
-  source: Pick<EventSource, "kind" | "adapter">,
-): string {
+export function eventSourceKindLabel(t: OpenGeniText, source: EventSourceChoiceSubject): string {
   const choice = eventSourceChoiceOf(source);
-  if (choice === "linear" || choice === "sentry")
+  if (isAppWebhookChoice(choice))
     return t("automations.source.kind.appWebhook", { app: eventSourceChoiceName(t, choice) });
   if (choice === "webhook") return t("automations.source.kind.webhook");
   if (choice === "workspace") return t("automations.source.kind.workspace");
@@ -192,9 +229,7 @@ export function eventSourceKindLabel(
 }
 
 /** The domain whose logo stands for the source, when it has one. */
-export function eventSourceProviderDomain(
-  source: Pick<EventSource, "kind" | "adapter">,
-): string | null {
+export function eventSourceProviderDomain(source: EventSourceChoiceSubject): string | null {
   return choiceFacts(eventSourceChoiceOf(source)).providerDomain;
 }
 
@@ -332,26 +367,27 @@ export interface PastedWebhookSetup {
 
 export function pastedWebhookSetup(
   t: OpenGeniText,
-  source: Pick<EventSource, "kind" | "adapter">,
+  source: EventSourceChoiceSubject,
 ): PastedWebhookSetup | null {
   if (source.kind !== "webhook") return null;
-  if (source.adapter === "linear") {
-    return {
-      app: "Linear",
-      secretName: t("automations.paste.linear.secretName"),
-      urlStep: t("automations.paste.linear.urlStep"),
-      secretStep: t("automations.paste.linear.secretStep"),
-    };
+  const app = eventSourceChoiceOf(source);
+  if (!isAppWebhookChoice(app)) {
+    // Any other app's webhook: the same two steps, in that app's settings.
+    return source.adapter === "custom"
+      ? {
+          app: t("automations.paste.custom.app"),
+          secretName: t("automations.paste.custom.secretName"),
+          urlStep: t("automations.paste.custom.urlStep"),
+          secretStep: t("automations.paste.custom.secretStep"),
+        }
+      : null;
   }
-  if (source.adapter === "sentry") {
-    return {
-      app: "Sentry",
-      secretName: t("automations.paste.sentry.secretName"),
-      urlStep: t("automations.paste.sentry.urlStep"),
-      secretStep: t("automations.paste.sentry.secretStep"),
-    };
-  }
-  return null;
+  return {
+    app: eventSourceChoiceName(t, app),
+    secretName: t(`automations.paste.${app}.secretName`),
+    urlStep: t(`automations.paste.${app}.urlStep`),
+    secretStep: t(`automations.paste.${app}.secretStep`),
+  };
 }
 
 /** The request that adds a source of the chosen kind; an unnamed webhook takes the kind's name. */
@@ -369,11 +405,13 @@ export function createEventSourceRequest(
   const name = input.name.trim();
   const adapter = WEBHOOK_ADAPTER_OF[input.choice];
   if (adapter) {
+    const preset = isAppWebhookChoice(input.choice) ? PRESET_OF[input.choice] : undefined;
     return {
       kind: "webhook",
       adapter,
       name: name || eventSourceChoiceName(t, input.choice),
       visibility: input.visibility,
+      ...(preset ? { format: WEBHOOK_FORMAT_PRESETS[preset] } : {}),
       ...(adapter !== "standard" && input.signingSecret
         ? { signingSecret: input.signingSecret.trim() }
         : {}),

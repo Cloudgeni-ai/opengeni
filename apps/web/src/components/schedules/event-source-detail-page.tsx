@@ -337,7 +337,9 @@ export function EventSourceDetailPage({
               await client.updateEventSource(workspaceId, source.id, { signingSecret }),
             );
             toast.success(
-              source.awaitingSigningSecret ? `${setup.app} connected` : "Secret replaced",
+              source.awaitingSigningSecret
+                ? `${setup.app.charAt(0).toUpperCase()}${setup.app.slice(1)} connected`
+                : "Secret replaced",
               { description: source.name },
             );
           }}
