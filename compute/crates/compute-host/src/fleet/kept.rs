@@ -10,25 +10,29 @@
 //! without opening it, which would feed it too.
 //!
 //! A guard is ready only once it sees systemd keep the device: once
-//! systemd has dealt with its request ([`Barrier`]) and holds the device
-//! after that ([`held_by_manager`]). systemd holds a descriptor it was
-//! sent for a moment before it decides whether to keep it, so holding it
-//! alone shows nothing.
+//! systemd has dealt with its request ([`Barrier`]) and lists the device
+//! in the service's store after that ([`stored`]). That systemd holds the
+//! descriptor shows nothing: it holds one it was sent while it decides
+//! whether to keep it, and systemd 255 closes one it refused afterwards,
+//! in a process of its own, possibly after it dealt with the barrier.
 
 use std::fs::File;
 use std::io::{self, IoSlice, PipeReader};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
-use std::path::{Path, PathBuf};
+use std::os::fd::{AsFd as _, BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use compute_engine::watchdog::Watchdog;
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::fs::{major, minor};
 use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::net::{
     AddressFamily, SendAncillaryBuffer, SendAncillaryMessage, SendFlags, SocketAddrUnix,
     SocketFlags, SocketType, sendmsg_addr, socket_with,
 };
+use serde::Deserialize;
 
 /// The name the guard keeps its watchdog under in the store.
 pub const WATCHDOG: &str = "watchdog";
@@ -176,44 +180,96 @@ fn notify(socket: &str, message: &str, fd: BorrowedFd<'_>) -> io::Result<()> {
     Ok(())
 }
 
-/// Whether the service manager holds the file `fd` is open on: the user's
-/// manager (`MANAGERPID`) for a user's service, otherwise PID 1. For the
-/// watchdog, which opens once at a time, that is the guard's own open
-/// file, which the manager holds only in the service's store.
+/// Which file a descriptor is open on, as systemd lists the files in a
+/// store: the device holding it, its inode, and, for a device file, the
+/// device it is. The watchdog opens once at a time, so a stored file of
+/// the watchdog device is the guard's own open file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Identity {
+    dev: (u32, u32),
+    inode: u64,
+    rdev: (u32, u32),
+}
+
+impl Identity {
+    /// The file `fd` is open on.
+    ///
+    /// # Errors
+    ///
+    /// When it cannot be looked at.
+    pub fn of(fd: BorrowedFd<'_>) -> io::Result<Self> {
+        let stat = rustix::fs::fstat(fd)?;
+        Ok(Self {
+            dev: (major(stat.st_dev), minor(stat.st_dev)),
+            inode: stat.st_ino,
+            rdev: (major(stat.st_rdev), minor(stat.st_rdev)),
+        })
+    }
+}
+
+/// Whether this process's service keeps the file `identity` names in its
+/// store, under `name`, as systemd lists the store (`systemd-analyze
+/// fdstore`, systemd 254 and later): only a descriptor it kept is listed.
+/// The service is the user's manager's (`MANAGERPID` set) or the
+/// system's. It waits for systemd to answer, so the guard asks from
+/// another thread.
 ///
 /// # Errors
 ///
-/// When the manager's descriptors cannot be read.
-pub fn held_by_manager(fd: BorrowedFd<'_>) -> io::Result<bool> {
-    let manager = std::env::var("MANAGERPID")
-        .ok()
-        .and_then(|pid| pid.parse::<u32>().ok())
-        .unwrap_or(1);
-    held_by(manager, fd)
+/// When the service cannot be found or systemd does not list its store,
+/// as for a service that keeps none.
+pub fn stored(name: &str, identity: Identity) -> io::Result<bool> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup")?;
+    let unit = service_of(&cgroup).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("not in a service's cgroup: {}", cgroup.trim()),
+        )
+    })?;
+    let mut list = Command::new("systemd-analyze");
+    if std::env::var_os("MANAGERPID").is_some() {
+        list.arg("--user");
+    }
+    let output = list
+        .args(["fdstore", "--json=short", unit])
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "systemd-analyze fdstore {unit}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    listed(&output.stdout, name, identity)
 }
 
-/// Whether process `pid` has a descriptor open on the file `fd` is open on.
-fn held_by(pid: u32, fd: BorrowedFd<'_>) -> io::Result<bool> {
-    let path = |of: PathBuf| std::fs::read_link(of).ok();
-    let ours = path(PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())));
-    let same = rustix::fs::fstat(fd)?;
-    for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
-        // A descriptor closed meanwhile is not the one.
-        let Ok(entry) = entry else { continue };
-        // Its path first, so only a likely one is looked at.
-        if path(entry.path()) != ours {
-            continue;
-        }
-        let Ok(theirs) = rustix::fs::stat(entry.path()) else {
-            continue;
-        };
-        if (theirs.st_dev, theirs.st_ino, theirs.st_rdev)
-            == (same.st_dev, same.st_ino, same.st_rdev)
-        {
-            return Ok(true);
-        }
+/// The service a process in the cgroup `cgroup` (as `/proc/<pid>/cgroup`
+/// reads, cgroup v2) runs in, as `sd_pid_get_unit` finds it.
+fn service_of(cgroup: &str) -> Option<&str> {
+    let path = cgroup.lines().find_map(|line| line.strip_prefix("0::"))?;
+    path.rsplit('/')
+        .find(|part| !part.is_empty())
+        .filter(|unit| unit.ends_with(".service"))
+}
+
+/// Whether the store systemd lists as `json` (`systemd-analyze fdstore
+/// --json=short`) holds the file `identity` names, under `name`.
+fn listed(json: &[u8], name: &str, identity: Identity) -> io::Result<bool> {
+    #[derive(Deserialize)]
+    struct Entry {
+        fdname: String,
+        devno: Option<(u32, u32)>,
+        inode: Option<u64>,
+        rdevno: Option<(u32, u32)>,
     }
-    Ok(false)
+    let entries: Vec<Entry> = serde_json::from_slice(json)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(entries.iter().any(|entry| {
+        entry.fdname == name
+            && entry.devno == Some(identity.dev)
+            && entry.inode == Some(identity.inode)
+            && entry.rdevno == Some(identity.rdev)
+    }))
 }
 
 #[cfg(test)]
@@ -293,31 +349,61 @@ mod tests {
         );
     }
 
-    /// What tells a guard that systemd keeps its watchdog: another process
-    /// holding the same file.
+    /// What tells a guard that systemd keeps its watchdog: systemd listing
+    /// the same file, under its name, in the service's store.
     #[test]
-    fn a_file_is_seen_held_only_by_a_process_that_holds_it() {
+    fn a_file_is_seen_stored_only_when_systemd_lists_it() {
         let dir = tempfile::tempdir().unwrap();
         let file = File::create(dir.path().join("device")).unwrap();
-        let other = File::create(dir.path().join("other")).unwrap();
-        let holding = std::process::Command::new("sleep")
-            .arg("30")
-            .stdin(file.try_clone().unwrap())
-            .spawn()
-            .unwrap();
-        let not_holding = std::process::Command::new("sleep")
-            .arg("30")
-            .stdin(other.try_clone().unwrap())
-            .spawn()
-            .unwrap();
-        assert!(held_by(holding.id(), file.as_fd()).unwrap());
-        assert!(!held_by(not_holding.id(), file.as_fd()).unwrap());
-        assert!(held_by(not_holding.id(), other.as_fd()).unwrap());
-        for mut child in [holding, not_holding] {
-            child.kill().unwrap();
-            child.wait().unwrap();
-        }
-        assert!(held_by(u32::MAX, file.as_fd()).is_err(), "no such process");
+        let identity = Identity::of(file.as_fd()).unwrap();
+        let entry = |name: &str, identity: Identity| {
+            format!(
+                r#"{{"fdname":"{name}","type":8592,"devno":[{},{}],"inode":{},"rdevno":[{},{}],"path":"/dev/watchdog0","flags":"wo"}}"#,
+                identity.dev.0, identity.dev.1, identity.inode, identity.rdev.0, identity.rdev.1
+            )
+        };
+        let other = Identity {
+            inode: identity.inode + 1,
+            ..identity
+        };
+        let list = |entries: &[String]| format!("[{}]", entries.join(","));
+        let stored = |json: String| listed(json.as_bytes(), WATCHDOG, identity).unwrap();
+        assert!(stored(list(&[entry(WATCHDOG, identity)])));
+        assert!(stored(list(&[
+            entry("x", other),
+            entry(WATCHDOG, identity)
+        ])));
+        assert!(!stored(list(&[])), "an empty store");
+        assert!(!stored(list(&[entry(WATCHDOG, other)])), "another file");
+        assert!(!stored(list(&[entry("x", identity)])), "another name");
+        assert!(
+            !stored(
+                r#"[{"fdname":"watchdog","type":49663,"devno":[0,10],"inode":1,"rdevno":null,"path":"socket:[1]","flags":"rw"}]"#
+                    .into()
+            ),
+            "a socket"
+        );
+        assert!(listed(b"", WATCHDOG, identity).is_err());
+        assert!(listed(b"Failed", WATCHDOG, identity).is_err());
+    }
+
+    /// The service a process runs in, from its cgroup.
+    #[test]
+    fn a_process_s_service_is_its_cgroup_s() {
+        assert_eq!(
+            service_of("0::/system.slice/compute-guard.service\n"),
+            Some("compute-guard.service")
+        );
+        assert_eq!(
+            service_of("0::/user.slice/user-1000.slice/user@1000.service/app.slice/test.service\n"),
+            Some("test.service")
+        );
+        assert_eq!(
+            service_of("0::/user.slice/user-1000.slice/session-3.scope\n"),
+            None
+        );
+        assert_eq!(service_of("1:name=systemd:/x.service\n"), None, "cgroup v1");
+        assert_eq!(service_of(""), None);
     }
 
     /// A barrier passes once systemd has closed what it was sent, not while

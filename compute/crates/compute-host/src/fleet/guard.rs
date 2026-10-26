@@ -31,7 +31,9 @@ use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd as _, BorrowedFd};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -281,10 +283,10 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
     let mut ready = None;
     let mut waiting = false;
     // Whether the guard has seen systemd keep the watchdog.
-    let mut keeping = Keeping {
-        taken_over: watchdog.is_some(),
-        ..Keeping::default()
-    };
+    let mut keeping = Keeping::new(
+        watchdog.is_some(),
+        Arc::new(|identity| kept::stored(kept::WATCHDOG, identity)),
+    );
     let mut kept_open = false;
     let socket = std::env::var("NOTIFY_SOCKET").ok();
     tracing::info!(cgroup = %config.cgroup.display(), "guard running");
@@ -306,7 +308,7 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
         if let Some(watchdog) = &watchdog
             && !kept_open
         {
-            kept_open = keeping.kept(watchdog.as_fd(), socket.as_deref(), kept::held_by_manager);
+            kept_open = keeping.kept(watchdog.as_fd(), socket.as_deref());
         }
         if ready.is_none() && (kept_open || config.watchdog.is_none()) {
             // Armed and stepped once: the VMs are guarded from here on. A
@@ -334,35 +336,83 @@ pub fn run_guard(config: &GuardConfig, stop: &AtomicBool) -> anyhow::Result<()> 
     }
 }
 
+/// Whether the store of the guard's service holds a file, as systemd lists
+/// it ([`kept::stored`]); it waits for systemd.
+type ListStore = Arc<dyn Fn(kept::Identity) -> io::Result<bool> + Send + Sync>;
+
 /// The guard's asking systemd to keep its watchdog open.
-#[derive(Debug, Default)]
 struct Keeping {
     /// The guard took the watchdog over from the store.
     taken_over: bool,
+    /// How it lists the store.
+    list: ListStore,
     /// When it last asked.
     asked: Option<Instant>,
     /// The barrier sent after it asked, until systemd deals with it.
     barrier: Option<kept::Barrier>,
+    /// The listing of the store under way since then, on a thread of its
+    /// own, until systemd answers.
+    listing: Option<(Instant, mpsc::Receiver<io::Result<bool>>)>,
+    /// Whether systemd dealt with the last request, but the store could
+    /// not be listed: it is listed again, without asking again.
+    list_again: bool,
     /// Whether it said why it is not ready, so it says it once.
     told: bool,
 }
 
 impl Keeping {
+    fn new(taken_over: bool, list: ListStore) -> Self {
+        Self {
+            taken_over,
+            list,
+            asked: None,
+            barrier: None,
+            listing: None,
+            list_again: false,
+            told: false,
+        }
+    }
+
     /// Whether systemd keeps the watchdog `fd` is open on, as far as the
     /// guard has seen, without waiting: it asks systemd, through its
     /// notification socket `socket`, to keep it, with a barrier after that,
-    /// and once the barrier has passed, sees whether systemd holds the
-    /// device (`held`), which then only the store can, since the device
-    /// opens once at a time. Until then it asks again every [`KEEP_AGAIN`]
-    /// (systemd keeps one file once). A watchdog taken over from the store
-    /// is kept there already, so the first time it sends the barrier
-    /// alone: asked to keep it again, systemd would refuse the copy.
-    fn kept(
-        &mut self,
-        fd: BorrowedFd<'_>,
-        socket: Option<&str>,
-        held: impl Fn(BorrowedFd<'_>) -> io::Result<bool>,
-    ) -> bool {
+    /// and once the barrier has passed, lists the service's store, on
+    /// another thread, for the device. Until it is listed it asks again
+    /// every [`KEEP_AGAIN`] (systemd keeps one file once), or, when the
+    /// store could not be listed, lists it again. A watchdog taken over
+    /// from the store is kept there already, so the first time it sends the
+    /// barrier alone: asked to keep it again, systemd would refuse the copy.
+    fn kept(&mut self, fd: BorrowedFd<'_>, socket: Option<&str>) -> bool {
+        if let Some((since, listing)) = &self.listing {
+            let answer = match listing.try_recv() {
+                Ok(answer) => answer,
+                Err(mpsc::TryRecvError::Empty) => {
+                    if since.elapsed() >= KEEP_AGAIN * 5 {
+                        self.tell("systemd has not listed the service's file descriptor store");
+                    }
+                    return false;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => Err(io::Error::other(
+                    "listing the store ended without an answer",
+                )),
+            };
+            self.listing = None;
+            match answer {
+                Ok(true) => {
+                    tracing::info!("systemd keeps the watchdog open");
+                    return true;
+                }
+                Ok(false) => self.tell(
+                    "systemd does not keep the watchdog (its service sets no FileDescriptorStoreMax?)",
+                ),
+                Err(error) => {
+                    self.list_again = true;
+                    self.tell(&format!(
+                        "could not see whether systemd keeps the watchdog: {error}"
+                    ));
+                }
+            }
+        }
         if let Some(barrier) = &self.barrier {
             match barrier.passed() {
                 Ok(false) => {
@@ -373,18 +423,8 @@ impl Keeping {
                 }
                 Ok(true) => {
                     self.barrier = None;
-                    match held(fd) {
-                        Ok(true) => {
-                            tracing::info!("systemd keeps the watchdog open");
-                            return true;
-                        }
-                        Ok(false) => self.tell(
-                            "systemd does not keep the watchdog (its service sets no FileDescriptorStoreMax?)",
-                        ),
-                        Err(error) => self.tell(&format!(
-                            "could not see whether systemd keeps the watchdog: {error}"
-                        )),
-                    }
+                    self.list(fd);
+                    return false;
                 }
                 Err(error) => {
                     self.barrier = None;
@@ -396,6 +436,10 @@ impl Keeping {
             return false;
         }
         let first = self.asked.replace(Instant::now()).is_none();
+        if std::mem::take(&mut self.list_again) {
+            self.list(fd);
+            return false;
+        }
         let Some(socket) = socket else {
             self.tell("not run by systemd, which would keep the watchdog");
             return false;
@@ -412,6 +456,29 @@ impl Keeping {
             )),
         }
         false
+    }
+
+    /// Starts listing the store for the file `fd` is open on.
+    fn list(&mut self, fd: BorrowedFd<'_>) {
+        let started = kept::Identity::of(fd).and_then(|identity| {
+            let (answer, listing) = mpsc::channel();
+            let list = Arc::clone(&self.list);
+            std::thread::Builder::new()
+                .name("guard-store".into())
+                .spawn(move || {
+                    let _ = answer.send(list(identity));
+                })?;
+            Ok(listing)
+        });
+        match started {
+            Ok(listing) => self.listing = Some((Instant::now(), listing)),
+            Err(error) => {
+                self.list_again = true;
+                self.tell(&format!(
+                    "could not see whether systemd keeps the watchdog: {error}"
+                ));
+            }
+        }
     }
 
     /// Says, once, why the guard is not ready.
@@ -752,156 +819,232 @@ mod tests {
         );
     }
 
-    /// A stand-in for systemd's notification socket at `socket`: it takes
-    /// each message's descriptors into its table, as systemd does before it
-    /// decides, decides `deciding` later, and then keeps a descriptor it
-    /// was asked to keep if it `keeps` and closes the rest (a barrier's
-    /// with them).
-    fn systemd(
-        socket: &Path,
-        keeps: bool,
-        deciding: Duration,
-    ) -> (
-        std::sync::Arc<std::sync::Mutex<Vec<std::os::fd::OwnedFd>>>,
-        std::sync::Arc<AtomicBool>,
-    ) {
-        use std::io::IoSliceMut;
-        use std::mem::MaybeUninit;
-
-        use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
-
-        let notifications = std::os::unix::net::UnixDatagram::bind(socket).unwrap();
-        notifications
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .unwrap();
-        let table = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let done = std::sync::Arc::new(AtomicBool::new(false));
-        let (holding, ending) = (table.clone(), done.clone());
-        std::thread::spawn(move || {
-            while !ending.load(Ordering::Relaxed) {
-                let mut text = [0_u8; 256];
-                let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
-                let mut control = RecvAncillaryBuffer::new(&mut space);
-                let Ok(received) = recvmsg(
-                    &notifications,
-                    &mut [IoSliceMut::new(&mut text)],
-                    &mut control,
-                    RecvFlags::empty(),
-                ) else {
-                    continue;
-                };
-                let storing = text[..received.bytes].starts_with(b"FDSTORE=1\n");
-                let fds: Vec<std::os::fd::OwnedFd> = control
-                    .drain()
-                    .filter_map(|message| match message {
-                        RecvAncillaryMessage::ScmRights(fds) => Some(fds),
-                        _ => None,
-                    })
-                    .flatten()
-                    .collect();
-                let count = fds.len();
-                holding.lock().unwrap().extend(fds);
-                std::thread::sleep(deciding);
-                if !(storing && keeps) {
-                    let mut held = holding.lock().unwrap();
-                    let at = held.len() - count;
-                    held.truncate(at);
-                }
-            }
-        });
-        (table, done)
+    /// A stand-in for systemd's notification socket, as systemd 255
+    /// deals with it: it keeps a descriptor it is asked to keep if it
+    /// `keeps`; one it refuses it holds on, `closing` long, and closes
+    /// later, from another thread, after it went on to the messages after
+    /// it; a barrier's it closes as it deals with it.
+    struct Systemd {
+        socket: PathBuf,
+        /// What it keeps in the store.
+        store: Arc<std::sync::Mutex<Vec<std::os::fd::OwnedFd>>>,
+        /// What it refused and has yet to close.
+        closing: Arc<std::sync::Mutex<Vec<std::os::fd::OwnedFd>>>,
+        /// How many times it was asked to keep a descriptor.
+        asked: Arc<std::sync::atomic::AtomicUsize>,
+        done: Arc<AtomicBool>,
     }
 
-    /// A guard is ready only once systemd has dealt with its request and
-    /// keeps the watchdog: not while systemd holds it only to decide, nor
-    /// when it does not keep it, nor outside systemd.
+    impl Systemd {
+        fn start(socket: PathBuf, keeps: bool, closing: Duration) -> Self {
+            use std::io::IoSliceMut;
+            use std::mem::MaybeUninit;
+
+            use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
+
+            let notifications = std::os::unix::net::UnixDatagram::bind(&socket).unwrap();
+            notifications
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .unwrap();
+            let systemd = Self {
+                socket,
+                store: Arc::default(),
+                closing: Arc::default(),
+                asked: Arc::default(),
+                done: Arc::default(),
+            };
+            let (store, refused, asked, done) = (
+                Arc::clone(&systemd.store),
+                Arc::clone(&systemd.closing),
+                Arc::clone(&systemd.asked),
+                Arc::clone(&systemd.done),
+            );
+            std::thread::spawn(move || {
+                while !done.load(Ordering::Relaxed) {
+                    let mut text = [0_u8; 256];
+                    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+                    let mut control = RecvAncillaryBuffer::new(&mut space);
+                    let Ok(received) = recvmsg(
+                        &notifications,
+                        &mut [IoSliceMut::new(&mut text)],
+                        &mut control,
+                        RecvFlags::empty(),
+                    ) else {
+                        continue;
+                    };
+                    let fds: Vec<std::os::fd::OwnedFd> = control
+                        .drain()
+                        .filter_map(|message| match message {
+                            RecvAncillaryMessage::ScmRights(fds) => Some(fds),
+                            _ => None,
+                        })
+                        .flatten()
+                        .collect();
+                    if !text[..received.bytes].starts_with(b"FDSTORE=1\n") {
+                        drop(fds);
+                        continue;
+                    }
+                    asked.fetch_add(1, Ordering::Relaxed);
+                    if keeps {
+                        store.lock().unwrap().extend(fds);
+                        continue;
+                    }
+                    let count = fds.len();
+                    refused.lock().unwrap().extend(fds);
+                    let refused = Arc::clone(&refused);
+                    std::thread::spawn(move || {
+                        std::thread::sleep(closing);
+                        let mut held = refused.lock().unwrap();
+                        let closed = count.min(held.len());
+                        held.drain(..closed);
+                    });
+                }
+            });
+            systemd
+        }
+
+        fn socket(&self) -> Option<&str> {
+            self.socket.to_str()
+        }
+
+        /// How the guard lists the store: what it keeps, not what it holds.
+        fn list(&self) -> ListStore {
+            let store = Arc::clone(&self.store);
+            Arc::new(move |identity| {
+                Ok(store
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|kept| kept::Identity::of(kept.as_fd()).unwrap() == identity))
+            })
+        }
+
+        /// Whether it holds a file it refused, `fd`'s, yet to close it.
+        fn closing(&self, fd: BorrowedFd<'_>) -> bool {
+            let identity = kept::Identity::of(fd).unwrap();
+            self.closing
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|held| kept::Identity::of(held.as_fd()).unwrap() == identity)
+        }
+    }
+
+    impl Drop for Systemd {
+        fn drop(&mut self) {
+            self.done.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Steps `keeping` every 20 ms for `within`, or until it sees the
+    /// watchdog `device` kept; with `each` called on every step.
+    fn keep_for(
+        keeping: &mut Keeping,
+        device: &File,
+        socket: Option<&str>,
+        within: Duration,
+        mut each: impl FnMut(),
+    ) -> bool {
+        let until = Instant::now() + within;
+        while Instant::now() < until {
+            if keeping.kept(device.as_fd(), socket) {
+                return true;
+            }
+            each();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// A guard is ready only once systemd lists the watchdog in the
+    /// service's store: not when systemd refuses it, though it still holds
+    /// it after it dealt with the request, nor outside systemd, nor while
+    /// it cannot list the store.
     #[test]
-    fn a_guard_sees_systemd_keep_its_watchdog_only_once_systemd_has_dealt_with_it() {
-        let same = |a: BorrowedFd<'_>, b: BorrowedFd<'_>| {
-            let (a, b) = (rustix::fs::fstat(a).unwrap(), rustix::fs::fstat(b).unwrap());
-            (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
-        };
+    fn a_guard_is_ready_only_once_systemd_lists_its_watchdog_in_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let device = File::create(dir.path().join("device")).unwrap();
 
-        // systemd holds it for a while to decide, then does not keep it.
-        let socket = dir.path().join("refusing");
-        let (table, done) = systemd(&socket, false, Duration::from_millis(300));
-        let held = |fd: BorrowedFd<'_>| -> io::Result<bool> {
-            Ok(table
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|kept| same(kept.as_fd(), fd)))
-        };
-        let mut keeping = Keeping::default();
-        let mut seen_deciding = false;
-        let until = Instant::now() + Duration::from_millis(1600);
-        while Instant::now() < until {
-            assert!(
-                !keeping.kept(device.as_fd(), socket.to_str(), held),
-                "systemd does not keep it"
-            );
-            seen_deciding |= held(device.as_fd()).unwrap();
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(seen_deciding, "systemd held it while it decided");
+        // systemd refuses it, and closes it only well after it went on.
+        let systemd = Systemd::start(
+            dir.path().join("refusing"),
+            false,
+            Duration::from_millis(900),
+        );
+        let mut keeping = Keeping::new(false, systemd.list());
+        let mut seen_closing = false;
+        let kept = keep_for(
+            &mut keeping,
+            &device,
+            systemd.socket(),
+            Duration::from_millis(1600),
+            || seen_closing |= systemd.closing(device.as_fd()),
+        );
+        assert!(!kept, "systemd does not keep it");
+        assert!(seen_closing, "systemd held it after it refused it");
         assert!(keeping.told);
-        done.store(true, Ordering::Relaxed);
+        assert!(systemd.asked.load(Ordering::Relaxed) >= 2, "asked again");
 
         // systemd keeps it.
-        let socket = dir.path().join("keeping");
-        let (table, done) = systemd(&socket, true, Duration::from_millis(50));
-        let held = |fd: BorrowedFd<'_>| -> io::Result<bool> {
-            Ok(table
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|kept| same(kept.as_fd(), fd)))
-        };
-        let mut keeping = Keeping::default();
-        let until = Instant::now() + Duration::from_secs(2);
-        let mut kept = false;
-        while !kept && Instant::now() < until {
-            kept = keeping.kept(device.as_fd(), socket.to_str(), held);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(kept, "systemd keeps it");
+        let systemd = Systemd::start(dir.path().join("keeping"), true, Duration::ZERO);
+        let mut keeping = Keeping::new(false, systemd.list());
+        let socket = systemd.socket();
+        assert!(keep_for(
+            &mut keeping,
+            &device,
+            socket,
+            Duration::from_secs(2),
+            || {}
+        ));
         assert!(!keeping.told);
-        done.store(true, Ordering::Relaxed);
 
         // Taken over from the store, it is kept there already: the guard
         // sends the barrier alone, not a second copy systemd would refuse.
-        let socket = dir.path().join("taken-over");
-        let (table, done) = systemd(&socket, true, Duration::from_millis(50));
-        table
+        let systemd = Systemd::start(dir.path().join("taken-over"), true, Duration::ZERO);
+        systemd
+            .store
             .lock()
             .unwrap()
             .push(device.try_clone().unwrap().into());
-        let held = |fd: BorrowedFd<'_>| -> io::Result<bool> {
-            Ok(table
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|kept| same(kept.as_fd(), fd)))
-        };
-        let mut keeping = Keeping {
-            taken_over: true,
-            ..Keeping::default()
-        };
-        let until = Instant::now() + Duration::from_secs(2);
-        let mut kept = false;
-        while !kept && Instant::now() < until {
-            kept = keeping.kept(device.as_fd(), socket.to_str(), held);
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(kept, "systemd keeps it");
-        assert_eq!(table.lock().unwrap().len(), 1, "not sent to keep again");
-        done.store(true, Ordering::Relaxed);
+        let mut keeping = Keeping::new(true, systemd.list());
+        let socket = systemd.socket();
+        assert!(keep_for(
+            &mut keeping,
+            &device,
+            socket,
+            Duration::from_secs(2),
+            || {}
+        ));
+        assert_eq!(systemd.asked.load(Ordering::Relaxed), 0, "not asked again");
+        assert_eq!(systemd.store.lock().unwrap().len(), 1);
+
+        // The store cannot be listed: it is listed again, and systemd not
+        // asked again to keep what it may keep already.
+        let systemd = Systemd::start(dir.path().join("unlisted"), true, Duration::ZERO);
+        let listed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counting = Arc::clone(&listed);
+        let mut keeping = Keeping::new(
+            false,
+            Arc::new(move |_| {
+                counting.fetch_add(1, Ordering::Relaxed);
+                Err(io::Error::other("no systemd-analyze"))
+            }),
+        );
+        let socket = systemd.socket();
+        assert!(!keep_for(
+            &mut keeping,
+            &device,
+            socket,
+            Duration::from_millis(2500),
+            || {}
+        ));
+        assert!(keeping.told);
+        assert_eq!(systemd.asked.load(Ordering::Relaxed), 1, "asked once");
+        assert!(listed.load(Ordering::Relaxed) >= 2, "listed again");
 
         // Not run by systemd.
-        let mut keeping = Keeping::default();
-        assert!(!keeping.kept(device.as_fd(), None, |_| Ok(true)));
+        let mut keeping = Keeping::new(false, Arc::new(|_| Ok(true)));
+        assert!(!keeping.kept(device.as_fd(), None));
         assert!(keeping.told);
     }
 }
