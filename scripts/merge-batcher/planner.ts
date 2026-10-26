@@ -169,6 +169,9 @@ function planCandidate(o: Observation, c: Config): Action {
     return n + running + (!latestRun(x, c) && missing?.status !== "released" ? 1 : 0);
   }, 0);
   const inflight = Math.max(localInflight, o.headroom?.occupiedBatchSlots ?? 0);
+  // Runner headroom (mainBusy/headroom) gates only actions that start CI:
+  // publication and the single retry. Landing fast-forwards main to the exact
+  // tested tip and consumes no runner, so it never waits for headroom.
   const publicationBlocked = o.mainBusy || o.headroom?.publicationBlocked === true;
   // Full main CI is an independent backstop, not candidate admission evidence.
   // Retain any legacy baseHold for audit; it neither blocks a tested green tip
@@ -177,13 +180,10 @@ function planCandidate(o: Observation, c: Config): Action {
   if (root) {
     const run = latestRun(root, c);
     if (run?.status === "completed") {
-      if (run.trusted && run.outcome === "success")
-        return o.mainBusy
-          ? {
-              kind: "wait",
-              reason: "full-main CI has priority; tested candidate retained without cancellation",
-            }
-          : { kind: "land", candidate: root };
+      // A trusted green exact root lands on this step regardless of runner
+      // headroom. Safety lives at the landing boundary: exact tree, tested
+      // base, readiness/head rereads, fast-forward only and lease/CAS/epoch.
+      if (run.trusted && run.outcome === "success") return { kind: "land", candidate: root };
       // A red exact base is not proof that members caused this failure. Hold
       // before retry/splitting, retaining the failed candidate and all evidence.
       // This does not claim identical fingerprints or authorize a green result.

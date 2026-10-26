@@ -111,8 +111,10 @@ has finished and the parent explicitly gives the go-ahead.
 
 The accepted GitHub contract is **only the exact tested tree lands**, not
 “no PR head can change after the final HTTP read.” The adapter rechecks every
-head/readiness/evidence binding, source branch head, exact workflow result and
-main-CI headroom immediately before its atomic Git transaction. A last-moment
+head/readiness/evidence binding, source branch head and exact workflow result
+immediately before its atomic Git transaction. Only publication also rechecks
+runner headroom and the Batch slot there; a landing uses no runner and never
+waits for headroom. A last-moment
 PR update remains possible; no local lock or single replica eliminates it.
 
 One narrow head-refresh exception preserves a candidate when a queued PR only
@@ -471,6 +473,25 @@ outcomes retain their reservation; foreign, invalidated and waiting Batch runs
 still consume provider slots. No running CI is cancelled. Only a tested root
 whose base is current main may land, with exact tree/provenance/CAS checks;
 landing consumes no additional hosted slot and does not wait for successor CI.
+
+**A tested green root lands on the next controller step regardless of runner
+headroom.** Landing fast-forwards main to the exact already-tested tip and uses
+no runner, so holding it only delays every member PR and the next publication.
+The planner therefore never returns a headroom wait for a trusted, completed,
+successful exact root run, and the executor does not reread headroom before a
+landing. This deliberately retires the former "full-main CI has priority;
+tested candidate retained without cancellation" hold: a busy, unknown,
+incomplete, overrun or misconfigured runner inventory (`mainBusy`,
+`headroom.allowed: false`, `publicationBlocked`) no longer delays a landing.
+Every landing safety check is unchanged: the exact tested commit and tree,
+tested base equal to current main, a fresh complete re-observation and replan
+that must select the same tip, final readiness, binding and source-branch head
+rereads, head-refresh equivalence, exact-attempt run provenance, fast-forward
+only main, lease epoch/owner fencing and state-ref CAS, and shadow mode never
+landing. Runner headroom still gates everything that starts CI: publication
+(rechecked at the effect boundary with the Batch slot and complete inventory)
+and the single trusted retry. A headroom read that throws (rather than
+reporting a hold) still fails the whole observation, as every other read does.
 At publication/retry, the slot budget is the union of exact published-candidate
 reservations and current provider runs, not two independent limits. A matching
 visible push run is counted once; missing, mismatched or unresolved histories
@@ -503,9 +524,10 @@ from 519 to 369 job-minutes, not make runner capacity unlimited.
 Failed or changed predecessors invalidate descendants without cancelling their
 runs. Version barriers, control-plane singleton isolation and sequential bisection remain unchanged.
 Full-main capacity estimates remain observable rather than reserving runners.
-Before publication, the existing single trusted retry, and landing, the reader scans current
+Before publication and the existing single trusted retry, the reader scans current
 repository runs and their latest jobs (100 entries per page, paginated through
-the reported total; incomplete observations hold). Each of the five active run statuses
+the reported total; incomplete observations hold publication and retry, never a
+tested landing). Each of the five active run statuses
 is listed twice, so a run whose status changes once during the listing (in either
 direction, for example `in_progress` to `waiting` while other jobs still run) is
 still listed; the latest active listing is used, and a run listed as `completed`
@@ -521,8 +543,22 @@ request concurrency, not inventory size or provider latency. There are no 64-run
 or 32-run admission limits. A
 120-second scan deadline is checked before each request and after the last
 response; an overrun or provider error holds. Each listing requires a stable
-reported total, correctly sized pages and unique identities across pages;
-inconsistent pages and run identity drift hold rather than admitting partial
+reported total, correctly sized pages and unique identities across pages. A
+listing whose rows disagree with GitHub's reported `total_count` (count drift,
+short or long pages, repeated identities) is **re-read once** before anything
+holds; malformed pages and invalid identities do not retry. If a run's
+latest-job listing still disagrees after that re-read (GitHub's `filter=latest`
+count can include jobs it does not return), the live reader uses the distinct
+rows actually returned, lists the run in `partialJobRuns` and adds a warning
+to the headroom reason. Such a partial listing never proves a run
+approval-only and never seeds the approval cache. Job counts are informational
+for slot one, so publication of the first Batch proceeds; any additional slot
+(`occupiedBatchSlots > 0`) stays closed ("Additional Batch slots require a
+complete job inventory"), because an undercount there could overrun the runner
+budget. Run listings, which bound the Batch slots, stay strict: a run-listing
+mismatch that survives the re-read still holds publication and retry. The
+traffic-shadow reader keeps the strict job hold. None of these holds delay a
+tested landing. Run identity drift holds rather than admitting partial
 demand. A run is **approval-only** only when
 the following complete-job proof establishes it. The live reader may reuse that
 proof for at most 15 minutes only for main push CI whose sole waiting job is
@@ -610,7 +646,8 @@ may enter GitHub's queue; a tested candidate need not wait for main capacity to
 land. `capacityInformational`
 marks this policy; `capacity.hold` retains the historical capacity heuristic for
 diagnostics, not an admission rejection. Invalid capacity configuration and
-incomplete/unknown evidence still hold. Traffic-shadow capacity comparisons
+incomplete/unknown evidence still hold publication and retry; they never hold a
+tested landing, which ignores headroom entirely. Traffic-shadow capacity comparisons
 retain their existing conservative decisions.
 
 The exact tested tree, lease/CAS, provenance, configured in-flight limit and unknown-outcome
@@ -695,7 +732,8 @@ ready subset on the exact stacked candidate tree. Its trusted, completed, latest
 run-attempt success permits landing even when full-main CI is red, missing,
 running, cancelled or unknown. This is not full-CI equivalence or release evidence.
 Full main CI remains an independent post-merge backstop. Capacity admission still
-respects observed main runner demand; main advancing still invalidates obsolete
+respects observed main runner demand for publication and retry, never for a
+tested landing; main advancing still invalidates obsolete
 candidates and requires a new exact-tree test. Legacy `baseHold` records remain
 audit history, not green-candidate admission gates.
 

@@ -368,6 +368,7 @@ export class GitHubReader {
       maxInflight: this.config.maxInflight,
       requireFreeBatchSlot: purpose === "publish",
       reservations,
+      tolerateJobCountMismatch: true,
     });
     result.scannedRuns = scan.scannedRuns;
     result.approvalOnlyRuns = scan.approvalOnlyRuns;
@@ -397,15 +398,23 @@ export class GitHubReader {
     result.occupiedBatchSlots = scan.occupiedBatchSlots;
     result.capacityInformational =
       decision.capacity.hold !== "invalid-capacity" && scan.occupiedBatchSlots === 0;
+    // Job counts are informational for slot one, so a GitHub count/row mismatch
+    // that survived one re-read is only a warning there; extra slots stay closed.
+    const partialJobRuns = scan.partialJobRuns ?? [];
     result.publicationBlocked =
       scan.occupiedBatchSlots >= this.config.maxInflight ||
-      (scan.occupiedBatchSlots > 0 && decision.capacity.hold !== null);
+      (scan.occupiedBatchSlots > 0 &&
+        (decision.capacity.hold !== null || partialJobRuns.length > 0));
     result.allowed =
       decision.capacity.hold !== "invalid-capacity" &&
       (purpose !== "publish" || !result.publicationBlocked);
     result.reason = result.allowed
       ? `Batch ${purpose}; ${scan.activeBatchRuns}/${this.config.maxInflight} active provider slots; capacity observation: ${decision.capacity.hold ? CAPACITY_HOLD_REASONS[decision.capacity.hold] : "observed demand fits configured estimates"}`
-      : CAPACITY_HOLD_REASONS[decision.capacity.hold ?? "invalid-capacity"];
+      : decision.capacity.hold === null && partialJobRuns.length > 0
+        ? "Additional Batch slots require a complete job inventory"
+        : CAPACITY_HOLD_REASONS[decision.capacity.hold ?? "invalid-capacity"];
+    if (partialJobRuns.length > 0)
+      result.reason += `; warning: job listing for run(s) ${partialJobRuns.join(", ")} disagreed with GitHub's total_count after a re-read; returned rows used`;
     return result;
   }
   async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {

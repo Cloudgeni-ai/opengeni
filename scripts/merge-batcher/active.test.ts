@@ -626,7 +626,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(checked).toBe(true);
     expect(await f.git.remoteRefs(f.origin.dir)).toEqual(before);
   });
-  test("landing checks evidence without reserving another hosted slot", async () => {
+  test("landing checks evidence without any hosted-slot or headroom read", async () => {
     const f = await fixture();
     const purposes: Array<string | undefined> = [];
     // Seed the already-published candidate before simulating occupied slots.
@@ -638,8 +638,46 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     };
     expect((await f.controller().step()).action.kind).toBe("land");
     expect(purposes).toContain("observe");
-    expect(purposes).toContain("land");
+    // Landing uses no runner, so the effect boundary no longer rereads headroom.
+    expect(purposes).not.toContain("land");
     expect(purposes).not.toContain("publish");
+  });
+  test("a trusted green root lands on the next step while every headroom read is blocked", async () => {
+    const f = await fixture();
+    const manifest = await f.publish();
+    f.verdict(manifest);
+    const purposes: Array<string | undefined> = [];
+    f.api.mainBusy = async (purpose) => {
+      purposes.push(purpose);
+      f.api.lastHeadroom = {
+        allowed: false,
+        reason: "Active workflow observation exceeded its scan deadline",
+        budget: 52,
+        occupied: 60,
+        reservedMain: 30,
+        candidateSlots: 18,
+        occupiedBatchSlots: f.cfg.maxInflight,
+        publicationBlocked: true,
+      };
+      return true;
+    };
+    const result = await f.controller().step();
+    expect(result.action.kind).toBe("land");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(manifest.tipSha);
+    expect((await f.state()).ledger.landed).toContain(manifest.batchId);
+    expect(purposes.every((purpose) => purpose === "observe")).toBe(true);
+  });
+  test("blocked headroom does not bypass landing head rereads", async () => {
+    const f = await fixture();
+    const manifest = await f.publish();
+    f.verdict(manifest);
+    f.api.mainBusy = async () => true;
+    // The source branch moves after observation: landing must refuse without a write.
+    f.api.onSnapshot = () => {
+      f.api.snapshot.branchHeadSha = f.newer;
+    };
+    await expect(f.controller().step()).rejects.toThrow("Final source branch head changed");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
   });
   async function refreshedFixture() {
     const f = await fixture();
@@ -1067,9 +1105,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(f.publish()).rejects.toThrow();
     expect((await f.state()).sha).toBe(f.initializedSha);
   });
-  test("blocking reader evidence prevents hosted publication, retry and landing", async () => {
+  test("blocking reader evidence prevents hosted publication and retry, never a tested landing", async () => {
     // This stub models incomplete/unknown evidence or an occupied Batch slot.
     // Valid numeric/main-capacity estimates are informational in the live reader.
+    // Landing uses no runner, so the same blocked evidence does not hold it.
     const f = await fixture();
     f.api.busy = true;
     const local = await f.controller().step();
@@ -1084,8 +1123,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(f.api.calls).toHaveLength(0);
     f.api.workflowRuns = [];
     f.verdict(m);
-    expect((await f.controller().step()).action.kind).toBe("wait");
-    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
   });
   test.each(["publish", "retry", "land"] as const)(
     "live capacity observation permits %s while preserving executor checks",
@@ -1930,13 +1969,24 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         { total_count: 101, jobs: jobs(...Array(101).fill("completed")) },
         "Incomplete",
       ],
-      ["truncated job page", { total_count: 2, jobs: jobs("queued") }, "Incomplete"],
       ["malformed job page", { total_count: 0 }, "Incomplete"],
     ] as const)("%s holds", async (_name, jobPage, reason) => {
       const r = reader([{ id: 2, status: "queued", ...OTHER }], { 2: jobPage }, "1000");
       expect(await r.mainBusy()).toBe(true);
       expect(r.lastHeadroom?.reason).toContain(reason);
       expect(r.lastHeadroom?.allowed).toBe(false);
+    });
+    test("a truncated job page survives one re-read as returned rows with a warning", async () => {
+      // Formerly a hold. Job counts are informational for slot one, so the live
+      // reader uses the rows GitHub returned; extra slots stay closed.
+      const r = reader(
+        [{ id: 2, status: "queued", ...OTHER }],
+        { 2: { total_count: 2, jobs: jobs("queued") } },
+        "1000",
+      );
+      expect(await r.mainBusy()).toBe(false);
+      expect(r.lastHeadroom).toMatchObject({ allowed: true, occupied: 1 });
+      expect(r.lastHeadroom?.reason).toContain("warning: job listing for run(s) 2");
     });
     test("idle run volume is allowed but malformed inventories still hold", async () => {
       const idle = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [i + 1, page([])]));
@@ -2213,11 +2263,6 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         ["unknown job status", page(jobs("waiting", "action_required")), "Unrecognized"],
         ["missing job status", page(jobs("waiting", undefined)), "Unrecognized"],
         [
-          "truncated job page",
-          { total_count: 3, jobs: jobs("waiting", "completed") },
-          "Incomplete",
-        ],
-        [
           "oversized job page",
           { total_count: 101, jobs: jobs("waiting", ...Array(100).fill("completed")) },
           "Incomplete",
@@ -2234,6 +2279,19 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
           expect.stringContaining(reason),
         ]);
       }
+      // A truncated job page is used as returned (with a warning) after one
+      // re-read, but a partial listing never proves a run approval-only.
+      nextId = 1;
+      const truncated = reader(
+        [
+          ...approvalMain(40),
+          ...runs(1, "waiting", MAIN, { total_count: 3, jobs: jobs("waiting", "completed") }),
+        ],
+        "1000",
+      );
+      expect(await truncated.github.mainBusy()).toBe(false);
+      expect(truncated.github.lastHeadroom).toMatchObject({ approvalOnlyRuns: 40 });
+      expect(truncated.github.lastHeadroom?.reason).toContain("warning: job listing for run(s)");
       // Provider errors on a job page or a run-list page reject; callers hold.
       // Each failed read makes all five bounded attempts with real backoff.
       nextId = 1;
