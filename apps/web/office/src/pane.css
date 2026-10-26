@@ -214,6 +214,24 @@ body,
   color: var(--og-color-fg);
 }
 
+/* Retrying: looks disabled but stays focusable (aria-disabled, not disabled). */
+.pane-secondary[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pane-secondary[aria-disabled="true"]:hover {
+  border-color: var(--og-color-border);
+  color: var(--og-color-fg-muted);
+}
+
+.pane-notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
 .pane-primary:focus-visible,
 .pane-secondary:focus-visible,
 .pane-link:focus-visible {
