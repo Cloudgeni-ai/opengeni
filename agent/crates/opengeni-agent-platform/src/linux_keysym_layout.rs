@@ -228,8 +228,19 @@ pub(super) struct LayoutKeymap {
 }
 
 impl LayoutKeymap {
-    /// Reads the core keyboard's XKB keymap. `None` when XKB is unavailable.
+    /// Reads the core keyboard's XKB keymap with its names. `None` when XKB
+    /// is unavailable.
     pub(super) fn read(conn: &RustConnection) -> Option<Self> {
+        let keymap = Self::read_types(conn)?;
+        Some(Self {
+            names: KeymapNames::read(conn).unwrap_or_default(),
+            ..keymap
+        })
+    }
+
+    /// Reads the core keyboard's XKB keymap without its names. `None` when
+    /// XKB is unavailable.
+    pub(super) fn read_types(conn: &RustConnection) -> Option<Self> {
         if !conn.xkb_use_extension(1, 0).ok()?.reply().ok()?.supported {
             return None;
         }
@@ -281,12 +292,17 @@ impl LayoutKeymap {
             keys,
             kinds,
             max_keycode: reply.max_key_code,
-            names: KeymapNames::read(conn).unwrap_or_default(),
+            names: KeymapNames::default(),
         })
     }
 
     pub(super) fn names(&self) -> &KeymapNames {
         &self.names
+    }
+
+    /// The keycodes of the keymap's keys, ascending.
+    pub(super) fn keycodes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.keys.iter().map(|key| key.keycode)
     }
 
     /// The number of layout groups.
@@ -491,26 +507,11 @@ pub(super) fn gives(keysym: u32, character: char, capitalized: bool) -> bool {
     if !capitalized {
         return is(character);
     }
-    // A capitalized letter is its single-character capital; a character
-    // whose capital is several characters is not predictable.
-    let upper = |character: char| {
-        let mut upper = character.to_uppercase();
-        match (upper.next(), upper.next()) {
-            (Some(single), None) => Some(single),
-            _ => None,
-        }
-    };
-    let lower = |character: char| {
-        let mut lower = character.to_lowercase();
-        match (lower.next(), lower.next()) {
-            (Some(single), None) => Some(single),
-            _ => None,
-        }
-    };
-    (is(character) && upper(character) == Some(character))
-        || lower(character)
-            .filter(|&small| small != character && is(small))
-            .is_some_and(|small| upper(small) == Some(character))
+    // A capitalized keysym gives its character's capital, which must be
+    // exactly `character` (`ß`, whose capital is `SS`, is not predictable).
+    std::iter::once(character)
+        .chain(character.to_lowercase())
+        .any(|small| is(small) && small.to_uppercase().eq(std::iter::once(character)))
 }
 
 impl LayoutKey {

@@ -296,9 +296,14 @@ impl LayoutReport {
                 self.group = LayoutGroup::Active(group);
                 self.locked = Some(locked);
             }
-            // Until the new keyboard reports, its group and keymap are unknown.
+            // Until the new keyboard reports, its group and keymap are
+            // unknown. Mutter keeps the locked modifiers across the keymap
+            // change and does not report them again, so they stay.
             LayoutChange::KeyboardRemoved if self.group != LayoutGroup::Pending => {
-                *self = Self::UNKNOWN;
+                *self = Self {
+                    locked: self.locked,
+                    ..Self::UNKNOWN
+                };
             }
             LayoutChange::KeyboardRemoved => self.keymap = None,
             LayoutChange::NoGroup if self.group == LayoutGroup::Pending => {
@@ -834,29 +839,36 @@ mod tests {
             }
         );
         assert_eq!(report.group, LayoutGroup::Pending);
-        report.apply(LayoutChange::Group {
-            group: 1,
-            locked: 0,
-        });
-        assert_eq!(report.layout().active_group, Some(1));
-        assert_eq!(report.layout().locked_modifiers, Some(0));
-        report.apply(LayoutChange::NoGroup);
-        assert_eq!(report.layout().active_group, Some(1));
-        // A keymap change replaces the keyboard: nothing is known until the
-        // new one reports.
-        report.apply(LayoutChange::KeyboardRemoved);
-        assert_eq!(report, LayoutReport::UNKNOWN);
-        report.apply(LayoutChange::Keyboard(Some(ru_us.clone())));
         // Caps Lock locks the Lock modifier, which changes what a key types.
         report.apply(LayoutChange::Group {
-            group: 0,
+            group: 1,
             locked: 2,
+        });
+        assert_eq!(report.layout().active_group, Some(1));
+        assert_eq!(report.layout().locked_modifiers, Some(2));
+        report.apply(LayoutChange::NoGroup);
+        assert_eq!(report.layout().active_group, Some(1));
+        // A keymap change replaces the keyboard: its group and keymap are
+        // unknown until the new one reports, while Mutter keeps the locks.
+        report.apply(LayoutChange::KeyboardRemoved);
+        assert_eq!(
+            report.layout(),
+            CompositorLayout {
+                active_group: None,
+                locked_modifiers: Some(2),
+                keymap: None,
+            }
+        );
+        report.apply(LayoutChange::Keyboard(Some(ru_us.clone())));
+        report.apply(LayoutChange::Group {
+            group: 0,
+            locked: 0,
         });
         assert_eq!(
             report.layout(),
             CompositorLayout {
                 active_group: Some(0),
-                locked_modifiers: Some(2),
+                locked_modifiers: Some(0),
                 keymap: Some(ru_us.clone()),
             }
         );
@@ -867,5 +879,94 @@ mod tests {
         assert_eq!(older.group, LayoutGroup::Unknown);
         assert_eq!(older.layout().locked_modifiers, None);
         assert_eq!(older.layout().keymap, Some(ru_us));
+    }
+
+    /// Reads the next request a fake EIS server receives.
+    fn next_request(context: &reis::eis::Context) -> reis::eis::Request {
+        loop {
+            match context.pending_request() {
+                Some(reis::PendingRequestResult::Request(request)) => return request,
+                Some(_) => panic!("malformed EIS request"),
+                None => {}
+            }
+            match context.read() {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("EIS read: {error}"),
+            }
+        }
+    }
+
+    /// A fake Mutter EIS server: a keyboard that reports group 1 with Lock
+    /// locked, then (once `gate` opens) is removed as on a keymap change.
+    fn fake_mutter_eis(socket: UnixStream, gate: &std::sync::mpsc::Receiver<()>) {
+        use reis::request::{DeviceCapability, EisRequest, EisRequestConverter};
+        let context = reis::eis::Context::new(socket).unwrap();
+        let mut handshaker = reis::handshake::EisHandshaker::new(&context, 1);
+        let handshake = loop {
+            if let Some(done) = handshaker.handle_request(next_request(&context)).unwrap() {
+                break done;
+            }
+        };
+        let mut converter = EisRequestConverter::new(&context, handshake, 1);
+        let connection = converter.handle().clone();
+        let seat = connection.add_seat(Some("seat"), DeviceCapability::Keyboard.into());
+        connection.flush().unwrap();
+        while !matches!(converter.next_request(), Some(EisRequest::Bind(_))) {
+            converter.handle_request(next_request(&context)).unwrap();
+        }
+        let device = seat.add_device(
+            Some("keyboard"),
+            reis::eis::device::DeviceType::Virtual,
+            DeviceCapability::Keyboard.into(),
+            |_| {},
+        );
+        device.resumed();
+        let keyboard = device.interface::<reis::eis::Keyboard>().unwrap();
+        connection.with_next_serial(|serial| keyboard.modifiers(serial, 0, 2, 0, 1));
+        connection.flush().unwrap();
+        gate.recv().unwrap();
+        device.remove();
+        connection.flush().unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_layout_follower_keeps_mutters_locked_modifiers() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (open, gate) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || fake_mutter_eis(server, &gate));
+        let (sender, mut report) = watch::channel(LayoutReport::PENDING);
+        let observe = async {
+            let reported = report
+                .wait_for(|report| report.group == LayoutGroup::Active(1))
+                .await
+                .unwrap()
+                .layout();
+            open.send(()).unwrap();
+            let removed = report
+                .wait_for(|report| report.group == LayoutGroup::Unknown)
+                .await
+                .unwrap()
+                .layout();
+            (reported, removed)
+        };
+        let ((reported, removed), ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(observe, follow_layout(client, &sender))
+        })
+        .await
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            (reported.active_group, reported.locked_modifiers),
+            (Some(1), Some(2))
+        );
+        // Mutter re-adds the keyboard after a keymap change without
+        // reporting its modifiers again; the locks it keeps still apply.
+        assert_eq!(
+            (removed.active_group, removed.locked_modifiers),
+            (None, Some(2))
+        );
     }
 }
