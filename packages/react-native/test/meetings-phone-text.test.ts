@@ -56,10 +56,10 @@ describe("phone recorder wording", () => {
     ).toStartWith("No connection right now. Recording continues");
     expect(
       phoneUploadLine(msg, recorder({ state: "idle", upload: upload({ pendingChunks: 3 }) })),
-    ).toBe("Saving the last few seconds of audio.");
+    ).toBe("Saving the rest of the audio.");
     expect(
       phoneUploadLine(msg, recorder({ state: "idle", upload: upload({ pendingChunks: 0 }) })),
-    ).toBe("Saving the last few seconds of audio.");
+    ).toBe("Saving the rest of the audio.");
     expect(
       phoneUploadLine(msg, recorder({ state: "idle", upload: upload({ discarded: true }) })),
     ).toBe("Nothing was recorded, so no meeting was saved.");

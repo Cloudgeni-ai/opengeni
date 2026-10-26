@@ -2529,7 +2529,7 @@ export const englishMessages = {
   "meetings.recorderPanel.resume": "Resume",
   "meetings.recorderPanel.save": "Save",
   "meetings.recorderPanel.saving": "Saving…",
-  "meetings.recorderPanel.savingTheLastFewSeconds": "Saving the last few seconds of audio.",
+  "meetings.recorderPanel.savingTheRestOfTheAudio": "Saving the rest of the audio.",
   "meetings.recorderPanel.showsWhatSSaidAs":
     "Shows what's said as it's said. The final transcript still comes after you stop.",
   "meetings.recorderPanel.starting": "Starting",
