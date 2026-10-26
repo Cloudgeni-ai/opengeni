@@ -64,7 +64,7 @@ export function MeetingsListPage({
   workspaceId,
   liveTranscriptDefault = false,
   liveTranscript = true,
-  defaultLanguage = null,
+  defaultLanguage,
   recordings: recordingsClient,
   meetingHref,
   onOpen,
@@ -78,7 +78,10 @@ export function MeetingsListPage({
   liveTranscriptDefault?: boolean;
   /** Offer the live transcript preview at all; false hides it even when a live model is connected. */
   liveTranscript?: boolean;
-  /** The workspace's meeting language; null detects it. */
+  /**
+   * The language the recorder starts on; null detects it. By default the
+   * workspace's meeting language, from the server.
+   */
   defaultLanguage?: string | null;
   /** A recordings client to use instead of the app's, for previews. */
   recordings?: RecordingsClientOverride["recordings"];
@@ -162,7 +165,7 @@ export function MeetingsListPage({
             recorder={recorder}
             onStopped={onOpen}
             onOpenNotes={onOpen}
-            defaultLanguage={defaultLanguage}
+            defaultLanguage={defaultLanguage !== undefined ? defaultLanguage : models.language}
             autoStart={autoStart}
             externalRef={externalRef}
             notice={notice}

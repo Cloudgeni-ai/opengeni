@@ -404,7 +404,7 @@ export function RecorderPanel({
   onStopped,
   onOpenNotes,
   liveTranscript = null,
-  defaultLanguage = null,
+  defaultLanguage,
   autoStart = null,
   externalRef = null,
   notice = null,
@@ -417,7 +417,11 @@ export function RecorderPanel({
   onOpenNotes?: ((recordingId: string) => void) | undefined;
   /** Offer the live transcript preview; null when the workspace has no live model. */
   liveTranscript?: { defaultOn: boolean; usdPerHour?: number | null } | null;
-  /** The workspace's meeting language; null detects it. */
+  /**
+   * The workspace's meeting language; null detects it. Undefined while it
+   * isn't known: a meeting started then names no language, and the server
+   * uses the workspace's.
+   */
   defaultLanguage?: string | null | undefined;
   /**
    * Start recording as soon as the recorder is ready, with this panel's
@@ -458,7 +462,10 @@ export function RecorderPanel({
       ...(liveOn ? { liveTranscript: true } : {}),
       ...(externalRef ? { externalRef } : {}),
       // Sent even when it's the workspace's, so this meeting keeps it.
-      transcription: { language: language === DETECT_LANGUAGE ? null : language },
+      transcription:
+        languageChoice === null && defaultLanguage === undefined
+          ? {}
+          : { language: language === DETECT_LANGUAGE ? null : language },
     });
   };
   const autoStartReady = Boolean(autoStart?.pending && recorder?.supported && state === "idle");

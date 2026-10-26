@@ -18,6 +18,16 @@ recording may rename it, edit speakers and text, re-run its transcript and
 switch the shown version. Only the person who recorded it may upload, finish,
 share, unshare or delete it.
 
+## Language
+
+A meeting is transcribed in `transcription.language` when the create request
+names one, else in the workspace's `settings.recordings.language`; `null`
+asks the model to detect it even when the workspace names one. Leave the
+language out to use the workspace's. `GET …/recording-models` returns the
+workspace's as `language` (null detects), and the React recorder starts on it
+unless the host passes `defaultLanguage`. Naming the language matters for
+close languages: without it, Norwegian can come back as Danish or Swedish.
+
 ## Capture contract
 
 Clients record locally first, so a dropped connection, a reload or a crash

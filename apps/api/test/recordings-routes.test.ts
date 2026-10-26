@@ -520,10 +520,13 @@ describe("recording routes", () => {
 
   test("the workspace's meeting language, unless a recording names one or asks to detect", async () => {
     const scope = await fixture();
+    expect((await scope.owner.call("GET", "/recording-models")).body.language).toBeNull();
     await shared.admin`
       update workspaces set settings = settings || '{"recordings":{"language":"no"}}'::jsonb
       where id = ${scope.workspaceId}`;
-    const create = async (transcription?: { language: string | null }) => {
+    // Recorders show it before the meeting starts.
+    expect((await scope.owner.call("GET", "/recording-models")).body.language).toBe("no");
+    const create = async (transcription?: { language?: string | null }) => {
       const recordingId = crypto.randomUUID();
       const created = await scope.owner.call("POST", "/recordings", {
         recordingId,
@@ -535,6 +538,7 @@ describe("recording routes", () => {
     };
     // None named: the workspace's, settled at the start for the live transcript.
     expect((await create()).transcription.language).toBe("no");
+    expect((await create({})).transcription.language).toBe("no");
     expect((await create({ language: "en" })).transcription.language).toBe("en");
     // Null detects it, even though the workspace names one.
     expect((await create({ language: null })).transcription.language).toBeUndefined();

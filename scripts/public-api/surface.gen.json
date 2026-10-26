@@ -20483,6 +20483,7 @@
         "$.dictationDefault": "object! null",
         "$.dictationDefault.model": "string!",
         "$.dictationDefault.providerId": "string!",
+        "$.language": "string? null",
         "$.models": "array!",
         "$.models[]": "ref(RecordingTranscriptionModel)",
         "$.pinned": "boolean!"
