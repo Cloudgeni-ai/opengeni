@@ -139,6 +139,15 @@ html[data-desktop="macos"] [data-rail-collapsed="true"] [data-titlebar] {
   padding-left: 32px;
 }
 
+/* The Site view has no title bar of its own: the Site's toolbar is its top
+   row, so beside a collapsed rail it starts after the window controls too.
+   While the window is being shared or recorded, macOS swaps the controls for
+   a wider purple sharing badge (about 80px in); 32px past the rail clears
+   both. */
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-view] dialog:not([data-artifact-fullscreen]) > [data-artifact-toolbar] {
+  padding-left: 32px;
+}
+
 /* A full-window workspace panel (maximized, or the overlay in a narrow
    window) puts its tab row under the traffic lights. */
 html[data-desktop="macos"] [data-workspace-surface][role="dialog"] [data-dock-chrome] > :first-child {

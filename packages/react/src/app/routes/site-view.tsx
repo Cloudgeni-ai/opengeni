@@ -175,6 +175,9 @@ export function SiteViewRoute({
     <div
       className="flex min-h-0 min-w-0 flex-1 max-lg:flex-col"
       data-workspace-scroll-owner="self-managed"
+      // The Site's toolbar is this page's top row (desktop window-control
+      // clearance in apps/web/src/styles.css).
+      data-site-view
     >
       <div ref={siteColumn} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {publishingSite ? (
