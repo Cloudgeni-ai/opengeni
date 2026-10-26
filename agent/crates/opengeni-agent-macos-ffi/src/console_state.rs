@@ -51,19 +51,54 @@ pub struct MacConsoleUser {
 
 /// Whose session `users` (the entries of `IOConsoleUsers`) marks as on the
 /// console, as seen by `user`. Sessions logged in in the background are listed
-/// too, off the console, and do not count.
+/// too, off the console, and do not count. Another user's session on the
+/// console wins even when this user's is marked too (macOS replaces the list
+/// as a whole, so that is not expected): it is never taken as this one's.
 #[must_use]
 pub fn console_session(users: &[MacConsoleUser], user: u32) -> MacConsoleSession {
-    let mut on_console = users.iter().filter(|entry| entry.on_console);
-    if let Some(this) = on_console.clone().find(|entry| entry.user == user) {
-        MacConsoleSession::ThisUser {
-            locked: this.screen_locked,
-        }
-    } else if on_console.next().is_some() {
+    let on_console = || users.iter().filter(|entry| entry.on_console);
+    if on_console().next().is_none() {
+        MacConsoleSession::Nobody
+    } else if on_console().any(|entry| entry.user != user) {
         MacConsoleSession::OtherUser
     } else {
-        MacConsoleSession::Nobody
+        MacConsoleSession::ThisUser {
+            locked: on_console().any(|entry| entry.screen_locked),
+        }
     }
+}
+
+/// One entry of `IOConsoleUsers` as read from the registry.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Read only on macOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MacConsoleUserEntry {
+    /// `kCGSSessionUserIDKey`; `None` when absent or not a number.
+    pub(crate) user: Option<i64>,
+    /// `kCGSSessionOnConsoleKey`; false when absent.
+    pub(crate) on_console: bool,
+    /// `CGSSessionScreenIsLocked`; false when absent.
+    pub(crate) screen_locked: bool,
+}
+
+/// The sessions `IOConsoleUsers` lists, from its entries as read (`None` for
+/// an entry that is not a dictionary). One entry that is not a dictionary or
+/// has no valid user id makes the whole list unreadable: which session is on
+/// screen is then not proven, and the `/dev/console` fallback decides.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Read only on macOS.
+pub(crate) fn console_users(
+    entries: impl IntoIterator<Item = Option<MacConsoleUserEntry>>,
+) -> Option<Vec<MacConsoleUser>> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            let entry = entry?;
+            Some(MacConsoleUser {
+                user: u32::try_from(entry.user?).ok()?,
+                on_console: entry.on_console,
+                screen_locked: entry.screen_locked,
+            })
+        })
+        .collect()
 }
 
 /// The facts the console state is decided from.
@@ -223,6 +258,67 @@ mod tests {
         ] {
             assert_eq!(console_state(&facts), MacConsoleState::Locked, "{facts:?}");
         }
+    }
+
+    #[test]
+    fn another_user_on_the_console_next_to_this_one_is_other_user() {
+        for users in [
+            [entry(501, true), entry(502, true)],
+            [entry(502, true), entry(501, true)],
+        ] {
+            assert_eq!(console_session(&users, 501), MacConsoleSession::OtherUser);
+        }
+    }
+
+    #[test]
+    fn a_user_listed_twice_is_decided_by_the_entry_on_the_console() {
+        let locked_off_console = MacConsoleUser {
+            screen_locked: true,
+            ..entry(501, false)
+        };
+        assert_eq!(
+            console_session(&[locked_off_console, entry(501, true)], 501),
+            MacConsoleSession::ThisUser { locked: false }
+        );
+        let locked_on_console = MacConsoleUser {
+            screen_locked: true,
+            ..entry(501, true)
+        };
+        assert_eq!(
+            console_session(&[entry(501, false), locked_on_console], 501),
+            MacConsoleSession::ThisUser { locked: true }
+        );
+    }
+
+    #[test]
+    fn an_entry_without_a_user_or_not_a_dictionary_leaves_the_list_unread() {
+        let read = |user: Option<i64>| {
+            Some(MacConsoleUserEntry {
+                user,
+                on_console: user == Some(501),
+                screen_locked: false,
+            })
+        };
+        assert_eq!(
+            console_users([read(Some(502)), read(Some(501))]),
+            Some(vec![entry(502, false), entry(501, true)])
+        );
+        for broken in [
+            vec![read(Some(502)), None, read(Some(501))],
+            vec![read(None), read(Some(501))],
+            vec![read(Some(-1)), read(Some(501))],
+            vec![read(Some(i64::from(u32::MAX) + 1)), read(Some(501))],
+        ] {
+            assert_eq!(console_users(broken.clone()), None, "{broken:?}");
+        }
+        // With the list unread, the console owner decides as before: the
+        // background user owning the device is taken as on screen.
+        let unread = MacConsoleFacts {
+            console_session: console_users([read(Some(502)), None, read(Some(501))])
+                .map(|users| console_session(&users, 501)),
+            ..with_background_user()
+        };
+        assert_eq!(console_state(&unread), MacConsoleState::OtherUser);
     }
 
     #[test]

@@ -211,35 +211,29 @@ fn registry_console_users() -> Option<Vec<crate::MacConsoleUser>> {
     use core_foundation::number::CFNumber;
 
     let users = registry_root_property("IOConsoleUsers")?.downcast::<CFArray>()?;
-    users
-        .get_all_values()
-        .into_iter()
-        .map(|entry| {
-            // The array holds its entries for this call; each is checked to be
-            // a dictionary before it is wrapped as one (retained again).
-            let item = unsafe { CFType::wrap_under_get_rule(entry) };
-            if !item.instance_of::<CFDictionary>() {
-                return None;
-            }
-            let entry: CFDictionary<CFString, CFType> =
-                unsafe { CFDictionary::wrap_under_get_rule(entry as CFDictionaryRef) };
-            let flag = |key: &str| {
-                entry
-                    .find(CFString::new(key))
-                    .and_then(|value| value.downcast::<CFBoolean>())
-                    .is_some_and(bool::from)
-            };
-            let user = entry
-                .find(CFString::new("kCGSSessionUserIDKey"))?
-                .downcast::<CFNumber>()?
-                .to_i64()?;
-            Some(crate::MacConsoleUser {
-                user: u32::try_from(user).ok()?,
-                on_console: flag("kCGSSessionOnConsoleKey"),
-                screen_locked: flag("CGSSessionScreenIsLocked"),
-            })
+    crate::console_state::console_users(users.get_all_values().into_iter().map(|entry| {
+        // The array holds its entries for this call; each is checked to be a
+        // dictionary before it is wrapped as one (retained again).
+        let item = unsafe { CFType::wrap_under_get_rule(entry) };
+        if !item.instance_of::<CFDictionary>() {
+            return None;
+        }
+        let entry: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_get_rule(entry as CFDictionaryRef) };
+        let value = |key: &str| entry.find(CFString::new(key));
+        let flag = |key: &str| {
+            value(key)
+                .and_then(|value| value.downcast::<CFBoolean>())
+                .is_some_and(bool::from)
+        };
+        Some(crate::console_state::MacConsoleUserEntry {
+            user: value("kCGSSessionUserIDKey")
+                .and_then(|value| value.downcast::<CFNumber>())
+                .and_then(|number| number.to_i64()),
+            on_console: flag("kCGSSessionOnConsoleKey"),
+            screen_locked: flag("CGSSessionScreenIsLocked"),
         })
-        .collect()
+    }))
 }
 
 /// The IORegistry root's `IOConsoleLocked`; false when it cannot be read.
