@@ -371,11 +371,19 @@ function FieldSegmented<Value extends string>(
 
 type EachRun = "new_session_per_run" | "reusable_session" | "existing_session";
 
-type IfStillRunning = "queue" | "skip";
+type IfStillRunning = "steer" | "queue" | "skip";
 
 const IF_STILL_RUNNING_HINT: Record<IfStillRunning, string> = {
+  steer:
+    "The new run reaches the agent at its next step, so it handles both together. Anything else working in the chat, like your own message, still finishes first.",
   queue: "The new run waits, then starts when the previous one finishes.",
   skip: "The new run is skipped. The next one runs as normal.",
+};
+
+const IF_STILL_RUNNING_SUMMARY: Record<IfStillRunning, string> = {
+  steer: "Steer if still running",
+  queue: "Queue if still running",
+  skip: "Skip if still running",
 };
 
 interface FormErrors {
@@ -995,7 +1003,8 @@ function AgentScheduleForm({
 
   /* ----- summaries */
   const eachRun = draft.runMode as EachRun;
-  const ifStillRunning: IfStillRunning = draft.overlapPolicy === "skip" ? "skip" : "queue";
+  const ifStillRunning: IfStillRunning =
+    draft.overlapPolicy === "skip" ? "skip" : draft.overlapPolicy === "steer" ? "steer" : "queue";
   const learningCustom = Boolean(draft.agentLearning && Object.keys(draft.agentLearning).length);
   // Secrets: shown while this schedule's agent can use secrets.
   const canListSecrets =
@@ -1015,9 +1024,7 @@ function AgentScheduleForm({
   });
   const secretsSummary = scheduleSecretsOn ? scheduleSecretsSummary(draft.vaultPolicy) : null;
   const advancedSummary = [
-    ...(eachRun === "new_session_per_run"
-      ? []
-      : [ifStillRunning === "skip" ? "Skip if still running" : "Queue if still running"]),
+    ...(eachRun === "new_session_per_run" ? [] : [IF_STILL_RUNNING_SUMMARY[ifStillRunning]]),
     ...(inheritsChatSettings ? [] : [whereLabel]),
     ...(secretsSummary ? [`Secrets: ${secretsSummary}`] : []),
     ...(draft.events.triggers.length > 0 && Number.isFinite(draft.events.maxRunsPerHour)
@@ -1588,12 +1595,13 @@ function AgentScheduleForm({
                     value={ifStillRunning}
                     onValueChange={(value) =>
                       update({
-                        overlapPolicy: value === "skip" ? "skip" : "allow_concurrent",
+                        overlapPolicy: value === "queue" ? "allow_concurrent" : value,
                       })
                     }
                     options={[
-                      { value: "queue", label: "Queue this run" },
-                      { value: "skip", label: "Skip this run" },
+                      { value: "steer", label: "Steer" },
+                      { value: "queue", label: "Queue" },
+                      { value: "skip", label: "Skip" },
                     ]}
                   />
                 </Field>

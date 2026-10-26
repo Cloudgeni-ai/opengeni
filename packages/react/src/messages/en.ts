@@ -497,7 +497,8 @@ export const englishMessages = {
   "automations.rows.sentAgain_one": "Sent again once",
   "automations.rows.sentAgain_other": "Sent again {count} times",
   "automations.rows.type": "Type",
-  "automations.run.error.accessUnavailable": "The access it was set up with is no longer valid.",
+  "automations.run.error.accessUnavailable":
+    "The access it was saved with has changed. Save it again to approve it with your current access.",
   "automations.run.error.accountUnavailable":
     "A connected account it needs can no longer be used. Reconnect that account.",
   "automations.run.error.allowanceUsed": "The usage allowance is used up.",
@@ -659,6 +660,10 @@ export const englishMessages = {
   "automations.wait.chip.event": "Waiting on {source}",
   "automations.wait.chip.more_other": "{count} more",
   "automations.wait.chip.nextRun": "Next: {time}",
+  "automations.wait.details.heading": "This chat's automations",
+  "automations.wait.details.more_one": "{count} more automation is waiting too",
+  "automations.wait.details.more_other": "{count} more automations are waiting too",
+  "automations.wait.details.open": "Click to see or change them",
   "automations.wait.event": "Waiting for an event",
   "automations.wait.eventFrom": "Waiting for {event}",
   "automations.wait.eventOrNextRun": "Waiting for {event}. Next run: {time}",
