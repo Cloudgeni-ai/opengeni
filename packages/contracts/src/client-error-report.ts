@@ -306,6 +306,7 @@ export const CLIENT_PAGES = [
   "connect-agent",
   "native-sign-in",
   "reset-password",
+  "shared-chat",
   "setup-account",
   "account-auth",
   "site-auth",

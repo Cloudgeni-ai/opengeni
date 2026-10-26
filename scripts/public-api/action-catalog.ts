@@ -58,6 +58,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   { pattern: /^\/v1\/(analytics-consent|client-errors)$/, reason: "browser telemetry" },
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
   {
+    pattern: /^\/v1\/shared-sessions\//,
+    reason: "a signed-out read of a chat share link; the link itself is the credential",
+  },
+  {
     pattern:
       /^\/v1\/workspaces\/:workspaceId\/(recordings|recording-people|recording-models)(\/|$)/,
     reason: "meeting recordings reach agents through the meetings_search and meeting_read tools",

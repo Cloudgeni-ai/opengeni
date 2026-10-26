@@ -161,6 +161,10 @@ export function appActionConfirmationTitle(
         : body?.visibility === "private"
           ? `Make ${chat} visible only to you?`
           : `Change who can see ${chat}?`;
+    case "createSessionShareLink":
+      return `Create a link to ${chat}? Anyone with the link can read the conversation up to now.`;
+    case "revokeSessionShareLink":
+      return `Stop sharing ${chat}? Its link will stop working.`;
     case "updateWorkspaceSettings":
       return `Change ${workspace}'s settings?`;
     case "updateOrganizationModelDefaults":

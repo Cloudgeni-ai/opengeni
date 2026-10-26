@@ -1013,6 +1013,35 @@ export async function requireWorkspaceSettingsGrant(
 }
 
 /**
+ * Read by the person and, through app actions, by the agent: why a Personal
+ * workspace refuses member changes, and what works instead.
+ */
+export const PERSONAL_WORKSPACE_MEMBERS_MESSAGE =
+  "Personal workspaces are private to their owner and can't have other members. To let someone read a chat from here, create a share link for that chat: anyone with the link can read the conversation up to the moment it was shared.";
+
+/**
+ * A member change in a Personal workspace can never succeed, for anyone. Say
+ * so plainly to someone who can use the workspace, instead of a missing
+ * permission that sends them looking for an administrator. Anyone else keeps
+ * the original refusal, so this reveals nothing about other workspaces.
+ */
+async function refuseMembersInPersonalWorkspace(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+): Promise<void> {
+  try {
+    await requireAccessGrant(c, deps, workspaceId);
+  } catch {
+    return;
+  }
+  const workspace = await getWorkspace(deps.db, workspaceId);
+  if (workspace?.kind === "personal") {
+    throw new HTTPException(403, { message: PERSONAL_WORKSPACE_MEMBERS_MESSAGE });
+  }
+}
+
+/**
  * Authority for a shared workspace's own Members surface (list, candidates,
  * add, change, remove). A holder of the requested workspace permission keeps
  * the ordinary grant. Otherwise an active organization owner or administrator,
@@ -1036,6 +1065,8 @@ export async function requireWorkspaceMemberManagementAuthority(
     };
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 403) throw error;
+    if (permission === "members:manage")
+      await refuseMembersInPersonalWorkspace(c, deps, workspaceId);
     const context = await requireAccessContext(c, deps);
     if (!canonicalManagedCookieContexts.has(context) || !context.subjectId.startsWith("user:")) {
       throw error;

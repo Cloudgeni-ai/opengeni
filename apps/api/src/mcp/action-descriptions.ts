@@ -37,6 +37,30 @@ const RULES: Rule[] = [
       "List connected password managers and deployment availability: 1Password, Proton Pass, Keeper, Bitwarden and external vaults. Returns connection metadata and setup status, not secret values; does not contact providers.",
   },
   {
+    method: "PUT",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Share a chat with anyone, for example family or a friend, without adding them to a workspace: creates a read-only link to the conversation as it is now, or refreshes the existing link so it includes the newest messages. Anyone with the link can read the person's messages and the replies, without signing in; tool details, files and anything not shown in the replies are left out. Only the person who started the chat can share it. Returns the link's url to give them.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Check whether a chat has a share link and get its url. enabled is false when share links are turned off here.",
+  },
+  {
+    method: "DELETE",
+    pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
+    text: () =>
+      "Stop sharing a chat: its share link stops working at once. Sharing it again later makes a new link.",
+  },
+  {
+    method: "GET",
+    pattern: /\/workspaces\/:workspaceId\/share-links$/,
+    text: () =>
+      "List the chats the person has shared with a link in this workspace, with each url.",
+  },
+  {
     method: "POST",
     pattern: /\/vault-providers\/connections$/,
     text: () =>

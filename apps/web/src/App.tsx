@@ -174,6 +174,10 @@ const LazyResetPasswordRoute = lazyRouteComponent(
   () => import("@/routes/reset-password"),
   "ResetPasswordRoute",
 );
+const LazySharedSessionRoute = lazyRouteComponent(
+  () => import("@/routes/shared-session"),
+  "SharedSessionRoute",
+);
 const LazyExcelAddinRoute = lazyRouteComponent(
   () => import("@/routes/excel-addin"),
   "ExcelAddinRoute",
@@ -392,6 +396,13 @@ const resetPasswordRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { token?: string } =>
     typeof search.token === "string" && search.token ? { token: search.token } : {},
   component: ResetPassword,
+});
+// A chat someone shared with a link. PUBLIC, like `/reset-password`: the
+// person opening it usually isn't signed in and may have no account.
+const sharedSessionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "share/$shareId",
+  component: SharedSession,
 });
 // How to add the Excel add-in. PUBLIC, like `/reset-password`: agents and
 // colleagues send this link to people who may not be signed in.
@@ -1021,6 +1032,7 @@ const routeTree = rootRoute.addChildren([
   connectAgentRoute,
   teamsConnectRoute,
   resetPasswordRoute,
+  sharedSessionRoute,
   excelAddinRoute,
   desktopReturnRoute,
   identityLinkRoute,
@@ -1633,6 +1645,11 @@ function SiteAuthorize() {
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
   return <LazyResetPasswordRoute token={token} />;
+}
+
+function SharedSession() {
+  const { shareId } = sharedSessionRoute.useParams();
+  return <LazySharedSessionRoute shareId={shareId} />;
 }
 
 function SetupAccount() {

@@ -38,6 +38,7 @@ import {
   PencilIcon,
   PinIcon,
   SearchIcon,
+  Share2Icon,
   ShieldCheckIcon,
   ShieldOffIcon,
   SmartphoneIcon,
@@ -54,6 +55,8 @@ import {
   type SessionAdminAccessControl,
 } from "../session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "../session/subagents";
+import { ShareChatDialog } from "../session/share-chat-dialog";
+import { useSessionUiFeature } from "../../lib/session-ui-features";
 import { Button } from "../../../ui/button";
 import {
   DropdownMenu,
@@ -234,6 +237,16 @@ export function SessionHeader({
   const context = useOptionalAppContext();
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
+  const shareLinksFeature = useSessionUiFeature("shareLinks");
+  // Only the person who started a top-level chat can share it; the server
+  // decides whether links are on at all and says so in the dialog.
+  const canShare =
+    shareLinksFeature &&
+    context !== null &&
+    session.parentSessionId === null &&
+    session.createdBy?.kind === "subject" &&
+    session.createdBy.subjectId === context.accessContext.subjectId;
+  const [shareOpen, setShareOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -497,6 +510,16 @@ export function SessionHeader({
                 <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut>
               ) : null}
             </DropdownMenuItem>
+            {canShare ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = () => setShareOpen(true);
+                }}
+              >
+                <Share2Icon />
+                Share…
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               className="lg:hidden"
               aria-keyshortcuts={pinKeys?.ariaKeys}
@@ -577,6 +600,15 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {canShare && context ? (
+          <ShareChatDialog
+            client={context.client}
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            open={shareOpen}
+            onOpenChange={setShareOpen}
+          />
+        ) : null}
         {adminAccess ? (
           <GrantSessionAdminAccessDialog
             control={adminAccess}

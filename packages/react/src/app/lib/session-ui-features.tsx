@@ -29,6 +29,11 @@ export type SessionUiFeatures = Readonly<{
    * Slack, GitHub or Linear, schedule a brief, and so on).
    */
   starters: boolean;
+  /**
+   * Share in the chat header: a read-only link to the chat's conversation
+   * so far, which anyone holding it can open. The server can turn links off.
+   */
+  shareLinks: boolean;
 }>;
 
 export type SessionUiPreset = "app" | "companion" | "embed";
@@ -42,6 +47,7 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: true,
     brand: true,
     starters: true,
+    shareLinks: true,
   },
   /**
    * First-party side panes (the Excel add-in): everything but admin access and
@@ -54,11 +60,12 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: false,
     brand: true,
     starters: true,
+    shareLinks: true,
   },
   /**
    * A customer product page (the default): the chat list, chats and composer,
    * without Opengeni's brand and suggested tasks, the session panel, admin
-   * access or page-wide shortcuts until the host turns them on.
+   * access, share links or page-wide shortcuts until the host turns them on.
    */
   embed: {
     chatList: true,
@@ -67,6 +74,7 @@ export const SESSION_UI_PRESETS: Readonly<Record<SessionUiPreset, SessionUiFeatu
     keyboardShortcuts: false,
     brand: false,
     starters: false,
+    shareLinks: false,
   },
 };
 

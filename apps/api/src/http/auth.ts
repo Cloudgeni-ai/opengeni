@@ -12,6 +12,8 @@ import {
   mcpOAuthBearerToken,
 } from "../mcp-oauth";
 
+// The signed-out read of a chat share link (routes/session-share-links.ts).
+const SHARED_SESSION_PUBLIC_PATH = /^\/v1\/shared-sessions\/[^/]+$/;
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
 // The Connected Machine agent's own protocol. A machine never holds the
 // deployment key; each route authenticates its own enroll token, device code,
@@ -78,6 +80,12 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   // The analytics banner is answered before sign-in too. The report is one
   // closed decision and the route bounds its own admission.
   if (c.req.method === "POST" && path === ANALYTICS_CONSENT_PATH) {
+    return true;
+  }
+  // A chat share link opens without signing in: the unguessable share id is
+  // the whole credential, the route is rate limited, and a deployment turns
+  // links off with OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED.
+  if (c.req.method === "GET" && SHARED_SESSION_PUBLIC_PATH.test(path)) {
     return true;
   }
   if (path === "/v1/auth" || path.startsWith("/v1/auth/")) {

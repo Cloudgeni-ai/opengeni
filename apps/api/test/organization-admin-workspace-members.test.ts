@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
+const PERSONAL_WORKSPACE_MEMBERS_MESSAGE =
+  "Personal workspaces are private to their owner and can't have other members. To let someone read a chat from here, create a share link for that chat: anyone with the link can read the conversation up to the moment it was shared.";
 import {
   createDb,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -321,6 +323,32 @@ describe("workspace Members surface under organization authority", () => {
         })
       ).status,
     ).toBe(403);
+
+    // The owner's own Personal workspace says why, and what works instead,
+    // rather than a missing permission that sends them to an administrator.
+    for (const [method, path] of [
+      ["GET", "member-candidates"],
+      ["POST", "members"],
+    ] as const) {
+      const own = await request(
+        owner.cookie,
+        method,
+        `/v1/workspaces/${owner.personalWorkspaceId}/${path}`,
+        method === "POST"
+          ? { organizationMembershipId: member.membershipId, permissions: ["workspace:read"] }
+          : undefined,
+      );
+      expect(own.status).toBe(403);
+      expect(await own.text()).toBe(PERSONAL_WORKSPACE_MEMBERS_MESSAGE);
+    }
+    // Someone else's Personal workspace keeps the plain refusal and reveals nothing.
+    const foreignPersonal = await request(
+      foreign.cookie,
+      "GET",
+      `/v1/workspaces/${owner.personalWorkspaceId}/member-candidates`,
+    );
+    expect(foreignPersonal.status).toBe(403);
+    expect(await foreignPersonal.text()).not.toContain("Personal workspaces");
 
     for (const personal of [owner.personalWorkspaceId, member.personalWorkspaceId]) {
       expect(

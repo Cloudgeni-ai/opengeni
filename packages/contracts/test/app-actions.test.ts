@@ -73,6 +73,18 @@ test("the confirmation is a plain question built only from checked values", () =
   expect(share({ workspaceId: "ws-1", sessionId: "chat-1" }, "private")).toBe(
     "Make this chat visible only to you?",
   );
+  // A share link's one confirmation says plainly who can read what.
+  const link = (id: string, sessionId: string) =>
+    appActionConfirmationTitle({ id, pathParameters: { workspaceId: "ws-1", sessionId } }, here);
+  expect(link("createSessionShareLink", "chat-1")).toBe(
+    "Create a link to this chat? Anyone with the link can read the conversation up to now.",
+  );
+  expect(link("createSessionShareLink", "chat-2")).toBe(
+    "Create a link to another chat? Anyone with the link can read the conversation up to now.",
+  );
+  expect(link("revokeSessionShareLink", "chat-1")).toBe(
+    "Stop sharing this chat? Its link will stop working.",
+  );
   expect(
     appActionConfirmationTitle(
       { id: "updateWorkspaceSettings", pathParameters: { workspaceId: "ws-2" } },

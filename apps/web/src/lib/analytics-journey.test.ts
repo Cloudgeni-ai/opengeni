@@ -66,6 +66,8 @@ describe("content-free customer journey", () => {
     });
     expect(journeyPage("/device", "?user_code=PRIVATE")).toEqual({ page: "device" });
     expect(journeyPage("/reset-password", "?token=private")).toEqual({ page: "reset-password" });
+    // The share id is the link's credential: only the page kind is reported.
+    expect(journeyPage("/share/PRIVATE_share_id_1234567", "")).toEqual({ page: "shared-chat" });
     expect(journeyPage("/billing", "?checkout=success")).toEqual({ page: "checkout-return" });
     expect(journeyPage("/integrations")).toEqual({ page: "integration-return" });
     const teams = new URL(

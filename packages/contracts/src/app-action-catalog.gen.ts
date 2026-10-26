@@ -1318,6 +1318,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createSessionShareLink",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/share-link",
+    "request": [],
+    "response": [
+      "SessionShareLink"
+    ],
+    "permission": "sessions:control"
+  },
+  {
     "id": "createSiteAuthConnection",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/site-auth-connections",
@@ -4034,6 +4044,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "files:read"
   },
   {
+    "id": "getSessionShareLink",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/share-link",
+    "request": [],
+    "response": [
+      "SessionShareLinkState"
+    ],
+    "permission": "sessions:read"
+  },
+  {
     "id": "getSessionTenancyCreateCapabilities",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/session-tenancy/capabilities",
@@ -5845,6 +5865,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "Session",
       "SessionListEntryResponse",
       "SessionListResponse"
+    ],
+    "permission": "sessions:read"
+  },
+  {
+    "id": "listSessionShareLinks",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/share-links",
+    "request": [],
+    "response": [
+      "SessionShareLinkList"
     ],
     "permission": "sessions:read"
   },
@@ -8184,6 +8214,14 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SessionAdminAccess"
     ]
+  },
+  {
+    "id": "revokeSessionShareLink",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/share-link",
+    "request": [],
+    "response": [],
+    "permission": "sessions:control"
   },
   {
     "id": "revokeUserResourceGrant",

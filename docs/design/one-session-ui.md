@@ -86,6 +86,7 @@ person's permissions, exactly as in the web app. A switch only hides.
 | `adminAccess` (workspace-admin access indicator and grant) | on | off | off |
 | `keyboardShortcuts` (⌘K menu, shortcut keys, ⌘/ sheet; `newChatShortcut` is a deprecated alias) | on | off | off |
 | `brand` (the Opengeni row at the top of the chat list) | on | on | off |
+| `shareLinks` (Share in the chat header: a read-only link anyone holding it can open) | on | on | off |
 
 `SessionApp` defaults to `embed`; first-party hosts pass `companion` or `app`.
 With the dock off, entries that only open a dock panel (the header's usage

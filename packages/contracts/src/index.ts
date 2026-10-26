@@ -41,6 +41,7 @@ export * from "./model-account-choice";
 export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
+export * from "./session-share-links";
 export * from "./session-history-import";
 import { SessionImportedArchive } from "./session-history-import";
 import {
@@ -9275,6 +9276,8 @@ export const SessionAuthorizationOperation = /* @__PURE__ */ defineSchema(() =>
     "session.visibility.write",
     "session.fork.create",
     "session.personal_resource.grant",
+    /** Create, refresh or stop a read-only share link anyone holding it can open. */
+    "session.share_link.write",
   ]),
 );
 export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;

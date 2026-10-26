@@ -165,6 +165,7 @@ A preset decides which features show and single keys switch them:
 | `keyboardShortcuts`: ⌘K menu, shortcut keys and the ⌘/ sheet (`newChatShortcut` is a deprecated alias) | on | off | off |
 | `brand`: the Opengeni row at the top of the chat list and the mobile header | on | on | off |
 | `starters`: Opengeni's suggested first tasks under the new-chat composer | on | on | off |
+| `shareLinks`: Share in the chat header, a read-only link anyone holding it can open | on | on | off |
 
 Everything else (model and effort, capabilities, repositories, runs on,
 secrets, usage limit, approvals and questions, goals, attachments, voice, find
