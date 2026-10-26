@@ -121,6 +121,7 @@ import { parseExecBannerSessionId } from "./exec-banner";
 import { runStateCompatibilityProvider, runStateExposedPortsRecord } from "./run-state-compat";
 import type { ExposedPortEndpoint } from "./stream-port";
 import type { ComputeCreateIdentity } from "./compute/session";
+import { errorMessage } from "@opengeni/contracts/values";
 
 // Re-export the config-owned environment/port helpers from the leaf so the
 // API-direct control plane can pull its full sandbox-construction surface from
@@ -2634,7 +2635,7 @@ export async function establishSandboxSessionFromEnvelope(
     } catch (error) {
       throw new SandboxConfigError(
         backend,
-        `Failed to deserialize sandbox resume envelope for backend "${backend}": ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to deserialize sandbox resume envelope for backend "${backend}": ${errorMessage(error)}`,
       );
     }
     if (resumedState !== undefined) {

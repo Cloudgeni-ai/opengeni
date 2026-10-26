@@ -6,6 +6,7 @@ import {
   type RetainedArtifactMetadata,
 } from "@opengeni/sdk";
 import { tryParseJson } from "../lib/format";
+import { isRecord } from "@opengeni/contracts/values";
 
 export type { GeneratedImageReceipt };
 
@@ -226,10 +227,6 @@ const UPDATE_FILE = "*** Update File: ";
 const MOVE_TO = "*** Move to: ";
 
 const APPLY_PATCH_OP_TYPES = new Set(["create_file", "update_file", "delete_file"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 /** Freeform / `{ patch }` / command payloads — tolerate leading whitespace. */
 function freeformApplyPatchOps(rawPatch: string): ApplyPatchOperation[] {

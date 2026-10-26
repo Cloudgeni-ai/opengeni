@@ -39,6 +39,7 @@ import type {
   InteractionPasskeyStore,
   InteractionSecretsPort,
 } from "./interaction-secrets";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const CAPABILITY_CACHE_MS = 30_000;
 const CAPABILITY_CACHE_LIMIT = 512;
@@ -262,7 +263,7 @@ export function createVaultInteractionSecretsPort(deps: {
             // One unreachable password manager never blocks the other passkeys.
             deps.log?.("browser.passkey.provider_read_failed", {
               itemId,
-              message: error instanceof Error ? error.message : String(error),
+              message: errorMessage(error),
             });
           }
           continue;
@@ -337,7 +338,7 @@ export function createVaultInteractionSecretsPort(deps: {
       } catch (error) {
         deps.log?.("browser.passkey.provider_sign_count_failed", {
           itemId,
-          message: error instanceof Error ? error.message : String(error),
+          message: errorMessage(error),
         });
       }
     },

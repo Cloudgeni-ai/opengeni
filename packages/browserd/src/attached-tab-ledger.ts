@@ -1,6 +1,7 @@
 import { renameSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { errorMessage } from "@opengeni/contracts/values";
 
 /**
  * What a browser session has done to the person's own Chrome (attached
@@ -287,7 +288,7 @@ export class AttachedTabLedgerRecorder {
       // The browser keeps working; only cleanup after a crash is lost.
       console.warn("browserd.attached_tab_ledger_write_failed", {
         browserSessionId: this.ledger.browserSessionId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
       });
     }
   }

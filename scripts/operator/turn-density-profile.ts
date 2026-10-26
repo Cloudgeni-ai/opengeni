@@ -27,6 +27,7 @@ import { ScriptedModel, type ScriptedModelStep } from "@opengeni/testing/scripte
 import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { eq } from "drizzle-orm";
 import { createTurnActivities } from "../../apps/worker/src/activities";
+import { errorMessage } from "@opengeni/contracts/values";
 
 const MIB = 1024 * 1024;
 const MAX_ACTIVE_HISTORY_BYTES_PER_TURN = ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES;
@@ -2474,10 +2475,6 @@ export async function withDeadline<T>(
     throw new Error(message);
   }
   return await withTimeout(work, remainingMs, message);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 if (import.meta.main) {

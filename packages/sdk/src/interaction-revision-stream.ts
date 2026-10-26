@@ -1,12 +1,6 @@
-import { isAbortError, isRetryableStreamError, OpenGeniStreamError } from "./errors";
 import type { WorkspaceInteractionRevisionEvent } from "./interaction";
-import { parseSseStream } from "./sse";
-import {
-  jitteredDelay,
-  runBeforeLive,
-  type StreamSessionEventsOptions,
-  withStreamInactivityTimeout,
-} from "./stream";
+import { reconnectingCursorStream, type StreamSessionEventsOptions } from "./stream";
+import { isRecord } from "@opengeni/contracts/values";
 
 export type WorkspaceInteractionRevisionStreamTransport = {
   openStream: (
@@ -24,57 +18,16 @@ export async function* streamWorkspaceInteractionRevisions(
   transport: WorkspaceInteractionRevisionStreamTransport,
   options: StreamSessionEventsOptions = {},
 ): AsyncGenerator<WorkspaceInteractionRevisionEvent, void, void> {
-  const signal = options.signal;
-  const reconnect = options.reconnect ?? true;
-  const baseDelayMs = options.reconnectDelayMs ?? 500;
-  const maxDelayMs = options.maxReconnectDelayMs ?? 10_000;
-  const jitterRatio = options.reconnectJitterRatio ?? 0.2;
-  const beforeLiveTimeoutMs = options.beforeLiveTimeoutMs ?? 15_000;
-  const heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 45_000;
-  const maxAttempts = options.maxReconnectAttempts ?? Number.POSITIVE_INFINITY;
-  let cursor = options.after ?? 0;
-  let failures = 0;
-  let delayMs = baseDelayMs;
-  let everConnected = false;
-
-  for (;;) {
-    if (signal?.aborted) return;
-    options.onStateChange?.(everConnected || failures > 0 ? "reconnecting" : "connecting");
-    const cursorAtOpen = cursor;
-    try {
-      const body = await transport.openStream(cursor, signal);
-      everConnected = true;
-      failures = 0;
-      delayMs = baseDelayMs;
-      await runBeforeLive(options.beforeLive, beforeLiveTimeoutMs, signal);
-      options.onStateChange?.("live");
-      for await (const message of parseSseStream(
-        withStreamInactivityTimeout(body, heartbeatTimeoutMs, signal),
-      )) {
-        if (signal?.aborted) return;
-        const event = parseWorkspaceInteractionRevision(message.data);
-        if (!event || event.sequence <= cursor) continue;
-        cursor = event.sequence;
-        yield event;
-      }
-      if (!reconnect) return;
-      if (cursor === cursorAtOpen) await sleep(jitteredDelay(baseDelayMs, jitterRatio), signal);
-      continue;
-    } catch (error) {
-      if (signal?.aborted || isAbortError(error)) return;
-      if (!reconnect || !isRetryableStreamError(error)) throw error;
-      failures += 1;
-      if (failures > maxAttempts) {
-        throw new OpenGeniStreamError(
-          `workspace interaction stream gave up after ${maxAttempts} reconnect attempts: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      }
-    }
-    await sleep(jitteredDelay(delayMs, jitterRatio), signal);
-    delayMs = Math.min(Math.max(delayMs * 2, baseDelayMs), maxDelayMs);
-  }
+  yield* reconnectingCursorStream({
+    label: "workspace interaction stream",
+    options,
+    cursor: options.after ?? 0,
+    open: (cursor, signal) => transport.openStream(cursor, signal),
+    read: (data, cursor) => {
+      const event = parseWorkspaceInteractionRevision(data);
+      return event && event.sequence > cursor ? { cursor: event.sequence, event } : null;
+    },
+  });
 }
 
 function parseWorkspaceInteractionRevision(data: string): WorkspaceInteractionRevisionEvent | null {
@@ -97,21 +50,4 @@ function parseWorkspaceInteractionRevision(data: string): WorkspaceInteractionRe
     return null;
   }
   return value as WorkspaceInteractionRevisionEvent;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-async function sleep(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
-  if (signal?.aborted || delayMs <= 0) return;
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(done, delayMs);
-    function done() {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    }
-    signal?.addEventListener("abort", done, { once: true });
-  });
 }

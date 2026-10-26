@@ -27,6 +27,7 @@ import { registerWorkspaceLearningRoutes } from "../src/routes/workspace-learnin
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerBrowserSessionRoutes } from "../src/routes/browser-sessions";
 import { registerSitePublishingRoutes } from "../src/routes/site-publishing";
+import { sha256Hex } from "@opengeni/contracts/values";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -1044,10 +1045,3 @@ describe("managed personal workspace access", () => {
     expect(secondOverlap.status).toBe(429);
   });
 });
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
