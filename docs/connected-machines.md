@@ -74,7 +74,11 @@ the caller's retry budget reads wall time: clock skew, jumps and corrections do
 not poison this transport. The call offset is elapsed caller time since receiving
 the batch, anchored at the receiver's issuance time. This conservatively includes
 return-path latency in the call budget, but not idle prefetch age. Future offsets
-are refused. Receipt expiry is the earlier of the batch deadline and the fixed
+are refused. Because the two hosts' elapsed clocks tick at slightly different
+rates, the caller understates the offset by 1%: a caller clock running a little
+faster than the receiver's would otherwise produce future offsets for older
+tokens. The understatement only makes the receiver charge more elapsed time, so
+deadlines come sooner, never later. Receipt expiry is the earlier of the batch deadline and the fixed
 call offset plus lifetime. Streamed exec uses its existing relative timeout from
 that same call offset; delivery or retries cannot reset the deadline.
 The absolute exec deadline remains only for legacy one-shot peers. This does not
