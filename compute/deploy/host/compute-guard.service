@@ -12,8 +12,8 @@
 # descriptor store, which outlives the guard however it ends: the next
 # guard takes it over from the store without opening it. The store is
 # kept while the service is stopped or failed too, so a guard that crashed
-# never closes it. A guard is ready (and the agent joins) only once it sees
-# systemd hold the watchdog.
+# never closes it. A guard is ready (and the agent, which waits for that,
+# joins) only once systemd lists the watchdog in the store.
 #
 # An upgrade hands it over: install.sh restarts a guard running another
 # binary once systemd keeps its watchdog (a guard of a release before the

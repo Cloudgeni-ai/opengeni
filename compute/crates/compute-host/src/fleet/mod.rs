@@ -56,6 +56,56 @@ pub use tls::{Tls, TlsFiles};
 
 use crate::agent::{Handle, HostError};
 
+/// How long the agent waits for its guard to be ready before it gives up
+/// joining. A guard just started, at boot or handed over by an upgrade, is
+/// ready moments later, once systemd keeps its watchdog; the agent, started
+/// with it, waits rather than exiting and being started again, which five
+/// times within ten seconds would hit systemd's start limit and leave it
+/// down until the host's lease ran out.
+pub const GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Waits until a guard whose lock is `lock` is ready, up to `within`, and
+/// says whether it is.
+///
+/// # Errors
+///
+/// When the guard's ready lock cannot be checked.
+pub async fn guard_ready_within(
+    lock: &std::path::Path,
+    within: std::time::Duration,
+) -> std::io::Result<bool> {
+    let until = tokio::time::Instant::now() + within;
+    let mut told = false;
+    loop {
+        if guard_ready(lock)? {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= until {
+            return Ok(false);
+        }
+        if !std::mem::replace(&mut told, true) {
+            tracing::info!(lock = %lock.display(), "waiting for the guard to be ready");
+        }
+        tokio::time::sleep(GUARD_STEP).await;
+    }
+}
+
+/// What [`FleetConfig::prepare`] gives for `fleet`, for a host in one, once
+/// a guard is ready: it waits for one up to [`GUARD_WAIT`].
+///
+/// # Errors
+///
+/// As [`FleetConfig::prepare`].
+pub async fn prepare_guarded(fleet: Option<&FleetConfig>) -> anyhow::Result<Option<Prepared>> {
+    let Some(fleet) = fleet else {
+        return Ok(None);
+    };
+    guard_ready_within(&fleet.guard_lock, GUARD_WAIT)
+        .await
+        .with_context(|| format!("checking {}", fleet.guard_lock.display()))?;
+    fleet.prepare().map(Some)
+}
+
 /// How a host joins a fleet.
 #[derive(Clone, Debug)]
 pub struct FleetConfig {
@@ -281,6 +331,31 @@ impl FleetConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The agent waits for a guard that gets ready a moment after it
+    /// starts, and gives up on one that does not.
+    #[tokio::test]
+    async fn the_agent_waits_a_while_for_its_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("guard.lock");
+        let within = std::time::Duration::from_millis(400);
+        let started = std::time::Instant::now();
+        assert!(!guard_ready_within(&lock, within).await.unwrap());
+        assert!(started.elapsed() >= within, "waited");
+
+        let ready = ready_lock(&lock);
+        let readying = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            hold_lock(&ready).unwrap()
+        });
+        assert!(
+            guard_ready_within(&lock, std::time::Duration::from_secs(5))
+                .await
+                .unwrap(),
+            "ready a moment later"
+        );
+        let _held = readying.join().unwrap();
+    }
 
     #[test]
     fn the_service_is_reached_only_over_https() {

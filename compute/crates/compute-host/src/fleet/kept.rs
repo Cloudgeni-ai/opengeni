@@ -226,14 +226,7 @@ pub fn stored(name: &str, identity: Identity) -> io::Result<bool> {
             format!("not in a service's cgroup: {}", cgroup.trim()),
         )
     })?;
-    let mut list = Command::new("systemd-analyze");
-    if std::env::var_os("MANAGERPID").is_some() {
-        list.arg("--user");
-    }
-    let output = list
-        .args(["fdstore", "--json=short", unit])
-        .stdin(Stdio::null())
-        .output()?;
+    let output = listing(unit, std::env::var_os("MANAGERPID").is_some()).output()?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "systemd-analyze fdstore {unit}: {}",
@@ -241,6 +234,30 @@ pub fn stored(name: &str, identity: Identity) -> io::Result<bool> {
         )));
     }
     listed(&output.stdout, name, identity)
+}
+
+/// The command that lists the store of `unit`, the user's manager's if
+/// `user`. It gets neither systemd's notification socket nor the
+/// descriptors systemd passed: they are the guard's, and systemd's tools
+/// notify their exit status through a socket they are given, which systemd
+/// then refuses, and logs, from a process that is not the service's main
+/// one.
+fn listing(unit: &str, user: bool) -> Command {
+    let mut list = Command::new("systemd-analyze");
+    for passed in [
+        "NOTIFY_SOCKET",
+        "LISTEN_PID",
+        "LISTEN_FDS",
+        "LISTEN_FDNAMES",
+    ] {
+        list.env_remove(passed);
+    }
+    if user {
+        list.arg("--user");
+    }
+    list.args(["fdstore", "--json=short", unit])
+        .stdin(Stdio::null());
+    list
 }
 
 /// The service a process in the cgroup `cgroup` (as `/proc/<pid>/cgroup`
@@ -385,6 +402,31 @@ mod tests {
         );
         assert!(listed(b"", WATCHDOG, identity).is_err());
         assert!(listed(b"Failed", WATCHDOG, identity).is_err());
+    }
+
+    /// The store is listed without what systemd gave the guard: its
+    /// notification socket, which systemd-analyze would notify its exit
+    /// status through, and its passed descriptors.
+    #[test]
+    fn the_store_is_listed_without_what_systemd_gave_the_guard() {
+        let list = listing("compute-guard.service", false);
+        let removed: Vec<_> = list
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_str().unwrap())
+            .collect();
+        for passed in [
+            "NOTIFY_SOCKET",
+            "LISTEN_PID",
+            "LISTEN_FDS",
+            "LISTEN_FDNAMES",
+        ] {
+            assert!(removed.contains(&passed), "{passed} kept");
+        }
+        let args: Vec<_> = list.get_args().map(|arg| arg.to_str().unwrap()).collect();
+        assert_eq!(args, ["fdstore", "--json=short", "compute-guard.service"]);
+        let user = listing("test.service", true);
+        assert_eq!(user.get_args().next().unwrap(), "--user");
     }
 
     /// The service a process runs in, from its cgroup.

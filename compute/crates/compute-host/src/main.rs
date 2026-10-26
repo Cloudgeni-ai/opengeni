@@ -780,7 +780,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             .cpu_budget
             .context("a serving host guarantees processor time")?,
     })?;
-    let prepared = fleet.as_ref().map(FleetConfig::prepare).transpose()?;
+    let prepared = compute_host::fleet::prepare_guarded(fleet.as_ref()).await?;
     // A host in a fleet keeps agent links for the sandboxes that run
     // Opengeni's agent; its tokens come from the control service.
     let agent_link = fleet.as_ref().map(FleetConfig::agent_links).transpose()?;
