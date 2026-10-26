@@ -1864,6 +1864,14 @@ impl X11KeyboardMapping {
         keysyms::character_keysyms(character).find_map(|keysym| self.resolve(keysym))
     }
 
+    /// Whether any group and level of any keycode carries `keysym`. Unlike
+    /// [`Self::resolve`] (the first group's two shift levels, which XTEST can
+    /// press), this is what a compositor resolving keysyms itself across
+    /// groups and levels could deliver.
+    fn contains(&self, keysym: u32) -> bool {
+        keysym != 0 && self.keysyms.contains(&keysym)
+    }
+
     fn row(&self, keycode: u8) -> Option<&[u32]> {
         let start = usize::from(keycode.checked_sub(self.min_keycode)?) * self.keysyms_per_keycode;
         self.keysyms.get(start..start + self.keysyms_per_keycode)
@@ -2174,8 +2182,12 @@ pub fn validate_linux_named_key_chord(name: &str) -> PlatformResult<()> {
 /// lacks (GNOME Wayland remote desktop).
 ///
 /// `layout_display` names an X display that mirrors the compositor's layout
-/// (Xwayland). When it is reachable every keysym is checked against that
-/// layout; otherwise the keysyms are returned unchecked.
+/// (Xwayland). When it is reachable, a keysym that no group and no level of
+/// that keymap carries is refused, since it can never be delivered. Anything
+/// some group or level carries is passed on: the compositor picks the keycode
+/// in its active group and applies the level modifier itself (a Latin
+/// shortcut on a non-Latin first layout, an AltGr character). Without the
+/// display the keysyms are returned unchecked.
 ///
 /// # Errors
 ///
@@ -2193,11 +2205,9 @@ fn layout_named_keysyms(
     mapping: Option<&X11KeyboardMapping>,
     keysyms: Vec<u32>,
 ) -> PlatformResult<Vec<u32>> {
-    if let Some(missing) = mapping.and_then(|mapping| {
-        keysyms
-            .iter()
-            .find(|&&keysym| mapping.resolve(keysym).is_none())
-    }) {
+    if let Some(missing) =
+        mapping.and_then(|mapping| keysyms.iter().find(|&&keysym| !mapping.contains(keysym)))
+    {
         return Err(PlatformError::Unsupported(format!(
             "X11 keymap does not expose named key/chord component {missing:#x}"
         )));
@@ -3123,6 +3133,55 @@ mod tests {
         }
         // No layout display: unchecked, as for text.
         assert_eq!(layout_named_keysyms(None, vec![0xffca]).unwrap(), [0xffca]);
+    }
+
+    /// A core keymap as an XKB server reports it: per keycode, group 1 levels
+    /// 1-2, group 2 levels 1-2, then group 1 levels 3-4.
+    fn core_keymap(rows: &[[u32; 6]]) -> X11KeyboardMapping {
+        X11KeyboardMapping {
+            min_keycode: 8,
+            keysyms_per_keycode: 6,
+            keysyms: rows.iter().flatten().copied().collect(),
+            modifier_keycodes: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn keysym_input_accepts_keys_on_any_group_or_level() {
+        let chord = |mapping: &X11KeyboardMapping, name: &str| {
+            layout_named_keysyms(Some(mapping), parse_named_key_chord(name).unwrap())
+        };
+        let control = [0xffe3, 0, 0xffe3, 0, 0, 0];
+        let shift = [0xffe1, 0, 0xffe1, 0, 0, 0];
+        // ru,us: Latin letters are only in the second group.
+        let ru_us = core_keymap(&[
+            control,
+            shift,
+            [0x6d3, 0x6f3, 0x63, 0x43, 0, 0], // Cyrillic_es / c
+            [0x6c5, 0x6e5, 0x74, 0x54, 0, 0], // Cyrillic_ie / t
+            [0x6cd, 0x6ed, 0x76, 0x56, 0, 0], // Cyrillic_em / v
+        ]);
+        for name in ["Ctrl+c", "Ctrl+v", "Ctrl+Shift+t", "c"] {
+            assert!(chord(&ru_us, name).is_ok(), "ru,us {name}");
+        }
+        // de: `@` is AltGr+q, the first group's third level.
+        let de = core_keymap(&[control, [0x71, 0x51, 0x71, 0x51, 0x40, 0x7d9]]);
+        assert_eq!(chord(&de, "@").unwrap(), [0x40]);
+        // us: F13 is on no group or level, so it could never be delivered.
+        let us = core_keymap(&[
+            control,
+            [0x63, 0x43, 0x63, 0x43, 0, 0],
+            [0xffbf, 0xffbf, 0xffbf, 0xffbf, 0xffbf, 0xffbf],
+        ]);
+        assert!(chord(&us, "Ctrl+c").is_ok());
+        assert!(chord(&us, "F2").is_ok());
+        let error = chord(&us, "F13").unwrap_err().to_string();
+        assert!(
+            error.contains("X11 keymap does not expose named key/chord component 0xffca"),
+            "{error}"
+        );
+        // NoSymbol is never a key.
+        assert!(!us.contains(0));
     }
 
     #[test]
