@@ -1,6 +1,7 @@
 // Meetings on a phone: one recorder held above the screens, the meetings list
 // with the recorder on top, and one meeting's transcript. Wrap them in an
-// `OpenGeniProvider` with the client, workspace and host text.
+// `OpenGeniProvider` with the client, workspace and host text, inside
+// `OpenGeniReactNativeProvider` (the client needs its crypto on Hermes).
 export {
   isCapturing,
   MeetingRecorderProvider,
