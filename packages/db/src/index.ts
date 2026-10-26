@@ -4020,6 +4020,35 @@ export async function getManagedUserProfilesByIds(
   );
 }
 
+/**
+ * A workspace member's name as the workspace's people list shows it: their
+ * profile name, else the label their membership was given, else their email.
+ * Null when none is known.
+ */
+export async function workspaceMemberDisplayName(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<string | null> {
+  const [profile] = input.subjectId.startsWith("user:")
+    ? await getManagedUserProfilesByIds(db, [input.subjectId.slice("user:".length)])
+    : [];
+  const name = profile?.name?.trim();
+  if (name) return name;
+  const [membership] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb
+      .select({ subjectLabel: schema.workspaceMemberships.subjectLabel })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        ),
+      )
+      .limit(1),
+  );
+  return membership?.subjectLabel?.trim() || profile?.email?.trim() || null;
+}
+
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
   await db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Database;

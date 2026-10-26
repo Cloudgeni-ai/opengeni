@@ -19,6 +19,7 @@ import {
   meetingPhase,
   meetingStatusLabel,
   meetingTitle,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -279,6 +280,14 @@ describe("speakers", () => {
     expect(defaultSpeakerName("track-0", tracks)).toBe("Microphone");
     expect(defaultSpeakerName("track-1", tracks)).toBe("Shared audio");
     expect(defaultSpeakerName("track-4", tracks)).toBe("Track 5");
+  });
+
+  test("beside computer audio the live microphone is the person recording, the rest is Others", () => {
+    expect(ownerLiveLaneName(tracks, 0, "Maja Berg")).toBe("Maja Berg");
+    expect(ownerLiveLaneName(tracks, 1, "Maja Berg")).toBe("Others");
+    // A microphone alone is named by its source as before.
+    const micOnly = tracks.filter((track) => track.source === "microphone");
+    expect(ownerLiveLaneName(micOnly, 0, "Maja Berg")).toBeNull();
   });
 
   test("a label is named only by a person or a name someone gave it", () => {

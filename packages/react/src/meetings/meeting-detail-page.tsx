@@ -44,6 +44,7 @@ import {
   languageName,
   meetingHereStatus,
   meetingPhase,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
@@ -853,6 +854,10 @@ function MeetingDetailPageContent({
   }
 
   const owner = recording.ownerSubjectId === viewerSubjectId;
+  // The person recording, as the transcript will name their microphone.
+  const ownerName =
+    peopleList.find((person) => person.memberSubjectId === recording.ownerSubjectId)?.displayName ??
+    (owner ? (viewerName ?? null) : null);
   const phase = meetingPhase(recording);
   // Only while the server still waits for audio: this device may know more.
   const here =
@@ -1247,7 +1252,9 @@ function MeetingDetailPageContent({
                     trackNumber: track.trackNumber,
                     text: track.partial,
                   }))}
-                  speakerName={(trackNumber) => liveSpeakerName(recorder, trackNumber, msg)}
+                  speakerName={(trackNumber) =>
+                    liveSpeakerName(recorder, trackNumber, msg, ownerName)
+                  }
                   status={liveStatus(recorder.live, msg)}
                   empty={msg("meetings.detailPage.listeningWhatSSaidShows")}
                 />
@@ -1256,7 +1263,9 @@ function MeetingDetailPageContent({
                   heading={false}
                   lines={savedLive.segments}
                   speakerName={(trackNumber) =>
-                    defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg)
+                    (ownerName
+                      ? ownerLiveLaneName(recording.tracks, trackNumber, ownerName, msg)
+                      : null) ?? defaultSpeakerName(`track-${trackNumber}`, recording.tracks, msg)
                   }
                   status={
                     savedLive.error

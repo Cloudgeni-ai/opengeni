@@ -11,6 +11,7 @@ import {
   RecordingNoteKind,
   RememberRecordingPersonVoiceRequest,
   resolveWorkspaceVoiceInputEnabled,
+  recordingMicrophoneIsOwner,
   resolveWorkspaceRecordingSettings,
   SaveRecordingNoteRequest,
   UpdateRecordingRequest,
@@ -46,6 +47,7 @@ import {
   getRecordingTrackPreparedObject,
   getRecordingTranscriptPage,
   getWorkspace,
+  workspaceMemberDisplayName,
   listRecordingChunks,
   listRecordingLiveSegments,
   listRecordingNotes,
@@ -500,6 +502,10 @@ export function registerRecordingRoutes(
             ...(language ? { language } : {}),
           }
         : undefined;
+    // Computer or tab audio makes the microphone the owner, named in the live preview.
+    const ownerName = recordingMicrophoneIsOwner(body.tracks)
+      ? await workspaceMemberDisplayName(db, actor).catch(() => null)
+      : null;
     const result = await guard(() =>
       createRecording(db, {
         ...actor,
@@ -511,6 +517,7 @@ export function registerRecordingRoutes(
         metadata: body.metadata,
         tracks: body.tracks,
         transcription,
+        ownerName,
       }),
     );
     if (result.recording.purpose !== "meeting") {

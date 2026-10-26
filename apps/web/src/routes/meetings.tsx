@@ -16,7 +16,7 @@ function meetingPath(workspaceId: string, recordingId: string): string {
 
 export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
-  const { workspaces } = useAppContext();
+  const { accessContext, workspaces } = useAppContext();
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
   const liveTranscript = settings.liveTranscript === true;
@@ -26,6 +26,7 @@ export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
         workspaceId={workspaceId}
         liveTranscriptDefault={liveTranscript}
         defaultLanguage={settings.language ?? null}
+        viewerName={accessContext.subjectLabel?.trim() || null}
         meetingHref={(recordingId) => meetingPath(workspaceId, recordingId)}
         onOpen={(recordingId) =>
           void navigate({
