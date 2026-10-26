@@ -669,9 +669,13 @@ describe("controller isolation and fencing", () => {
     fencedSideEffects: true,
     reason: "test provider",
   };
-  test("shadow builds locally but never calls a write adapter, even if supplied", async () => {
+  test("shadow builds despite ready conflicts and never stages or writes notices", async () => {
     const f = await fixture();
-    const o = { ...observation([pull(1, f.first)]), baseSha: f.base };
+    const o = {
+      ...observation([pull(1, f.first)]),
+      baseSha: f.base,
+      conflicts: [{ number: 2, headSha: "a".repeat(40) }],
+    };
     let writes = 0;
     const controller = new Controller(
       { ...cfg, outputDir: join(f.root, "stage") },
@@ -680,6 +684,9 @@ describe("controller isolation and fencing", () => {
       "shadow",
       {
         capabilities,
+        prepareLedger: () => {
+          throw Error("shadow must not stage effects");
+        },
         transact: async () => {
           writes++;
         },
@@ -689,6 +696,7 @@ describe("controller isolation and fencing", () => {
     const r = await controller.step();
     expect(r.manifest?.pulls[0]!.headSha).toBe(f.first);
     expect(writes).toBe(0);
+    expect((await controller.step()).action.kind).toBe("build");
     expect(await f.git.remoteRefs(f.origin.dir)).toEqual(before);
     const saved = JSON.parse(await readFile(join(f.root, "stage", "stage.json"), "utf8"));
     expect(saved.result.manifest.tipSha).toBe(r.manifest!.tipSha);

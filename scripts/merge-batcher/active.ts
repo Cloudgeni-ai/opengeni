@@ -242,13 +242,18 @@ export class GitHubActiveExecutor implements Executor {
     await this.push([{ ref: this.writer.stateRef, expected: state.sha, next: sha }]);
     return { sha, ledger, main: state.main };
   }
-  prepareLedger(ledger: Ledger, effect: Effect, now: string): Ledger {
-    if (effect.kind === "conflict-notice")
+  prepareLedger(
+    ledger: Ledger,
+    effect: Effect,
+    now: string,
+    conflicts: { number: number; headSha: string }[] = [],
+  ): Ledger {
+    for (const conflict of conflicts)
       addComment(
         ledger,
-        `conflict:${effect.headSha}`,
-        effect.number,
-        `Not queued: this PR conflicts with main at head ${effect.headSha}. Rebase or merge main into it and push; it re-queues automatically once required checks pass.`,
+        `conflict:${conflict.headSha}`,
+        conflict.number,
+        `Not queued: this PR conflicts with main at head ${conflict.headSha}. Rebase or merge main into it and push; it re-queues automatically once required checks pass.`,
         now,
       );
     if (effect.kind === "publish")

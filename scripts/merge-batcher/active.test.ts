@@ -1580,12 +1580,18 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
       expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
       f.verdict(m);
       // Main-CI observation failure must not become an indirect admission gate.
+      f.api.conflicts = [{ number: 99, headSha: "a".repeat(40) }];
       f.api.baseCI = async () => {
         throw Error("full main CI unavailable");
       };
       expect((await f.controller().step()).action.kind).toBe("land");
       expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
       expect((await f.state()).ledger.landed).toContain(m.batchId);
+      expect(
+        Object.values((await f.state()).ledger.effects).some(
+          (effect) => effect.kind === "comment" && effect.number === 99,
+        ),
+      ).toBe(true);
       expect(f.api.comments).toHaveLength(1);
       expect(f.api.comments[0]).toContain("landed the exact tested PR head");
       expect(f.api.calls.every((call) => call.endsWith("/comments"))).toBe(true);
