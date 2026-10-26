@@ -69,6 +69,16 @@ describe("Azure Speech recordings", () => {
     expect(result.words).toEqual([]);
   });
 
+  test("keeps the language of a transcript whose phrases carry no words", () => {
+    const result = parseAzureSpeechTranscript({
+      durationMilliseconds: 5_123,
+      phrases: [{ locale: "en-US" }],
+      combinedPhrases: [{ text: "hello" }],
+    });
+    expect(result.languages).toEqual(["en-US"]);
+    expect(result.text).toBe("hello");
+  });
+
   test("sends Norwegian as Bokmål and keeps other languages to their base", () => {
     expect(azureSpeechLocale("no")).toBe("nb");
     expect(azureSpeechLocale("nor")).toBe("nb");

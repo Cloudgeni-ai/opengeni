@@ -54,6 +54,7 @@ type AzureSpeechWord = {
 type AzureSpeechPhrase = {
   locale?: unknown;
   words?: unknown;
+  text?: unknown;
 };
 
 function milliseconds(value: unknown): number | null {
@@ -79,13 +80,26 @@ export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptio
     combinedPhrases?: unknown;
   };
   const phrases = Array.isArray(response.phrases) ? (response.phrases as AzureSpeechPhrase[]) : [];
+  // The whole text as the service punctuates it, which dictation uses.
+  const combined = Array.isArray(response.combinedPhrases)
+    ? (response.combinedPhrases as Array<{ text?: unknown }>)
+        .map((phrase) => (typeof phrase?.text === "string" ? phrase.text.trim() : ""))
+        .filter((text) => text.length > 0)
+        .join(" ")
+    : null;
   const words: RecordingTranscribedWord[] = [];
   const languages = new Set<string>();
   for (const phrase of phrases) {
     const items = Array.isArray(phrase?.words) ? (phrase.words as AzureSpeechWord[]) : [];
-    // Azure labels audio it heard no language in as "unk"; that is no language.
+    // A language counts where something was said in it: the phrase has words
+    // or text, or the transcript has text and the phrase carries no words of
+    // its own. Azure labels audio it heard no language in as "unk".
     const locale = typeof phrase?.locale === "string" ? phrase.locale.trim() : "";
-    if (items.length > 0 && locale && !UNKNOWN_LOCALES.has(locale.toLowerCase())) {
+    const said =
+      items.length > 0 ||
+      (typeof phrase?.text === "string" && phrase.text.trim() !== "") ||
+      Boolean(combined);
+    if (said && locale && !UNKNOWN_LOCALES.has(locale.toLowerCase())) {
       languages.add(canonicalLanguageTag(locale));
     }
     for (const item of items) {
@@ -103,13 +117,6 @@ export function parseAzureSpeechTranscript(body: unknown): RecordingTranscriptio
     }
   }
   words.sort((left, right) => left.startMilliseconds - right.startMilliseconds);
-  // The whole text as the service punctuates it, which dictation uses.
-  const combined = Array.isArray(response.combinedPhrases)
-    ? (response.combinedPhrases as Array<{ text?: unknown }>)
-        .map((phrase) => (typeof phrase?.text === "string" ? phrase.text.trim() : ""))
-        .filter((text) => text.length > 0)
-        .join(" ")
-    : null;
   const audioMilliseconds = milliseconds(response.durationMilliseconds);
   return {
     languages: [...languages],
