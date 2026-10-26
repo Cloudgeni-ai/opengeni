@@ -30,7 +30,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "3e5b1a79c089cf7e181249f1492bebcc76f755f23d78a5851ea9d769634a58e2"
+      "sha256": "d8875d31eb6ee699893d26bee17800e2cd1108d2aea786a21395754dff443d29"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
@@ -861,7 +861,7 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "deployment",
       "step": "Validate Terraform",
-      "sha256": "de947484bd04df5f1bee6ed285290f6ce3007c3cbc5ddc85197b63b40417d6e9"
+      "sha256": "6d34c2156e766f0928e5d3a9fb18c42909757dd992d3ed0475dbf060f68b40e6"
     },
     {
       "workflow": ".github/workflows/ci.yml",

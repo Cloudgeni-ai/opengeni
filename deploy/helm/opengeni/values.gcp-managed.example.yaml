@@ -37,6 +37,8 @@ externalSecret:
     kind: ClusterSecretStore
   dataFrom:
     - extract:
+        # Must equal the GCP Terraform runtime_secret_id output: the runtime
+        # service account may read only that secret.
         key: opengeni-runtime
 
 networkPolicy:
