@@ -332,3 +332,83 @@ e2e(
   },
   60_000,
 );
+
+// A button the page shuts out of pointer input from outside it: behind a
+// native modal dialog, inside an inert page under an overlay, and under a
+// modal library's pointer-events: none on the body with its overlay. The
+// browser's hit stack leaves the button out in each, as it does a cut-off
+// row, but here what is on top really is over it.
+const SHUT_OUT = fixture([
+  "<!doctype html><title>Modals</title>",
+  "<style>",
+  "body{margin:0;font:14px sans-serif}",
+  "#behind{position:absolute;left:40px;top:40px;width:160px;height:40px}",
+  "#settings{width:300px;height:120px;margin:0;left:400px;top:300px}",
+  ".veil{position:fixed;inset:0;background:rgba(0,0,0,.3);pointer-events:auto}",
+  "</style>",
+  '<main id="page"><button id="behind">Behind</button></main>',
+  '<dialog id="settings" aria-label="Settings"><button id="close">Close</button></dialog>',
+  "<script>",
+  "globalThis.log=[];",
+  'document.getElementById("behind").addEventListener("click",()=>log.push("behind"));',
+  "</script>",
+]);
+
+e2e(
+  "a target shut out behind a modal, an inert page or a body without pointer input is covered at its center",
+  async () => {
+    await withSession(SHUT_OUT, async ({ evaluate, click }) => {
+      // Behind is found by CSS, as from an observation made before the
+      // modal opened; role locators already skip inert content.
+      const behind = { type: "click", locator: { kind: "css", selector: "#behind" } } as const;
+      const refusal = async (cover: string) => {
+        const result = await click(behind);
+        expect(result.state).not.toBe("completed");
+        expect(result.error?.message).toContain(
+          `browser element is covered by ${cover} at its center`,
+        );
+        expect(await evaluate("log")).toEqual([]);
+      };
+
+      // A native modal dialog makes the rest of the page inert.
+      await evaluate('document.getElementById("settings").showModal()');
+      await refusal('dialog "Settings"');
+      await evaluate('document.getElementById("settings").close()');
+
+      // An inert page under an overlay.
+      await evaluate(
+        'document.getElementById("page").inert = true; document.body.insertAdjacentHTML("beforeend", \'<div class="veil" id="veil">Hi</div>\')',
+      );
+      await refusal('div "Hi"');
+      await evaluate(
+        'document.getElementById("page").inert = false; document.getElementById("veil").remove()',
+      );
+
+      // A modal library's pointer-events: none on the body, with its overlay.
+      await evaluate(
+        'document.body.style.pointerEvents = "none"; document.body.insertAdjacentHTML("beforeend", \'<div class="veil" id="veil"></div>\')',
+      );
+      await refusal("div");
+      await evaluate(
+        'document.body.style.pointerEvents = ""; document.getElementById("veil").remove()',
+      );
+
+      // A button that turns pointer input off on itself, with nothing over
+      // it, keeps the reason that it does not take pointer input.
+      await evaluate('document.getElementById("behind").style.pointerEvents = "none"');
+      const disabled = await click(behind);
+      expect(disabled.state).not.toBe("completed");
+      expect(disabled.error?.message).toContain(
+        "browser element does not take pointer input (pointer-events: none), which often means it is disabled; use another control",
+      );
+
+      // With every block gone, the button takes the click.
+      await evaluate('document.getElementById("behind").style.pointerEvents = ""');
+      const open = await click(behind);
+      expect(open.error ?? null).toBeNull();
+      expect(open.state).toBe("completed");
+      expect(await evaluate("log")).toEqual(["behind"]);
+    });
+  },
+  60_000,
+);

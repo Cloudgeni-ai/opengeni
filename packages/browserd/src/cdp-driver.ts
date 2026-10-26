@@ -9775,12 +9775,35 @@ const DESCRIBE_HELPER = `
 // rounding cannot put a press beside it; null when empty. shownPoints: the
 // points of a grid over that area where the target shows, nearest the middle
 // of the part that shows first (that middle itself when it shows); null when
-// no part shows.
+// no part shows. shutOut: the page keeps the target from taking pointer input
+// from outside the target itself, so it is missing from every stack without
+// being cut off: it is inert or inside an inert element, an open modal (a
+// showModal() dialog, or a fullscreen element) does not hold it, or its
+// pointer-events: none comes from a container (a modal library setting it on
+// the body). What is on top over it then covers it, as #6170 reported. A
+// target that sets pointer-events: none on itself is not shut out.
 const SHOWN_PART_HELPER = `
   const holds = (target, x, y) => {
     const root = target.getRootNode();
     const scope = root && typeof root.elementsFromPoint === "function" ? root : document;
     return scope.elementsFromPoint(x, y).some((node) => owns(target, node));
+  };
+  const shutOut = (target) => {
+    const flatParent = (node) => {
+      const next = node.assignedSlot ?? node.parentNode ?? null;
+      return next instanceof ShadowRoot ? next.host : next;
+    };
+    for (let node = target; node instanceof Element; node = flatParent(node)) {
+      if (node.hasAttribute("inert")) return true;
+    }
+    try {
+      const modals = Array.from(target.ownerDocument.querySelectorAll(":modal"));
+      if (modals.length && !modals.some((modal) => owns(modal, target))) return true;
+    } catch {}
+    const view = target.ownerDocument.defaultView || window;
+    if (view.getComputedStyle(target).pointerEvents !== "none") return false;
+    const parent = flatParent(target);
+    return parent instanceof Element && view.getComputedStyle(parent).pointerEvents === "none";
   };
   const visibleArea = (target, rect, bounds) => {
     const viewport = target.ownerDocument.documentElement;
@@ -9887,7 +9910,9 @@ const COVER_DESCRIPTION_FUNCTION = `function(bounds) {
   const cy = rect.top + rect.height / 2;
   const hit = topHit(element, cx, cy);
   if (hit && owns(element, hit)) return null;
-  if (hit && !owns(hit, element) && holds(element, cx, cy)) return describe(hit);
+  if (hit && !owns(hit, element) && (holds(element, cx, cy) || shutOut(element))) {
+    return describe(hit);
+  }
   if (rect.width <= 0 || rect.height <= 0) return null;
   const area = visibleArea(element, rect, bounds);
   const points = area && shownPoints(element, area);
@@ -9962,11 +9987,13 @@ const VISIBLE_PART_FUNCTION = `function(bounds) {
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   const centre = topHit(element, cx, cy);
-  // Something else on top at the centre, where the target shows under it,
-  // covers it. Where the target does not show at its centre (a row running
-  // past its side panel's edge, with the next panel on top there), what is
-  // on top there is not over it.
-  if (centre && !owns(centre, element) && holds(element, cx, cy)) return null;
+  // Something else on top at the centre, where the target shows under it or
+  // the page shuts it out (behind a modal), covers it. Where the target does
+  // not show at its centre (a row running past its side panel's edge, with
+  // the next panel on top there), what is on top there is not over it.
+  if (centre && !owns(centre, element) && (holds(element, cx, cy) || shutOut(element))) {
+    return null;
+  }
   const area = visibleArea(element, rect, bounds);
   const points = area && shownPoints(element, area);
   if (!points) return null;
@@ -10052,7 +10079,9 @@ const UNREACHABLE_REASON_FUNCTION = `function() {
   if (!hit) return "outside";
   if (!owns(element, hit) && owns(hit, element)) return "clipped";
   if (owns(element, hit) || holds(element, cx, cy)) return null;
-  // Hidden (visibility: hidden) is missing from the stack too, but not cut off.
+  // Hidden (visibility: hidden) or shut out (behind a modal) is missing from
+  // the stack too, but not cut off.
+  if (shutOut(element)) return null;
   if (typeof element.checkVisibility === "function" && !element.checkVisibility({ visibilityProperty: true })) return null;
   return "cut-off";
 }`;
