@@ -884,11 +884,16 @@ async fn a_view_token_watches_a_terminal_but_cannot_type_into_or_close_it() {
             .is_none(),
         "view-mode keystrokes and Close must be dropped"
     );
-    assert_eq!(
-        metrics.unauthorized_drops(),
-        2,
-        "both dropped messages are visible to operators"
-    );
+    // Both drops become visible to operators (polled: a loaded runner may still
+    // be processing the second message).
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while metrics.unauthorized_drops() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both dropped messages are counted");
+    assert_eq!(metrics.unauthorized_drops(), 2);
 
     // The channel is still alive: output keeps flowing to the viewer.
     producer
