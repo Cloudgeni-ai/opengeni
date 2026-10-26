@@ -900,6 +900,53 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("keys fenced on a replaced reading are refused when nothing was focused or the document changed", async () => {
+    const fixture = new Fixture();
+    fixture.windowName = "Report A";
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const type = (observation: ComputerBackendObservation) =>
+        backend.dispatch({
+          ...command(observation),
+          action: { type: "keyboard", action: "type", value: "secret" },
+        });
+      const typed = () => fixture.calls.filter((call) => call.name === "type_text").length;
+      const refused = {
+        code: "observation_stale",
+        dispatched: false,
+        message: "CUA action requires the current semantic observation",
+      };
+      // Nothing focused, then the window shows another document, still with
+      // nothing focused: the keys would land wherever the focus is by then.
+      const planned = await backend.observe(target.id);
+      expect(planned.focusedRef).toBeNull();
+      fixture.windowName = "Report B";
+      expect((await backend.observe(target.id)).focusedRef).toBeNull();
+      await expect(type(planned)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // Nothing focused in the same document: only the latest reading fences
+      // the keys.
+      const same = await backend.observe(target.id);
+      await backend.observe(target.id);
+      await expect(type(same)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // An element focused in both readings, but of another document.
+      fixture.applyFocused = true;
+      const focused = await backend.observe(target.id);
+      expect(focused.focusedRef).not.toBeNull();
+      fixture.windowName = "Report C";
+      expect((await backend.observe(target.id)).focusedRef).not.toBeNull();
+      await expect(type(focused)).rejects.toMatchObject(refused);
+      expect(typed()).toBe(0);
+      // The latest reading still fences them.
+      await type(await backend.observe(target.id));
+      expect(typed()).toBe(1);
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("Windows delivers pointer and keyboard input in the foreground with Windows modifiers", async () => {
     const fixture = new WindowsFixture();
     const backend = await CuaComputerBackend.open(fixture, "windows");
