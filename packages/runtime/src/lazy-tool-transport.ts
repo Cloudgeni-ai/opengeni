@@ -714,8 +714,16 @@ export class LazyToolRuntime {
   /** Compact discovery has no schema byte exclusions and discloses no companions. */
   matches(rawArguments: unknown): Tool[] {
     const tools = this.searchableTools(this.currentTools);
-    this.searchIndex ??= new ToolSearchIndex(tools);
+    this.searchIndex ??= this.newSearchIndex(tools);
     return rankToolPool(tools, rawArguments, this.searchIndex);
+  }
+
+  /** Ranks within this pool, knowing which connected account each tool reaches. */
+  private newSearchIndex(tools: readonly Tool[]): ToolSearchIndex {
+    const accounts = this.connectedAccounts?.();
+    return new ToolSearchIndex(tools, (tool) =>
+      tool.type === "function" ? accounts?.get(tool.name)?.source : undefined,
+    );
   }
 
   searchDisclosure(rawArguments: unknown): Record<string, unknown>[] {
@@ -775,7 +783,7 @@ export class LazyToolRuntime {
       return accounts ? this.withNotice(loaded, "connectedAccounts", accounts) : loaded;
     }
     const pool = this.searchableTools(this.currentTools);
-    this.searchIndex ??= new ToolSearchIndex(pool);
+    this.searchIndex ??= this.newSearchIndex(pool);
     const named = toolsNamedInQuery(pool.filter(isFunctionTool), query).map((t) => t.name);
     const strong = this.searchIndex
       .strongMatches(query)

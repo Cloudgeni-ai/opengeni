@@ -110,12 +110,31 @@ export class ToolSearchIndex {
   private readonly documents: Document[];
   private readonly documentFrequency = new Map<string, number>();
   private readonly averageLengths: number[];
+  /** Per connected integration: its tool count and, for each word, how many of
+   * its tools use that word in their names or capability sentences. */
+  private readonly integrations = new Map<string, { tools: number; uses: Map<string, number> }>();
+  private readonly integrationOf: (tool: Tool) => string | undefined;
 
-  constructor(tools: readonly Tool[]) {
+  /** integrationOf names the connected integration (account) a tool reaches, if any. */
+  constructor(
+    tools: readonly Tool[],
+    integrationOf: (tool: Tool) => string | undefined = () => undefined,
+  ) {
+    this.integrationOf = integrationOf;
     this.documents = tools.filter((t) => t.type === "function").map(document);
     for (const doc of this.documents) {
       for (const term of doc.terms)
         this.documentFrequency.set(term, (this.documentFrequency.get(term) ?? 0) + 1);
+      const id = integrationOf(doc.tool);
+      if (id === undefined) continue;
+      const integration = this.integrations.get(id) ?? { tools: 0, uses: new Map() };
+      integration.tools++;
+      for (const term of new Set([
+        ...doc.fields[0]!.frequencies.keys(),
+        ...doc.fields[1]!.frequencies.keys(),
+      ]))
+        integration.uses.set(term, (integration.uses.get(term) ?? 0) + 1);
+      this.integrations.set(id, integration);
     }
     this.averageLengths = [0, 1, 2, 3].map((i) =>
       Math.max(
@@ -186,15 +205,19 @@ export class ToolSearchIndex {
   /**
    * For a result that cannot list compact candidates (native search loads
    * schemas or nothing): when bestMatches declines, each clause's strongest
-   * relevant tool and every tool tied with it. Relevant means the tool's name
-   * or capability sentence contains one of the query's own words; a match only
-   * through operation synonyms, long guidance or parameter names is not
-   * enough, so an unrelated query still finds nothing.
+   * relevant tool and every tool tied with it. A relevant tool does what the
+   * query asks to what it names: when the query names an operation, the tool's
+   * name has that operation; and a query resource word is in the tool's name or
+   * capability sentence, or is its connected integration's own word (at least
+   * two of the integration's tools, and one in twenty, use it there: a mail
+   * integration's tools say "email"). A shared verb alone, or a word only in
+   * long guidance or parameter names, is not enough, so an unrelated or
+   * verb-only query still finds nothing.
    */
   leadingMatches(query: string): Tool[] {
     const selected: Tool[] = [];
     for (const clause of query.split(/[;\n]+/).filter((part) => words(part).length > 0)) {
-      const relevant = this.rankClause(clause).filter((hit) => hit.namesQueryWord);
+      const relevant = this.rankClause(clause).filter((hit) => hit.relevant);
       const best = relevant[0];
       if (!best) continue;
       for (const hit of relevant) {
@@ -207,10 +230,11 @@ export class ToolSearchIndex {
 
   private rankClause(
     query: string,
-  ): Array<{ tool: Tool; score: number; resourceCoverage: number; namesQueryWord: boolean }> {
+  ): Array<{ tool: Tool; score: number; resourceCoverage: number; relevant: boolean }> {
     const tokens = [...new Set(words(query))];
     if (!tokens.length) return [];
     const queryWeights = new Map(tokens.map((token) => [token, 1]));
+    const operations = OPERATIONS.filter((group) => tokens.some((token) => group.has(token)));
     const operation = tokens
       .map((token) => OPERATIONS.find((group) => group.has(token)))
       .find(Boolean);
@@ -252,14 +276,19 @@ export class ToolSearchIndex {
             doc.resources.length
           : 0;
         const resourceCoverage = Math.max(queryCoverage, nameCoverage);
-        const namesQueryWord = tokens.some(
-          (token) =>
-            !GENERIC_QUERY_TERMS.has(token) &&
-            (doc.fields[0]!.frequencies.has(token) || doc.fields[1]!.frequencies.has(token)),
-        );
-        return { tool: doc.tool, score, resourceCoverage, namesQueryWord };
+        const relevant =
+          (!operations.length || (!!doc.operation && operations.includes(doc.operation))) &&
+          (queryCoverage > 0 || resourceTokens.some((token) => this.integrationWord(doc, token)));
+        return { tool: doc.tool, score, resourceCoverage, relevant };
       })
       .filter((hit) => hit.score > 0)
       .sort((a, b) => b.score - a.score);
+  }
+
+  private integrationWord(doc: Document, token: string): boolean {
+    const id = this.integrationOf(doc.tool);
+    const integration = id === undefined ? undefined : this.integrations.get(id);
+    const uses = integration?.uses.get(token) ?? 0;
+    return uses >= 2 && uses * 20 >= integration!.tools;
   }
 }

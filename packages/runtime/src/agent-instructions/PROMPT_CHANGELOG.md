@@ -6,11 +6,16 @@ candidates, so when ranking found tools but no single clear best (an exact tie
 between two hits, or a top hit whose name and capability sentence share no
 resource word with the query) the model used to see "No matching tools found".
 It now loads each clause's strongest relevant tool and any tools tied with it,
-within the search limit. Relevant means the tool's name or capability
-sentence contains one of the query's own words, so a query that matches only
-through an operation synonym, long guidance or parameter names, or nothing at
-all, still loads nothing. "Search and read user's email inbox recent unread
-emails" now loads Gmail's `search_messages` instead of nothing. Generic
+within the search limit. A relevant tool does what the query asks to
+something the query names: when the query names an operation, the tool's name
+has that operation; and a query resource word is in the tool's name or
+capability sentence, or is its connected integration's own word (used there
+by at least two of the integration's tools and one in twenty, as a mail
+integration's tools say "email"). A tool that shares only a verb with the
+query ("get the weather in Oslo", "send it", "find files"), or matches only
+through long guidance or parameter names, is never loaded, so such queries
+still load nothing, as before. "Search and read user's email inbox recent
+unread emails" now loads Gmail's `search_messages` instead of nothing. Generic
 dispatch routes, which list compact candidates, are unchanged. The existing
 `connectedAccounts` notice above now also follows a load by exact names (for
 example after browsing a group with `tool_list`) when it is the turn's first

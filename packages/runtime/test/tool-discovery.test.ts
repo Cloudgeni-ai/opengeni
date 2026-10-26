@@ -16,7 +16,13 @@ import { testSettings } from "@opengeni/testing";
 import { createHttpDecisionModel } from "@opengeni/decisions";
 import { ToolSearchIndex } from "../src/tool-discovery-ranking";
 import { rankToolPool } from "../src/codex-tool-search";
-import { GMAIL_REST_MCP_TOOLS } from "../src/gmail-rest-mcp";
+import {
+  CALENDAR_TOOLS,
+  CONNECTED_TOOL_CATALOG,
+  GMAIL_TOOLS,
+  OUTLOOK_MAIL_TOOLS,
+  type CatalogTool,
+} from "./fixtures/connected-tool-catalog";
 import {
   catalogConnectableIntegrationLookup,
   connectableIntegrationNotice,
@@ -57,6 +63,8 @@ function candidate(
     execute: () => "ok",
   }) as Tool;
 }
+const catalogTool = (t: CatalogTool) =>
+  candidate(`${t.source}__${t.name}`, t.description, t.inputSchema);
 const names = (tools: Tool[]) => tools.map((t) => (t as Tool & { name: string }).name);
 const call = (id: string, name: string, args: unknown) => ({
   type: "function_call" as const,
@@ -1636,29 +1644,9 @@ describe("searches that reach one of several connected accounts", () => {
 
   describe("a vague email search with Gmail and Outlook Mail connected", () => {
     // The real Gmail tools, and Outlook Mail tools in the shape the OpenAPI
-    // compiler gives Microsoft Graph operations: the operationId as the name,
-    // then the operation's description, method, path and safety.
-    const gmailTools = GMAIL_REST_MCP_TOOLS.map((t) =>
-      candidate(`mcp__gmail__${t.name}`, t.description ?? "", t.inputSchema as never),
-    );
-    const outlookTools = [
-      [
-        "me_listmessages",
-        "Get the messages in the signed-in user's mailbox (including the Deleted Items and Clutter folders). GET /me/messages. Read-only.",
-      ],
-      [
-        "me_getmessages",
-        "Retrieve the properties and relationships of a message object. GET /me/messages/{message-id}. Read-only.",
-      ],
-      [
-        "me_mailfolders_listmessages",
-        "Get all the messages in the specified user's mailbox, or those messages in a specified folder in the mailbox. GET /me/mailFolders/{mailFolder-id}/messages. Read-only.",
-      ],
-      [
-        "me_sendmail",
-        "Send the message specified in the request body using either JSON or MIME format. POST /me/sendMail. Changes external state. Your tool permissions determine whether review is needed.",
-      ],
-    ].map(([name, description]) => candidate(`mcp__outlook__${name}`, description!));
+    // compiler gives Microsoft Graph operations.
+    const gmailTools = GMAIL_TOOLS.map(catalogTool);
+    const outlookTools = OUTLOOK_MAIL_TOOLS.map(catalogTool);
     const accounts: ReadonlyMap<string, ConnectedToolAccount> = new Map([
       ...gmailTools.map((t) => [(t as { name: string }).name, gmail] as const),
       ...outlookTools.map((t) => [(t as { name: string }).name, outlook] as const),
@@ -1673,8 +1661,9 @@ describe("searches that reach one of several connected accounts", () => {
 
     for (const transport of ["openai_native", "codex_native"] as const) {
       test(`${transport}: loads the strongest relevant tool and names the other mailbox`, async () => {
-        // No tool's name or capability sentence has "email" or "inbox", so
-        // there is no clear best match; the result still loads Gmail search.
+        // No tool's own name or capability sentence has "email" or "inbox",
+        // so there is no clear best match. Several Gmail tools say "email",
+        // which makes it Gmail's own word, so the result loads Gmail search.
         const result = await mailRuntime(transport).prepareSearch(STAGING);
         expect(loaded(result)).toEqual(["mcp__gmail__search_messages"]);
         expect(result.notice).toBe(NOTICE);
@@ -1682,7 +1671,11 @@ describe("searches that reach one of several connected accounts", () => {
       });
 
       test(`${transport}: an unrelated query or a synonym-only match still loads nothing`, async () => {
-        for (const query of ["book a flight to Paris", "show the weather forecast"]) {
+        for (const query of [
+          "book a flight to Paris",
+          "show the weather forecast",
+          "search for cheap flights to Paris",
+        ]) {
           const runtime = mailRuntime(transport);
           const result = await runtime.prepareSearch({ query, limit: 2 });
           expect(loaded(result)).toEqual([]);
@@ -1787,5 +1780,140 @@ describe("searches that reach one of several connected accounts", () => {
         }
       },
     );
+  });
+
+  describe("vague searches on a large catalog of connected integrations", () => {
+    // About 170 tools from eight connected integrations and first-party tools.
+    const integration = (source: string): ConnectedToolAccount => {
+      const label =
+        { mcp__gmail: "Gmail", mcp__outlook: "Outlook Mail", mcp__chat: "Team chat" }[source] ??
+        source;
+      const communication = ["mcp__gmail", "mcp__outlook", "mcp__chat"].includes(source);
+      return {
+        source,
+        label,
+        connector: label,
+        ...(communication ? { kind: "communication" } : {}),
+      };
+    };
+    const catalogRuntime = (
+      transport: "generic_dispatch" | "openai_native" | "codex_native",
+      catalog: readonly CatalogTool[] = CONNECTED_TOOL_CATALOG,
+    ) => {
+      const accounts = new Map(
+        catalog
+          .filter((t) => t.source.startsWith("mcp__"))
+          .map((t) => [`${t.source}__${t.name}`, integration(t.source)] as const),
+      );
+      const runtime = runtimeWith(transport, accounts);
+      runtime.refresh(catalog.map(catalogTool));
+      return runtime;
+    };
+    const STAGING = { query: "Search and read user's email inbox recent unread emails", limit: 2 };
+
+    test("the catalog is realistic in size and breadth", () => {
+      expect(CONNECTED_TOOL_CATALOG.length).toBeGreaterThanOrEqual(150);
+      expect(new Set(CONNECTED_TOOL_CATALOG.map((t) => t.source)).size).toBeGreaterThanOrEqual(8);
+    });
+
+    for (const transport of ["openai_native", "codex_native"] as const) {
+      test(`${transport}: a query that shares only a verb with the catalog loads nothing`, async () => {
+        // Each of these once loaded a tool whose only overlap was the verb
+        // (kv_namespace_get, send_broadcast, create_template,
+        // connect_to_editor, find_projects, run_on, Gmail search_messages).
+        for (const query of [
+          "get the weather in Oslo",
+          "get my calendar",
+          "send it",
+          "create a ticket",
+          "show the weather forecast",
+          "find files",
+          "run the tests",
+          "search for cheap flights to Paris",
+        ]) {
+          for (const limit of [1, 2, 5]) {
+            const runtime = catalogRuntime(transport);
+            const result = await runtime.prepareSearch({ query, limit });
+            expect({ query, limit, loaded: loaded(result) }).toEqual({ query, limit, loaded: [] });
+            expect(result.notice).toBeUndefined();
+            // Nothing was shown, so the turn's notice is still unspent.
+            expect((await runtime.prepareSearch(STAGING)).notice).toContain(
+              "These tools reach Gmail. Also connected: Outlook Mail",
+            );
+          }
+        }
+      });
+
+      test(`${transport}: a named resource still decides, never a shared verb`, async () => {
+        // The catalog has a branch list but no tool that deletes a branch: the
+        // clear resource match is unchanged, and delete_comment, which shares
+        // only the verb, is never loaded.
+        const branch = await catalogRuntime(transport).prepareSearch({
+          query: "delete the old branch",
+          limit: 2,
+        });
+        expect(loaded(branch)).toEqual(["mcp__github__branches_list"]);
+        // With a calendar connected, "get my calendar" finds the calendar.
+        const calendar = await catalogRuntime(transport, [
+          ...CONNECTED_TOOL_CATALOG,
+          ...CALENDAR_TOOLS,
+        ]).prepareSearch({ query: "get my calendar", limit: 2 });
+        expect(loaded(calendar)).toEqual(["mcp__calendar__list_calendars"]);
+      });
+
+      test(`${transport}: the vague email search loads Gmail search and names Outlook Mail`, async () => {
+        const result = await catalogRuntime(transport).prepareSearch(STAGING);
+        expect(loaded(result)).toEqual(["mcp__gmail__search_messages"]);
+        expect(result.notice).toStartWith(
+          "These tools reach Gmail. Also connected: Outlook Mail, Team chat. If",
+        );
+      });
+    }
+
+    test("generic_dispatch: a verb-only query lists compact candidates and loads nothing", async () => {
+      const result = await catalogRuntime("generic_dispatch").prepareSearch({
+        query: "send it",
+        limit: 2,
+      });
+      expect(loaded(result)).toEqual([]);
+      expect(JSON.parse(result.output).schemasLoaded).toBe(false);
+    });
+  });
+});
+
+describe("which tools a vague native search may load", () => {
+  const transfers = [
+    candidate("mcp__media__create_transfer", "Create a transfer of a media file."),
+    candidate("mcp__media__list_transfers", "List transfers and their progress."),
+    candidate("mcp__media__revoke_transfer", "Revoke a transfer and its download ticket."),
+  ];
+  const integrationOf = (t: Tool) => (t as { name: string }).name.split("__")[1];
+
+  test("an integration's own word counts only for a connected integration's tools", () => {
+    const tools = GMAIL_TOOLS.map(catalogTool);
+    const query = "Search and read user's email inbox recent unread emails";
+    // Several Gmail tools say "email" in their capability sentence.
+    expect(names(new ToolSearchIndex(tools, integrationOf).leadingMatches(query))).toEqual([
+      "mcp__gmail__search_messages",
+    ]);
+    // The same tools with no connected integration have no such evidence.
+    expect(new ToolSearchIndex(tools).leadingMatches(query)).toEqual([]);
+  });
+
+  test("one tool mentioning a word in passing does not make it the integration's", () => {
+    const index = new ToolSearchIndex(transfers, integrationOf);
+    expect(index.leadingMatches("create a ticket")).toEqual([]);
+    // The tool that says it is still found when the operation agrees.
+    expect(names(index.leadingMatches("revoke the ticket"))).toEqual([
+      "mcp__media__revoke_transfer",
+    ]);
+  });
+
+  test("the tool must do what the query asks when the query names an operation", () => {
+    const index = new ToolSearchIndex(transfers, integrationOf);
+    expect(index.leadingMatches("delete the media file")).toEqual([]);
+    expect(names(index.leadingMatches("make a media file"))).toEqual([
+      "mcp__media__create_transfer",
+    ]);
   });
 });
