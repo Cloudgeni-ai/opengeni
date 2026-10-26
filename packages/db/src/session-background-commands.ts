@@ -1602,6 +1602,26 @@ export async function classifyConnectedCommandOps(
   return classified;
 }
 
+/**
+ * Make the running commands one exact runner process did not answer for
+ * (left to it as `provider_unanswered`) due again, while it reports its
+ * inventory. A runner reports only operations it knows, so one whose start
+ * never reached it would otherwise stay running forever. The next reconciler
+ * pass asks the runner, which is talking now: an unknown operation answers
+ * lost and settles. Returns how many commands were made due.
+ */
+export async function rearmUnansweredConnectedCommands(
+  db: Database,
+  input: { controlWorkspaceId: string; enrollmentId: string; connectionInstanceId: string },
+): Promise<number> {
+  const rows = await db.execute<{ rearmed: number }>(sql`
+    select opengeni_private.rearm_unanswered_connected_commands(
+      ${input.controlWorkspaceId}::uuid, ${input.enrollmentId}::uuid,
+      ${input.connectionInstanceId}::text
+    ) as rearmed`);
+  return Number((rows as Array<{ rearmed: number }>)[0]?.rearmed ?? 0);
+}
+
 /** Observe terminal state, not output consumption. Native terminal-result adapters
  * call this after settlement. Session-first ordering serializes settlement and
  * inbox claiming; already delivered history is never rewritten. */

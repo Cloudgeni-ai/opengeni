@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import {
@@ -13,6 +14,7 @@ import {
 import {
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
+  rearmUnansweredConnectedCommands,
   requestSessionBackgroundCommandCancellation,
 } from "../src/session-background-commands";
 
@@ -250,5 +252,72 @@ describe("connected-command reconciliation on compute sandboxes", () => {
     await defer(legacy, "provider_offline");
     expect(await due()).toBe(true);
     expect((await claim()).find((c) => c.commandId === legacy)?.proof).toBeNull();
+  }, 60_000);
+
+  /** The exact runner process a command was left to. */
+  async function runnerOf(id: string) {
+    const [row] = await admin<
+      { controlWorkspaceId: string; enrollmentId: string; connectionInstanceId: string }[]
+    >`select control_workspace_id as "controlWorkspaceId", enrollment_id as "enrollmentId",
+        connection_instance_id as "connectionInstanceId"
+      from session_background_commands where id = ${id}`;
+    return row!;
+  }
+
+  async function outcomeOf(id: string) {
+    const [row] = await admin<{ outcome: string | null }[]>`
+      select last_reconcile_outcome as outcome from session_background_commands where id = ${id}`;
+    return row!.outcome;
+  }
+
+  // 0984: a runner reports only operations it knows. One whose start never
+  // reached it never completes, so a command left to it stayed running
+  // forever although the same process came back.
+  test("a machine runner that reports again is asked once more about commands it did not answer for", async () => {
+    if (!available) return;
+    const left = await runningCommand("machine", { notified: true });
+    await defer(left);
+    expect(await due()).toBe(false);
+    const runner = await runnerOf(left);
+    // Another process of the same machine does not speak for this one.
+    expect(
+      await rearmUnansweredConnectedCommands(db, { ...runner, connectionInstanceId: "other" }),
+    ).toBe(0);
+    expect(await due()).toBe(false);
+    expect(await rearmUnansweredConnectedCommands(db, runner)).toBe(1);
+    expect(await outcomeOf(left)).toBe("runner_reported");
+    // Reporting again changes nothing more.
+    expect(await rearmUnansweredConnectedCommands(db, runner)).toBe(0);
+    expect(await due()).toBe(true);
+    const claimed = (await claim()).find((c) => c.commandId === left);
+    expect(claimed?.state).toBe("running");
+    expect(claimed?.proof).toBeNull();
+    expect(await due()).toBe(false);
+  }, 60_000);
+
+  test("a sandbox runner's report does not make its running commands polled", async () => {
+    if (!available) return;
+    const left = await runningCommand("sandbox", { notified: true });
+    await defer(left);
+    await rearmUnansweredConnectedCommands(db, await runnerOf(left));
+    expect(await due()).toBe(false);
+    expect((await claim()).map((c) => c.commandId)).not.toContain(left);
+  }, 60_000);
+
+  test("the migration makes commands already left this way due once", async () => {
+    if (!available) return;
+    const left = await runningCommand("machine", { notified: true });
+    await defer(left);
+    expect(await due()).toBe(false);
+    const migration = await readFile(
+      new URL("../drizzle/0984_connected_commands_rearm_on_runner_report.sql", import.meta.url),
+      "utf8",
+    );
+    const heal = migration.slice(migration.indexOf("DO $heal$"));
+    expect(heal.trim().endsWith("END $heal$;")).toBe(true);
+    await admin.unsafe(heal);
+    expect(await outcomeOf(left)).toBe("runner_reported");
+    expect(await due()).toBe(true);
+    expect((await claim()).find((c) => c.commandId === left)?.proof).toBeNull();
   }, 60_000);
 });

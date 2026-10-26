@@ -215,6 +215,16 @@ the reconciler cannot read which kind of runner it is, it leaves the command
 for a later pass and records nothing. A Connected Machine never sleeps, so its
 answered queries continue on each pass as before.
 
+A runner lists only operations it knows, so a command whose start never
+reached it (sent while it was offline), or that it no longer holds, would
+never be reported and would stay running forever. So when a Connected Machine
+runner reports its inventory again, the first page of each report makes the
+running commands left to that exact process due again (outcome
+`runner_reported`). The next reconciler pass asks the runner, which is
+talking: an operation it does not know answers lost and the command settles
+lost, never as a success; one it runs continues as before. A compute runner's
+report does not do this, since its running commands are never polled.
+
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses
 the start and keeps a tombstone for the operation: a query or attach answers
