@@ -40,7 +40,7 @@ const RULES: Rule[] = [
     method: "PUT",
     pattern: /\/workspaces\/:workspaceId\/sessions\/:sessionId\/share-link$/,
     text: () =>
-      "Share a chat with anyone, for example family or a friend, without adding them to a workspace: creates a read-only link to the conversation as it is now, or refreshes the existing link so it includes the newest messages. Anyone with the link can read the person's messages and the replies, without signing in; tool details, files and anything not shown in the replies are left out. Only the person who started the chat can share it. Returns the link's url to give them.",
+      "Share a chat with anyone, for example family or a friend, without adding them to a workspace: creates a read-only link to the conversation as it is now, or refreshes the existing link so it includes the newest messages. Anyone with the link can read the conversation, without signing in: each person's messages under the name the chat shows for them, and the replies; tool details, files and anything not shown in the replies are left out. Only the person who started the chat can share it. Returns the link's url to give them.",
   },
   {
     method: "GET",

@@ -1721,6 +1721,12 @@ export type UpdateSessionVisibilityResponse = {
 export type SharedSessionMessage = {
   role: "user" | "assistant";
   text: string;
+  /**
+   * The name the chat shows for the person who sent a message, never an
+   * email address or id. Absent for replies, and when the chat has no such
+   * name for them.
+   */
+  sender?: string;
 };
 
 /** A chat's live read-only share link, as its owner sees it. */

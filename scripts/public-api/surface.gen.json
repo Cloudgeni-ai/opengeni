@@ -27530,6 +27530,7 @@
       "shape": {
         "$": "object",
         "$.role": "enum!=[\"\\\"assistant\\\"\",\"\\\"user\\\"\"]",
+        "$.sender": "string?",
         "$.text": "string!"
       }
     },

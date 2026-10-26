@@ -135,7 +135,7 @@ export function ShareChatDialog({
               ? "Share links are turned off on this server."
               : link
                 ? "Anyone with this link can read the conversation up to when you shared it, without signing in. Tool details and files aren't included."
-                : "Anyone with the link can read the conversation up to now, without signing in: your messages and the replies. Tool details and files aren't included."}
+                : "Anyone with the link can read the conversation up to now, without signing in: the messages, with who sent them, and the replies. Tool details and files aren't included."}
           </DialogDescription>
         </DialogHeader>
 

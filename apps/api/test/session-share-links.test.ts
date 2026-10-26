@@ -269,4 +269,89 @@ describe("chat share links", () => {
     );
     expect((await app.request("http://x/v1/shared-sessions/short")).status).toBe(404);
   }, 60_000);
+
+  test("each person's messages carry the name the chat shows for them, never an email", async () => {
+    if (!client) return;
+    const app = appWith(true);
+    const { base, authorization, grant, starter, session } = await chat();
+    const starterUserId = starter.slice("user:".length);
+    await shared!.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${starterUserId}, 'Olav Berg', ${`${starterUserId}@example.test`}, true)`;
+    const colleague = `user:share-colleague-${crypto.randomUUID()}`;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, subject_label, role, permissions)
+      values (${grant.accountId}, ${grant.workspaceId}, ${colleague}, 'Kari Berg', 'member',
+        ${shared!.admin.json(["workspace:read", "sessions:read"])})`;
+    const visitor = `user:share-visitor-${crypto.randomUUID()}`;
+    const rows: Array<[number, Record<string, unknown>]> = [
+      [
+        8,
+        {
+          text: "Can I join the dinner?",
+          initiator: { kind: "subject", subjectId: colleague, label: "kari@example.test" },
+        },
+      ],
+      [
+        9,
+        {
+          text: "Me too",
+          initiator: { kind: "subject", subjectId: visitor, label: "per@example.test" },
+        },
+      ],
+    ];
+    for (const [sequence, payload] of rows) {
+      await shared!.admin`
+        insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+        values (${grant.accountId}, ${grant.workspaceId}, ${session.id}, ${sequence}, 'user.message',
+          ${shared!.admin.json(payload as never)})`;
+    }
+
+    const link = (await (
+      await app.request(base, { method: "PUT", headers: { authorization } })
+    ).json()) as { shareId: string };
+    const body = (await (
+      await app.request(`http://x/v1/shared-sessions/${link.shareId}`)
+    ).json()) as { messages: Array<{ role: string; text: string; sender?: string }> };
+    expect(body.messages).toEqual([
+      { role: "user", text: "What's on my calendar this weekend?", sender: "Olav Berg" },
+      { role: "assistant", text: "Your weekend is mostly free. [image not included]" },
+      { role: "user", text: "Can I join the dinner?", sender: "Kari Berg" },
+      // The chat knows this person only by an email address, so the link shows no name.
+      { role: "user", text: "Me too" },
+    ]);
+    const text = JSON.stringify(body);
+    for (const hidden of ["@example.test", colleague, visitor, starter]) {
+      expect(text).not.toContain(hidden);
+    }
+  }, 120_000);
+
+  test("a link opens only while the person who shared it can still read the chat", async () => {
+    if (!client) return;
+    const app = appWith(true);
+    const { base, authorization, grant, starter } = await chat();
+    const link = (await (
+      await app.request(base, { method: "PUT", headers: { authorization } })
+    ).json()) as { shareId: string };
+    const open = async () =>
+      (await app.request(`http://x/v1/shared-sessions/${link.shareId}`)).status;
+    expect(await open()).toBe(200);
+
+    // Losing access to the workspace's chats closes the link at once.
+    await shared!.admin`
+      update workspace_memberships set permissions = ${shared!.admin.json(["workspace:read"])}
+      where workspace_id = ${grant.workspaceId} and subject_id = ${starter}`;
+    expect(await open()).toBe(404);
+    await shared!.admin`
+      update workspace_memberships
+      set permissions = ${shared!.admin.json(["workspace:read", "sessions:read"])}
+      where workspace_id = ${grant.workspaceId} and subject_id = ${starter}`;
+    expect(await open()).toBe(200);
+
+    // Leaving the workspace closes it too.
+    await shared!.admin`
+      delete from workspace_memberships
+      where workspace_id = ${grant.workspaceId} and subject_id = ${starter}`;
+    expect(await open()).toBe(404);
+  }, 120_000);
 });

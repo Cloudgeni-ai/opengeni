@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ApiRouteDeps } from "@opengeni/core";
 const PERSONAL_WORKSPACE_MEMBERS_MESSAGE =
-  "Personal workspaces are private to their owner and can't have other members. To let someone read a chat from here, create a share link for that chat: anyone with the link can read the conversation up to the moment it was shared.";
+  "Personal workspaces are private to their owner and can't have other members.";
+const PERSONAL_WORKSPACE_MEMBERS_SHARE_MESSAGE = `${PERSONAL_WORKSPACE_MEMBERS_MESSAGE} To let someone read a chat from here, create a share link for that chat: anyone with the link can read the conversation up to the moment it was shared.`;
 import {
   createDb,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -27,6 +28,8 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let app: Hono | null = null;
+/** The same routes on a server that turned chat share links off. */
+let noShareLinksApp: Hono | null = null;
 const sessions = new Map<string, { sessionId: string; email: string; name: string }>();
 const createdUsers: string[] = [];
 const createdAccounts: string[] = [];
@@ -123,12 +126,13 @@ function request(
   method: string,
   path: string,
   body?: unknown,
+  target: Hono | null = app,
 ): Promise<Response> {
   const auth = cookieOrBearer.startsWith("Bearer ")
     ? { authorization: cookieOrBearer }
     : { cookie: cookieOrBearer };
   return Promise.resolve(
-    app!.request(`http://x${path}`, {
+    target!.request(`http://x${path}`, {
       method,
       headers: { ...auth, ...(body === undefined ? {} : { "content-type": "application/json" }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -150,29 +154,37 @@ beforeAll(async () => {
     return;
   }
   client = createDb(shared.appUrl);
-  app = new Hono();
-  registerWorkspaceRoutes(app, {
-    db: client.db,
-    settings: testSettings({ productAccessMode: "managed" }),
-    managedAuth: {
-      api: {
-        getSession: async (input: { headers: Headers }) => {
-          const userId = /session=([^;]+)/.exec(input.headers.get("cookie") ?? "")?.[1];
-          const session = userId ? sessions.get(userId) : undefined;
-          return session
-            ? {
-                headers: new Headers(),
-                response: {
-                  session: { id: session.sessionId },
-                  user: { id: userId, email: session.email, name: session.name },
-                },
-              }
-            : { headers: new Headers(), response: null };
+  const db = client.db;
+  const routes = (settings: ReturnType<typeof testSettings>) => {
+    const routed = new Hono();
+    registerWorkspaceRoutes(routed, {
+      db,
+      settings,
+      managedAuth: {
+        api: {
+          getSession: async (input: { headers: Headers }) => {
+            const userId = /session=([^;]+)/.exec(input.headers.get("cookie") ?? "")?.[1];
+            const session = userId ? sessions.get(userId) : undefined;
+            return session
+              ? {
+                  headers: new Headers(),
+                  response: {
+                    session: { id: session.sessionId },
+                    user: { id: userId, email: session.email, name: session.name },
+                  },
+                }
+              : { headers: new Headers(), response: null };
+          },
         },
-      },
-    } as never,
-    schedulePromptPostCommit: () => undefined,
-  } as ApiRouteDeps);
+      } as never,
+      schedulePromptPostCommit: () => undefined,
+    } as ApiRouteDeps);
+    return routed;
+  };
+  app = routes(testSettings({ productAccessMode: "managed" }));
+  noShareLinksApp = routes(
+    testSettings({ productAccessMode: "managed", privacyChatShareLinksAllowed: false }),
+  );
 }, 180_000);
 
 afterAll(async () => {
@@ -339,8 +351,18 @@ describe("workspace Members surface under organization authority", () => {
           : undefined,
       );
       expect(own.status).toBe(403);
-      expect(await own.text()).toBe(PERSONAL_WORKSPACE_MEMBERS_MESSAGE);
+      expect(await own.text()).toBe(PERSONAL_WORKSPACE_MEMBERS_SHARE_MESSAGE);
     }
+    // A server without share links doesn't suggest one: the plain reason only.
+    const withoutLinks = await request(
+      owner.cookie,
+      "GET",
+      `/v1/workspaces/${owner.personalWorkspaceId}/member-candidates`,
+      undefined,
+      noShareLinksApp,
+    );
+    expect(withoutLinks.status).toBe(403);
+    expect(await withoutLinks.text()).toBe(PERSONAL_WORKSPACE_MEMBERS_MESSAGE);
     // Someone else's Personal workspace keeps the plain refusal and reveals nothing.
     const foreignPersonal = await request(
       foreign.cookie,

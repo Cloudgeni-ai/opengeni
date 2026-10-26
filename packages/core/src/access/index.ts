@@ -1014,30 +1014,42 @@ export async function requireWorkspaceSettingsGrant(
 
 /**
  * Read by the person and, through app actions, by the agent: why a Personal
- * workspace refuses member changes, and what works instead.
+ * workspace refuses member changes, and, for someone who can create a chat
+ * share link here, what works instead.
  */
 export const PERSONAL_WORKSPACE_MEMBERS_MESSAGE =
+  "Personal workspaces are private to their owner and can't have other members.";
+export const PERSONAL_WORKSPACE_MEMBERS_SHARE_MESSAGE =
   "Personal workspaces are private to their owner and can't have other members. To let someone read a chat from here, create a share link for that chat: anyone with the link can read the conversation up to the moment it was shared.";
 
 /**
  * A member change in a Personal workspace can never succeed, for anyone. Say
  * so plainly to someone who can use the workspace, instead of a missing
  * permission that sends them looking for an administrator. Anyone else keeps
- * the original refusal, so this reveals nothing about other workspaces.
+ * the original refusal, so this reveals nothing about other workspaces. The
+ * share link is suggested only to someone who can create one: a signed-in
+ * person, on a server that allows share links.
  */
 async function refuseMembersInPersonalWorkspace(
   c: Context,
   deps: AccessDeps,
   workspaceId: string,
 ): Promise<void> {
+  let grant: AccessGrant;
   try {
-    await requireAccessGrant(c, deps, workspaceId);
+    grant = await requireAccessGrant(c, deps, workspaceId);
   } catch {
     return;
   }
   const workspace = await getWorkspace(deps.db, workspaceId);
   if (workspace?.kind === "personal") {
-    throw new HTTPException(403, { message: PERSONAL_WORKSPACE_MEMBERS_MESSAGE });
+    const canShare =
+      deps.settings.privacyChatShareLinksAllowed !== false && grant.subjectId.startsWith("user:");
+    throw new HTTPException(403, {
+      message: canShare
+        ? PERSONAL_WORKSPACE_MEMBERS_SHARE_MESSAGE
+        : PERSONAL_WORKSPACE_MEMBERS_MESSAGE,
+    });
   }
 }
 

@@ -3,8 +3,9 @@
 // account), so `RootRouteComponent` renders this route ahead of the auth gate
 // and WITHOUT the app context. Nothing here may call `useAppContext`.
 //
-// The page shows the snapshot the server stored when the link was shared: the
-// person's messages and the replies, as text. It never loads images or files.
+// The page shows the snapshot the server stored when the link was shared: each
+// person's messages, under the name the chat shows for them, and the replies,
+// as text. It never loads images or files.
 import type { SharedSession } from "@opengeni/sdk";
 import { Markdown } from "@opengeni/react";
 import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
@@ -156,9 +157,25 @@ export function SharedSessionView(props: { load: Load; onRetry?: (() => void) | 
           {shared.messages.map((message, index) =>
             message.role === "user" ? (
               // oxlint-disable-next-line react/no-array-index-key -- a fixed snapshot; messages have no ids and never reorder
-              <li key={index} className="flex justify-end" data-shared-message="user">
+              <li
+                // oxlint-disable-next-line react/no-array-index-key -- a fixed snapshot; messages have no ids and never reorder
+                key={index}
+                className="flex flex-col items-end gap-1"
+                data-shared-message="user"
+              >
+                {message.sender ? (
+                  <span
+                    aria-hidden="true"
+                    className="max-w-[85%] truncate px-1 text-xs text-fg-muted"
+                    data-shared-sender=""
+                  >
+                    {message.sender}
+                  </span>
+                ) : null}
                 <div className="w-fit max-w-[85%] min-w-0 rounded-lg rounded-br-sm border border-border bg-surface-2 px-4 py-2.5 text-[15px] leading-6 whitespace-pre-wrap [overflow-wrap:anywhere]">
-                  <span className="sr-only">They wrote: </span>
+                  <span className="sr-only">
+                    {message.sender ? `${message.sender} wrote: ` : "They wrote: "}
+                  </span>
                   {message.text}
                 </div>
               </li>
