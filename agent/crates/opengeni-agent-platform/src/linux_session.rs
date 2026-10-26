@@ -968,7 +968,7 @@ mod tests {
             ..agent.clone()
         };
         let found = display_candidates(&stale, &empty.roots());
-        assert!(found.displays.is_empty());
+        assert_eq!(found.displays, [] as [X11Display; 0]);
         assert_eq!(found.absence, Absence::NoLogin);
         // A user-run X server still opens, and the reason names it.
         empty.own_x_server(5);
@@ -998,15 +998,16 @@ mod tests {
         fixture.session("3", agent.uid, "TYPE=tty\nSEAT=seat0\nACTIVE=0\n");
         fixture.process(700, "3", &["DISPLAY=:1"]);
         let found = display_candidates(&agent, &fixture.roots());
-        assert!(found.displays.is_empty());
+        assert_eq!(found.displays, [] as [X11Display; 0]);
         assert_eq!(found.absence, Absence::Inactive);
         // Another user's session naming it in logind is the same.
         let other = Fixture::new();
         other.own_x_server(1);
         other.session("c9", agent.uid + 1, "TYPE=x11\nDISPLAY=:1\nACTIVE=1\n");
-        assert!(display_candidates(&agent, &other.roots())
-            .displays
-            .is_empty());
+        assert_eq!(
+            display_candidates(&agent, &other.roots()).displays,
+            [] as [X11Display; 0]
+        );
     }
 
     #[test]
@@ -1102,7 +1103,7 @@ mod tests {
         fixture.session("9", agent.uid, "TYPE=tty\nREMOTE=1\nACTIVE=1\n");
         let found = display_candidates(&agent, &fixture.roots());
         assert_eq!(found.absence, Absence::NoLogin);
-        assert!(found.displays.is_empty());
+        assert_eq!(found.displays, [] as [X11Display; 0]);
         // A lingering user with no session at all is the same.
         std::fs::remove_file(fixture.root.path().join(format!("run/users/{}", agent.uid))).unwrap();
         assert_eq!(
@@ -1118,7 +1119,7 @@ mod tests {
         );
         let found = display_candidates(&agent, &fixture.roots());
         assert_eq!(found.absence, Absence::NoLogin);
-        assert!(found.displays.is_empty());
+        assert_eq!(found.displays, [] as [X11Display; 0]);
     }
 
     #[test]
@@ -1136,7 +1137,7 @@ mod tests {
         fixture.session("c7", agent.uid + 1, "TYPE=x11\nDISPLAY=:0\nACTIVE=1\n");
         let found = display_candidates(&agent, &fixture.roots());
         assert_eq!(found.absence, Absence::OtherUser);
-        assert!(found.displays.is_empty());
+        assert_eq!(found.displays, [] as [X11Display; 0]);
         // The display manager's login screen after a sign-out is nobody's
         // desktop, not another user's.
         fixture.write(
@@ -1174,7 +1175,7 @@ mod tests {
         // Fast user switching moves the screen to another session.
         fixture.session("7", agent.uid, "TYPE=x11\nDISPLAY=:2\nACTIVE=0\n");
         let found = display_candidates(&agent, &fixture.roots());
-        assert!(found.displays.is_empty());
+        assert_eq!(found.displays, [] as [X11Display; 0]);
         assert_eq!(found.absence, Absence::Inactive);
         assert_eq!(unavailable_reason(&found, ":0", ""), INACTIVE_REASON);
     }
@@ -1280,7 +1281,7 @@ mod tests {
             ..agent()
         };
         let found = display_candidates(&agent, &fixture.roots());
-        assert!(found.displays.is_empty());
+        assert_eq!(found.displays, [] as [X11Display; 0]);
         assert_eq!(found.skipped.as_deref(), Some(":7"));
         let reason = unavailable_reason(&found, ":0", "");
         assert!(
