@@ -11,6 +11,10 @@
  * In the desktop app, the provider also carries out the call notifications'
  * choices; the host says where Meetings and a meeting are with
  * `onOpenMeetings` and `onOpenMeeting`.
+ *
+ * A recording belongs to the workspace it started in and keeps going when the
+ * person moves to another workspace: the recorder follows the host's current
+ * workspace only while nothing is being captured.
  */
 import {
   createContext,
@@ -35,7 +39,13 @@ export type MeetingStartRequest = { title: string };
 export type MeetingRecorderStore = {
   get: () => MeetingRecorder | null;
   subscribe: (listener: () => void) => () => void;
-  set: (recorder: MeetingRecorder | null) => void;
+  /** Publish the recorder, and the workspace its recordings go to. */
+  set: (recorder: MeetingRecorder | null, workspaceId?: string | null) => void;
+  /**
+   * The workspace the recorder's recordings go to: while one records, the
+   * workspace it started in, even after the person moved to another one.
+   */
+  workspaceId: () => string | null;
   /** Recordings whose upload finished in this tab, newest last. */
   finished: () => readonly string[];
   markFinished: (recordingId: string) => void;
@@ -46,12 +56,19 @@ export type MeetingRecorderStore = {
   takeStart: () => MeetingStartRequest | null;
   /** Load the capture code. Idempotent. */
   activate: () => void;
+  /**
+   * Open a recorded meeting in its own workspace, through the host's
+   * `onOpenMeeting`. False when the host gave no way to.
+   */
+  openMeeting: (recordingId: string, workspaceId: string) => boolean;
 };
 
 export function createMeetingRecorderStore(
   onActivate: () => void = () => {},
+  onOpenMeeting: (recordingId: string, workspaceId: string) => boolean = () => false,
 ): MeetingRecorderStore {
   let current: MeetingRecorder | null = null;
+  let currentWorkspaceId: string | null = null;
   let finished: string[] = [];
   let pending: MeetingStartRequest | null = null;
   const listeners = new Set<() => void>();
@@ -64,10 +81,12 @@ export function createMeetingRecorderStore(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    set: (recorder) => {
+    set: (recorder, workspaceId = null) => {
       current = recorder;
+      currentWorkspaceId = recorder ? workspaceId : null;
       notify();
     },
+    workspaceId: () => currentWorkspaceId,
     finished: () => finished,
     markFinished: (recordingId) => {
       finished = [...finished.filter((id) => id !== recordingId), recordingId];
@@ -88,6 +107,7 @@ export function createMeetingRecorderStore(
       return request;
     },
     activate: onActivate,
+    openMeeting: (recordingId, workspaceId) => onOpenMeeting(recordingId, workspaceId),
   };
 }
 
@@ -98,6 +118,13 @@ export const MeetingRecorderStoreProvider = MeetingRecorderContext.Provider;
 const LazyRecorderHost = lazy(() => import("./recorder-host"));
 
 const RECORDING_DATABASE = "opengeni-recordings";
+
+/** States in which the recorder holds a capture that unmounting its host would end. */
+function capturing(state: MeetingRecorder["state"] | null | undefined): boolean {
+  return (
+    state === "starting" || state === "recording" || state === "paused" || state === "stopping"
+  );
+}
 
 /** True when this browser still holds recording chunks from an earlier visit. */
 async function hasLocalRecordings(): Promise<boolean> {
@@ -127,12 +154,31 @@ export function MeetingRecorderProvider({
   client?: object | undefined;
   /** Show the Meetings page, where a desktop call notification's recording starts. */
   onOpenMeetings?: (() => void) | undefined;
-  /** Show one meeting, after a desktop call notification stopped its recording. */
-  onOpenMeeting?: ((recordingId: string) => void) | undefined;
+  /**
+   * Show one meeting, after a desktop call notification stopped its recording
+   * or a recording made in another workspace stopped. `workspaceId` is the
+   * workspace the meeting is in, which may not be the one shown.
+   */
+  onOpenMeeting?: ((recordingId: string, workspaceId: string) => void) | undefined;
   children: ReactNode;
 }) {
   const [active, setActive] = useState(false);
-  const store = useMemo(() => createMeetingRecorderStore(() => setActive(true)), []);
+  const openMeeting = useRef(onOpenMeeting);
+  useEffect(() => {
+    openMeeting.current = onOpenMeeting;
+  });
+  const store = useMemo(
+    () =>
+      createMeetingRecorderStore(
+        () => setActive(true),
+        (recordingId, recordingWorkspaceId) => {
+          if (!openMeeting.current) return false;
+          openMeeting.current(recordingId, recordingWorkspaceId);
+          return true;
+        },
+      ),
+    [],
+  );
   useEffect(() => {
     let cancelled = false;
     void hasLocalRecordings().then((found) => {
@@ -142,16 +188,26 @@ export function MeetingRecorderProvider({
       cancelled = true;
     };
   }, []);
-  useDesktopMeetingRequests(store, { onOpenMeetings, onOpenMeeting });
+  useDesktopMeetingRequests(store, { onOpenMeetings });
+  // Leaving a workspace must not end a recording made in it: the host, and
+  // with it the capture, stays in the recording's workspace until it stops,
+  // then follows the host's current workspace.
+  const busy = useSyncExternalStore(
+    store.subscribe,
+    () => capturing(store.get()?.state),
+    () => false,
+  );
+  const [hostWorkspaceId, setHostWorkspaceId] = useState(workspaceId);
+  if (!busy && hostWorkspaceId !== workspaceId) setHostWorkspaceId(workspaceId);
   return (
     <MeetingRecorderContext.Provider value={store}>
       {children}
-      {active && workspaceId ? (
+      {active && hostWorkspaceId ? (
         <Suspense fallback={null}>
           <LazyRecorderHost
-            key={workspaceId}
+            key={hostWorkspaceId}
             store={store}
-            workspaceId={workspaceId}
+            workspaceId={hostWorkspaceId}
             client={client}
           />
         </Suspense>
@@ -168,10 +224,7 @@ const NO_FINISHED: readonly string[] = [];
  */
 function useDesktopMeetingRequests(
   store: MeetingRecorderStore,
-  navigation: {
-    onOpenMeetings?: (() => void) | undefined;
-    onOpenMeeting?: ((recordingId: string) => void) | undefined;
-  },
+  navigation: { onOpenMeetings?: (() => void) | undefined },
 ): void {
   const latest = useRef(navigation);
   useEffect(() => {
@@ -194,9 +247,11 @@ function useDesktopMeetingRequests(
         return;
       }
       const recordingId = recorder?.recordingId ?? null;
+      const recordingWorkspaceId = store.workspaceId();
       if (!recorder || (recorder.state !== "recording" && recorder.state !== "paused")) return;
       void recorder.stop().then(() => {
-        if (recordingId) latest.current.onOpenMeeting?.(recordingId);
+        if (recordingId && recordingWorkspaceId)
+          store.openMeeting(recordingId, recordingWorkspaceId);
       });
     });
   }, [store]);
@@ -220,6 +275,13 @@ export function usePendingMeetingStart(): {
 export function useMeetingRecorder(): {
   recorder: MeetingRecorder | null;
   finished: readonly string[];
+  /** The workspace the recorder's recording is in; may differ from the one shown. */
+  workspaceId: string | null;
+  /**
+   * Open a meeting the recorder made in its own workspace. False when the
+   * host gave no way to, so the caller opens it as usual.
+   */
+  openMeeting: (recordingId: string, workspaceId: string) => boolean;
 } {
   const store = useContext(MeetingRecorderContext);
   useEffect(() => store?.activate(), [store]);
@@ -233,7 +295,12 @@ export function useMeetingRecorder(): {
     store?.finished ?? (() => NO_FINISHED),
     () => NO_FINISHED,
   );
-  return { recorder, finished };
+  const workspaceId = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    store?.workspaceId ?? nullSnapshot,
+    nullSnapshot,
+  );
+  return { recorder, finished, workspaceId, openMeeting: store?.openMeeting ?? neverOpens };
 }
 
 /** Only the recorder's state word, for the rail: re-renders on state changes, not on every tick. */
@@ -252,4 +319,8 @@ function noopSubscribe(): () => void {
 
 function nullSnapshot(): null {
   return null;
+}
+
+function neverOpens(): boolean {
+  return false;
 }

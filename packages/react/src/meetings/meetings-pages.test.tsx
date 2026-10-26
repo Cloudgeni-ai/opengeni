@@ -263,6 +263,71 @@ describe("Recorder provider", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  test("Stop on a recording made in another workspace opens it in that workspace", async () => {
+    const fixture = createMeetingsFixture();
+    const openedElsewhere: string[] = [];
+    const openedHere: string[] = [];
+    const store = createMeetingRecorderStore(
+      () => {},
+      (recordingId, workspaceId) => {
+        openedElsewhere.push(`${workspaceId}/${recordingId}`);
+        return true;
+      },
+    );
+    let state: "recording" | "stopped" = "recording";
+    const recorder = {
+      get state() {
+        return state;
+      },
+      recordingId: "recording-elsewhere",
+      supported: true,
+      title: null,
+      tracks: [],
+      elapsedMilliseconds: 61_000,
+      systemAudioKind: null,
+      upload: { created: true },
+      recovered: [],
+      live: null,
+      error: null,
+      stop: async () => {
+        state = "stopped";
+      },
+      pause: () => {},
+      resume: () => {},
+    } as unknown as ReturnType<typeof useMeetingRecorder>["recorder"];
+    store.set(recorder, "workspace-elsewhere");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MeetingRecorderStoreProvider value={store}>
+          <MeetingsListPage
+            workspaceId={fixture.workspaceId}
+            recordings={fixture.client}
+            meetingHref={(id) => `/meetings/${id}`}
+            onOpen={(id) => openedHere.push(id)}
+          />
+        </MeetingRecorderStoreProvider>,
+      );
+    });
+    try {
+      const stop = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Stop",
+      );
+      expect(stop).toBeDefined();
+      await act(async () => {
+        stop!.click();
+      });
+      await settle(50);
+      expect(openedElsewhere).toEqual(["workspace-elsewhere/recording-elsewhere"]);
+      expect(openedHere).toEqual([]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });
 
 describe("Meeting page", () => {

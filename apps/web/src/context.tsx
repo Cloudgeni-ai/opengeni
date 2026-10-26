@@ -36,6 +36,7 @@ import {
 } from "@/api";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
+import { ConsoleMeetingRecorderProvider } from "@/components/meetings/recorder-provider";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@opengeni/react/ui/button";
 import { SignInCallbackNotice } from "@/components/sign-in-callback-notice";
@@ -455,6 +456,22 @@ export function RootRouteComponent() {
     </AppContext.Provider>
   );
 
+  // A meeting being recorded keeps going while the person moves between
+  // pages and workspaces, and while a dropped connection or an update shows
+  // the waiting panel: the recorder lives above all of them. An actor change
+  // still replaces it, below.
+  const recordedSurface = isPublicAuthRoute ? (
+    applicationSurface
+  ) : (
+    <ConsoleMeetingRecorderProvider
+      workspaceId={routedWorkspace?.id ?? null}
+      fallbackWorkspaceId={defaultWorkspaceId}
+      client={client}
+    >
+      {applicationSurface}
+    </ConsoleMeetingRecorderProvider>
+  );
+
   const actorFencedSurface =
     browserAccountsEnabled && !isPublicAuthRoute ? (
       <Suspense fallback={<LoadingPanel />}>
@@ -465,11 +482,11 @@ export function RootRouteComponent() {
           mutationBusy={mutationBusy}
           onActorTransition={handleBrowserActorTransition}
         >
-          <BrowserAccountsLoadingGate>{applicationSurface}</BrowserAccountsLoadingGate>
+          <BrowserAccountsLoadingGate>{recordedSurface}</BrowserAccountsLoadingGate>
         </BrowserAccountsRuntime>
       </Suspense>
     ) : (
-      applicationSurface
+      recordedSurface
     );
 
   return (

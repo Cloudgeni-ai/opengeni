@@ -90,12 +90,18 @@ mounted hooks call.
 `@opengeni/react/meetings` is the ready-made UI on those hooks, the same one
 the console uses:
 
-- `MeetingRecorderProvider`: mount it once above the routes, so a recording
-  keeps going while the person moves around. In the desktop app it also
-  carries out the call notifications ("Record this meeting?"); pass
-  `onOpenMeetings` and `onOpenMeeting` to say where those open. A host
-  without an `OpenGeniProvider` above its routes passes its SDK `client`,
-  and `workspaceId={null}` until it knows the workspace.
+- `MeetingRecorderProvider`: mount it once above the routes, and above
+  anything that unmounts when the person switches workspace, so a recording
+  keeps going while the person moves around. A recording stays with the
+  workspace it started in until it stops, even when `workspaceId` changes or
+  is null for a while; then the recorder moves to the workspace shown. In
+  the desktop app it also carries out the call notifications ("Record this
+  meeting?"); pass `onOpenMeetings` and `onOpenMeeting` to say where those
+  open. `onOpenMeeting` gets the meeting's workspace, which may not be the
+  one shown, and `MeetingsListPage` uses it to open a recording made in
+  another workspace after Stop. A host without an `OpenGeniProvider` above
+  its routes passes its SDK `client`, and `workspaceId={null}` until it
+  knows the workspace.
 - `MeetingsListPage`: the recorder plus the searchable list. Pass
   `externalRef` to show only the meetings that belong to something of yours,
   such as a project, and to give new recordings started there the same id;
@@ -176,7 +182,9 @@ Native screens:
   module, while the phone is locked or another app is in front. Audio is
   written to the phone as it is captured and uploaded in the background. Pass
   a `storeScope` per signed-in account, so unsent audio is only ever uploaded
-  with that account's credential. A host without an `OpenGeniProvider` above
+  with that account's credential; a new `storeScope` ends a recording at
+  once. A recording stays with the workspace it started in until it stops,
+  even when `workspaceId` changes. A host without an `OpenGeniProvider` above
   its screens passes its SDK `client`, and `workspaceId={null}` until it
   knows the workspace.
 - `MeetingsList`: the recorder plus the list. `useMeetingView`: one
