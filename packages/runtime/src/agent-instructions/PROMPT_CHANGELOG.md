@@ -22,9 +22,7 @@ dispatch routes, which list compact candidates, are unchanged. Ranking also
 reads past the `Account: … Use only this account…` first line a
 tool description gets when the person has several accounts of its connector,
 so those tools rank on their own capability sentence, exactly as with one
-account; the description the model sees is unchanged. And "check" now counts
-as a read operation ("check my unread emails"), not a resource word matching
-tools named `check…`.
+account; the description the model sees is unchanged.
 The existing
 `connectedAccounts` notice above now also follows a load by exact names (for
 example after browsing a group with `tool_list`) when it is the turn's first

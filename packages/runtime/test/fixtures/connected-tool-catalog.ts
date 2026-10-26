@@ -61,9 +61,10 @@ export const withAccount = (
   tools.map((t) => ({ ...t, source, description: withAccountLine(account, t.description) }));
 
 /**
- * A realistic pool of about 170 tools from several connected integrations
+ * A realistic pool of about 190 tools from several connected integrations
  * (mail, code hosting, file storage, cloud hosting, a newsletter service, an
- * error tracker, an issue tracker, team chat) and first-party tools, with
+ * error tracker, an issue tracker, team chat, CI, uptime monitoring) and
+ * first-party tools, with
  * descriptions written the way those servers write them. It has no calendar,
  * weather, travel or ticketing tools, so vague requests for those must find
  * nothing here.
@@ -170,6 +171,22 @@ export const CONNECTED_TOOL_CATALOG: CatalogTool[] = [
     ["add_reaction", "Add an emoji reaction to a message."],
     ["get_user_profile", "Get a person's profile and status."],
     ["upload_file", "Upload a file to a channel."],
+  ]),
+  ...written("mcp__ci", [
+    ["list_workflow_runs", "List workflow runs for a repository, newest first."],
+    ["get_workflow_run", "Get one workflow run and its jobs."],
+    ["rerun_workflow", "Re-run a workflow run's failed jobs."],
+    ["list_check_runs", "List check runs for a commit."],
+    ["get_check_run", "Get one check run with its output and annotations."],
+    ["list_check_suites", "List check suites for a commit."],
+  ]),
+  ...written("mcp__uptime", [
+    ["list_checks", "List uptime checks for your sites."],
+    ["get_check", "Get one uptime check and its recent results."],
+    ["create_check", "Create an uptime check for a URL."],
+    ["pause_check", "Pause an uptime check."],
+    ["resume_check", "Resume a paused uptime check."],
+    ["delete_check", "Delete an uptime check."],
   ]),
   ...written("opengeni", [
     ["run_on", "Run a one-off op on a specific enrolled machine; prefer the shell for this session's own machine."],

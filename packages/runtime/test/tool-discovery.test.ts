@@ -1846,6 +1846,18 @@ describe("searches that reach one of several connected accounts", () => {
       });
 
       test(`${transport}: a named resource still decides, never a shared verb`, async () => {
+        // Tools named after checks (CI check runs, uptime checks) keep their
+        // clear match: "check" is a resource word there, not an operation.
+        for (const [query, expected] of [
+          ["list check runs", "mcp__ci__list_check_runs"],
+          ["get the check run", "mcp__ci__get_check_run"],
+          ["list my checks", "mcp__uptime__list_checks"],
+          ["get the homepage check", "mcp__uptime__get_check"],
+          ["pause the check", "mcp__uptime__pause_check"],
+        ] as const) {
+          const result = await catalogRuntime(transport).prepareSearch({ query, limit: 2 });
+          expect({ query, loaded: loaded(result) }).toEqual({ query, loaded: [expected] });
+        }
         // The catalog has a branch list but no tool that deletes a branch: the
         // clear resource match is unchanged, and delete_comment, which shares
         // only the verb, is never loaded.
@@ -1924,7 +1936,7 @@ describe("searches that reach one of several connected accounts", () => {
         );
       const QUERIES = [
         "any new email?",
-        "check my unread emails",
+        "did anyone email me today",
         "send an email to Alex",
         STAGING.query,
         "send it",
@@ -1961,9 +1973,10 @@ describe("searches that reach one of several connected accounts", () => {
           };
           const NOTICE_TWO =
             "These tools reach Gmail (alex@example.com), Gmail (alex@example.org). Also connected: Outlook Mail, Team chat. If";
-          for (const query of ["any new email?", "check my unread emails"]) {
+          {
             // Both mailboxes' copies of one Gmail tool tie; which Gmail tool
             // is a ranking guess, but the result reaches Gmail.
+            const query = "any new email?";
             const result = await search(query);
             const [personal, work] = loaded(result) as string[];
             expect(personal).toStartWith("mcp__gmail__");

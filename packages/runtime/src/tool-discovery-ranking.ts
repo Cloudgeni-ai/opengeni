@@ -33,7 +33,7 @@ function words(text: string): string[] {
 // Generic operation vocabulary, not per-tool aliases. Exact words retain greater
 // weight than expansions; an expansion alone must never drown out the resource.
 const OPERATIONS = [
-  "get read retrieve fetch inspect show view check",
+  "get read retrieve fetch inspect show view",
   "list browse enumerate",
   "search find lookup",
   "create make add insert spawn",
