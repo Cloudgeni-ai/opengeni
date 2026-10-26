@@ -4440,10 +4440,13 @@ function applyMcpApprovalPolicy(
     )
     .map((server) => {
       const connectionId = (): string | null => {
-        return (
-          resolvedMcpConnectionId(server, resolvedMcpConnectionIds) ??
-          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url))
-        );
+        // A server without a connector row is always approved under its synthetic
+        // session-MCP identity, exactly as the attempt gateway and saved tool
+        // permission rules derive it. A local registration's own connection
+        // identity is for its adapter, never a substitute for that identity.
+        return server.connectionRef
+          ? resolvedMcpConnectionId(server, resolvedMcpConnectionIds)
+          : sessionMcpApprovalConnectionId(server.id, server.url);
       };
       return {
         prefix: prefixedMcpToolName(server.id, ""),
