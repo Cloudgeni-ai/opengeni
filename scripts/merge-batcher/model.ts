@@ -191,6 +191,8 @@ export interface FollowupPull {
 export type DurableEffect = EffectState &
   (
     | { kind: "rerun"; run: Run }
+    /** Priority-lane cancellation of an abandoned candidate's running Batch CI. */
+    | { kind: "cancel"; run: Run; batchId: string }
     | { kind: "comment"; number: number; body: string; marker: string }
     | { kind: "followup"; request: FollowupRequest }
     | { kind: "disable-auto-merge"; number: number; headSha: string; parkedAt: string }
@@ -882,6 +884,8 @@ export interface Observation {
   baseSha: string;
   ready: Pull[];
   excluded: { number: number; reason: string }[];
+  /** PR numbers with a trusted, timeline-backed queue-priority label. Ordering only. */
+  priority?: number[];
   candidates: Candidate[];
   stateSha: string | null;
   ledger: Ledger;

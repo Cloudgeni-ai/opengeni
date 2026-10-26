@@ -2934,3 +2934,97 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     ).rejects.toThrow("Shadow mode");
   });
 });
+
+describe("main-fix priority lane", () => {
+  const setup = async () => {
+    const f = await fixture();
+    const manifest = await f.publish();
+    const running = f.verdict(manifest);
+    Object.assign(running, { status: "in_progress", outcome: "unknown", completedAt: null });
+    const fixHead = await f.commit({ base: "base", fix: "fix" }, [f.base]);
+    await f.origin.exec(["update-ref", "refs/heads/fix", fixHead]);
+    const fix: Pull = { ...f.makePull(fixHead), number: 2, headRef: "fix" };
+    const control = { priority: [2] };
+    f.api.ready = async () => ({
+      ready: [...structuredClone(f.api.pulls), structuredClone(fix)],
+      excluded: [],
+      ...(control.priority.length ? { priority: control.priority } : {}),
+    });
+    const snapshot = f.api.pullSnapshot.bind(f.api);
+    f.api.pullSnapshot = async (number: number) =>
+      number === 2
+        ? {
+            ...(await snapshot(1)),
+            number: 2,
+            headSha: fixHead,
+            branchHeadSha: fixHead,
+            headRef: "fix",
+          }
+        : snapshot(number);
+    const cancels: string[] = [];
+    const original = f.api.transport;
+    Object.defineProperty(f.api, "transport", {
+      value: (async (url, init) => {
+        if (!String(url).endsWith("/cancel")) return original(url, init);
+        cancels.push(String(url));
+        return new Response("{}", { status: 202 });
+      }) as typeof fetch,
+    });
+    const cancelEffects = async () =>
+      Object.values((await f.state()).ledger.effects).filter((e) => e.kind === "cancel");
+    return { f, manifest, running, fix, control, cancels, cancelEffects };
+  };
+  test("a red base lets a priority fix abandon a running batch, cancel its Batch CI and run alone", async () => {
+    const x = await setup();
+    x.f.api.baseStatus = "green";
+    expect((await x.f.controller().step()).action.kind).not.toBe("abandon");
+    expect(await x.cancelEffects()).toEqual([]);
+
+    x.f.api.baseStatus = "red";
+    const abandoned = await x.f.controller().step();
+    expect(abandoned.action.kind).toBe("abandon");
+    const state = await x.f.state();
+    expect(state.ledger.invalidated).toContain(x.manifest.batchId);
+    expect(await x.cancelEffects()).toMatchObject([
+      { batchId: x.manifest.batchId, status: "pending", run: { id: 100, attempt: 1 } },
+    ]);
+
+    await x.f.executor().maintain();
+    expect(x.cancels).toEqual([
+      `https://api.github.com/repos/${x.f.cfg.repository}/actions/runs/100/cancel`,
+    ]);
+    expect((await x.cancelEffects())[0]?.status).toBe("done");
+    // The slot stays reserved until the provider reports the run terminal.
+    const reserved = await x.f.controller().step();
+    expect(reserved.action).toMatchObject({ kind: "build", publish: false });
+    Object.assign(x.running, { status: "completed", outcome: "cancelled", completedAt: NOW });
+    const published = await x.f.controller().step();
+    expect(published.action).toMatchObject({ kind: "build", publish: true });
+    expect(published.manifest?.pulls.map((p) => p.number)).toEqual([2]);
+    expect(published.manifest?.baseSha).toBe(x.f.base);
+    await x.f.executor().maintain();
+    expect(x.cancels).toHaveLength(1);
+  });
+  test("a cancel intent whose candidate is no longer abandoned is suppressed without a POST", async () => {
+    const x = await setup();
+    x.f.api.baseStatus = "red";
+    expect((await x.f.controller().step()).action.kind).toBe("abandon");
+    await x.f.seed((ledger) => {
+      ledger.invalidated = ledger.invalidated.filter((id) => id !== x.manifest.batchId);
+    });
+    expect(await x.f.executor().maintain()).toContain("obsolete priority cancellation suppressed");
+    expect(x.cancels).toEqual([]);
+    expect((await x.cancelEffects())[0]?.status).toBe("blocked");
+  });
+  test("only batcher-owned Batch CI runs can be cancelled", async () => {
+    const x = await setup();
+    const mutations = new GitHubMutations(x.f.api);
+    await expect(
+      mutations.cancel({ ...x.running, workflow: ".github/workflows/ci.yml" }),
+    ).rejects.toThrow("batcher-owned");
+    await expect(mutations.cancel({ ...x.running, branch: "main" })).rejects.toThrow(
+      "batcher-owned",
+    );
+    expect(x.cancels).toEqual([]);
+  });
+});
