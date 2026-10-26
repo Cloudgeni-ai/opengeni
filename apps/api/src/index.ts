@@ -19,7 +19,9 @@ import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  databasePasswordFileOptions,
   databasePoolOptions,
+  logDatabaseCredentialEvent,
   defaultDatabasePreparedStatements,
   eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
@@ -457,6 +459,11 @@ export async function startApi(
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
     ...databasePoolOptions(settings),
+    // Runtime login only: the files rotate this URL's password in place.
+    ...databasePasswordFileOptions(settings),
+    onCredentialEvent: logDatabaseCredentialEvent("api", (message, attributes) =>
+      observability.warn(message, attributes),
+    ),
   });
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   let workflowClient: Awaited<ReturnType<typeof createTemporalWorkflowClient>> | undefined;

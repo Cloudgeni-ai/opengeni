@@ -1220,6 +1220,85 @@ cutover with SQLSTATE `55000`; a lock timeout or guard failure rolls back the
 whole migration. After commit, never restart a pre-0197 image or attempt a
 mixed-version rolling rollback—remain in maintenance and fix forward.
 
+### Rotating the runtime database password
+
+PostgreSQL keeps one password per role, and every runtime pool keeps opening
+new connections (30 s idle timeout, 600 s maximum lifetime, growth under load).
+A password that is fixed in `OPENGENI_DATABASE_URL` at process start therefore
+fails every new connection with SQLSTATE `28P01` from the moment the role's
+password changes until each pod restarts. To rotate `opengeni_app` while pods
+keep serving, without restarting them, give the runtime its password through
+files instead:
+
+| Setting | Meaning |
+| --- | --- |
+| `OPENGENI_DATABASE_PASSWORD_FILE` | File with the current password. Missing or empty: the URL password. |
+| `OPENGENI_DATABASE_PREVIOUS_PASSWORD_FILE` | File with the previous password during a rotation. Missing or empty: none. |
+
+Both are optional. Unset, the runtime uses the URL password exactly as before.
+Each pool that logs in as the runtime role re-reads the files on every new
+connection (trailing newlines are ignored) and keeps the candidates
+`[previous, current]` (previous only when non-empty and different). It starts
+on the previous password, moves to the current one after a single `28P01` and
+then stays there. Only a change in the files' contents starts the order over.
+Logs and metrics never carry a password; the pools log only content-free
+events such as `switched database credential candidate` with candidate indexes.
+
+A query or transaction start refused with `28P01` is retried on the newly
+selected candidate, but only at the connection layer, only while another
+distinct candidate exists, and at most once per candidate. This is safe
+because PostgreSQL raises `28P01` only while authenticating a new connection,
+before any statement runs. With a single candidate (no previous password), a
+wrong password fails fast exactly as before. Session persistence, turn
+admission and the API add no retry of their own.
+
+This covers the API's application pool, its session-list LISTEN connection and
+the Better Auth (managed auth) pool; the worker's application, readiness and
+activity pools; and the `db:assert-runtime-posture`, session-content compaction
+and (when it falls back to the runtime URL) lifecycle backfill commands.
+Migration, role-provisioning and dedicated service logins (artifact
+materializer, outbox dispatcher) keep their own URLs.
+
+With Helm, set `runtimeDatabasePasswordFiles.enabled=true`. The api,
+worker-control and worker-turns pods then mount the optional keys
+`OPENGENI_DATABASE_PASSWORD` and `OPENGENI_DATABASE_PREVIOUS_PASSWORD` of the
+runtime Secret (or `runtimeDatabasePasswordFiles.secretName`) read-only at
+`/var/run/opengeni/database/password` and
+`/var/run/opengeni/database/previous-password`, and set both file settings.
+The volume is optional, so pods start and keep using the URL password while
+the keys are absent. It is a directory mount, because `subPath` mounts never
+receive kubelet's Secret updates. Because the pods also load the runtime
+Secret as environment variables, the two keys also appear as unused
+environment variables of the same names; the runtime ignores them.
+
+To rotate, in this order:
+
+1. Write `OPENGENI_DATABASE_PREVIOUS_PASSWORD` = the old password and
+   `OPENGENI_DATABASE_PASSWORD` = the new one into the runtime Secret. The
+   pools keep using the old password, which is still valid. Before step 2,
+   confirm that every api, worker-control and worker-turns pod sees both
+   files. kubelet refreshes them on its sync period plus its Secret cache TTL
+   (often one to two minutes), so check rather than wait a fixed time, without
+   printing the files: for example `kubectl exec <pod> -- test -s
+   /var/run/opengeni/database/previous-password` on each pod (when the image
+   has `test`), or a `reloaded database credential candidates` log line with
+   `candidates: 2` from each pod.
+2. In one step, with no release in between: run `ALTER ROLE opengeni_app
+   PASSWORD ...` with the new password, set `OPENGENI_APP_DATABASE_PASSWORD`
+   (role provisioning resets the role to it on every release), and set the
+   password in `OPENGENI_DATABASE_URL` to the new value (release jobs such as
+   `db:assert-runtime-posture` log in with the URL and mount no files). Update
+   every source those values are rebuilt from as well, such as CI secrets.
+   Running pods keep using the files, and each pool meets one `28P01` on its
+   next new connection and switches to the new password.
+3. Clear `OPENGENI_DATABASE_PREVIOUS_PASSWORD`.
+
+Change the role only after the files show both passwords. If the role changes
+first, new connections fail until the files catch up. Outside Kubernetes,
+where the files are written one at a time, write the previous file before the
+current one: the other order briefly leaves only the new password, and a
+single password fails fast.
+
 ### Pre-registration invitation cutover (0314)
 
 `0314_unregistered_organization_invitations.sql` is a drained application

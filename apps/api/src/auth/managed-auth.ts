@@ -7,8 +7,19 @@ import {
   type ManagedEmailMessage,
   type ManagedEmailTransport,
 } from "@opengeni/core";
-import type { Database } from "@opengeni/db";
-import { ensureManagedAccessForUser } from "@opengeni/db";
+import type {
+  Database,
+  DatabaseCredentialEventListener,
+  DatabasePasswordFiles,
+  RotatingDatabasePassword,
+} from "@opengeni/db";
+import {
+  databasePasswordFileOptions,
+  ensureManagedAccessForUser,
+  logDatabaseCredentialEvent,
+  rotatingDatabasePasswordFor,
+  withDatabaseAuthenticationRetry,
+} from "@opengeni/db";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanIdentityProjection,
@@ -20,7 +31,8 @@ import { betterAuth } from "better-auth";
 import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { sql } from "drizzle-orm";
-import { Pool, type PoolConfig } from "pg";
+import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { parse as parseConnectionString } from "pg-connection-string";
 
 import { TRUSTED_CLIENT_ADDRESS_HEADER } from "../http/request-source";
 import { decideCanonicalHumanSessionAdmission } from "./canonical-human-session-admission";
@@ -191,8 +203,30 @@ export const MANAGED_AUTH_DATABASE_POOL_OPTIONS = {
 export function createManagedAuthDatabasePool(
   databaseUrl: string,
   observability?: ManagedAuthPoolObservability,
+  passwordFiles?: DatabasePasswordFiles,
+  onCredentialEvent: DatabaseCredentialEventListener = logDatabaseCredentialEvent(
+    "managed-auth",
+    (message, attributes) => {
+      if (observability) observability.warn(message, attributes);
+      else console.warn(`[database] ${message}`, attributes);
+    },
+  ),
 ): Pool {
-  const pool = new Pool({ connectionString: databaseUrl, ...MANAGED_AUTH_DATABASE_POOL_OPTIONS });
+  const credential = rotatingDatabasePasswordFor(databaseUrl, passwordFiles, onCredentialEvent);
+  const pool = new Pool(
+    credential
+      ? {
+          ...MANAGED_AUTH_DATABASE_POOL_OPTIONS,
+          // `pg` lets a connectionString's password override a password
+          // function, so pass the parsed fields instead, merged the way `pg`
+          // merges them, with the file-backed password read on every new
+          // connection.
+          ...(parseConnectionString(databaseUrl) as unknown as PoolConfig),
+          password: () => credential.password(),
+        }
+      : { connectionString: databaseUrl, ...MANAGED_AUTH_DATABASE_POOL_OPTIONS },
+  );
+  if (credential) retryConnectAfterAuthenticationFailure(pool, credential);
   const checkedOut = new WeakSet<object>();
   pool.on("acquire", (client) => checkedOut.add(client));
   pool.on("release", (_error, client) => checkedOut.delete(client));
@@ -207,6 +241,41 @@ export function createManagedAuthDatabasePool(
   });
   pool.on("error", () => recordManagedAuthPoolError(observability, "idle_connection_discarded"));
   return pool;
+}
+
+/**
+ * Make the pool's checkouts (and so `pool.query`, which checks out through
+ * `connect`) try again after a 28P01 on the next password candidate, only
+ * while another distinct candidate exists. A 28P01 is raised only while a new
+ * connection authenticates, before any statement runs, so retrying a checkout
+ * cannot repeat work. At most one attempt per candidate; the last 28P01
+ * surfaces unchanged.
+ */
+function retryConnectAfterAuthenticationFailure(
+  pool: Pool,
+  credential: RotatingDatabasePassword,
+): void {
+  const connect = pool.connect.bind(pool) as () => Promise<PoolClient>;
+  const connectWithRetry = () => withDatabaseAuthenticationRetry(credential, () => connect());
+  type ConnectCallback = (
+    error: Error | undefined,
+    client: PoolClient | undefined,
+    done: (release?: unknown) => void,
+  ) => void;
+  pool.connect = ((callback?: ConnectCallback) => {
+    if (!callback) return connectWithRetry();
+    // Call back outside the promise chain, as pg does (process.nextTick): an
+    // exception thrown by the callback then surfaces as pg's would, instead of
+    // becoming an unhandled rejection.
+    connectWithRetry().then(
+      (client) =>
+        process.nextTick(() =>
+          callback(undefined, client, (release) => client.release(release as Error)),
+        ),
+      (error: Error) => process.nextTick(() => callback(error, undefined, () => undefined)),
+    );
+    return undefined;
+  }) as Pool["connect"];
 }
 
 export const MANAGED_AUTH_DATABASE_POOL_ERRORS_METRIC = {
@@ -249,7 +318,12 @@ export function createManagedAuth(
     ? createSignupFunnelMetrics(options.observability)
     : undefined;
   const requireEmailVerification = managedAuthRequiresEmailVerification(settings);
-  const pool = createManagedAuthDatabasePool(settings.databaseUrl, options.observability);
+  // Same login as the application pool, so the same password files apply.
+  const pool = createManagedAuthDatabasePool(
+    settings.databaseUrl,
+    options.observability,
+    databasePasswordFileOptions(settings).passwordFiles,
+  );
   // The deployment ceiling is static Better Auth configuration; the runtime
   // switch is checked per user create in the hook below.
   const newSignupsSocialProviderOptions = managedAuthSocialSignupOptions(settings);

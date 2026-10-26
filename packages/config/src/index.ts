@@ -333,6 +333,15 @@ const SettingsSchema = z.object({
   // Absent on dev/source builds — consumers must treat it as optional.
   serverVersion: z.string().optional(),
   databaseUrl: z.string().default("postgres://opengeni:opengeni@127.0.0.1:5432/opengeni"),
+  // Optional files holding the runtime login's password (the user in
+  // databaseUrl), read on every new connection so the password can be rotated
+  // without a restart. Unset → the URL password, exactly as before. A missing
+  // or empty current file also falls back to the URL password; a missing or
+  // empty previous file means no previous candidate. During a rotation the
+  // pools try previous first and switch to current after one rejected login.
+  // See docs/deployment.md ("Rotating the runtime database password").
+  databasePasswordFile: z.string().optional(),
+  databasePreviousPasswordFile: z.string().optional(),
   // LISTEN needs a session-pinned connection. Direct deployments reuse the
   // ordinary URL; transaction poolers supply this separate direct endpoint.
   databaseNotificationUrl: z.string().optional(),
@@ -5256,6 +5265,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       optional("GITHUB_SHA"),
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
+    databasePasswordFile: optional("OPENGENI_DATABASE_PASSWORD_FILE"),
+    databasePreviousPasswordFile: optional("OPENGENI_DATABASE_PREVIOUS_PASSWORD_FILE"),
     databaseNotificationUrl: optional("OPENGENI_DATABASE_NOTIFICATION_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
     databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),

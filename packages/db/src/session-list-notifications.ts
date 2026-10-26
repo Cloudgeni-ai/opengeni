@@ -1,5 +1,9 @@
 import postgres from "postgres";
 import { setTimeout as delay } from "node:timers/promises";
+import {
+  isDatabaseAuthenticationFailure,
+  type RotatingDatabasePassword,
+} from "./database-credentials";
 import { LOSSLESS_CONTENT_WRITER_APPLICATION_NAME } from "./lossless-json";
 
 export const SESSION_LIST_NOTIFICATION_CHANNEL = "opengeni_session_lists";
@@ -49,8 +53,14 @@ function parseChange(payload: string): SessionListDatabaseChange | null {
  */
 export function createSessionListChangeSource(
   databaseUrl: string,
-  options: { searchPath?: string; reconnectDelayMs?: number } = {},
+  options: {
+    searchPath?: string;
+    reconnectDelayMs?: number;
+    /** File-backed password for the same login (see `createDb`'s `passwordFiles`). */
+    credential?: RotatingDatabasePassword;
+  } = {},
 ): SessionListChangeSource {
+  const credential = options.credential;
   const listeners = new Set<(event: SessionListNotification) => void>();
   const stop = new AbortController();
   let loop: Promise<void> | undefined;
@@ -89,6 +99,9 @@ export function createSessionListChangeSource(
       prepare: false,
       idle_timeout: 0,
       max_lifetime: 0,
+      // Asked on every (re)connect: re-reads the files, so a rotated password
+      // applies to the next LISTEN.
+      ...(credential ? { pass: () => credential.password() } : {}),
       connection: {
         application_name: LOSSLESS_CONTENT_WRITER_APPLICATION_NAME,
         ...(options.searchPath ? { search_path: options.searchPath } : {}),
@@ -103,6 +116,7 @@ export function createSessionListChangeSource(
     driver = postgres(databaseUrl, connectionOptions);
     while (!stop.signal.aborted) {
       const observedGeneration = generation;
+      const observedCandidate = credential?.position();
       const lost = new Promise<void>((resolve) => {
         wake = resolve;
       });
@@ -118,8 +132,25 @@ export function createSessionListChangeSource(
         connected = true;
         emit({ type: "connected" });
         await lost;
-      } catch {
+      } catch (error) {
+        // A rejected password moves this connection to the next candidate;
+        // the reconnect below then tries it. Nothing ran on a refused login.
+        let switched = false;
+        if (
+          credential &&
+          observedCandidate !== undefined &&
+          isDatabaseAuthenticationFailure(error)
+        ) {
+          credential.reportAuthenticationFailure(observedCandidate);
+          const selected = credential.position();
+          switched =
+            selected.generation !== observedCandidate.generation ||
+            selected.index !== observedCandidate.index;
+        }
         disconnect();
+        // The next candidate is ready: try it at once rather than after the
+        // reconnect delay.
+        if (switched && !stop.signal.aborted) continue;
       }
       if (!stop.signal.aborted) {
         await delay(options.reconnectDelayMs ?? 1000, undefined, { signal: stop.signal }).catch(
