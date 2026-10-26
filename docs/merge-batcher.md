@@ -111,8 +111,10 @@ has finished and the parent explicitly gives the go-ahead.
 
 The accepted GitHub contract is **only the exact tested tree lands**, not
 “no PR head can change after the final HTTP read.” The adapter rechecks every
-head/readiness/evidence binding, source branch head, exact workflow result and
-main-CI headroom immediately before its atomic Git transaction. A last-moment
+head/readiness/evidence binding, source branch head and exact workflow result
+immediately before its atomic Git transaction. Only publication also rechecks
+runner headroom and the Batch slot there; a landing uses no runner and never
+waits for headroom. A last-moment
 PR update remains possible; no local lock or single replica eliminates it.
 
 One narrow head-refresh exception preserves a candidate when a queued PR only

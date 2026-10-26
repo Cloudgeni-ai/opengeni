@@ -1105,9 +1105,10 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     await expect(f.publish()).rejects.toThrow();
     expect((await f.state()).sha).toBe(f.initializedSha);
   });
-  test("blocking reader evidence prevents hosted publication, retry and landing", async () => {
+  test("blocking reader evidence prevents hosted publication and retry, never a tested landing", async () => {
     // This stub models incomplete/unknown evidence or an occupied Batch slot.
     // Valid numeric/main-capacity estimates are informational in the live reader.
+    // Landing uses no runner, so the same blocked evidence does not hold it.
     const f = await fixture();
     f.api.busy = true;
     const local = await f.controller().step();
@@ -1122,8 +1123,8 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
     expect(f.api.calls).toHaveLength(0);
     f.api.workflowRuns = [];
     f.verdict(m);
-    expect((await f.controller().step()).action.kind).toBe("wait");
-    expect(await f.origin.exec(["rev-parse", "main"])).toBe(f.base);
+    expect((await f.controller().step()).action.kind).toBe("land");
+    expect(await f.origin.exec(["rev-parse", "main"])).toBe(m.tipSha);
   });
   test.each(["publish", "retry", "land"] as const)(
     "live capacity observation permits %s while preserving executor checks",
