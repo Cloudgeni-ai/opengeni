@@ -30,7 +30,7 @@ function installedReleasePlanner(): (cwd: string) => Promise<ReleasePlan> {
 
 /** Returns an error message, or undefined when the pending release plan is valid. */
 export async function checkChangesetPlan(
-  options: { cwd?: string; output?: string } = {},
+  options: { cwd?: string | undefined; output?: string | undefined } = {},
 ): Promise<string | undefined> {
   let plan: ReleasePlan;
   try {
