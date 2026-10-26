@@ -1606,7 +1606,7 @@ describe("web API auth helpers", () => {
               },
             },
             { status },
-          )) as typeof fetch;
+          )) as unknown as typeof fetch;
         await expect(
           signUpEmail({
             name: "Human",
