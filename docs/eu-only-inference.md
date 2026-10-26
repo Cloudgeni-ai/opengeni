@@ -37,11 +37,15 @@ Rules:
   (`EU_AZURE_REGIONS`, `EU_AWS_REGIONS`). The United Kingdom is not in the EEA.
 - An `eu` claim must also fit its route (`modelResidencyRouteProblems`): a
   Bedrock upstream id with a non-EU inference profile prefix (`us.`,
-  `us-gov.`, `apac.`, `jp.`, `au.`, `ca.`, `global.`), a `bedrock_geo_profile`
-  whose id does not start with `eu.`, or an endpoint on a known global host
-  (`NON_EU_MODEL_HOSTS`, exact host match) is rejected when the configuration
-  is loaded, and counts as unknown wherever else it is resolved. Names only
-  ever reject a claim, never grant one.
+  `us-gov.`, `apac.`, `jp.`, `au.`, `ca.`, `global.`, any case), a
+  `bedrock_geo_profile` whose id does not start with `eu.`, or an endpoint on a
+  known global host (`NON_EU_MODEL_HOSTS`, exact host match ignoring a
+  trailing dot) is wrong. Every resolver, including built-in models, treats
+  such a claim as unknown. `OPENGENI_MODEL_PROVIDERS_JSON`,
+  `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` and the catalog upsert refuse it; a
+  stored database document is never refused for it, so a later release that
+  adds a host or prefix cannot take the catalog down. Names only ever reject a
+  claim, never grant one.
 - Operators declare residency only on deployment registry providers
   (`kind` `api-key` or `anonymous`), in `OPENGENI_MODEL_PROVIDERS_JSON` or the
   database catalog's `registryProviders`: `residency` on the provider applies to
@@ -53,12 +57,14 @@ Rules:
   claim (geography, deployment type and regions) for each model; evidence and
   dates come from the host, so re-verifying never needs a database change. A
   one-sided or different claim makes that provider's routes unknown (and logs
-  a warning) without failing the rest of the catalog. For `anonymous`
+  a warning once) without failing the rest of the catalog; the catalog upsert
+  refuses it. For `anonymous`
   providers the database document owns the endpoint and its residency.
 - Each built-in OpenAI or Azure model is its own deployment, so
   `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON` maps model ids to declarations
   (`{"gpt-eu": {...}}`). An undeclared built-in model uses the rule below, and
-  a key that is not a configured built-in model logs a warning at startup.
+  a key that is not a configured built-in model logs a warning at startup (in
+  code catalog mode, where the environment lists the built-in models).
 - Every other provider kind uses a code-owned rule with `built_in_rule`
   evidence and cannot declare its own: Codex, SuperGrok and Claude
   subscriptions, the Anthropic API, OpenAI API keys (`api.openai.com`), Vercel

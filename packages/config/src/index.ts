@@ -3524,22 +3524,6 @@ const RegistryProviderSchema = z
     models: z.array(RegistryModelSchema).min(1),
   })
   .superRefine((provider, ctx) => {
-    if (operatorDeclaresResidency(provider.kind)) {
-      provider.models.forEach((model, index) => {
-        const declared = model.residency ?? provider.residency;
-        if (!declared) return;
-        for (const problem of modelResidencyRouteProblems(declared, {
-          upstreamModelId: model.upstreamModelId ?? model.id,
-          baseUrl: provider.baseUrl,
-        })) {
-          ctx.addIssue({
-            code: "custom",
-            path: ["models", index, "residency"],
-            message: problem.message,
-          });
-        }
-      });
-    }
     if (!operatorDeclaresResidency(provider.kind)) {
       if (provider.residency !== undefined) {
         ctx.addIssue({
@@ -4029,6 +4013,95 @@ export function parseModelCatalogDocument(value: unknown): ModelCatalogDocument 
   return ModelCatalogDocument.parse(value);
 }
 
+type ResidencyDeclaringProvider = {
+  id: string;
+  kind: RegistryProviderKind | InternalRegistryProvider["kind"];
+  baseUrl?: string | undefined;
+  residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
+  models: readonly {
+    id: string;
+    upstreamModelId?: string | undefined;
+    residency?: z.output<typeof ModelResidencyDeclaration> | undefined;
+  }[];
+};
+
+/**
+ * EU claims an operator provider's own routes contradict (see
+ * `modelResidencyRouteProblems`), one message per model. Strict for the host
+ * environment and the catalog upsert; a stored database document is never
+ * refused for it, its routes become unknown instead.
+ */
+export function registryProviderResidencyRouteProblems(
+  provider: ResidencyDeclaringProvider,
+): string[] {
+  if (!operatorDeclaresResidency(provider.kind)) return [];
+  return provider.models.flatMap((model) => {
+    const declared = model.residency ?? provider.residency;
+    if (!declared) return [];
+    return modelResidencyRouteProblems(declared, {
+      upstreamModelId: model.upstreamModelId ?? model.id,
+      baseUrl: provider.baseUrl,
+    }).map((problem) => `${provider.id} model ${model.id}: ${problem.message}`);
+  });
+}
+
+function residencyClaimKey(
+  declaration: z.output<typeof ModelResidencyDeclaration> | undefined,
+): string | null {
+  return declaration ? canonicalJson(modelResidencyClaim(declaration)) : null;
+}
+
+/** Whether a database provider makes the same residency claim as its host transport, per model. */
+function databaseResidencyAgreesWithHost(
+  provider: ResidencyDeclaringProvider,
+  host: ResidencyDeclaringProvider,
+): boolean {
+  const hostModels = new Map(host.models.map((model) => [model.id, model]));
+  return provider.models.every(
+    (model) =>
+      residencyClaimKey(model.residency ?? provider.residency) ===
+      residencyClaimKey(hostModels.get(model.id)?.residency ?? host.residency),
+  );
+}
+
+function withoutResidency<T extends ResidencyDeclaringProvider>(provider: T): T {
+  const { residency: _residency, ...rest } = provider;
+  return {
+    ...rest,
+    models: provider.models.map(({ residency: _modelResidency, ...model }) => model),
+  } as unknown as T;
+}
+
+const warnedCatalogResidency = new Set<string>();
+
+function warnCatalogResidencyOnce(key: string, message: string): void {
+  if (warnedCatalogResidency.has(key)) return;
+  warnedCatalogResidency.add(key);
+  console.warn(message);
+}
+
+/**
+ * Residency problems the catalog upsert refuses: a database provider whose
+ * claim differs from its host transport, and EU claims the route contradicts.
+ * At runtime the same problems only make the affected routes unknown.
+ */
+export function modelCatalogResidencyProblems(settings: Settings, rawDocument: unknown): string[] {
+  const document = parseModelCatalogDocument(rawDocument);
+  const hostProviders = new Map(
+    parseModelProvidersJson(settings.modelProvidersJson).map((provider) => [provider.id, provider]),
+  );
+  return document.registryProviders.flatMap((provider) => {
+    const problems = registryProviderResidencyRouteProblems(provider);
+    const host = hostProviders.get(provider.id);
+    if (provider.kind === "api-key" && host && !databaseResidencyAgreesWithHost(provider, host)) {
+      problems.push(
+        `${provider.id}: the residency claim differs from its host-authorized transport (OPENGENI_MODEL_PROVIDERS_JSON)`,
+      );
+    }
+    return problems;
+  });
+}
+
 function deploymentRegistryProvidersWithHostCredentials(
   settings: Settings,
   providers: readonly z.infer<typeof DeploymentRegistryProviderSchema>[],
@@ -4037,7 +4110,17 @@ function deploymentRegistryProvidersWithHostCredentials(
     parseModelProvidersJson(settings.modelProvidersJson).map((provider) => [provider.id, provider]),
   );
   return providers.map((provider) => {
-    if (provider.kind !== "api-key") return provider;
+    if (provider.kind !== "api-key") {
+      // An anonymous database provider owns its endpoint and residency; an
+      // EU claim its route contradicts makes its routes unknown.
+      const problems = registryProviderResidencyRouteProblems(provider);
+      if (problems.length === 0) return provider;
+      warnCatalogResidencyOnce(
+        `route:${provider.id}:${canonicalJson(problems)}`,
+        `database model catalog provider ${provider.id} has residency claims its route contradicts; its routes are treated as unknown: ${problems.join("; ")}`,
+      );
+      return withoutResidency(provider);
+    }
     const host = hostProviders.get(provider.id);
     if (!host || host.kind !== "api-key") {
       throw new Error(
@@ -4062,15 +4145,12 @@ function deploymentRegistryProvidersWithHostCredentials(
     // A one-sided or different claim makes this provider's routes unknown, so
     // never EU, without failing the rest of the catalog.
     const hostModels = new Map(host.models.map((model) => [model.id, model]));
-    const residencyClaim = (declaration: z.output<typeof ModelResidencyDeclaration> | undefined) =>
-      declaration ? canonicalJson(modelResidencyClaim(declaration)) : null;
-    const residencyAgrees = provider.models.every(
-      (model) =>
-        residencyClaim(model.residency ?? provider.residency) ===
-        residencyClaim(hostModels.get(model.id)?.residency ?? host.residency),
-    );
+    const residencyAgrees = databaseResidencyAgreesWithHost(provider, host);
     if (!residencyAgrees) {
-      console.warn(
+      warnCatalogResidencyOnce(
+        `claim:${provider.id}:${canonicalJson(
+          provider.models.map((model) => residencyClaimKey(model.residency ?? provider.residency)),
+        )}`,
         `database model catalog provider ${provider.id} does not make the same residency claim as its host-authorized transport; its routes are treated as unknown`,
       );
     }
@@ -8236,6 +8316,25 @@ function builtinResidencyDeclarations(settings: Settings): ReadonlyMap<string, M
   return declarations;
 }
 
+/** The built-in provider's endpoint, for the residency route check. */
+function builtinResidencyBaseUrl(settings: Settings): string | undefined {
+  if (settings.openaiProvider === "azure") {
+    return settings.azureOpenaiBaseUrl ?? settings.azureOpenaiEndpoint;
+  }
+  return settings.openaiBaseUrl ?? "https://api.openai.com/v1";
+}
+
+function builtinResidencyRouteProblems(
+  settings: Settings,
+  modelId: string,
+  declared: Pick<ModelResidencyV1, "geography" | "deploymentType">,
+): string[] {
+  return modelResidencyRouteProblems(declared, {
+    upstreamModelId: modelId,
+    baseUrl: builtinResidencyBaseUrl(settings),
+  }).map((problem) => `${modelId}: ${problem.message}`);
+}
+
 /**
  * Where one built-in OpenAI or Azure model processes data. Each built-in model
  * is its own deployment (on Azure, with its own SKU), so the operator declares
@@ -8245,7 +8344,13 @@ function builtinResidencyDeclarations(settings: Settings): ReadonlyMap<string, M
  */
 export function builtinModelResidency(settings: Settings, modelId: string): ModelResidencyV1 {
   const declared = builtinResidencyDeclarations(settings).get(modelId);
-  if (declared) return declared;
+  if (declared) {
+    // The same route check as registry providers: an EU claim on
+    // api.openai.com, for example, is wrong and counts as unknown.
+    return builtinResidencyRouteProblems(settings, modelId, declared).length > 0
+      ? UNKNOWN_MODEL_RESIDENCY
+      : declared;
+  }
   if (settings.openaiProvider === "azure") {
     return builtInResidencyRule(
       "unknown",
@@ -10988,6 +11093,12 @@ export function parseModelProvidersJson(raw: string): RegistryProvider[] {
         `OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${result.error.message}`,
       );
     }
+    const residencyProblems = registryProviderResidencyRouteProblems(result.data);
+    if (residencyProblems.length > 0) {
+      throw new Error(
+        `OPENGENI_MODEL_PROVIDERS_JSON provider[${index}] is invalid: ${residencyProblems.join("; ")}`,
+      );
+    }
     try {
       return normalizeRegistryProvider(result.data);
     } catch (error) {
@@ -11855,9 +11966,22 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
   if (settings.builtinModelResidencyJson !== undefined) {
     const declared = parseBuiltinModelResidencyJson(settings.builtinModelResidencyJson);
+    const routeProblems = Object.entries(declared).flatMap(([modelId, declaration]) =>
+      builtinResidencyRouteProblems(settings, modelId, declaration),
+    );
+    if (routeProblems.length > 0) {
+      throw new Error(
+        `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON is invalid: ${routeProblems.join("; ")}`,
+      );
+    }
     // A misspelled key would leave the intended model unknown without a sign.
+    // In database catalog mode the document lists the built-in models, so the
+    // environment's list proves nothing.
     const builtinIds = new Set([settings.openaiModel, ...splitCsv(settings.openaiAllowedModels)]);
-    const unmatched = Object.keys(declared).filter((modelId) => !builtinIds.has(modelId));
+    const unmatched =
+      settings.modelCatalogSource === "database"
+        ? []
+        : Object.keys(declared).filter((modelId) => !builtinIds.has(modelId));
     if (unmatched.length > 0) {
       console.warn(
         `OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON declares models that are not configured built-in models: ${unmatched.join(", ")}`,

@@ -12,6 +12,7 @@ import {
   getSettings,
   parseModelCatalogDocument,
   parseModelProvidersJson,
+  modelCatalogResidencyProblems,
   registryModelResidency,
   withCodexCatalogProvider,
 } from "../src";
@@ -318,7 +319,9 @@ describe("model residency", () => {
     try {
       withEnv(
         {
-          OPENGENI_OPENAI_API_KEY: "sk-test",
+          OPENGENI_OPENAI_PROVIDER: "azure",
+          OPENGENI_AZURE_OPENAI_BASE_URL: "https://res.openai.azure.com/openai/v1",
+          OPENGENI_AZURE_OPENAI_API_KEY: "az-key",
           OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON: JSON.stringify({ "gpt-typo": euDataZone }),
         },
         () => getSettings(),
@@ -327,6 +330,109 @@ describe("model residency", () => {
       console.warn = warn;
     }
     expect(warnings.some((message) => message.includes("gpt-typo"))).toBe(true);
+  });
+
+  test("a built-in EU claim on a global host is unknown and refused at startup", () => {
+    const providerDefault = { ...euDataZone, deploymentType: "provider_default", regions: [] };
+    const env = (extra: NodeJS.ProcessEnv) => ({
+      OPENGENI_OPENAI_API_KEY: "sk-test",
+      OPENGENI_OPENAI_MODEL: "gpt-5",
+      OPENGENI_BUILTIN_MODEL_RESIDENCY_JSON: JSON.stringify({ "gpt-5": providerDefault }),
+      ...extra,
+    });
+    for (const extra of [{}, { OPENGENI_OPENAI_BASE_URL: "https://api.openai.com/v1" }]) {
+      expect(() => withEnv(env(extra), () => getSettings())).toThrow(/routes outside the EU/u);
+      // The resolver applies the same check to settings that skipped validation.
+      const settings = withEnv(
+        { OPENGENI_OPENAI_API_KEY: "sk-test", OPENGENI_OPENAI_MODEL: "gpt-5", ...extra },
+        () => getSettings(),
+      );
+      expect(
+        isEuResidency(
+          builtinModelResidency(
+            {
+              ...settings,
+              builtinModelResidencyJson: JSON.stringify({ "gpt-5": providerDefault }),
+            },
+            "gpt-5",
+          ),
+        ),
+      ).toBe(false);
+    }
+    // A distinct EU endpoint is not a global host.
+    const eu = withEnv(env({ OPENGENI_OPENAI_BASE_URL: "https://eu.api.openai.com/v1" }), () =>
+      getSettings(),
+    );
+    expect(isEuResidency(builtinModelResidency(eu, "gpt-5"))).toBe(true);
+  });
+
+  test("name checks ignore case and a trailing dot", () => {
+    const providerDefault = {
+      ...euDataZone,
+      deploymentType: "provider_default",
+      regions: [],
+    } as const;
+    expect(
+      isEuResidency(
+        registryModelResidency(
+          { kind: "api-key", residency: providerDefault, baseUrl: "https://openrouter.ai./api/v1" },
+          { upstreamModelId: "model" },
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      isEuResidency(
+        registryModelResidency(
+          {
+            kind: "api-key",
+            residency: {
+              ...euDataZone,
+              deploymentType: "bedrock_regional",
+              regions: ["eu-central-1"],
+            },
+          },
+          { upstreamModelId: "US.anthropic.claude-sonnet" },
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  test("a stored catalog with a contradicted claim loads as unknown; the upsert refuses it", () => {
+    const providerDefault = { ...euDataZone, deploymentType: "provider_default", regions: [] };
+    const document = {
+      schemaVersion: 1,
+      defaultModel: "router/model",
+      builtInModels: [],
+      registryProviders: [
+        {
+          id: "router",
+          kind: "anonymous",
+          api: "chat",
+          baseUrl: "https://openrouter.ai/api/v1",
+          residency: providerDefault,
+          models: [{ id: "router/model", upstreamModelId: "model" }],
+        },
+      ],
+    };
+    const host = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
+    expect(() => parseModelCatalogDocument(document)).not.toThrow();
+    const warnings: string[] = [];
+    const warn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      const applied = applyModelCatalogDocument(host, document);
+      applyModelCatalogDocument(host, document);
+      expect(
+        configuredModels(applied).find((model) => model.id === "router/model")?.residency,
+      ).toEqual(UNKNOWN_MODEL_RESIDENCY);
+    } finally {
+      console.warn = warn;
+    }
+    // Warned once, not on every resolve.
+    expect(warnings.filter((message) => message.includes("router")).length).toBe(1);
+    expect(modelCatalogResidencyProblems(host, document).join(" ")).toMatch(
+      /routes outside the EU/u,
+    );
   });
 
   test("non-operator provider kinds cannot declare their own residency", () => {

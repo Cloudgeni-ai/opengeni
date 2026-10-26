@@ -198,7 +198,8 @@ export const NON_EU_MODEL_HOSTS: readonly string[] = Object.freeze([
 
 function hostOf(baseUrl: string): string | null {
   try {
-    return new URL(baseUrl).hostname.toLowerCase();
+    // A trailing dot names the same host (openrouter.ai. is openrouter.ai).
+    return new URL(baseUrl).hostname.toLowerCase().replace(/\.+$/u, "");
   } catch {
     return null;
   }
@@ -216,7 +217,8 @@ export function modelResidencyRouteProblems(
 ): { path: string[]; message: string }[] {
   if (residency.geography !== "eu") return [];
   const problems: { path: string[]; message: string }[] = [];
-  const upstreamModelId = route.upstreamModelId ?? "";
+  // Profile prefixes compare case-insensitively (US.anthropic... is us.).
+  const upstreamModelId = (route.upstreamModelId ?? "").toLowerCase();
   if (residency.deploymentType.startsWith("bedrock_")) {
     const prefix = NON_EU_BEDROCK_PROFILE_PREFIXES.find((candidate) =>
       upstreamModelId.startsWith(candidate),
