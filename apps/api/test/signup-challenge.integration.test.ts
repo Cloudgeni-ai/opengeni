@@ -178,6 +178,50 @@ test("email and OAuth creation require a single-use challenge, including direct 
   }
 }, 120_000);
 
+test("passwordless negative probes cannot create an account or send email when challenge is disabled", async () => {
+  if (!shared || !client) return;
+  const settings = testSettings({
+    databaseUrl: shared.appUrl,
+    productAccessMode: "managed",
+    publicBaseUrl: "http://opengeni.test",
+    betterAuthSecret: "signup-challenge-disabled-test-secret-32-bytes",
+    signupChallengeEnabled: false,
+  });
+  let delivered = 0;
+  const transport = {
+    sender: "auth@example.test",
+    idempotency: { scope: "test:captcha-disabled", retentionSeconds: 86400 },
+    send: async () => {
+      delivered += 1;
+      return { status: "sent" as const, providerMessageId: null };
+    },
+  };
+  const auth = createManagedAuth(settings, client.db, transport)!;
+  const app = createApp({
+    settings,
+    db: client.db,
+    managedAuth: auth,
+    managedEmailTransport: transport,
+    bus: new MemoryEventBus(),
+    workflowClient: {} as never,
+  });
+  const email = `turnstile-negative-${crypto.randomUUID()}@example.invalid`;
+  for (const signupChallengeToken of [undefined, "invalid-negative-probe"]) {
+    const response = await app.request("/v1/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://opengeni.test" },
+      body: JSON.stringify({ name: "Negative verification probe", email, signupChallengeToken }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "VALIDATION_ERROR" });
+  }
+  const rows = await shared.admin<
+    { n: number }[]
+  >`select count(*)::int n from auth_users where email = ${email}`;
+  expect(rows[0]!.n).toBe(0);
+  expect(delivered).toBe(0);
+}, 120_000);
+
 test("broker OAuth persists the pass in server state and replays without consuming CAPTCHA twice", async () => {
   if (!shared || !client) return;
   const {
