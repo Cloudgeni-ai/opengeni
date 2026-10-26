@@ -15,6 +15,7 @@ import {
   RecordingTranscriptionError,
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
+  withoutMicrophoneEchoes,
   type RecordingDiarizerResult,
   type RecordingDiarizer,
   type RecordingAlignedWords,
@@ -730,7 +731,9 @@ export function createRecordingActivities(
             words: shiftWords(words, offsetMilliseconds),
           });
         }
-        const segments = buildRecordingSegments(trackWords);
+        const segments = buildRecordingSegments(
+          withoutMicrophoneEchoes(trackWords, job.recording.tracks),
+        );
         const voices: RecordingSpeakerVoice[] = [];
         if (recognizeVoices) {
           const labels = recordingSpeakerLabels(trackWords);
