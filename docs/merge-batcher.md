@@ -561,10 +561,9 @@ The cheap source contracts are the shared pending-changeset release plan
 ignored/not-ignored changeset or an ignored-only plan fails the PR), the committed
 Site runtime check, the committed workflow execution graph (otherwise only a unit
 test that workflow-changing PRs defer to Batch), and the impact plan's guards
-except lint (its own step),
-`subscription-contract` (about 20 seconds) and the output-producing guards Batch
-also defers. A broken changeset or stale public API snapshot therefore fails its
-own PR instead of a batch of up to 15.
+except lint (its own step), `subscription-contract` (about 20 seconds) and the
+output-producing guards Batch also defers. A broken changeset or stale public API
+snapshot therefore fails its own PR instead of a batch of up to 15.
 Changed unit files are prioritized, then paths are ordered deterministically.
 Broad workflow/root/toolchain impact explicitly selects no admission units and
 defers full coverage to Batch CI. Release-note `.changeset/` files alone do not
