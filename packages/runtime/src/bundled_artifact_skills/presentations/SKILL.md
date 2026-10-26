@@ -49,15 +49,15 @@ in your context lists that format), so do not load artifact tools just to check:
    (`slide_layouts[6]`) with your own text boxes, 12.1 in wide at 0.6 in from
    the left, word wrap on. Text fits without a render when the title is one
    line of at most 45 characters at 36 pt and the body is at most six lines of
-   at most 60 characters at 24 pt; put the talking points in speaker notes.
+   at most 60 characters at 28 pt; put the talking points in speaker notes.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
 3. Read the result back to check the content: each slide's text and notes, and
    that no shape extends past the slide. Render only when the user asks how it
    looks or the deck depends on hand-placed images or charts:
    `apt-get install -y --no-install-recommends libreoffice-impress
-   poppler-utils` (about a minute), `soffice --headless --convert-to pdf`, then
-   `pdftoppm -png -r 50`.
+   fonts-crosextra-carlito poppler-utils` (about a minute), `soffice --headless
+   --convert-to pdf`, then `pdftoppm -png -r 50`.
 4. Publish the file with `sandbox_file_publish` and reply with a short summary
    and its link. If that tool is not loaded yet, load it with `tool_search` in
    the same batch as your first command. Do not also build a native artifact of

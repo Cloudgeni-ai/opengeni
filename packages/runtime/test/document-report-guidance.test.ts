@@ -107,7 +107,7 @@ test("Office file Skills give the managed-sandbox fast path without probing", as
   // layout with its own boxes and a fit rule instead of a render.
   expect(presentations).toContain("build every slide on the blank layout (`slide_layouts[6]`)");
   expect(presentations).toContain(
-    "the title is one line of at most 45 characters at 36 pt and the body is at most six lines of at most 60 characters at 24 pt",
+    "the title is one line of at most 45 characters at 36 pt and the body is at most six lines of at most 60 characters at 28 pt",
   );
   for (const text of [documents, presentations]) {
     expect(text).toContain("a sent or requested file (below) does not need it.");
