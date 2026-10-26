@@ -72,10 +72,16 @@ fn running_native_client_path() -> Option<PathBuf> {
 /// Connected Machine link carrying it. The control plane cannot safely infer
 /// this route: one runner may serve several deployments, while `localhost` has
 /// a different meaning on each host.
+///
+/// Only the origin comes from the link. The workspace stays the one the
+/// control plane addressed, because the attempt's token is minted for the
+/// chat's workspace: a personal machine serves its owner in every workspace
+/// they use, so that can differ from the workspace that enrolled the machine.
+/// The link's workspace is the fallback when the request names none.
 pub fn bind_connection_origin(
     request: &mut ControlRequest,
     api_base_url: &str,
-    workspace_id: &str,
+    link_workspace_id: &str,
 ) {
     let Some(exec) = request_exec_mut(request) else {
         return;
@@ -89,11 +95,34 @@ pub fn bind_connection_origin(
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return;
     }
+    let workspace_id = exec
+        .env
+        .get(URL_ENV)
+        .and_then(|requested| requested_workspace_id(requested))
+        .unwrap_or_else(|| link_workspace_id.to_string());
     let prefix = url.path().trim_end_matches('/');
     url.set_path(&format!("{prefix}/v1/workspaces/{workspace_id}/codemode"));
     url.set_query(None);
     url.set_fragment(None);
     exec.env.insert(URL_ENV.to_string(), url.to_string());
+}
+
+/// The workspace in a control-plane Codemode URL (`…/workspaces/<id>/codemode`).
+fn requested_workspace_id(requested: &str) -> Option<String> {
+    let url = Url::parse(requested).ok()?;
+    let segments: Vec<&str> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let [.., workspaces, workspace_id, codemode] = segments.as_slice() else {
+        return None;
+    };
+    let valid = *workspaces == "workspaces"
+        && *codemode == "codemode"
+        && workspace_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    valid.then(|| (*workspace_id).to_string())
 }
 
 fn request_exec_mut(request: &mut ControlRequest) -> Option<&mut ExecRequest> {
@@ -2065,6 +2094,60 @@ mod tests {
             exec.env.get(URL_ENV).map(String::as_str),
             Some("https://machine.example.test/opengeni/v1/workspaces/workspace-1/codemode")
         );
+    }
+
+    fn bind_on_link(requested_url: &str) -> Option<String> {
+        let mut exec = ExecRequest::default();
+        exec.env
+            .insert(TOKEN_ENV.to_string(), "attempt-secret".to_string());
+        exec.env
+            .insert(URL_ENV.to_string(), requested_url.to_string());
+        let mut request = ControlRequest {
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(exec)),
+                ..v1::OpStart::default()
+            })),
+            ..ControlRequest::default()
+        };
+        bind_connection_origin(
+            &mut request,
+            "https://machine.example.test/opengeni",
+            "home-workspace",
+        );
+        let Some(v1::control_request::Op::OpStart(start)) = request.op else {
+            panic!("op start request");
+        };
+        let Some(v1::op_start::Op::Exec(exec)) = start.op else {
+            panic!("streamed exec request");
+        };
+        exec.env.get(URL_ENV).cloned()
+    }
+
+    #[test]
+    fn personal_machine_keeps_the_chat_workspace_the_token_was_minted_for() {
+        // A personal machine enrolled in its owner's home workspace, used from
+        // a chat in another workspace: only the origin follows the link.
+        assert_eq!(
+            bind_on_link("https://public.example.test/v1/workspaces/chat-workspace/codemode")
+                .as_deref(),
+            Some("https://machine.example.test/opengeni/v1/workspaces/chat-workspace/codemode")
+        );
+    }
+
+    #[test]
+    fn unrecognised_codemode_routes_fall_back_to_the_link_workspace() {
+        for requested in [
+            "https://public.example.test/custom/codemode",
+            "https://public.example.test/v1/workspaces/a%2Fb/codemode",
+            "https://public.example.test/v1/workspaces/chat-workspace/mcp",
+            "not a url",
+        ] {
+            assert_eq!(
+                bind_on_link(requested).as_deref(),
+                Some("https://machine.example.test/opengeni/v1/workspaces/home-workspace/codemode"),
+                "{requested}"
+            );
+        }
     }
 
     #[tokio::test]

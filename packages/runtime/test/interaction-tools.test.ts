@@ -1958,7 +1958,7 @@ describe("interaction attempt tools", () => {
       { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
     );
     expect((result.structuredContent as { error: { message: string } }).error.message).toBe(
-      `API 404: BrowserSession not found. ${browserSessionId} was listed as open in this chat a moment ago, so it may have just ended or restarted. This chat's open BrowserSessions, most recently used first: ${other.id} "Other". Use one of these ids, or omit browserSessionId to use the one you used last.`,
+      `API 404: BrowserSession not found. ${browserSessionId} was listed as open in this chat a moment ago, so it may have just ended. This chat's open BrowserSessions, most recently used first: ${other.id} "Other". Use one of these ids, or omit browserSessionId to use the one you used last.`,
     );
   });
 
@@ -2049,6 +2049,74 @@ describe("interaction attempt tools", () => {
     expect(message).toBe(
       `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${open.id} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
     );
+  });
+
+  describe("a computerSessionId near an open one", () => {
+    const openId = "44867760-0b48-4b43-aa93-91eb19c94f64";
+    const observeWith = async (
+      sentId: string,
+      open: ReadonlyArray<{ id: string; name: string; lastUsedAt?: string }>,
+    ) => {
+      const sessions = open.map((entry) => {
+        const computer = discoveredComputerSession(entry.id, sessionId);
+        computer.lifecycle = "active";
+        computer.name = entry.name;
+        if (entry.lastUsedAt) computer.lastUsedAt = entry.lastUsedAt;
+        return computer;
+      });
+      const definitions = createInteractionAttemptToolDefinitions({
+        transport: partialTransport({
+          listComputerSessions: async () => ({ revision: 1, sessions }) as never,
+          observeComputerTarget: async () => {
+            throw new OpenGeniApiError(404, "ComputerSession not found");
+          },
+          captureComputerTarget: async () => {
+            throw new OpenGeniApiError(404, "ComputerSession not found");
+          },
+        }),
+        workspaceId,
+        sessionId,
+        selectedTools: ["computer_observe"],
+        permissions: ["sessions:read"],
+      });
+      const result = await definitions[0]!.execute(
+        { computerSessionId: sentId, targetId: "window-1" },
+        { operationId: randomUUID(), caller: { kind: "model", subjectId: "model:test" } },
+      );
+      return (result.structuredContent as { error: { message: string } }).error.message;
+    };
+
+    test("is named as not that session", async () => {
+      const sent = "44867760-0b48-4b43-aa93-91eb19c94f65";
+      expect(await observeWith(sent, [{ id: openId, name: "Desktop" }])).toBe(
+        `API 404: ComputerSession not found. The computerSessionId you sent, ${sent}, is not ${openId}: they differ in 1 character. This chat's open ComputerSessions, most recently used first: ${openId} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("is named up to 8 differing characters, not at 9", async () => {
+      const eight = "44867760-0b48-4b43-aa93-91eb00000000";
+      const nine = "44867760-0b48-4b43-aa93-91e000000000";
+      expect(await observeWith(eight, [{ id: openId, name: "Desktop" }])).toContain(
+        `The computerSessionId you sent, ${eight}, is not ${openId}: they differ in 8 characters.`,
+      );
+      expect(await observeWith(nine, [{ id: openId, name: "Desktop" }])).toBe(
+        `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${openId} "Desktop". Use one of these ids, or omit computerSessionId to use the one you used last.`,
+      );
+    });
+
+    test("names the closest of two near sessions", async () => {
+      // Three characters off the sent id's target, and listed first.
+      const fartherId = "44867760-0b48-4b43-aa93-91eb19c94000";
+      const sent = "44867760-0b48-4b43-aa93-91eb19c94f6a";
+      const message = await observeWith(sent, [
+        { id: fartherId, name: "Newer", lastUsedAt: new Date().toISOString() },
+        { id: openId, name: "Older", lastUsedAt: new Date(Date.now() - 60_000).toISOString() },
+      ]);
+      expect(message).toContain(
+        `The computerSessionId you sent, ${sent}, is not ${openId}: they differ in 1 character.`,
+      );
+      expect(message).not.toContain(`is not ${fartherId}`);
+    });
   });
 
   describe("tools that name a session directly give the same hint", () => {
@@ -2176,6 +2244,46 @@ describe("interaction attempt tools", () => {
       expect(message).toBe(
         `API 404: ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${computer.id} "Lab: BrowserSession not found". Use one of these ids.`,
       );
+    });
+
+    test("browser_open naming a missing linked computer is answered from the API's own refusal", async () => {
+      const browser = openBrowser();
+      const computer = openComputer();
+      // The body the API sends when the linked ComputerSession does not exist.
+      const linkedMissing = () =>
+        new OpenGeniApiError(
+          404,
+          JSON.stringify({
+            error: {
+              status: 404,
+              code: "not_found",
+              message: "Linked ComputerSession not found",
+              retryable: false,
+              requestId: "request-1",
+            },
+          }),
+        );
+      for (const args of [
+        { linkedComputerSessionId: randomUUID() },
+        { browserSessionId: browser.id, linkedComputerSessionId: randomUUID() },
+      ]) {
+        const message = await run("browser_open", args, {
+          listBrowserSessions: async () => ({ revision: 1, sessions: [browser] }) as never,
+          listComputerSessions: async () => ({ revision: 1, sessions: [computer] }) as never,
+          getBrowserSession: async () => {
+            throw linkedMissing();
+          },
+          createBrowserSession: async () => {
+            throw linkedMissing();
+          },
+          openBrowserSession: async () => {
+            throw linkedMissing();
+          },
+        });
+        expect(message).toBe(
+          `API 404: Linked ComputerSession not found. This chat's open ComputerSessions, most recently used first: ${computer.id} "Desktop". Use one of these ids. Reference: request-1.`,
+        );
+      }
     });
 
     test("a missing session is recognised from the API's JSON refusal, flat or nested", async () => {

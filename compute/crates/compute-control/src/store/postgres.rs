@@ -6,11 +6,12 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr as _;
+use std::time::Duration;
 
 use compute_fleet::{AnsweredAt, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends};
 use compute_protocol::fleet::{Capacity, HostInfo, Register, Renew, Report, Ruling};
 use compute_protocol::host::{Id, ImageId};
-use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod};
+use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use serde_json::Value;
 use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
@@ -21,8 +22,11 @@ use super::{
 };
 use crate::e2b::lifecycle::Record;
 
+mod connect;
 mod images;
 mod schema;
+
+use connect::{OPEN_WITHIN, bounded};
 
 /// The advisory lock the leader holds for as long as its connection lives.
 const LEADER_LOCK: i64 = 7_231_402;
@@ -286,6 +290,10 @@ impl PostgresStore {
     /// caller that adds what a connection string cannot carry safely, such
     /// as a password from a secret.
     ///
+    /// Connections are bounded against a network that drops them (see
+    /// the `connect` module). Waiting for a free pooled connection is not:
+    /// each connection in use is itself bounded.
+    ///
     /// # Errors
     ///
     /// When the database cannot be reached or its schema not brought up
@@ -295,6 +303,20 @@ impl PostgresStore {
         tls: Option<rustls::ClientConfig>,
         connections: usize,
     ) -> Result<Self> {
+        let store = Self::pooled(config, tls, connections, OPEN_WITHIN)?;
+        schema::migrate(&mut store.client().await?).await?;
+        Ok(store)
+    }
+
+    /// A store over a pool of up to `connections` to `config`'s database,
+    /// each opened within `open_within`, without touching the database.
+    fn pooled(
+        config: tokio_postgres::Config,
+        tls: Option<rustls::ClientConfig>,
+        connections: usize,
+        open_within: Duration,
+    ) -> Result<Self> {
+        let config = bounded(config);
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Fast,
         };
@@ -308,11 +330,11 @@ impl PostgresStore {
         };
         let pool = Pool::builder(manager)
             .max_size(connections)
+            .runtime(Runtime::Tokio1)
+            .create_timeout(Some(open_within))
             .build()
             .map_err(database)?;
-        let store = Self { pool };
-        schema::migrate(&mut store.client().await?).await?;
-        Ok(store)
+        Ok(Self { pool })
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Object> {

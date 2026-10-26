@@ -29,6 +29,7 @@ import { Input } from "../../../ui/input";
 import { Notice } from "../../../ui/notice";
 import { MENU_LABEL_CLASS, MENU_NOTE_CLASS, MENU_SEPARATOR_CLASS } from "../../../ui/menu-styles";
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
+import { machineNameTwinLabel } from "../../../sandbox-label-model";
 import {
   rememberedMachineFolder,
   workspaceDefaultRigOptionLabel,
@@ -326,7 +327,9 @@ export function RunsOnMenuBody(
                 disabled={props.disabled || !isMachineComputeSelectable(machine.state)}
                 icon={machine.os === "macos" ? <LaptopIcon /> : <ServerIcon />}
                 label={machine.name}
-                meta={machineStateMeta(machine)}
+                meta={[machineNameTwinLabel(t, machine, props.machines), machineStateMeta(machine)]
+                  .filter(Boolean)
+                  .join(" · ")}
                 onSelect={() => selectMachine(machine)}
               />
             ))}

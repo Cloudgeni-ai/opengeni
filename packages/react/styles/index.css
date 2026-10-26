@@ -517,6 +517,22 @@
   animation: var(--animate-og-markdown-settle);
 }
 
+/* Math (KaTeX) in message bodies: a display equation wider than the message scrolls
+   on its own instead of widening the bubble; inline math follows the text size. */
+.og-markdown-body .katex {
+  font-size: 1.08em;
+}
+.og-markdown-body .katex-display {
+  margin: 0.75em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25em 0;
+}
+.og-markdown-body .katex-error {
+  font-family: var(--og-font-mono, ui-monospace, monospace);
+  font-size: 0.9em;
+}
+
 /* Markdown crystallize no longer uses View Transitions — styling `*` faded the
    document root and read as a full-page blink at stream end. Local
    `.og-markdown-settle` on the body is enough. */

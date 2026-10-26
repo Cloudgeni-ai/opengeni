@@ -120,6 +120,10 @@ const errorCodes: Record<string, ComputerBackendErrorCode> = {
   // a bubble or popover attached to the window, which takes accessibility
   // actions only.
   element_in_attached_window: "invalid_action",
+  // Pointer or key input refused before anything was sent: the element is an
+  // item of a menu the app has open over the window, which takes
+  // accessibility actions only.
+  element_in_open_menu: "invalid_action",
   // A value write the control did not apply: it holds what it held before
   // (macOS set_value, effect not_applied).
   write_not_applied: "driver_failed",

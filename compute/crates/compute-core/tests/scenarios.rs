@@ -305,6 +305,94 @@ fn touch_cancels_a_sleep_step_in_flight() {
 }
 
 #[test]
+fn an_idle_pause_declined_while_a_command_runs_leaves_a_let_go_balloon_alone() {
+    let mut rig = Rig::new(HostPolicy::default());
+    let id = SandboxId(1);
+    let actions = rig.add(1, State::RUNNING, recommended());
+    let [
+        Action::Balloon {
+            bytes: 0, request, ..
+        },
+    ] = actions[..]
+    else {
+        panic!("{actions:?}");
+    };
+    assert_eq!(
+        rig.send(Input::BalloonSet {
+            sandbox: id,
+            request
+        }),
+        []
+    );
+    // A command runs on in the background: each time the sandbox has been
+    // idle long enough, its guest declines the pause before it begins and
+    // counts as busy. Its balloon, let go already, is not set again.
+    for round in 1..=3 {
+        let (step, op) = only_start(&rig.tick_at_deadline());
+        assert_eq!(step, Step::Pause);
+        assert_eq!(rig.now, At::from_duration(secs(10 * round)));
+        let mut actions = Vec::new();
+        rig.host.handle_all(
+            rig.now,
+            [
+                Input::Finished {
+                    sandbox: id,
+                    op,
+                    outcome: Outcome::Cancelled,
+                    wrote: false,
+                },
+                Input::Busy { sandbox: id },
+            ],
+            &mut actions,
+        );
+        assert_eq!(actions, [], "round {round}");
+        assert_eq!(rig.state(1), State::RUNNING);
+    }
+    // Once the command ends, the next idle period pauses it as usual.
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Pause);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1).level, Level::Paused);
+    // Woken, the same VM's balloon is still known let go.
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Resume);
+    assert_eq!(
+        rig.finish(1, op, Outcome::Done),
+        [Action::Notify {
+            sandbox: id,
+            notice: Notice::State(State::RUNNING),
+        }]
+    );
+}
+
+#[test]
+fn a_pause_that_began_while_a_balloon_was_set_has_it_let_go_again() {
+    let mut rig = Rig::new(HostPolicy::default());
+    rig.add(1, State::RUNNING, recommended());
+    // The balloon setting asked when the VM was found is not confirmed:
+    // the pause may or may not have let it go, so it is asked again.
+    let (step, op) = only_start(&rig.tick_at_deadline());
+    assert_eq!(step, Step::Pause);
+    let actions = rig.send(Input::Finished {
+        sandbox: SandboxId(1),
+        op,
+        outcome: Outcome::Cancelled,
+        wrote: false,
+    });
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            Action::Balloon {
+                sandbox: SandboxId(1),
+                bytes: 0,
+                ..
+            }
+        )),
+        "{actions:?}"
+    );
+}
+
+#[test]
 fn a_wake_during_a_safety_copy_cancels_it_and_resumes() {
     let mut rig = Rig::new(HostPolicy::default());
     rig.add(1, paused(Durability::Local), recommended());
