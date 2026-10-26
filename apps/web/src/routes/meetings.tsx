@@ -6,6 +6,7 @@ import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
 import { MeetingDetailPage, MeetingsListPage } from "@opengeni/react/meetings";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
+import { meetingViewerName } from "../components/meetings/viewer-name";
 
 /** The detail page draws its own 960px frame, back link and padding. */
 const PAGE_FRAME = "max-w-none px-0 py-0 pb-0 sm:px-0 lg:px-0";
@@ -16,7 +17,8 @@ function meetingPath(workspaceId: string, recordingId: string): string {
 
 export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
   const navigate = useNavigate();
-  const { accessContext, workspaces } = useAppContext();
+  const context = useAppContext();
+  const { workspaces } = context;
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const settings = resolveWorkspaceRecordingSettings(workspace?.settings);
   const liveTranscript = settings.liveTranscript === true;
@@ -26,7 +28,7 @@ export function MeetingsRoute({ workspaceId }: { workspaceId: string }) {
         workspaceId={workspaceId}
         liveTranscriptDefault={liveTranscript}
         defaultLanguage={settings.language ?? null}
-        viewerName={accessContext.subjectLabel?.trim() || null}
+        viewerName={meetingViewerName(context)}
         meetingHref={(recordingId) => meetingPath(workspaceId, recordingId)}
         onOpen={(recordingId) =>
           void navigate({
@@ -47,7 +49,8 @@ export function MeetingDetailRoute({
   recordingId: string;
 }) {
   const navigate = useNavigate();
-  const { accessContext, workspaces } = useAppContext();
+  const context = useAppContext();
+  const { accessContext, workspaces } = context;
   const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
   const voiceRecognition =
     resolveWorkspaceRecordingSettings(workspace?.settings).voiceprints === true;
@@ -58,7 +61,7 @@ export function MeetingDetailRoute({
         workspaceId={workspaceId}
         recordingId={recordingId}
         viewerSubjectId={accessContext.subjectId}
-        viewerName={accessContext.subjectLabel?.trim() || "Me"}
+        viewerName={meetingViewerName(context) ?? "Me"}
         voiceRecognition={voiceRecognition}
         onBack={() =>
           void navigate({ to: "/workspaces/$workspaceId/meetings", params: { workspaceId } })
