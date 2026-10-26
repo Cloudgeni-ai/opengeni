@@ -6,16 +6,37 @@ import { ScrollView, Text, View, type TextStyle } from "react-native";
 import { SvgXml } from "react-native-svg";
 import type { MathEngine } from "./math-engine";
 
-let engine: MathEngine | null = null;
+/** The engine once loaded; `false` when it could not load (formulas then show as TeX). */
+let engine: MathEngine | false | null = null;
 
 function typeset(tex: string, display: boolean) {
-  if (!engine) {
+  engine ??= loadEngine();
+  return engine ? engine(tex, display) : null;
+}
+
+function loadEngine(): MathEngine | false {
+  // React Native defines a partial global `document`, and MathJax probes
+  // `document.getElementsByTagName` while its modules load, so hide it for the load.
+  const scope = globalThis as { document?: { getElementsByTagName?: unknown } };
+  const saved = Object.getOwnPropertyDescriptor(scope, "document");
+  const partial = saved !== undefined && typeof scope.document?.getElementsByTagName !== "function";
+  try {
+    if (partial) {
+      Object.defineProperty(scope, "document", {
+        value: undefined,
+        configurable: true,
+        writable: true,
+      });
+    }
     // Synchronous and on first use: Metro bundles the module but evaluates it only here.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const module = require("./math-engine") as typeof import("./math-engine");
-    engine = module.createMathEngine();
+    return module.createMathEngine();
+  } catch {
+    return false;
+  } finally {
+    if (partial) Object.defineProperty(scope, "document", saved);
   }
-  return engine(tex, display);
 }
 
 /** One ex of the message font, in points (TeX fonts: about 0.43 em). */
