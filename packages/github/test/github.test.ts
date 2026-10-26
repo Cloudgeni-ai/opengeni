@@ -86,6 +86,49 @@ describe("GitHub app manifest helpers", () => {
     expect(setupCallback.setup_on_update).toBe(true);
   });
 
+  test("points the App's webhook at the webhook address when the console is not public", () => {
+    const split = buildGitHubAppManifest({
+      appName: "Private console",
+      baseUrl: "https://console.internal.example.com",
+      public: false,
+      includeCiPermissions: false,
+      setupUrl: "https://console.internal.example.com/v1/github/setup",
+      webhookBaseUrl: "https://hooks.example.com:8443/",
+    });
+    expect(split.hook_attributes).toEqual({
+      url: "https://hooks.example.com:8443/v1/webhooks/github",
+      active: true,
+    });
+    expect(split.callback_urls).toEqual([
+      "https://console.internal.example.com/v1/github/oauth/callback",
+    ]);
+    expect(split.setup_url).toBe("https://console.internal.example.com/v1/github/setup");
+
+    const localConsolePublicHooks = buildGitHubAppManifest({
+      appName: "Local console",
+      baseUrl: "http://127.0.0.1:8000",
+      public: false,
+      includeCiPermissions: false,
+      webhookBaseUrl: "https://hooks.example.com",
+    });
+    expect(localConsolePublicHooks.hook_attributes).toEqual({
+      url: "https://hooks.example.com/v1/webhooks/github",
+      active: true,
+    });
+
+    const blankWebhookBase = buildGitHubAppManifest({
+      appName: "Blank",
+      baseUrl: "https://agents.example.com",
+      public: false,
+      includeCiPermissions: false,
+      webhookBaseUrl: " ",
+    });
+    expect(blankWebhookBase.hook_attributes).toEqual({
+      url: "https://agents.example.com/v1/webhooks/github",
+      active: true,
+    });
+  });
+
   test("renders env lines with escaped private key", () => {
     const lines = envLinesFromGitHubManifestConversion({
       id: 1,
