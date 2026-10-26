@@ -1,5 +1,5 @@
 /**
- * Credential profiles (0985): names and secret references that Opengeni adds
+ * Credential profiles (0988): names and secret references that Opengeni adds
  * to the environment of every command an agent runs. The workspace has at
  * most one profile; a session can add one, which its child sessions inherit.
  * Nothing here holds or reads a secret value. Callers authorize the request
