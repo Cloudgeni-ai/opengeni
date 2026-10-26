@@ -1,5 +1,5 @@
 import type { SessionTurn } from "@opengeni/sdk";
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ComposerOptimisticMessage, ComposerState } from "./use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "./use-turn-queue";
 
@@ -7,8 +7,17 @@ import type { QueueMutationKind, UseTurnQueueResult } from "./use-turn-queue";
 export type QueuedPromptRecallOutcome = "recalled" | "already_sent" | "unavailable";
 
 /**
+ * How long Up pressed right after a send waits for that prompt to reach the
+ * queue. The send is normally settled within a second or two; past this the
+ * press is dropped rather than left pending behind a stalled send.
+ */
+export const QUEUED_RECALL_SETTLE_TIMEOUT_MS = 10_000;
+
+/**
  * Up-arrow recall of the person's latest waiting prompt. `available` is a
- * render-time hint; `recall` re-checks everything against live state.
+ * render-time hint that Up should be taken for recall: a prompt is waiting, or
+ * one just sent is still on its way into the queue. `recall` re-checks
+ * everything against live state, waiting for such a send to settle first.
  */
 export type ComposerQueuedRecall = {
   available: boolean;
@@ -87,18 +96,27 @@ export function hasQueuedSendInFlight(
 ): boolean {
   // Same projection as the queue panel's optimistic rows; failed sends stay in
   // the composer's retry UI and never block recall.
-  return (messages ?? []).some(
-    (message) =>
-      message.delivery === "send" &&
-      message.destination === "queue" &&
-      message.state !== "failed" &&
-      (!message.turnId || !queuedTurnIds.has(message.turnId)) &&
-      !(
-        message.turnId &&
-        message.appliedQueueVersion != null &&
-        queueVersion != null &&
-        queueVersion >= message.appliedQueueVersion
-      ),
+  return (messages ?? []).some((message) =>
+    isQueuedSendInFlight(message, queuedTurnIds, queueVersion),
+  );
+}
+
+function isQueuedSendInFlight(
+  message: ComposerOptimisticMessage,
+  queuedTurnIds: ReadonlySet<string>,
+  queueVersion: number | null | undefined,
+): boolean {
+  return (
+    message.delivery === "send" &&
+    message.destination === "queue" &&
+    message.state !== "failed" &&
+    (!message.turnId || !queuedTurnIds.has(message.turnId)) &&
+    !(
+      message.turnId &&
+      message.appliedQueueVersion != null &&
+      queueVersion != null &&
+      queueVersion >= message.appliedQueueVersion
+    )
   );
 }
 
@@ -106,6 +124,10 @@ export function hasQueuedSendInFlight(
  * Wire a session's queue to its composer for Up-arrow recall. The withdraw is
  * the same atomic server checkout as the queue's Edit action, so a prompt the
  * agent already took can never be duplicated or lost.
+ *
+ * The queue row shows a just-sent prompt as waiting before the server's queue
+ * snapshot includes it. Up pressed in that window waits for the send to settle
+ * and then recalls it, so one press is always enough.
  */
 export function useQueuedPromptRecall({
   queue,
@@ -135,24 +157,75 @@ export function useQueuedPromptRecall({
   const settling = composer ? recallSettling(composer, queue) : false;
   const live = useRef({ queue, composer, subjectId });
   live.current = { queue, composer, subjectId };
+  // Resolved after the commit in which no send is settling any more (true), or
+  // on unmount and timeout (false).
+  const settleWaiters = useRef(new Set<(settled: boolean) => void>());
+  useEffect(() => {
+    if (settling || settleWaiters.current.size === 0) return;
+    const waiters = [...settleWaiters.current];
+    settleWaiters.current.clear();
+    for (const resolve of waiters) resolve(true);
+  });
+  useEffect(() => {
+    const waiters = settleWaiters.current;
+    return () => {
+      const pending = [...waiters];
+      waiters.clear();
+      for (const resolve of pending) resolve(false);
+    };
+  }, []);
   const supported =
     enabled &&
     composer !== undefined &&
     composer.draftPersistence !== "disabled" &&
     queue.recallTurn !== undefined;
   const recall = useCallback(async (): Promise<QueuedPromptRecallOutcome> => {
-    const current = live.current;
-    const target = current.composer;
-    const recallTurn = current.queue.recallTurn;
-    if (!target || target.draftPersistence === "disabled" || !recallTurn) return "unavailable";
+    let current = live.current;
+    let target = current.composer;
+    if (!target || target.draftPersistence === "disabled" || !current.queue.recallTurn) {
+      return "unavailable";
+    }
     if (target.draftLoading || target.hasDraftContent()) return "unavailable";
-    if (recallSettling(target, current.queue)) return "unavailable";
+    // Prompts already waiting when Up was pressed. After waiting for a send,
+    // only the just-sent prompt may be recalled, never an older one instead.
+    let waitingBeforeSend: ReadonlySet<string> | null = null;
+    let sendsInFlight: ReadonlySet<string> = new Set();
+    if (recallSettling(target, current.queue)) {
+      waitingBeforeSend = new Set(current.queue.queue.map((turn) => turn.id));
+      sendsInFlight = inFlightQueueSends(target, current.queue);
+      const settled = await new Promise<boolean>((resolve) => {
+        const waiters = settleWaiters.current;
+        const timer = setTimeout(() => {
+          waiters.delete(finish);
+          resolve(false);
+        }, QUEUED_RECALL_SETTLE_TIMEOUT_MS);
+        function finish(value: boolean) {
+          clearTimeout(timer);
+          resolve(value);
+        }
+        waiters.add(finish);
+      });
+      if (!settled) return "unavailable";
+      current = live.current;
+      target = current.composer;
+      if (!target || target.draftPersistence === "disabled") return "unavailable";
+      // Typing while the send settled means a new message, not an edit.
+      if (target.draftLoading || target.hasDraftContent()) return "unavailable";
+      if (recallSettling(target, current.queue)) return "unavailable";
+    }
+    const recallTurn = current.queue.recallTurn;
+    if (!recallTurn) return "unavailable";
     const turn = latestRecallableQueuedTurn(
       current.queue.queue,
       current.queue.mutationFor,
       current.subjectId,
     );
-    if (!turn) return "unavailable";
+    if (!turn || waitingBeforeSend?.has(turn.id)) {
+      // The just-sent prompt is not waiting: the agent took it as it landed.
+      return waitingBeforeSend && sentPromptLeftQueue(target, current.queue, sendsInFlight)
+        ? "already_sent"
+        : "unavailable";
+    }
     const result = await recallTurn(turn.id, { expectedDraftRevision: target.draftRevision });
     if (result.status === "recalled") {
       const latest = live.current.composer ?? target;
@@ -173,7 +246,9 @@ export function useQueuedPromptRecall({
     () =>
       supported
         ? {
-            available: candidate !== null && !settling,
+            // While a send settles the row already shows it as queued, so Up
+            // is taken now and `recall` waits for it to land.
+            available: candidate !== null || settling,
             turnId: settling ? null : (candidate?.id ?? null),
             recall,
           }
@@ -192,5 +267,33 @@ function recallSettling(
     composer.optimisticMessages,
     new Set(queue.queue.map((turn) => turn.id)),
     queue.snapshot?.version,
+  );
+}
+
+function inFlightQueueSends(
+  composer: Pick<ComposerState, "optimisticMessages">,
+  queue: Pick<UseTurnQueueResult, "queue" | "snapshot">,
+): ReadonlySet<string> {
+  const queuedTurnIds = new Set(queue.queue.map((turn) => turn.id));
+  return new Set(
+    (composer.optimisticMessages ?? [])
+      .filter((message) => isQueuedSendInFlight(message, queuedTurnIds, queue.snapshot?.version))
+      .map((message) => message.clientEventId),
+  );
+}
+
+/** One of the sends Up waited for was queued, but is no longer waiting. */
+function sentPromptLeftQueue(
+  composer: Pick<ComposerState, "optimisticMessages">,
+  queue: Pick<UseTurnQueueResult, "queue">,
+  sends: ReadonlySet<string>,
+): boolean {
+  const queuedTurnIds = new Set(queue.queue.map((turn) => turn.id));
+  return (composer.optimisticMessages ?? []).some(
+    (message) =>
+      sends.has(message.clientEventId) &&
+      message.state !== "failed" &&
+      typeof message.turnId === "string" &&
+      !queuedTurnIds.has(message.turnId),
   );
 }
