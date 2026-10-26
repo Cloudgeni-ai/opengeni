@@ -397,54 +397,77 @@ export function countOptimisticQueuedMessages(
  * it. Steer needs the queued turn's id and version, which arrive with the next
  * queue read, so the click is taken at once and carried out when that exact
  * message lands in the queue. It is dropped, never retargeted, when the send
- * fails, is withdrawn or dismissed, or the agent starts the message first.
+ * fails, is withdrawn or dismissed, the agent starts the message first, or
+ * something else (an edit, Up recall or another Steer) already acts on it.
+ * Each just-sent message keeps its own request, so steering a newer one never
+ * cancels an earlier one.
  */
 function useDeferredQueuedSteer({
   messages,
   optimisticQueued,
   queuedTurnIds,
   steerTurn,
+  mutationFor,
+  mutating,
+  enabled,
 }: {
   messages: readonly ComposerOptimisticMessage[] | undefined;
   optimisticQueued: readonly ComposerOptimisticMessage[];
   queuedTurnIds: ReadonlySet<string>;
   steerTurn: UseTurnQueueResult["steerTurn"];
+  mutationFor: UseTurnQueueResult["mutationFor"];
+  mutating: boolean;
+  enabled: boolean;
 }) {
-  const [pending, setPending] = useState<{ clientEventId: string; turnId: string | null } | null>(
-    null,
-  );
+  // clientEventId -> the message's turn id once known.
+  const [pending, setPending] = useState<ReadonlyMap<string, string | null>>(() => new Map());
   const steerRef = useRef(steerTurn);
   steerRef.current = steerTurn;
   useEffect(() => {
-    if (!pending) return;
-    const message = (messages ?? []).find(
-      (candidate) => candidate.clientEventId === pending.clientEventId,
-    );
-    // Gone means the turn started or was withdrawn; failed means nothing waits.
-    if (!message || message.state === "failed") {
-      setPending(null);
-      return;
-    }
-    const turnId = message.turnId ?? null;
-    if (turnId && queuedTurnIds.has(turnId)) {
-      setPending(null);
-      void steerRef.current(turnId);
-      return;
-    }
-    const stillPlacing = optimisticQueued.some(
-      (candidate) => candidate.clientEventId === pending.clientEventId,
-    );
-    if (!stillPlacing) {
+    if (pending.size === 0) return;
+    const next = new Map<string, string | null>();
+    const fire: string[] = [];
+    for (const [clientEventId, knownTurnId] of pending) {
+      const message = (messages ?? []).find(
+        (candidate) => candidate.clientEventId === clientEventId,
+      );
+      // Gone means the turn started or was withdrawn; failed means nothing waits.
+      if (!enabled || !message || message.state === "failed") continue;
+      const turnId = message.turnId ?? knownTurnId;
+      if (turnId && queuedTurnIds.has(turnId)) {
+        // An edit, Up recall or Steer already acting on it wins.
+        if (mutationFor(turnId) !== null) continue;
+        // Another queue change is applying: steer right after it.
+        if (mutating) {
+          next.set(clientEventId, turnId);
+          continue;
+        }
+        fire.push(turnId);
+        continue;
+      }
+      const stillPlacing = optimisticQueued.some(
+        (candidate) => candidate.clientEventId === clientEventId,
+      );
       // The queue read caught up without it waiting there: already started.
-      setPending(null);
-      return;
+      if (!stillPlacing) continue;
+      next.set(clientEventId, turnId);
     }
-    if (turnId !== pending.turnId) setPending({ ...pending, turnId });
-  }, [messages, optimisticQueued, pending, queuedTurnIds]);
+    const changed =
+      next.size !== pending.size ||
+      [...next].some(([clientEventId, turnId]) => pending.get(clientEventId) !== turnId);
+    if (changed) setPending(next);
+    for (const turnId of fire) void steerRef.current(turnId);
+  }, [enabled, messages, mutating, mutationFor, optimisticQueued, pending, queuedTurnIds]);
   return {
-    request: (clientEventId: string) => setPending({ clientEventId, turnId: null }),
-    isPending: (clientEventId: string) => pending?.clientEventId === clientEventId,
-    isPendingTurn: (turnId: string) => pending?.turnId === turnId,
+    request: (clientEventId: string) =>
+      setPending((current) => {
+        if (current.has(clientEventId)) return current;
+        const next = new Map(current);
+        next.set(clientEventId, null);
+        return next;
+      }),
+    isPending: (clientEventId: string) => pending.has(clientEventId),
+    isPendingTurn: (turnId: string) => [...pending.values()].includes(turnId),
   };
 }
 
@@ -674,6 +697,9 @@ function SessionChromeView({
     optimisticQueued,
     queuedTurnIds,
     steerTurn: queue.steerTurn,
+    mutationFor: queue.mutationFor,
+    mutating: queue.mutating,
+    enabled: canSteerQueued,
   });
 
   const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));

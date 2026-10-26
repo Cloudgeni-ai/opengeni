@@ -2360,10 +2360,11 @@ describe("Steer on a just-sent queued message", () => {
   }
 
   function render(
-    message: ComposerOptimisticMessage,
+    message: ComposerOptimisticMessage | ComposerOptimisticMessage[],
     turns: SessionTurn[],
     steered: string[],
     version = 1,
+    extra: Partial<UseTurnQueueResult> = {},
   ) {
     return (
       <SessionChrome
@@ -2374,8 +2375,9 @@ describe("Steer on a just-sent queued message", () => {
             steered.push(turnId);
             return true;
           },
+          ...extra,
         })}
-        composer={composer({ optimisticMessages: [message] })}
+        composer={composer({ optimisticMessages: Array.isArray(message) ? message : [message] })}
       />
     );
   }
@@ -2462,5 +2464,89 @@ describe("Steer on a just-sent queued message", () => {
     await flush();
     expect(steered).toEqual([]);
     expect(steerButton().querySelector(".animate-og-spin")).toBeNull();
+  });
+
+  test("a message the agent started directly is not steered", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    // The agent was free, so the send went straight into the chat and runs.
+    await mounted.rerender(
+      render([sent({ destination: "chat", state: "queued", turnId: SENT_TURN_ID })], [], steered),
+    );
+    await flush();
+    expect(steered).toEqual([]);
+    expect(steerButton()).toBeNull();
+  });
+
+  test("steering a newer send keeps the earlier request, and both are steered", async () => {
+    const steered: string[] = [];
+    const NEXT_TURN_ID = "55555555-5555-4555-8555-555555555555";
+    const nextTurn = fakeTurn({ id: NEXT_TURN_ID, prompt: "And the pricing page" });
+    const next = (overrides: Partial<ComposerOptimisticMessage> = {}) =>
+      sent({ clientEventId: "client-send-steer-2", text: "And the pricing page", ...overrides });
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    // The chip now shows the newer send, and its Steer is usable too.
+    await mounted.rerender(render([sent(), next()], [], steered));
+    expect(steerButton().disabled).toBe(false);
+    await act(async () => steerButton().click());
+    expect(steered).toEqual([]);
+    await mounted.rerender(
+      render(
+        [
+          sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+          next({ state: "queued", turnId: NEXT_TURN_ID, appliedQueueVersion: 3 }),
+        ],
+        [sentTurn, nextTurn],
+        steered,
+        3,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([SENT_TURN_ID, NEXT_TURN_ID]);
+  });
+
+  test("a message something else already acts on is left to that action", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    // An Up recall (the queue's Edit) on this message is already in flight.
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [sentTurn],
+        steered,
+        2,
+        {
+          mutating: true,
+          mutationFor: (turnId) => (turnId === SENT_TURN_ID ? "edit" : null),
+        },
+      ),
+    );
+    await flush();
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [sentTurn],
+        steered,
+        2,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([]);
+  });
+
+  test("waits for another queue change to apply, then steers", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    const landed = sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 });
+    await mounted.rerender(render(landed, [sentTurn], steered, 2, { mutating: true }));
+    await flush();
+    expect(steered).toEqual([]);
+    await mounted.rerender(render(landed, [sentTurn], steered, 2));
+    await flush();
+    expect(steered).toEqual([SENT_TURN_ID]);
   });
 });
