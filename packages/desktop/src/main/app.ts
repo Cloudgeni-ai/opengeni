@@ -87,7 +87,7 @@ import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
-import { SystemAudioCaptures, systemAudioUsable } from "./system-audio";
+import { handleSystemAudioIpc, SystemAudioCaptures, systemAudioUsable } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
 import { refuseAllPermissions } from "./web-permissions";
@@ -181,8 +181,6 @@ export class DesktopShell {
   private readonly appShots: AppShots;
   /** Other apps' audio for the web app's meeting recorder. */
   private readonly systemAudio: SystemAudioCaptures;
-  /** Pages whose system audio captures end when they navigate or close. */
-  private readonly systemAudioPages = new WeakSet<WebContents>();
   /** Offers to record when a call starts, and to stop when it ends. */
   private readonly meetings: MeetingDetection;
   /** Pages that report whether they record, cleared when they navigate or close. */
@@ -1287,26 +1285,10 @@ export class DesktopShell {
         await this.appShots.requestPermission(id as DesktopAppShotPermissionId);
       }
     });
-    ipcMain.handle(DESKTOP_IPC.systemAudioStart, async (event) => {
-      this.senderAccount(event);
-      const page = event.sender;
-      if (!this.systemAudioPages.has(page)) {
-        this.systemAudioPages.add(page);
-        const end = () => this.systemAudio.stopFor(page);
-        page.once("destroyed", end);
-        page.on("did-start-navigation", (details) => {
-          if (details.isMainFrame && !details.isSameDocument) end();
-        });
-      }
-      try {
-        return { ok: true as const, ...(await this.systemAudio.start(page)) };
-      } catch (error) {
-        return { ok: false as const, error };
-      }
-    });
-    ipcMain.handle(DESKTOP_IPC.systemAudioStop, (event, captureId: unknown) => {
-      this.senderAccount(event);
-      if (typeof captureId === "string") this.systemAudio.stop(captureId, event.sender);
+    handleSystemAudioIpc({
+      ipcMain,
+      captures: this.systemAudio,
+      allow: (event) => void this.senderAccount(event),
     });
     handle(DESKTOP_IPC.meetingDetectionStatus, () => this.meetings.status());
     handle(DESKTOP_IPC.meetingDetectionUpdate, (_account, change) => this.meetings.update(change));

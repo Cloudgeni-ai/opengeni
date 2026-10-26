@@ -54,7 +54,7 @@ import type {
   UpdateRecordingSpeakersResponse,
 } from "@opengeni/contracts";
 import type { OpenGeniClient } from "./client";
-import { type DesktopBridge, getDesktopBridge } from "./desktop-bridge";
+import { type DesktopBridge, getDesktopBridge, getDesktopSystemAudio } from "./desktop-bridge";
 import {
   createLiveTranscriber,
   type LiveTranscriber,
@@ -1533,7 +1533,9 @@ function canShareDisplayAudio(): boolean {
   if (!media || typeof media.getDisplayMedia !== "function") return false;
   const agent = globalThis.navigator.userAgent ?? "";
   const chromium = /\b(Chrome|Chromium|Edg)\//u.test(agent) && !/\bMobile\b/u.test(agent);
-  return chromium;
+  // An Electron app shows no share picker unless it builds one; it records
+  // other apps' audio itself (desktopSystemAudioSource) or not at all.
+  return chromium && !/\bElectron\//u.test(agent);
 }
 
 export type SystemAudioKind = "desktop" | "display";
@@ -1597,14 +1599,16 @@ type AudioTrackGenerator = MediaStreamTrack & {
 };
 
 /**
- * Other apps' audio from the Opengeni desktop app this page runs in, or null
- * outside one (or in a version that can't). The app records everything the
- * computer plays except its own sounds, without a share prompt.
+ * Other apps' audio from the desktop app this page runs in, or null outside
+ * one (or in a version that can't): the Opengeni desktop app, or any app that
+ * defines `window.opengeniSystemAudio` with `@opengeni/desktop`. The app
+ * records everything the computer plays except its own sounds, without a
+ * share prompt.
  */
 export function desktopSystemAudioSource(
   bridge: DesktopBridge | null = getDesktopBridge(),
 ): SystemAudioSource | null {
-  const capture = bridge?.capabilities.includes("systemAudio") ? bridge.systemAudio : undefined;
+  const capture = getDesktopSystemAudio(bridge);
   const scope = globalThis as {
     MediaStreamTrackGenerator?: new (init: { kind: "audio" }) => AudioTrackGenerator;
     AudioData?: new (init: {

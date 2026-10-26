@@ -123,6 +123,51 @@ The pages navigate through callbacks (`onOpen`, `meetingHref`, `onBack`), so
 any router works. `@opengeni/react/testing/meetings` has an in-memory
 recordings client with meetings in every state, for previews and tests.
 
+### In your own desktop app
+
+A browser records other people in a call only from a shared tab. A desktop
+app can record everything the computer plays, which includes the call, as its
+own track and without a prompt. The Opengeni desktop app does this, and so can
+any Electron app that shows Opengeni's meetings, with `@opengeni/desktop`:
+
+- Bundle the helper that records it. Each Opengeni desktop release
+  (`desktop-v*` on GitHub) attaches it per platform, for example
+  `opengeni-audio-capture-mac-arm64` and
+  `opengeni-audio-capture-win-x64.exe`. `SHA256SUMS` lists their checksums,
+  so pin them in your build. Ship it as an extra resource (electron-builder's
+  `extraResources`); on macOS your app signs it with the rest of the bundle.
+- In the main process, start the captures and answer the preload's calls:
+
+  ```ts
+  import {
+    handleSystemAudioIpc,
+    SystemAudioCaptures,
+    systemAudioHelperName,
+    systemAudioUsable,
+  } from "@opengeni/desktop/system-audio";
+
+  const helperPath = join(process.resourcesPath, "audio-capture", systemAudioHelperName());
+  const captures = new SystemAudioCaptures({
+    helperPath,
+    excludePid: process.pid, // leaves your app's own sounds out
+    excludeBundlePrefix: "com.example.app", // and, on macOS, its helpers'
+  });
+  handleSystemAudioIpc({ ipcMain, captures, allow: (event) => assertYourWebApp(event) });
+  // Pass systemAudioUsable(helperPath) to the preload, for example as an argument.
+  ```
+
+- In the preload of your web app's window, when the main process says it is
+  usable, call `exposeSystemAudio()` from `@opengeni/desktop/preload/system-audio`.
+  It defines `window.opengeniSystemAudio`, and the meeting recorder then
+  records computer audio there instead of offering a tab's.
+- On macOS (14.2 and later) add `NSAudioCaptureUsageDescription` to the app's
+  `Info.plist`; the person allows it once, under Screen & System Audio
+  Recording. Windows needs version 10 2004 or later, and Linux a PulseAudio or
+  PipeWire sound server.
+
+Inside an Electron app that doesn't, the recorder offers no tab audio, because
+Electron shows no share picker of its own.
+
 On a phone, `@opengeni/react-native/meetings` has the same pieces for React
 Native screens:
 
