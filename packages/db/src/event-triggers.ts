@@ -15,6 +15,7 @@ import {
   type ScheduledTaskEvents,
   type ScheduledTaskRunEventOccurrence,
   type WebhookEventAdapter,
+  WebhookFormat,
 } from "@opengeni/contracts";
 import { createHmac } from "node:crypto";
 import { and, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
@@ -88,6 +89,8 @@ export type EventSourceRecord = {
   workspaceId: string;
   kind: EventSourceKind;
   adapter: WebhookEventAdapter | null;
+  /** How a custom webhook reads its app's deliveries; null for every other source. */
+  format: WebhookFormat | null;
   name: string;
   ownerSubjectId: string | null;
   visibility: EventSourceVisibility;
@@ -107,6 +110,13 @@ export type EventSourceRecord = {
   updatedAt: Date;
 };
 
+/** A stored custom webhook format; one that no longer parses reads as none, so deliveries are refused. */
+function storedWebhookFormat(value: unknown): WebhookFormat | null {
+  if (value === null || value === undefined) return null;
+  const parsed = WebhookFormat.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 function mapSource(row: SourceRow, routeId: string | null): EventSourceRecord {
   return {
     id: row.id,
@@ -114,6 +124,7 @@ function mapSource(row: SourceRow, routeId: string | null): EventSourceRecord {
     workspaceId: row.workspaceId,
     kind: row.kind as EventSourceKind,
     adapter: (row.adapter as WebhookEventAdapter | null) ?? null,
+    format: storedWebhookFormat(row.webhookFormat),
     name: row.name,
     ownerSubjectId: row.ownerSubjectId,
     visibility: row.visibility as EventSourceVisibility,
@@ -169,6 +180,7 @@ export type CreateEventSourceInput = {
   ownerSubjectId: string | null;
   visibility: EventSourceVisibility;
   adapter?: WebhookEventAdapter | null;
+  format?: WebhookFormat | null;
   secretEncrypted?: string | null;
   /** Defaults to active; a pasted webhook waiting for its secret starts blocked. */
   status?: EventSourceStatus;
@@ -198,6 +210,7 @@ export async function createEventSource(
         workspaceId: input.workspaceId,
         kind: input.kind,
         adapter: input.adapter ?? null,
+        webhookFormat: input.format ?? null,
         name: input.name,
         ownerSubjectId: input.ownerSubjectId,
         visibility: input.visibility,
@@ -466,6 +479,7 @@ export async function updateEventSource(
     status?: EventSourceStatus;
     statusReason?: EventStatusReason | null;
     secretEncrypted?: string;
+    format?: WebhookFormat;
   },
 ): Promise<EventSourceRecord | null> {
   return await withWorkspaceRls(db, workspaceId, async (scoped) => {
@@ -478,6 +492,7 @@ export async function updateEventSource(
           ? { status: patch.status, ...storedStatusReason(patch.status, patch.statusReason) }
           : {}),
         ...(patch.secretEncrypted !== undefined ? { secretEncrypted: patch.secretEncrypted } : {}),
+        ...(patch.format !== undefined ? { webhookFormat: patch.format } : {}),
         updatedAt: sql`now()`,
       })
       .where(

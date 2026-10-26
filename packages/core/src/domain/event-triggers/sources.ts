@@ -10,6 +10,7 @@ import type {
   SendTestEventResponse,
   UpdateEventSourceRequest,
   WebhookEventAdapter,
+  WebhookFormat,
 } from "@opengeni/contracts";
 import {
   createEventSource,
@@ -51,7 +52,7 @@ import { eventMatchesTrigger } from "./matching";
 import { boundEvent, type NormalizedEventInput } from "./normalize";
 import { slackEventTypeCatalog } from "./slack-events";
 import { createSlackEventSource } from "./slack-source";
-import { webhookAdapter } from "./webhook-adapters";
+import { webhookAdapterFor } from "./webhook-adapters";
 import { workspaceDeliveryEvents, workspaceEventTypeCatalog } from "./workspace-events";
 import { createWorkspaceEventSource } from "./workspace-source";
 import {
@@ -69,7 +70,7 @@ import {
   McpServerWithoutEventsError,
 } from "./mcp-event-types";
 import { serverOffersMcpEvents } from "./mcp-events-protocol";
-import { generateStandardWebhookSecret } from "./webhook-signatures";
+import { generateStandardWebhookSecret, standardWebhookSecretKey } from "./webhook-signatures";
 import { eventSourceWebhookUrl } from "./webhook-url";
 
 /**
@@ -138,6 +139,7 @@ export function eventSourceForClient(source: EventSourceRecord, baseUrl: string)
     workspaceId: source.workspaceId,
     kind: source.kind,
     adapter: source.adapter,
+    format: source.format,
     name: source.name,
     ownerSubjectId: source.ownerSubjectId,
     visibility: source.visibility,
@@ -228,6 +230,9 @@ export async function createEventSourceForViewer(
   const key = requireEncryptionKey(input.settings);
   const generated = request.adapter === "standard" ? generateStandardWebhookSecret() : null;
   const secret = generated ?? request.signingSecret;
+  if (request.signingSecret !== undefined) {
+    assertSecretFitsFormat(request.signingSecret, request.format ?? null);
+  }
   // A workspace-level caller owns nothing, so its sources are the workspace's.
   const owner = input.viewer.subjectId;
   const { source } = await createEventSource(input.db, {
@@ -236,11 +241,12 @@ export async function createEventSourceForViewer(
     createdBySubjectId: input.createdBySubjectId,
     kind: "webhook",
     adapter: request.adapter,
+    ...(request.adapter === "custom" && request.format ? { format: request.format } : {}),
     name: request.name,
     ownerSubjectId: owner,
     visibility: owner === null ? "workspace" : request.visibility,
-    // Linear and Sentry show their secret only once they have the URL, so a
-    // source without one waits, blocked, until it is pasted.
+    // Linear, Sentry and many other apps show their secret only once they have
+    // the URL, so a source without one waits, blocked, until it is pasted.
     ...(secret
       ? { secretEncrypted: encryptEnvironmentValue(key, secret) }
       : { status: "blocked" as const, statusReason: awaitingSecretReason(request.adapter) }),
@@ -251,13 +257,29 @@ export async function createEventSourceForViewer(
   };
 }
 
+const PASTED_WEBHOOK_APPS: Partial<Record<WebhookEventAdapter, string>> = {
+  linear: "Linear",
+  sentry: "Sentry",
+};
+
 /** Why a pasted webhook waits: the sending app's secret is not pasted yet. */
 function awaitingSecretReason(adapter: WebhookEventAdapter): EventStatusReason {
-  const app = adapter === "linear" ? "Linear" : adapter === "sentry" ? "Sentry" : "the sending app";
+  const app = PASTED_WEBHOOK_APPS[adapter];
   return eventStatusReason(
     "awaiting_secret",
-    `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`,
+    app
+      ? `Paste the signing secret ${app} shows for this webhook. Until then its deliveries are refused.`
+      : "Paste the webhook's signing secret, the one the app shows or the one you set there. Until then its deliveries are refused.",
   );
+}
+
+/** A Standard Webhooks app signs with a `whsec_` secret; any other secret could never verify. */
+function assertSecretFitsFormat(secret: string, format: WebhookFormat | null): void {
+  if (format?.signature.scheme === "standard_webhooks" && !standardWebhookSecretKey(secret)) {
+    throw new HTTPException(422, {
+      message: "This app signs with Standard Webhooks, so its secret starts with whsec_",
+    });
+  }
 }
 
 /** Network access for MCP sources; tests replace the transport. */
@@ -387,6 +409,17 @@ export async function updateEventSourceForViewer(input: {
           : "This source has no signing secret to replace",
     });
   }
+  if (request.format !== undefined && source.adapter !== "custom") {
+    throw new HTTPException(422, { message: "Only a custom webhook has a format to change" });
+  }
+  if (request.signingSecret !== undefined) {
+    assertSecretFitsFormat(request.signingSecret, request.format ?? source.format);
+  } else if (request.format !== undefined && source.secretEncrypted !== null) {
+    assertSecretFitsFormat(
+      decryptEnvironmentValue(requireEncryptionKey(input.settings), source.secretEncrypted),
+      request.format,
+    );
+  }
   // The first pasted secret is what a waiting webhook source was blocked on.
   if (
     request.status === "active" &&
@@ -406,6 +439,7 @@ export async function updateEventSourceForViewer(input: {
   const updated = await updateEventSource(input.db, source.workspaceId, source.id, {
     ...(request.name !== undefined ? { name: request.name } : {}),
     ...(request.visibility !== undefined ? { visibility: request.visibility } : {}),
+    ...(request.format !== undefined ? { format: request.format } : {}),
     ...(status !== undefined
       ? {
           status,
@@ -504,7 +538,7 @@ export async function receiveEventWebhook(input: {
   // Before its secret is pasted, a delivery is refused but still logged, so
   // the person setting it up sees the app is sending.
   const verification = source.secretEncrypted
-    ? webhookAdapter(source.adapter).verify({
+    ? webhookAdapterFor(source).verify({
         secret: decryptEnvironmentValue(
           requireEncryptionKey(input.settings),
           source.secretEncrypted,
@@ -740,7 +774,7 @@ export async function listEventSourceTypes(
   if (input.source.kind === "gmail") return gmailEventTypeCatalog();
   if (input.source.kind === "workspace") return workspaceEventTypeCatalog();
   if (input.source.kind === "webhook") {
-    return webhookEventTypeCatalog(input.source.adapter ?? "standard", recent);
+    return webhookEventTypeCatalog(input.source, recent);
   }
   return recent.map((entry) => ({
     type: entry.type,

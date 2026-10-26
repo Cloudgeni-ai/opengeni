@@ -15098,6 +15098,7 @@
         "$": "union=[\"1\",\"kind=gmail\",\"kind=mcp\",\"kind=webhook\",\"kind=workspace\"]",
         "$|kind=webhook": "object",
         "$|kind=webhook.adapter": "ref(WebhookEventAdapter)!",
+        "$|kind=webhook.format": "ref(WebhookFormat)?",
         "$|kind=webhook.kind": "const!=[\"\\\"webhook\\\"\"]",
         "$|kind=webhook.name": "string!",
         "$|kind=webhook.signingSecret": "string?",
@@ -16578,6 +16579,7 @@
         "$.adapter": "ref(WebhookEventAdapter)! null",
         "$.awaitingSigningSecret": "boolean!",
         "$.createdAt": "string!",
+        "$.format": "ref(WebhookFormat)! null",
         "$.id": "string!",
         "$.kind": "ref(EventSourceKind)!",
         "$.lastDeliveryAt": "string! null",
@@ -29724,6 +29726,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.format": "ref(WebhookFormat)?",
         "$.name": "string?",
         "$.signingSecret": "string?",
         "$.status": "ref(AutomationSourceStatus)?",
@@ -31258,7 +31261,69 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"linear\\\"\",\"\\\"sentry\\\"\",\"\\\"standard\\\"\"]"
+        "$": "enum=[\"\\\"custom\\\"\",\"\\\"linear\\\"\",\"\\\"sentry\\\"\",\"\\\"standard\\\"\"]"
+      }
+    },
+    "WebhookFormat": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actor": "string?",
+        "$.batch": "object?",
+        "$.batch.path": "string?",
+        "$.deliveryId": "ref(WebhookValueSource)?",
+        "$.eventId": "string?",
+        "$.occurredAt": "string?",
+        "$.preset": "string?",
+        "$.signature": "ref(WebhookSignatureFormat)!",
+        "$.subject": "string?",
+        "$.summary": "string?",
+        "$.type": "union!=[\"0\",\"1\",\"2\"]",
+        "$.type|0": "object",
+        "$.type|0.path": "string!",
+        "$.type|1": "object",
+        "$.type|1.header": "string!",
+        "$.type|2": "object",
+        "$.type|2.value": "string!",
+        "$.url": "string?"
+      }
+    },
+    "WebhookSignatureFormat": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"scheme=hmac_sha256\",\"scheme=standard_webhooks\",\"scheme=timestamped_hmac_sha256\",\"scheme=token\"]",
+        "$|scheme=standard_webhooks": "object",
+        "$|scheme=standard_webhooks.scheme": "const!=[\"\\\"standard_webhooks\\\"\"]",
+        "$|scheme=hmac_sha256": "object",
+        "$|scheme=hmac_sha256.encoding": "enum?=[\"\\\"base64\\\"\",\"\\\"hex\\\"\"]",
+        "$|scheme=hmac_sha256.header": "string!",
+        "$|scheme=hmac_sha256.prefix": "string?",
+        "$|scheme=hmac_sha256.scheme": "const!=[\"\\\"hmac_sha256\\\"\"]",
+        "$|scheme=timestamped_hmac_sha256": "object",
+        "$|scheme=timestamped_hmac_sha256.header": "string!",
+        "$|scheme=timestamped_hmac_sha256.scheme": "const!=[\"\\\"timestamped_hmac_sha256\\\"\"]",
+        "$|scheme=timestamped_hmac_sha256.toleranceSeconds": "integer?",
+        "$|scheme=token": "object",
+        "$|scheme=token.header": "string!",
+        "$|scheme=token.prefix": "string?",
+        "$|scheme=token.scheme": "const!=[\"\\\"token\\\"\"]"
+      }
+    },
+    "WebhookValueSource": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "object",
+        "$|0.path": "string!",
+        "$|1": "object",
+        "$|1.header": "string!"
       }
     },
     "WorkClaimDiscoverySummary": {

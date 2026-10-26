@@ -29,12 +29,81 @@ export const EVENT_SOURCE_KINDS = [
 export const EventSourceKind = /* @__PURE__ */ defineSchema(() => z.enum(EVENT_SOURCE_KINDS));
 export type EventSourceKind = z.infer<typeof EventSourceKind>;
 
-/** How a webhook endpoint verifies and reads deliveries. */
-export const WEBHOOK_EVENT_ADAPTERS = ["standard", "linear", "sentry"] as const;
+/**
+ * How a webhook endpoint verifies and reads deliveries: `standard` is
+ * Opengeni's own format (Standard Webhooks with an Opengeni secret), `linear`
+ * and `sentry` are those apps' webhooks, and `custom` reads any other app's
+ * webhooks as the source's `format` describes.
+ */
+export const WEBHOOK_EVENT_ADAPTERS = ["standard", "linear", "sentry", "custom"] as const;
 export const WebhookEventAdapter = /* @__PURE__ */ defineSchema(() =>
   z.enum(WEBHOOK_EVENT_ADAPTERS),
 );
 export type WebhookEventAdapter = z.infer<typeof WebhookEventAdapter>;
+
+/** An HTTP header name, matched without regard to case. */
+export const WebhookHeaderName = /* @__PURE__ */ defineSchema(() =>
+  z.string().regex(/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/u, "A header name such as X-Signature"),
+);
+
+/** A dot-separated path into a JSON object, such as `data.object.id`. */
+export const WebhookJsonPath = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .max(200)
+    .regex(/^[^.\s]+(?:\.[^.\s]+)*$/u, "A dot-separated path such as data.object.id"),
+);
+
+/** Where a value comes from: a JSON path in the event, or a request header. */
+export const WebhookValueSource = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    z.object({ path: WebhookJsonPath }).strict(),
+    z.object({ header: WebhookHeaderName }).strict(),
+  ]),
+);
+export type WebhookValueSource = z.infer<typeof WebhookValueSource>;
+
+/**
+ * How a custom webhook proves it came from the app, always over the exact raw
+ * body and with the source's secret:
+ * - `standard_webhooks`: Standard Webhooks (`webhook-id`, `webhook-timestamp`,
+ *   `webhook-signature`) with a `whsec_` secret, as Svix-based apps send.
+ * - `hmac_sha256`: the HMAC-SHA256 of the body in `header`, hex or base64,
+ *   after an optional `prefix` such as `sha256=`.
+ * - `timestamped_hmac_sha256`: a `t=<unix seconds>,v1=<hex>` header whose
+ *   signature is the HMAC-SHA256 of `<t>.<body>`, as Stripe and Tailscale
+ *   send; deliveries signed more than `toleranceSeconds` away are refused.
+ * - `token`: the secret itself in `header`, after an optional `prefix` such
+ *   as `Bearer ` (a shared token, as GitLab sends).
+ */
+export const WebhookSignatureFormat = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("scheme", [
+    z.object({ scheme: z.literal("standard_webhooks") }).strict(),
+    z
+      .object({
+        scheme: z.literal("hmac_sha256"),
+        header: WebhookHeaderName,
+        encoding: z.enum(["hex", "base64"]).default("hex"),
+        prefix: z.string().max(32).default(""),
+      })
+      .strict(),
+    z
+      .object({
+        scheme: z.literal("timestamped_hmac_sha256"),
+        header: WebhookHeaderName,
+        toleranceSeconds: z.number().int().min(60).max(3600).default(300),
+      })
+      .strict(),
+    z
+      .object({
+        scheme: z.literal("token"),
+        header: WebhookHeaderName,
+        prefix: z.string().max(32).default(""),
+      })
+      .strict(),
+  ]),
+);
+export type WebhookSignatureFormat = z.infer<typeof WebhookSignatureFormat>;
 
 export const EventSourceStatus = /* @__PURE__ */ defineSchema(() =>
   z.enum(["active", "disabled", "blocked"]),
@@ -50,7 +119,7 @@ export type EventSourceStatus = z.infer<typeof EventSourceStatus>;
  * doesn't know, or none, as "show the sentence".
  *
  * - `turned_off`: someone turned it off.
- * - `awaiting_secret`: a pasted Linear or Sentry webhook waits for its signing secret.
+ * - `awaiting_secret`: a pasted Linear, Sentry or custom webhook waits for its signing secret.
  * - `reconnect`: the owner's connection to the app has to be signed in again.
  * - `missing_permission`: the connection no longer allows reading what the events need.
  * - `app_not_enabled`: the app isn't turned on for the connected account.
@@ -138,6 +207,70 @@ export const EventTypeName = /* @__PURE__ */ defineSchema(() =>
     .regex(/^[\x21-\x7e]+$/u, "Event types are printable ASCII without spaces"),
 );
 
+/**
+ * How a custom webhook source reads another app's deliveries. Paths are read
+ * in each event: the body, or each item of the list `batch` names.
+ */
+export const WebhookFormat = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      /** The preset that filled this in, such as `tailscale`: names the app and its documented event types. */
+      preset: z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9-]{0,63}$/u)
+        .optional(),
+      signature: WebhookSignatureFormat,
+      /**
+       * Present when one delivery holds several events: the body is a JSON
+       * list of them, or holds one at `path`. Absent: the body is one event.
+       */
+      batch: z.object({ path: WebhookJsonPath.optional() }).strict().optional(),
+      /** The event type: a path or header, or one `value` for every delivery. */
+      type: z.union([
+        z.object({ path: WebhookJsonPath }).strict(),
+        z.object({ header: WebhookHeaderName }).strict(),
+        z.object({ value: EventTypeName }).strict(),
+      ]),
+      /** The delivery's id, so a retried delivery is kept once; else the body's hash. */
+      deliveryId: WebhookValueSource.optional(),
+      /** Each event's own id, so an event delivered twice runs automations once. */
+      eventId: WebhookJsonPath.optional(),
+      /** When it happened: an ISO time or Unix seconds or milliseconds. */
+      occurredAt: WebhookJsonPath.optional(),
+      /** A one-line description; the event type when absent. */
+      summary: WebhookJsonPath.optional(),
+      /** What it is about, such as a device or order name. */
+      subject: WebhookJsonPath.optional(),
+      /** A link to it in the app. */
+      url: WebhookJsonPath.optional(),
+      /** Who did it. */
+      actor: WebhookJsonPath.optional(),
+    })
+    .strict(),
+);
+export type WebhookFormat = z.infer<typeof WebhookFormat>;
+export type WebhookFormatInput = z.input<typeof WebhookFormat>;
+
+/**
+ * Formats for apps whose webhooks are well known, keyed by their `preset`.
+ * A custom source made with one is the same as one that spells it out.
+ */
+export const WEBHOOK_FORMAT_PRESETS = {
+  /** Tailscale: a JSON list of events, signed `t=…,v1=…` over `<t>.<body>`. */
+  tailscale: {
+    preset: "tailscale",
+    signature: { scheme: "timestamped_hmac_sha256", header: "Tailscale-Webhook-Signature" },
+    batch: {},
+    type: { path: "type" },
+    occurredAt: "timestamp",
+    summary: "message",
+    subject: "data.deviceName",
+    url: "data.url",
+    actor: "data.actor",
+  },
+} as const satisfies Record<string, WebhookFormatInput>;
+export type WebhookFormatPreset = keyof typeof WEBHOOK_FORMAT_PRESETS;
+
 export const EventSourceMcpBinding = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -157,6 +290,8 @@ export const EventSource = /* @__PURE__ */ defineSchema(() =>
     kind: EventSourceKind,
     /** Webhook sources only. */
     adapter: WebhookEventAdapter.nullable(),
+    /** How a `custom` webhook source reads its app's deliveries; null otherwise. */
+    format: WebhookFormat.nullable().default(null),
     name: z.string(),
     /** The person the source belongs to; null for workspace app sources. */
     ownerSubjectId: z.string().nullable(),
@@ -174,8 +309,8 @@ export const EventSource = /* @__PURE__ */ defineSchema(() =>
     /** The URL to paste into the sending app. Webhook sources only. */
     webhookUrl: z.string().nullable(),
     /**
-     * A Linear or Sentry webhook whose secret is not pasted yet: it refuses
-     * deliveries until the secret is set with an update.
+     * A Linear, Sentry or custom webhook whose secret is not pasted yet: it
+     * refuses deliveries until the secret is set with an update.
      */
     awaitingSigningSecret: z.boolean().default(false),
     /** MCP sources only. */
@@ -195,7 +330,9 @@ export type EventSource = z.infer<typeof EventSource>;
 
 /**
  * Linear and Sentry generate the secret once they have the webhook URL, so it
- * is pasted on create or afterwards. Standard sources get one from Opengeni.
+ * is pasted on create or afterwards; a custom webhook takes the secret its app
+ * shows or the one a person chose there. Standard sources get one from
+ * Opengeni.
  */
 export const EventSourceSigningSecretInput = /* @__PURE__ */ defineSchema(() =>
   z.string().min(8).max(512),
@@ -211,6 +348,8 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
           name: EventSourceName,
           visibility: EventSourceVisibility.default("private"),
           signingSecret: EventSourceSigningSecretInput.optional(),
+          /** Required for, and only for, the `custom` adapter. */
+          format: WebhookFormat.optional(),
         })
         .strict(),
       z
@@ -258,6 +397,19 @@ export const CreateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
           message: "Opengeni generates the signing secret for standard webhooks",
         });
       }
+      if (
+        value.kind === "webhook" &&
+        (value.adapter === "custom") !== (value.format !== undefined)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["format"],
+          message:
+            value.adapter === "custom"
+              ? "A custom webhook needs a format"
+              : "Only a custom webhook takes a format",
+        });
+      }
     }),
 );
 /** What a caller sends; a webhook source's `visibility` defaults to `private`. */
@@ -281,8 +433,10 @@ export const UpdateEventSourceRequest = /* @__PURE__ */ defineSchema(() =>
       name: EventSourceName.optional(),
       visibility: EventSourceVisibility.optional(),
       status: z.enum(["active", "disabled"]).optional(),
-      /** Replace a pasted Linear or Sentry secret. */
+      /** Replace a pasted Linear, Sentry or custom webhook secret. */
       signingSecret: EventSourceSigningSecretInput.optional(),
+      /** Replace a custom webhook's format. */
+      format: WebhookFormat.optional(),
     })
     .strict()
     .refine((value) => Object.keys(value).length > 0, "Supply at least one field"),

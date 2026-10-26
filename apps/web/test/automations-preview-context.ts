@@ -29,6 +29,8 @@ export const projectId = "9e0c4b1a-2f3d-4e5f-8a6b-7c8d9e0f1a2b";
 const viewer = "viewer-subject";
 const params = new URLSearchParams(location.search);
 const eventsEnabled = params.get("events") !== "0";
+/** `custom=1` adds two custom webhook sources; off by default so pickers keep their short list. */
+const customSources = params.get("custom") === "1";
 const HOUR = 3_600_000;
 const now = Date.now();
 const at = (hoursAgo: number) => new Date(now - hoursAgo * HOUR).toISOString();
@@ -43,6 +45,7 @@ function source(index: number, fields: Partial<EventSource>): EventSource {
     workspaceId,
     kind: "webhook",
     adapter: null,
+    format: null,
     name: "Source",
     ownerSubjectId: null,
     visibility: "workspace",
@@ -96,7 +99,57 @@ const orders = source(6, {
   mcp: { serverId: "orders", connectionId: null } as EventSource["mcp"],
   lastDeliveryAt: at(0.5),
 });
-const sources: EventSource[] = eventsEnabled ? [github, slack, linear, gmail, deploys, orders] : [];
+const tailnet = source(7, {
+  kind: "webhook",
+  adapter: "custom",
+  format: {
+    preset: "tailscale",
+    signature: {
+      scheme: "timestamped_hmac_sha256",
+      header: "Tailscale-Webhook-Signature",
+      toleranceSeconds: 300,
+    },
+    batch: {},
+    type: { path: "type" },
+    summary: "message",
+  },
+  name: "Tailnet",
+  ownerSubjectId: viewer,
+  visibility: "private",
+  status: "blocked",
+  statusReason:
+    "Paste the webhook's signing secret, the one the app shows or the one you set there. Until then its deliveries are refused.",
+  statusReasonCode: "awaiting_secret",
+  awaitingSigningSecret: true,
+  webhookUrl: "https://app.opengeni.ai/v1/webhooks/events/5ce00000-0000-4000-8000-000000000007",
+  lastDeliveryAt: null,
+});
+const builds = source(8, {
+  kind: "webhook",
+  adapter: "custom",
+  format: {
+    signature: {
+      scheme: "hmac_sha256",
+      header: "X-Signature",
+      encoding: "hex",
+      prefix: "sha256=",
+    },
+    type: { header: "X-Event" },
+  },
+  name: "Build server",
+  ownerSubjectId: viewer,
+  visibility: "private",
+  status: "blocked",
+  statusReason:
+    "Paste the webhook's signing secret, the one the app shows or the one you set there. Until then its deliveries are refused.",
+  statusReasonCode: "awaiting_secret",
+  awaitingSigningSecret: true,
+  webhookUrl: "https://app.opengeni.ai/v1/webhooks/events/5ce00000-0000-4000-8000-000000000008",
+  lastDeliveryAt: null,
+});
+const sources: EventSource[] = eventsEnabled
+  ? [github, slack, linear, gmail, deploys, orders, ...(customSources ? [tailnet, builds] : [])]
+  : [];
 
 /** MCP servers the viewer is signed in to that offer events, by server id. */
 const readyServers: Record<string, string> = { support: "Support desk" };
