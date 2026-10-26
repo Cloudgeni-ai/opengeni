@@ -2,6 +2,7 @@ import { DRIVE_EXTRA_TOOLS } from "../../src/drive-mcp";
 import { GITHUB_REST_MCP_TOOLS } from "../../src/github-rest-mcp";
 import { GMAIL_REST_MCP_TOOLS } from "../../src/gmail-rest-mcp";
 import { GOOGLE_CALENDAR_REST_MCP_TOOLS } from "../../src/google-calendar-rest-mcp";
+import { withAccountLine } from "../../src/tool-discovery-ranking";
 
 /** One searchable tool: its model name is `${source}__${name}`. */
 export type CatalogTool = {
@@ -47,6 +48,17 @@ export const OUTLOOK_MAIL_TOOLS = written("mcp__outlook", [
 
 export const GMAIL_TOOLS = from("mcp__gmail", GMAIL_REST_MCP_TOOLS);
 export const CALENDAR_TOOLS = from("mcp__calendar", GOOGLE_CALENDAR_REST_MCP_TOOLS);
+
+/**
+ * One of several connected accounts of a connector: each tool description
+ * starts with the account line the runtime adds when a turn has several.
+ */
+export const withAccount = (
+  tools: readonly CatalogTool[],
+  source: string,
+  account: string,
+): CatalogTool[] =>
+  tools.map((t) => ({ ...t, source, description: withAccountLine(account, t.description) }));
 
 /**
  * A realistic pool of about 170 tools from several connected integrations

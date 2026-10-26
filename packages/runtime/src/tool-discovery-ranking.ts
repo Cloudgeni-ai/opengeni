@@ -33,7 +33,7 @@ function words(text: string): string[] {
 // Generic operation vocabulary, not per-tool aliases. Exact words retain greater
 // weight than expansions; an expansion alone must never drown out the resource.
 const OPERATIONS = [
-  "get read retrieve fetch inspect show view",
+  "get read retrieve fetch inspect show view check",
   "list browse enumerate",
   "search find lookup",
   "create make add insert spawn",
@@ -74,12 +74,33 @@ function field(text: string): Field {
   return { frequencies, length: tokens.length };
 }
 
+const ACCOUNT_LINE_GUIDANCE =
+  "Use only this account; if the intended account for a write is unclear, ask before calling.";
+
+/**
+ * A connected-account tool's description when the turn has several accounts
+ * of its connector: a first line naming the account, then the tool's own text.
+ */
+export function withAccountLine(account: string, description: string | undefined): string {
+  return `Account: ${account}. ${ACCOUNT_LINE_GUIDANCE}\n${description ?? ""}`.trimEnd();
+}
+
+/** The tool's own text: ranking reads past the account line withAccountLine adds. */
+function ownDescription(description: string): string {
+  const lineEnd = description.indexOf("\n");
+  const line = lineEnd < 0 ? description : description.slice(0, lineEnd);
+  return line.startsWith("Account: ") && line.endsWith(`. ${ACCOUNT_LINE_GUIDANCE}`)
+    ? description.slice(line.length + 1)
+    : description;
+}
+
 function document(tool: Tool): Document {
   if (tool.type !== "function") throw new Error("Only function tools are searchable");
   // Transport routing hashes are not capability words. Keep readable namespaces.
   const separator = tool.name.lastIndexOf("__");
   const name = separator < 0 ? tool.name : tool.name.slice(separator + 2);
-  const description = tool.description ?? "";
+  // The same tool ranks the same whether or not the turn has several accounts.
+  const description = ownDescription(tool.description ?? "");
   const lead = description.split(/(?<=[.!?])\s|\n/, 1)[0] ?? "";
   const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties;
   const fields = [
@@ -110,9 +131,13 @@ export class ToolSearchIndex {
   private readonly documents: Document[];
   private readonly documentFrequency = new Map<string, number>();
   private readonly averageLengths: number[];
-  /** Per connected integration: its tool count and, for each word, how many of
-   * its tools use that word in their names or capability sentences. */
-  private readonly integrations = new Map<string, { tools: number; uses: Map<string, number> }>();
+  /** Per connected integration: its tool count, the words in its tool names,
+   * and, for each word, how many of its tools use that word in their names or
+   * capability sentences. */
+  private readonly integrations = new Map<
+    string,
+    { tools: number; named: Set<string>; uses: Map<string, number> }
+  >();
   private readonly integrationOf: (tool: Tool) => string | undefined;
 
   /** integrationOf names the connected integration (account) a tool reaches, if any. */
@@ -127,8 +152,13 @@ export class ToolSearchIndex {
         this.documentFrequency.set(term, (this.documentFrequency.get(term) ?? 0) + 1);
       const id = integrationOf(doc.tool);
       if (id === undefined) continue;
-      const integration = this.integrations.get(id) ?? { tools: 0, uses: new Map() };
+      const integration = this.integrations.get(id) ?? {
+        tools: 0,
+        named: new Set(),
+        uses: new Map(),
+      };
       integration.tools++;
+      for (const term of doc.fields[0]!.frequencies.keys()) integration.named.add(term);
       for (const term of new Set([
         ...doc.fields[0]!.frequencies.keys(),
         ...doc.fields[1]!.frequencies.keys(),
@@ -289,6 +319,9 @@ export class ToolSearchIndex {
     const id = this.integrationOf(doc.tool);
     const integration = id === undefined ? undefined : this.integrations.get(id);
     const uses = integration?.uses.get(token) ?? 0;
-    return uses >= 2 && uses * 20 >= integration!.tools;
+    // A word some of its tool names use names one kind of thing among its
+    // tools ("record" in list_records), not the whole integration: only a tool
+    // that names or describes it matches.
+    return uses >= 2 && uses * 20 >= integration!.tools && !integration!.named.has(token);
   }
 }

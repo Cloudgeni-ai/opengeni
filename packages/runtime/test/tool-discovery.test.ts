@@ -21,6 +21,7 @@ import {
   CONNECTED_TOOL_CATALOG,
   GMAIL_TOOLS,
   OUTLOOK_MAIL_TOOLS,
+  withAccount,
   type CatalogTool,
 } from "./fixtures/connected-tool-catalog";
 import {
@@ -1878,6 +1879,114 @@ describe("searches that reach one of several connected accounts", () => {
       expect(loaded(result)).toEqual([]);
       expect(JSON.parse(result.output).schemasLoaded).toBe(false);
     });
+
+    describe("with two Gmail accounts and Outlook Mail", () => {
+      // With several accounts of one connector, every tool description starts
+      // with a line naming its account. A person whose email is their
+      // mailboxes: no separate email-sending service.
+      const PERSONAL = "Gmail — Personal: alex@example.com · Only me";
+      const WORK = "Gmail — Work: alex@example.org · Only me";
+      const others = CONNECTED_TOOL_CATALOG.filter(
+        (t) => t.source !== "mcp__gmail" && t.source !== "mcp__newsletter",
+      );
+      const twoAccounts = [
+        ...withAccount(GMAIL_TOOLS, "mcp__gmail", PERSONAL),
+        ...withAccount(GMAIL_TOOLS, "mcp__gmail_work", WORK),
+        ...others,
+      ];
+      const sameToolsOneLine = [
+        ...GMAIL_TOOLS,
+        ...GMAIL_TOOLS.map((t) => ({ ...t, source: "mcp__gmail_work" })),
+        ...others,
+      ];
+      const label = (source: string) =>
+        ({
+          mcp__gmail: "Gmail (alex@example.com)",
+          mcp__gmail_work: "Gmail (alex@example.org)",
+        })[source] ?? integration(source).label;
+      const accountsOf = (catalog: readonly CatalogTool[]) =>
+        new Map(
+          catalog
+            .filter((t) => t.source.startsWith("mcp__"))
+            .map((t) => {
+              const account = integration(t.source);
+              const connector = t.source.startsWith("mcp__gmail") ? "Gmail" : account.connector;
+              return [
+                `${t.source}__${t.name}`,
+                {
+                  ...account,
+                  label: label(t.source),
+                  connector,
+                  ...(connector === "Gmail" ? { kind: "communication" } : {}),
+                },
+              ] as const;
+            }),
+        );
+      const QUERIES = [
+        "any new email?",
+        "check my unread emails",
+        "send an email to Alex",
+        STAGING.query,
+        "send it",
+        "find files",
+      ];
+
+      test("ranking reads past the account line, as with one account", () => {
+        const index = (catalog: readonly CatalogTool[]) => {
+          const accounts = accountsOf(catalog);
+          return new ToolSearchIndex(
+            catalog.map(catalogTool),
+            (t) => accounts.get((t as { name: string }).name)?.source,
+          );
+        };
+        const lined = index(twoAccounts);
+        const plain = index(sameToolsOneLine);
+        for (const query of QUERIES) {
+          const ranked = (i: ToolSearchIndex) => ({
+            query,
+            rank: names(i.rank(query, 8)),
+            best: names(i.bestMatches(query)),
+            leading: names(i.leadingMatches(query)),
+          });
+          expect(ranked(lined)).toEqual(ranked(plain));
+        }
+      });
+
+      for (const transport of ["openai_native", "codex_native"] as const) {
+        test(`${transport}: vague email requests reach both mailboxes and name Outlook Mail`, async () => {
+          const search = async (query: string) => {
+            const runtime = runtimeWith(transport, accountsOf(twoAccounts));
+            runtime.refresh(twoAccounts.map(catalogTool));
+            return runtime.prepareSearch({ query, limit: 2 });
+          };
+          const NOTICE_TWO =
+            "These tools reach Gmail (alex@example.com), Gmail (alex@example.org). Also connected: Outlook Mail, Team chat. If";
+          for (const query of ["any new email?", "check my unread emails"]) {
+            // Both mailboxes' copies of one Gmail tool tie; which Gmail tool
+            // is a ranking guess, but the result reaches Gmail.
+            const result = await search(query);
+            const [personal, work] = loaded(result) as string[];
+            expect(personal).toStartWith("mcp__gmail__");
+            expect(work).toBe(personal!.replace("mcp__gmail__", "mcp__gmail_work__"));
+            expect(result.notice).toStartWith(NOTICE_TWO);
+          }
+          for (const [query, gmailTool] of [
+            ["send an email to Alex", "send_message"],
+            [STAGING.query, "search_messages"],
+          ] as const) {
+            const result = await search(query);
+            expect({ query, loaded: loaded(result) }).toEqual({
+              query,
+              loaded: [`mcp__gmail__${gmailTool}`, `mcp__gmail_work__${gmailTool}`],
+            });
+            expect(result.notice).toStartWith(NOTICE_TWO);
+          }
+          // A shared verb alone still loads nothing.
+          for (const query of ["send it", "find files", "get the weather in Oslo"])
+            expect(loaded(await search(query))).toEqual([]);
+        });
+      }
+    });
   });
 });
 
@@ -1915,5 +2024,32 @@ describe("which tools a vague native search may load", () => {
     expect(names(index.leadingMatches("make a media file"))).toEqual([
       "mcp__media__create_transfer",
     ]);
+  });
+
+  test("a word an integration's tool names use names one kind of thing, not the integration", () => {
+    // "record" is the CRM's own word, but list_records and create_record name
+    // it: records are one kind of thing there, so a tool must name or describe
+    // records itself. "email" names no Gmail tool, so it is all of Gmail's.
+    const crm = [
+      candidate("mcp__crm__list_records", "List records of an object."),
+      candidate("mcp__crm__create_record", "Create a record of an object."),
+      candidate("mcp__crm__create_note", "Create a note on a record."),
+      candidate("mcp__crm__delete_comment", "Delete a comment."),
+      candidate("mcp__crm__delete_note", "Delete a note."),
+    ];
+    const index = new ToolSearchIndex(crm, integrationOf);
+    expect(index.leadingMatches("delete the record")).toEqual([]);
+    expect(names(index.leadingMatches("delete the note"))).toEqual(["mcp__crm__delete_note"]);
+  });
+
+  test("the account line never changes what ranks", () => {
+    const line = withAccount(GMAIL_TOOLS, "mcp__gmail", "Gmail — Work: a@example.org · Only me");
+    expect(line[0]!.description).toBe(
+      `Account: Gmail — Work: a@example.org · Only me. Use only this account; if the intended account for a write is unclear, ask before calling.\n${GMAIL_TOOLS[0]!.description}`,
+    );
+    const query = "Search and read user's email inbox recent unread emails";
+    expect(
+      names(new ToolSearchIndex(line.map(catalogTool), integrationOf).leadingMatches(query)),
+    ).toEqual(["mcp__gmail__search_messages"]);
   });
 });

@@ -11,12 +11,21 @@ something the query names: when the query names an operation, the tool's name
 has that operation; and a query resource word is in the tool's name or
 capability sentence, or is its connected integration's own word (used there
 by at least two of the integration's tools and one in twenty, as a mail
-integration's tools say "email"). A tool that shares only a verb with the
-query ("get the weather in Oslo", "send it", "find files"), or matches only
+integration's tools say "email", and in none of its tool names: "record" in a
+CRM's `list_records` names one kind of thing, not the CRM). A tool that
+shares only a verb with the query ("get the weather in Oslo", "send it",
+"find files"), or matches only
 through long guidance or parameter names, is never loaded, so such queries
 still load nothing, as before. "Search and read user's email inbox recent
 unread emails" now loads Gmail's `search_messages` instead of nothing. Generic
-dispatch routes, which list compact candidates, are unchanged. The existing
+dispatch routes, which list compact candidates, are unchanged. Ranking also
+reads past the `Account: … Use only this account…` first line a
+tool description gets when the person has several accounts of its connector,
+so those tools rank on their own capability sentence, exactly as with one
+account; the description the model sees is unchanged. And "check" now counts
+as a read operation ("check my unread emails"), not a resource word matching
+tools named `check…`.
+The existing
 `connectedAccounts` notice above now also follows a load by exact names (for
 example after browsing a group with `tool_list`) when it is the turn's first
 result reaching one of several connected accounts; its text is unchanged.

@@ -220,6 +220,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { createToolSelector } from "./tool-discovery-decision";
+import { withAccountLine } from "./tool-discovery-ranking";
 import {
   HARNESS_CONTROL_FIRST_PARTY_TOOLS,
   HARNESS_CONTROL_MCP_SERVER_ID,
@@ -9211,10 +9212,7 @@ export class PrefixedMcpServer implements MCPServer {
             // connector to tell apart. With one account the line adds nothing
             // the model can act on, and it would repeat on every tool.
             ...(this.accountLabel?.account
-              ? {
-                  description:
-                    `Account: ${this.accountLabel.model}. Use only this account; if the intended account for a write is unclear, ask before calling.\n${tool.description ?? ""}`.trimEnd(),
-                }
+              ? { description: withAccountLine(this.accountLabel.model, tool.description) }
               : {}),
           };
         });
