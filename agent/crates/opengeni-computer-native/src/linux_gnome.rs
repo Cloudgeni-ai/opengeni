@@ -258,6 +258,8 @@ enum LayoutGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LayoutReport {
     group: LayoutGroup,
+    /// The locked modifiers, reported with the group.
+    locked: Option<u32>,
     /// The names of the keyboard's keymap, sent with the keyboard.
     keymap: Option<KeymapNames>,
 }
@@ -267,8 +269,8 @@ struct LayoutReport {
 enum LayoutChange {
     /// A keyboard arrived with this keymap.
     Keyboard(Option<KeymapNames>),
-    /// Mutter reported the active group.
-    Group(u32),
+    /// Mutter reported the active group and the locked modifiers.
+    Group { group: u32, locked: u32 },
     /// The keyboard was removed, as Mutter does when its keymap changes.
     KeyboardRemoved,
     /// No group was reported in time, or the report stream ended.
@@ -278,17 +280,22 @@ enum LayoutChange {
 impl LayoutReport {
     const PENDING: Self = Self {
         group: LayoutGroup::Pending,
+        locked: None,
         keymap: None,
     };
     const UNKNOWN: Self = Self {
         group: LayoutGroup::Unknown,
+        locked: None,
         keymap: None,
     };
 
     fn apply(&mut self, change: LayoutChange) {
         match change {
             LayoutChange::Keyboard(keymap) => self.keymap = keymap,
-            LayoutChange::Group(group) => self.group = LayoutGroup::Active(group),
+            LayoutChange::Group { group, locked } => {
+                self.group = LayoutGroup::Active(group);
+                self.locked = Some(locked);
+            }
             // Until the new keyboard reports, its group and keymap are unknown.
             LayoutChange::KeyboardRemoved if self.group != LayoutGroup::Pending => {
                 *self = Self::UNKNOWN;
@@ -307,6 +314,7 @@ impl LayoutReport {
                 LayoutGroup::Active(group) => Some(group),
                 LayoutGroup::Pending | LayoutGroup::Unknown => None,
             },
+            locked_modifiers: self.locked,
             keymap: self.keymap.clone(),
         }
     }
@@ -453,7 +461,10 @@ async fn follow_layout(socket: UnixStream, sender: &watch::Sender<LayoutReport>)
             {
                 LayoutChange::Keyboard(eis_keymap_names(added.device.keymap()))
             }
-            Some(Ok(EiEvent::KeyboardModifiers(modifiers))) => LayoutChange::Group(modifiers.group),
+            Some(Ok(EiEvent::KeyboardModifiers(modifiers))) => LayoutChange::Group {
+                group: modifiers.group,
+                locked: modifiers.locked,
+            },
             Some(Ok(EiEvent::DeviceRemoved(_))) => LayoutChange::KeyboardRemoved,
             Some(Ok(_)) => continue,
             Some(Err(_)) | None => return,
@@ -818,12 +829,17 @@ mod tests {
             report.layout(),
             CompositorLayout {
                 active_group: None,
+                locked_modifiers: None,
                 keymap: Some(ru_us.clone()),
             }
         );
         assert_eq!(report.group, LayoutGroup::Pending);
-        report.apply(LayoutChange::Group(1));
+        report.apply(LayoutChange::Group {
+            group: 1,
+            locked: 0,
+        });
         assert_eq!(report.layout().active_group, Some(1));
+        assert_eq!(report.layout().locked_modifiers, Some(0));
         report.apply(LayoutChange::NoGroup);
         assert_eq!(report.layout().active_group, Some(1));
         // A keymap change replaces the keyboard: nothing is known until the
@@ -831,11 +847,16 @@ mod tests {
         report.apply(LayoutChange::KeyboardRemoved);
         assert_eq!(report, LayoutReport::UNKNOWN);
         report.apply(LayoutChange::Keyboard(Some(ru_us.clone())));
-        report.apply(LayoutChange::Group(0));
+        // Caps Lock locks the Lock modifier, which changes what a key types.
+        report.apply(LayoutChange::Group {
+            group: 0,
+            locked: 2,
+        });
         assert_eq!(
             report.layout(),
             CompositorLayout {
                 active_group: Some(0),
+                locked_modifiers: Some(2),
                 keymap: Some(ru_us.clone()),
             }
         );
@@ -844,6 +865,7 @@ mod tests {
         older.apply(LayoutChange::Keyboard(Some(ru_us.clone())));
         older.apply(LayoutChange::NoGroup);
         assert_eq!(older.group, LayoutGroup::Unknown);
+        assert_eq!(older.layout().locked_modifiers, None);
         assert_eq!(older.layout().keymap, Some(ru_us));
     }
 }

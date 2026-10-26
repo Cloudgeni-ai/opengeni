@@ -194,6 +194,40 @@ mod linux {
         );
         assert!(linux_named_key_chord_keys(None, &CompositorLayout::default(), "F13").is_ok());
         layout_groups_and_levels(&display, &checked);
+        caps_lock_text(&display);
+    }
+
+    fn compositor(active_group: Option<u32>, keymap: Option<KeymapNames>) -> CompositorLayout {
+        CompositorLayout {
+            active_group,
+            locked_modifiers: None,
+            keymap,
+        }
+    }
+
+    /// Text under a locked Caps Lock, checked against the server's own key
+    /// types: a letter is sent as the keysym of its other case, which the
+    /// compositor presses with or without Shift so that Caps Lock turns it
+    /// back into the requested case.
+    fn caps_lock_text(display: &str) {
+        let display = display.to_string();
+        let caps = CompositorLayout {
+            locked_modifiers: Some(0x02),
+            ..CompositorLayout::default()
+        };
+        assert_eq!(
+            linux_layout_text_keysyms(Some(&display), &caps, "Hello, 1!").unwrap(),
+            vec![0x68, 0x45, 0x4c, 0x4c, 0x4f, 0x2c, 0x20, 0x31, 0x21]
+        );
+        // Num Lock (Mod2) leaves text alone.
+        let num = CompositorLayout {
+            locked_modifiers: Some(0x10),
+            ..CompositorLayout::default()
+        };
+        assert_eq!(
+            linux_layout_text_keysyms(Some(&display), &num, "Hello").unwrap(),
+            vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]
+        );
     }
 
     /// Text and chords on a running layout display, checked the way a
@@ -220,10 +254,7 @@ mod linux {
             .check()
             .unwrap();
         let text = |active: Option<u32>, text: &str| {
-            let layout = CompositorLayout {
-                active_group: active,
-                keymap: None,
-            };
+            let layout = compositor(active, None);
             linux_layout_text_keysyms(Some(&display), &layout, text).map_err(|e| e.to_string())
         };
         assert_eq!(text(Some(1), "aé"), Ok(vec![0x61, 0xe9]));
@@ -239,10 +270,7 @@ mod linux {
         // A chord key only another group has is sent as the physical key
         // that gives it there (evdev keycode 192 is X11 keycode 200).
         let chord = |active: Option<u32>, name: &str| {
-            let layout = CompositorLayout {
-                active_group: active,
-                keymap: None,
-            };
+            let layout = compositor(active, None);
             linux_named_key_chord_keys(Some(&display), &layout, name).map_err(|e| e.to_string())
         };
         assert_eq!(
@@ -266,16 +294,14 @@ mod linux {
         // carries the compositor's keymap names; until then typing waits, and
         // then fails as retryable rather than checking a stale layout.
         let names = display_keymap_names(&conn);
-        let synced = CompositorLayout {
-            active_group: Some(1),
-            keymap: Some(names),
-        };
+        let synced = compositor(Some(1), Some(names));
         assert_eq!(
             linux_layout_text_keysyms(Some(&display), &synced, "é").unwrap(),
             vec![0xe9]
         );
         let other = CompositorLayout {
             active_group: Some(1),
+            locked_modifiers: None,
             keymap: Some(KeymapNames::from_keymap_text(
                 "xkb_symbols \"pc+ru+us:2\" {\n\tname[1]=\"Russian\";\n\tname[2]=\"English (US)\";\n};",
             )),

@@ -1490,6 +1490,7 @@ fn prepare_inputs(
     inputs: &[v1::DesktopInput],
 ) -> PlatformResult<(Vec<PreparedInput>, KeymapRemapPlan)> {
     let mut mapping = None;
+    let mut lock = None;
     let mut remap = KeymapRemapPlan::default();
     let prepared = inputs
         .iter()
@@ -1507,11 +1508,13 @@ fn prepare_inputs(
                     mapping = Some(keyboard_mapping(conn).ok_or_else(|| {
                         PlatformError::Unsupported("X11 keyboard mapping is unavailable".into())
                     })?);
+                    lock = x11_text_lock(conn);
                 }
                 Ok(PreparedInput::Key {
                     request: key.clone(),
                     events: prepare_key(
                         mapping.as_ref().expect("keymap was loaded"),
+                        lock.as_ref(),
                         key,
                         &mut remap,
                     )?,
@@ -1631,8 +1634,11 @@ fn inject_pointer(
 /// Text the layout cannot type is bound to spare keycodes in `remap` (complete
 /// presses only: a held key must not outlive its temporary binding). So is a
 /// function key the layout lacks (F13 to F24 on most layouts).
+/// With a locked modifier such as Caps Lock (`lock`), each character is sent
+/// with or without Shift so that it arrives as requested, or refused.
 fn prepare_key(
     mapping: &X11KeyboardMapping,
+    lock: Option<&X11TextLock>,
     key: &v1::KeyEvent,
     remap: &mut KeymapRemapPlan,
 ) -> PlatformResult<Vec<(u8, u8)>> {
@@ -1645,25 +1651,7 @@ fn prepare_key(
         let strokes = key
             .key
             .chars()
-            .map(|character| {
-                mapping
-                    .resolve_character(character)
-                    .or_else(|| {
-                        complete
-                            .then(|| remap.bind(mapping, character))
-                            .flatten()
-                            .map(|keycode| X11KeyStroke {
-                                keycode,
-                                shift: false,
-                            })
-                    })
-                    .ok_or_else(|| {
-                        PlatformError::Unsupported(format!(
-                            "X11 keymap cannot type Unicode scalar U+{:04X}; use clipboard paste",
-                            character as u32
-                        ))
-                    })
-            })
+            .map(|character| text_stroke(mapping, lock, remap, complete, character))
             .collect::<PlatformResult<Vec<_>>>()?;
         let shift = if strokes.iter().any(|stroke| stroke.shift) {
             Some(
@@ -1739,6 +1727,38 @@ fn prepare_key(
 /// can take it on a spare keycode for one complete press.
 fn is_function_keysym(keysym: u32) -> bool {
     (0xffbe..=0xffd5).contains(&keysym)
+}
+
+/// The stroke that types `character`: on the layout, with Shift as locked
+/// modifiers require, or else (complete presses only) on a spare keycode.
+fn text_stroke(
+    mapping: &X11KeyboardMapping,
+    lock: Option<&X11TextLock>,
+    remap: &mut KeymapRemapPlan,
+    complete: bool,
+    character: char,
+) -> PlatformResult<X11KeyStroke> {
+    mapping
+        .resolve_character(character)
+        .and_then(|stroke| match lock {
+            Some(lock) => lock.stroke(stroke, character),
+            None => Some(stroke),
+        })
+        .or_else(|| {
+            (complete && lock.is_none_or(|lock| lock.bound_types(character)))
+                .then(|| remap.bind(mapping, character))
+                .flatten()
+                .map(|keycode| X11KeyStroke {
+                    keycode,
+                    shift: false,
+                })
+        })
+        .ok_or_else(|| {
+            PlatformError::Unsupported(format!(
+                "X11 keymap cannot type Unicode scalar U+{:04X}; use clipboard paste",
+                character as u32
+            ))
+        })
 }
 
 /// The maximum number of synthetic wheel clicks one scroll event may emit per
@@ -1905,6 +1925,72 @@ fn keyboard_mapping(conn: &x11rb::rust_connection::RustConnection) -> Option<X11
             .into_iter()
             .filter(|keycode| *keycode != 0)
             .collect(),
+    })
+}
+
+/// The keyboard's locked modifiers (such as Lock, which Caps Lock locks) and
+/// what its keys give under them, when any is locked. A locked modifier
+/// changes the level a key gives, and applications capitalize a letter its
+/// key type leaves Lock to, so a plain stroke can arrive in the wrong case.
+struct X11TextLock {
+    keymap: keysym_layout::LayoutKeymap,
+    /// The active layout group.
+    layout: usize,
+    locked: u8,
+}
+
+impl X11TextLock {
+    /// `stroke`, with Shift as resolved or the other way round, if that
+    /// types `character` under the locked modifiers.
+    fn stroke(&self, stroke: X11KeyStroke, character: char) -> Option<X11KeyStroke> {
+        [stroke.shift, !stroke.shift]
+            .into_iter()
+            .map(|shift| X11KeyStroke {
+                keycode: stroke.keycode,
+                shift,
+            })
+            .find(|candidate| {
+                self.keymap.keycode_gives(
+                    candidate.keycode,
+                    self.layout,
+                    u8::from(candidate.shift),
+                    self.locked,
+                    character,
+                )
+            })
+    }
+
+    /// Whether a spare keycode bound to `character` (on both levels) types it
+    /// under the locked modifiers.
+    fn bound_types(&self, character: char) -> bool {
+        keysym_layout::gives(
+            keysyms::text_keysym(character),
+            character,
+            self.locked & 0x02 != 0,
+        )
+    }
+}
+
+/// Reads the locked modifiers and, when any is locked, the XKB keymap.
+/// `None` when nothing is locked or XKB is unavailable.
+fn x11_text_lock(conn: &x11rb::rust_connection::RustConnection) -> Option<X11TextLock> {
+    use x11rb::protocol::xkb::{self, ConnectionExt as _};
+    if !conn.xkb_use_extension(1, 0).ok()?.reply().ok()?.supported {
+        return None;
+    }
+    let state = conn
+        .xkb_get_state(xkb::ID::USE_CORE_KBD.into())
+        .ok()?
+        .reply()
+        .ok()?;
+    let locked = u16::from(state.locked_mods).to_le_bytes()[0];
+    if locked == 0 {
+        return None;
+    }
+    Some(X11TextLock {
+        keymap: keysym_layout::LayoutKeymap::read(conn)?,
+        layout: usize::from(u8::from(state.group)),
+        locked,
     })
 }
 
@@ -2287,6 +2373,9 @@ fn layout_connection(
 /// character maps to its canonical keysym unchecked. When `layout` names the
 /// compositor's keymap, the display's keymap is used only once it carries
 /// those names.
+/// When `layout` reports locked modifiers, such as Caps Lock, each character
+/// is sent as the keysym that arrives as that character with them locked
+/// (`A` for `a` with Caps Lock), or refused when none does.
 ///
 /// # Errors
 ///
@@ -2302,7 +2391,7 @@ pub fn linux_layout_text_keysyms(
         Some(conn) => synced_layout_keymap(&conn, layout.keymap.as_ref())?,
         None => None,
     };
-    layout_text_keysyms(keymap.as_ref(), layout.active_group, text)
+    layout_text_keysyms(keymap.as_ref(), layout, text)
 }
 
 /// How long a layout display may take to show the compositor's keymap.
@@ -2336,7 +2425,7 @@ fn synced_layout_keymap(
 
 fn layout_text_keysyms(
     keymap: Option<&keysym_layout::LayoutKeymap>,
-    active_layout: Option<u32>,
+    layout: &CompositorLayout,
     text: &str,
 ) -> PlatformResult<Vec<u32>> {
     text.chars()
@@ -2344,8 +2433,8 @@ fn layout_text_keysyms(
             None => Ok(keysyms::text_keysym(character)),
             Some(keymap) => match character {
                 '\n' | '\r' | '\t' => Ok(keysyms::text_keysym(character)),
-                _ => keysyms::character_keysyms(character)
-                    .find(|&keysym| keymap.types(keysym, active_layout))
+                _ => keymap
+                    .text_keysym(character, layout.active_group, layout.locked_modifiers)
                     .ok_or_else(|| {
                         PlatformError::Unsupported(format!(
                             "the active keyboard layout cannot type U+{:04X}; use clipboard paste",
@@ -2719,18 +2808,18 @@ mod tests {
             action: v1::KeyAction::Press.into(),
         };
         assert!(matches!(
-            prepare_key(&mapping, &key, remap),
+            prepare_key(&mapping, None, &key, remap),
             Err(PlatformError::Unsupported(_))
         ));
         key.is_text = false;
         key.key = "Control+Escape".into();
         assert!(matches!(
-            prepare_key(&mapping, &key, remap),
+            prepare_key(&mapping, None, &key, remap),
             Err(PlatformError::Unsupported(_))
         ));
         key.key = "Control+Enter".into();
         assert_eq!(
-            prepare_key(&mapping, &key, remap).unwrap(),
+            prepare_key(&mapping, None, &key, remap).unwrap(),
             [
                 (KEY_PRESS, 12),
                 (KEY_PRESS, 13),
@@ -2741,7 +2830,7 @@ mod tests {
         key.is_text = true;
         key.key = "aA".into();
         assert_eq!(
-            prepare_key(&mapping, &key, remap).unwrap(),
+            prepare_key(&mapping, None, &key, remap).unwrap(),
             [
                 (KEY_PRESS, 10),
                 (KEY_RELEASE, 10),
@@ -2789,12 +2878,90 @@ mod tests {
     }
 
     #[test]
+    fn locked_caps_lock_types_text_in_the_requested_case_or_refuses_it() {
+        let mapping = fixture_keymap();
+        let lock = |locked: u8| X11TextLock {
+            keymap: keysym_layout::tests::keymap(&[
+                (10, &[&[u32::from('a'), u32::from('A')]]),
+                (11, &[&[0xffe1]]),
+                (12, &[&[0xffe3]]),
+                (13, &[&[0xff0d]]),
+            ]),
+            layout: 0,
+            locked,
+        };
+        let shifted = |keycode: u8| {
+            vec![
+                (KEY_PRESS, 11),
+                (KEY_PRESS, keycode),
+                (KEY_RELEASE, keycode),
+                (KEY_RELEASE, 11),
+            ]
+        };
+        let plain = |keycode: u8| vec![(KEY_PRESS, keycode), (KEY_RELEASE, keycode)];
+        let typed = |lock: Option<&X11TextLock>, text_: &str| {
+            prepare_key(
+                &mapping,
+                lock,
+                &text(text_, v1::KeyAction::Press),
+                &mut KeymapRemapPlan::default(),
+            )
+            .map_err(|error| error.to_string())
+        };
+        // Caps Lock turns the letter key's base level into its capital, and
+        // Shift with Caps Lock gives the small letter.
+        let caps = lock(0x02);
+        assert_eq!(typed(Some(&caps), "a"), Ok(shifted(10)));
+        assert_eq!(typed(Some(&caps), "A"), Ok(plain(10)));
+        assert_eq!(typed(None, "a"), Ok(plain(10)));
+        // Num Lock leaves letter keys alone.
+        assert_eq!(typed(Some(&lock(0x10)), "a"), Ok(plain(10)));
+        // A locked Shift (Shift Lock) gives only the capital: the small
+        // letter is refused rather than typed as a capital.
+        assert_eq!(typed(Some(&lock(0x01)), "A"), Ok(shifted(10)));
+        assert_eq!(
+            typed(Some(&lock(0x01)), "a"),
+            Err("unsupported operation: X11 keymap cannot type Unicode scalar U+0061; use clipboard paste".into())
+        );
+
+        // A spare keycode gives its glyph on both levels, which applications
+        // capitalize under Caps Lock: a capital is bound, a small letter is
+        // refused before anything is bound.
+        let spare = spare_keymap();
+        let mut remap = KeymapRemapPlan::default();
+        assert_eq!(
+            prepare_key(
+                &spare,
+                Some(&caps),
+                &text("Æ", v1::KeyAction::Press),
+                &mut remap
+            )
+            .unwrap(),
+            plain(13)
+        );
+        assert!(prepare_key(
+            &spare,
+            Some(&caps),
+            &text("æ", v1::KeyAction::Press),
+            &mut remap
+        )
+        .is_err());
+        assert_eq!(remap.bindings.len(), 1);
+    }
+
+    #[test]
     fn text_the_layout_lacks_is_bound_to_spare_keycodes_once_per_glyph() {
         let mapping = spare_keymap();
         let mut remap = KeymapRemapPlan::default();
         // π is on the layout through its legacy keysym; Æ and 密 are not.
         assert_eq!(
-            prepare_key(&mapping, &text("πÆ密Æa", v1::KeyAction::Press), &mut remap).unwrap(),
+            prepare_key(
+                &mapping,
+                None,
+                &text("πÆ密Æa", v1::KeyAction::Press),
+                &mut remap
+            )
+            .unwrap(),
             [
                 (KEY_PRESS, 12),
                 (KEY_RELEASE, 12),
@@ -2817,6 +2984,7 @@ mod tests {
         assert_eq!(
             prepare_key(
                 &mapping,
+                None,
                 &text("密", v1::KeyAction::Unspecified),
                 &mut remap
             )
@@ -2824,7 +2992,7 @@ mod tests {
             [(KEY_PRESS, 10), (KEY_RELEASE, 10)]
         );
         let Err(PlatformError::Unsupported(message)) =
-            prepare_key(&mapping, &text("Ø", v1::KeyAction::Press), &mut remap)
+            prepare_key(&mapping, None, &text("Ø", v1::KeyAction::Press), &mut remap)
         else {
             panic!("a glyph without a spare keycode must be unsupported");
         };
@@ -2840,16 +3008,27 @@ mod tests {
         let mut remap = KeymapRemapPlan::default();
         for action in [v1::KeyAction::Down, v1::KeyAction::Up] {
             assert!(matches!(
-                prepare_key(&mapping, &text("Æ", action), &mut remap),
+                prepare_key(&mapping, None, &text("Æ", action), &mut remap),
                 Err(PlatformError::Unsupported(_))
             ));
         }
         assert!(matches!(
-            prepare_key(&mapping, &text("\u{7}", v1::KeyAction::Press), &mut remap),
+            prepare_key(
+                &mapping,
+                None,
+                &text("\u{7}", v1::KeyAction::Press),
+                &mut remap
+            ),
             Err(PlatformError::Unsupported(_))
         ));
         assert_eq!(
-            prepare_key(&mapping, &text("\n", v1::KeyAction::Press), &mut remap).unwrap(),
+            prepare_key(
+                &mapping,
+                None,
+                &text("\n", v1::KeyAction::Press),
+                &mut remap
+            )
+            .unwrap(),
             [(KEY_PRESS, 14), (KEY_RELEASE, 14)]
         );
         assert_eq!(remap.bindings, []);
@@ -2868,13 +3047,20 @@ mod tests {
         let mapping = spare_keymap();
         let mut remap = KeymapRemapPlan::default();
         assert_eq!(
-            prepare_key(&mapping, &named("F13", v1::KeyAction::Press), &mut remap).unwrap(),
+            prepare_key(
+                &mapping,
+                None,
+                &named("F13", v1::KeyAction::Press),
+                &mut remap
+            )
+            .unwrap(),
             [(KEY_PRESS, 13), (KEY_RELEASE, 13)]
         );
         // A chord binds only the missing key; a repeat reuses its binding.
         assert_eq!(
             prepare_key(
                 &mapping,
+                None,
                 &named("Shift+F20", v1::KeyAction::Unspecified),
                 &mut remap
             )
@@ -2887,7 +3073,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            prepare_key(&mapping, &named("f13", v1::KeyAction::Press), &mut remap).unwrap(),
+            prepare_key(
+                &mapping,
+                None,
+                &named("f13", v1::KeyAction::Press),
+                &mut remap
+            )
+            .unwrap(),
             [(KEY_PRESS, 13), (KEY_RELEASE, 13)]
         );
         assert_eq!(
@@ -2903,7 +3095,7 @@ mod tests {
             ("Pause", v1::KeyAction::Press),
         ] {
             let Err(PlatformError::Unsupported(message)) =
-                prepare_key(&mapping, &named(key, action), &mut remap)
+                prepare_key(&mapping, None, &named(key, action), &mut remap)
             else {
                 panic!("{key} {action:?} must be unsupported");
             };
@@ -2915,7 +3107,13 @@ mod tests {
         assert_eq!(remap.bindings.len(), 2);
         let mut fresh = KeymapRemapPlan::default();
         assert_eq!(
-            prepare_key(&mapping, &named("F24", v1::KeyAction::Press), &mut fresh).unwrap(),
+            prepare_key(
+                &mapping,
+                None,
+                &named("F24", v1::KeyAction::Press),
+                &mut fresh
+            )
+            .unwrap(),
             [(KEY_PRESS, 13), (KEY_RELEASE, 13)]
         );
         assert_eq!(fresh.bindings, [(13, 0xffd5, vec![0, 0])]);
@@ -3226,7 +3424,15 @@ mod tests {
         active: Option<u32>,
         text: &str,
     ) -> Result<Vec<u32>, String> {
-        layout_text_keysyms(Some(keymap), active, text).map_err(|error| error.to_string())
+        layout_text_keysyms(
+            Some(keymap),
+            &CompositorLayout {
+                active_group: active,
+                ..CompositorLayout::default()
+            },
+            text,
+        )
+        .map_err(|error| error.to_string())
     }
 
     #[test]
@@ -3286,7 +3492,7 @@ mod tests {
         assert_eq!(layout_text(&ru_us, None, "\n"), Ok(vec![0xff0d]));
         // No layout display: unchecked.
         assert_eq!(
-            layout_text_keysyms(None, None, "hé").unwrap(),
+            layout_text_keysyms(None, &CompositorLayout::default(), "hé").unwrap(),
             vec![0x68, 0xe9]
         );
     }
