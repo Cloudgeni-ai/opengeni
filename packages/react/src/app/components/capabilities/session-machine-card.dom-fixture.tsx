@@ -67,6 +67,10 @@ const fleet = {
   machines: [sessionBox] as Machine[],
   canRead: true,
   canManage: true,
+  canConnect: true,
+  canManageMachine(target: { scope: string }): boolean {
+    return target.scope === "user" ? this.canConnect : this.canManage;
+  },
   canAttach: true,
   attaching: false,
   loading: false,
@@ -194,6 +198,7 @@ beforeEach(() => {
   fleet.machines = [sessionBox];
   fleet.canRead = true;
   fleet.canManage = true;
+  fleet.canConnect = true;
   fleet.canAttach = true;
   fleet.error = null;
   fleet.mutationError = null;
@@ -421,6 +426,7 @@ describe("Connected Machine conversation card", () => {
       { workspaceId: "workspace", permissions: ["enrollments:read", "sessions:control"] },
     ];
     fleet.canManage = false;
+    fleet.canConnect = false;
     fleet.machines = [
       sessionBox,
       machine("linux", "build-box", { os: "linux", hasDisplay: false }),
@@ -477,10 +483,39 @@ describe("Connected Machine conversation card", () => {
       { workspaceId: "workspace", permissions: ["enrollments:read", "sessions:control"] },
     ];
     fleet.canManage = false;
+    fleet.canConnect = false;
     const h = await render();
     try {
       expect(h.text()).toContain("Ask a workspace admin to connect a machine.");
       expect(h.button("Connect a computer")).toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("a signed-in member connects their own computer; This workspace needs an admin", async () => {
+    context.accessContext.workspaceGrants = [
+      { workspaceId: "workspace", permissions: ["enrollments:read", "sessions:control"] },
+    ];
+    fleet.canManage = false;
+    fleet.canConnect = true;
+    const h = await render();
+    try {
+      expect(h.text()).not.toContain("Ask a workspace admin to connect a machine.");
+      await click(h.button("Connect a computer"));
+      await click(
+        [...(h.dialog()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((button) =>
+          button.textContent?.startsWith("Connect a server instead"),
+        ) ?? null,
+      );
+      const workspace = [
+        ...(h.dialog()?.querySelectorAll<HTMLButtonElement>('[role="radio"]') ?? []),
+      ].find((radio) => radio.textContent?.startsWith("This workspace"));
+      expect(workspace?.disabled).toBe(true);
+      expect(h.dialogText()).toContain("Only workspace admins can choose this.");
+      for (const [, input] of mintEnrollToken.mock.calls) {
+        expect((input as { scope?: string }).scope).toBe("user");
+      }
     } finally {
       await h.close();
     }
@@ -724,6 +759,7 @@ describe("Connected Machine conversation card", () => {
       { workspaceId: "workspace", permissions: ["enrollments:read", "sessions:control"] },
     ];
     fleet.canManage = false;
+    fleet.canConnect = false;
     fleet.machines = [sessionBox, machine("mac", "Studio Mac")];
     const h = await render();
     try {
@@ -984,6 +1020,7 @@ describe("Connected Machine conversation card", () => {
     context.accessContext.workspaceGrants = [{ workspaceId: "workspace", permissions: [] }];
     fleet.canRead = false;
     fleet.canManage = false;
+    fleet.canConnect = false;
     fleet.machines = [];
     const h = await render();
     try {

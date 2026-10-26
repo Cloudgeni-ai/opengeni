@@ -32,6 +32,8 @@ export type EnrollmentConsentProps = {
   userCode: string;
   machine: EnrollmentConsentMachine;
   phase?: EnrollmentConsentPhase | undefined;
+  /** Whether this caller may share the machine with the whole workspace. */
+  allowWorkspaceScope?: boolean | undefined;
   /** Whether this caller may publish the machine to the whole organization. */
   allowOrganizationScope?: boolean | undefined;
   /** Approve with the chosen screen-control consent and explicit access scope. */
@@ -65,6 +67,7 @@ export function EnrollmentConsent({
   userCode,
   machine,
   phase = "review",
+  allowWorkspaceScope = true,
   allowOrganizationScope = false,
   onApprove,
   onDeny,
@@ -192,7 +195,9 @@ export function EnrollmentConsent({
           {t("enrollmentConsent.whoCanUseThisMachine")}
         </legend>
         {(["user", "workspace", "organization"] as const).map((candidate) => {
-          const disabled = candidate === "organization" && !allowOrganizationScope;
+          const disabled =
+            (candidate === "organization" && !allowOrganizationScope) ||
+            (candidate === "workspace" && !allowWorkspaceScope);
           return (
             <label
               key={candidate}
@@ -215,7 +220,11 @@ export function EnrollmentConsent({
               <span className="min-w-0">
                 <span className="block text-og-base font-medium text-og-fg">
                   {scopeCopy[candidate].label}
-                  {disabled ? " · organization admin required" : ""}
+                  {disabled
+                    ? candidate === "organization"
+                      ? " · organization admin required"
+                      : " · workspace admin required"
+                    : ""}
                 </span>
                 <span className="block text-og-sm text-og-fg-muted">
                   {scopeCopy[candidate].body}

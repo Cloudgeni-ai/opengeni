@@ -3914,14 +3914,15 @@ service in the ingress.
 ### Enrolling a machine
 
 Enrollment binds a machine to a workspace and requires the enable flag. Two paths
-are supported:
+are supported. A signed-in member with `enrollments:read` connects an Only me
+machine for themselves; a machine for the whole workspace needs
+`enrollments:manage` (see [Connected Machines](connected-machines.md#connect-a-machine)).
 
 - **Device flow**: the agent starts an enrollment
-  (`/v1/enrollments/device/start`) and a workspace member holding
-  `enrollments:manage` approves it at the consent page
+  (`/v1/enrollments/device/start`) and a workspace member approves it at the
+  consent page
   (`/v1/workspaces/:workspaceId/enrollments/device/approve`).
-- **Zero-click enroll token**: a workspace member holding `enrollments:manage`
-  mints a short-TTL enroll token
+- **Zero-click enroll token**: a workspace member mints a short-TTL enroll token
   (`/v1/workspaces/:workspaceId/enrollments/token`) that the agent redeems
   headlessly (`/v1/enrollments/token/exchange`) with no human approval — suited
   to fleet or headless provisioning.

@@ -125,9 +125,9 @@ export type ScreenControlActor = {
 
 /**
  * Turn screen control on for one enrolled machine, in place. The caller has
- * already authorized the actor for this enrollment (enrollments:manage, plus
- * account:admin for an organization machine, plus personal-machine admission
- * for an agent attempt). Safe to repeat: a retry re-requests the renewal.
+ * already authorized the actor for this enrollment (the machine scope rule in
+ * ./machine-authority.ts, plus personal-machine admission for an agent
+ * attempt). Safe to repeat: a retry re-requests the renewal.
  */
 export async function enableMachineScreenControl(
   services: Services,
