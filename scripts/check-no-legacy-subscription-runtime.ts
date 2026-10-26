@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, posix, relative } from "node:path";
 import { parseSync } from "oxc-parser";
 import {
@@ -191,20 +191,63 @@ export function isScannedRuntimeSource(file: string): boolean {
 /**
  * The sources a change can newly break, or null when only the full scan is
  * sound. Findings are per file for a fixed retirement registry and parser, so
- * unchanged files keep their verdict unless the registry, this engine or the
- * toolchain changed, or the plan is not focused.
+ * unchanged files keep their verdict unless the registry (with every module
+ * it is built from, see `guardInputFiles`), this engine or the toolchain
+ * changed, or the plan is not focused.
  */
-export function changedRuntimeSources(plan: {
-  mode?: unknown;
-  changedFiles?: unknown;
-}): string[] | null {
+export function changedRuntimeSources(
+  plan: { mode?: unknown; changedFiles?: unknown },
+  guardInputs: ReadonlySet<string>,
+): string[] | null {
   if (plan.mode !== "focused" && plan.mode !== "docs") return null;
   if (!Array.isArray(plan.changedFiles)) return null;
   const changed = plan.changedFiles.filter((path): path is string => typeof path === "string");
   const fullScan = (path: string) =>
-    GUARD_SOURCES.test(path) || path === "package.json" || path === "bun.lock";
+    GUARD_SOURCES.test(path) ||
+    guardInputs.has(path) ||
+    path === "package.json" ||
+    path === "bun.lock";
   if (changed.some(fullScan)) return null;
   return changed.filter(isScannedRuntimeSource);
+}
+
+const GUARD_ENTRY_POINTS = [
+  "scripts/check-no-legacy-subscription-runtime.ts",
+  "scripts/legacy-subscription-runtime/index.ts",
+];
+
+/**
+ * Every repository file the engine and its retirement registry load, following
+ * relative imports (including JSON) from both entry points. The registry is
+ * partly built from other modules (for example the database runtime posture),
+ * so a change to any of them can retire a name that unchanged files still use.
+ */
+export function guardInputFiles(root: string): Set<string> {
+  const seen = new Set<string>();
+  const pending = [...GUARD_ENTRY_POINTS];
+  while (pending.length > 0) {
+    const file = pending.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    if (!/\.[cm]?[jt]sx?$/.test(file)) continue;
+    const loader = file.endsWith("x") ? "tsx" : "ts";
+    const source = readFileSync(join(root, file), "utf8");
+    for (const { path } of new Bun.Transpiler({ loader }).scanImports(source)) {
+      if (!path.startsWith("./") && !path.startsWith("../")) continue;
+      const base = posix.normalize(posix.join(posix.dirname(file), path));
+      const resolved = [
+        base,
+        ...[".ts", ".tsx", ".js", ".mjs", ".json"].map((extension) => base + extension),
+        ...["ts", "tsx", "js"].map((extension) => `${base}/index.${extension}`),
+      ].find(
+        (candidate) =>
+          existsSync(join(root, candidate)) && statSync(join(root, candidate)).isFile(),
+      );
+      if (!resolved) throw new Error(`cannot resolve ${path} from ${file}`);
+      pending.push(resolved);
+    }
+  }
+  return seen;
 }
 
 export function checkNoLegacySubscriptionRuntime(
@@ -227,7 +270,12 @@ if (import.meta.main) {
   // PR fast checks scope the scan to the impact plan's changed files; Batch
   // and every other caller scan the whole tree.
   const planPath = process.env.OPENGENI_GUARD_SCOPE_PLAN;
-  const only = planPath ? changedRuntimeSources(JSON.parse(readFileSync(planPath, "utf8"))) : null;
+  const only = planPath
+    ? changedRuntimeSources(
+        JSON.parse(readFileSync(planPath, "utf8")),
+        guardInputFiles(process.cwd()),
+      )
+    : null;
   if (only) console.log(`Scoped to ${only.length} changed runtime source(s).`);
   const findings = checkNoLegacySubscriptionRuntime(process.cwd(), undefined, only);
   for (const finding of findings)

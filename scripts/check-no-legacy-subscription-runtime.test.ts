@@ -15,6 +15,7 @@ import {
   changedRuntimeSources,
   checkLegacySubscriptionSource,
   checkNoLegacySubscriptionRuntime,
+  guardInputFiles,
 } from "./check-no-legacy-subscription-runtime";
 import {
   LEGACY_CLAUDE_RUNTIME,
@@ -690,41 +691,54 @@ describe("no-legacy subscription runtime guard: PR scope", () => {
     exceptions: {},
   };
 
+  const inputs = guardInputFiles(process.cwd());
+
   test("a focused plan scopes the scan to changed runtime sources", () => {
     expect(
-      changedRuntimeSources({
-        mode: "focused",
-        changedFiles: [
-          "apps/api/src/app.ts",
-          "apps/api/test/app.test.ts",
-          "packages/core/src/x.integration.ts",
-          "packages/sdk/dist/index.js",
-          "packages/react/src/view.tsx",
-          "scripts/ci/impact.ts",
-          "docs/merge-batcher.md",
-          ".changeset/a.md",
-          "examples/demo/src/main.ts",
-        ],
-      }),
+      changedRuntimeSources(
+        {
+          mode: "focused",
+          changedFiles: [
+            "apps/api/src/app.ts",
+            "apps/api/test/app.test.ts",
+            "packages/core/src/x.integration.ts",
+            "packages/sdk/dist/index.js",
+            "packages/react/src/view.tsx",
+            "scripts/ci/impact.ts",
+            "docs/merge-batcher.md",
+            ".changeset/a.md",
+            "examples/demo/src/main.ts",
+          ],
+        },
+        inputs,
+      ),
     ).toEqual(["apps/api/src/app.ts", "packages/react/src/view.tsx", "scripts/ci/impact.ts"]);
-    expect(changedRuntimeSources({ mode: "docs", changedFiles: ["docs/a.md"] })).toEqual([]);
+    expect(changedRuntimeSources({ mode: "docs", changedFiles: ["docs/a.md"] }, inputs)).toEqual(
+      [],
+    );
   });
 
   test("the registry, engine, toolchain or a full plan require the whole tree", () => {
     for (const path of [
       "scripts/legacy-subscription-runtime/codex.ts",
       "scripts/check-no-legacy-subscription-runtime.ts",
+      // Modules the registry is built from, found by following its imports.
+      "packages/db/src/runtime-posture.ts",
+      "packages/db/src/runtime-posture-legacy-routines.json",
       "package.json",
       "bun.lock",
     ]) {
       expect(
-        changedRuntimeSources({ mode: "focused", changedFiles: ["apps/api/src/app.ts", path] }),
+        changedRuntimeSources(
+          { mode: "focused", changedFiles: ["apps/api/src/app.ts", path] },
+          inputs,
+        ),
       ).toBeNull();
     }
-    expect(changedRuntimeSources({ mode: "full", changedFiles: ["apps/api/src/app.ts"] })).toBe(
-      null,
-    );
-    expect(changedRuntimeSources({ mode: "focused" })).toBeNull();
+    expect(
+      changedRuntimeSources({ mode: "full", changedFiles: ["apps/api/src/app.ts"] }, inputs),
+    ).toBe(null);
+    expect(changedRuntimeSources({ mode: "focused" }, inputs)).toBeNull();
   });
 
   test("a scoped scan reports changed files only and skips deleted ones", () => {

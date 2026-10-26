@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createImpactPlan, type ImpactPlan } from "./impact";
 import { createWorkspaceGraph } from "./workspace";
 
@@ -39,7 +39,11 @@ export const PR_INVENTORY_TESTS: readonly { test: string; areas: readonly string
 export const PR_WEB_BUNDLE_PACKAGES = ["opengeni-web", "@opengeni/browser-extension"];
 
 /** Admission sampling only; the original full Batch plan is never changed. */
-export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: readonly string[]) {
+export function selectPrFastPlan<T extends Input>(
+  plan: T,
+  packageDirectories: readonly string[],
+  exists: (path: string) => boolean = existsSync,
+) {
   if (
     plan.schemaVersion !== 1 ||
     !["full", "focused", "docs"].includes(plan.mode) ||
@@ -72,9 +76,12 @@ export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: r
     createImpactPlan(plan.changedFiles.filter((path) => !path.startsWith(".changeset/"))).mode ===
       "focused";
   const selectDirect = plan.mode === "focused" || changesetOnlyFull;
+  // Inventory tests read other packages' sources, so the impact plan may not
+  // list them for a change in their area; they only need to exist.
   const pinned = PR_INVENTORY_TESTS.filter(
     ({ test, areas }) =>
-      inventory.includes(test) &&
+      plan.mode !== "docs" &&
+      exists(test) &&
       plan.changedFiles.some((path) => areas.some((area) => path.startsWith(area))),
   ).map(({ test }) => test);
   const unitTests = [
@@ -110,7 +117,7 @@ export function selectPrFastPlan<T extends Input>(plan: T, packageDirectories: r
       directCount: direct.length,
       inventoryTests: pinned,
       selectedCount: unitTests.length,
-      deferredCount: inventory.length - unitTests.length,
+      deferredCount: inventory.filter((path) => !unitTests.includes(path)).length,
     },
   };
 }

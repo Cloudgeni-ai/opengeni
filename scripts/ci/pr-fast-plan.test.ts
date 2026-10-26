@@ -122,9 +122,20 @@ test("inventory tests run whenever their area changes, beyond the cap and broad 
     dirs,
   );
   expect(migration.unitTests).toEqual(["scripts/release-schema-contract.test.ts"]);
-  // A test outside the impact plan's inventory is not added.
+  // Inventory tests need not be in the impact plan's list, only exist; docs
+  // plans never run units.
+  const web = selectPrFastPlan(
+    { ...plan, changedFiles: ["apps/web/src/main.tsx"], unitTests: tests },
+    dirs,
+  );
+  expect(web.unitTests).toEqual(["packages/sdk/test/browser-client-surface.test.ts"]);
+  expect(web.prAdmissionUnits.deferredCount).toBe(tests.length);
   expect(
-    selectPrFastPlan({ ...plan, changedFiles: ["apps/web/src/main.tsx"], unitTests: tests }, dirs)
+    selectPrFastPlan({ ...plan, changedFiles: ["apps/web/src/main.tsx"] }, dirs, () => false)
+      .unitTests,
+  ).toEqual([]);
+  expect(
+    selectPrFastPlan({ ...plan, mode: "docs", changedFiles: [".github/README.md"] }, dirs)
       .unitTests,
   ).toEqual([]);
 });
