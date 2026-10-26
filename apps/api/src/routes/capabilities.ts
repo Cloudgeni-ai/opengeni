@@ -247,6 +247,7 @@ export function registerCapabilityRoutes(app: Hono, deps: ApiRouteDeps): void {
       settings,
       capabilityId: decodeURIComponent(c.req.param("capabilityId")),
       payload,
+      mcpServerLogoStorage: deps.objectStorage,
     });
     return c.json(installation, 201);
   });

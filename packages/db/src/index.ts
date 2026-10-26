@@ -10100,7 +10100,8 @@ export async function upsertCapabilityCatalogItem(
         credentialFacts: values.credentialFacts,
         tier: values.tier,
         provenance: values.provenance,
-        logoAssetPath: values.logoAssetPath,
+        // A workspace item's logo comes from its server's advertised icon
+        // (setWorkspaceCapabilityCatalogItemLogo); editing the item keeps it.
         importBatchId: values.importBatchId,
         stale: values.stale,
         staleAt: values.staleAt,
@@ -10119,6 +10120,39 @@ export async function upsertCapabilityCatalogItem(
         throw new Error("Failed to upsert capability catalog item");
       }
       return mapCapabilityCatalogItem(row);
+    },
+  );
+}
+
+/**
+ * Sets the logo of a workspace-owned catalog item (a custom MCP server) to a
+ * stored `catalog-assets/...` key. Shared registry rows are never changed from a
+ * workspace connection. Returns whether a row changed.
+ */
+export async function setWorkspaceCapabilityCatalogItemLogo(
+  db: Database,
+  input: { accountId: string; workspaceId: string; id: string; logoAssetPath: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.capabilityCatalogItems)
+        .set({ logoAssetPath: input.logoAssetPath, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+            eq(schema.capabilityCatalogItems.id, input.id),
+            ne(schema.capabilityCatalogItems.source, registryCapabilitySource),
+            or(
+              isNull(schema.capabilityCatalogItems.logoAssetPath),
+              ne(schema.capabilityCatalogItems.logoAssetPath, input.logoAssetPath),
+            ),
+          ),
+        )
+        .returning({ id: schema.capabilityCatalogItems.id });
+      return rows.length > 0;
     },
   );
 }
