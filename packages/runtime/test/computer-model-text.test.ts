@@ -492,6 +492,49 @@ describe("computerObservationDiff", () => {
     );
   });
 
+  test("raw input that changed no element says it may not have taken effect", () => {
+    const unchanged = {
+      ...computerObservationDiff(reading("o_1", ribbon), reading("o_2", ribbon))!,
+      capturedFrame: undefined,
+    };
+    const receipt = {
+      operationId: "op-1",
+      targetId: "window:1",
+      state: "completed",
+      error: null,
+      observation: unchanged,
+    };
+    const line =
+      "No element changed after this input, and apps do not confirm the input they receive, so it may not have taken effect: check the window before sending it again.";
+    expect(Buffer.byteLength(line)).toBe(159);
+    expect(
+      computerActionText({ ...receipt, rawInput: true })
+        .split("\n")
+        .slice(0, 2),
+    ).toEqual(["Action completed on window:1 (operation op-1).", line]);
+    // A semantic action, raw input that changed an element, and a failed
+    // action keep their text.
+    expect(computerActionText(receipt)).not.toContain(line);
+    const changed = {
+      ...computerObservationDiff(
+        reading("o_1", ribbon),
+        reading("o_2", [node("e10", "radio", "Style 0", { value: "1" }), ...ribbon.slice(1)]),
+      )!,
+      capturedFrame: undefined,
+    };
+    expect(computerActionText({ ...receipt, observation: changed, rawInput: true })).not.toContain(
+      line,
+    );
+    expect(
+      computerActionText({
+        ...receipt,
+        state: "outcome_unknown",
+        error: { code: "driver_failed", message: "failed", retryable: false },
+        rawInput: true,
+      }),
+    ).not.toContain(line);
+  });
+
   test("keeps the whole reading when a diff would not help or could mislead", () => {
     const base = reading("o_1", ribbon);
     // Most elements are new: another view.

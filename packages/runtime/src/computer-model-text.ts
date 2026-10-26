@@ -644,6 +644,9 @@ export function computerActionText(
         error: ComputerTextError;
         observation: (ComputerTextObservation & { capturedFrame?: undefined }) | null;
         roleStandIns?: readonly ComputerTextRoleStandIn[] | undefined;
+        /** The action sent raw input (a pointer click, a key press, typed
+         * text), which no computer driver confirms the app acted on. */
+        rawInput?: boolean | undefined;
       }
     | {
         type: "batch";
@@ -661,6 +664,18 @@ export function computerActionText(
   ];
   if (receipt.error) lines.push(computerErrorLine(receipt.error));
   for (const standIn of receipt.roleStandIns ?? []) lines.push(roleStandInLine(standIn, false));
+  const semantic = receipt.observation?.semantic;
+  if (
+    receipt.rawInput &&
+    receipt.state === "completed" &&
+    receipt.observation?.target.id === receipt.targetId &&
+    semantic?.kind === "diff" &&
+    semantic.changed.length === 0 &&
+    semantic.removedRefs.length === 0
+  )
+    lines.push(
+      "No element changed after this input, and apps do not confirm the input they receive, so it may not have taken effect: check the window before sending it again.",
+    );
   if (receipt.observation && receipt.observation.target.id !== receipt.targetId)
     lines.push(
       `This action opened ${receipt.observation.target.id}; act on that target with the observation below.`,

@@ -274,6 +274,64 @@ test("web pages on macOS read without context-menu actions or repeated link text
   ]);
 });
 
+test("Chrome's page controls can be invoked although Chrome lists no AXPress on them", () => {
+  // What Chrome reports with the accessibility mode CUA turns on: every node
+  // of the page lists only AXShowMenu and AXScrollToVisible.
+  const listed = ["AXShowMenu", "AXScrollToVisible"];
+  const nodes = projectElements(
+    [
+      { element_index: 0, element_token: "s:0", role: "AXWindow", label: "Sign in", actions: [] },
+      {
+        element_index: 1,
+        element_token: "s:1",
+        parent_index: 0,
+        role: "AXButton",
+        label: "Reload",
+        actions: listed,
+      },
+      {
+        element_index: 2,
+        element_token: "s:2",
+        parent_index: 0,
+        role: "AXWebArea",
+        label: "Sign in",
+        actions: listed,
+      },
+      ...(
+        [
+          [3, "AXButton", "Continue"],
+          [4, "AXLink", "Help"],
+          [5, "AXCheckBox", "On, extension enabled"],
+          [6, "AXRadioButton", "Work"],
+          [7, "AXStaticText", "Use your passkey"],
+          [8, "AXHeading", "Sign in"],
+        ] as const
+      ).map(([index, role, label]) => ({
+        element_index: index,
+        element_token: `s:${index}`,
+        parent_index: 2,
+        role,
+        label,
+        actions: listed,
+      })),
+    ],
+    "macos",
+  );
+  expect(nodes.map((node) => [node.ref, node.role, node.actions])).toEqual([
+    ["s:0", "window", []],
+    // Browser UI outside the page is invoked only when it lists AXPress.
+    ["s:1", "button", ["show_menu", "focus"]],
+    ["s:2", "AXWebArea", []],
+    ["s:3", "button", ["invoke", "focus"]],
+    ["s:4", "link", ["invoke", "focus"]],
+    ["s:5", "checkbox", ["invoke", "focus"]],
+    ["s:6", "radio", ["invoke", "focus"]],
+    // Page text and headings stay plain text.
+    ["s:7", "text", []],
+    ["s:8", "AXHeading", []],
+  ]);
+});
+
 test("file dialog places, folders and files open on invoke and are not edited", () => {
   const nodes = projectElements(
     [
