@@ -3,13 +3,7 @@ import {
   SITE_VERSION_HEADER,
   siteConversationContext,
 } from "@opengeni/contracts/site-session-http";
-import type {
-  Session,
-  SessionEvent,
-  SessionListResponse,
-  SitePublication,
-  WorkspaceArtifact,
-} from "@opengeni/sdk";
+import type { Session, SessionEvent, SessionListResponse } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import {
   InfoIcon,
@@ -20,6 +14,8 @@ import {
   PlusIcon,
 } from "lucide-react";
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useId,
@@ -52,9 +48,6 @@ import {
   SitePublicationControl,
   useSitePublicationLink,
 } from "../components/artifacts/site-public-link";
-import { SitePublishPage } from "../components/artifacts/site-publishing";
-import { sitePublishFormProps } from "../components/artifacts/site-publish-form-props";
-import { useSiteManagement } from "../components/artifacts/site-settings";
 import { useAppApi } from "../lib/app-api";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
 import { Link, useNavigate } from "../lib/navigation";
@@ -70,9 +63,17 @@ import {
 } from "../lib/site-chat-panel";
 import { useRecordSiteOpened } from "../lib/site-opened";
 import { siteMayHaveChanged, useSiteLiveVersion } from "../lib/site-live-version";
-import { sitesClientConfig } from "../lib/site-publishing";
 import { useSessionListHintRefresh } from "../lib/use-session-list-hint-refresh";
 import { cn } from "../lib/utils";
+
+// Loaded when someone opens it, from the Artifacts route that already holds
+// the publish form and the Site's management (a separate lazy entry would
+// regroup the shared code-split chunks).
+const SitePublishingPage = lazy(() =>
+  import("./artifacts").then((module) => ({
+    default: module.SitePublishingPage,
+  })),
+);
 
 const SITE_ROUTE = "/workspaces/$workspaceId/sites/$siteId";
 /** The panel's width while it sits beside the Site, set live while dragging. */
@@ -177,14 +178,16 @@ export function SiteViewRoute({
     >
       <div ref={siteColumn} className="flex min-h-0 min-w-0 flex-1 flex-col">
         {publishingSite ? (
-          <SitePublishingPage
-            key={siteKey}
-            workspaceId={workspaceId}
-            siteId={siteId}
-            artifact={publishingSite}
-            onPublication={publication.update}
-            onBack={closePublishing}
-          />
+          <Suspense fallback={<div className="min-h-0 flex-1 bg-bg" />}>
+            <SitePublishingPage
+              key={siteKey}
+              workspaceId={workspaceId}
+              siteId={siteId}
+              artifact={publishingSite}
+              onPublication={publication.update}
+              onBack={closePublishing}
+            />
+          </Suspense>
         ) : null}
         {artifact?.status === "archived" ? (
           <p className="p-4 text-sm text-fg-muted">
@@ -254,76 +257,6 @@ export function SiteViewRoute({
           if (siteMayHaveChanged(event)) check();
         }}
       />
-    </div>
-  );
-}
-
-/**
- * Publish to web for the Site on screen: the same form, permissions and
- * publication as the Site's Settings, as a page in place of the Site. Its
- * back link (and a successful Publish or Save) returns to the Site.
- */
-function SitePublishingPage({
-  workspaceId,
-  siteId,
-  artifact,
-  onPublication,
-  onBack,
-}: {
-  workspaceId: string;
-  siteId: string;
-  artifact: WorkspaceArtifact;
-  /** Every change to the publication, so the header shows it at once. */
-  onPublication: (publication: SitePublication) => void;
-  onBack: () => void;
-}) {
-  const { client, clientConfig } = useAppContext();
-  // Sharing with the workspace (to publish an Only me Site) changes it here.
-  const [shown, setShown] = useState<WorkspaceArtifact>(artifact);
-  const management = useSiteManagement({
-    workspaceId,
-    siteId,
-    artifact: shown,
-    onArtifactChanged: setShown,
-    onStatusChanged: () => undefined,
-  });
-  const { publication, audience } = management;
-  // Focus moves into the form as it opens (what opened it is hidden now), and
-  // to its title again when the loaded form replaces the loading one.
-  const page = useRef<HTMLDivElement>(null);
-  const opened = useRef(false);
-  const loaded = publication.load.state !== "loading";
-  useEffect(() => {
-    const root = page.current;
-    if (!root) return;
-    const active = document.activeElement;
-    if (opened.current && active && active !== document.body && active !== root) return;
-    opened.current = true;
-    (root.querySelector<HTMLElement>("[tabindex='-1']") ?? root).focus();
-  }, [loaded]);
-  return (
-    <div
-      ref={page}
-      tabIndex={-1}
-      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-bg outline-hidden"
-    >
-      <SitePublishPage
-        {...sitePublishFormProps(management, {
-          client,
-          workspaceId,
-          site: shown,
-          sites: sitesClientConfig(clientConfig),
-        })}
-        layout="page"
-        onPublication={(next) => {
-          publication.setPublication(next);
-          onPublication(next);
-        }}
-        onBack={onBack}
-        onSubmitted={onBack}
-        canManage={management.manageData}
-      />
-      {management.showAudience ? audience.dialog : null}
     </div>
   );
 }

@@ -295,6 +295,14 @@ mock.module("../../ui/dropdown-menu", () => ({
   DropdownMenuLabel: ({ children }: { children: ReactNode }) => <p>{children}</p>,
   DropdownMenuSeparator: () => <hr />,
 }));
+// The Site view loads its publish page through the Artifacts route; here that
+// route is only the real page (over the mocked form and management above).
+let publishingPage: typeof import("../components/artifacts/site-publishing-page");
+mock.module("./artifacts", () => ({
+  SitePublishingPage: (props: Parameters<typeof publishingPage.SitePublishingPage>[0]) => (
+    <publishingPage.SitePublishingPage {...props} />
+  ),
+}));
 
 let module: typeof import("./site-view");
 let ownsDom = false;
@@ -302,6 +310,7 @@ beforeAll(async () => {
   ownsDom = !GlobalRegistrator.isRegistered;
   if (ownsDom) GlobalRegistrator.register({ url: "https://example.test" });
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  publishingPage = await import("../components/artifacts/site-publishing-page");
   module = await import("./site-view");
 });
 afterAll(async () => {
@@ -962,6 +971,8 @@ test("an unpublished Site offers Publish, which opens its publish form beside th
   expect(container.querySelector("[data-publish-page]")).toBeNull();
 
   await act(async () => button(container, "Publish")!.click());
+  // The form's code loads when it opens.
+  await settle();
   // The Site's own publish form, as a page in place of the Site; the Site
   // stays mounted behind it and the chat stays beside it.
   expect(container.querySelector("[data-publish-page]")?.getAttribute("data-publish-page")).toBe(
@@ -1011,6 +1022,7 @@ test("a published Site's settings open the same form; its back link returns to t
   );
   expect(siteViewProps.at(-1)!.fullScreen).toBe(true);
   await act(async () => button(container, "Publishing settings")!.click());
+  await settle();
   expect(siteViewProps.at(-1)!.fullScreen).toBe(false);
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
   expect(document.activeElement?.textContent).toBe("Publish to web");
