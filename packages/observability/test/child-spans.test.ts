@@ -7,6 +7,7 @@ import {
   startChildSpan,
   traceClientCalls,
   traceFetch,
+  tracedFetchTarget,
   withTraceContext,
 } from "../src";
 
@@ -174,6 +175,16 @@ test("telemetry export runs outside the trace it exports", async () => {
   root.end();
   await spans();
   expect(insideTrace).toBe(false);
+});
+
+test("a traced fetch names the fetch it wraps, so transport checks can look through it", () => {
+  const base = async () => new Response("ok");
+  expect(tracedFetchTarget(base)).toBe(base);
+  expect(tracedFetchTarget(traceFetch(base))).toBe(base);
+  expect(tracedFetchTarget(traceFetch(traceFetch(base)))).toBe(base);
+  // The marker is not an enumerable extra, so wrapping never copies it as one.
+  expect(Object.keys(traceFetch(base))).toEqual([]);
+  expect(tracedFetchTarget(null)).toBeNull();
 });
 
 test("traced fetch records method and status only, and passes through outside a request", async () => {

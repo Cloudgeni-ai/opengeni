@@ -35,7 +35,33 @@ function requestMethod(input: unknown, init: unknown): string {
   return HTTP_METHODS.has(upper) ? upper : "_OTHER";
 }
 
-/** Wrap a fetch implementation so each call under an API request is a client span. */
+/** The fetch implementation a `traceFetch` wrapper calls. */
+const TRACED_FETCH_TARGET = Symbol("opengeni.tracedFetchTarget");
+
+/**
+ * The fetch implementation that actually performs a call: `fetchImpl` itself,
+ * or for a `traceFetch` wrapper (at any depth) the implementation it wraps.
+ * A transport check that admits a specific fetch (native fetch, say) must look
+ * through the API's tracing, which wraps `globalThis.fetch` at startup.
+ */
+export function tracedFetchTarget<F>(fetchImpl: F): F {
+  let target: unknown = fetchImpl;
+  while (typeof target === "function") {
+    const next: unknown = (target as { [TRACED_FETCH_TARGET]?: unknown })[TRACED_FETCH_TARGET];
+    if (next === undefined) break;
+    target = next;
+  }
+  return target as F;
+}
+
+/**
+ * Wrap a fetch implementation so each call under an API request is a client span.
+ *
+ * The wrapper is transparent: it calls `fetchImpl` synchronously with the same
+ * arguments and settles with its exact response or error, so the caller's
+ * abort signal and response body custody are those of `fetchImpl` itself.
+ * `tracedFetchTarget` returns `fetchImpl` for it.
+ */
 export function traceFetch<F extends (input: never, init?: never) => Promise<Response>>(
   fetchImpl: F,
 ): F {
@@ -68,6 +94,7 @@ export function traceFetch<F extends (input: never, init?: never) => Promise<Res
       fetchImpl as unknown as Record<string, unknown>
     )[key];
   }
+  Object.defineProperty(traced, TRACED_FETCH_TARGET, { value: fetchImpl });
   return traced as unknown as F;
 }
 
