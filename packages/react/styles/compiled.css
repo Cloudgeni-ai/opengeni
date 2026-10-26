@@ -3102,6 +3102,9 @@
 :where(.og-root).rounded-\[14px\],:where(.og-root) .rounded-\[14px\] {
     border-radius: 14px;
   }
+:where(.og-root).rounded-\[14px\]\!,:where(.og-root) .rounded-\[14px\]\! {
+    border-radius: 14px !important;
+  }
 :where(.og-root).rounded-\[inherit\],:where(.og-root) .rounded-\[inherit\] {
     border-radius: inherit;
   }
@@ -3159,6 +3162,9 @@
 :where(.og-root).rounded-l-og-md,:where(.og-root) .rounded-l-og-md {
     border-top-left-radius: var(--og-radius-md);
     border-bottom-left-radius: var(--og-radius-md);
+  }
+:where(.og-root).rounded-tl-\[4px\],:where(.og-root) .rounded-tl-\[4px\] {
+    border-top-left-radius: 4px;
   }
 :where(.og-root).rounded-r-none,:where(.og-root) .rounded-r-none {
     border-top-right-radius: 0;
@@ -3603,6 +3609,12 @@
   }
 :where(.og-root).border-l-transparent,:where(.og-root) .border-l-transparent {
     border-left-color: transparent;
+  }
+:where(.og-root).bg-\[color-mix\(in_oklab\,var\(--speaker-hue\)_14\%\,transparent\)\],:where(.og-root) .bg-\[color-mix\(in_oklab\,var\(--speaker-hue\)_14\%\,transparent\)\] {
+    background-color: var(--speaker-hue);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab,var(--speaker-hue) 14%,transparent);
+    }
   }
 :where(.og-root).bg-accent,:where(.og-root) .bg-accent {
     background-color: var(--color-accent);
@@ -4913,6 +4925,9 @@
 :where(.og-root).text-\[0\.9em\],:where(.og-root) .text-\[0\.9em\] {
     font-size: 0.9em;
   }
+:where(.og-root).text-\[0\.93em\],:where(.og-root) .text-\[0\.93em\] {
+    font-size: 0.93em;
+  }
 :where(.og-root).text-\[8px\],:where(.og-root) .text-\[8px\] {
     font-size: 8px;
   }
@@ -5122,6 +5137,12 @@
   }
 :where(.og-root).whitespace-pre-wrap,:where(.og-root) .whitespace-pre-wrap {
     white-space: pre-wrap;
+  }
+:where(.og-root).text-\[color-mix\(in_oklab\,var\(--speaker-hue\)_50\%\,var\(--color-fg\)\)\],:where(.og-root) .text-\[color-mix\(in_oklab\,var\(--speaker-hue\)_50\%\,var\(--color-fg\)\)\] {
+    color: var(--speaker-hue);
+    @supports (color: color-mix(in lab, red, red)) {
+      color: color-mix(in oklab,var(--speaker-hue) 50%,var(--color-fg));
+    }
   }
 :where(.og-root).text-accent-foreground,:where(.og-root) .text-accent-foreground {
     color: var(--color-accent-foreground);
@@ -5908,6 +5929,11 @@
 :where(.og-root).group-focus-within\/section\:invisible,:where(.og-root) .group-focus-within\/section\:invisible {
     &:is(:where(.group\/section):focus-within *) {
       visibility: hidden;
+    }
+  }
+:where(.og-root).group-focus-within\/turn\:opacity-100,:where(.og-root) .group-focus-within\/turn\:opacity-100 {
+    &:is(:where(.group\/turn):focus-within *) {
+      opacity: 100%;
     }
   }
 :where(.og-root).group-hover\:flex,:where(.og-root) .group-hover\:flex {
@@ -10774,6 +10800,14 @@
       }
       --tw-gradient-via-stops: var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-via) var(--tw-gradient-via-position), var(--tw-gradient-to) var(--tw-gradient-to-position);
       --tw-gradient-stops: var(--tw-gradient-via-stops);
+    }
+  }
+:where(.og-root).dark\:text-\[color-mix\(in_oklab\,var\(--speaker-hue\)_62\%\,var\(--color-fg\)\)\],:where(.og-root) .dark\:text-\[color-mix\(in_oklab\,var\(--speaker-hue\)_62\%\,var\(--color-fg\)\)\] {
+    &:where(.dark, .dark *) {
+      color: var(--speaker-hue);
+      @supports (color: color-mix(in lab, red, red)) {
+        color: color-mix(in oklab,var(--speaker-hue) 62%,var(--color-fg));
+      }
     }
   }
 :where(.og-root).dark\:brightness-\[0\.88\],:where(.og-root) .dark\:brightness-\[0\.88\] {

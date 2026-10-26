@@ -113,11 +113,17 @@ the console uses:
   can't record here instead of the recorder, such as a setting an
   administrator has to turn on, while the meetings stay listed; and
   `header={false}` when the list sits inside a page of your own.
-- `MeetingDetailPage`: one meeting, with its player, transcript, speaker
-  naming, versions and sharing. `details` adds your own lines beside the
-  transcript, such as the project it belongs to. While this device records
-  the meeting (Take notes opens it), the page shows the recording's clock with
-  Pause and Stop; after Stop it reads Transcribing. Audio uploads while it
+- `MeetingDetailPage`: one meeting, with its player, speaker naming,
+  versions and sharing, and Summary · Transcript · Notepad tabs under the
+  title. It opens on Summary when the meeting has written `notes`, otherwise
+  on Transcript, whose turns read as speaker bubbles. `details` adds your own
+  lines beside the transcript, such as the project it belongs to. `onAsk`
+  adds "Ask about this meeting" under Summary and Transcript and receives the
+  meeting id and the question; the console starts a chat with the meeting
+  attached and the question as its first message. While this device records
+  the meeting (Take notes opens it), the page has no tabs: it shows the
+  recording's clock with Pause and Stop, the notepad and the live preview;
+  after Stop it reads Transcribing. Audio uploads while it
   records, so neither page says Uploading: a meeting still being recorded
   elsewhere reads In progress, and only a lost connection or a refused upload
   is called out. `meetingHereStatus` in `@opengeni/react/recordings` is that
@@ -542,6 +548,36 @@ its title and speakers; deleting the meeting deletes them.
 
 Saving the `notes` is a `recording.notes.updated` event; the notepad, which
 saves as people type, is not.
+
+### Mentions in the notes
+
+The `notes` may name the meeting's speakers and people with Markdown links of
+exactly two forms. This is a fixed contract between whatever writes the notes
+(a person, or an agent after the meeting) and the meeting page:
+
+- `[Display name](speaker:<speakerLabel>)`: a voice in this meeting, by its
+  transcript speaker label, such as `[Tomas Eriksen](speaker:speaker_0)` or
+  `[Ingrid Solberg](speaker:track-0)`.
+- `[Display name](person:<personId>)`: someone in the workspace's people
+  directory, by id.
+
+The page's Summary shows each as a small chip with the current name: a
+speaker by the meeting's speaker names (the same name the transcript shows,
+such as "Speaker 2" while unnamed), in that speaker's colour; a person by
+their directory name. Renaming a speaker or a person therefore updates the
+summary without rewriting it, and the display name in the link is only what
+it read when written. A label or id the meeting doesn't know shows the link
+text as plain text, never as a link. Copy on the Summary copies the Markdown
+with each mention replaced by its current name. Write a plain name, not a
+mention, for anyone who isn't a speaker or in the directory.
+
+The standalone `MeetingNotes` section doesn't load the speakers and people,
+so there every mention shows its link text as plain text; chips and Copy are
+on `MeetingDetailPage`.
+
+A summary usually opens with a short overview paragraph, then a heading per
+topic with nested bullets, then `## Decisions` and `## Action items`
+(`- [ ] [Name](speaker:speaker_1) does what, by when`).
 
 ## Recognizing people by voice
 
