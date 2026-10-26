@@ -1096,8 +1096,8 @@ test("the Site view's toolbar clears the macOS window controls beside a collapse
     }, `/workspaces/${workspaceId}/sites/${usageSiteId}`);
     await page.frameLocator("iframe").first().getByText("Weekly active users").first().waitFor();
     // Only the Site's own column: previews in its chat keep their spacing.
-    expect(await page.locator("[data-site-view] [aria-label='Chat']").count()).toBe(0);
-    const toolbar = page.locator("[data-site-view] [data-artifact-toolbar]");
+    expect(await page.locator("[data-site-column] [aria-label='Chat']").count()).toBe(0);
+    const toolbar = page.locator("[data-site-column] [data-artifact-toolbar]");
     const first = await toolbar.locator(":scope > div > *").first().boundingBox();
     expect(first).not.toBeNull();
     return first!;

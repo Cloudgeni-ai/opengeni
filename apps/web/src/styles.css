@@ -144,7 +144,7 @@ html[data-desktop="macos"] [data-rail-collapsed="true"] [data-titlebar] {
    While the window is being shared or recorded, macOS swaps the controls for
    a wider purple sharing badge (about 80px in); 32px past the rail clears
    both. */
-html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-view] dialog:not([data-artifact-fullscreen]) > [data-artifact-toolbar] {
+html[data-desktop="macos"] [data-rail-collapsed="true"] [data-site-column] dialog:not([data-artifact-fullscreen]) > [data-artifact-toolbar] {
   padding-left: 32px;
 }
 
