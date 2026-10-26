@@ -988,6 +988,12 @@ off with a five-submission budget. Uncertain observation has an eight-check budg
 Blocked effects do not falsely mark an ejection announced or starve unrelated
 queue work. All state is rebuildable from Git, not a local-only outbox.
 
+A build drops every member whose merge tree conflicts with the candidate
+predecessor or an earlier member, in the same controller step. Each dropped
+exact head is ejected with its comment intent in the same fenced state
+transaction, and the remaining members are rebuilt as their own canonical
+manifest and published when the slot allows. Conflicts never cost extra steps.
+
 After investigating a blocked/uncertain effect and confirming it was not applied,
 an operator can explicitly reset only that effect using the observed state SHA:
 
