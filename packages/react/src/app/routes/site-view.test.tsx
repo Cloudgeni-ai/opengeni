@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
-import { act, type ReactNode } from "react";
+import { act, createContext, useContext, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { Session, SessionListPageOptions } from "@opengeni/sdk";
 
@@ -193,6 +193,8 @@ mock.module("../components/artifacts/site-publishing", () => ({
     };
     return (
       <form data-publish-page={String(props.layout)}>
+        {/* As FormPage's title: focusable from script only. */}
+        <h1 tabIndex={-1}>Publish to web</h1>
         <button type="button" onClick={publish}>
           Publish now
         </button>
@@ -247,30 +249,49 @@ mock.module("../../components/new-conversation", () => ({
     );
   },
 }));
+// The menu renders open; selecting a row closes it as Radix does, calling the
+// content's onCloseAutoFocus unless the row kept the menu open.
+const MenuClosed = createContext<((event: Event) => void) | undefined>(undefined);
+function MockMenuItem({
+  children,
+  asChild,
+  onSelect,
+}: {
+  children: ReactNode;
+  asChild?: boolean;
+  onSelect?: (event: Event) => void;
+}) {
+  const closed = useContext(MenuClosed);
+  return asChild || !onSelect ? (
+    children
+  ) : (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={(event) => {
+        onSelect(event.nativeEvent);
+        if (!event.nativeEvent.defaultPrevented) closed?.(new Event("focus", { cancelable: true }));
+      }}
+    >
+      {children}
+    </button>
+  );
+}
 mock.module("../../ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
-  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
-  DropdownMenuItem: ({
+  DropdownMenuContent: ({
     children,
-    asChild,
-    onSelect,
+    onCloseAutoFocus,
   }: {
     children: ReactNode;
-    asChild?: boolean;
-    onSelect?: (event: Event) => void;
-  }) =>
-    asChild || !onSelect ? (
-      children
-    ) : (
-      <button
-        type="button"
-        role="menuitem"
-        onClick={(event) => onSelect(event as unknown as Event)}
-      >
-        {children}
-      </button>
-    ),
+    onCloseAutoFocus?: (event: Event) => void;
+  }) => (
+    <MenuClosed.Provider value={onCloseAutoFocus}>
+      <div role="menu">{children}</div>
+    </MenuClosed.Provider>
+  ),
+  DropdownMenuItem: MockMenuItem,
   DropdownMenuLabel: ({ children }: { children: ReactNode }) => <p>{children}</p>,
   DropdownMenuSeparator: () => <hr />,
 }));
@@ -946,6 +967,8 @@ test("an unpublished Site offers Publish, which opens its publish form beside th
   expect(container.querySelector("[data-publish-page]")?.getAttribute("data-publish-page")).toBe(
     "page",
   );
+  // Focus moves into the form: the button that opened it is hidden now.
+  expect(document.activeElement?.textContent).toBe("Publish to web");
   expect(siteHidden(container)).toBe(true);
   expect(container.querySelector("[data-site-view]")).not.toBeNull();
   expect(openConversation(container)).toBe(id(1));
@@ -990,6 +1013,7 @@ test("a published Site's settings open the same form; its back link returns to t
   await act(async () => button(container, "Publishing settings")!.click());
   expect(siteViewProps.at(-1)!.fullScreen).toBe(false);
   expect(container.querySelector("[data-publish-page]")).not.toBeNull();
+  expect(document.activeElement?.textContent).toBe("Publish to web");
 
   await act(async () => button(container, "Back to the Site")!.click());
   expect(container.querySelector("[data-publish-page]")).toBeNull();

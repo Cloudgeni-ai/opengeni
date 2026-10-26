@@ -1,33 +1,62 @@
 import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import {
+  act,
+  createContext,
+  useContext,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import type { SitePublicationLink } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 
 import type { SitePublicationLinkLoad } from "./site-public-link";
 
-// The menu renders open, so its rows can be read and clicked directly.
+// The menu renders open, so its rows can be read and clicked directly. A row
+// closes it as Radix does, calling onCloseAutoFocus unless it kept it open.
+// The real menu is tested in site-public-link-menu.test.tsx.
+const MenuClosed = createContext<((event: Event) => void) | undefined>(undefined);
+function MockMenuItem({
+  children,
+  onSelect,
+  asChild,
+}: {
+  children: ReactNode;
+  onSelect?: (event: ReactMouseEvent) => void;
+  asChild?: boolean;
+}) {
+  const closed = useContext(MenuClosed);
+  return asChild ? (
+    children
+  ) : (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={(event) => {
+        onSelect?.(event);
+        if (!event.defaultPrevented) closed?.(new Event("focus", { cancelable: true }));
+      }}
+    >
+      {children}
+    </button>
+  );
+}
 mock.module("../../../ui/dropdown-menu", () => ({
   DropdownMenu: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuTrigger: ({ children }: { children: ReactNode }) => children,
-  DropdownMenuContent: ({ children }: { children: ReactNode }) => <div role="menu">{children}</div>,
-  DropdownMenuItem: ({
+  DropdownMenuContent: ({
     children,
-    onSelect,
-    asChild,
+    onCloseAutoFocus,
   }: {
     children: ReactNode;
-    onSelect?: (event: ReactMouseEvent) => void;
-    asChild?: boolean;
-  }) =>
-    asChild ? (
-      children
-    ) : (
-      <button type="button" role="menuitem" onClick={(event) => onSelect?.(event)}>
-        {children}
-      </button>
-    ),
+    onCloseAutoFocus?: (event: Event) => void;
+  }) => (
+    <MenuClosed.Provider value={onCloseAutoFocus}>
+      <div role="menu">{children}</div>
+    </MenuClosed.Provider>
+  ),
+  DropdownMenuItem: MockMenuItem,
   DropdownMenuLabel: ({ children, title }: { children: ReactNode; title?: string }) => (
     <p data-menu-label="" title={title}>
       {children}

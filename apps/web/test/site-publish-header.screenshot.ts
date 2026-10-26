@@ -60,6 +60,13 @@ const usable = (page: Page, selector: string) =>
     return box.width > 0 && hit !== null && element.contains(hit);
   });
 
+/** Whether keyboard focus is inside the first element matching the selector. */
+const focusIn = (page: Page, selector: string) =>
+  page
+    .locator(selector)
+    .first()
+    .evaluate((element) => element.contains(document.activeElement));
+
 async function publishFromHeader(page: Page, theme: "light" | "dark") {
   // `publishDelay=hold` keeps the first Publish pending, to capture it.
   await openSite(page, theme, "&publishable=1&publishDelay=hold");
@@ -79,6 +86,7 @@ async function publishFromHeader(page: Page, theme: "light" | "dark") {
   const form = page.locator("form").filter({ hasText: "Publish to web" });
   await form.waitFor();
   await form.getByText(/is available/u).waitFor();
+  check(await focusIn(page, "form"), "focus didn't move into the publish form");
   check(
     (await page.locator("iframe").first().isVisible()) === false,
     "the Site still shows beside the publish form",
@@ -121,6 +129,7 @@ async function publishedMenu(page: Page, theme: "light" | "dark") {
   const form = page.locator("form").filter({ hasText: "Web address" });
   await form.waitFor();
   await form.getByText("usage.sites.opengeni.ai").first().waitFor();
+  check(await focusIn(page, "form"), "focus didn't move into the form from the menu");
   await capture(page, `site-publish-header-settings-${theme}`);
   await form.getByRole("button", { name: "Opengeni usage" }).click();
   await published.waitFor();

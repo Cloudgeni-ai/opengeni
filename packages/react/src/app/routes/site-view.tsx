@@ -53,6 +53,7 @@ import {
   useSitePublicationLink,
 } from "../components/artifacts/site-public-link";
 import { SitePublishPage } from "../components/artifacts/site-publishing";
+import { sitePublishFormProps } from "../components/artifacts/site-publish-form-props";
 import { useSiteManagement } from "../components/artifacts/site-settings";
 import { useAppApi } from "../lib/app-api";
 import { useConsoleSiteToolBridge, useConsoleSiteViewer } from "../lib/console-site";
@@ -287,27 +288,40 @@ function SitePublishingPage({
     onStatusChanged: () => undefined,
   });
   const { publication, audience } = management;
+  // Focus moves into the form as it opens (what opened it is hidden now), and
+  // to its title again when the loaded form replaces the loading one.
+  const page = useRef<HTMLDivElement>(null);
+  const opened = useRef(false);
+  const loaded = publication.load.state !== "loading";
+  useEffect(() => {
+    const root = page.current;
+    if (!root) return;
+    const active = document.activeElement;
+    if (opened.current && active && active !== document.body && active !== root) return;
+    opened.current = true;
+    (root.querySelector<HTMLElement>("[tabindex='-1']") ?? root).focus();
+  }, [loaded]);
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-bg">
+    <div
+      ref={page}
+      tabIndex={-1}
+      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto bg-bg outline-hidden"
+    >
       <SitePublishPage
+        {...sitePublishFormProps(management, {
+          client,
+          workspaceId,
+          site: shown,
+          sites: sitesClientConfig(clientConfig),
+        })}
         layout="page"
-        client={client}
-        workspaceId={workspaceId}
-        workspaceName={management.workspaceName}
-        site={shown}
-        load={publication.load}
         onPublication={(next) => {
           publication.setPublication(next);
           onPublication(next);
         }}
-        onReload={() => void publication.reload()}
         onBack={onBack}
         onSubmitted={onBack}
         canManage={management.manageData}
-        isAdmin={management.isAdmin}
-        onShareWithWorkspace={management.showAudience ? audience.share : undefined}
-        personalWorkspace={!management.showAudience}
-        sites={sitesClientConfig(clientConfig)}
       />
       {management.showAudience ? audience.dialog : null}
     </div>

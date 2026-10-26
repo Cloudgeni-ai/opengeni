@@ -208,13 +208,17 @@ export function SitePublicationControl({
       <button
         type="button"
         onClick={onOpenPublishing}
+        aria-label="Taken down, publishing settings"
         data-site-publication="suspended"
         className={CONTROL}
       >
         {content}
       </button>
     ) : (
-      <span data-site-publication="suspended" className={cn(CONTROL, "hover:bg-transparent")}>
+      <span
+        data-site-publication="suspended"
+        className={cn(CONTROL, "hover:bg-transparent hover:text-fg-muted")}
+      >
         {content}
       </span>
     );
@@ -233,14 +237,22 @@ function PublishedMenu({
   openExternal: (url: string) => boolean;
   onOpenPublishing?: (() => void) | undefined;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
   const [copy, setCopy] = useState<"copied" | "failed" | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Publishing settings opens once the menu has closed (its focus trap holds
+  // focus until then), and the form takes focus instead of this hidden control.
+  const toPublishing = useRef(false);
   useEffect(() => () => clearTimeout(timer.current ?? undefined), []);
   const open = (event: MouseEvent<HTMLAnchorElement>) => {
     // Modified clicks keep the browser's own behaviour (new window, etc.).
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0)
       return;
-    if (openExternal(url)) event.preventDefault();
+    // Handled on the desktop: the menu's own close is skipped, so close it here.
+    if (openExternal(url)) {
+      event.preventDefault();
+      setMenuOpen(false);
+    }
   };
   const copyLink = async () => {
     setCopy((await copyTextToClipboard(url)) ? "copied" : "failed");
@@ -248,55 +260,71 @@ function PublishedMenu({
     timer.current = setTimeout(() => setCopy(null), 2000);
   };
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label={`Published at ${hostname}`}
-          data-site-publication="published"
-          className={cn(CONTROL, "gap-1 data-[state=open]:bg-hover data-[state=open]:text-fg")}
-        >
-          <span
-            aria-hidden="true"
-            className="mr-0.5 size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10"
-          />
-          Published
-          <ChevronDownIcon aria-hidden="true" className="size-3" />
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuLabel className="truncate" title={url}>
-          {hostname}
-        </DropdownMenuLabel>
-        <DropdownMenuItem asChild>
-          <a href={url} target="_blank" rel="noopener noreferrer" onClick={open}>
-            <ArrowUpRightIcon aria-hidden="true" />
-            Open
-          </a>
-        </DropdownMenuItem>
-        <DropdownMenuItem
-          // The menu stays open so "Copied" shows, in full screen too.
-          onSelect={(event) => {
+    <>
+      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={`Published at ${hostname}`}
+            data-site-publication="published"
+            className={cn(CONTROL, "gap-1 data-[state=open]:bg-hover data-[state=open]:text-fg")}
+          >
+            <span
+              aria-hidden="true"
+              className="mr-0.5 size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10"
+            />
+            Published
+            <ChevronDownIcon aria-hidden="true" className="size-3" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className="w-64"
+          onCloseAutoFocus={(event) => {
+            if (!toPublishing.current) return;
+            toPublishing.current = false;
             event.preventDefault();
-            void copyLink();
+            onOpenPublishing?.();
           }}
         >
-          {copy === "copied" ? <CheckIcon aria-hidden="true" /> : <LinkIcon aria-hidden="true" />}
-          {copy === "copied" ? "Copied" : copy === "failed" ? "Couldn't copy" : "Copy link"}
-        </DropdownMenuItem>
-        {onOpenPublishing ? (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={onOpenPublishing}>
-              <Settings2Icon aria-hidden="true" />
-              Publishing settings
-            </DropdownMenuItem>
-          </>
-        ) : null}
-        <span role="status" aria-live="polite" className="sr-only">
-          {copy === "copied" ? "Link copied" : copy === "failed" ? "Couldn't copy the link" : ""}
-        </span>
-      </DropdownMenuContent>
-    </DropdownMenu>
+          <DropdownMenuLabel className="truncate" title={url}>
+            {hostname}
+          </DropdownMenuLabel>
+          <DropdownMenuItem asChild>
+            <a href={url} target="_blank" rel="noopener noreferrer" onClick={open}>
+              <ArrowUpRightIcon aria-hidden="true" />
+              Open
+            </a>
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            // The menu stays open so "Copied" shows, in full screen too.
+            onSelect={(event) => {
+              event.preventDefault();
+              void copyLink();
+            }}
+          >
+            {copy === "copied" ? <CheckIcon aria-hidden="true" /> : <LinkIcon aria-hidden="true" />}
+            {copy === "copied" ? "Copied" : copy === "failed" ? "Couldn't copy" : "Copy link"}
+          </DropdownMenuItem>
+          {onOpenPublishing ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onSelect={() => {
+                  toPublishing.current = true;
+                }}
+              >
+                <Settings2Icon aria-hidden="true" />
+                Publishing settings
+              </DropdownMenuItem>
+            </>
+          ) : null}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {/* Beside the menu, not in it: a menu holds only items. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copy === "copied" ? "Link copied" : copy === "failed" ? "Couldn't copy the link" : ""}
+      </span>
+    </>
   );
 }
