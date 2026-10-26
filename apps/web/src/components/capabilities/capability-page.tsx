@@ -39,16 +39,7 @@ export function CapabilityMark({
   icon?: ReactNode;
   size?: LogoTileSize;
 }) {
-  return (
-    <LogoTile
-      size={size}
-      name={name}
-      icon={src ? undefined : icon}
-      src={src ?? null}
-      fit="contain"
-      className={src ? "bg-surface dark:bg-fg" : undefined}
-    />
-  );
+  return <LogoTile size={size} name={name} icon={src ? undefined : icon} src={src ?? null} />;
 }
 
 /** The status words every Capabilities surface uses, mapped onto the one status language. */

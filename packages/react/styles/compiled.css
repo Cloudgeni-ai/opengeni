@@ -10701,6 +10701,11 @@
       }
     }
   }
+:where(.og-root).dark\:bg-fg,:where(.og-root) .dark\:bg-fg {
+    &:where(.dark, .dark *) {
+      background-color: var(--color-fg);
+    }
+  }
 :where(.og-root).dark\:bg-input\/30,:where(.og-root) .dark\:bg-input\/30 {
     &:where(.dark, .dark *) {
       background-color: var(--color-input);
@@ -14237,11 +14242,6 @@
   min-height: 60px;
   padding: 10px;
 }
-:where(.og-root).og-connect .og-connection-logo,:where(.og-root) .og-connect .og-connection-logo {
-  background: var(--og-color-surface-2,#f1f3f5);
-  color: var(--og-color-fg-muted,#545b66);
-  border: 1px solid var(--og-color-border,#e5e7eb);
-}
 :where(.og-root).og-connect .og-connect-secondary,:where(.og-root) .og-connect .og-connect-secondary {
   border-top: 1px solid var(--og-color-border,#e5e7eb);
   padding-top: 12px;
@@ -14385,21 +14385,23 @@
   justify-content: center;
   flex-shrink: 0;
   box-sizing: border-box;
-  padding: var(--og-connection-icon-padding, 0px);
+  padding: 0;
   overflow: hidden;
+  border: 1px solid var(--og-color-border,#e5e7eb);
   border-radius: var(--og-connection-icon-radius, 9px);
-  background: var(--og-connection-icon-background, transparent);
-  color: var(--og-connection-icon-color, inherit);
+  background: var(--og-connection-icon-background, var(--og-color-surface-2,#f1f3f5));
+  color: var(--og-connection-icon-color, var(--og-color-fg-muted,#545b66));
   font-size: 14px;
   font-weight: 600;
 }
 :where(.og-root).og-connection-logo img,:where(.og-root) .og-connection-logo img {
+  display: block;
+  box-sizing: border-box;
   width: 100%;
   height: 100%;
   object-fit: contain;
   padding: 0;
   border: 0;
-  border-radius: calc(var(--og-connection-icon-radius, 9px) - var(--og-connection-icon-padding, 0px));
   background: transparent;
 }
 @media (min-width: 720px) {
@@ -14449,15 +14451,26 @@
   margin: 0 12px 8px 52px;
   padding-top: 6px;
 }
+:where(.og-root).og-connection-logo[data-fit="cover"],:where(.og-root) .og-connection-logo[data-fit="cover"] {
+  background: transparent;
+}
+:where(.og-root).og-connection-logo[data-fit="cover"] img,:where(.og-root) .og-connection-logo[data-fit="cover"] img {
+  object-fit: cover;
+}
+:where(.og-root).og-connection-logo[data-fit="contain"],:where(.og-root) .og-connection-logo[data-fit="contain"] {
+  background: var(--og-connection-mark-plate, var(--og-color-surface,#ffffff));
+}
+:where(.og-root).og-connection-logo[data-fit="contain"] img,:where(.og-root) .og-connection-logo[data-fit="contain"] img {
+  padding: 20%;
+}
 :where(:where(.dark, [data-og-theme="dark"]) .og-connection-logo):where(.og-root),:where(:where(.dark, [data-og-theme="dark"]) .og-connection-logo):has(:where(.og-root)),:where(.og-root) :where(:where(.dark, [data-og-theme="dark"]) .og-connection-logo) {
-  --og-connection-icon-padding: 2px;
-  --og-connection-icon-background: #fafafa;
-  --og-connection-icon-color: #34383e;
+  --og-connection-mark-plate: #fafafa;
 }
 :where(:where([data-og-theme="light"]) .og-connection-logo):where(.og-root),:where(:where([data-og-theme="light"]) .og-connection-logo):has(:where(.og-root)),:where(.og-root) :where(:where([data-og-theme="light"]) .og-connection-logo) {
-  --og-connection-icon-padding: 0px;
-  --og-connection-icon-background: transparent;
-  --og-connection-icon-color: inherit;
+  --og-connection-mark-plate: var(--og-color-surface,#ffffff);
+}
+:where(.og-root).og-connection-logo[data-fit="pending"] img,:where(.og-root) .og-connection-logo[data-fit="pending"] img {
+  opacity: 0;
 }
 :where(.og-root).og-skill-discovery,:where(.og-root) .og-skill-discovery {
   margin-block: 24px;
