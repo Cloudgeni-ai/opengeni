@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import {
   createMeetingRecorderStore,
@@ -174,7 +175,7 @@ export default function PageMeetingsSection() {
     <KitSection sectionKey="page-meetings">
       <KitBlock
         title="Meetings"
-        description="The production Meetings pages over an in-memory recordings API. Open a meeting, name a speaker, change a turn's speaker or correct its words."
+        description="The production Meetings pages over an in-memory recordings API. Open a meeting, switch Summary, Transcript and Notepad, name a speaker, change a turn's speaker or correct its words, or ask about it."
       >
         <div className="mb-4 flex flex-wrap items-center gap-3">
           <SegmentedControl
@@ -268,6 +269,11 @@ export default function PageMeetingsSection() {
                 onOpenSettings={() => setView("settings")}
                 recordings={fixture.client}
                 onBack={() => setView("list")}
+                onOpenChat={() => toast("Opens the chat that wrote the notes")}
+                // The console starts a chat with the meeting attached and the question first.
+                onAsk={(_recordingId, question) => {
+                  toast("Starts a chat about this meeting", { description: question });
+                }}
               />
             )}
           </KitCanvas>
