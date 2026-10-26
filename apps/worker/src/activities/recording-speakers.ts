@@ -23,7 +23,7 @@ export type RecordingSpeakersConfig = {
   binaryPath: string;
   modelsDir: string;
   ffmpegPath: string;
-  /** CPU threads; the executable uses every available core when omitted. */
+  /** CPU threads; when omitted, speaker detection uses up to 4 and alignment every core. */
   threads?: number | undefined;
   tempRoot?: string | undefined;
 };
