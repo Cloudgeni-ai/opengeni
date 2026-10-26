@@ -2237,6 +2237,7 @@ export const englishMessages = {
   "markdown.matchInMessageSourceExcerpt":
     "Match in message source · Excerpt stays in place when Find closes",
   "markdown.openArtifact": "Open artifact",
+  "markdown.openChat": "Open chat",
   "markdown.openFile": "Open file",
   "markdown.openPath": "Open {path}",
   "markdown.openPathAtLineLine": "Open {path} at line {line}",
@@ -2244,6 +2245,7 @@ export const englishMessages = {
   "markdown.previewIncomplete": "Preview incomplete",
   "markdown.previewUnavailable": "(preview unavailable)",
   "markdown.showFormattedMessage": "Show formatted message",
+  "markdown.thisChatNeedsAWorkspace": "This chat link needs a workspace-aware host to open",
   "markdown.thisArtifactNeedsAWorkspace": "This artifact needs a workspace-aware host to open",
   "markdown.thisFileNeedsAWorkspace": "This file needs a workspace-aware host to open",
   "markdown.thisLinkIsUnavailable": "This link is unavailable",

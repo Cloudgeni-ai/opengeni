@@ -34087,6 +34087,7 @@
       "parseRetainedWorkspaceFileReference": "value",
       "parseSandboxFileArtifactReceipt": "value",
       "parseSandboxLink": "value",
+      "parseSessionReference": "value",
       "parseSseStream": "value",
       "parseToolDisplayMetadata": "value",
       "parseWorkspaceLiveEvent": "value",
