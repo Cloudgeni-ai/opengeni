@@ -1203,6 +1203,9 @@ export class CuaComputerBackend implements ComputerBackend {
    * - an element of a bubble or popover the window shows as its own takes
    *   accessibility actions (invoke, set_value) but no pointer or key input,
    *   which would land on the window under it;
+   * - an item of a menu the app has open over the window takes invoke, and
+   *   the control that opened the menu takes set_value, but pointer and key
+   *   input would not reach the menu;
    * - an element of another window of the app is that window's to act on,
    *   pointed at only when it is a target the caller can observe. */
   private async elementWindowRefusal(
@@ -1225,6 +1228,13 @@ export class CuaComputerBackend implements ComputerBackend {
       return new ComputerBackendError(
         code,
         "That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+        false,
+        false,
+      );
+    if (cuaCode === "element_in_open_menu")
+      return new ComputerBackendError(
+        code,
+        "That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
         false,
         false,
       );

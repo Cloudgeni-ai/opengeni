@@ -4117,6 +4117,22 @@ describe("CUA desktop boundary", () => {
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },
+        // Pointer or key input to an item of a menu the app has open over the
+        // window was refused before anything was sent: say what reaches it.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "element_in_open_menu",
+            message: "CUA's own reason, naming its own tools",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
         // A web dropdown whose menu would bring the browser forward was not
         // opened: say how to choose its option, without CUA's input modes.
         {

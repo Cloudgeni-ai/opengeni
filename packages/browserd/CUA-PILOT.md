@@ -1,7 +1,7 @@
 # CUA desktop adapter
 
 The macOS and Linux adapters use CUA Driver source revision
-`66525e4e6e3b4b6b7f901fa96035cfe97924b3a1`: upstream `cua-driver-rs-v0.37.0`
+`87425ff446fa56fb04199a47544b421b1c51f4cf`: upstream `cua-driver-rs-v0.37.0`
 (`2d2f9922`, including its non-invalidating preview capture and cursor support)
 plus two Linux X11 coordinate fixes, a macOS per-action overhead fix (a hidden
 cursor no longer glides; Electron detection no longer spawns `ps`), `run_steps`
@@ -96,14 +96,23 @@ instead of failing it after 7 s. A web `<select>` in a WebKit view (apps that
 embed a WKWebView) lists its open menu in the window's tree with no parent and
 no window: the menu's items are now the window's to press through
 accessibility (pointer and key input to them is refused with
-`element_in_attached_window`), and `set_value` chooses an option from that
-menu, whether it opened the menu itself or found it open, and closes a menu it
-opened even though the button always reads as not expanded.
+`element_in_open_menu`), and `set_value` chooses an option from that menu,
+whether it opened the menu itself or found it open, and closes a menu it
+opened even though the button always reads as not expanded. Neither the
+button's expanded nor focused state says whose menu is open, so a menu found
+open counts as the button's only when exactly one of its items reads as
+selected, that item matches what the button shows, and it lies over the
+button (AppKit lays the chosen item over its button); another select's menu
+open over it is not used. After pressing an item of such a menu, `set_value`
+reads the button's value back and fails plainly if it does not show the
+option.
 The walk asks an element once more when its one-request read times out with
-time left, and counts one that does not answer twice as unread, so the read
-reports truncation. WebKit times out the first request made of the element
-hosting a WKWebView's web content, which made the first read of such a window
-omit the whole page.
+time left, and in a read with a time limit counts one that does not answer
+twice as unread, so the read reports truncation; a walk without a time limit
+keeps it as an empty row. WebKit times out the first request made of the
+element hosting a WKWebView's web content, which made the first read of such
+a window omit the whole page. The window-number request made of each of the
+app's windows while finding the target window is bounded by the same deadline.
 `@trycua/cua-driver` 0.37.0
 supplies the private-worker transport; the source-built executable performs
 desktop operations. Windows uses the published SDK's native runtime in process.
@@ -219,7 +228,7 @@ Viewer pointer input takes a fresh capture under the serialized worker queue,
 translates coordinates, and refuses resized windows. The adapter requests structured elements
 for semantic observations. Unknown input outcomes are never automatically replayed.
 
-[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/66525e4e6e3b4b6b7f901fa96035cfe97924b3a1/libs/cua-driver).
+[Pinned source](https://github.com/Cloudgeni-ai/cua/tree/87425ff446fa56fb04199a47544b421b1c51f4cf/libs/cua-driver).
 The two commits on top of upstream carry the X11 coordinate corrections proposed in
 [CUA #4890](https://github.com/trycua/cua/pull/4890), rebased onto 0.37: only
 Chromium's renderer-local frame is rebased, and GTK4 windows without client-side
