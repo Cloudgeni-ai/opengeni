@@ -1,4 +1,5 @@
 import type { AttemptToolResult } from "@opengeni/contracts";
+import { ProviderCommandObservationUnavailableError } from "./sandbox/provider-command-session";
 import { SelfhostedControlError } from "./sandbox/selfhosted/control-rpc";
 import { OpStreamUnavailableError } from "./sandbox/selfhosted/op-transport";
 
@@ -28,24 +29,18 @@ export async function executeCommandReadWithRefresh(input: {
     if (!snapshot || snapshot.terminal || input.signal?.aborted)
       return finishReceipt(result, started, seconds);
     let refreshedOwner: boolean;
+    let refreshUnavailable = false;
     try {
       refreshedOwner = await input.refresh(input.args.commandId);
     } catch (error) {
       if (input.signal?.aborted || !isTransientRefreshFailure(error)) throw error;
-      // A failed live refresh must not hide durable output. Reauthorize and
-      // reread, rather than serving a cached receipt after authority changed.
-      // Do not retry the provider operation or turn this into observation logic.
-      const retained = await input.call({ ...input.args, waitSeconds: 0 });
-      const retainedSnapshot = commandSnapshot(retained);
-      return finishReceipt(
-        retainedSnapshot && !retainedSnapshot.terminal
-          ? patchReceipt(retained, {
-              freshness: { status: "refresh_unavailable", retryable: true },
-            })
-          : retained,
-        started,
-        seconds,
-      );
+      // A failed live refresh must not hide durable output. The reread below
+      // reauthorizes rather than serving a cached receipt after authority
+      // changed. Within the caller's own wait, the next iteration refreshes
+      // the same retained command again exactly like a quiet refresh; that is
+      // a read only, never a Start or stdin replay.
+      refreshedOwner = true;
+      refreshUnavailable = true;
     }
     if (!refreshedOwner) {
       return finishReceipt(
@@ -68,7 +63,15 @@ export async function executeCommandReadWithRefresh(input: {
       expired ||
       input.signal?.aborted
     ) {
-      return finishReceipt(result, started, seconds);
+      return finishReceipt(
+        refreshUnavailable && !refreshed.terminal
+          ? patchReceipt(result, {
+              freshness: { status: "refresh_unavailable", retryable: true },
+            })
+          : result,
+        started,
+        seconds,
+      );
     }
     // Reuse the API's existing one-second durable recheck wait. Each iteration
     // reauthorizes, and the next owner refresh happens before any long wait.
@@ -77,8 +80,11 @@ export async function executeCommandReadWithRefresh(input: {
 }
 
 /** Fail closed for unknown faults, fencing, consent, and integrity errors.
- * Neither exception text nor a generic retryable flag is sufficient evidence. */
+ * Neither exception text nor a generic retryable flag is sufficient evidence.
+ * A provider observation that missed its bounded read window is transient only
+ * when the provider itself marked another read of the same invocation safe. */
 function isTransientRefreshFailure(error: unknown): boolean {
+  if (error instanceof ProviderCommandObservationUnavailableError) return error.readRetryAllowed;
   if (error instanceof SelfhostedControlError) {
     return (
       !error.fenced &&

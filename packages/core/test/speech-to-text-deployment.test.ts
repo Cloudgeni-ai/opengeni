@@ -4,6 +4,7 @@ import {
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationProviders,
+  meetingModelFor,
   speechToTextModelFor,
   transcriptText,
 } from "../src/transcription-service";
@@ -176,6 +177,76 @@ describe("speech-to-text deployment", () => {
         settings: testSettings({ speechToTextPinned: "azure-speech/MAI-Transcribe-2" }),
       }),
     ).toThrow(/does not offer/u);
+  });
+});
+
+describe("the model a workspace's meetings run", () => {
+  const scope = { accountId: "a", workspaceId: "w", subjectId: "u" };
+  /** A subscription the given workspaces are signed in to. */
+  function subscription(signedIn: readonly string[]): RecordingTranscriptionProvider {
+    return {
+      ...fakeTextProvider("subscription", "workspace_subscription", async () => {
+        throw new Error("not called");
+      }),
+      available: async (context) => signedIn.includes(context?.workspaceId ?? ""),
+    };
+  }
+  function deploymentWith(input: {
+    signedIn?: readonly string[];
+    keyed?: readonly string[];
+    wordAlignment?: boolean;
+    settings?: Parameters<typeof testSettings>[0];
+  }) {
+    return createSpeechToTextDeployment(
+      {
+        settings: testSettings({
+          voiceInputOpenaiEnabled: false,
+          recordingWordAlignment: input.wordAlignment ?? true,
+          ...input.settings,
+        }),
+      },
+      {
+        providers: [subscription(input.signedIn ?? [])],
+        loadWorkspaceKey: async (_provider, { workspaceId }) =>
+          (input.keyed ?? []).includes(workspaceId) ? "el" : null,
+      },
+    );
+  }
+
+  test("a workspace with only a subscription transcribes with it", async () => {
+    const deployment = deploymentWith({ signedIn: ["w"] });
+    expect(await meetingModelFor(deployment, null, scope)).toEqual({
+      providerId: "subscription",
+      model: "subscription-model",
+    });
+  });
+
+  test("the deployment's default wins when this workspace can use it", async () => {
+    const deployment = deploymentWith({ signedIn: ["w"], keyed: ["w"] });
+    expect(await meetingModelFor(deployment, null, scope)).toEqual({
+      providerId: "elevenlabs",
+      model: "scribe_v2",
+    });
+  });
+
+  test("with nothing usable it is the default, so the failure names what to connect", async () => {
+    const deployment = deploymentWith({});
+    expect(await meetingModelFor(deployment, null, scope)).toEqual(deployment.meetingDefault);
+  });
+
+  test("a text-only model serves meetings only where the deployment aligns words", async () => {
+    const deployment = deploymentWith({ signedIn: ["w"], wordAlignment: false });
+    expect(await meetingModelFor(deployment, null, scope)).toEqual(deployment.meetingDefault);
+  });
+
+  test("a pin, then a model the workspace names, come before what is usable", async () => {
+    const named = { providerId: "elevenlabs", model: "scribe_v2" };
+    expect(await meetingModelFor(deploymentWith({ signedIn: ["w"] }), named, scope)).toEqual(named);
+    const pinned = deploymentWith({
+      signedIn: ["w"],
+      settings: { ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" },
+    });
+    expect(await meetingModelFor(pinned, null, scope)).toEqual(pinned.pinned!);
   });
 });
 

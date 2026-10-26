@@ -45,6 +45,7 @@ import {
 import {
   CdpCommandTimeoutError,
   CdpProtocolError,
+  CdpResponseRefusedError,
   CdpSessionDetachedError,
   CdpTransportError,
 } from "./cdp";
@@ -2372,6 +2373,18 @@ function protocolResponse(
   // browser connection ended) says so, so the caller checks before retrying.
   if (error instanceof InteractionOutcomeUnknownDriverError) {
     return fail(error.code, error.message, error.retryable, interactionStatus(error.code));
+  }
+  // One reply the browser connection refused (too large, or not JSON) failed
+  // only this request; the same request would fail again, a smaller one not.
+  if (error instanceof CdpResponseRefusedError) {
+    return fail(
+      "invalid_action",
+      error.method === "Page.captureScreenshot"
+        ? "the page's screenshot is too large to transfer; capture the viewport instead of the full page, or use JPEG"
+        : "the page's reply is too large to transfer; read a smaller part of the page",
+      false,
+      interactionStatus("invalid_action"),
+    );
   }
   return fail("driver_failed", "interaction controller request failed", false, 500);
 }

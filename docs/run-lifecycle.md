@@ -1738,6 +1738,33 @@ dispatch is not counted as an executed retry. Exhaustion retains the public
 `provider_unavailable` classification, selected maximum, actual retry count and
 `providerRecoveryExhaustedReason` (`deadline`, `retry_limit` or `invalid_clock`).
 
+**An unreachable model provider waits for the connection to return.** When the
+machine running the turn loses its internet connection, five quick retries
+cannot outlast it, and every running turn used to fail within about two
+minutes. A retryable `provider_unavailable` or `upstream_connectivity_unavailable`
+failure with no HTTP status, no request timeout and no function-tool origin
+selects the internal durable reason `provider_unreachable` when its cause chain
+shows the provider was never reached: a temporary name-resolution failure
+(`EAI_AGAIN`), no route (`ENETUNREACH`, `EHOSTUNREACH`, `ENETDOWN`), a refused
+connection (`ECONNREFUSED`, `ConnectionRefused`, `FailedToOpenSocket`, or the
+runtime's exact "Unable to connect" message), or the OpenAI SDK's opaque
+`Connection error.` with no code anywhere on the chain. A dropped or slow
+connection (`ECONNRESET`, `ETIMEDOUT`), a name that does not exist
+(`ENOTFOUND`), TLS failures and every HTTP status keep their existing policy.
+No-route codes are now retryable at all; before, they failed the turn at once.
+
+`provider_unreachable` allows at most **90 consecutive replacement attempts
+within six hours** of the first durable recovery checkpoint, with delays of
+5 s / 15 s / 30 s / 60 s / 120 s and then 300 s plus positive jitter. It uses the
+same durable count and clock as the other windowed policies, so a turn whose
+first failure was ordinary keeps that first clock. A failing model socket still
+switches to HTTP at the fifth recovery, as for ordinary failures. The public
+code stays `provider_unavailable`, a new message from the person ends the wait
+as for every recovery, and a completed model response clears the streak. A
+misconfigured local endpoint that refuses connections also waits up to six
+hours instead of failing within two minutes. Workers older than this policy
+treat the reason as an ordinary recovery and exhaust at five.
+
 The DB-only checkpoint-outage wire preserves the exact next overload count and
 bounded delay (including Retry-After); it cannot promote another cause to the
 larger budget. Legacy wire results without a delay preserve their prior workflow
@@ -4123,12 +4150,18 @@ calls and Codemode use this path; third-party lookalike tools do not. Outside
 that owning context, native reads and background reconciliation refresh the
 stored snapshot. An empty running snapshot can therefore precede capture of
 bytes already produced by the process.
-If a live refresh encounters a recognized temporary transport failure, the
-runtime reauthorizes and rereads the API instead of discarding retained output.
-A still-running result reports `freshness.status: "refresh_unavailable"` and
-`retryable: true`; this is a freshness warning, not proof of command failure or
-completion. No provider operation is retried by this fallback. Authorization,
-consent, fencing, integrity, and unclassified errors still fail closed.
+If a live refresh encounters a recognized temporary failure, the runtime
+reauthorizes and rereads the API instead of discarding retained output.
+Recognized temporary failures are transport outages and a provider observation
+that missed its bounded read window when the provider marks another read of the
+same invocation safe. A `command_wait` keeps its requested wait and refreshes
+the same command again on its ordinary one-second cadence; that is a read, never
+a Start or stdin replay. A still-running result whose latest refresh failed
+reports `freshness.status: "refresh_unavailable"` and `retryable: true`; this is
+a freshness warning, not proof of command failure or completion. Authorization,
+consent, fencing, integrity, unclassified errors, and observation failures that
+do not permit another read (for example, a provider that discarded the
+invocation's observation state) still fail closed.
 
 Typed runner failures are distinct from the process exit code: a runner may
 report an output/spool failure alongside exit code zero. Migration 0417 adds

@@ -11,6 +11,9 @@ import {
   createDb,
   expirePlanCreditPeriod,
   getBillingBalance,
+  getSpendableCreditBalance,
+  freePlanCreditEligible,
+  withAccountRls,
   nestedPostgresSqlState,
   grantPlanCreditPeriod,
   replacePlanCreditPeriod,
@@ -306,4 +309,89 @@ test("missing scope refuses new Free funding, legacy receipts stay general, live
       })
     ).debitedMicros,
   ).toBe(M);
+}, 180_000);
+
+test("promotion holds preserve paid funding, historical receipts and in-flight settlement", async () => {
+  if (!client || !shared) return;
+  const id = await owner();
+  const input = await state(id);
+  const grant = await grantPlanCreditPeriod(client.db, input);
+  await ledger(id, 3 * M);
+  await shared.admin`select opengeni_private.set_promotion_enforcement(true,'test','test activation',true)`;
+  try {
+    await shared.admin`select opengeni_private.set_promotion_decision(${id}::uuid,'held','test','farm', '{}'::jsonb,'operator:test',0)`;
+    const history =
+      await shared.admin`select data_schema from opengeni_private.promotion_decision_history where account_id=${id}::uuid`;
+    expect(history[0]!.data_schema).toBe(shared.schema);
+    const gross = await getBillingBalance(client.db, id);
+    expect(gross.balanceMicros).toBe(23 * M);
+    expect(gross.heldCreditMicros).toBe(20 * M);
+    expect((await getSpendableCreditBalance(client.db, id, "model-b")).balanceMicros).toBe(3 * M);
+    expect(await freePlanCreditEligible(client.db, id)).toBe(false);
+    // Exact replay returns the immutable receipt; it never restores eligibility.
+    expect((await grantPlanCreditPeriod(client.db, input)).id).toBe(grant.id);
+    // Accounting for an already-dispatched call still uses the admitted funds.
+    expect((await charge(id, M, "model-b")).debitedMicros).toBe(M);
+    expect((await getBillingBalance(client.db, id)).heldCreditMicros).toBe(19 * M);
+    await expect(
+      Promise.resolve(
+        client.db.execute(
+          (await import("drizzle-orm"))
+            .sql`select opengeni_private.set_promotion_decision(${id}::uuid,'eligible','x','x','{}'::jsonb,'forged',1)`,
+        ),
+      ),
+    ).rejects.toThrow();
+    await shared.admin`select opengeni_private.set_promotion_decision(${id}::uuid,'eligible','test','review','{}'::jsonb,'operator:test',1)`;
+    expect((await getSpendableCreditBalance(client.db, id, "model-b")).balanceMicros).toBe(22 * M);
+    const paid = await owner();
+    const paidInput = await state(paid, "pro");
+    await grantPlanCreditPeriod(client.db, paidInput);
+    await shared.admin`select opengeni_private.set_promotion_decision(${paid}::uuid,'denied','test','farm','{}'::jsonb,'operator:test',0)`;
+    const paidBalance = await getBillingBalance(client.db, paid);
+    expect(paidBalance.heldCreditMicros).toBe(10 * M);
+    expect(spendableCreditMicros(paidBalance, "model-b")).toBe(
+      paidBalance.plan!.creditRemainingMicros,
+    );
+  } finally {
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
+test("new grants and renewals are blocked transactionally; tenant reads cannot inspect or release other holds", async () => {
+  if (!client || !shared) return;
+  const id = await owner();
+  const other = await owner();
+  const input = await state(id);
+  await shared.admin`select opengeni_private.set_promotion_decision(${id}::uuid,'held','test','farm','{}'::jsonb,'operator:test',0)`;
+  // Shadow decisions have no money effect until rollout activation.
+  expect((await getBillingBalance(client.db, id)).promotionDecision).toBe("eligible");
+  await shared.admin`select opengeni_private.set_promotion_enforcement(true,'test','test activation',true)`;
+  try {
+    await expect(grantPlanCreditPeriod(client.db, input)).rejects.toThrow();
+    const { sql } = await import("drizzle-orm");
+    const rows = await withAccountRls(
+      client.db,
+      other,
+      async (tx) =>
+        await tx.execute(
+          sql`select account_id from promotion_decisions where account_id=${id}::uuid`,
+        ),
+    );
+    expect(rows.length).toBe(0);
+    await expect(
+      Promise.resolve(client.db.execute(sql`update promotion_enforcement set enabled=false`)),
+    ).rejects.toThrow();
+    await expect(
+      Promise.resolve(
+        client.db.execute(sql`select * from opengeni_private.promotion_decision_history`),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      Promise.resolve(
+        shared.admin`select opengeni_private.set_promotion_decision(${id}::uuid,'eligible','test','review','{}'::jsonb,'operator:test',0)`,
+      ),
+    ).rejects.toThrow();
+  } finally {
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
 }, 180_000);

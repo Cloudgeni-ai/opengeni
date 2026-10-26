@@ -2124,6 +2124,10 @@ const SettingsSchema = z.object({
   prReviewGithubAppSlug: z.string().optional(),
   prReviewGithubWebhookSecret: z.string().optional(),
   prReviewGithubAppPrivateKey: z.string().optional(),
+  signupChallengeEnabled: EnvBoolean.default(false),
+  signupChallengeSiteKey: z.string().optional(),
+  signupChallengeSecretKey: z.string().optional(),
+  signupChallengeHostnames: z.string().default(""),
   betterAuthSecret: z.string().optional(),
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
@@ -5917,6 +5921,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     prReviewGithubAppSlug: optional("OPENGENI_PR_REVIEW_GITHUB_APP_SLUG"),
     prReviewGithubWebhookSecret: optional("OPENGENI_PR_REVIEW_GITHUB_WEBHOOK_SECRET"),
     prReviewGithubAppPrivateKey: optional("OPENGENI_PR_REVIEW_GITHUB_APP_PRIVATE_KEY"),
+    signupChallengeEnabled: optional("OPENGENI_SIGNUP_CHALLENGE_ENABLED"),
+    signupChallengeSiteKey: optional("OPENGENI_SIGNUP_CHALLENGE_SITE_KEY"),
+    signupChallengeSecretKey: optional("OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY"),
+    signupChallengeHostnames: optional("OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES"),
     betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
@@ -7969,13 +7977,6 @@ function configuredCostForModel(
   if (credentialSource.kind === "organization_connection") return "organization";
   if (credentialSource.kind === "connected_subscription") return "subscription";
   return parseModelCostPolicyJson(settings.modelCostPolicyJson)[productModelId] ?? "credits";
-}
-
-export function modelCostClassForConfiguredModel(
-  _settings: Settings,
-  model: Pick<ConfiguredModel, "cost">,
-): ConfiguredModelCostClass {
-  return model.cost;
 }
 
 function builtinCredentialSource(settings: Settings): CredentialSourceV1 {
@@ -11223,6 +11224,25 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when OPENGENI_PRODUCT_ACCESS_MODE=managed",
       );
+    }
+    if (settings.signupChallengeEnabled) {
+      if (
+        !settings.signupChallengeSiteKey ||
+        !settings.signupChallengeSecretKey ||
+        !settings.signupChallengeHostnames.trim()
+      ) {
+        throw new Error(
+          "Signup challenge requires site key, secret key, and explicit allowed hostnames",
+        );
+      }
+      if (
+        !["local", "test"].includes(settings.environment) &&
+        [settings.signupChallengeSiteKey, settings.signupChallengeSecretKey].some((key) =>
+          /^(1x|2x|3x)0+/.test(key),
+        )
+      ) {
+        throw new Error("Turnstile test keys are forbidden outside local/test");
+      }
     }
     if (!settings.betterAuthSecret) {
       throw new Error(

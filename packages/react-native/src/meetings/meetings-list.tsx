@@ -5,8 +5,10 @@ import {
   formatClock,
   formatDuration,
   groupLiveTurns,
+  meetingHereStatus,
   meetingPhase,
   meetingStatusLabel,
+  meetingTitle,
   tidyLiveText,
   tidyPartialText,
   useRecordingModels,
@@ -72,7 +74,11 @@ export type MeetingsListProps = {
    * the list refreshes when the person comes back to it.
    */
   focused?: boolean;
-  /** Space below the list, such as the bottom safe-area inset. */
+  /**
+   * Extra space below the list, such as Android's bottom safe-area inset. On iOS the
+   * list already keeps clear of the bars and the home indicator, including a
+   * translucent header drawn over it.
+   */
   bottomInset?: number;
 };
 
@@ -133,6 +139,7 @@ export function MeetingsList({
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: c.bg }}
+      contentInsetAdjustmentBehavior="automatic"
       refreshControl={
         <RefreshControl
           refreshing={pulling}
@@ -201,16 +208,22 @@ export function MeetingsList({
             overflow: "hidden",
           }}
         >
-          {list.recordings.map((recording, index) => (
-            <MeetingRow
-              key={recording.id}
-              recording={recording}
-              live={recording.id === capturingId}
-              paused={recorder?.state === "paused"}
-              first={index === 0}
-              onPress={() => onOpen(recording.id)}
-            />
-          ))}
+          {list.recordings.map((recording, index) => {
+            // Recording here until Stop; after it, Transcribing.
+            const here =
+              recording.state === "capturing" ? meetingHereStatus(recorder, recording.id) : null;
+            return (
+              <MeetingRow
+                key={recording.id}
+                recording={recording}
+                live={here === "recording" || here === "paused"}
+                paused={here === "paused"}
+                transcribingHere={here === "transcribing"}
+                first={index === 0}
+                onPress={() => onOpen(recording.id)}
+              />
+            );
+          })}
         </View>
       )}
       {list.hasMore ? (
@@ -234,6 +247,8 @@ function MeetingRow(props: {
   recording: Recording;
   live: boolean;
   paused: boolean;
+  /** Stopped on this phone with its last audio on its way: Transcribing, not In progress. */
+  transcribingHere: boolean;
   first: boolean;
   onPress: () => void;
 }) {
@@ -241,7 +256,12 @@ function MeetingRow(props: {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const { recording } = props;
-  const status = props.live ? null : meetingStatusLabel(meetingPhase(recording), msg);
+  const status = props.live
+    ? null
+    : meetingStatusLabel(
+        props.transcribingHere ? { kind: "transcribing", version: null } : meetingPhase(recording),
+        msg,
+      );
   const facts = [
     meetingDateLabel(msg, recording.startedAt),
     recording.durationMilliseconds ? formatDuration(recording.durationMilliseconds, msg) : null,
@@ -253,7 +273,7 @@ function MeetingRow(props: {
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={[
-        recording.title || msg("native.meetings.meetingsList.untitledMeeting"),
+        meetingTitle(recording, msg),
         ...facts,
         props.live ? liveLabel : status?.label,
       ]
@@ -277,7 +297,7 @@ function MeetingRow(props: {
           numberOfLines={2}
           style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}
         >
-          {recording.title || msg("native.meetings.meetingsList.untitledMeeting")}
+          {meetingTitle(recording, msg)}
         </Text>
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
           {recording.visibility === "private" ? (

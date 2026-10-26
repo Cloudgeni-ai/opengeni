@@ -15,6 +15,7 @@ const source = {
   workspaceId: "3a4b5c6d-7e8f-4a0b-9c1d-2e3f4a5b6c7d",
   kind: "github",
   adapter: null,
+  format: null,
   name: "Acme GitHub",
   ownerSubjectId: null,
   visibility: "workspace",

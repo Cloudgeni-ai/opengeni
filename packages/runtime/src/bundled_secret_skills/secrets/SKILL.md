@@ -46,6 +46,8 @@ needs the user's permission.
 1. Reuse a saved browser session (browser identity or `browser_auth`).
 2. Sign in with a saved login: `{{secret:Item/username}}`, `{{secret:Item}}`,
    then `{{secret:Item/otp}}` at the code prompt.
+   When the item shows `hasPasskey`, the managed browser already holds its
+   passkey: choose the site's passkey sign-in instead.
 3. After signing in, enroll your own TOTP so the next login needs no one.
 4. Get email or SMS codes and magic links through connected mail or
    messaging tools.

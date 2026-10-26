@@ -3529,7 +3529,7 @@ export type ScheduledTaskStatus = "active" | "paused";
 
 export type ScheduledTaskRunMode = "new_session_per_run" | "reusable_session" | "existing_session";
 
-export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one";
+export type ScheduledTaskOverlapPolicy = "allow_concurrent" | "skip" | "buffer_one" | "steer";
 
 export type ScheduledTaskDayOfWeek =
   | "SUNDAY"
@@ -4031,6 +4031,7 @@ export type FirstPartyMcpToolName =
   | "knowledge_retain_file"
   | "meetings_search"
   | "meeting_read"
+  | "meeting_notes_save"
   | "knowledge_retain_message"
   | "knowledge_archive"
   | "instruction_policy_save"
@@ -5418,6 +5419,7 @@ export type ClientAuthConfig =
        * accounts can still sign in. Omitted (treat as true) by older deployments.
        */
       newSignupsEnabled?: boolean;
+      signupChallengeSiteKey?: string | undefined;
     };
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
@@ -9852,6 +9854,8 @@ export type PromotionalCreditBalance = PromotionalCreditScope & {
   coversVoice?: boolean | undefined;
   /** Monthly scoped allowance; allocated before other promotions. */
   planCredit?: boolean | undefined;
+  /** Free funding unavailable for new admission under an active promotion hold. */
+  held?: boolean | undefined;
 };
 
 export type {
@@ -9874,6 +9878,9 @@ export type BillingBalance = {
   updatedAt: string;
   generalBalanceMicros?: number | undefined;
   promotionalCredits?: PromotionalCreditBalance[] | undefined;
+  heldCreditMicros?: number | undefined;
+  heldGeneralCreditMicros?: number | undefined;
+  promotionDecision?: "eligible" | "verification_required" | "held" | "denied" | undefined;
   plan?: BillingPlanBalance | null | undefined;
 };
 

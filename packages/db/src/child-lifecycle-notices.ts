@@ -25,9 +25,14 @@ import {
  * once at boot by `@opengeni/config` (`settings.childLifecycleNoticesEnabled`)
  * and installed here by the API app and both worker roles. Rolling hazard: a
  * worker from before these kinds existed throws in `mapSessionSystemUpdate`
- * on an unknown kind, so the flag stays off until the whole fleet runs a new
- * image. Delivery and consumption of an already committed notice never read
- * the flag; only production does.
+ * on an unknown kind, and current workers drop a row they cannot parse, so a
+ * release turns the flag on only once its whole fleet runs the candidate, or
+ * from its first rollout when the live and candidate
+ * `child-lifecycle-notice-protocol.gen.json` are byte-identical. Changing
+ * anything here an older consumer relies on (dedupe keys, `sourceId`,
+ * classification, summary, lineage) requires bumping
+ * `CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION`. Delivery and consumption of an
+ * already committed notice never read the flag; only production does.
  */
 let childLifecycleNoticesEnabledFlag = false;
 

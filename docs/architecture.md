@@ -22,6 +22,12 @@ funding. Migration 0845 retains the canonical signup issuer and one-human/one-or
 receipt but issues zero money; monthly Free funding replaces new signup bonuses.
 Legacy positive receipts remain eligible and retain their balances; no backfill.
 
+Signup challenge verification is owned by `apps/api/src/auth/signup-challenge.ts`.
+Promotional funding decisions and proven-machine correlation are separate from
+identity/access, with private operator evidence and default-off enforcement.
+See [signup abuse protection](signup-abuse-protection.md) for the rolling activation
+boundary and accounting semantics.
+
 ## 1. Startup
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
@@ -615,31 +621,6 @@ Workspace operations require API-resolved authenticated access contexts and gran
 before data access. Transaction-local Postgres FORCE RLS adds defense-in-depth;
 resource UUIDs grant nothing.
 
-The unused private Modal worker-host proof transport
-(`packages/core/src/application/modal-native-worker-host-transport.ts`) has a
-separate prefix, version, purpose and HMAC subkey/message domain. It accepts only
-the explicitly configured deployment delegation root, never ordinary delegated
-tokens or the access-key/local fallback. A verified request MAC is transport
-correlation, not a resolved workspace grant, initiating-human authorization,
-native response, current custody claim, physical settlement or effect permit.
-No host entry, provider caller or durable recovery is activated by this helper.
-See [Modal recovery assurance](design/modal-recovery-assurance-2026-10-02.md).
-
-`modal-native-original-configuration.ts` is likewise unused private groundwork.
-It samples explicit deployment settings once, pins the direct read/TLS policy,
-and derives a separately domain-bound private equality commitment. Its draft
-and opaque sample are configuration data, not host/grant/capture authority.
-Tokens and keys never enter the draft; keyed equality must remain protected.
-
-`modal-native-live-declaration-join.ts` is an unused private request/data join,
-not the canonical claimed-worker issuer or a native context. It owns the exact
-bytes before MAC verification/parsing, joins the accepted LIVE origin, frozen
-human, Temporal tuple and unchanged recovery count, then rechecks current
-transport expiry and deployment configuration after blocking DB locks. Its
-immutable output must remain request-local and be consumed in that transaction.
-Protected cold/config/grant insertion and actual worker provenance are still
-required; this helper creates no permission to observe, dispatch or publish.
-
 Organization/workspace membership, API keys, delegated grants, private-session
 ownership and personal-resource grants remain distinct. Organization keys with
 `workspace:admin` may change private-session product settings; DB fences recheck
@@ -1031,15 +1012,6 @@ loss and deadlines remain insufficient proof. Published
 consumers use unpatched Modal: the runtime owns its error class and recognizes
 SDK boundaries by a local own-Symbol marker, never patch-only imports, names,
 codes or text.
-
-`modal-original-read-wire.ts` is a dormant private read-only transport, with no
-production caller or public sandbox export. Its pinned Modal 0.9.0 projection
-owns an explicit pair, TLS endpoint/channel and bundled Node trust roots;
-namespace and exact-task router-access reads have no ambient SDK profile or
-transport retry. Local observation slots and joined close wait for actual RPC
-callbacks, not waiter abort. It issues no host grant, authenticated original
-context, capture receipt or effect permit. See
-[the recovery design](design/modal-recovery-assurance-2026-10-02.md).
 
 Snapshots use `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS`; zero-holder drains/rotations
 may override with `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS`. Boot reserves the
@@ -1470,6 +1442,19 @@ steering). A turn that a Steer replaced while it only waited (an approval, a
 question or capacity; its `turn.superseded` names `targetTurnId` or
 `targetUpdateId`) also closes quietly, and its approvals stop being
 actionable. A queued Send is unaffected and still runs after the whole turn.
+An automation that continues a chat gets the same handover with
+`overlapPolicy: "steer"`, the default for new automations (saved automations
+keep their choice). While a turn that one of its runs started is still
+running, its next run (a `scheduled_occurrence` update for a dispatched run of
+the same automation) counts as a waiting Steer for that turn only: the shared
+predicate behind `hasPendingSteerForTurn` matches it, so the steer watch, the
+model-step admission and the `requirePendingSteer` re-check all treat it like a
+person's Steer, and the run is then claimed on the unchanged history. A turn
+anyone else started (a person, a goal continuation, another automation) never
+matches, so the run waits for it as a queued run does. The waiting-Steer path
+that replaces an approval, question or capacity wait reads only queued Steer
+messages and Agent Steer instructions, so an automation run never closes a wait
+for a person; it hands over at the first model step after the wait resumes.
 `steerQueueItem` with `interrupt: true` (an API option on the Steer's turn as
 `steerMessage` returned it; the web and React Native surfaces no longer offer
 it)
@@ -3120,6 +3105,11 @@ unit coverage from a successful Batch attempt only with identical-tree, canonica
 manifest, exact attempt and archive-digest proof (`scripts/ci/reuse-batch-units.ts`).
 Impact-selected subsets or missing/unknown evidence run the ordinary main units;
 the full-green release receipt contract is unchanged.
+Separately, a non-Version, non-control-plane, non-CI-definition batcher landing whose exact tree passed
+a trusted `queue/live` Batch attempt skips main's test lanes by attestation
+(`scripts/ci/batch-attestation.ts`); artifacts, images and the unchanged receipts
+still run; release admission refuses such receipts. This is a documented
+coverage reduction (see docs/merge-batcher.md).
 Candidate plan/source/selected-unit/ready success may land on red or unknown
 full-main CI. A two-hour latency breaker retains raw measurements and deducts only
 bounded recorded main-capacity holds. Latency-stop backpressure holds new work, not an otherwise eligible

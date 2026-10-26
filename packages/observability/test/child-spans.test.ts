@@ -7,6 +7,7 @@ import {
   startChildSpan,
   traceClientCalls,
   traceFetch,
+  tracedFetchTarget,
   withTraceContext,
 } from "../src";
 
@@ -174,6 +175,22 @@ test("telemetry export runs outside the trace it exports", async () => {
   root.end();
   await spans();
   expect(insideTrace).toBe(false);
+});
+
+test("a traced fetch names the fetch it wraps, so transport checks can look through it", () => {
+  const base = async () => new Response("ok");
+  expect(tracedFetchTarget(base)).toBe(base);
+  expect(tracedFetchTarget(traceFetch(base))).toBe(base);
+  expect(tracedFetchTarget(traceFetch(traceFetch(base)))).toBe(base);
+  // Only an exact wrapper names its target: nothing is copied onto it, and
+  // neither a Proxy of a wrapper nor a function inheriting from one counts.
+  expect(Object.keys(traceFetch(base))).toEqual([]);
+  const traced = traceFetch(base);
+  const proxy = new Proxy(traced, {});
+  expect(tracedFetchTarget(proxy)).toBe(proxy);
+  const heir = Object.setPrototypeOf(async () => new Response("other"), traced);
+  expect(tracedFetchTarget(heir)).toBe(heir);
+  expect(tracedFetchTarget(null)).toBeNull();
 });
 
 test("traced fetch records method and status only, and passes through outside a request", async () => {

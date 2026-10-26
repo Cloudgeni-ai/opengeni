@@ -49,7 +49,7 @@ import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerExternalIdentityLinkRoutes } from "../src/routes/external-identity-links";
 import { registerConnectRoutes } from "../src/routes/connect";
 
-import { requireConnectOwnerAuthority } from "../src/integrations/connect-authority";
+import { requireConnectOwnerAuthority } from "@opengeni/core";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const delegationSecret = `personal-ws-session-surface-${crypto.randomUUID()}`;

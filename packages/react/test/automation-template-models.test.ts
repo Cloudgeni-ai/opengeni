@@ -30,6 +30,7 @@ function source(overrides: Partial<EventSource>): EventSource {
     workspaceId: WORKSPACE_ID,
     kind: "github",
     adapter: null,
+    format: null,
     name: "Acme GitHub",
     ownerSubjectId: null,
     visibility: "workspace",

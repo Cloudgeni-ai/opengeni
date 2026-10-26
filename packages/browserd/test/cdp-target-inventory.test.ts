@@ -185,7 +185,7 @@ test("a tab this session closed says when it closed and how to carry on", async 
   }
 });
 
-test("tabs of a browser this one replaced name the tab that shows their page now", async () => {
+test("tabs a relaunched browser reopened keep their IDs; a tab that did not reopen says why", async () => {
   const fixture = inventoryFixture();
   try {
     fixture.driver.noteRelaunchedTabs({
@@ -196,17 +196,67 @@ test("tabs of a browser this one replaced name the tab that shows their page now
         { targetId: "old-unmatched", replacementId: null },
       ],
     });
-    const failure = await fixture.driver.observe("old-prior").catch((error: unknown) => error);
+    // The reopened tab is listed, read and acted on under its earlier ID; the
+    // browser's new ID for it never reaches a caller.
+    expect((await fixture.driver.listTargets()).map((target) => target.id)).toEqual(["old-prior"]);
+    expect((await fixture.driver.observe("old-prior")).target.id).toBe("old-prior");
+    expect((await fixture.driver.targetState("old-prior")).targetId).toBe("old-prior");
+    expect((await fixture.driver.target("old-prior"))?.id).toBe("old-prior");
+    expect(fixture.driver.adoptedTabIds()).toEqual([
+      { tabId: "old-prior", browserTargetId: "prior" },
+    ]);
+    const failure = await fixture.driver
+      .captureScreenshot("old-unmatched")
+      .catch((error: unknown) => error);
     expect(failure).toMatchObject({
       code: "target_not_found",
       message:
-        "browser target does not exist: this browser was stopped after going unused for 10 minutes and relaunched on its next call, so its tabs reopened with new IDs and unsaved page input may be lost; this tab's page is now tab prior",
+        "browser target does not exist: this browser was stopped after going unused for 10 minutes and relaunched on its next call, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; list the current tabs and use one of their IDs",
     });
-    await expect(fixture.driver.captureScreenshot("old-unmatched")).rejects.toThrow(
-      "so its tabs reopened with new IDs and unsaved page input may be lost; list the current tabs and use one of their IDs",
+    // Closing the reopened tab closes the browser's tab, and its ID then
+    // reads as closed.
+    expect(await fixture.driver.closeTarget("old-prior")).toEqual([]);
+    expect(
+      fixture.calls.filter((call) => call.method === "Target.closeTarget").at(-1)?.params,
+    ).toEqual({ targetId: "prior" });
+    await expect(fixture.driver.observe("old-prior")).rejects.toThrow(
+      /^browser target does not exist: this tab was closed at .* by a close-tab call;/u,
     );
-    // The replacement is an ordinary live tab.
-    expect((await fixture.driver.observe("prior")).target.id).toBe("prior");
+    expect(fixture.driver.adoptedTabIds()).toEqual([]);
+  } finally {
+    await fixture.driver.detach();
+  }
+});
+
+test("a tab takes an earlier ID only when neither ID already belongs to another tab", async () => {
+  const fixture = inventoryFixture();
+  try {
+    await fixture.driver.listTargets();
+    await fixture.driver.openTargetWithInventory("about:blank");
+    fixture.driver.adoptTabIds([
+      // The ID names another open tab.
+      { tabId: "opened-1", browserTargetId: "prior" },
+      { tabId: "earlier", browserTargetId: "prior" },
+      // The tab already took an earlier ID; so did this ID.
+      { tabId: "earliest", browserTargetId: "prior" },
+      { tabId: "earlier", browserTargetId: "opened-1" },
+    ]);
+    expect((await fixture.driver.listTargets()).map((target) => target.id)).toEqual([
+      "earlier",
+      "opened-1",
+    ]);
+    expect(fixture.driver.adoptedTabIds()).toEqual([
+      { tabId: "earlier", browserTargetId: "prior" },
+    ]);
+    // Every result names the tab by the ID callers hold.
+    const observation = await fixture.driver.observe("earlier");
+    expect(observation.target.id).toBe("earlier");
+    expect(
+      fixture.calls.some(
+        (call) => call.method === "Target.attachToTarget" && call.params.targetId === "earlier",
+      ),
+    ).toBe(false);
+    expect(fixture.driver.readClipboard().sourceTargetId).toBeNull();
   } finally {
     await fixture.driver.detach();
   }
@@ -222,22 +272,21 @@ test("a missing tab's answer says why it is gone for every known cause", () => {
     "browser target does not exist: this tab was closed at 2026-01-02T03:04:05Z by its page, or by a person or agent using this browser; list the current tabs and use one of their IDs",
   );
   const relaunched = (reason: "controller_restart" | "browser_lost" | "state_capture") =>
-    goneBrowserTargetMessage({ kind: "relaunched", reason, replacementId: "new-1" });
+    goneBrowserTargetMessage({ kind: "relaunched", reason });
   expect(relaunched("controller_restart")).toBe(
-    "browser target does not exist: this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call, so its tabs reopened with new IDs and unsaved page input may be lost; this tab's page is now tab new-1",
+    "browser target does not exist: this browser stopped when its controller restarted (or while unused afterwards) and was relaunched on its next call, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; list the current tabs and use one of their IDs",
   );
   expect(relaunched("browser_lost")).toBe(
-    "browser target does not exist: this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched, so its tabs reopened with new IDs and unsaved page input may be lost; this tab's page is now tab new-1",
+    "browser target does not exist: this browser's process ended unexpectedly (a crash, or the system or a person ended it) and was relaunched, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; list the current tabs and use one of their IDs",
   );
   expect(relaunched("state_capture")).toBe(
-    "browser target does not exist: this browser restarted to save its profile state, so its tabs reopened with new IDs and unsaved page input may be lost; this tab's page is now tab new-1",
+    "browser target does not exist: this browser restarted to save its profile state, and this tab was replaced: no reopened tab could be matched to it, so its page may be open under a new ID and unsaved page input may be lost; list the current tabs and use one of their IDs",
   );
   expect(
     goneBrowserTargetMessage({
       kind: "relaunched",
       reason: "idle_release",
       idleReleaseMinutes: 1,
-      replacementId: null,
     }),
   ).toStartWith(
     "browser target does not exist: this browser was stopped after going unused for 1 minute and",

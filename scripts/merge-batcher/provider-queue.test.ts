@@ -13,6 +13,8 @@ function reader(
     withMain?: boolean;
     generousCapacity?: boolean;
     noRuns?: boolean;
+    /** Added to every job listing's total_count, as GitHub sometimes reports. */
+    jobTotalDelta?: number;
   } = {},
 ) {
   const cfg = config({
@@ -33,7 +35,7 @@ function reader(
     const path = String(url);
     if (path.includes("/jobs?"))
       return Response.json({
-        total_count: jobs.length,
+        total_count: jobs.length + (options.jobTotalDelta ?? 0),
         jobs: options.unknown ? [{ status: "unknown" }] : jobs,
       });
     const status = new URL(path).searchParams.get("status");
@@ -70,6 +72,41 @@ test("pre-fan-out main demand is retained but does not withhold one Batch", asyn
     capacityInformational: true,
     capacity: { hold: "main-pre-fanout", preFanoutMainRuns: [1] },
   });
+});
+
+test("a persistent job count/row mismatch uses returned rows for slot one and closes extra slots", async () => {
+  // GitHub reports more jobs than it returns, on the read and on the re-read.
+  const live = reader([{ status: "in_progress" }], { jobTotalDelta: 2 });
+  expect(await live.mainBusy("publish")).toBe(false);
+  expect(live.lastHeadroom).toMatchObject({
+    allowed: true,
+    mainDemand: 1,
+    publicationBlocked: false,
+    capacityInformational: true,
+  });
+  expect(live.lastHeadroom?.reason).toContain(
+    "warning: job listing for run(s) 1 disagreed with GitHub's total_count",
+  );
+  // With one Batch slot occupied, a second slot needs a complete job inventory.
+  const second = reader([{ status: "in_progress" }], {
+    batch: true,
+    maxInflight: 2,
+    generousCapacity: true,
+    jobTotalDelta: 1,
+  });
+  expect(await second.mainBusy("publish")).toBe(true);
+  expect(second.lastHeadroom).toMatchObject({ publicationBlocked: true });
+  expect(second.lastHeadroom?.reason).toContain(
+    "Additional Batch slots require a complete job inventory",
+  );
+  expect(await second.mainBusy("observe")).toBe(false);
+  // The same complete inventory still admits the second slot.
+  const complete = reader([{ status: "in_progress" }], {
+    batch: true,
+    maxInflight: 2,
+    generousCapacity: true,
+  });
+  expect(await complete.mainBusy("publish")).toBe(false);
 });
 
 test("live reader honors two hosted slots and uses non-reserving complete observations for landing", async () => {

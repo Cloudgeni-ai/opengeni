@@ -356,3 +356,46 @@ export function speechToTextModelFor(
   if (named) return named;
   return use === "meeting" ? deployment.meetingDefault : null;
 }
+
+/**
+ * The model a workspace's meeting runs: the deployment's pin, else what the
+ * request or the workspace names, else the deployment's meeting default when
+ * this workspace can use it, else the first model in the deployment's order
+ * that serves meetings and that this workspace can use. A workspace signed in
+ * to a subscription, or holding its own key, transcribes with it without
+ * picking it first. When none is usable it is still the default, so the
+ * failure names the provider to connect.
+ */
+export async function meetingModelFor(
+  deployment: SpeechToTextDeployment,
+  named: SpeechToTextModelRef | null | undefined,
+  scope: { accountId?: string; workspaceId: string; subjectId?: string },
+): Promise<SpeechToTextModelRef> {
+  if (deployment.pinned) return deployment.pinned;
+  if (named) return named;
+  const fallback = deployment.meetingDefault;
+  const candidates: SpeechToTextModelRef[] = [fallback];
+  for (const providerId of deployment.order) {
+    const provider = deployment.registry.get(providerId);
+    const spec = provider?.models.find(
+      (candidate) =>
+        candidate.capabilities.batch && speechToTextServesMeetings(deployment, candidate),
+    );
+    if (spec) candidates.push({ providerId, model: spec.model });
+  }
+  const checked = new Map<string, Promise<boolean>>();
+  for (const candidate of candidates) {
+    if (
+      !findRecordingTranscriptionModel(deployment.registry, candidate.providerId, candidate.model)
+    ) {
+      continue;
+    }
+    let available = checked.get(candidate.providerId);
+    if (!available) {
+      available = deployment.available(candidate.providerId, scope).catch(() => false);
+      checked.set(candidate.providerId, available);
+    }
+    if (await available) return candidate;
+  }
+  return fallback;
+}

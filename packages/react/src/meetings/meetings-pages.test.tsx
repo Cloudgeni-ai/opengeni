@@ -67,6 +67,14 @@ async function waitForText(container: HTMLElement, text: string, timeout = 3_000
   }
 }
 
+async function waitFor(check: () => boolean, timeout = 3_000) {
+  const deadline = Date.now() + timeout;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("Timed out waiting");
+    await settle(50);
+  }
+}
+
 describe("Meetings list", () => {
   test("lists meetings with their state and opens one", async () => {
     const fixture = createMeetingsFixture();
@@ -142,9 +150,7 @@ describe("Meetings list", () => {
       expect(found).toContain("Weekly product sync");
       expect(found).not.toContain("Transcript failed");
       await search("zzz");
-      expect(view.container.textContent).toContain(
-        "Search finds words in meeting titles and transcripts.",
-      );
+      expect(view.container.textContent).toContain("Searches titles and transcripts.");
     } finally {
       await view.unmount();
     }
@@ -383,7 +389,7 @@ describe("Meeting page", () => {
     try {
       await waitForText(view.container, "Lea Haugen");
       const text = view.container.textContent ?? "";
-      expect(text).toContain("Suggested from their voice");
+      expect(text).toContain("Suggested by voice");
       const notThem = view.container.querySelector<HTMLButtonElement>(
         '[aria-label="Not Lea Haugen"]',
       );
@@ -391,7 +397,7 @@ describe("Meeting page", () => {
       await act(async () => notThem!.click());
       await settle(400);
       const after = view.container.textContent ?? "";
-      expect(after).not.toContain("Suggested from their voice");
+      expect(after).not.toContain("Suggested by voice");
       expect(after).toContain("Speaker 3");
       expect(after).toContain("Who spoke? 2 speakers have no name yet.");
     } finally {
@@ -432,7 +438,7 @@ describe("Meeting page", () => {
     );
     try {
       await waitForText(view.container, "The audio was deleted on");
-      expect(view.container.textContent).toContain("keeps audio only for a set time");
+      expect(view.container.textContent).toContain("retention setting");
       const again = [...view.container.querySelectorAll("button")].find(
         (button) => button.textContent?.trim() === "Transcribe again",
       );
@@ -555,6 +561,159 @@ describe("Recorder errors", () => {
 });
 
 describe("Live transcript", () => {
+  /** A recorder on this device, recording the fixture's meeting in progress. */
+  async function fakeRecorder(
+    state: "recording" | "paused" | "stopping" | "stopped",
+    upload: { pendingChunks?: number; finalized?: boolean; retryingAfterError?: string } = {},
+  ) {
+    const { LIVE_RECORDING_ID } = await import("../testing/meetings-fixture");
+    const calls: string[] = [];
+    const recorder = {
+      state,
+      recordingId: LIVE_RECORDING_ID,
+      title: "Platform standup",
+      elapsedMilliseconds: 754_000,
+      tracks: [{ trackNumber: 0, source: "microphone", label: "Microphone" }],
+      upload: {
+        recordingId: LIVE_RECORDING_ID,
+        created: true,
+        pendingChunks: upload.pendingChunks ?? 1,
+        pendingBytes: 4_000,
+        uploading: true,
+        retryingAfterError: upload.retryingAfterError ?? null,
+        failed: null,
+        finalized: upload.finalized ?? false,
+        discarded: false,
+      },
+      error: null,
+      live: null,
+      supported: true,
+      systemAudioSupported: false,
+      systemAudioKind: null,
+      recovered: [],
+      start: async () => {},
+      pause: () => calls.push("pause"),
+      resume: () => calls.push("resume"),
+      stop: async () => {
+        calls.push("stop");
+      },
+      discard: async () => {},
+      rename: async () => {},
+      levels: () => ({}),
+    } as unknown as NonNullable<ReturnType<typeof useMeetingRecorder>["recorder"]>;
+    return { recorder, calls, recordingId: LIVE_RECORDING_ID };
+  }
+
+  test("taking notes while recording shows it's recording, with Stop, not Uploading", async () => {
+    const fixture = createMeetingsFixture();
+    const { recorder, calls, recordingId } = await fakeRecorder("recording");
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={recordingId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await act(async () => view.store.set(recorder));
+      await waitForText(view.container, "Platform standup");
+      const text = view.container.textContent ?? "";
+      expect(text).not.toContain("Uploading");
+      expect(text).not.toContain("Not finished yet");
+      const bar = view.container.querySelector('section[aria-label="Recording"]');
+      expect(bar?.textContent).toContain("12:34");
+      const stop = [...bar!.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Stop",
+      );
+      expect(stop).toBeDefined();
+      await act(async () => stop!.click());
+      expect(calls).toEqual(["stop"]);
+      // Said once, by the bar, not again beside the title.
+      expect(text.split("Recording").length - 1).toBe(1);
+
+      await act(async () => view.store.set({ ...recorder, state: "paused" }));
+      expect(view.container.textContent).toContain("Paused");
+      expect(view.container.textContent).toContain("Resume");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("after Stop the meeting reads Transcribing, never Uploading", async () => {
+    const fixture = createMeetingsFixture();
+    // Stop waits for the last few seconds of audio, then the recorder is stopped.
+    const { recorder, recordingId } = await fakeRecorder("stopping", { pendingChunks: 1 });
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={recordingId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={fixture.client}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await act(async () => view.store.set(recorder));
+      await waitForText(view.container, "Platform standup");
+      let text = view.container.textContent ?? "";
+      expect(text).toContain("Transcribing");
+      expect(text).not.toContain("Uploading");
+      expect(view.container.querySelector('section[aria-label="Recording"]')).toBeNull();
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          state: "stopped",
+          upload: { ...recorder.upload!, pendingChunks: 0, finalized: true },
+        }),
+      );
+      expect(view.container.textContent).toContain("Transcribing");
+
+      // Only a lost connection keeps it from transcribing, and it says so.
+      await act(async () =>
+        view.store.set({
+          ...recorder,
+          upload: { ...recorder.upload!, retryingAfterError: "Failed to fetch" },
+        }),
+      );
+      text = view.container.textContent ?? "";
+      expect(text).toContain("Offline");
+      expect(text).not.toContain("Transcribing.");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("the list says Transcribing for a meeting just stopped here", async () => {
+    const fixture = createMeetingsFixture();
+    const { recorder } = await fakeRecorder("stopping", { pendingChunks: 1 });
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await act(async () => view.store.set(recorder));
+      await waitForText(view.container, "Platform standup");
+      await settle();
+      // The widest box around the meeting's title that holds no other meeting.
+      let row: Element | null = [...view.container.querySelectorAll("a")].find((link) =>
+        link.textContent?.includes("Platform standup"),
+      )!;
+      while (row.parentElement && row.parentElement.querySelectorAll("a").length === 1) {
+        row = row.parentElement;
+      }
+      expect(row.textContent).toContain("Transcribing");
+      expect(view.container.textContent).not.toContain("Uploading");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a meeting can be named while it records", async () => {
     const { RecorderPanel } = await import("./recorder-panel");
     const renamed: string[] = [];
@@ -625,10 +784,12 @@ describe("Live transcript", () => {
       await waitForText(view.container, "Let's keep this one short.");
       const text = view.container.textContent ?? "";
       expect(text).toContain("Not finished yet");
-      expect(text).toContain("In progress");
-      expect(text).toContain("this page updates by itself");
-      // Someone else's microphone isn't "You".
-      expect(text).toContain("Microphone");
+      expect(text).toContain("still being recorded on another device");
+      // Beside tab audio the microphone is the person recording, by name, and
+      // the tab audio is everyone else.
+      expect(text).toContain("Ingrid Solberg");
+      expect(text).toContain("Others");
+      expect(text).not.toContain("Microphone");
       expect(text).not.toContain("You0:04");
       expect(view.container.querySelector('[role="log"]')).not.toBeNull();
     } finally {
@@ -636,7 +797,26 @@ describe("Live transcript", () => {
     }
   });
 
-  test("the recorder offers live text when the workspace has a live model", async () => {
+  test("the person recording reads their own name on the microphone's live text", async () => {
+    const { liveSpeakerName } = await import("./recorder-panel");
+    const withTab = {
+      tracks: [
+        { trackNumber: 0, source: "microphone" as const },
+        { trackNumber: 1, source: "system" as const },
+      ],
+      systemAudioKind: "tab" as const,
+    } as unknown as Parameters<typeof liveSpeakerName>[0];
+    expect(liveSpeakerName(withTab, 0, undefined, "Ingrid Solberg")).toBe("Ingrid Solberg");
+    expect(liveSpeakerName(withTab, 1, undefined, "Ingrid Solberg")).toBe("Others");
+    expect(liveSpeakerName(withTab, 0)).toBe("You");
+    const micOnly = {
+      tracks: [{ trackNumber: 0, source: "microphone" as const }],
+      systemAudioKind: null,
+    } as unknown as Parameters<typeof liveSpeakerName>[0];
+    expect(liveSpeakerName(micOnly, 0, undefined, "Ingrid Solberg")).toBe("Microphone");
+  });
+
+  test("the recorder bar keeps live text and its cost in its options menu", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
       <MeetingsListPage
@@ -648,19 +828,16 @@ describe("Live transcript", () => {
       />,
     );
     try {
-      await waitForText(view.container, "Live transcript");
-      const box = [
-        ...view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
-      ].find((element) => element.closest("label")?.textContent?.includes("Live transcript"));
-      expect(box?.checked).toBe(true);
-      // Switched on, it says what it costs.
-      expect(view.container.textContent).toContain("The live transcript adds about $");
+      await waitForText(view.container, "Start recording");
+      // It waits in the options menu beside Start, not as another control in the bar.
+      expect(view.container.textContent).not.toContain("Live transcript");
+      expect(view.container.textContent).not.toContain("per hour");
     } finally {
       await view.unmount();
     }
   });
 
-  test("the recorder starts in the workspace's meeting language, and can detect instead", async () => {
+  test("the recorder starts in the workspace's meeting language", async () => {
     const fixture = createMeetingsFixture();
     const view = await render(
       <MeetingsListPage
@@ -673,13 +850,31 @@ describe("Live transcript", () => {
     );
     try {
       await waitForText(view.container, "Start recording");
-      const select = view.container.querySelector<HTMLSelectElement>(
-        'select[aria-label="Meeting language"]',
+      expect(
+        view.container.querySelector('button[aria-label="Recording options, Norwegian"]'),
+      ).not.toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("without a language from the host, the recorder starts in the one the server reports", async () => {
+    const fixture = createMeetingsFixture({ language: "no" });
+    const view = await render(
+      <MeetingsListPage
+        workspaceId={fixture.workspaceId}
+        recordings={fixture.client}
+        meetingHref={(id) => `/meetings/${id}`}
+        onOpen={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "Start recording");
+      await waitFor(
+        () =>
+          view.container.querySelector('button[aria-label="Recording options, Norwegian"]') !==
+          null,
       );
-      expect(select?.value).toBe("no");
-      const labels = [...select!.options].map((option) => option.textContent);
-      expect(labels[0]).toBe("Detect language");
-      expect(labels).toContain("Norwegian");
     } finally {
       await view.unmount();
     }
@@ -699,8 +894,8 @@ describe("Live transcript", () => {
     const text = liveUnavailableText([
       { error: { code: "quota_exceeded", message: "The live transcript stopped" } },
     ]);
-    expect(text).toContain("no credit left");
-    expect(text).toContain("still recorded and transcribed");
+    expect(text).toContain("out of credit");
+    expect(text).toContain("You still get the transcript");
     expect(liveUnavailableText([{ error: null }])).not.toContain("  ");
   });
 

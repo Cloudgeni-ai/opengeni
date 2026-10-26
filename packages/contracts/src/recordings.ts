@@ -687,6 +687,20 @@ export type RecordingSpeaker = z.infer<typeof RecordingSpeaker>;
 const DIARIZED_SPEAKER_LABEL = /^(?:t\d+_)?speaker_(\d+)$/u;
 const TRACK_SPEAKER_LABEL = /^track-(\d+)$/u;
 
+/**
+ * True when a recording's microphone is the person recording it: computer
+ * or tab audio sits beside it, so everyone else is on that track. A
+ * microphone alone (a phone, a room) may hear several people.
+ */
+export function recordingMicrophoneIsOwner(
+  tracks: readonly { source: RecordingTrackSource }[],
+): boolean {
+  return (
+    tracks.some((track) => track.source === "microphone") &&
+    tracks.some((track) => track.source === "system")
+  );
+}
+
 /** What an unnamed speaker label stands for, for clients that word it in the reader's language. */
 export type RecordingSpeakerDefault =
   | { kind: "speaker"; number: number }
@@ -854,6 +868,11 @@ export const ListRecordingModelsResponse = /* @__PURE__ */ defineSchema(() =>
     dictationDefault: z.object({ providerId: z.string(), model: z.string() }).nullable(),
     /** The deployment uses one model for everything; workspaces cannot pick. */
     pinned: z.boolean(),
+    /**
+     * The language this workspace's meetings are transcribed in unless a
+     * recording names another; null detects it. Absent from older servers.
+     */
+    language: z.string().nullable().optional(),
   }),
 );
 export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResponse>;

@@ -1,13 +1,16 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
 
 import { cn } from "../lib/cn";
+import { cachedLogoFit, measureLogoFit, type LogoFit } from "../logo-fit";
 
 /* ----------------------------------------------------------------------------
    LogoTile (design brief, "Also build").
 
    One tile for logos, monograms and icons, the same in both themes:
-   - a brand logo image (square app icons fill the tile; transparent marks
-     sit on the surface with padding),
+   - a brand logo image: square app icons fill the tile; transparent marks
+     sit with padding on a light plate in both themes, so dark and colored
+     marks stay legible. By default each image is measured once to tell the
+     two apart (see ../logo-fit),
    - a monogram on surface-2 when there is no logo or it fails to load,
    - a lucide glyph for things that are not brands (skills, variable sets,
      API keys), so a fallback never looks like a real logo.
@@ -77,10 +80,11 @@ export interface LogoTileProps {
   /** A brand logo. Missing or broken logos fall back to the monogram. */
   src?: string | null | undefined;
   /**
-   * "cover" (default) fills the tile, for square app icons that carry their own
-   * background. "contain" pads a transparent mark on the tile's surface.
+   * "auto" (default) measures the image: a square image with an opaque edge
+   * fills the tile like an app icon, anything else is padded like a mark.
+   * "cover" always fills; "contain" always pads the mark on a light plate.
    */
-  fit?: "cover" | "contain" | undefined;
+  fit?: LogoFit | "auto" | undefined;
   /** What the tile stands for. Used for the monogram and the optional label. */
   name?: string | undefined;
   /** One or two letters. Defaults to the first letter of `name`. */
@@ -100,7 +104,7 @@ export interface LogoTileProps {
 export function LogoTile({
   size: sizeProp,
   src,
-  fit = "cover",
+  fit = "auto",
   name,
   monogram,
   icon,
@@ -128,7 +132,7 @@ export function LogoTile({
         "relative inline-flex shrink-0 items-center justify-center overflow-hidden select-none",
         // The hairline sits on top of the logo, so full-bleed icons keep a crisp edge.
         "after:pointer-events-none after:absolute after:inset-0 after:rounded-[inherit] after:border after:border-border after:content-['']",
-        src && fit === "contain" ? "bg-surface" : "bg-surface-2",
+        "bg-surface-2",
         BOX[size],
         className,
       )}
@@ -150,26 +154,50 @@ function LogoImage({
   fallback,
 }: {
   src: string;
-  fit: "cover" | "contain";
+  fit: LogoFit | "auto";
   size: LogoTileSize;
   fallback: ReactNode;
 }) {
   const [failed, setFailed] = useState(false);
+  const [measured, setMeasured] = useState<LogoFit | undefined>(() =>
+    fit === "auto" ? cachedLogoFit(src) : undefined,
+  );
+  const resolved = fit === "auto" ? measured : fit;
+  // An image already decoded before hydration never fires onLoad again.
+  const measureIfLoaded = useCallback(
+    (image: HTMLImageElement | null) => {
+      if (fit !== "auto" || !image || !image.complete || image.naturalWidth === 0) return;
+      setMeasured((current) => current ?? measureLogoFit(src, image));
+    },
+    [fit, src],
+  );
   if (failed) {
     return <span className="grid size-full place-items-center bg-surface-2">{fallback}</span>;
   }
   return (
-    <img
-      src={src}
-      alt=""
-      loading="lazy"
-      decoding="async"
-      draggable={false}
-      onError={() => setFailed(true)}
-      className={cn(
-        "size-full",
-        fit === "cover" ? "object-cover" : cn("object-contain", CONTAIN_PADDING[size]),
-      )}
-    />
+    <span
+      data-fit={resolved ?? "pending"}
+      className={cn("grid size-full place-items-center", resolved === "contain" && LIGHT_PLATE)}
+    >
+      <img
+        ref={measureIfLoaded}
+        src={src}
+        alt=""
+        loading="lazy"
+        decoding="async"
+        draggable={false}
+        onLoad={(event) => measureIfLoaded(event.currentTarget)}
+        onError={() => setFailed(true)}
+        className={cn(
+          "size-full",
+          // Hidden only until an "auto" image is measured, so it never jumps.
+          resolved === undefined && "opacity-0",
+          resolved === "contain" ? cn("object-contain", CONTAIN_PADDING[size]) : "object-cover",
+        )}
+      />
+    </span>
   );
 }
+
+/** Brand marks are drawn for light backgrounds; give them one in both themes. */
+const LIGHT_PLATE = "bg-surface dark:bg-fg";

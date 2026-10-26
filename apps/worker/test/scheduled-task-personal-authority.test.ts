@@ -20,7 +20,6 @@ import {
 } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
-  captureScheduledTaskRestoreState,
   defaultSessionMcpServerIds,
   mcpAccountRouteId,
   resolveSessionToolPolicy,
@@ -2558,7 +2557,7 @@ describe("scheduled task personal MCP authority", () => {
       await expect(
         syncUpdatedScheduledTask({
           db: client.db,
-          previous: await captureScheduledTaskRestoreState(client.db, original),
+          previous: { task: original },
           task: changed,
           workflowClient: {
             syncScheduledTask: async ({
@@ -2666,7 +2665,7 @@ describe("scheduled task personal MCP authority", () => {
     const original = await updateScheduledTask(client.db, workspace.workspaceId, created.id, {
       reusableSessionId: reusableSession.id,
     });
-    const restoreState = await captureScheduledTaskRestoreState(client.db, original);
+    const restoreState = { task: original };
     const changedDelegations = delegation(workspace.subjectId, "github", "github.com");
     const changed = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
       name: "changed name",

@@ -4,7 +4,8 @@
 // - Android: the microphone permission and the foreground service, with the
 //   microphone type, that keeps capture alive with the screen off. Declared
 //   only on request, because Play asks every app with a microphone
-//   foreground service to justify it.
+//   foreground service to justify it. Also the notification permission:
+//   Android 13 and later hide the service's ongoing notification without it.
 // - iOS: the `audio` background mode, which the call plugin also adds.
 const { withAndroidManifest, withInfoPlist } = require("expo/config-plugins");
 
@@ -13,6 +14,7 @@ const PERMISSIONS = [
   "android.permission.RECORD_AUDIO",
   "android.permission.FOREGROUND_SERVICE",
   "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+  "android.permission.POST_NOTIFICATIONS",
 ];
 
 /** Add the recording permissions and service to a parsed AndroidManifest.xml. */

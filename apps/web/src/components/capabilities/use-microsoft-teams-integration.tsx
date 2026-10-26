@@ -1,3 +1,4 @@
+import microsoftTeamsLogo from "@/assets/integration-logos/microsoft-teams.svg";
 import { useIntegrationDefinitionRow } from "@/components/capabilities/use-api-integration-accounts";
 import type { IntegrationAdapter } from "@/components/capabilities/use-api-integration-accounts";
 import type {
@@ -6,8 +7,7 @@ import type {
 } from "@opengeni/react/app/types";
 
 export const MICROSOFT_TEAMS_DEFINITION_ID = "microsoft-teams";
-export const MICROSOFT_TEAMS_LOGO_URL =
-  "https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/teams_48x1.svg";
+export const MICROSOFT_TEAMS_LOGO_URL = microsoftTeamsLogo;
 
 /** User-delegated Graph access is separate from the workspace bot installation. */
 export function useMicrosoftTeamsIntegration(input: {

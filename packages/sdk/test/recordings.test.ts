@@ -750,6 +750,28 @@ describe("desktopSystemAudioSource", () => {
     ).toBeNull();
   });
 
+  test("an app that only records other apps' audio defines it on its own global", async () => {
+    await withMediaGlobals(async (frames) => {
+      const desktop = fakeDesktop(async () => ({ captureId: "cap-1", sampleRate: 4 }));
+      const scope = globalThis as Record<string, unknown>;
+      // Half an implementation is no implementation.
+      scope.opengeniSystemAudio = { start: desktop.bridge.systemAudio!.start };
+      expect(desktopSystemAudioSource(null)).toBeNull();
+      scope.opengeniSystemAudio = desktop.bridge.systemAudio;
+      try {
+        const source = desktopSystemAudioSource(null);
+        expect(source?.kind).toBe("desktop");
+        const capture = await source!.open();
+        desktop.samples("cap-1", [0.5]);
+        expect(frames).toHaveLength(1);
+        capture.stop();
+        expect(desktop.stopped).toEqual(["cap-1"]);
+      } finally {
+        delete scope.opengeniSystemAudio;
+      }
+    });
+  });
+
   test("turns the app's samples into a track, keeping samples that beat the start", async () => {
     await withMediaGlobals(async (frames, tracks) => {
       let desktop!: ReturnType<typeof fakeDesktop>;

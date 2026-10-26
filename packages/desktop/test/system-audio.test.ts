@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import type { DesktopSystemAudioError } from "../src/contract";
+import { DESKTOP_IPC } from "../src/contract";
 import {
+  handleSystemAudioIpc,
   SystemAudioCaptures,
+  systemAudioHelperName,
   systemAudioSupported,
   type SystemAudioTarget,
 } from "../src/main/system-audio";
@@ -112,5 +115,40 @@ describe("system audio", () => {
     expect(second.captureId).not.toBe(first.captureId);
     audio.stopFor(page);
     await Bun.sleep(300);
+  });
+
+  test("answers the preload for allowed pages only, and ends a capture when its page leaves", async () => {
+    expect(systemAudioHelperName("win32")).toBe("opengeni-audio-capture.exe");
+    expect(systemAudioHelperName("darwin")).toBe("opengeni-audio-capture");
+    const audio = captures();
+    type Listener = (event: unknown, ...args: unknown[]) => unknown;
+    const handlers = new Map<string, Listener>();
+    handleSystemAudioIpc({
+      ipcMain: {
+        handle: (channel: string, listener: Listener) => {
+          handlers.set(channel, listener);
+        },
+      } as never,
+      captures: audio,
+      allow: (event) => {
+        if ((event as { trusted?: boolean }).trusted !== true) throw new Error("Not allowed");
+      },
+    });
+    const listeners = new Map<string, (details?: unknown) => void>();
+    const page = Object.assign(new Page(6), {
+      once: (name: string, listener: () => void) => listeners.set(name, listener),
+      on: (name: string, listener: (details?: unknown) => void) => listeners.set(name, listener),
+    });
+    const start = handlers.get(DESKTOP_IPC.systemAudioStart)!;
+    await expect(start({ trusted: false, sender: page })).rejects.toThrow("Not allowed");
+    const started = (await start({ trusted: true, sender: page })) as { ok: boolean };
+    expect(started.ok).toBe(true);
+    // A same-document navigation keeps it; leaving the page ends it.
+    listeners.get("did-start-navigation")!({ isMainFrame: true, isSameDocument: true });
+    await Bun.sleep(100);
+    expect(page.ended).toBeNull();
+    listeners.get("did-start-navigation")!({ isMainFrame: true, isSameDocument: false });
+    await page.whenEnded();
+    expect(page.ended?.error).toBeNull();
   });
 });

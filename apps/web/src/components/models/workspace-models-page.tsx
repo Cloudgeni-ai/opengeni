@@ -85,7 +85,8 @@ import {
   readyOrganizationKeyModels,
   type ModelsWorkspace,
 } from "@/components/models/organization-models-list";
-import { OpenGeniCreditsRow, useOpenGeniCredits } from "@/components/models/opengeni-credits-row";
+import { OpenGeniCreditsRow } from "@/components/models/opengeni-credits-row";
+import { useOpenGeniCredits } from "@/lib/opengeni-credits";
 import {
   OrgCodexAccessPage,
   OrgCodexAccountPage,

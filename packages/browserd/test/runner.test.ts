@@ -152,22 +152,31 @@ describe("managed browser profile cryptography", () => {
     expect(browserProfileCryptoPolicy("darwin")).toBe("chromium_mock_keychain");
     expect(browserProfileCryptoPolicy("win32")).toBe("platform_bound");
     expect(browserLaunchArguments("linux").join(",")).toBe(
-      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--test-type,--ignore-gpu-blocklist,--enable-unsafe-swiftshader,--password-store=basic",
+      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--enable-features=CDPScreenshotNewSurface,--test-type,--ignore-gpu-blocklist,--enable-unsafe-swiftshader,--password-store=basic",
     );
     expect(browserLaunchArguments("darwin").join(",")).toBe(
-      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--use-mock-keychain",
+      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--enable-features=CDPScreenshotNewSurface,--use-mock-keychain",
     );
     expect(browserLaunchArguments("win32").join(",")).toBe(
-      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled",
+      "--restore-last-session,--disable-field-trial-config,--disable-background-timer-throttling,--disable-renderer-backgrounding,--disable-features=OptimizationGuideOnDeviceModel,--disk-cache-size=67108864,--disable-blink-features=AutomationControlled,--enable-features=CDPScreenshotNewSurface",
     );
   });
 
-  test("uses presentation-independent screenshots only for headed Linux browsers", () => {
+  test("uses presentation-independent screenshots for every managed browser", () => {
     const feature = "--enable-features=CDPScreenshotNewSurface";
-    expect(browserLaunchArguments("linux", [], true)).toContain(feature);
-    expect(browserLaunchArguments("linux", [], false)).not.toContain(feature);
-    expect(browserLaunchArguments("darwin", [], true)).not.toContain(feature);
-    expect(browserLaunchArguments("win32", [], true)).not.toContain(feature);
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      expect(browserLaunchArguments(platform)).toContain(feature);
+    }
+    // Chromium honors only the last switch: an additional one is folded in.
+    const merged = browserLaunchArguments("linux", [
+      "--enable-features=OverlayScrollbar",
+      "--lang=en-US",
+      "--enable-features=CDPScreenshotNewSurface,Extra",
+    ]);
+    expect(merged.filter((argument) => argument.startsWith("--enable-features="))).toEqual([
+      "--enable-features=CDPScreenshotNewSurface,OverlayScrollbar,Extra",
+    ]);
+    expect(merged.at(-1)).toBe("--lang=en-US");
   });
 
   test.skipIf(process.platform !== "darwin")(

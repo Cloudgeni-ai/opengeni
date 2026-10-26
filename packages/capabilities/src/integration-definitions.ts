@@ -62,14 +62,6 @@ export interface IntegrationDefinition {
   }>;
 }
 
-/** @deprecated Compatibility adapter. User choices are always overridable. */
-export function autoApprovalForbidden(
-  _definition: IntegrationDefinition | undefined,
-  _operationKey: string,
-): boolean {
-  return false;
-}
-
 export interface IntegrationFacetDefinition {
   readonly facetKey: string;
   readonly kind: "knowledge_source" | "inbound_trigger" | "delivery_destination" | "identity_link";

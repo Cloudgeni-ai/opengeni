@@ -11796,7 +11796,10 @@
         "$.balanceMicros": "integer!",
         "$.currency": "const!=[\"\\\"usd\\\"\"]",
         "$.generalBalanceMicros": "integer?",
+        "$.heldCreditMicros": "integer?",
+        "$.heldGeneralCreditMicros": "integer?",
         "$.plan": "ref(BillingPlanBalance)? null",
+        "$.promotionDecision": "enum?=[\"\\\"denied\\\"\",\"\\\"eligible\\\"\",\"\\\"held\\\"\",\"\\\"verification_required\\\"\"]",
         "$.promotionalCredits": "array?",
         "$.promotionalCredits[]": "ref(PromotionalCreditBalance)",
         "$.updatedAt": "string!"
@@ -13410,6 +13413,7 @@
         "$.auth|mode=managedSession.mode": "const!=[\"\\\"managedSession\\\"\"]",
         "$.auth|mode=managedSession.newSignupsEnabled": "boolean!",
         "$.auth|mode=managedSession.session": "const!=[\"\\\"cookie\\\"\"]",
+        "$.auth|mode=managedSession.signupChallengeSiteKey": "string?",
         "$.auth|mode=managedSession.socialProviders": "array!",
         "$.auth|mode=managedSession.socialProviders[]": "ref(ManagedSignInProvider)",
         "$.azureOpenAIDeploymentIdentity": "boolean?",
@@ -15098,6 +15102,7 @@
         "$": "union=[\"1\",\"kind=gmail\",\"kind=mcp\",\"kind=webhook\",\"kind=workspace\"]",
         "$|kind=webhook": "object",
         "$|kind=webhook.adapter": "ref(WebhookEventAdapter)!",
+        "$|kind=webhook.format": "ref(WebhookFormat)?",
         "$|kind=webhook.kind": "const!=[\"\\\"webhook\\\"\"]",
         "$|kind=webhook.name": "string!",
         "$|kind=webhook.signingSecret": "string?",
@@ -15539,7 +15544,7 @@
         "$|1.metadata": "object?",
         "$|1.metadata{}": "unknown",
         "$|1.name": "string!",
-        "$|1.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]",
+        "$|1.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]",
         "$|1.pinnedAccounts": "array?",
         "$|1.pinnedAccounts[]": "ref(McpConnectionAccountSelection)",
         "$|1.pinnedAccountsRequired": "boolean?",
@@ -15771,7 +15776,7 @@
         "$.metadata": "object?",
         "$.metadata{}": "unknown",
         "$.name": "string!",
-        "$.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]",
+        "$.overlapPolicy": "enum?=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]",
         "$.prompt": "string!",
         "$.runMode": "const?=[\"\\\"existing_session\\\"\"]",
         "$.schedule": "ref(ScheduledTaskScheduleSpec)!",
@@ -16578,6 +16583,7 @@
         "$.adapter": "ref(WebhookEventAdapter)! null",
         "$.awaitingSigningSecret": "boolean!",
         "$.createdAt": "string!",
+        "$.format": "ref(WebhookFormat)! null",
         "$.id": "string!",
         "$.kind": "ref(EventSourceKind)!",
         "$.lastDeliveryAt": "string! null",
@@ -17090,7 +17096,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"admin_action_call\\\"\",\"\\\"admin_action_describe\\\"\",\"\\\"admin_actions_search\\\"\",\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_record\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enable_screen_control\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"event_sources_list\\\"\",\"\\\"events_get\\\"\",\"\\\"excel_run\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"inbox_tidy\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"meeting_read\\\"\",\"\\\"meetings_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"notification_withdraw\\\"\",\"\\\"notify_user\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"secret_delete\\\"\",\"\\\"secret_get\\\"\",\"\\\"secret_move\\\"\",\"\\\"secret_save\\\"\",\"\\\"secret_search\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_message_status\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_target_get\\\"\",\"\\\"session_target_set\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"site_data_define_collection\\\"\",\"\\\"site_data_describe\\\"\",\"\\\"site_data_export\\\"\",\"\\\"site_data_import\\\"\",\"\\\"site_data_query\\\"\",\"\\\"site_data_reset\\\"\",\"\\\"site_data_write\\\"\",\"\\\"site_files_delete\\\"\",\"\\\"site_files_list\\\"\",\"\\\"site_files_upload\\\"\",\"\\\"site_hostname_check\\\"\",\"\\\"site_publication_apply_fix\\\"\",\"\\\"site_publication_get\\\"\",\"\\\"site_publication_update\\\"\",\"\\\"site_sql_define_query\\\"\",\"\\\"site_sql_enable\\\"\",\"\\\"site_sql_execute\\\"\",\"\\\"site_sql_export\\\"\",\"\\\"site_sql_import\\\"\",\"\\\"site_sql_inspect\\\"\",\"\\\"site_sql_migrate\\\"\",\"\\\"site_sql_query\\\"\",\"\\\"site_sql_reset\\\"\",\"\\\"site_sql_run\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
+        "$": "enum=[\"\\\"admin_action_call\\\"\",\"\\\"admin_action_describe\\\"\",\"\\\"admin_actions_search\\\"\",\"\\\"artifacts_archive\\\"\",\"\\\"artifacts_create\\\"\",\"\\\"artifacts_get_source\\\"\",\"\\\"artifacts_list\\\"\",\"\\\"artifacts_prepare_upload\\\"\",\"\\\"artifacts_publish\\\"\",\"\\\"artifacts_restore\\\"\",\"\\\"artifacts_rollback\\\"\",\"\\\"atlassian_get\\\"\",\"\\\"atlassian_search\\\"\",\"\\\"atlassian_sources_list\\\"\",\"\\\"browser_act\\\"\",\"\\\"browser_auth\\\"\",\"\\\"browser_clipboard\\\"\",\"\\\"browser_debug\\\"\",\"\\\"browser_download_save\\\"\",\"\\\"browser_downloads\\\"\",\"\\\"browser_identity\\\"\",\"\\\"browser_lifecycle\\\"\",\"\\\"browser_observe\\\"\",\"\\\"browser_open\\\"\",\"\\\"browser_publish\\\"\",\"\\\"browser_read\\\"\",\"\\\"browser_record\\\"\",\"\\\"browser_screenshot\\\"\",\"\\\"browser_tabs\\\"\",\"\\\"capability_authorization_request\\\"\",\"\\\"capability_catalog_search\\\"\",\"\\\"command_read\\\"\",\"\\\"command_wait\\\"\",\"\\\"company_profile_confirm\\\"\",\"\\\"company_profile_propose\\\"\",\"\\\"computer_act\\\"\",\"\\\"computer_clipboard\\\"\",\"\\\"computer_lifecycle\\\"\",\"\\\"computer_observe\\\"\",\"\\\"computer_open\\\"\",\"\\\"computer_targets\\\"\",\"\\\"connected_machine_enable_screen_control\\\"\",\"\\\"connected_machine_enroll_token\\\"\",\"\\\"connected_machine_remove\\\"\",\"\\\"custom_mcp_setup_request\\\"\",\"\\\"editable_artifact_apply\\\"\",\"\\\"editable_artifact_create\\\"\",\"\\\"editable_artifact_export\\\"\",\"\\\"editable_artifact_export_status\\\"\",\"\\\"editable_artifact_get\\\"\",\"\\\"editable_artifact_import\\\"\",\"\\\"editable_artifact_inspect\\\"\",\"\\\"editable_artifact_list\\\"\",\"\\\"environment_list\\\"\",\"\\\"environment_set_variable\\\"\",\"\\\"event_sources_list\\\"\",\"\\\"events_get\\\"\",\"\\\"excel_run\\\"\",\"\\\"fiken_bank_accounts_list\\\"\",\"\\\"fiken_companies_list\\\"\",\"\\\"fiken_contact_create\\\"\",\"\\\"fiken_contacts_list\\\"\",\"\\\"fiken_invoice_draft_create\\\"\",\"\\\"fiken_invoice_get\\\"\",\"\\\"fiken_invoices_list\\\"\",\"\\\"fiken_products_list\\\"\",\"\\\"fiken_purchases_list\\\"\",\"\\\"fiken_sales_list\\\"\",\"\\\"github_connect_link\\\"\",\"\\\"github_repositories_list\\\"\",\"\\\"goal_complete\\\"\",\"\\\"goal_pause\\\"\",\"\\\"goal_progress\\\"\",\"\\\"goal_resume\\\"\",\"\\\"goal_set\\\"\",\"\\\"goal_update\\\"\",\"\\\"inbox_tidy\\\"\",\"\\\"instruction_policy_get\\\"\",\"\\\"instruction_policy_propose\\\"\",\"\\\"instruction_policy_save\\\"\",\"\\\"interaction_discover\\\"\",\"\\\"interaction_request_human\\\"\",\"\\\"knowledge_archive\\\"\",\"\\\"knowledge_browse\\\"\",\"\\\"knowledge_correct\\\"\",\"\\\"knowledge_get\\\"\",\"\\\"knowledge_prepare_save\\\"\",\"\\\"knowledge_propose\\\"\",\"\\\"knowledge_retain_file\\\"\",\"\\\"knowledge_retain_message\\\"\",\"\\\"knowledge_save\\\"\",\"\\\"knowledge_search\\\"\",\"\\\"meeting_notes_save\\\"\",\"\\\"meeting_read\\\"\",\"\\\"meetings_search\\\"\",\"\\\"memory_correct\\\"\",\"\\\"memory_save\\\"\",\"\\\"memory_search\\\"\",\"\\\"notification_withdraw\\\"\",\"\\\"notify_user\\\"\",\"\\\"preference_propose\\\"\",\"\\\"preference_registry_get\\\"\",\"\\\"preference_registry_summary\\\"\",\"\\\"project_create\\\"\",\"\\\"project_delete\\\"\",\"\\\"project_get\\\"\",\"\\\"project_list\\\"\",\"\\\"project_reorder\\\"\",\"\\\"project_update\\\"\",\"\\\"reddit_accounts_list\\\"\",\"\\\"reddit_mentions_live\\\"\",\"\\\"reddit_post_reply\\\"\",\"\\\"reddit_posts_sync\\\"\",\"\\\"reddit_search_live\\\"\",\"\\\"reddit_thread_fetch\\\"\",\"\\\"remember\\\"\",\"\\\"remember_confirm\\\"\",\"\\\"rig_get\\\"\",\"\\\"rig_list\\\"\",\"\\\"rig_promote\\\"\",\"\\\"rig_propose_change\\\"\",\"\\\"rig_verify\\\"\",\"\\\"run_on\\\"\",\"\\\"sandbox_attach\\\"\",\"\\\"sandbox_file_publish\\\"\",\"\\\"sandbox_provision\\\"\",\"\\\"sandbox_swap\\\"\",\"\\\"sandboxes_list\\\"\",\"\\\"scheduled_task_runs_list\\\"\",\"\\\"scheduled_tasks_create\\\"\",\"\\\"scheduled_tasks_delete\\\"\",\"\\\"scheduled_tasks_get\\\"\",\"\\\"scheduled_tasks_list\\\"\",\"\\\"scheduled_tasks_pause\\\"\",\"\\\"scheduled_tasks_resume\\\"\",\"\\\"scheduled_tasks_trigger\\\"\",\"\\\"scheduled_tasks_update\\\"\",\"\\\"secret_delete\\\"\",\"\\\"secret_get\\\"\",\"\\\"secret_move\\\"\",\"\\\"secret_save\\\"\",\"\\\"secret_search\\\"\",\"\\\"session_create\\\"\",\"\\\"session_events\\\"\",\"\\\"session_get\\\"\",\"\\\"session_human_input_respond\\\"\",\"\\\"session_message_status\\\"\",\"\\\"session_pause\\\"\",\"\\\"session_resume\\\"\",\"\\\"session_send_message\\\"\",\"\\\"session_set_model\\\"\",\"\\\"session_set_project\\\"\",\"\\\"session_steer\\\"\",\"\\\"session_target_get\\\"\",\"\\\"session_target_set\\\"\",\"\\\"session_wait\\\"\",\"\\\"sessions_list\\\"\",\"\\\"set_other_session_title\\\"\",\"\\\"set_session_title\\\"\",\"\\\"site_data_define_collection\\\"\",\"\\\"site_data_describe\\\"\",\"\\\"site_data_export\\\"\",\"\\\"site_data_import\\\"\",\"\\\"site_data_query\\\"\",\"\\\"site_data_reset\\\"\",\"\\\"site_data_write\\\"\",\"\\\"site_files_delete\\\"\",\"\\\"site_files_list\\\"\",\"\\\"site_files_upload\\\"\",\"\\\"site_hostname_check\\\"\",\"\\\"site_publication_apply_fix\\\"\",\"\\\"site_publication_get\\\"\",\"\\\"site_publication_update\\\"\",\"\\\"site_sql_define_query\\\"\",\"\\\"site_sql_enable\\\"\",\"\\\"site_sql_execute\\\"\",\"\\\"site_sql_export\\\"\",\"\\\"site_sql_import\\\"\",\"\\\"site_sql_inspect\\\"\",\"\\\"site_sql_migrate\\\"\",\"\\\"site_sql_query\\\"\",\"\\\"site_sql_reset\\\"\",\"\\\"site_sql_run\\\"\",\"\\\"slack_bot_channel_history\\\"\",\"\\\"slack_bot_delete_message\\\"\",\"\\\"slack_bot_file_content\\\"\",\"\\\"slack_bot_file_info\\\"\",\"\\\"slack_bot_list_channels\\\"\",\"\\\"slack_bot_list_files\\\"\",\"\\\"slack_bot_list_users\\\"\",\"\\\"slack_bot_post_message\\\"\",\"\\\"slack_bot_prepare_message\\\"\",\"\\\"slack_bot_search\\\"\",\"\\\"slack_bot_send_prepared_message\\\"\",\"\\\"slack_bot_thread_replies\\\"\",\"\\\"slack_bot_upload_file\\\"\",\"\\\"social_connections_list\\\"\",\"\\\"social_daily_analysis_context\\\"\",\"\\\"social_mentions_live\\\"\",\"\\\"social_post_reply\\\"\",\"\\\"social_posts_recent\\\"\",\"\\\"social_posts_sync\\\"\",\"\\\"social_search_live\\\"\",\"\\\"social_thread_fetch\\\"\",\"\\\"task_note_archive\\\"\",\"\\\"task_note_promote_instruction_policy\\\"\",\"\\\"task_note_promote_knowledge\\\"\",\"\\\"task_note_promote_preference\\\"\",\"\\\"task_note_replace\\\"\",\"\\\"task_note_save\\\"\",\"\\\"task_notes_list\\\"\",\"\\\"variable_set_get_variable\\\"\",\"\\\"variable_set_list\\\"\",\"\\\"variable_set_set_variable\\\"\",\"\\\"wait_for_input\\\"\",\"\\\"work_claim_release\\\"\",\"\\\"work_claim_upsert\\\"\",\"\\\"x_accounts_list\\\"\",\"\\\"x_mentions_live\\\"\",\"\\\"x_post_reply\\\"\",\"\\\"x_posts_sync\\\"\",\"\\\"x_search_live\\\"\",\"\\\"x_thread_fetch\\\"\"]"
       }
     },
     "ForkSessionRequest": {
@@ -20483,6 +20489,7 @@
         "$.dictationDefault": "object! null",
         "$.dictationDefault.model": "string!",
         "$.dictationDefault.providerId": "string!",
+        "$.language": "string? null",
         "$.models": "array!",
         "$.models[]": "ref(RecordingTranscriptionModel)",
         "$.pinned": "boolean!"
@@ -23677,6 +23684,7 @@
         "$.eligibleModelIds": "array!",
         "$.eligibleModelIds[]": "string",
         "$.grantId": "string!",
+        "$.held": "boolean?",
         "$.label": "string!",
         "$.planCredit": "boolean?",
         "$.remainingMicros": "integer!"
@@ -25553,7 +25561,7 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\"]"
+        "$": "enum=[\"\\\"allow_concurrent\\\"\",\"\\\"buffer_one\\\"\",\"\\\"skip\\\"\",\"\\\"steer\\\"\"]"
       }
     },
     "ScheduledTaskPolicyDrift": {
@@ -29723,6 +29731,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.format": "ref(WebhookFormat)?",
         "$.name": "string?",
         "$.signingSecret": "string?",
         "$.status": "ref(AutomationSourceStatus)?",
@@ -31257,7 +31266,69 @@
         "output"
       ],
       "shape": {
-        "$": "enum=[\"\\\"linear\\\"\",\"\\\"sentry\\\"\",\"\\\"standard\\\"\"]"
+        "$": "enum=[\"\\\"custom\\\"\",\"\\\"linear\\\"\",\"\\\"sentry\\\"\",\"\\\"standard\\\"\"]"
+      }
+    },
+    "WebhookFormat": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.actor": "string?",
+        "$.batch": "object?",
+        "$.batch.path": "string?",
+        "$.deliveryId": "ref(WebhookValueSource)?",
+        "$.eventId": "string?",
+        "$.occurredAt": "string?",
+        "$.preset": "string?",
+        "$.signature": "ref(WebhookSignatureFormat)!",
+        "$.subject": "string?",
+        "$.summary": "string?",
+        "$.type": "union!=[\"0\",\"1\",\"2\"]",
+        "$.type|0": "object",
+        "$.type|0.path": "string!",
+        "$.type|1": "object",
+        "$.type|1.header": "string!",
+        "$.type|2": "object",
+        "$.type|2.value": "string!",
+        "$.url": "string?"
+      }
+    },
+    "WebhookSignatureFormat": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"scheme=hmac_sha256\",\"scheme=standard_webhooks\",\"scheme=timestamped_hmac_sha256\",\"scheme=token\"]",
+        "$|scheme=standard_webhooks": "object",
+        "$|scheme=standard_webhooks.scheme": "const!=[\"\\\"standard_webhooks\\\"\"]",
+        "$|scheme=hmac_sha256": "object",
+        "$|scheme=hmac_sha256.encoding": "enum?=[\"\\\"base64\\\"\",\"\\\"hex\\\"\"]",
+        "$|scheme=hmac_sha256.header": "string!",
+        "$|scheme=hmac_sha256.prefix": "string?",
+        "$|scheme=hmac_sha256.scheme": "const!=[\"\\\"hmac_sha256\\\"\"]",
+        "$|scheme=timestamped_hmac_sha256": "object",
+        "$|scheme=timestamped_hmac_sha256.header": "string!",
+        "$|scheme=timestamped_hmac_sha256.scheme": "const!=[\"\\\"timestamped_hmac_sha256\\\"\"]",
+        "$|scheme=timestamped_hmac_sha256.toleranceSeconds": "integer?",
+        "$|scheme=token": "object",
+        "$|scheme=token.header": "string!",
+        "$|scheme=token.prefix": "string?",
+        "$|scheme=token.scheme": "const!=[\"\\\"token\\\"\"]"
+      }
+    },
+    "WebhookValueSource": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "union=[\"0\",\"1\"]",
+        "$|0": "object",
+        "$|0.path": "string!",
+        "$|1": "object",
+        "$|1.header": "string!"
       }
     },
     "WorkClaimDiscoverySummary": {
@@ -34016,6 +34087,7 @@
       "parseRetainedWorkspaceFileReference": "value",
       "parseSandboxFileArtifactReceipt": "value",
       "parseSandboxLink": "value",
+      "parseSessionReference": "value",
       "parseSseStream": "value",
       "parseToolDisplayMetadata": "value",
       "parseWorkspaceLiveEvent": "value",
@@ -37438,6 +37510,7 @@
       "ModelPolicyPickerProps": "type",
       "OPEN_WORKSTREAM_CONTROL_EVENT": "value",
       "PauseButton": "value",
+      "PauseButtonSlot": "value",
       "PausedState": "value",
       "PersistVoiceRecordingChunkInput": "type",
       "PersistVoiceRecordingChunkResult": "type",
@@ -37745,6 +37818,11 @@
       "UseMachinesResult": "type",
       "WINDOW_LABEL": "value"
     },
+    "@opengeni/react/markdown-math": {
+      "mayContainMath": "value",
+      "PreparedMathMarkdown": "type",
+      "prepareMathMarkdown": "value"
+    },
     "@opengeni/react/meetings": {
       "createMeetingRecorderStore": "value",
       "DeleteMeetingDialog": "value",
@@ -37956,9 +38034,13 @@
       "languageName": "value",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
+      "meetingHereStatus": "value",
+      "MeetingHereStatus": "type",
       "meetingPhase": "value",
       "MeetingPhase": "type",
       "meetingStatusLabel": "value",
+      "meetingTitle": "value",
+      "ownerLiveLaneName": "value",
       "RecordingsClientLike": "type",
       "RecordingsClientOverride": "type",
       "speakerColorSlots": "value",
@@ -38003,6 +38085,7 @@
       "CLOUD_SANDBOX_LABEL": "value",
       "LOCAL_SANDBOX_LABEL": "value",
       "machineDisplayName": "value",
+      "machineNameTwinLabel": "value",
       "machineScopeLabel": "value",
       "NO_SANDBOX_LABEL": "value",
       "sessionComputeLabel": "value",
@@ -38237,6 +38320,7 @@
       "SessionAutomationWait": "type",
       "sessionAutomationWaitLabel": "value",
       "sessionDisplayTitle": "value",
+      "sessionHasPendingWake": "value",
       "sessionHasUpcomingSchedule": "value",
       "sessionInputWait": "value",
       "SessionListRow": "type",
@@ -38246,7 +38330,8 @@
       "SessionRecencyGroup": "type",
       "sessionRenameSeed": "value",
       "sessionRepoLabel": "value",
-      "SessionStatusTone": "type"
+      "SessionStatusTone": "type",
+      "withLineageAutomationFacts": "value"
     },
     "@opengeni/react/session-realtime": {
       "CODEX_LIVE_MODEL": "value",

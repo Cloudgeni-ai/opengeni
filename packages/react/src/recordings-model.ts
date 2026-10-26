@@ -4,6 +4,7 @@
  * No React here, so each rule is tested on its own.
  */
 import {
+  recordingMicrophoneIsOwner,
   recordingSpeakerDefault,
   type Recording,
   type RecordingSpeaker,
@@ -11,6 +12,7 @@ import {
   type RecordingTranscriptSegment,
   type RecordingTranscriptVersion,
 } from "@opengeni/contracts";
+import type { RecorderSnapshot } from "@opengeni/sdk/recordings";
 import { createOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
 const defaultText = createOpenGeniText();
@@ -47,8 +49,10 @@ export type MeetingPhase =
 
 /**
  * Where a recording is in its life, from the reader's side. A recording still
- * capturing is "uploading": the audio is on the recorder's device until its
- * chunks reach storage. A failed re-run leaves an older complete version
+ * capturing is "uploading" (kept for compatibility; it reads "In progress"):
+ * it is still being recorded, or its last audio is still on its way from the
+ * device that recorded it. That device knows which, so it asks
+ * {@link meetingHereStatus}. A failed re-run leaves an older complete version
  * current, so the transcript stays readable.
  */
 export function meetingPhase(recording: Recording): MeetingPhase {
@@ -65,6 +69,43 @@ export function meetingPhase(recording: Recording): MeetingPhase {
   return { kind: "no_transcript" };
 }
 
+/**
+ * What this device's recorder knows about one meeting that the server can't
+ * yet: it is recording (or paused) here, or it was stopped here and its last
+ * few seconds of audio are on their way, which a person reads as Transcribing.
+ * The audio uploads while it records, so nothing is left to "upload" after
+ * Stop unless the connection is down or the server refused it. Null when this
+ * device isn't recording that meeting, or when capture failed before Stop
+ * finished it; the server's {@link meetingPhase} says the rest.
+ */
+export type MeetingHereStatus =
+  | "recording"
+  | "paused"
+  | "transcribing"
+  | "waiting_for_connection"
+  | "upload_failed";
+
+export function meetingHereStatus(
+  recorder: Pick<RecorderSnapshot, "state" | "recordingId" | "upload"> | null,
+  recordingId: string,
+  online = true,
+): MeetingHereStatus | null {
+  if (!recorder || recorder.recordingId !== recordingId) return null;
+  if (recorder.state === "recording") return "recording";
+  if (recorder.state === "paused") return "paused";
+  if (recorder.state === "idle" || recorder.state === "starting") return null;
+  const upload = recorder.upload;
+  if (upload?.discarded) return null;
+  if (upload?.failed) return "upload_failed";
+  // Capture failed mid-recording: nothing finishes it until this browser
+  // recovers it, so it isn't transcribing yet.
+  if (recorder.state === "failed" && !upload?.finalized) return null;
+  if (!upload?.finalized && (!online || upload?.retryingAfterError)) {
+    return "waiting_for_connection";
+  }
+  return "transcribing";
+}
+
 /** The one-word state a list row shows, or null when there is nothing to say. */
 export function meetingStatusLabel(
   phase: MeetingPhase,
@@ -72,7 +113,7 @@ export function meetingStatusLabel(
 ): { label: string; tone: "progress" | "danger" | "neutral" } | null {
   switch (phase.kind) {
     case "uploading":
-      return { label: msg("meetings.recordings.uploading"), tone: "progress" };
+      return { label: msg("meetings.recordings.inProgress"), tone: "progress" };
     case "transcribing":
       return { label: msg("meetings.recordings.transcribing"), tone: "progress" };
     case "failed":
@@ -148,6 +189,25 @@ export function defaultSpeakerName(
     case "label":
       return named.label;
   }
+}
+
+/**
+ * A live preview lane's name when the microphone is the person recording
+ * (computer or tab audio beside it): `ownerName` for the microphone and
+ * "Others" for the computer or tab audio. Null otherwise, when lanes are
+ * named by their source.
+ */
+export function ownerLiveLaneName(
+  tracks: readonly { trackNumber: number; source: RecordingTrack["source"] }[],
+  trackNumber: number,
+  ownerName: string,
+  msg: OpenGeniText = defaultText,
+): string | null {
+  if (!recordingMicrophoneIsOwner(tracks)) return null;
+  const source = tracks.find((track) => track.trackNumber === trackNumber)?.source;
+  if (source === "microphone") return ownerName;
+  if (source === "system") return msg("meetings.liveTranscript.others");
+  return null;
 }
 
 /** True when the label has a name of its own: a person, a plain name, or a suggestion. */
@@ -350,11 +410,51 @@ export function languageName(code: string, locale?: string): string {
   return LANGUAGE_NAMES[tag] ?? LANGUAGE_NAMES[tag.split("-")[0]!] ?? tag;
 }
 
-/** A short, readable default title for a new recording: "Meeting, Oct 23, 14:05". */
+const MONTH_KEYS = [
+  "time.month.jan",
+  "time.month.feb",
+  "time.month.mar",
+  "time.month.apr",
+  "time.month.may",
+  "time.month.jun",
+  "time.month.jul",
+  "time.month.aug",
+  "time.month.sep",
+  "time.month.oct",
+  "time.month.nov",
+  "time.month.dec",
+] as const;
+
+/**
+ * A short, readable default title for a new recording, in local time and the
+ * app's own date words and 24-hour clock: "Meeting, 23 Oct, 14:05".
+ */
 export function defaultMeetingTitle(now: Date, msg: OpenGeniText = defaultText): string {
-  const date = now.toLocaleDateString(msg.locale, { month: "short", day: "numeric" });
-  const time = now.toLocaleTimeString(msg.locale, { hour: "2-digit", minute: "2-digit" });
+  const month = msg(MONTH_KEYS[now.getMonth()] ?? "time.month.jan");
+  const date = msg("time.date", { day: now.getDate(), month });
+  const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
   return msg("meetings.recordings.defaultTitle", { date, time });
+}
+
+/**
+ * The title to show for a meeting. One started without a title carries the
+ * server's stand-in, "Recording 2026-10-26 11:15 UTC"; it shows as a
+ * recorder would have named it, in the viewer's language and time.
+ */
+export function meetingTitle(
+  recording: Pick<Recording, "title" | "startedAt">,
+  msg: OpenGeniText = defaultText,
+): string {
+  const title = recording.title.trim();
+  const startedAt = new Date(recording.startedAt);
+  if (Number.isNaN(startedAt.getTime())) return title;
+  if (title && title !== serverDefaultTitle(startedAt)) return title;
+  return defaultMeetingTitle(startedAt, msg);
+}
+
+/** The title the server gives a recording started without one. */
+function serverDefaultTitle(startedAt: Date): string {
+  return `Recording ${startedAt.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
 
 /** A finished stretch of live text on one track, as the live preview shows it. */

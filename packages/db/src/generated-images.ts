@@ -1053,7 +1053,7 @@ async function debitImageGenerationCredits(
   // general credit, exactly as a settled chat response.
   const allocations = operation.creditUsageModelId
     ? planPostUseCreditAllocations(
-        await getBillingBalance(tx, operation.accountId, undefined, settledAt),
+        await getBillingBalance(tx, operation.accountId, undefined, settledAt, true),
         operation.pricedCostMicros,
         operation.creditUsageModelId,
       )

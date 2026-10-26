@@ -202,6 +202,9 @@ export type CodemodeBrowserAgentView = Readonly<{
   omittedRegions?: readonly Readonly<{ role: string; name?: string; count: number }>[];
   removedRefCount?: number;
   clippedFieldCount?: number;
+  /** The page was too large to read whole: at least this many elements were
+   * left unread. The view keeps the page's structure and the part on screen. */
+  unreadNodeCount?: number;
 }>;
 
 /** A tab with the identity, page, selection and fences a next call needs. */

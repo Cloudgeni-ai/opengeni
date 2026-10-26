@@ -238,8 +238,9 @@ other organization consumers outside this repository separately.
 
 The traffic reader applies the same pool checks as the batcher (see the
 headroom section of [merge-batcher.md](merge-batcher.md)). It holds while any active
-full-main run is before its fan-out (at most the 3 pre-plan jobs and not proven
-approval-only) or has jobs `queued` or `requested`. It also requires observed
+full-main run is before its fan-out (at most the 4 pre-plan jobs and not proven
+approval-only) or has jobs `queued` or `requested`. Batch-attested main runs are
+excluded from both holds but keep their demand. It also requires observed
 repository demand plus the other-repository allowance (default 28, a measured
 maximum, not an observation of other repositories) plus 18 to fit the hosted job
 limit (default 60). The report's `publication.headroom.capacity` records the

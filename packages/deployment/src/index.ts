@@ -1644,6 +1644,13 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_GITHUB_APP_PRIVATE_KEY",
       "OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET",
     );
+    if (env.OPENGENI_SIGNUP_CHALLENGE_ENABLED === "true") {
+      vars.push(
+        "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
+        "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
+        "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES",
+      );
+    }
     if (env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED === "true") {
       vars.push(
         "OPENGENI_INTEGRATIONS_ENABLED",
@@ -2770,6 +2777,19 @@ function runtimeEnvValues(
     ...(contract.product.accessMode === "managed"
       ? [
           requiredEnv("OPENGENI_BETTER_AUTH_SECRET", env.OPENGENI_BETTER_AUTH_SECRET),
+          valueEnv(
+            "OPENGENI_SIGNUP_CHALLENGE_ENABLED",
+            env.OPENGENI_SIGNUP_CHALLENGE_ENABLED ?? "false",
+          ),
+          ...[
+            "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
+            "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
+            "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES",
+          ].map((key) =>
+            env.OPENGENI_SIGNUP_CHALLENGE_ENABLED === "true"
+              ? requiredEnv(key, env[key])
+              : valueEnv(key, env[key]),
+          ),
           valueEnv(
             "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS",
             env.OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS ?? publicBaseUrl ?? "",

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing/settings";
 import type { CodexCredentialForRun, Database } from "@opengeni/db";
 import { CodexReloginRequired } from "@opengeni/codex";
-import { buildCodexTokenResolver, type CodexAuthDeps } from "../src/activities/codex-auth";
+import { buildCodexTokenResolver, type CodexAuthDeps } from "@opengeni/db";
 
 const db = {} as Database;
 const settings = testSettings({ codexSubscriptionEnabled: true });

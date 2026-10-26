@@ -4020,6 +4020,36 @@ export async function getManagedUserProfilesByIds(
   );
 }
 
+/**
+ * A workspace member's name as the workspace's people list shows it: their
+ * profile name, else the label their membership was given, else their email.
+ * Null when none is known.
+ */
+export async function workspaceMemberDisplayName(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<string | null> {
+  // A deployment without managed profiles still has membership labels.
+  const [profile] = input.subjectId.startsWith("user:")
+    ? await getManagedUserProfilesByIds(db, [input.subjectId.slice("user:".length)]).catch(() => [])
+    : [];
+  const name = profile?.name?.trim();
+  if (name) return name;
+  const [membership] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb
+      .select({ subjectLabel: schema.workspaceMemberships.subjectLabel })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        ),
+      )
+      .limit(1),
+  );
+  return membership?.subjectLabel?.trim() || profile?.email?.trim() || null;
+}
+
 export async function deleteWorkspace(db: Database, workspaceId: string): Promise<void> {
   await db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Database;
@@ -6525,6 +6555,7 @@ export async function applyCreditDebitUpToBalance(
         input.accountId,
         input.creditPolicyRevision,
         settledAt,
+        true,
       );
       const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
       const candidateDebitMicros = plan.debitedMicros;
@@ -6614,7 +6645,7 @@ export async function applyCreditDebitAfterUse(
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
       if (input.usage) {
         allocations = planPostUseCreditAllocations(
-          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt),
+          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
           input.usage,
         );
@@ -7657,6 +7688,8 @@ export type EnabledMcpCapabilityServer = {
   capabilityId: string;
   id: string;
   name: string;
+  /** The catalog item's category ("communication", "files"), naming the need it serves. */
+  category?: string;
   url: string;
   allowedTools?: string[];
   timeoutMs?: number;
@@ -10098,7 +10131,8 @@ export async function upsertCapabilityCatalogItem(
         credentialFacts: values.credentialFacts,
         tier: values.tier,
         provenance: values.provenance,
-        logoAssetPath: values.logoAssetPath,
+        // A workspace item's logo comes from its server's advertised icon
+        // (setWorkspaceCapabilityCatalogItemLogo); editing the item keeps it.
         importBatchId: values.importBatchId,
         stale: values.stale,
         staleAt: values.staleAt,
@@ -10117,6 +10151,39 @@ export async function upsertCapabilityCatalogItem(
         throw new Error("Failed to upsert capability catalog item");
       }
       return mapCapabilityCatalogItem(row);
+    },
+  );
+}
+
+/**
+ * Sets the logo of a workspace-owned catalog item (a custom MCP server) to a
+ * stored `catalog-assets/...` key. Shared registry rows are never changed from a
+ * workspace connection. Returns whether a row changed.
+ */
+export async function setWorkspaceCapabilityCatalogItemLogo(
+  db: Database,
+  input: { accountId: string; workspaceId: string; id: string; logoAssetPath: string },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb
+        .update(schema.capabilityCatalogItems)
+        .set({ logoAssetPath: input.logoAssetPath, updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.capabilityCatalogItems.workspaceId, input.workspaceId),
+            eq(schema.capabilityCatalogItems.id, input.id),
+            ne(schema.capabilityCatalogItems.source, registryCapabilitySource),
+            or(
+              isNull(schema.capabilityCatalogItems.logoAssetPath),
+              ne(schema.capabilityCatalogItems.logoAssetPath, input.logoAssetPath),
+            ),
+          ),
+        )
+        .returning({ id: schema.capabilityCatalogItems.id });
+      return rows.length > 0;
     },
   );
 }
@@ -11466,6 +11533,7 @@ export async function listEnabledMcpCapabilityServers(
         capabilityId: item.id,
         id: mcpServerIdForCapability(item.id, metadata),
         name: item.name,
+        ...(item.category ? { category: item.category } : {}),
         url: item.endpointUrl,
         ...(allowedTools ? { allowedTools } : {}),
         ...(timeoutMs ? { timeoutMs } : {}),
@@ -37600,6 +37668,62 @@ type LineageIdRow = {
   cycle: boolean;
 };
 
+/** Descendants a lineage read lists: depth 5 and this many rows at most. */
+export const SESSION_TREE_DESCENDANT_LIMIT = 200;
+
+/**
+ * Descendants of a session, shallower before deeper and newest first within a
+ * level, so a long fleet loses its oldest grandchildren first. Returns one row
+ * more than the limit when there are more.
+ */
+async function selectSessionDescendantRows(
+  scopedDb: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<LineageIdRow[]> {
+  return (await scopedDb.execute(sql<LineageIdRow>`
+    with recursive descendants(id, parent_session_id, created_at, depth, path) as (
+      select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and child.parent_session_id = ${sessionId}
+      union all
+      select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
+      from ${schema.sessions} child
+      join descendants on child.parent_session_id = descendants.id
+      where child.workspace_id = ${workspaceId}
+        and descendants.depth < 5
+        and not child.id = any(descendants.path)
+    )
+    select id, parent_session_id as "parentSessionId", depth, path, false as cycle
+    from descendants
+    order by depth, created_at desc, id desc
+    limit ${SESSION_TREE_DESCENDANT_LIMIT + 1}
+  `)) as LineageIdRow[];
+}
+
+/**
+ * A session and the descendants its lineage lists, in that order, or null when
+ * the session is not visible in the workspace. Ids only: callers authorize
+ * each session before using it.
+ */
+export async function listSessionTreeIds(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string[] | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rootRows = await scopedDb.execute<{ id: string }>(sql`
+      select id from ${schema.sessions}
+      where ${schema.sessions.workspaceId} = ${workspaceId} and ${schema.sessions.id} = ${sessionId}
+      limit 1
+    `);
+    if (rootRows.length === 0) return null;
+    const rows = await selectSessionDescendantRows(scopedDb, workspaceId, sessionId);
+    return [sessionId, ...rows.slice(0, SESSION_TREE_DESCENDANT_LIMIT).map((row) => row.id)];
+  });
+}
+
 /**
  * Read the full lineage slice around a session. Every recursive step carries
  * workspace_id as a hard predicate; a foreign parent/child id is invisible even
@@ -37616,7 +37740,7 @@ export async function getSessionLineage(
   workspaceId: string,
   sessionId: string,
 ): Promise<SessionLineage | null> {
-  const descendantLimit = 200;
+  const descendantLimit = SESSION_TREE_DESCENDANT_LIMIT;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
     // withWorkspaceRls (getSession opens its own scoped transaction, which
@@ -37665,25 +37789,7 @@ export async function getSessionLineage(
     }
     const ancestorRows = ancestorLineageRows.filter((row) => row.depth > 0);
 
-    const childRows = (await scopedDb.execute(sql<LineageIdRow>`
-      with recursive descendants(id, parent_session_id, created_at, depth, path) as (
-        select child.id, child.parent_session_id, child.created_at, 1, array[${sessionId}, child.id]
-        from ${schema.sessions} child
-        where child.workspace_id = ${workspaceId}
-          and child.parent_session_id = ${sessionId}
-        union all
-        select child.id, child.parent_session_id, child.created_at, descendants.depth + 1, descendants.path || child.id
-        from ${schema.sessions} child
-        join descendants on child.parent_session_id = descendants.id
-        where child.workspace_id = ${workspaceId}
-          and descendants.depth < 5
-          and not child.id = any(descendants.path)
-      )
-      select id, parent_session_id as "parentSessionId", depth, path, false as cycle
-      from descendants
-      order by depth, created_at desc, id desc
-      limit ${descendantLimit + 1}
-    `)) as LineageIdRow[];
+    const childRows = await selectSessionDescendantRows(scopedDb, workspaceId, sessionId);
     const truncated = childRows.length > descendantLimit;
     const descendantRows = truncated ? childRows.slice(0, descendantLimit) : childRows;
 
@@ -43064,12 +43170,14 @@ export async function recordSkippedContextCompaction(
 /**
  * Whether a Steer is waiting for this session's running turn: a queued prompt
  * marked `delivery: "steer"` (human, API, or a queue row an agent steered) or
- * a pending Agent Steer instruction. Steer admission leaves a live attempt
- * running, and the worker reads this before each model request: a pending
- * Steer is delivered at that model-step boundary by settling the running turn
- * `superseded` (reason `steer`, `atModelStep`), after the completed step's
- * tool calls and results are recorded, so nothing in flight is cut off. The
- * Steer then runs next on the same history.
+ * a pending Agent Steer instruction, or, while the running turn is a run of an
+ * automation whose overlap is `steer`, a pending later run of that same
+ * automation. Steer admission leaves a live attempt running, and the worker
+ * reads this before each model request: a pending Steer is delivered at that
+ * model-step boundary by settling the running turn `superseded` (reason
+ * `steer`, `atModelStep`), after the completed step's tool calls and results
+ * are recorded, so nothing in flight is cut off. The Steer then runs next on
+ * the same history.
  *
  * This unlocked read only decides whether that settlement is worth trying.
  * The settlement's `requirePendingSteer` precondition re-checks the same
@@ -43145,7 +43253,63 @@ async function pendingSteerExists(
       ),
     )
     .limit(1);
-  return agentSteer !== undefined;
+  if (agentSteer) return true;
+  return await pendingAutomationSteerExists(db, workspaceId, sessionId, turnId);
+}
+
+/**
+ * A later run of the automation that owns the running turn waits in the chat,
+ * and that automation hands its running turn over (`overlapPolicy: "steer"`).
+ * Only the automation's own turn yields: a person's turn, a goal continuation
+ * or another automation's run never matches, so they finish first and the run
+ * is delivered after them as usual. The waiting run must be deliverable as it
+ * stands (dispatched with its accepted execution, the claim's own preclaim
+ * rule), so a run the claim would refuse never ends the turn for nothing.
+ */
+async function pendingAutomationSteerExists(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+): Promise<boolean> {
+  const turns = schema.sessionTurns;
+  const runs = schema.scheduledTaskRuns;
+  const tasks = schema.scheduledTasks;
+  const updates = schema.sessionSystemUpdates;
+  const [row] = await rawRows<{ present: number }>(
+    db,
+    sql`select 1 as present
+      from ${turns} running_turn
+      join ${runs} running_run
+        on running_run.workspace_id = running_turn.workspace_id
+        and running_run.id = running_turn.scheduled_task_run_id
+      join ${tasks} task
+        on task.workspace_id = running_run.workspace_id
+        and task.id = running_run.task_id
+      where running_turn.workspace_id = ${workspaceId}
+        and running_turn.session_id = ${sessionId}
+        and running_turn.id = ${turnId}
+        and task.overlap_policy = 'steer'
+        and task.status = 'active'
+        and task.deleted_at is null
+        and exists (
+          select 1
+          from ${updates} waiting
+          join ${runs} waiting_run
+            on waiting_run.workspace_id = waiting.workspace_id
+            and waiting_run.id = waiting.scheduled_task_run_id
+          where waiting.workspace_id = running_turn.workspace_id
+            and waiting.session_id = running_turn.session_id
+            and waiting.kind = 'scheduled_occurrence'
+            and waiting.state = 'pending'
+            and waiting_run.task_id = task.id
+            and waiting_run.id <> running_run.id
+            and waiting_run.status = 'dispatched'
+            and waiting_run.accepted_execution_snapshot is not null
+        )
+      limit 1`,
+  );
+  return row !== undefined;
 }
 
 /**
@@ -65372,12 +65536,15 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
 // selfhosted sandbox — never a duplicate. Device-approval retries are intercepted
 // before this helper so replaying one already-approved request does not rotate.
 //
-// A personal machine belongs to the workspace it was first connected from, and
-// finalize_scoped_enrollment reuses the owner's enrollment for the same public
-// key wherever that is. Credentials and connection lookups are per workspace,
-// so a personal finalize from any other workspace is refused with
-// PersonalMachineConnectedElsewhereError. The caller's transaction rolls back,
-// so nothing is written and a single-use token is not claimed.
+// A live personal machine belongs to the workspace it was connected from, and
+// finalize_scoped_enrollment reuses the owner's live enrollment for the same
+// public key wherever that is. Credentials and connection lookups are per
+// workspace, so a personal finalize from any other workspace while it is live
+// is refused with PersonalMachineConnectedElsewhereError (the machine serves
+// the owner's other workspaces through grants instead). The caller's
+// transaction rolls back, so nothing is written and a single-use token is not
+// claimed. Once removed, the machine can be connected again from any of the
+// owner's workspaces: a new enrollment is made there (0996).
 export class PersonalMachineConnectedElsewhereError extends Error {
   constructor() {
     super("this machine was first connected as a personal machine from another workspace");
@@ -91846,3 +92013,5 @@ export * from "./boot-connect";
 export * from "./teams-conversations";
 
 export * from "./teams-private-session";
+
+export { recordMachinePromotionProof } from "./promotion-abuse";

@@ -125,6 +125,8 @@ import {
   FIRST_PARTY_MCP_SETUP_RETRY_MS,
   MCP_SERVICE_UNAVAILABLE_BACKOFF_MS,
   MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
+  PROVIDER_UNREACHABLE_BACKOFF_MS,
+  PROVIDER_UNREACHABLE_RECOVERY_CODE,
   validProviderOverloadRecoveryDelay,
   windowedRecoveryPolicy,
 } from "./provider-recovery-policy";
@@ -133,6 +135,7 @@ export {
   MAX_AUTOMATIC_PROVIDER_OVERLOAD_RECOVERIES,
   PROVIDER_OVERLOAD_RECOVERY_WINDOW_MS,
   MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
+  PROVIDER_UNREACHABLE_RECOVERY_CODE,
 } from "./provider-recovery-policy";
 
 // Retryable provider connectivity/5xx failures start quickly and back off to
@@ -143,6 +146,14 @@ export const MAX_AUTOMATIC_PROVIDER_RECOVERIES = PROVIDER_CONNECTIVITY_BACKOFF_M
 export function providerRecoveryLimit(failureCode: unknown): number | undefined {
   if (failureCode === FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE) return undefined;
   return windowedRecoveryPolicy(failureCode)?.maxRecoveries ?? MAX_AUTOMATIC_PROVIDER_RECOVERIES;
+}
+/**
+ * The recovery at which a failing model socket switches to HTTP. A long
+ * offline wait still switches at the usual point, not after its last retry.
+ */
+export function modelSocketFallbackRecoveryLimit(failureCode: unknown): number {
+  if (failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE) return MAX_AUTOMATIC_PROVIDER_RECOVERIES;
+  return providerRecoveryLimit(failureCode) ?? Infinity;
 }
 /**
  * Minimum wait per rate-limited recovery. Providers such as Azure OpenAI often
@@ -266,31 +277,39 @@ export function providerRecoveryResult(input: {
               )
             ]!,
           )
-        : overload ||
-            input.failureCode === "provider_unavailable" ||
-            input.failureCode === "upstream_connectivity_unavailable" ||
-            input.failureCode === "sandbox_command_start_unavailable" ||
-            input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
-            input.failureCode === "mcp_transport_timeout" ||
-            input.failureCode === "mcp_transport_unavailable" ||
-            input.failureCode === "turn_execution_policy_definition_mismatch" ||
-            input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
-          ? Math.max(
-              providerDelay ?? 0,
-              PROVIDER_CONNECTIVITY_BACKOFF_MS[
-                Math.min(
-                  Math.max(Math.trunc(input.attemptNumber) - 1, 0),
-                  PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
-                )
-              ]!,
-            )
-          : PROVIDER_BACKPRESSURE_DELAY_MS;
+        : input.failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE
+          ? PROVIDER_UNREACHABLE_BACKOFF_MS[
+              Math.min(
+                Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+                PROVIDER_UNREACHABLE_BACKOFF_MS.length - 1,
+              )
+            ]!
+          : overload ||
+              input.failureCode === "provider_unavailable" ||
+              input.failureCode === "upstream_connectivity_unavailable" ||
+              input.failureCode === "sandbox_command_start_unavailable" ||
+              input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
+              input.failureCode === "mcp_transport_timeout" ||
+              input.failureCode === "mcp_transport_unavailable" ||
+              input.failureCode === "turn_execution_policy_definition_mismatch" ||
+              input.failureCode === POST_COMPACTION_CONTINUATION_EMPTY_CODE
+            ? Math.max(
+                providerDelay ?? 0,
+                PROVIDER_CONNECTIVITY_BACKOFF_MS[
+                  Math.min(
+                    Math.max(Math.trunc(input.attemptNumber) - 1, 0),
+                    PROVIDER_CONNECTIVITY_BACKOFF_MS.length - 1,
+                  )
+                ]!,
+              )
+            : PROVIDER_BACKPRESSURE_DELAY_MS;
   const delayMs =
     continueDelayMs +
     (overload ||
     input.failureCode === "provider_rate_limited" ||
     input.failureCode === "provider_unavailable" ||
-    input.failureCode === "upstream_connectivity_unavailable"
+    input.failureCode === "upstream_connectivity_unavailable" ||
+    input.failureCode === PROVIDER_UNREACHABLE_RECOVERY_CODE
       ? providerRecoveryJitterMs(continueDelayMs, input.jitterSample ?? 0)
       : 0);
   // Do not shorten Retry-After, or schedule a replacement outside the window.
@@ -1123,10 +1142,6 @@ export function sandboxRouteTransitionCode(
   return null;
 }
 
-export function isSandboxRouteTransitionError(error: unknown): boolean {
-  return sandboxRouteTransitionCode(error) !== null;
-}
-
 /** Backward-compatible name for callers/tests that only exercised the original
  * machine-to-home transition. */
 export function isHomeSandboxTurnTransitionError(error: unknown): boolean {
@@ -1443,7 +1458,51 @@ export function isExactStatuslessUpstreamConnectivityMessage(message: string): b
   return STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGES.has(message.trim().toLowerCase());
 }
 
-const TRANSIENT_TRANSPORT_CODE = /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i;
+/**
+ * Codes that mean the provider could not be reached at all: its name did not
+ * resolve for now, there was no route to it, or nothing accepted the
+ * connection. A dropped or slow connection (ECONNRESET, ETIMEDOUT), a name
+ * that does not exist (ENOTFOUND) and TLS failures are deliberately absent:
+ * they say something about the provider or its configuration, not about the
+ * machine being offline.
+ */
+const PROVIDER_UNREACHABLE_TRANSPORT_CODE =
+  /^(?:EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|ENETDOWN|ConnectionRefused|FailedToOpenSocket)$/i;
+/** The OpenAI SDK's message for a request that never got a response. */
+const OPAQUE_CONNECTION_ERROR_MESSAGE = "Connection error.";
+
+/**
+ * Whether a statusless transport failure shows the provider was unreachable,
+ * as during a lost internet connection, rather than a provider fault.
+ */
+export function isProviderUnreachableTransportError(error: unknown): boolean {
+  let current = error;
+  const seen = new Set<unknown>();
+  let opaqueConnectionError = false;
+  let otherCode = false;
+  for (let depth = 0; depth < 8 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const value = current as { code?: unknown; message?: unknown; cause?: unknown };
+    if (typeof value.code === "string" && value.code.length > 0) {
+      if (PROVIDER_UNREACHABLE_TRANSPORT_CODE.test(value.code)) return true;
+      otherCode = true;
+    }
+    if (typeof value.message === "string") {
+      if (value.message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE) {
+        return true;
+      }
+      if (value.message === OPAQUE_CONNECTION_ERROR_MESSAGE) opaqueConnectionError = true;
+    }
+    current = value.cause;
+  }
+  // The SDK can drop the transport cause. With no code anywhere, nothing
+  // shows a provider fault, and the request never reached the provider.
+  return opaqueConnectionError && !otherCode;
+}
+
+const TRANSIENT_TRANSPORT_CODE =
+  /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE|ENETUNREACH|EHOSTUNREACH|ENETDOWN)$/i;
 
 /**
  * A network fault code anywhere on the Error.cause chain. SDK and runner
@@ -1739,7 +1798,7 @@ export function isProviderOverloadError(
 /** Retry authority must not depend on the looser presentation-only overload label. */
 export function providerRecoveryCode(
   error: unknown,
-  failure: { code?: string; retryable?: boolean },
+  failure: { code?: string; retryable?: boolean; timeoutClass?: string },
 ): string | undefined {
   if (
     failure.code === "mcp_transport_unavailable" &&
@@ -1754,6 +1813,17 @@ export function providerRecoveryCode(
     isMcpServiceUnavailableError(error)
   ) {
     return MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE;
+  }
+  if (
+    (failure.code === "provider_unavailable" ||
+      failure.code === "upstream_connectivity_unavailable") &&
+    failure.retryable &&
+    !failure.timeoutClass &&
+    providerHttpStatus(error) === undefined &&
+    !isFunctionToolProviderFailure(error) &&
+    isProviderUnreachableTransportError(error)
+  ) {
+    return PROVIDER_UNREACHABLE_RECOVERY_CODE;
   }
   if (failure.code !== "provider_unavailable" || !failure.retryable) return failure.code;
   const status = providerHttpStatus(error);

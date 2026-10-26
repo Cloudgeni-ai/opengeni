@@ -35,6 +35,8 @@ import {
   VaultProviderError,
   type ProviderFieldMeta,
   type ProviderItemMeta,
+  type ProviderPasskey,
+  type ProviderPasskeyMeta,
   type ProviderWriteItem,
   type VaultFieldKind,
 } from "./contract";
@@ -416,8 +418,123 @@ export function mapCipher(cipher: Json, ownerKey: SymmetricKey): MappedCipher {
     version: revision,
     updatedAt: revision ? new Date(revision).toISOString() : null,
     archivedAt: archivedDateOf(cipher),
+    passkeys: cipher.type === CIPHER_LOGIN ? passkeyMetas(cipher, key) : [],
   };
   return { meta, fields, markerIndex };
+}
+
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function base64url(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64url");
+}
+
+/**
+ * A Bitwarden passkey credential id as the bytes a site sees, base64url.
+ * Bitwarden writes ids it generated as a GUID (its 16 bytes in written
+ * order) and imported ids as "b64." followed by base64url.
+ */
+export function passkeyCredentialId(stored: string): string | null {
+  if (stored.startsWith("b64.")) {
+    const bytes = Buffer.from(stored.slice(4), "base64url");
+    return bytes.length > 0 ? base64url(bytes) : null;
+  }
+  if (!GUID.test(stored)) return null;
+  return base64url(Buffer.from(stored.replaceAll("-", ""), "hex"));
+}
+
+function passkeyCredentials(cipher: Json): Json[] {
+  return list(json(cipher.login)?.fido2Credentials);
+}
+
+/** One credential's display metadata, or null when it can't be opened or is incomplete. */
+function passkeyMeta(credential: Json, key: SymmetricKey): ProviderPasskeyMeta | null {
+  try {
+    const stored = decryptOptional(credential.credentialId, key);
+    const rpId = decryptOptional(credential.rpId, key);
+    const credentialId = stored ? passkeyCredentialId(stored) : null;
+    if (!credentialId || !rpId) return null;
+    return { credentialId, rpId, userName: decryptOptional(credential.userName, key) };
+  } catch (error) {
+    if (error instanceof BitwardenCryptoError) return null;
+    throw error;
+  }
+}
+
+function passkeyMetas(cipher: Json, key: SymmetricKey): ProviderPasskeyMeta[] {
+  const metas: ProviderPasskeyMeta[] = [];
+  for (const credential of passkeyCredentials(cipher)) {
+    const meta = passkeyMeta(credential, key);
+    if (meta) metas.push(meta);
+  }
+  return metas;
+}
+
+function signCountOf(credential: Json, key: SymmetricKey): number {
+  const value = Number.parseInt(decryptOptional(credential.counter, key) ?? "0", 10);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * A login's passkeys with their key material (Bitwarden `login.fido2Credentials`).
+ * Only ECDSA P-256 keys, the kind Bitwarden creates and imports, are returned.
+ */
+export function cipherPasskeys(cipher: Json, ownerKey: SymmetricKey): ProviderPasskey[] {
+  if (cipher.type !== CIPHER_LOGIN) return [];
+  const key = itemKey(cipher, ownerKey);
+  const passkeys: ProviderPasskey[] = [];
+  for (const credential of passkeyCredentials(cipher)) {
+    const meta = passkeyMeta(credential, key);
+    if (!meta) continue;
+    const algorithm = decryptOptional(credential.keyAlgorithm, key);
+    const curve = decryptOptional(credential.keyCurve, key);
+    const privateKey = decryptOptional(credential.keyValue, key);
+    if (!privateKey || (algorithm && algorithm !== "ECDSA") || (curve && curve !== "P-256")) {
+      continue;
+    }
+    passkeys.push({
+      credentialId: meta.credentialId,
+      rpId: meta.rpId,
+      userHandle: decryptOptional(credential.userHandle, key) || null,
+      userName: meta.userName ?? null,
+      userDisplayName: decryptOptional(credential.userDisplayName, key) || null,
+      privateKey: base64url(Buffer.from(privateKey, "base64url")),
+      signCount: signCountOf(credential, key),
+    });
+  }
+  return passkeys;
+}
+
+/**
+ * The update that raises one passkey's counter to `signCount`, with the rest
+ * of the item unchanged; null when the stored counter is already there.
+ * Throws `provider_not_found` when the item has no such passkey.
+ */
+export function passkeyCounterRequest(
+  cipher: Json,
+  ownerKey: SymmetricKey,
+  credentialId: string,
+  signCount: number,
+  encryptedFor: string,
+): Json | null {
+  const key = itemKey(cipher, ownerKey);
+  const login = json(cipher.login);
+  let found = false;
+  let changed = false;
+  const credentials = passkeyCredentials(cipher).map((credential) => {
+    if (passkeyMeta(credential, key)?.credentialId !== credentialId) return credential;
+    found = true;
+    if (signCountOf(credential, key) >= signCount) return credential;
+    changed = true;
+    return { ...credential, counter: encryptString(String(signCount), key) };
+  });
+  if (!found) {
+    throw new VaultProviderError("provider_not_found", "The Bitwarden item has no such passkey");
+  }
+  if (!changed) return null;
+  return cipherRequestBody(cipher, encryptedFor, {
+    login: { ...login, fido2Credentials: credentials },
+  });
 }
 
 /** Concealed and one-time-code values, which a hide-passwords collection withholds. */
@@ -802,14 +919,7 @@ export function updateRequest(
 
   const sectionBody = (part: BuiltIn["section"] | "secureNote") =>
     (part !== "secureNote" ? sections.get(part) : undefined) ?? cipher[part] ?? null;
-  return {
-    type: cipher.type,
-    organizationId: cipher.organizationId ?? null,
-    encryptedFor,
-    folderId: cipher.folderId ?? null,
-    favorite: cipher.favorite === true,
-    reprompt: typeof cipher.reprompt === "number" ? cipher.reprompt : 0,
-    key: encrypted(cipher.key) ? cipher.key : null,
+  return cipherRequestBody(cipher, encryptedFor, {
     name,
     notes,
     fields: fields.filter((_, index) => !removed.has(index)),
@@ -819,13 +929,35 @@ export function updateRequest(
     card: sectionBody("card"),
     identity: sectionBody("identity"),
     sshKey: sectionBody("sshKey"),
+  });
+}
+
+/**
+ * A `PUT /ciphers/{id}` body that keeps everything the item holds except the
+ * given parts. `lastKnownRevisionDate` makes the server refuse it if the item
+ * changed in between.
+ */
+function cipherRequestBody(cipher: Json, encryptedFor: string, changes: Json): Json {
+  return {
+    type: cipher.type,
+    organizationId: cipher.organizationId ?? null,
+    encryptedFor,
+    folderId: cipher.folderId ?? null,
+    favorite: cipher.favorite === true,
+    reprompt: typeof cipher.reprompt === "number" ? cipher.reprompt : 0,
+    key: encrypted(cipher.key) ? cipher.key : null,
+    name: cipher.name,
+    notes: cipher.notes ?? null,
+    fields: list(cipher.fields),
+    passwordHistory: list(cipher.passwordHistory),
+    login: cipher.login ?? null,
+    secureNote: cipher.secureNote ?? null,
+    card: cipher.card ?? null,
+    identity: cipher.identity ?? null,
+    sshKey: cipher.sshKey ?? null,
+    ...changes,
     lastKnownRevisionDate: revisionOf(cipher),
     // Vaultwarden un-archives an item for this account when an update omits it.
     archivedDate: typeof cipher.archivedDate === "string" ? cipher.archivedDate : null,
   };
-}
-
-/** True when the error came from decrypting data rather than from the server. */
-export function isCryptoError(error: unknown): error is BitwardenCryptoError {
-  return error instanceof BitwardenCryptoError;
 }

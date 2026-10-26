@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { WEBHOOK_FORMAT_PRESETS } from "@opengeni/contracts/event-triggers";
 import type { EventTypeDescriptor, ScheduledTaskEvents } from "@opengeni/sdk";
 
 import {
@@ -321,24 +322,46 @@ describe("event trigger words", () => {
 });
 
 describe("event sources", () => {
-  test("Linear and Sentry are webhooks people pick by app name", () => {
+  test("Linear, Sentry and Tailscale are webhooks people pick by app name", () => {
+    const tailscale = {
+      kind: "webhook" as const,
+      adapter: "custom" as const,
+      format: { preset: "tailscale" },
+    };
     expect(eventSourceChoiceOf({ kind: "webhook", adapter: "linear" })).toBe("linear");
+    // Tailscale is a custom webhook made with its preset; any other custom one is a webhook.
+    expect(eventSourceChoiceOf(tailscale)).toBe("tailscale");
+    expect(eventSourceChoiceOf({ kind: "webhook", adapter: "custom", format: {} })).toBe("webhook");
+    expect(
+      eventSourceChoiceOf({ kind: "webhook", adapter: "custom", format: { preset: "linear" } }),
+    ).toBe("webhook");
     expect(eventSourceChoiceOf({ kind: "webhook", adapter: "standard" })).toBe("webhook");
     expect(eventSourceChoiceOf({ kind: "gmail", adapter: null })).toBe("gmail");
     expect(eventSourceKindLabel(t, { kind: "webhook", adapter: "sentry" })).toBe("Sentry webhook");
+    expect(eventSourceKindLabel(t, tailscale)).toBe("Tailscale webhook");
     expect(eventSourceKindLabel(t, { kind: "webhook", adapter: "standard" })).toBe("Webhook");
     expect(eventSourceKindLabel(t, { kind: "mcp", adapter: null })).toBe("MCP server");
     expect(eventSourceProviderDomain({ kind: "github", adapter: null })).toBe("github.com");
+    expect(eventSourceProviderDomain(tailscale)).toBe("tailscale.com");
     expect(eventSourceProviderDomain({ kind: "webhook", adapter: "standard" })).toBeNull();
     expect(eventSourceSubjectOfChoice(t, "linear")).toEqual({
       kind: "webhook",
       adapter: "linear",
+      format: null,
       name: "Linear",
+      mcp: null,
+    });
+    expect(eventSourceSubjectOfChoice(t, "tailscale")).toEqual({
+      kind: "webhook",
+      adapter: "custom",
+      format: { preset: "tailscale" },
+      name: "Tailscale",
       mcp: null,
     });
     expect(eventSourceAddLabel(t, "webhook")).toBe("Add a webhook");
     expect(eventSourceAddLabel(t, "github")).toBe("Add GitHub");
     expect(isEventSourceChoice("sentry")).toBe(true);
+    expect(isEventSourceChoice("tailscale")).toBe(true);
     expect(isEventSourceChoice("zapier")).toBe(false);
   });
 
@@ -431,13 +454,34 @@ describe("event sources", () => {
     ).toBe("Orders når ikke webhook-adressen til Assistent. Svar: timeout");
   });
 
-  test("only pasted Linear and Sentry webhooks explain where the URL and secret go", () => {
+  test("only pasted app webhooks explain where the URL and secret go", () => {
     expect(pastedWebhookSetup(t, { kind: "webhook", adapter: "linear" })?.secretName).toBe(
       "signing secret",
     );
     expect(pastedWebhookSetup(t, { kind: "webhook", adapter: "sentry" })?.secretName).toBe(
       "client secret",
     );
+    expect(
+      pastedWebhookSetup(t, {
+        kind: "webhook",
+        adapter: "custom",
+        format: { preset: "tailscale" },
+      }),
+    ).toEqual({
+      app: "Tailscale",
+      secretName: "webhook secret",
+      urlStep:
+        "In the Tailscale admin console, open Settings, then Webhooks, and add an endpoint with this URL. Pick the events you want, such as new devices and policy changes.",
+      secretStep: "Tailscale then shows the webhook secret once. Copy it and paste it here.",
+    });
+    // Any other app's webhook: the same steps in that app's settings.
+    expect(pastedWebhookSetup(t, { kind: "webhook", adapter: "custom", format: {} })).toEqual({
+      app: "the app",
+      secretName: "signing secret",
+      urlStep:
+        "In the app's webhook settings, add an endpoint with this URL and pick the events you want.",
+      secretStep: "Paste the secret the app shows for this webhook, or the one you set there.",
+    });
     expect(pastedWebhookSetup(t, { kind: "webhook", adapter: "standard" })).toBeNull();
     expect(pastedWebhookSetup(t, { kind: "github", adapter: null })).toBeNull();
   });
@@ -460,6 +504,21 @@ describe("event sources", () => {
     expect(
       createEventSourceRequest(t, { choice: "sentry", name: "Errors", visibility: "private" }),
     ).toEqual({ kind: "webhook", adapter: "sentry", name: "Errors", visibility: "private" });
+    expect(
+      createEventSourceRequest(t, {
+        choice: "tailscale",
+        name: "",
+        visibility: "private",
+        signingSecret: "tskey-webhook-secret",
+      }),
+    ).toEqual({
+      kind: "webhook",
+      adapter: "custom",
+      name: "Tailscale",
+      visibility: "private",
+      format: WEBHOOK_FORMAT_PRESETS.tailscale,
+      signingSecret: "tskey-webhook-secret",
+    });
     expect(
       createEventSourceRequest(t, {
         choice: "webhook",

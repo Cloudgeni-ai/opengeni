@@ -2,7 +2,13 @@ import { createSign, randomUUID } from "node:crypto";
 import { writeAttempted, writeResolved } from "./cycle-outcome";
 import { inflateRawSync } from "node:zlib";
 import { type ReadyEvent } from "./evidence";
-import { admitGitHub, type HostedCheck, type RequiredCheck } from "./github-admission";
+import {
+  admitGitHub,
+  priorityActive,
+  priorityLabel,
+  type HostedCheck,
+  type RequiredCheck,
+} from "./github-admission";
 import {
   type Config,
   type Manifest,
@@ -368,6 +374,7 @@ export class GitHubReader {
       maxInflight: this.config.maxInflight,
       requireFreeBatchSlot: purpose === "publish",
       reservations,
+      tolerateJobCountMismatch: true,
     });
     result.scannedRuns = scan.scannedRuns;
     result.approvalOnlyRuns = scan.approvalOnlyRuns;
@@ -375,6 +382,7 @@ export class GitHubReader {
     if (!scan.ok) return { ...result, reason: HEADROOM_HOLD_REASONS[scan.hold] };
     const { mainDemand, otherDemand } = scan;
     result.mainDemand = mainDemand;
+    result.attestedMainRuns = scan.attestedMainRuns;
     result.occupied = mainDemand + otherDemand;
     const decision = capacityDecision({
       mainDemand,
@@ -397,15 +405,23 @@ export class GitHubReader {
     result.occupiedBatchSlots = scan.occupiedBatchSlots;
     result.capacityInformational =
       decision.capacity.hold !== "invalid-capacity" && scan.occupiedBatchSlots === 0;
+    // Job counts are informational for slot one, so a GitHub count/row mismatch
+    // that survived one re-read is only a warning there; extra slots stay closed.
+    const partialJobRuns = scan.partialJobRuns ?? [];
     result.publicationBlocked =
       scan.occupiedBatchSlots >= this.config.maxInflight ||
-      (scan.occupiedBatchSlots > 0 && decision.capacity.hold !== null);
+      (scan.occupiedBatchSlots > 0 &&
+        (decision.capacity.hold !== null || partialJobRuns.length > 0));
     result.allowed =
       decision.capacity.hold !== "invalid-capacity" &&
       (purpose !== "publish" || !result.publicationBlocked);
     result.reason = result.allowed
       ? `Batch ${purpose}; ${scan.activeBatchRuns}/${this.config.maxInflight} active provider slots; capacity observation: ${decision.capacity.hold ? CAPACITY_HOLD_REASONS[decision.capacity.hold] : "observed demand fits configured estimates"}`
-      : CAPACITY_HOLD_REASONS[decision.capacity.hold ?? "invalid-capacity"];
+      : decision.capacity.hold === null && partialJobRuns.length > 0
+        ? "Additional Batch slots require a complete job inventory"
+        : CAPACITY_HOLD_REASONS[decision.capacity.hold ?? "invalid-capacity"];
+    if (partialJobRuns.length > 0)
+      result.reason += `; warning: job listing for run(s) ${partialJobRuns.join(", ")} disagreed with GitHub's total_count after a re-read; returned rows used`;
     return result;
   }
   async findFollowup(request: FollowupRequest): Promise<FollowupPull | null> {
@@ -437,8 +453,19 @@ export class GitHubReader {
       : null;
   }
   async timeline(number: number): Promise<ReadyEvent[]> {
+    return (await this.timelineEvents(number)).ready;
+  }
+  /**
+   * Actual GraphQL label/auto-merge timeline. queue-priority events use the
+   * same trust rule as queue-ready: only a recorded LabeledEvent (GitHub
+   * requires triage or higher to label) counts, never prose or comments.
+   */
+  async timelineEvents(
+    number: number,
+  ): Promise<{ ready: ReadyEvent[]; priority: Omit<ReadyEvent, "source">[] }> {
     const [owner, name] = this.config.repository.split("/");
     const events: ReadyEvent[] = [];
+    const priority: Omit<ReadyEvent, "source">[] = [];
     let cursor: string | null = null;
     for (let page = 0; page < 1000; page++) {
       const token = await this.auth.token();
@@ -491,20 +518,32 @@ export class GitHubReader {
             source: "queue-ready",
             enabled: kind === "LabeledEvent",
           });
+        if (
+          (kind === "LabeledEvent" || kind === "UnlabeledEvent") &&
+          node.label?.name === priorityLabel
+        )
+          priority.push({ id: node.id, at: node.createdAt, enabled: kind === "LabeledEvent" });
       }
-      if (!timeline.pageInfo.hasNextPage) return events;
+      if (!timeline.pageInfo.hasNextPage) return { ready: events, priority };
       if (typeof timeline.pageInfo.endCursor !== "string" || timeline.pageInfo.endCursor === cursor)
         throw new Error("Timeline pagination stalled");
       cursor = timeline.pageInfo.endCursor;
     }
     throw new Error("Timeline pagination incomplete");
   }
-  async ready(): Promise<{ ready: Pull[]; excluded: { number: number; reason: string }[] }> {
+  async ready(): Promise<{
+    ready: Pull[];
+    excluded: { number: number; reason: string }[];
+    conflicts?: { number: number; headSha: string }[];
+    priority?: number[];
+  }> {
     const pulls = await this.pages(
       `pulls?state=open&base=${encodeURIComponent(this.config.baseBranch)}`,
     );
     const ready: Pull[] = [],
       excluded: { number: number; reason: string }[] = [];
+    const conflicts: { number: number; headSha: string }[] = [];
+    const priority: number[] = [];
     const rules = await this.pages(`rules/branches/${encodeURIComponent(this.config.baseBranch)}`);
     if (!Array.isArray(rules)) throw new Error("Effective branch rules unavailable");
     if (rules.some((r) => ["workflows", "required_workflows"].includes(r.type)))
@@ -549,9 +588,29 @@ export class GitHubReader {
         excluded.push({ number, reason: "auto-merge or queue-ready required" });
         continue;
       }
+      // Listing responses do not reliably include mergeability. Observe the
+      // exact marked-ready head before fast-check admission can hide a conflict.
+      const detail = await this.get(`pulls/${number}`);
+      if (
+        !Array.isArray(detail) &&
+        detail.state === "open" &&
+        !detail.draft &&
+        detail.mergeable === false &&
+        detail.head?.sha === pull.head?.sha &&
+        /^[a-f0-9]{40}$/.test(detail.head.sha) &&
+        detail.base?.ref === this.config.baseBranch &&
+        (detail.auto_merge != null ||
+          (Array.isArray(detail.labels) &&
+            detail.labels.some((label: Json) => label.name === "queue-ready")))
+      ) {
+        conflicts.push({ number, headSha: detail.head.sha });
+        excluded.push({ number, reason: "head conflicts with main" });
+        continue;
+      }
       let events: ReadyEvent[];
+      let priorityEvents: Omit<ReadyEvent, "source">[];
       try {
-        events = await this.timeline(number);
+        ({ ready: events, priority: priorityEvents } = await this.timelineEvents(number));
         if (autoMerge) {
           // GitHub can expose a current native request with no corresponding
           // timeline node. Bind to that request, never PR creation/read time.
@@ -613,10 +672,18 @@ export class GitHubReader {
         conversationResolutionRequired,
         unresolvedThreads: review.unresolved,
       });
-      if (admission.ready) ready.push(admission.ready);
-      else excluded.push({ number, reason: admission.reason });
+      if (admission.ready) {
+        ready.push(admission.ready);
+        if (
+          priorityActive(
+            Array.isArray(pull.labels) && pull.labels.some((l: Json) => l.name === priorityLabel),
+            priorityEvents,
+          )
+        )
+          priority.push(number);
+      } else excluded.push({ number, reason: admission.reason });
     }
-    return { ready, excluded };
+    return { ready, excluded, conflicts, ...(priority.length ? { priority } : {}) };
   }
   async openPullNumbers(): Promise<number[]> {
     const pulls = await this.pages("pulls?state=open");
@@ -1337,6 +1404,19 @@ export class GitHubMutations {
     )
       throw new Error("Only a first-attempt terminal candidate failure may be retried");
     await this.post(`actions/runs/${run.id}/rerun`, {});
+  }
+  /** Priority-lane cancellation of an abandoned candidate's own Batch CI only. */
+  async cancel(run: Run): Promise<void> {
+    if (
+      run.workflow !== ".github/workflows/batch-ci.yml" ||
+      run.workflow !== this.reader.config.workflow ||
+      !run.branch.startsWith(this.reader.config.branchPrefix) ||
+      !/^[a-f0-9]{64}$/.test(run.branch.slice(this.reader.config.branchPrefix.length)) ||
+      !Number.isSafeInteger(run.id) ||
+      run.id < 1
+    )
+      throw new Error("Only a batcher-owned candidate Batch CI run may be cancelled");
+    await this.post(`actions/runs/${run.id}/cancel`, {});
   }
   async announce(number: number, body: string): Promise<void> {
     await this.post(`issues/${number}/comments`, { body });

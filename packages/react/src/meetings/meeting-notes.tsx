@@ -7,7 +7,7 @@
  * the notes do. Notes an agent wrote say so and link to its chat.
  */
 import { useOpenGeniText } from "../messages/runtime";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ComponentProps } from "react";
 import { BotIcon, LoaderCircleIcon, PencilIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { RecordingNote } from "@opengeni/contracts";
@@ -20,6 +20,7 @@ import { TextArea } from "../ui/field";
 import { Notice } from "../ui/notice";
 import { formatAbsoluteTime } from "../ui/relative-time";
 import { Skeleton } from "../ui/skeleton";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 /** How long typing pauses before the notepad saves. */
 export const NOTEPAD_SAVE_DELAY_MS = 800;
@@ -36,7 +37,7 @@ function errorText(error: unknown): string | undefined {
   return error instanceof Error ? error.message : undefined;
 }
 
-export function MeetingNotes({
+function MeetingNotesContent({
   recordingId,
   recording: override,
   capturing,
@@ -79,6 +80,8 @@ export function MeetingNotes({
     <Notepad
       note={notes.notepad}
       prominent={capturing}
+      // Alone under the Notes heading while recording, it needs no second heading.
+      labelHidden={capturing && !notes.notes}
       save={(body) => notes.save("notepad", body)}
     />
   );
@@ -274,10 +277,12 @@ type NotepadStatus = "idle" | "saving" | "saved" | "failed";
 function Notepad({
   note,
   prominent,
+  labelHidden,
   save,
 }: {
   note: RecordingNote | null;
   prominent: boolean;
+  labelHidden: boolean;
   save: (body: string) => Promise<RecordingNote>;
 }) {
   const msg = useOpenGeniText();
@@ -329,22 +334,32 @@ function Notepad({
     [],
   );
 
+  const statusText = (
+    <span role="status" aria-live="polite" className="text-xs leading-4 text-fg-muted">
+      {status === "saving"
+        ? msg("meetings.notes.notepadSaving")
+        : status === "saved"
+          ? msg("meetings.notes.notepadSaved")
+          : status === "failed"
+            ? msg("meetings.notes.notepadFailed")
+            : null}
+    </span>
+  );
+
   return (
     <div className="grid gap-2">
-      <div className="flex items-baseline justify-between gap-3">
-        <label htmlFor={id} className="text-sm leading-5 font-medium text-fg">
+      {labelHidden ? (
+        <label htmlFor={id} className="sr-only">
           {msg("meetings.notes.notepad")}
         </label>
-        <span role="status" aria-live="polite" className="text-xs leading-4 text-fg-muted">
-          {status === "saving"
-            ? msg("meetings.notes.notepadSaving")
-            : status === "saved"
-              ? msg("meetings.notes.notepadSaved")
-              : status === "failed"
-                ? msg("meetings.notes.notepadFailed")
-                : null}
-        </span>
-      </div>
+      ) : (
+        <div className="flex items-baseline justify-between gap-3">
+          <label htmlFor={id} className="text-sm leading-5 font-medium text-fg">
+            {msg("meetings.notes.notepad")}
+          </label>
+          {statusText}
+        </div>
+      )}
       <TextArea
         id={id}
         rows={prominent ? 6 : 3}
@@ -360,6 +375,7 @@ function Notepad({
         }}
         onBlur={() => flush(draft)}
       />
+      {labelHidden ? <div className="flex min-h-4 justify-end">{statusText}</div> : null}
       {status === "failed" ? (
         <button
           type="button"
@@ -370,5 +386,13 @@ function Notepad({
         </button>
       ) : null}
     </div>
+  );
+}
+
+export function MeetingNotes(props: ComponentProps<typeof MeetingNotesContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingNotesContent {...props} />
+    </MeetingsOverlayScope>
   );
 }

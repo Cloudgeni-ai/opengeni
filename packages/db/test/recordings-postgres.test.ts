@@ -57,6 +57,7 @@ import {
   updateRecordingSegments,
   updateRecordingSpeakers,
   updateWorkspaceSettings,
+  workspaceMemberDisplayName,
   type DbClient,
 } from "../src";
 
@@ -493,6 +494,170 @@ describe("recordings", () => {
       recordingId: recording.recordingId,
     });
     expect(after.version.versionNumber).toBe(1);
+  });
+
+  test("beside computer audio the microphone is the person recording, until someone renames it", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    await updateWorkspaceSettings(db, scope.workspaceId, { recordings: { voiceprints: true } });
+    const ownerActor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    // Their profile name, else what their membership is labelled (here the email).
+    expect(await workspaceMemberDisplayName(db, ownerActor)).toContain("@example.test");
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${scope.owner.slice("user:".length)}, 'Recording owner', ${`${crypto.randomUUID()}@example.test`}, true)`;
+    const ownerName = await workspaceMemberDisplayName(db, ownerActor);
+    expect(ownerName).toBe("Recording owner");
+    const recording = await finalizedRecording(scope, "workspace");
+    const voice = [0.9, 0.1, 0.05, 0];
+    async function transcribe(versionId: string) {
+      const lease = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db, {
+        ...ownerActor,
+        versionId,
+        processingOwner: lease,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db, {
+        ...ownerActor,
+        versionId,
+        processingOwner: lease,
+        languages: ["en"],
+        diarized: true,
+        diarization: "ours",
+        audioMilliseconds: 60_000,
+        segments: [
+          {
+            startMilliseconds: 0,
+            endMilliseconds: 9_000,
+            trackNumber: 0,
+            speakerLabel: "track-0",
+            text: "Let's start.",
+          },
+          {
+            startMilliseconds: 10_000,
+            endMilliseconds: 19_000,
+            trackNumber: 1,
+            speakerLabel: "speaker_0",
+            text: "Sounds good.",
+          },
+        ],
+        trackSpeakers: [{ label: "track-0", memberSubjectId: scope.owner, displayName: ownerName }],
+        // Even a voice kept for the microphone teaches nothing by itself.
+        voices: [
+          {
+            label: "track-0",
+            channel: "microphone",
+            model: "test-model",
+            embedding: voice,
+            speechMilliseconds: 30_000,
+          },
+        ],
+      });
+      return (
+        await getRecordingTranscriptPage(db, {
+          ...ownerActor,
+          recordingId: recording.recordingId,
+          versionId,
+        })
+      ).speakers;
+    }
+
+    // The owner is added to the directory, as "It's me" would, and named.
+    const first = await transcribe(recording.versionId);
+    const people = await listRecordingPeople(db, ownerActor);
+    const me = people.find((person) => person.memberSubjectId === scope.owner);
+    expect(me).toMatchObject({ displayName: "Recording owner", voice: null });
+    expect(first.find((speaker) => speaker.label === "track-0")).toMatchObject({
+      name: "Recording owner",
+      personId: me!.id,
+      source: "track",
+      confidence: null,
+    });
+    // The microphone is named, so it is never offered as a voice suggestion.
+    expect(first.filter((speaker) => speaker.source === "suggested")).toEqual([]);
+
+    // Nobody agreed, so no voiceprint; agreeing later doesn't learn from a
+    // speaker nobody confirmed.
+    const prints = async () =>
+      (
+        await shared!.admin<{ prints: number; learned: number }[]>`
+          select
+            (select count(*)::int from recording_voiceprints where person_id = ${me!.id}) as prints,
+            (select count(*)::int from recording_speaker_voices where learned_person_id = ${me!.id}) as learned`
+      )[0];
+    expect(await prints()).toEqual({ prints: 0, learned: 0 });
+    const remembered = await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: me!.id,
+      consent: "self",
+    });
+    expect(remembered.voice).toMatchObject({ consent: "self", learned: false });
+    expect(await prints()).toEqual({ prints: 0, learned: 0 });
+
+    // A new version names them again, reusing their person.
+    const version2 = await createRecordingTranscriptVersion(db, {
+      ...ownerActor,
+      recordingId: recording.recordingId,
+      versionId: crypto.randomUUID(),
+      transcription,
+    });
+    expect(
+      (await transcribe(version2.id)).find((speaker) => speaker.label === "track-0"),
+    ).toMatchObject({ personId: me!.id, source: "track" });
+
+    // A name someone gives the microphone stays through every later version.
+    await updateRecordingSpeakers(db, {
+      ...ownerActor,
+      recordingId: recording.recordingId,
+      assignments: [{ label: "track-0", name: "Kari" }],
+    });
+    for (let round = 0; round < 2; round += 1) {
+      const next = await createRecordingTranscriptVersion(db, {
+        ...ownerActor,
+        recordingId: recording.recordingId,
+        versionId: crypto.randomUUID(),
+        transcription,
+      });
+      expect(
+        (await transcribe(next.id)).find((speaker) => speaker.label === "track-0"),
+      ).toMatchObject({ name: "Kari", personId: null, source: "carried_over" });
+    }
+    expect(
+      (await listRecordingPeople(db, ownerActor)).filter(
+        (person) => person.memberSubjectId === scope.owner,
+      ),
+    ).toHaveLength(1);
+  });
+
+  test("starting a recording with computer audio adds its owner to the speaker directory", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const ownerActor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const start = async (sources: Array<"microphone" | "system">) =>
+      await createRecording(db, {
+        ...ownerActor,
+        accountId: scope.accountId,
+        recordingId: crypto.randomUUID(),
+        ownerName: "Recording owner",
+        tracks: sources.map((source, trackNumber) => ({
+          trackNumber,
+          source,
+          mimeType: "audio/webm",
+        })),
+      });
+    // A microphone alone may be a whole room: nobody is assumed.
+    await start(["microphone"]);
+    expect(await listRecordingPeople(db, ownerActor)).toEqual([]);
+    await start(["microphone", "system"]);
+    await start(["microphone", "system"]);
+    const people = await listRecordingPeople(db, ownerActor);
+    expect(people.map((person) => [person.displayName, person.memberSubjectId])).toEqual([
+      ["Recording owner", scope.owner],
+    ]);
+    expect(people[0]?.voice).toBeNull();
   });
 
   test("search finds title words, transcript word prefixes and corrected words", async () => {

@@ -1019,6 +1019,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "knowledge_archive",
   "meetings_search",
   "meeting_read",
+  "meeting_notes_save",
   "instruction_policy_save",
   "instruction_policy_get",
   "memory_search",
@@ -6390,6 +6391,8 @@ export const PromotionalCreditBalance = /* @__PURE__ */ defineSchema(() =>
     coversVoice: primitives.optionalBoolean,
     /** Monthly scoped allowance; allocated before other promotions. */
     planCredit: primitives.optionalBoolean,
+    /** Free funding excluded from new admission while an abuse hold is active. */
+    held: primitives.optionalBoolean,
   }),
 );
 export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
@@ -6418,6 +6421,9 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
     /** General credits, including unrestricted legacy grants. May be negative after use. */
     generalBalanceMicros: z.number().int().optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
+    heldCreditMicros: primitives.nonnegativeInteger.optional(),
+    heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),
+    promotionDecision: z.enum(["eligible", "verification_required", "held", "denied"]).optional(),
     /** Absent/null until an operator or subscription worker activates this organization. */
     plan: BillingPlanBalance.nullable().optional(),
   }),
@@ -10433,10 +10439,31 @@ export const CHILD_REQUIRES_ACTION_MAX_REQUESTS = 20;
 export const CHILD_PAUSED_REASON_MAX_BYTES = 2 * 1024;
 export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
 
-const boundedUtf8String = (maxBytes: number) =>
-  primitives.string.refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
-    message: `must be at most ${maxBytes} UTF-8 bytes`,
-  });
+/**
+ * Revision of the child lifecycle notice protocol rendered in
+ * `child-lifecycle-notice-protocol.gen.json`. Bump it for any change an older
+ * consumer could see that the rendering does not capture: what a field means,
+ * the `sourceId`, dedupe keys, classification, summary or lineage the
+ * producers write, or how a consumer supersedes, wakes on or renders a notice.
+ */
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 1;
+
+/**
+ * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
+ * notice protocol records limits as data. Validation and JSON Schema output
+ * are unaffected.
+ */
+export const UTF8_BYTE_LIMIT_CHECKS: WeakMap<object, number> = new WeakMap();
+
+const boundedUtf8String = (maxBytes: number) => {
+  const schema = primitives.string.refine(
+    (value) => new TextEncoder().encode(value).byteLength <= maxBytes,
+    { message: `must be at most ${maxBytes} UTF-8 bytes` },
+  );
+  const check = schema._zod.def.checks?.at(-1);
+  if (check) UTF8_BYTE_LIMIT_CHECKS.set(check, maxBytes);
+  return schema;
+};
 
 /**
  * Compact copy of one question of a child's blocking request: enough for the
@@ -12014,8 +12041,20 @@ export const ScheduledTaskRunMode = /* @__PURE__ */ /* @__PURE__ */ defineSchema
 );
 export type ScheduledTaskRunMode = z.infer<typeof ScheduledTaskRunMode>;
 
+/**
+ * What a run does when the automation's previous run is still working. Only an
+ * automation that continues a chat (`existing_session`, `reusable_session`)
+ * can overlap; a run in a new chat always runs on its own, whatever the
+ * choice. `steer`, the default for new automations, hands this automation's
+ * own running turn over at its next model step, like a person's Steer, so the
+ * agent sees the new run with the work so far; a turn anyone else started
+ * still finishes first, and the run follows it. In a chat, `allow_concurrent`
+ * and `buffer_one` both deliver the run when the current turn finishes,
+ * together with anything else that waited. `skip` drops a run that finds the
+ * chat busy.
+ */
 export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ /* @__PURE__ */ defineSchema(() =>
-  z.enum(["allow_concurrent", "skip", "buffer_one"]),
+  z.enum(["allow_concurrent", "skip", "buffer_one", "steer"]),
 );
 export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
 
@@ -13385,7 +13424,7 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
       .strict()
       .default({ kind: "agent_turn" }),
     runMode: ScheduledTaskRunMode.default("new_session_per_run"),
-    overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
+    overlapPolicy: ScheduledTaskOverlapPolicy.default("steer"),
     targetSessionId: z.string().uuid().nullable().optional(),
     /** Who can see it. Omitted: the organization's default for new schedules. */
     visibility: SessionVisibility.optional(),
@@ -13499,7 +13538,7 @@ export const CreateSessionScheduledTaskRequest = /* @__PURE__ */ /* @__PURE__ */
       /** A schedule posting into an Only me chat is always Only me. */
       visibility: SessionVisibility.optional(),
       runMode: z.literal("existing_session").default("existing_session"),
-      overlapPolicy: ScheduledTaskOverlapPolicy.default("buffer_one"),
+      overlapPolicy: ScheduledTaskOverlapPolicy.default("steer"),
       status: ScheduledTaskStatus.default("active"),
       metadata: ScheduledTaskMetadataInput.default({}),
       /** Event triggers that also post into the chat; `once` makes this a "wake me when". */
@@ -20822,6 +20861,7 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       // False while the deployment has paused new account creation (launch-load
       // safety switch). Sign-in for existing accounts stays available.
       newSignupsEnabled: primitives.boolean.default(true),
+      signupChallengeSiteKey: z.string().optional(),
     }),
   ]),
 );

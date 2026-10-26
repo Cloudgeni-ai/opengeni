@@ -62,12 +62,24 @@ runs from before the last edit or resume do not count):
   (`admissionDiagnostic`), any non-retryable refusal above, a paused chat
   (`scheduled_session_paused`), a chat that ended or no longer exists
   (`session_cancelled` outside new-chat-per-run mode,
-  `scheduled_target_session_unavailable`) and an unavailable model.
+  `scheduled_target_session_unavailable`), an unavailable model, and an owner
+  whose saved access no longer holds: the database admission or claim fence
+  refused the run because the organization membership revision the task
+  revision was saved under changed (`scheduled_run_authority_proof_rejected`,
+  `scheduled_causal_membership_changed`). Saving the schedule again approves it
+  with the owner's current access.
 - When runs fail or are skipped for a reason that may clear by itself (a busy
   chat, a paused workspace, a retryable refusal, a failed turn), the owner is
   told once and the schedule keeps running. Only a schedule that runs at least
   hourly waits for three such runs in a row; a daily, weekly or one-time
   schedule, and a schedule's last run before its end, tell at the first one.
+
+An organization membership's authorization revision advances only when
+something about the member's access changes (a different role, suspension,
+reactivation, offboarding, narrowed workspace permissions). Setting a member's
+role to the role they already hold leaves it alone (migration
+`0995_membership_same_role_keeps_authority.sql`), so it no longer stops every
+schedule they saved.
 
 Every occurrence settles. A Pause of the target chat or of the workspace
 refuses the occurrence under every overlap policy, not only `skip`: queued

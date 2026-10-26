@@ -6,7 +6,7 @@
  * voice is marked suggested until someone confirms or turns it down.
  */
 import { useOpenGeniText, createOpenGeniText, type OpenGeniText } from "../messages/runtime";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ComponentProps } from "react";
 import {
   AudioLinesIcon,
   CheckIcon,
@@ -50,6 +50,7 @@ import {
   speakerIsNamed,
   type TranscriptTurn,
 } from "../recordings";
+import { MeetingsOverlayScope } from "./overlay-scope";
 
 /** The chart palette, one hue per voice. Text stays in fg; only the dot carries color. */
 const defaultText = createOpenGeniText();
@@ -505,7 +506,7 @@ function EditTurnDialog({
   );
 }
 
-export function MeetingTranscript({
+function MeetingTranscriptContent({
   segments,
   speakers,
   tracks,
@@ -727,5 +728,13 @@ export function MeetingTranscript({
         actions={actions}
       />
     </>
+  );
+}
+
+export function MeetingTranscript(props: ComponentProps<typeof MeetingTranscriptContent>) {
+  return (
+    <MeetingsOverlayScope>
+      <MeetingTranscriptContent {...props} />
+    </MeetingsOverlayScope>
   );
 }
