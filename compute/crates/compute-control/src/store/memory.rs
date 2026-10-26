@@ -285,7 +285,8 @@ impl MemoryStore {
             && entry.drained
             && from == HostState::Draining
             && to == HostState::Live;
-        if entry.row.state != from && !undrained_while_lost {
+        let marked_apart = entry.row.state == to && entry.drained != (to == HostState::Draining);
+        if entry.row.state != from && !undrained_while_lost && !marked_apart {
             return false;
         }
         if !undrained_while_lost {

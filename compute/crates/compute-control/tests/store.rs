@@ -493,6 +493,83 @@ async fn a_drained_host_given_up_on_registers_again_drained_until_undrained() {
     each(drained, drained).await;
 }
 
+/// Moves `host` from `from` to `to` as a build from before the drain mark
+/// did.
+async fn moved_by_an_older_build(
+    client: &tokio_postgres::Client,
+    host: HostId,
+    from: &'static str,
+    to: &'static str,
+) {
+    let moved = client
+        .execute(
+            "update compute_hosts set state = $3, changed = nextval('compute_changes') \
+             where id = $1 and state = $2",
+            &[&i64::try_from(host.0).unwrap(), &from, &to],
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved, 1);
+}
+
+/// A build from before the mark, still running during a rollout, moves a
+/// host without it: repeating the drain or undrain sets the mark for the
+/// state the host is in already, so the operator's latest word holds when
+/// the host is given up on and comes back. Repeated with the mark in step,
+/// it changes nothing.
+#[tokio::test]
+async fn a_repeated_drain_or_undrain_mends_the_mark_an_older_build_left() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let store = PostgresStore::connect(&url, None, 2).await.unwrap();
+    let older = |host, from, to| moved_by_an_older_build(&client, host, from, to);
+
+    // Drained by the older build, then again by this one.
+    let name = name();
+    let (host, _) = registered(&store, &register(&name, random(), Vec::new())).await;
+    older(host, "live", "draining").await;
+    assert!(
+        store
+            .set_state(host, HostState::Live, HostState::Draining)
+            .await
+            .unwrap(),
+        "the mark is set"
+    );
+    assert!(
+        !store
+            .set_state(host, HostState::Live, HostState::Draining)
+            .await
+            .unwrap(),
+        "once"
+    );
+    back_after_a_fence(&store, &name, host).await;
+    assert_eq!(state(&store, host).await, HostState::Draining);
+
+    // Undrained by the older build, then again by this one.
+    older(host, "draining", "live").await;
+    assert!(
+        store
+            .set_state(host, HostState::Draining, HostState::Live)
+            .await
+            .unwrap(),
+        "the mark is cleared"
+    );
+    assert!(
+        !store
+            .set_state(host, HostState::Draining, HostState::Live)
+            .await
+            .unwrap(),
+        "once"
+    );
+    back_after_a_fence(&store, &name, host).await;
+    assert_eq!(state(&store, host).await, HostState::Live);
+}
+
 async fn reclaim<S: Store>(store: S) {
     let returning = name();
     let (host, _) = registered(&store, &register(&returning, random(), Vec::new())).await;

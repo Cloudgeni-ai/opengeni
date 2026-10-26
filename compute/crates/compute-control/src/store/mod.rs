@@ -310,7 +310,10 @@ pub trait Store: Send + Sync + 'static {
     /// up on, it registers again draining, so a drain an operator asked for
     /// outlasts the host's going away and coming back. Moved from draining
     /// to live while given up on, it stays given up on and registers again
-    /// live.
+    /// live. A host already in `to` whose mark says otherwise (a build from
+    /// before the mark drained or undrained it, or registered it again
+    /// live, during a rollout) has its mark set as for `to`, so repeating
+    /// a drain or undrain repairs it.
     fn set_state(
         &self,
         host: HostId,
