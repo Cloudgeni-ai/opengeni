@@ -56,10 +56,12 @@
     "child_paused": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": {
-        "x-opengeni-def": {
-          "checks": [],
-          "type": "unknown"
-        }
+        "x-opengeni-defs": [
+          {
+            "checks": [],
+            "type": "unknown"
+          }
+        ]
       },
       "properties": {
         "actorKind": {
@@ -69,92 +71,104 @@
             "agent"
           ],
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "entries": {
-              "agent": "agent",
-              "api": "api",
-              "human": "human"
-            },
-            "type": "enum"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "entries": {
+                "agent": "agent",
+                "api": "api",
+                "human": "human"
+              },
+              "type": "enum"
+            }
+          ]
         },
         "childSessionId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "operationId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "reason": {
           "anyOf": [
             {
               "type": "string",
-              "x-opengeni-def": {
-                "checks": [
-                  {
-                    "check": "custom",
-                    "message": "must be at most 2048 UTF-8 bytes",
-                    "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
-                    "utf8MaxBytes": 2048
-                  }
-                ],
-                "type": "string"
-              }
+              "x-opengeni-defs": [
+                {
+                  "checks": [
+                    {
+                      "check": "custom",
+                      "message": "must be at most 2048 UTF-8 bytes",
+                      "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
+                      "utf8MaxBytes": 2048
+                    }
+                  ],
+                  "type": "string"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "x-opengeni-def": {
-            "checks": [],
-            "innerType": "<schema>",
-            "type": "nullable"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "innerType": "<schema>",
+              "type": "nullable"
+            }
+          ]
         },
         "type": {
           "const": "child_paused",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "type": "literal",
-            "values": [
-              "child_paused"
-            ]
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "type": "literal",
+              "values": [
+                "child_paused"
+              ]
+            }
+          ]
         }
       },
       "required": [
@@ -165,133 +179,149 @@
         "reason"
       ],
       "type": "object",
-      "x-opengeni-def": {
-        "catchall": "<schema>",
-        "checks": [],
-        "shape": {
-          "actorKind": "<schema>",
-          "childSessionId": "<schema>",
-          "operationId": "<schema>",
-          "reason": "<schema>",
-          "type": "<schema>"
-        },
-        "type": "object"
-      }
+      "x-opengeni-defs": [
+        {
+          "catchall": "<schema>",
+          "checks": [],
+          "shape": {
+            "actorKind": "<schema>",
+            "childSessionId": "<schema>",
+            "operationId": "<schema>",
+            "reason": "<schema>",
+            "type": "<schema>"
+          },
+          "type": "object"
+        }
+      ]
     },
     "child_progress": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": {
-        "x-opengeni-def": {
-          "checks": [],
-          "type": "unknown"
-        }
+        "x-opengeni-defs": [
+          {
+            "checks": [],
+            "type": "unknown"
+          }
+        ]
       },
       "properties": {
         "childSessionId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "goalId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "objectiveRevision": {
           "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "number_format",
-                "format": "safeint",
-                "type": "number"
-              },
-              {
-                "check": "greater_than",
-                "inclusive": true,
-                "value": 0
-              }
-            ],
-            "type": "number"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "number_format",
+                  "format": "safeint",
+                  "type": "number"
+                },
+                {
+                  "check": "greater_than",
+                  "inclusive": true,
+                  "value": 0
+                }
+              ],
+              "type": "number"
+            }
+          ]
         },
         "operationId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "progressNote": {
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "check": "custom",
-                "message": "must be at most 4096 UTF-8 bytes",
-                "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
-                "utf8MaxBytes": 4096
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "check": "custom",
+                  "message": "must be at most 4096 UTF-8 bytes",
+                  "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
+                  "utf8MaxBytes": 4096
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "type": {
           "const": "child_progress",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "type": "literal",
-            "values": [
-              "child_progress"
-            ]
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "type": "literal",
+              "values": [
+                "child_progress"
+              ]
+            }
+          ]
         }
       },
       "required": [
@@ -303,89 +333,99 @@
         "progressNote"
       ],
       "type": "object",
-      "x-opengeni-def": {
-        "catchall": "<schema>",
-        "checks": [],
-        "shape": {
-          "childSessionId": "<schema>",
-          "goalId": "<schema>",
-          "objectiveRevision": "<schema>",
-          "operationId": "<schema>",
-          "progressNote": "<schema>",
-          "type": "<schema>"
-        },
-        "type": "object"
-      }
+      "x-opengeni-defs": [
+        {
+          "catchall": "<schema>",
+          "checks": [],
+          "shape": {
+            "childSessionId": "<schema>",
+            "goalId": "<schema>",
+            "objectiveRevision": "<schema>",
+            "operationId": "<schema>",
+            "progressNote": "<schema>",
+            "type": "<schema>"
+          },
+          "type": "object"
+        }
+      ]
     },
     "child_requires_action": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": {
-        "x-opengeni-def": {
-          "checks": [],
-          "type": "unknown"
-        }
+        "x-opengeni-defs": [
+          {
+            "checks": [],
+            "type": "unknown"
+          }
+        ]
       },
       "properties": {
         "childSessionId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "childTurnGeneration": {
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991,
           "type": "integer",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "number_format",
-                "format": "safeint",
-                "type": "number"
-              },
-              {
-                "check": "greater_than",
-                "inclusive": false,
-                "value": 0
-              }
-            ],
-            "type": "number"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "number_format",
+                  "format": "safeint",
+                  "type": "number"
+                },
+                {
+                  "check": "greater_than",
+                  "inclusive": false,
+                  "value": 0
+                }
+              ],
+              "type": "number"
+            }
+          ]
         },
         "childTurnId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "requests": {
           "items": {
@@ -394,75 +434,87 @@
                 "properties": {
                   "allowSkip": {
                     "type": "boolean",
-                    "x-opengeni-def": {
-                      "checks": [],
-                      "type": "boolean"
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [],
+                        "type": "boolean"
+                      }
+                    ]
                   },
                   "expiresAt": {
                     "anyOf": [
                       {
                         "type": "string",
-                        "x-opengeni-def": {
-                          "checks": [],
-                          "type": "string"
-                        }
+                        "x-opengeni-defs": [
+                          {
+                            "checks": [],
+                            "type": "string"
+                          }
+                        ]
                       },
                       {
                         "type": "null"
                       }
                     ],
-                    "x-opengeni-def": {
-                      "checks": [],
-                      "innerType": "<schema>",
-                      "type": "nullable"
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [],
+                        "innerType": "<schema>",
+                        "type": "nullable"
+                      }
+                    ]
                   },
                   "firstQuestion": {
                     "type": "string",
-                    "x-opengeni-def": {
-                      "checks": [
-                        {
-                          "check": "custom",
-                          "message": "must be at most 512 UTF-8 bytes",
-                          "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
-                          "utf8MaxBytes": 512
-                        }
-                      ],
-                      "type": "string"
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [
+                          {
+                            "check": "custom",
+                            "message": "must be at most 512 UTF-8 bytes",
+                            "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
+                            "utf8MaxBytes": 512
+                          }
+                        ],
+                        "type": "string"
+                      }
+                    ]
                   },
                   "kind": {
                     "const": "human_input",
                     "type": "string",
-                    "x-opengeni-def": {
-                      "checks": [],
-                      "type": "literal",
-                      "values": [
-                        "human_input"
-                      ]
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [],
+                        "type": "literal",
+                        "values": [
+                          "human_input"
+                        ]
+                      }
+                    ]
                   },
                   "questionCount": {
                     "maximum": 9007199254740991,
                     "minimum": 0,
                     "type": "integer",
-                    "x-opengeni-def": {
-                      "checks": [
-                        {
-                          "abort": false,
-                          "check": "number_format",
-                          "format": "safeint",
-                          "type": "number"
-                        },
-                        {
-                          "check": "greater_than",
-                          "inclusive": true,
-                          "value": 0
-                        }
-                      ],
-                      "type": "number"
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [
+                          {
+                            "abort": false,
+                            "check": "number_format",
+                            "format": "safeint",
+                            "type": "number"
+                          },
+                          {
+                            "check": "greater_than",
+                            "inclusive": true,
+                            "value": 0
+                          }
+                        ],
+                        "type": "number"
+                      }
+                    ]
                   },
                   "questions": {
                     "items": {
@@ -470,47 +522,64 @@
                         "humanOnly": {
                           "const": true,
                           "type": "boolean",
-                          "x-opengeni-def": {
-                            "checks": [],
-                            "innerType": "<schema>",
-                            "type": "optional"
-                          }
+                          "x-opengeni-defs": [
+                            {
+                              "checks": [],
+                              "type": "literal",
+                              "values": [
+                                true
+                              ]
+                            },
+                            {
+                              "checks": [],
+                              "innerType": "<schema>",
+                              "type": "optional"
+                            }
+                          ]
                         },
                         "id": {
                           "maxLength": 64,
                           "minLength": 1,
                           "type": "string",
-                          "x-opengeni-def": {
-                            "checks": [
-                              {
-                                "check": "min_length",
-                                "minimum": 1
-                              },
-                              {
-                                "check": "max_length",
-                                "maximum": 64
-                              }
-                            ],
-                            "type": "string"
-                          }
+                          "x-opengeni-defs": [
+                            {
+                              "checks": [
+                                {
+                                  "check": "min_length",
+                                  "minimum": 1,
+                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                },
+                                {
+                                  "check": "max_length",
+                                  "maximum": 64,
+                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                }
+                              ],
+                              "type": "string"
+                            }
+                          ]
                         },
                         "kind": {
                           "maxLength": 32,
                           "minLength": 1,
                           "type": "string",
-                          "x-opengeni-def": {
-                            "checks": [
-                              {
-                                "check": "min_length",
-                                "minimum": 1
-                              },
-                              {
-                                "check": "max_length",
-                                "maximum": 32
-                              }
-                            ],
-                            "type": "string"
-                          }
+                          "x-opengeni-defs": [
+                            {
+                              "checks": [
+                                {
+                                  "check": "min_length",
+                                  "minimum": 1,
+                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                },
+                                {
+                                  "check": "max_length",
+                                  "maximum": 32,
+                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                }
+                              ],
+                              "type": "string"
+                            }
+                          ]
                         },
                         "options": {
                           "items": {
@@ -519,33 +588,39 @@
                                 "maxLength": 64,
                                 "minLength": 1,
                                 "type": "string",
-                                "x-opengeni-def": {
-                                  "checks": [
-                                    {
-                                      "check": "min_length",
-                                      "minimum": 1
-                                    },
-                                    {
-                                      "check": "max_length",
-                                      "maximum": 64
-                                    }
-                                  ],
-                                  "type": "string"
-                                }
+                                "x-opengeni-defs": [
+                                  {
+                                    "checks": [
+                                      {
+                                        "check": "min_length",
+                                        "minimum": 1,
+                                        "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                      },
+                                      {
+                                        "check": "max_length",
+                                        "maximum": 64,
+                                        "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                      }
+                                    ],
+                                    "type": "string"
+                                  }
+                                ]
                               },
                               "label": {
                                 "type": "string",
-                                "x-opengeni-def": {
-                                  "checks": [
-                                    {
-                                      "check": "custom",
-                                      "message": "must be at most 128 UTF-8 bytes",
-                                      "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
-                                      "utf8MaxBytes": 128
-                                    }
-                                  ],
-                                  "type": "string"
-                                }
+                                "x-opengeni-defs": [
+                                  {
+                                    "checks": [
+                                      {
+                                        "check": "custom",
+                                        "message": "must be at most 128 UTF-8 bytes",
+                                        "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
+                                        "utf8MaxBytes": 128
+                                      }
+                                    ],
+                                    "type": "string"
+                                  }
+                                ]
                               }
                             },
                             "required": [
@@ -553,48 +628,57 @@
                               "label"
                             ],
                             "type": "object",
-                            "x-opengeni-def": {
-                              "checks": [],
-                              "shape": {
-                                "id": "<schema>",
-                                "label": "<schema>"
-                              },
-                              "type": "object"
-                            }
+                            "x-opengeni-defs": [
+                              {
+                                "checks": [],
+                                "shape": {
+                                  "id": "<schema>",
+                                  "label": "<schema>"
+                                },
+                                "type": "object"
+                              }
+                            ]
                           },
                           "maxItems": 20,
                           "type": "array",
-                          "x-opengeni-def": {
-                            "checks": [
-                              {
-                                "check": "max_length",
-                                "maximum": 20
-                              }
-                            ],
-                            "element": "<schema>",
-                            "type": "array"
-                          }
+                          "x-opengeni-defs": [
+                            {
+                              "checks": [
+                                {
+                                  "check": "max_length",
+                                  "maximum": 20,
+                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                }
+                              ],
+                              "element": "<schema>",
+                              "type": "array"
+                            }
+                          ]
                         },
                         "prompt": {
                           "type": "string",
-                          "x-opengeni-def": {
-                            "checks": [
-                              {
-                                "check": "custom",
-                                "message": "must be at most 512 UTF-8 bytes",
-                                "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
-                                "utf8MaxBytes": 512
-                              }
-                            ],
-                            "type": "string"
-                          }
+                          "x-opengeni-defs": [
+                            {
+                              "checks": [
+                                {
+                                  "check": "custom",
+                                  "message": "must be at most 512 UTF-8 bytes",
+                                  "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
+                                  "utf8MaxBytes": 512
+                                }
+                              ],
+                              "type": "string"
+                            }
+                          ]
                         },
                         "required": {
                           "type": "boolean",
-                          "x-opengeni-def": {
-                            "checks": [],
-                            "type": "boolean"
-                          }
+                          "x-opengeni-defs": [
+                            {
+                              "checks": [],
+                              "type": "boolean"
+                            }
+                          ]
                         }
                       },
                       "required": [
@@ -605,46 +689,63 @@
                         "options"
                       ],
                       "type": "object",
-                      "x-opengeni-def": {
-                        "checks": [],
-                        "shape": {
-                          "humanOnly": "<schema>",
-                          "id": "<schema>",
-                          "kind": "<schema>",
-                          "options": "<schema>",
-                          "prompt": "<schema>",
-                          "required": "<schema>"
-                        },
-                        "type": "object"
-                      }
+                      "x-opengeni-defs": [
+                        {
+                          "checks": [],
+                          "shape": {
+                            "humanOnly": "<schema>",
+                            "id": "<schema>",
+                            "kind": "<schema>",
+                            "options": "<schema>",
+                            "prompt": "<schema>",
+                            "required": "<schema>"
+                          },
+                          "type": "object"
+                        }
+                      ]
                     },
                     "maxItems": 20,
                     "type": "array",
-                    "x-opengeni-def": {
-                      "checks": [],
-                      "innerType": "<schema>",
-                      "type": "optional"
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [
+                          {
+                            "check": "max_length",
+                            "maximum": 20,
+                            "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                          }
+                        ],
+                        "element": "<schema>",
+                        "type": "array"
+                      },
+                      {
+                        "checks": [],
+                        "innerType": "<schema>",
+                        "type": "optional"
+                      }
+                    ]
                   },
                   "requestId": {
                     "format": "uuid",
                     "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
                     "type": "string",
-                    "x-opengeni-def": {
-                      "checks": [
-                        {
-                          "abort": false,
-                          "check": "string_format",
-                          "format": "uuid",
-                          "pattern": {
-                            "flags": "",
-                            "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                          },
-                          "type": "string"
-                        }
-                      ],
-                      "type": "string"
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [
+                          {
+                            "abort": false,
+                            "check": "string_format",
+                            "format": "uuid",
+                            "pattern": {
+                              "flags": "",
+                              "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                            },
+                            "type": "string"
+                          }
+                        ],
+                        "type": "string"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -656,72 +757,82 @@
                   "expiresAt"
                 ],
                 "type": "object",
-                "x-opengeni-def": {
-                  "checks": [],
-                  "shape": {
-                    "allowSkip": "<schema>",
-                    "expiresAt": "<schema>",
-                    "firstQuestion": "<schema>",
-                    "kind": "<schema>",
-                    "questionCount": "<schema>",
-                    "questions": "<schema>",
-                    "requestId": "<schema>"
-                  },
-                  "type": "object"
-                }
+                "x-opengeni-defs": [
+                  {
+                    "checks": [],
+                    "shape": {
+                      "allowSkip": "<schema>",
+                      "expiresAt": "<schema>",
+                      "firstQuestion": "<schema>",
+                      "kind": "<schema>",
+                      "questionCount": "<schema>",
+                      "questions": "<schema>",
+                      "requestId": "<schema>"
+                    },
+                    "type": "object"
+                  }
+                ]
               },
               {
                 "properties": {
                   "approvalId": {
                     "type": "string",
-                    "x-opengeni-def": {
-                      "checks": [
-                        {
-                          "check": "custom",
-                          "message": "must be at most 256 UTF-8 bytes",
-                          "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
-                          "utf8MaxBytes": 256
-                        }
-                      ],
-                      "type": "string"
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [
+                          {
+                            "check": "custom",
+                            "message": "must be at most 256 UTF-8 bytes",
+                            "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
+                            "utf8MaxBytes": 256
+                          }
+                        ],
+                        "type": "string"
+                      }
+                    ]
                   },
                   "kind": {
                     "const": "approval",
                     "type": "string",
-                    "x-opengeni-def": {
-                      "checks": [],
-                      "type": "literal",
-                      "values": [
-                        "approval"
-                      ]
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [],
+                        "type": "literal",
+                        "values": [
+                          "approval"
+                        ]
+                      }
+                    ]
                   },
                   "toolName": {
                     "anyOf": [
                       {
                         "type": "string",
-                        "x-opengeni-def": {
-                          "checks": [
-                            {
-                              "check": "custom",
-                              "message": "must be at most 128 UTF-8 bytes",
-                              "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
-                              "utf8MaxBytes": 128
-                            }
-                          ],
-                          "type": "string"
-                        }
+                        "x-opengeni-defs": [
+                          {
+                            "checks": [
+                              {
+                                "check": "custom",
+                                "message": "must be at most 128 UTF-8 bytes",
+                                "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
+                                "utf8MaxBytes": 128
+                              }
+                            ],
+                            "type": "string"
+                          }
+                        ]
                       },
                       {
                         "type": "null"
                       }
                     ],
-                    "x-opengeni-def": {
-                      "checks": [],
-                      "innerType": "<schema>",
-                      "type": "nullable"
-                    }
+                    "x-opengeni-defs": [
+                      {
+                        "checks": [],
+                        "innerType": "<schema>",
+                        "type": "nullable"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -730,58 +841,69 @@
                   "toolName"
                 ],
                 "type": "object",
-                "x-opengeni-def": {
-                  "checks": [],
-                  "shape": {
-                    "approvalId": "<schema>",
-                    "kind": "<schema>",
-                    "toolName": "<schema>"
-                  },
-                  "type": "object"
-                }
+                "x-opengeni-defs": [
+                  {
+                    "checks": [],
+                    "shape": {
+                      "approvalId": "<schema>",
+                      "kind": "<schema>",
+                      "toolName": "<schema>"
+                    },
+                    "type": "object"
+                  }
+                ]
               }
             ],
-            "x-opengeni-def": {
-              "checks": [],
-              "discriminator": "kind",
-              "inclusive": false,
-              "options": [
-                "<schema>",
-                "<schema>"
-              ],
-              "type": "union"
-            }
+            "x-opengeni-defs": [
+              {
+                "checks": [],
+                "discriminator": "kind",
+                "inclusive": false,
+                "options": [
+                  "<schema>",
+                  "<schema>"
+                ],
+                "type": "union"
+              }
+            ]
           },
           "maxItems": 20,
           "type": "array",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "check": "max_length",
-                "maximum": 20
-              }
-            ],
-            "element": "<schema>",
-            "type": "array"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "check": "max_length",
+                  "maximum": 20,
+                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                }
+              ],
+              "element": "<schema>",
+              "type": "array"
+            }
+          ]
         },
         "truncated": {
           "type": "boolean",
-          "x-opengeni-def": {
-            "checks": [],
-            "type": "boolean"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "type": "boolean"
+            }
+          ]
         },
         "type": {
           "const": "child_requires_action",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "type": "literal",
-            "values": [
-              "child_requires_action"
-            ]
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "type": "literal",
+              "values": [
+                "child_requires_action"
+              ]
+            }
+          ]
         }
       },
       "required": [
@@ -793,115 +915,129 @@
         "truncated"
       ],
       "type": "object",
-      "x-opengeni-def": {
-        "catchall": "<schema>",
-        "checks": [],
-        "shape": {
-          "childSessionId": "<schema>",
-          "childTurnGeneration": "<schema>",
-          "childTurnId": "<schema>",
-          "requests": "<schema>",
-          "truncated": "<schema>",
-          "type": "<schema>"
-        },
-        "type": "object"
-      }
+      "x-opengeni-defs": [
+        {
+          "catchall": "<schema>",
+          "checks": [],
+          "shape": {
+            "childSessionId": "<schema>",
+            "childTurnGeneration": "<schema>",
+            "childTurnId": "<schema>",
+            "requests": "<schema>",
+            "truncated": "<schema>",
+            "type": "<schema>"
+          },
+          "type": "object"
+        }
+      ]
     },
     "child_requires_action_resolved": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": {
-        "x-opengeni-def": {
-          "checks": [],
-          "type": "unknown"
-        }
+        "x-opengeni-defs": [
+          {
+            "checks": [],
+            "type": "unknown"
+          }
+        ]
       },
       "properties": {
         "approvalId": {
           "anyOf": [
             {
               "type": "string",
-              "x-opengeni-def": {
-                "checks": [
-                  {
-                    "check": "custom",
-                    "message": "must be at most 256 UTF-8 bytes",
-                    "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
-                    "utf8MaxBytes": 256
-                  }
-                ],
-                "type": "string"
-              }
+              "x-opengeni-defs": [
+                {
+                  "checks": [
+                    {
+                      "check": "custom",
+                      "message": "must be at most 256 UTF-8 bytes",
+                      "source": "(value) => new TextEncoder().encode(value).byteLength <= maxBytes",
+                      "utf8MaxBytes": 256
+                    }
+                  ],
+                  "type": "string"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "x-opengeni-def": {
-            "checks": [],
-            "innerType": "<schema>",
-            "type": "nullable"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "innerType": "<schema>",
+              "type": "nullable"
+            }
+          ]
         },
         "childSessionId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "childTurnGeneration": {
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991,
           "type": "integer",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "number_format",
-                "format": "safeint",
-                "type": "number"
-              },
-              {
-                "check": "greater_than",
-                "inclusive": false,
-                "value": 0
-              }
-            ],
-            "type": "number"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "number_format",
+                  "format": "safeint",
+                  "type": "number"
+                },
+                {
+                  "check": "greater_than",
+                  "inclusive": false,
+                  "value": 0
+                }
+              ],
+              "type": "number"
+            }
+          ]
         },
         "childTurnId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "outcome": {
           "enum": [
@@ -913,18 +1049,20 @@
             "rejected"
           ],
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "entries": {
-              "answered": "answered",
-              "approved": "approved",
-              "cancelled": "cancelled",
-              "expired": "expired",
-              "rejected": "rejected",
-              "skipped": "skipped"
-            },
-            "type": "enum"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "entries": {
+                "answered": "answered",
+                "approved": "approved",
+                "cancelled": "cancelled",
+                "expired": "expired",
+                "rejected": "rejected",
+                "skipped": "skipped"
+              },
+              "type": "enum"
+            }
+          ]
         },
         "requestId": {
           "anyOf": [
@@ -932,31 +1070,35 @@
               "format": "uuid",
               "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
               "type": "string",
-              "x-opengeni-def": {
-                "checks": [
-                  {
-                    "abort": false,
-                    "check": "string_format",
-                    "format": "uuid",
-                    "pattern": {
-                      "flags": "",
-                      "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                    },
-                    "type": "string"
-                  }
-                ],
-                "type": "string"
-              }
+              "x-opengeni-defs": [
+                {
+                  "checks": [
+                    {
+                      "abort": false,
+                      "check": "string_format",
+                      "format": "uuid",
+                      "pattern": {
+                        "flags": "",
+                        "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                      },
+                      "type": "string"
+                    }
+                  ],
+                  "type": "string"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "x-opengeni-def": {
-            "checks": [],
-            "innerType": "<schema>",
-            "type": "nullable"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "innerType": "<schema>",
+              "type": "nullable"
+            }
+          ]
         },
         "respondedByKind": {
           "enum": [
@@ -966,27 +1108,31 @@
             "system"
           ],
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "entries": {
-              "agent_attempt": "agent_attempt",
-              "api": "api",
-              "human": "human",
-              "system": "system"
-            },
-            "type": "enum"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "entries": {
+                "agent_attempt": "agent_attempt",
+                "api": "api",
+                "human": "human",
+                "system": "system"
+              },
+              "type": "enum"
+            }
+          ]
         },
         "type": {
           "const": "child_requires_action_resolved",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "type": "literal",
-            "values": [
-              "child_requires_action_resolved"
-            ]
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "type": "literal",
+              "values": [
+                "child_requires_action_resolved"
+              ]
+            }
+          ]
         }
       },
       "required": [
@@ -1000,89 +1146,101 @@
         "respondedByKind"
       ],
       "type": "object",
-      "x-opengeni-def": {
-        "catchall": "<schema>",
-        "checks": [],
-        "shape": {
-          "approvalId": "<schema>",
-          "childSessionId": "<schema>",
-          "childTurnGeneration": "<schema>",
-          "childTurnId": "<schema>",
-          "outcome": "<schema>",
-          "requestId": "<schema>",
-          "respondedByKind": "<schema>",
-          "type": "<schema>"
-        },
-        "type": "object"
-      }
+      "x-opengeni-defs": [
+        {
+          "catchall": "<schema>",
+          "checks": [],
+          "shape": {
+            "approvalId": "<schema>",
+            "childSessionId": "<schema>",
+            "childTurnGeneration": "<schema>",
+            "childTurnId": "<schema>",
+            "outcome": "<schema>",
+            "requestId": "<schema>",
+            "respondedByKind": "<schema>",
+            "type": "<schema>"
+          },
+          "type": "object"
+        }
+      ]
     },
     "child_waiting_capacity": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": {
-        "x-opengeni-def": {
-          "checks": [],
-          "type": "unknown"
-        }
+        "x-opengeni-defs": [
+          {
+            "checks": [],
+            "type": "unknown"
+          }
+        ]
       },
       "properties": {
         "childSessionId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "childTurnId": {
           "format": "uuid",
           "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [
-              {
-                "abort": false,
-                "check": "string_format",
-                "format": "uuid",
-                "pattern": {
-                  "flags": "",
-                  "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-                },
-                "type": "string"
-              }
-            ],
-            "type": "string"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [
+                {
+                  "abort": false,
+                  "check": "string_format",
+                  "format": "uuid",
+                  "pattern": {
+                    "flags": "",
+                    "regex": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "type": "string"
+                }
+              ],
+              "type": "string"
+            }
+          ]
         },
         "nextCheckAt": {
           "anyOf": [
             {
               "type": "string",
-              "x-opengeni-def": {
-                "checks": [],
-                "type": "string"
-              }
+              "x-opengeni-defs": [
+                {
+                  "checks": [],
+                  "type": "string"
+                }
+              ]
             },
             {
               "type": "null"
             }
           ],
-          "x-opengeni-def": {
-            "checks": [],
-            "innerType": "<schema>",
-            "type": "nullable"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "innerType": "<schema>",
+              "type": "nullable"
+            }
+          ]
         },
         "provider": {
           "enum": [
@@ -1091,26 +1249,30 @@
             "claude"
           ],
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "entries": {
-              "claude": "claude",
-              "codex": "codex",
-              "xai": "xai"
-            },
-            "type": "enum"
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "entries": {
+                "claude": "claude",
+                "codex": "codex",
+                "xai": "xai"
+              },
+              "type": "enum"
+            }
+          ]
         },
         "type": {
           "const": "child_waiting_capacity",
           "type": "string",
-          "x-opengeni-def": {
-            "checks": [],
-            "type": "literal",
-            "values": [
-              "child_waiting_capacity"
-            ]
-          }
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "type": "literal",
+              "values": [
+                "child_waiting_capacity"
+              ]
+            }
+          ]
         }
       },
       "required": [
@@ -1121,18 +1283,20 @@
         "nextCheckAt"
       ],
       "type": "object",
-      "x-opengeni-def": {
-        "catchall": "<schema>",
-        "checks": [],
-        "shape": {
-          "childSessionId": "<schema>",
-          "childTurnId": "<schema>",
-          "nextCheckAt": "<schema>",
-          "provider": "<schema>",
-          "type": "<schema>"
-        },
-        "type": "object"
-      }
+      "x-opengeni-defs": [
+        {
+          "catchall": "<schema>",
+          "checks": [],
+          "shape": {
+            "childSessionId": "<schema>",
+            "childTurnId": "<schema>",
+            "nextCheckAt": "<schema>",
+            "provider": "<schema>",
+            "type": "<schema>"
+          },
+          "type": "object"
+        }
+      ]
     }
   },
   "revision": 1,

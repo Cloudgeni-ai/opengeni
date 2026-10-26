@@ -87,6 +87,33 @@ describe("child lifecycle notice protocol", () => {
     });
   }
 
+  const wrappers: Record<string, (schema: z.ZodType) => z.ZodType> = {
+    optional: (schema) => schema.optional(),
+    nullable: (schema) => schema.nullable(),
+    default: (schema) => (schema as z.ZodString).default("a"),
+    prefault: (schema) => (schema as z.ZodString).prefault("a"),
+    readonly: (schema) => schema.readonly(),
+    catch: (schema) => (schema as z.ZodString).catch("a"),
+    nonoptional: (schema) => schema.optional().nonoptional(),
+    lazy: (schema) => z.lazy(() => schema),
+    "optional twice": (schema) => schema.optional().readonly().optional(),
+  };
+  for (const [wrapper, wrap] of Object.entries(wrappers)) {
+    test(`inner limits, flags and URL restrictions stay visible under ${wrapper}`, () => {
+      for (const [before, after] of [
+        [utf8Bounded(256), utf8Bounded(512)],
+        [z.string(), utf8Bounded(512)],
+        [z.string().regex(/x/), z.string().regex(/x/i)],
+        [z.url({ protocol: /^https$/ }), z.url({ protocol: /^https?$/ })],
+        [z.url({ hostname: /^a\.test$/ }), z.url({ hostname: /^b\.test$/ })],
+      ] as const) {
+        expect(render(z.object({ field: wrap(after) }))).not.toBe(
+          render(z.object({ field: wrap(before) })),
+        );
+      }
+    });
+  }
+
   test("a refinement that does not record its limit as data is refused", () => {
     expect(() =>
       render(z.object({ note: z.string().refine((value) => value.length < 10, "too long") })),
@@ -99,6 +126,13 @@ describe("child lifecycle notice protocol", () => {
       .refine((value) => value.length < 10, { message: "too long", when: () => false });
     UTF8_BYTE_LIMIT_CHECKS.set(schema._zod.def.checks!.at(-1)!, 10);
     expect(() => render(z.object({ note: schema }))).toThrow(/conditional/);
+  });
+
+  test("a custom condition on a built-in check changes the rendering", () => {
+    const conditional = z.string().max(5);
+    const check = conditional._zod.def.checks!.at(-1)!._zod.def as { when?: unknown };
+    check.when = () => false;
+    expect(render(conditional)).not.toBe(render(z.string().max(5)));
   });
 
   test("preprocessing and transforms are refused", () => {

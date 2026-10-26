@@ -125,6 +125,8 @@ function checkData(check: ZodCheckInternals, owner: string): unknown {
   }
   if (def.check === "overwrite") return { check: "overwrite", source: String(def.tx) };
   const data = definitionData(def) as Record<string, unknown>;
+  // zod's own guard by default; a custom condition changes the rendering.
+  if (typeof def.when === "function") data.when = String(def.when);
   const message = refinementMessage(def.error);
   if (message !== null) data.message = message;
   return data;
@@ -132,8 +134,10 @@ function checkData(check: ZodCheckInternals, owner: string): unknown {
 
 /**
  * Input JSON Schema of one schema, with every node's own definition data and
- * checks recorded beside it (`x-opengeni-def`), because JSON Schema drops
- * refinements, regex flags and URL restrictions.
+ * checks recorded beside it (`x-opengeni-defs`), because JSON Schema drops
+ * refinements, regex flags and URL restrictions. Wrappers (optional, default,
+ * readonly, catch, lazy and similar) share their inner schema's JSON Schema
+ * node, so each definition is appended in visiting order, never replaced.
  */
 export function childLifecycleNoticeSchemaFingerprint(schema: z.ZodType): Json {
   return sortJson(
@@ -150,7 +154,9 @@ export function childLifecycleNoticeSchemaFingerprint(schema: z.ZodType): Json {
         recorded.checks = ((checks as ZodCheckInternals[] | undefined) ?? []).map((check) =>
           checkData(check, def.type),
         );
-        (ctx.jsonSchema as Record<string, unknown>)["x-opengeni-def"] = recorded;
+        const node = ctx.jsonSchema as Record<string, unknown>;
+        const defs = (node["x-opengeni-defs"] ??= []) as unknown[];
+        defs.push(recorded);
       },
     }),
   );
