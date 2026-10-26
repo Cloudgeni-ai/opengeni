@@ -989,7 +989,15 @@ export function registerRecordingRoutes(
           available: availability.get(provider.id) ?? false,
           funding: provider.funding,
           capabilities: spec.capabilities,
-          usdPerHour: spec.usdPerHour,
+          // A price only where this workspace pays it: its own key, or credits
+          // charged for a deployment's model. Otherwise the hour costs it nothing.
+          usdPerHour:
+            provider.funding === "workspace_key" ||
+            (provider.funding === "deployment" &&
+              voiceInputCreditBillingActive(deps.settings) &&
+              spec.creditPricing)
+              ? spec.usdPerHour
+              : null,
         })),
     );
     const voiceInput = WorkspaceVoiceInputSettings.safeParse(workspace?.settings.voiceInput).data;

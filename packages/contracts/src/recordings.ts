@@ -835,7 +835,12 @@ export const RecordingTranscriptionModel = /* @__PURE__ */ defineSchema(() =>
     available: z.boolean(),
     funding: RecordingTranscriptionFunding,
     capabilities: RecordingTranscriptionCapabilities,
-    /** List price in USD per audio hour, when known. */
+    /**
+     * What an audio hour costs this workspace in USD: the list price on its
+     * own key, or the credits charged for a deployment's model. Null when it
+     * pays nothing per hour (a subscription, or a model the deployment covers)
+     * or the price is unknown.
+     */
     usdPerHour: z.number().nullable(),
   }),
 );
