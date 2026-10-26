@@ -249,7 +249,8 @@ const MAX_PINNED_SCROLLERS = 256;
 /**
  * Finds the classic (space-taking) scrollbars a full-page capture would hide.
  * Vertical ones in the document tree are `pinned`: a selector keeps their
- * gutter. The rest (horizontal ones, those inside shadow trees, any past the
+ * gutter. Those whose gutter the page keeps stable itself need no rule; `own`
+ * holds the rule that re-evaluates their scrollbars afterwards. The rest (horizontal ones, those inside shadow trees, any past the
  * limit) cannot be kept, which makes the capture inexact; `refresh` names the
  * elements, or shadow hosts, whose style must change afterwards to bring
  * them back. Overlay scrollbars take no space and are never found.
@@ -259,15 +260,20 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
   if (!root) return null;
   const limit = ${MAX_PINNED_SCROLLERS};
   const pinned = [];
-  // A gutter the page already keeps stable (either edge or both) needs no
-  // rule, which could only change it; its scrollbar still has to be
-  // re-evaluated afterwards.
-  const stable = [];
-  const pin = (selector, style) =>
-    (String(style.scrollbarGutter).startsWith("stable") ? stable : pinned).push(selector);
+  // A gutter the page keeps stable itself already holds its space, so it
+  // gets no rule. Its scrollbar, if it shows one, is brought back afterwards
+  // by flipping overflow-y between scroll and auto, which lays out an
+  // overflowing scroller the same way and keeps any custom scrollbar style.
+  const own = [];
+  const pin = (selector, element, style) => {
+    if (!String(style.scrollbarGutter).startsWith("stable")) return pinned.push(selector);
+    const scroll = style.overflowY === "scroll";
+    if (!scroll && element.scrollHeight <= element.clientHeight) return;
+    own.push(selector + "{overflow-y:" + (scroll ? "auto" : "scroll") + "!important}");
+  };
   const refresh = new Set();
   let overflow = false;
-  if (innerWidth - root.clientWidth >= 1) pin(":root", getComputedStyle(root));
+  if (innerWidth - root.clientWidth >= 1) pin(":root", root, getComputedStyle(root));
   if (innerHeight - root.clientHeight >= 1) refresh.add(":root");
   // Changing a rule restyles every element its last compound could match, so
   // that compound names the element's tag, id and first class as well.
@@ -297,14 +303,20 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
       if (width === 0 && height === 0) continue;
       const wide = element.offsetWidth - width;
       const tall = element.offsetHeight - height;
-      // Equal borders and no scrollbar: skip the costly style read.
-      if (Math.abs(wide - 2 * element.clientLeft) < 1 && Math.abs(tall - 2 * element.clientTop) < 1) continue;
+      // Equal borders and no overflow: skip the costly style read. (A
+      // "stable both-edges" scroller's gutters look like equal borders.)
+      if (
+        Math.abs(wide - 2 * element.clientLeft) < 1 &&
+        Math.abs(tall - 2 * element.clientTop) < 1 &&
+        element.scrollHeight <= height &&
+        element.scrollWidth <= width
+      ) continue;
       const style = getComputedStyle(element);
       const vertical = wide - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth) >= 1;
       const horizontal = tall - parseFloat(style.borderTopWidth) - parseFloat(style.borderBottomWidth) >= 1;
       if (!vertical && !horizontal) continue;
-      const kept = vertical && !host && pinned.length + stable.length < limit;
-      if (kept) pin(path(element), style);
+      const kept = vertical && !host && pinned.length + own.length < limit;
+      if (kept) pin(path(element), element, style);
       if (horizontal || !kept) {
         if (refresh.size < limit) refresh.add(path(host ?? element));
         else overflow = true;
@@ -312,10 +324,11 @@ const SCROLLBAR_LAYOUT_EXPRESSION = `(() => {
     }
   };
   visit(document, null);
-  return { viewportWidth: innerWidth, pinned, stable, refresh: overflow ? [":root"] : [...refresh] };
+  return { viewportWidth: innerWidth, pinned, own, refresh: overflow ? [":root"] : [...refresh] };
 })()`;
-const STYLE_READ_EXPRESSION =
-  "document.documentElement ? getComputedStyle(document.documentElement).color : null";
+/** Lays the page out, which re-evaluates the scrollbars of restyled scrollers. */
+const LAYOUT_READ_EXPRESSION =
+  "document.documentElement ? document.documentElement.getBoundingClientRect().width : null";
 const MAX_FRAME_TREES = 512;
 const ACCESSIBILITY_FRAME_CONCURRENCY = 16;
 const ACCESSIBILITY_SNAPSHOT_ATTEMPTS = 3;
@@ -2135,18 +2148,17 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
       !Number.isFinite(found.viewportWidth) ||
       found.viewportWidth <= 0 ||
       !isSelectorList(found.pinned) ||
-      !isSelectorList(found.stable) ||
+      !isSelectorList(found.own) ||
       !isSelectorList(found.refresh)
     ) {
       return unchanged;
     }
     const viewportWidth = found.viewportWidth;
     const pinned = found.pinned;
+    const own = found.own;
     const refresh = found.refresh;
     const inexact = refresh.length > 0;
-    // Scrollbars that need a style change of their own afterwards.
-    const restyle = [...refresh, ...found.stable];
-    if (pinned.length === 0 && restyle.length === 0) {
+    if (pinned.length + own.length === 0 && !inexact) {
       return { viewportWidth, inexact, restore: async () => {} };
     }
     // Every step stays within the capture's own deadline.
@@ -2180,44 +2192,53 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     const restore = async () => {
       if (restored) return;
       restored = true;
-      const sheet = styleSheetId;
-      try {
-        if (sheet === null) return;
-        const setText = async (text: string) =>
-          await this.sendTarget(
-            state,
-            "CSS.setStyleSheetText",
-            { styleSheetId: sheet, text },
-            { timeoutMs: stepTimeout() },
-          );
+      // A JavaScript dialog can cut the capture short; the work it abandons
+      // may no longer reach the page. The restore only takes back this
+      // capture's own temporary style, so it runs outside that scope: its
+      // commands wait for the dialog to be answered and then apply.
+      await dialogWork.exit(async () => {
+        const sheet = styleSheetId;
         try {
-          // A style change on a scroller re-evaluates its scrollbars. The
-          // removed gutter rule does that for every pinned element. Scrollbars
-          // the sheet could not pin (horizontal ones, those inside shadow
-          // trees) and gutters the page keeps stable itself need a change of
-          // their own: scrollbar-color is inherited
-          // into shadow trees and changes no layout. That change needs a style
-          // pass before the sheet is cleared, or the two would cancel out, so
-          // a style read forces one.
-          if (restyle.length > 0 && deadline > Date.now()) {
-            await setText(`${restyle.join(",")}{scrollbar-color:GrayText Canvas!important}`);
-            await this.evaluateIsolated(state, STYLE_READ_EXPRESSION, stepTimeout());
+          if (sheet === null) return;
+          const setText = async (text: string) =>
+            await this.sendTarget(
+              state,
+              "CSS.setStyleSheetText",
+              { styleSheetId: sheet, text },
+              { timeoutMs: stepTimeout() },
+            );
+          try {
+            // A style change on a scroller re-evaluates its scrollbars. The
+            // removed gutter rule does that for every pinned element. Gutters
+            // the page keeps stable itself get the overflow-y flip found above.
+            // Scrollbars the sheet could not pin (horizontal ones, those inside
+            // shadow trees) get scrollbar-color, which is inherited into shadow
+            // trees and changes no layout of a standard scrollbar. Either change
+            // needs a layout pass before the sheet is cleared, or the two would
+            // cancel out, so a layout read forces one.
+            if ((inexact || own.length > 0) && deadline > Date.now()) {
+              await setText(
+                (inexact ? `${refresh.join(",")}{scrollbar-color:GrayText Canvas!important}` : "") +
+                  own.join(""),
+              );
+              await this.evaluateIsolated(state, LAYOUT_READ_EXPRESSION, stepTimeout());
+            }
+          } finally {
+            // Always clear the sheet, whatever the step above did: nothing of
+            // the capture may stay on the page. A busy page that misses this
+            // bound still runs the queued clear once it answers. The clear needs
+            // no style pass: the page's next frame or layout read applies it,
+            // before anything can see layout.
+            await setText("");
           }
+        } catch {
+          // The page may have moved to another document; its sheet went with it.
         } finally {
-          // Always clear the sheet, whatever the step above did: nothing of
-          // the capture may stay on the page. A busy page that misses this
-          // bound still runs the queued clear once it answers. The clear needs
-          // no style pass: the page's next frame or layout read applies it,
-          // before anything can see layout.
-          await setText("");
+          await this.sendTarget(state, "CSS.disable", {}, { timeoutMs: stepTimeout() }).catch(
+            () => undefined,
+          );
         }
-      } catch {
-        // The page may have moved to another document; its sheet went with it.
-      } finally {
-        await this.sendTarget(state, "CSS.disable", {}, { timeoutMs: stepTimeout() }).catch(
-          () => undefined,
-        );
-      }
+      });
     };
     return { viewportWidth, inexact, restore };
   }

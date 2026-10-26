@@ -2,11 +2,84 @@ import { expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
+import { inflateSync } from "node:zlib";
 import type { BrowserActionCommand, BrowserObservation } from "@opengeni/contracts";
 import { AgentBrowserDriver, CdpConnection, ManagedBrowserRunner } from "../src";
 import { CdpCommandTimeoutError } from "../src/cdp";
 
-const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
+const headed = process.env.OPENGENI_BROWSERD_HEADED_E2E === "1";
+const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" || headed ? test : test.skip;
+// Headed Chromium under a virtual display can size a 390 px emulated viewport
+// one pixel wider, in the tab's report or in its image, so widths are checked
+// within a CSS pixel (at the given scale).
+const near = (width: number | undefined, expected: number, scale = 1) =>
+  expect(Math.abs((width ?? 0) - expected * scale)).toBeLessThanOrEqual(scale);
+const near390 = (width: number | undefined) => near(width, 390);
+
+/** Decodes an 8-bit RGB or RGBA PNG, as Chromium writes them. */
+function pngPixels(data: Uint8Array): { width: number; channels: number; pixels: Uint8Array } {
+  const buffer = Buffer.from(data);
+  const chunks: Buffer[] = [];
+  let width = 0;
+  let height = 0;
+  let channels = 4;
+  for (let offset = 8; offset < buffer.length;) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString("ascii", offset + 4, offset + 8);
+    const body = buffer.subarray(offset + 8, offset + 8 + length);
+    if (type === "IHDR") {
+      width = body.readUInt32BE(0);
+      height = body.readUInt32BE(4);
+      channels = body[9] === 6 ? 4 : 3;
+    }
+    if (type === "IDAT") chunks.push(body);
+    offset += 12 + length;
+  }
+  const raw = inflateSync(Buffer.concat(chunks));
+  const stride = width * channels;
+  const pixels = new Uint8Array(stride * height);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)];
+    for (let x = 0; x < stride; x++) {
+      const at = y * stride + x;
+      const left = x >= channels ? pixels[at - channels]! : 0;
+      const up = y > 0 ? pixels[at - stride]! : 0;
+      const corner = x >= channels && y > 0 ? pixels[at - stride - channels]! : 0;
+      const guess = left + up - corner;
+      const nearest =
+        Math.abs(guess - left) <= Math.abs(guess - up) &&
+        Math.abs(guess - left) <= Math.abs(guess - corner)
+          ? left
+          : Math.abs(guess - up) <= Math.abs(guess - corner)
+            ? up
+            : corner;
+      const predicted = [0, left, up, (left + up) >> 1, nearest][filter!] ?? 0;
+      pixels[at] = (raw[y * (stride + 1) + 1 + x]! + predicted) & 255;
+    }
+  }
+  return { width, channels, pixels };
+}
+
+/**
+ * How many pixels two same-size PNGs differ in. Headed Chromium can draw an
+ * edge's antialiasing differently after it re-rasters a tile; a missing
+ * scrollbar differs in hundreds of pixels.
+ */
+function differingPixels(a: Uint8Array, b: Uint8Array): number {
+  const first = pngPixels(a);
+  const second = pngPixels(b);
+  expect(second.pixels.length).toBe(first.pixels.length);
+  let count = 0;
+  for (let at = 0; at < first.pixels.length; at += first.channels) {
+    if (
+      first.pixels[at] !== second.pixels[at] ||
+      first.pixels[at + 1] !== second.pixels[at + 1] ||
+      first.pixels[at + 2] !== second.pixels[at + 2]
+    )
+      count += 1;
+  }
+  return count;
+}
 
 /**
  * A settings page taller than a phone viewport, with a right-aligned button
@@ -61,6 +134,12 @@ async function withPage(
     /** Commands the page runs but whose reply arrives too late, as on a page
      * busy when the command lands. */
     late?: (method: string, params: Readonly<Record<string, unknown>>) => boolean;
+    /** Runs after each command the driver sends, with that command's session. */
+    after?: (
+      method: string,
+      params: Readonly<Record<string, unknown>>,
+      send: (method: string, params?: Record<string, unknown>) => Promise<unknown>,
+    ) => void;
   } = {},
 ): Promise<void> {
   const server = Bun.serve({
@@ -73,7 +152,7 @@ async function withPage(
   const controllerGeneration = `controller-${randomUUID()}`;
   const runner = await ManagedBrowserRunner.create({
     profileDirectory: join(directory, "profile"),
-    headed: false,
+    headed,
     ...(process.env.OPENGENI_BROWSER_EXECUTABLE
       ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
       : {}),
@@ -93,6 +172,16 @@ async function withPage(
         ) => {
           methods.push(method);
           const reply = await connection.send<T>(method, params, sendOptions);
+          options.after?.(
+            method,
+            params,
+            async (next, nextParams = {}) =>
+              await connection.send(
+                next,
+                nextParams,
+                sendOptions?.sessionId ? { sessionId: sendOptions.sessionId } : {},
+              ),
+          );
           if (options.late?.(method, params)) {
             throw new CdpCommandTimeoutError(method, sendOptions?.sessionId ?? "browser");
           }
@@ -158,24 +247,25 @@ e2e(
   async () => {
     await withPage(page(VERTICAL_PANES), { deviceScaleFactor: 1 }, async (input) => {
       const { driver, observation, evaluate } = input;
-      expect(observation.viewport?.width).toBe(390);
+      near390(observation.viewport?.width);
+      const viewportWidth = observation.viewport!.width;
       await evaluate("scrollTo(0, 300)");
       const before = JSON.parse((await evaluate("read()")) as string);
       // A classic scrollbar takes part of the 390 px viewport.
-      expect(before.root).toBeLessThan(390);
+      expect(before.root).toBeLessThan(viewportWidth);
       await evaluate("window.changes.length = 0");
 
       const viewportFrame = await driver.captureScreenshot(observation.target.id, {
         format: "png",
       });
-      expect(viewportFrame.width).toBe(390);
+      near(viewportFrame.width, viewportWidth);
       expect(viewportFrame.deviceScaleFactor).toBe(1);
 
       const frame = await driver.captureScreenshot(observation.target.id, {
         fullPage: true,
         format: "png",
       });
-      expect(frame.width).toBe(390);
+      near(frame.width, viewportWidth);
       expect(frame.height).toBeGreaterThan(2400);
       expect(frame.deviceScaleFactor).toBe(1);
       expect(frame.inexactScrollbars).toBeUndefined();
@@ -189,6 +279,9 @@ e2e(
         await evaluate("window.changes.filter((value) => JSON.parse(value).root > 1)"),
       ).toEqual([]);
       expect(JSON.parse((await evaluate("read()")) as string)).toEqual(before);
+      // Every scrollbar is drawn again: the viewport looks as it did.
+      const again = await driver.captureScreenshot(observation.target.id, { format: "png" });
+      expect(differingPixels(again.data, viewportFrame.data)).toBeLessThanOrEqual(4);
       // Page scripts see no stylesheet of ours.
       expect(await evaluate("document.styleSheets.length")).toBe(1);
     });
@@ -212,7 +305,7 @@ e2e(
         fullPage: true,
         format: "png",
       });
-      expect(frame.width).toBe(390);
+      near(frame.width, observation.viewport!.width);
       expect(frame.inexactScrollbars).toBe(true);
       await Bun.sleep(300);
       expect(JSON.parse((await evaluate("read()")) as string)).toEqual(before);
@@ -231,13 +324,13 @@ e2e(
         const viewportFrame = await driver.captureScreenshot(observation.target.id, {
           format: "png",
         });
-        expect(viewportFrame.width).toBe(780);
+        near(viewportFrame.width, observation.viewport!.width, 2);
         expect(viewportFrame.deviceScaleFactor).toBe(2);
         const frame = await driver.captureScreenshot(observation.target.id, {
           fullPage: true,
           format: "png",
         });
-        expect(frame.width).toBe(780);
+        near(frame.width, observation.viewport!.width, 2);
         expect(frame.deviceScaleFactor).toBe(2);
       },
     );
@@ -277,29 +370,71 @@ e2e(
 );
 
 e2e(
-  "a full-page capture keeps a page's own stable both-edges gutters",
+  "a dialog that cuts a full-page capture short leaves no style behind",
   async () => {
-    const html = page(VERTICAL_PANES).replace(
-      ".pane{",
-      ":root{scrollbar-gutter:stable both-edges}.pane{scrollbar-gutter:stable both-edges;",
+    const gutter = "getComputedStyle(document.documentElement).scrollbarGutter";
+    let answer: (() => Promise<unknown>) | null = null;
+    await withPage(
+      page(VERTICAL_PANES),
+      { deviceScaleFactor: 1 },
+      async ({ driver, observation, evaluate }) => {
+        expect(await evaluate(gutter)).toBe("auto");
+        await expect(
+          driver.captureScreenshot(observation.target.id, { fullPage: true, format: "png" }),
+        ).rejects.toThrow(/dialog/);
+        expect(answer).not.toBeNull();
+        await answer!();
+        // The capture's own restore applies once the page can answer again.
+        const until = Date.now() + 15_000;
+        while ((await evaluate(gutter)) !== "auto" && Date.now() < until) await Bun.sleep(100);
+        expect(await evaluate(gutter)).toBe("auto");
+      },
+      {
+        // The page opens an alert just as the gutters are pinned.
+        after: (method, params, send) => {
+          if (method !== "CSS.setStyleSheetText" || !String(params.text).includes("gutter")) return;
+          if (answer) return;
+          answer = async () => await send("Page.handleJavaScriptDialog", { accept: true });
+          void send("Runtime.evaluate", { expression: "alert('Saved')" }).catch(() => undefined);
+        },
+      },
     );
-    await withPage(html, { deviceScaleFactor: 1 }, async ({ driver, observation, evaluate }) => {
-      const before = JSON.parse((await evaluate("read()")) as string);
-      await evaluate("window.changes.length = 0");
-      const frame = await driver.captureScreenshot(observation.target.id, {
-        fullPage: true,
-        format: "png",
-      });
-      expect(frame.inexactScrollbars).toBeUndefined();
-      await Bun.sleep(300);
-      expect(
-        await evaluate("window.changes.filter((value) => JSON.parse(value).root > 1)"),
-      ).toEqual([]);
-      expect(JSON.parse((await evaluate("read()")) as string)).toEqual(before);
-    });
   },
   120_000,
 );
+
+for (const gutter of ["stable", "stable both-edges"]) {
+  e2e(
+    `a full-page capture keeps a page's own ${gutter} gutters and custom scrollbars`,
+    async () => {
+      // Every pane keeps its own gutter; one draws a 6 px custom scrollbar.
+      const html = page(VERTICAL_PANES).replace(
+        ".pane{",
+        `:root{scrollbar-gutter:${gutter}}.pane{scrollbar-gutter:${gutter};`,
+      );
+      await withPage(html, { deviceScaleFactor: 1 }, async ({ driver, observation, evaluate }) => {
+        const before = JSON.parse((await evaluate("read()")) as string);
+        const shown = await driver.captureScreenshot(observation.target.id, { format: "png" });
+        await evaluate("window.changes.length = 0");
+        const frame = await driver.captureScreenshot(observation.target.id, {
+          fullPage: true,
+          format: "png",
+        });
+        expect(frame.inexactScrollbars).toBeUndefined();
+        await Bun.sleep(300);
+        // No size change while captured (Chromium's own 1×1 step aside)...
+        expect(
+          await evaluate("window.changes.filter((value) => JSON.parse(value).root > 1)"),
+        ).toEqual([]);
+        expect(JSON.parse((await evaluate("read()")) as string)).toEqual(before);
+        // ...and every scrollbar, the custom one included, is drawn again.
+        const after = await driver.captureScreenshot(observation.target.id, { format: "png" });
+        expect(differingPixels(after.data, shown.data)).toBeLessThanOrEqual(4);
+      });
+    },
+    120_000,
+  );
+}
 
 e2e(
   "a page too tall to capture whole fails before any style changes",
