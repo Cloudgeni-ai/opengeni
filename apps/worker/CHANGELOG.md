@@ -1,5 +1,149 @@
 # @opengeni/worker-bundle
 
+## 5.4.2
+
+### Minor Changes
+
+- 5aa883b: Automations have a new overlap choice, `overlapPolicy: "steer"`, and it is the default for new automations. When an automation that continues a chat gets its next run while its own earlier run is still working there, the run reaches that turn at its next model step, the way a person's Steer does: the step's tool calls finish, and the agent then reads the new run together with the work so far instead of waiting for the whole turn. A turn anyone else started (a person, a goal continuation, another automation) still finishes first, and the run follows it; a run waiting on a person's approval keeps waiting. Runs that each start a new chat never overlap, so the choice changes nothing for them.
+
+  Creating an automation without `overlapPolicy` now gives `steer` (previously `allow_concurrent`, or `buffer_one` for a message scheduled into a chat). Existing automations keep their stored choice. Pass `buffer_one` to keep waiting for the whole turn. The automation form offers Steer, Queue and Skip, starting on Steer; the reusable automation panel creates chat automations with the default; and the agent tools now explain every overlap choice, including that `allow_concurrent` and `buffer_one` both wait in a chat.
+
+  A turn whose steer watch had noticed a waiting Steer that was then withdrawn (or whose automation was paused) no longer has every later model request cut short; it listens again and keeps working.
+
+- fd43805: The control worker now reports why durable queued turns are not running. `opengeni_turns_queued_by_hold{hold}` splits the existing `opengeni_turns_queued` total into `ready` (waiting for dispatch), `behind_active_turn`, `paused` (own, ancestor or workspace Pause), `failed` (resumes on the next message), `requires_action`, `waiting_capacity` and `cancelled`, and `opengeni_turns_queued_oldest_age_seconds{hold}` gives the oldest queued age in each class. Only `ready` prompts wait for a worker, so an old `ready` prompt is a stranded queue. Migration 0988 adds the content-free `opengeni_private.summarize_queued_turns_by_hold()` function and `@opengeni/db` exports `summarizeQueuedTurnsByHold` and `QUEUED_TURN_HOLDS`. The runtime grant is deferred for one release, so these series appear only after a later migration grants it; until then the worker publishes only the total. Prompts from a non-owner on a personal-machine chat that wait for the machine owner are not yet a separate class and count as `ready`.
+
+### Patch Changes
+
+- 38f5eb2: A turn that fails while a command is still waiting for its sandbox, for example because the sandbox could not be created, now records that command as not started instead of outcome unknown, so Retry stays available. Such a call is closed when it is recorded: if the sandbox comes up later, the command is not sent.
+- 4024f23: After history is compacted, a request the agent already answered keeps a short copy of that answer, so the agent no longer mistakes it for a pending request and answers it again. Answers are matched by the turn that wrote them, so a request in the turn still running stays open, and repeated compactions keep each request with its own answer.
+- bed99c5: Computer and browser calls of one model response that use the same ComputerSession, or the same BrowserSession tab, now run in model order, so a `computer_observe` written after a `computer_act` shows the window after it, and a parallel read can no longer replace the reading an unfenced action was fenced on. Calls on other sessions or tabs, and other tools, still run concurrently. CUA keyboard input fenced on an earlier reading of the same window is sent when that window's focused element is unchanged.
+- 7ba1be6: A Browser, Computer, Terminal or Files request that arrives while a chat's sandbox is still starting now waits for that start, as a turn does, instead of failing with "sandbox lease is not attachable". A fresh chat's first Browser or Computer open no longer needs a retry. The API and the worker share one wait for a starting sandbox.
+- 53e1fe5: Agents now find and open any of the person's computers in one call.
+
+  - interaction_discover lists the person's Connected Machines this chat can use (`machines`: name, OS, online state, whether it has a screen, the placement to open it with, and which one the chat is on). The model's view leaves out browser and computer sessions on machines listed as offline, and says how many it left out; Code Mode still receives every record.
+  - computer_open and browser_open with a Connected Machine placement the chat is not on move the chat there first, exactly as sandbox_swap would, instead of failing and asking for a separate swap, and the result says the chat moved. A personal machine whose owner has not allowed the chat yet shows the card to allow that machine in the same call. An open that names a Connected Machine placement runs in model order with the other calls of a response, like sandbox_swap; other opens still run in parallel.
+  - tool_search loads a tool by its exact name without the server prefix (`sandboxes_list` loads `opengeni__sandboxes_list`). When several servers share that name, Opengeni's own tool (else the first) loads and the others are listed as suggestions.
+  - An agent's swap and machine list through the API act for the person who started its turn when it moves or lists its own chat, as sandbox_swap and sandboxes_list do, so that person's Only me machines are in reach. Repointing another chat it may control works as before. An agent attempt may list its own chat's machines with the session read permission sandboxes_list needs.
+  - Moving a chat to a machine that has not reported its workspace root (or with an invalid working directory) is a typed refusal from the swap API, not a 500.
+  - A computer or browser request while the chat's current machine is offline or no longer usable is a 409 that says so, not a 500. Asking for another machine in that state gets the wrong-placement answer.
+
+- 5b9feb9: A meeting recorded with computer or tab audio now names its microphone after the person recording. Each new transcript version gives the microphone speaker the owner's person in the speaker directory, added for them if they have none, as "It's me" does, with `source: "track"` and no confidence, so it doesn't read as a voice suggestion. A name someone gave that speaker carries over through every later version instead (before, one that had already carried over once could be replaced), and a microphone alone stays diarized as Speaker 1, 2…. The naming enrolls nobody's voice: it gives no agreement, and an unconfirmed `track` speaker never teaches a voiceprint. Starting such a recording adds the owner to the directory, so the live preview shows the microphone under the owner's name to everyone watching (the person recording sees their own) and the computer or tab audio as "Others". New exports: `recordingMicrophoneIsOwner` (contracts), `ownerLiveLaneName` (react), `workspaceMemberDisplayName` and the `TrackSpeaker` type (db); `MeetingsListPage` and `RecorderPanel` take an optional `viewerName`, and `createRecording` an optional `ownerName`.
+- 454ca0a: Meeting transcripts and speaker names now stay in time with the recording when a capture
+  leaves small holes in its timestamps, as a desktop's computer-audio track can (33 seconds of
+  holes in an 8-minute meeting). Decoding closed those holes up, so words came out timed up to
+  half a minute early, and a model that decoded the audio itself could disagree with our speaker
+  turns. The worker now fills the holes with silence when it prepares a track, re-encoding it
+  instead of copying it, and in every decode it does itself, so every model, word alignment,
+  speaker detection and playback share the recording's own timeline. A track prepared before
+  this change is prepared again the next time it is transcribed.
+- d3d8ccf: A computer_open or browser_open that moved the chat to another machine and then failed now says the chat moved, so the agent does not assume it is still on its old machine. Moving a chat in the UI to a machine that has not reported its workspace folder, or whose workspace does not contain the chat's working folder, shows what to do instead of "Try again."
+- f84a6f5: A turn hit by a provider overload or server error in the middle of a streamed response now recovers on its own again, instead of sometimes stopping with "couldn't be retried automatically" or "an earlier request has an unresolved outcome". The stream reader cancels the response without waiting when it sees the error event, so failure handling could read the request's record a few milliseconds before its outcome was saved and treat it as unsettled. Failure handling now waits (briefly, at most ten seconds) for the outcomes this attempt has already started recording before it decides whether the turn can be retried.
+- 5f332c1: Fewer prompt-cache misses. Claude portable checkpoints and Codex remote compaction now send the exact ordinary request withheld at the compaction boundary, so they extend the cached request instead of re-projecting history that diverged at the first tool disclosure. Workspace governance moves from the system prompt to a durable history item written before the turn that first sees a new value, and Codex cache affinity is keyed by the session scope subject, so recovery attempts, steers and turns by other people no longer rewrite the start of every request. Each model call fact now records a request fingerprint, Claude's dropped-thinking counts and a warm-miss class in `prompt_cache_diagnostics`, with matching worker metrics.
+- e096a40: A turn whose model provider cannot be reached at all, as when the machine running it loses its internet connection, now waits for the connection to return instead of failing after five quick retries. It retries at a calm pace (up to every five minutes) for up to six hours from the first failure and continues by itself when the provider answers again; a new message still ends the wait at once. Name-resolution failures, refused connections, missing routes and the OpenAI SDK's bare "Connection error." qualify. Provider errors with an HTTP status, dropped or slow connections, unknown host names and TLS failures keep the existing five-retry budget. "No route to host" and "network is unreachable" failures are now retried instead of failing the turn at once.
+- 7d48157: Speaker detection for meeting recordings runs on 4 threads by default
+  instead of every core. A half-hour meeting takes 128 CPU-seconds instead of
+  304 on a 32-thread machine and still finishes alongside its transcription.
+  Word alignment keeps using every core.
+- f5b8289: An image provider that is out of credit, rate limited, refusing or down no longer fails the turn as if the chat model were out of credits. `generate_image` returns its own short error and the turn continues, so the agent can tell the person and offer something else. Nothing is charged and held credits are released at once. Operators get the `opengeni_image_generation_provider_failures_total` metric and an `image generation provider failed` warning with the provider's detail; the agent and the person never see provider account text or billing links. Any other tool error that carries a provider 402 or 429 now stops the turn as `tool_provider_refused` instead of `provider_quota_exhausted` or a chat-model rate limit.
+- 7a02989: Hand off retained commands with unavailable foreground observations before exposing their background command IDs, so finished turns can clean up without waiting for an unavailable observer. Preserve physical writer and capture fences, classify forgotten Modal exec state as uncertainty, and retain bounded probe diagnostics. Identify outstanding writer kinds during finalization and label deliberate worker containment even when Temporal masks its force-stop exception.
+- Updated dependencies [931325b]
+- Updated dependencies [23e7e1e]
+- Updated dependencies [d649005]
+- Updated dependencies [5aa883b]
+- Updated dependencies [f884a9b]
+- Updated dependencies [a57cfa8]
+- Updated dependencies [484a6ff]
+- Updated dependencies [8a13aa9]
+- Updated dependencies [9db3491]
+- Updated dependencies [4488c59]
+- Updated dependencies [5a48fe7]
+- Updated dependencies [3ee89da]
+- Updated dependencies [2a181e7]
+- Updated dependencies [f6298be]
+- Updated dependencies [58d272f]
+- Updated dependencies [3708369]
+- Updated dependencies [38f5eb2]
+- Updated dependencies [4024f23]
+- Updated dependencies [57e4bee]
+- Updated dependencies [bed99c5]
+- Updated dependencies [bd8e4b4]
+- Updated dependencies [a345601]
+- Updated dependencies [0b76a0a]
+- Updated dependencies [801743c]
+- Updated dependencies [b85edfc]
+- Updated dependencies [d562814]
+- Updated dependencies [01188c9]
+- Updated dependencies [415c32b]
+- Updated dependencies [7ba1be6]
+- Updated dependencies [995c16f]
+- Updated dependencies [53e1fe5]
+- Updated dependencies [db28f4f]
+- Updated dependencies [f0e8083]
+- Updated dependencies [f721495]
+- Updated dependencies [3532517]
+- Updated dependencies [d30a243]
+- Updated dependencies [659f5a4]
+- Updated dependencies [5b9feb9]
+- Updated dependencies [de7087a]
+- Updated dependencies [a2ae2ce]
+- Updated dependencies [cb15454]
+- Updated dependencies [1e015c1]
+- Updated dependencies [a8b429e]
+- Updated dependencies [5769285]
+- Updated dependencies [57cfc37]
+- Updated dependencies [f20b8fb]
+- Updated dependencies [96502c5]
+- Updated dependencies [e74e3db]
+- Updated dependencies [1ed80fb]
+- Updated dependencies [51915c3]
+- Updated dependencies [d3d8ccf]
+- Updated dependencies [1d2b021]
+- Updated dependencies [82a9da9]
+- Updated dependencies [5f332c1]
+- Updated dependencies [3cd4985]
+- Updated dependencies [fd43805]
+- Updated dependencies [47a0e5b]
+- Updated dependencies [ba4c9dc]
+- Updated dependencies [24b71c6]
+- Updated dependencies [50989e2]
+- Updated dependencies [47a0e5b]
+- Updated dependencies [7f9c06b]
+- Updated dependencies [1320698]
+- Updated dependencies [54c2f9e]
+- Updated dependencies [936d9e0]
+- Updated dependencies [4651b0d]
+- Updated dependencies [616950d]
+- Updated dependencies [f5b8289]
+- Updated dependencies [7a02989]
+- Updated dependencies [b833bfc]
+  - @opengeni/contracts@5.4.0
+  - @opengeni/config@5.4.0
+  - @opengeni/db@5.4.0
+  - @opengeni/sdk@5.4.0
+  - @opengeni/core@5.4.0
+  - @opengeni/runtime@5.4.0
+  - @opengeni/network@5.4.0
+  - @opengeni/codemode@5.4.0
+  - @opengeni/interaction@5.4.0
+  - @opengeni/capabilities@5.4.0
+  - @opengeni/github@5.4.0
+  - @opengeni/observability@5.4.0
+  - @opengeni/vaults@5.4.0
+  - @opengeni/vaults-bitwarden@5.4.0
+  - @opengeni/vaults-keeper@5.4.0
+  - @opengeni/vaults-protonpass@5.4.0
+  - @opengeni/storage@5.4.0
+  - @opengeni/codex@5.4.0
+  - @opengeni/documents@5.4.0
+  - @opengeni/events@5.4.0
+  - @opengeni/tool-gateway@5.4.0
+  - @opengeni/vaults-onepassword@5.4.0
+  - @opengeni/xai-subscription@5.4.0
+  - @opengeni/agent-proto@5.4.0
+  - @opengeni/decisions@5.4.0
+  - @opengeni/jev@5.4.0
+  - @opengeni/subscriptions@5.4.0
+
 ## 5.3.1
 
 ### Minor Changes
