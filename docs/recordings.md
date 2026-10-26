@@ -315,16 +315,23 @@ The recording providers:
   longer than about a quarter of an hour during its preview.
 
 The dictation providers in `docs/transcription.md` (OpenAI, Azure OpenAI and
-the two subscriptions) share the same registry, credentials and billing, and
-serve dictation only.
+the two subscriptions) share the same registry, credentials and billing. They
+return only text, so they serve meetings only where the deployment aligns
+words (`OPENGENI_RECORDING_WORD_ALIGNMENT=true`, set in the stock images).
 
-Meetings use Azure Speech when its account is configured, else ElevenLabs.
-`OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT` (`provider/model`, such as
-`elevenlabs/scribe_v2`) picks another default for the deployment, and a
-workspace can set its own in `settings.recordings.transcription`.
+The deployment's meeting default is Azure Speech when its account is
+configured, else ElevenLabs; `OPENGENI_RECORDING_TRANSCRIPTION_DEFAULT`
+(`provider/model`, such as `elevenlabs/scribe_v2`) picks another. A meeting
+runs the deployment's pin, else the model the request or the workspace names
+(`settings.recordings.transcription`), else the default when this workspace
+can use it, else the first model in the provider order that serves meetings
+and that this workspace can use. So a workspace signed in to a ChatGPT or
+SuperGrok subscription, or holding its own key, transcribes with it without
+picking it. With nothing usable it stays the default, and the transcript
+fails saying which provider to connect.
 `GET …/recording-models` lists the models, their capabilities, funding and
-whether each is available to this workspace, plus `dictationDefault` and
-`pinned`.
+whether each is available to this workspace, plus the `default` a meeting
+would run now, `dictationDefault` and `pinned`.
 
 A deployment-funded meeting transcript is charged in credits once it
 completes, at the model's price per hour of audio; workspace keys and
