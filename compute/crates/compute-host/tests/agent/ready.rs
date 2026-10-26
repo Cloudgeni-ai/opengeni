@@ -279,6 +279,52 @@ async fn a_create_that_asks_for_less_still_claims_a_ready_sandbox_given_its_guar
     lab.assert_clean();
 }
 
+/// A create that asks for a longer disk still claims a ready sandbox: the
+/// claim lengthens its disk and tells its paused VM before its guest runs
+/// again, so the guest grows its file system into it, and its record keeps
+/// the new length. A create that asks for none leaves the disk as it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_that_asks_for_a_longer_disk_claims_a_ready_sandbox_and_lengthens_it() {
+    const LONG: u64 = 64 << 20;
+    let lab = ready_lab(Lab::root(), Arc::default(), 2).await;
+    wait_filled(&lab, 2).await;
+    let filled = ready_dirs(&lab);
+    let longer = Request::Create {
+        id: id(1),
+        config: SandboxConfig::new(SHAPE.vcpus, SHAPE.memory_mib, NEVER).with_disk_mib(64),
+    };
+    assert_eq!(lab.client.call(&longer).await.unwrap(), Reply::Done);
+    assert_eq!(
+        lab.world.restores.load(Ordering::Relaxed),
+        2,
+        "the claim restored nothing"
+    );
+    let (dir, record) = record_of(&lab, id(1));
+    assert!(filled.contains(&dir), "it took a ready sandbox");
+    assert_eq!(record["config"]["disk_mib"], 64);
+    assert_eq!(record["allocation"]["disk_bytes"], LONG);
+    let disk = lab
+        .root
+        .join("state/vm/firecracker")
+        .join(&dir)
+        .join("root/disk.ext4");
+    assert_eq!(std::fs::metadata(disk).unwrap().len(), LONG);
+    assert_eq!(
+        *lab.world.drives_resized.lock().unwrap(),
+        [(dir, vec![LONG], true)],
+        "its paused VM was told"
+    );
+    assert_eq!(lab.run(id(1), &["sandbox?"]).await, [id(1).to_string()]);
+
+    wait_filled(&lab, 2).await;
+    assert_eq!(create(&lab, id(2)).await, Reply::Done);
+    let (_, record) = record_of(&lab, id(2));
+    assert!(record["config"].get("disk_mib").is_none());
+    assert_eq!(lab.world.drives_resized.lock().unwrap().len(), 1);
+    wait_filled(&lab, 2).await;
+    lab.assert_clean();
+}
+
 /// A ready sandbox's guest runs whole while it fills, so it starts at its
 /// shape's whole weight, as it is booked, and a create that asks for no
 /// request takes it at the default: a tenth of its processor.

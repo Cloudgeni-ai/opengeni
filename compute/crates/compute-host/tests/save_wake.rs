@@ -373,6 +373,7 @@ fn field<'a>(output: &'a str, name: &str) -> &'a str {
 async fn cycle(agent: &Agent, id: &str, deepest: LevelName, cycles: u32) {
     let id: Id = id.parse().unwrap();
     let config = SandboxConfig {
+        disk_mib: None,
         image: None,
         vcpus: 2,
         memory_mib: 512,
@@ -489,6 +490,7 @@ async fn survive_restart(lab: &Path, name: &str, deepest: LevelName, store: Opti
     let _ = std::fs::remove_dir_all(lab.join("ht").join(name));
     let agent = Process::start(lab, name, UID, store, RECORD_FOR).await;
     let config = SandboxConfig {
+        disk_mib: None,
         image: None,
         vcpus: 2,
         memory_mib: 512,
@@ -714,6 +716,7 @@ async fn a_guest_whose_pager_died_boots_afresh() {
     let _ = std::fs::remove_dir_all(lab.join("ht").join(&name));
     let agent = Process::start(&lab, &name, UID, store, RECORD_LONG).await;
     let config = SandboxConfig {
+        disk_mib: None,
         image: None,
         vcpus: 2,
         memory_mib: 512,
@@ -870,6 +873,7 @@ async fn a_checkpoint_of_a_running_guest_brings_it_back_on_another_host() {
     )
     .await;
     let config = SandboxConfig {
+        disk_mib: None,
         vcpus: 2,
         memory_mib: 512,
         memory_request_mib: None,

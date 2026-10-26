@@ -9,6 +9,7 @@
 
 mod api;
 mod balloon;
+mod drives;
 mod holder;
 mod jail;
 mod pager;
@@ -31,6 +32,7 @@ use tokio::time::{Instant, sleep, timeout};
 use self::api::Api;
 pub use self::api::ApiError;
 use self::balloon::Balloon;
+use self::drives::drive_config;
 pub use self::jail::BINARY_NAME;
 use self::jail::{
     API_SOCKET, Jail, LAUNCH_LEFTOVERS, Launch, PID_FILE, jailer_args, remove_if_present,
@@ -39,7 +41,7 @@ pub use self::process::Exit;
 use self::process::{Process, in_cgroup, parse_pid};
 use self::runtime::{Binary, chosen, readable, record_runtime, recorded_runtime};
 use crate::Readable;
-use crate::cgroup::{Cgroup, MemoryStats};
+use crate::cgroup::{Cgroup, MemoryStats, Writes};
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
@@ -863,13 +865,9 @@ impl Engine for Firecracker {
 
     async fn boot(&self, spec: &VmSpec) -> Result<FirecrackerVm, EngineError> {
         const OP: &str = "boot";
-        let owned = spec
-            .drives
-            .iter()
-            .filter(|drive| !drive.read_only)
-            .map(|drive| (drive.path.clone(), Owned::File))
-            .collect();
-        let vm = self.launch(spec, OP, owned, &self.binary).await?;
+        let vm = self
+            .launch(spec, OP, drives::owned(&spec.drives), &self.binary)
+            .await?;
         let configure = async {
             // A rejected configuration will not fix itself: fatal.
             let put = |path: &'static str, body: Value| {
@@ -888,21 +886,12 @@ impl Engine for Firecracker {
             )
             .await?;
             for drive in &spec.drives {
-                // No `cache_type`: Firecracker's default, `Unsafe`, offers
-                // the guest no flush, so the VMM syncs a drive only while
-                // it takes a snapshot. Callers that check a disk for lost
-                // writes around each snapshot rely on that.
                 vm.call(
                     OP,
                     ErrorKind::Fatal,
                     "PUT",
                     &format!("/drives/{}", drive.id),
-                    &json!({
-                        "drive_id": drive.id,
-                        "path_on_host": vm.inside(OP, &drive.path)?,
-                        "is_root_device": drive.root,
-                        "is_read_only": drive.read_only,
-                    }),
+                    &drive_config(drive, &vm.inside(OP, &drive.path)?),
                 )
                 .await?;
             }
@@ -961,16 +950,12 @@ impl Engine for Firecracker {
             Jail::new(spec).map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
         let body = load_request(spec, &jail, files, self.memory)
             .map_err(|error| EngineError::new(ErrorKind::Fatal, OP, error))?;
-        let owned: Vec<(PathBuf, Owned)> = spec
-            .drives
-            .iter()
-            .filter(|drive| !drive.read_only)
-            .map(|drive| (drive.path.clone(), Owned::File))
-            .collect();
         // Saved state and memory are only read; they stay the host's, so the
         // VMM cannot change an image it restores from.
         let binary = self.binary_for(files.made_under.as_deref());
-        let vm = self.launch(spec, OP, owned, binary).await?;
+        let vm = self
+            .launch(spec, OP, drives::owned(&spec.drives), binary)
+            .await?;
         if let MemorySource::Pager(pager) = &files.memory {
             // The host's own failure: the image is not in question.
             let started = async {
@@ -1161,6 +1146,10 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("set_memory_limit", error))
     }
 
+    async fn resize_drives(&self, vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {
+        drives::resize(vm, spec).await
+    }
+
     fn cpu_time(&self, vm: &FirecrackerVm) -> Result<Duration, EngineError> {
         vm.cgroup
             .cpu_time()
@@ -1171,6 +1160,19 @@ impl Engine for Firecracker {
         vm.cgroup
             .io_bytes()
             .map_err(|error| EngineError::io("io_bytes", error))
+    }
+
+    fn writes(&self, vm: &FirecrackerVm) -> Result<Writes, EngineError> {
+        vm.cgroup
+            .writes()
+            .map_err(|error| EngineError::io("writes", error))
+    }
+
+    fn settle_writes(
+        &self,
+        vm: &FirecrackerVm,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        drives::settled(vm.api.clone())
     }
 
     fn memory_stats(&self, vm: &FirecrackerVm) -> Result<MemoryStats, EngineError> {

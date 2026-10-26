@@ -324,6 +324,19 @@ image no create used for as long as a template may go unused, and whose
 template is gone, is removed. A create without an image uses the host's
 base image, as before.
 
+A create may ask for a longer disk than its image's (`disk_mib`, up to
+1 TiB). Its copy is made that long, the new end a hole that takes no host
+disk until the guest writes there, and the guest's init grows its ext4
+root file system to fill it at boot. Templates and ready clones stay per
+image and shape whatever disk a create asks for: a copy of a template is
+lengthened as it is made, a claimed clone as it is claimed, and the guest,
+which knows the template's length, is told the new one through its VMM
+before it next runs and grows its file system then. The new space's inode
+tables are never zeroed, since a hole reads as zeroes already: ext4 would
+otherwise write a sixty-fourth of the space added. Only images whose init
+is from a release that grows its disk do so; an older one runs with its
+image's file system on the longer disk.
+
 ## The fleet
 
 `compute-control` is the control service ([ADR 15](docs/adr/0015-placement-and-moves-between-hosts.md),
@@ -370,7 +383,9 @@ The baseline is the E2B JS SDK 2.56.0. One listener (`--e2b-listen`,
 connect, pause, kill, set the timeout, list templates) and traffic to
 `<port>-<id>.<domain>`, or to one address with the `E2b-Sandbox-Id` and
 `E2b-Sandbox-Port` headers. Templates name an image and a shape
-(`--e2b-template base=<image>:2x1024`). With `--e2b-tls-cert` and
+(`--e2b-template base=<image>:2x1024`), and may name the disk their
+sandboxes get (`--e2b-template ci=<image>:4x8192x65536`, in MiB, as a
+create's `disk_mib`). With `--e2b-tls-cert` and
 `--e2b-tls-key` it serves HTTPS itself, with one certificate for the API's
 name and `*.<domain>`; without them it speaks plain HTTP behind a load
 balancer that terminates TLS.

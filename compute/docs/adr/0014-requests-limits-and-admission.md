@@ -338,7 +338,10 @@ pick a VM.
   A sandbox's bound comes from its own disk's length, recorded when its
   disk is made, so a base image that changes later does not change what
   older sandboxes book; a new one before its disk exists uses today's
-  base image. A sandbox adopted from the store keeps the length of the
+  base image, grown to the disk length its create asks for (`disk_mib`)
+  where that is longer, and placement books the same length. A claim of a
+  ready clone records the length it lengthened the clone's disk to. A
+  sandbox adopted from the store keeps the length of the
   disk in the copy it claims. An awake VM's
   measurement uses its own disk's length too. A boot also relinks the
   kernel (tens of MiB, replacing the previous copy), which the reserve

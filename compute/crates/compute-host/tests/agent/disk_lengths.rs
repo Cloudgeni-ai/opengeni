@@ -1,12 +1,19 @@
 //! Disk lengths across restarts: what each sandbox, and each VM an earlier
-//! agent left running, books on local disk by its own disk's length.
+//! agent left running, books on local disk by its own disk's length; and
+//! disks a create asks to be longer than their image's.
 
+use std::os::unix::fs::MetadataExt;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
-use compute_core::{DiskPolicy, HostPolicy};
-use compute_host::protocol::{Reply, Request};
+use compute_core::{DiskPolicy, DiskSpace, HostPolicy};
+use compute_host::DiskGauge;
+use compute_host::protocol::{ErrorCode, MAX_DISK_MIB, Reply, Request, SandboxConfig};
+use tokio::time::{Instant, sleep};
 
-use super::{Delays, Lab, NEVER, id, vm_name};
+use super::{Delays, Lab, NEVER, World, id, vm_name};
 
 /// A sandbox's record keeps its disk's length, so what it books stays its
 /// own disk's however the host's base image changes, in object storage
@@ -28,6 +35,116 @@ async fn a_sandbox_keeps_its_disk_length_when_the_base_image_changes() {
     lab.create(other, NEVER).await;
     assert_eq!(lab.record(other)["allocation"]["disk_bytes"], 64 << 10);
     lab.assert_clean();
+}
+
+/// A create may ask for a longer disk than its image's: the disk is made
+/// that long at once, its new end a hole the guest grows into, and is
+/// recorded and booked at that length, across a restart too. Asking for
+/// less than the image holds keeps the image's length, and asking for more
+/// than the host's disk can take is refused for disk, leaving nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_may_ask_for_a_longer_disk_than_its_image() {
+    const IMAGE: u64 = 2 << 20;
+    const LONG: u64 = 64 << 20;
+    let root = Lab::root();
+    std::fs::write(root.join("base.img"), vec![1; 2 << 20]).unwrap();
+    let (lab, _) = gauged(root, Arc::default()).await;
+    let (long, short, huge) = (id(56), id(57), id(58));
+    assert_eq!(create(&lab, long, 64).await, Reply::Done);
+    assert_eq!(create(&lab, short, 1).await, Reply::Done);
+    let reply = create(&lab, huge, MAX_DISK_MIB).await;
+    assert!(
+        matches!(&reply, Reply::Error { code: ErrorCode::HostFull, message } if message.contains("disk")),
+        "{reply:?}"
+    );
+    assert!(
+        !lab.sandbox_dir(huge).exists(),
+        "the refused create made files"
+    );
+    let disk = |lab: &Lab, sandbox| lab.sandbox_dir(sandbox).join("root/disk.ext4");
+    let lengths = |lab: &Lab| {
+        [long, short].map(|sandbox| {
+            (
+                std::fs::metadata(disk(lab, sandbox)).unwrap().len(),
+                lab.record(sandbox)["allocation"]["disk_bytes"]
+                    .as_u64()
+                    .unwrap(),
+            )
+        })
+    };
+    assert_eq!(lengths(&lab), [(LONG, LONG), (IMAGE, IMAGE)]);
+    let held = std::fs::metadata(disk(&lab, long)).unwrap().blocks() * 512;
+    assert!(held < IMAGE + (1 << 20), "its new end is a hole: {held}");
+
+    let (root, world) = lab.stop().await;
+    let (lab, gauge) = gauged(root, world).await;
+    assert_eq!(lengths(&lab), [(LONG, LONG), (IMAGE, IMAGE)]);
+    // Awake, the long disk books all its guest may still write to it: what
+    // each books shows as it goes.
+    for sandbox in [long, short] {
+        assert_eq!(lab.run(sandbox, &["set awake"]).await, ["ok"]);
+    }
+    sleep(Duration::from_millis(200)).await;
+    let both = read(&lab, &gauge).await;
+    lab.remove(long).await;
+    let without_long = read(&lab, &gauge).await;
+    lab.remove(short).await;
+    let longer = (both - without_long) - (without_long - read(&lab, &gauge).await);
+    assert!(
+        longer >= LONG - IMAGE - (1 << 20),
+        "the long disk books {longer} more"
+    );
+    lab.assert_clean();
+}
+
+/// A lab at `root` with a disk policy, whose agent reads its disk from the
+/// gauge returned, and has read 64 GiB free.
+async fn gauged(root: PathBuf, world: Arc<World>) -> (Lab, DiskGauge) {
+    let gauge = DiskGauge::default();
+    let reading = gauge.clone();
+    let lab = Lab::start_configured(
+        root,
+        world,
+        Delays::default(),
+        HostPolicy::default(),
+        move |config| {
+            config.policy.disk = Some(DiskPolicy {
+                reserve: 0,
+                reserve_inodes: 0,
+            });
+            config.disk_reading = Some(reading);
+        },
+    )
+    .await;
+    read(&lab, &gauge).await;
+    (lab, gauge)
+}
+
+/// Has the agent of `lab` read 64 GiB free, then tells what its disk book
+/// holds.
+async fn read(lab: &Lab, gauge: &DiskGauge) -> u64 {
+    gauge.give(DiskSpace {
+        bytes: 64 << 30,
+        inodes: 1 << 30,
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !gauge.taken() {
+        assert!(Instant::now() < deadline, "no sample took the reading");
+        sleep(Duration::from_millis(5)).await;
+    }
+    lab.status().await.disk.unwrap().booked
+}
+
+/// Asks `lab` for sandbox `sandbox` with a disk of at least `disk_mib`.
+async fn create(lab: &Lab, sandbox: compute_host::protocol::Id, disk_mib: u32) -> Reply {
+    let config = SandboxConfig::new(1, 256, NEVER).with_disk_mib(disk_mib);
+    lab.client
+        .call(&Request::Create {
+            id: sandbox,
+            config,
+        })
+        .await
+        .unwrap()
 }
 
 /// A VM left running books its own disk's length while a restart's removal

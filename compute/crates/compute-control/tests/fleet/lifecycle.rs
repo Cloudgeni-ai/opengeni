@@ -4,14 +4,14 @@
 use std::time::Duration;
 
 use compute_fleet::HostId;
-use compute_protocol::fleet::{HostInfo, REGISTER_PATH, Register, Registered};
+use compute_protocol::fleet::{Capacity, HostInfo, REGISTER_PATH, Register, Registered};
 use compute_protocol::host::{ErrorCode, Reply, Request};
 use reqwest::Method;
 use serde_json::json;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::support::{
-    Act, Fleet, KEY, OPERATOR_KEY, OTHER_KEY, connect, id, op_name, roomy, until,
+    Act, FakeHost, Fleet, KEY, OPERATOR_KEY, OTHER_KEY, connect, id, op_name, roomy, until,
 };
 
 #[tokio::test]
@@ -166,6 +166,39 @@ async fn a_sandbox_whose_create_says_nothing_of_sleep_is_checkpointed_as_the_fle
         .await;
     assert_eq!(status, 201, "{row}");
     assert_eq!(row["config"]["sleep"], sleep);
+}
+
+/// A create may ask for a longer disk than its image's: it goes only to a
+/// host with that much disk free, which is asked for it. One asking for a
+/// size no disk is made with is refused before any host is asked.
+#[tokio::test]
+async fn a_create_asking_for_a_longer_disk_goes_to_a_host_with_room_for_it() {
+    let fleet = Fleet::start().await;
+    let small = FakeHost::start(
+        &fleet,
+        "host-a.example",
+        Capacity {
+            disk_free_mib: 32 << 10,
+            ..roomy()
+        },
+    )
+    .await;
+    fleet.sees(&small).await;
+    let large = fleet.host("host-b.example").await;
+    let asking = |disk_mib: u32| json!({ "vcpus": 1, "memory_mib": 256, "disk_mib": disk_mib });
+    let (status, row) = fleet.post("/v1/sandboxes", asking(64 << 10)).await;
+    assert_eq!(status, 201, "{row}");
+    assert_eq!(row["host"], "host-b.example");
+    assert_eq!(row["config"]["disk_mib"], 64 << 10);
+    let Request::Create { config, .. } = &large.seen()[0].envelope.request else {
+        panic!("not a create");
+    };
+    assert_eq!(config.disk_mib, Some(64 << 10));
+    assert!(small.ops().is_empty(), "{:?}", small.ops());
+
+    let (status, body) = fleet.post("/v1/sandboxes", asking(0)).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(small.ops().is_empty() && large.ops().len() == 1);
 }
 
 #[tokio::test]

@@ -160,6 +160,7 @@ impl CreateArgs {
             settings.compress = compress;
         }
         SandboxConfig {
+            disk_mib: None,
             image: self.image,
             vcpus: self.vcpus,
             memory_mib: self.memory_mib,

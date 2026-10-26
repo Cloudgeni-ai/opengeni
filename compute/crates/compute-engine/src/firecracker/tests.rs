@@ -1,6 +1,6 @@
 use super::runtime::{Format, cpu_model, runtime_of};
 use super::*;
-use crate::spec::Network;
+use crate::spec::{Drive, Network};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -478,6 +478,33 @@ fn spec() -> VmSpec {
         network: None,
         free_page_reporting: true,
     }
+}
+
+/// The host gets back what the guest frees on a disk it may write; a
+/// read-only drive takes no discard, which Firecracker refuses for one.
+#[test]
+fn writable_drives_take_the_guests_discards() {
+    let mut drive = Drive {
+        id: "rootfs".into(),
+        path: "/lab/vm/firecracker/a/root/rootfs.ext4".into(),
+        root: true,
+        read_only: false,
+    };
+    let config = drive_config(&drive, Path::new("/rootfs.ext4"));
+    assert_eq!(
+        config,
+        json!({
+            "drive_id": "rootfs",
+            "path_on_host": "/rootfs.ext4",
+            "is_root_device": true,
+            "is_read_only": false,
+            "discard": true,
+        })
+    );
+    drive.read_only = true;
+    let config = drive_config(&drive, Path::new("/rootfs.ext4"));
+    assert_eq!(config["is_read_only"], true);
+    assert_eq!(config["discard"], false);
 }
 
 #[test]

@@ -21,7 +21,7 @@ use std::future::Future;
 use std::os::fd::OwnedFd;
 use std::time::Duration;
 
-pub use cgroup::MemoryStats;
+pub use cgroup::{MemoryStats, Writes};
 pub use error::{EngineError, ErrorKind};
 pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
 pub use spec::{
@@ -241,6 +241,39 @@ pub trait Engine: Send + Sync + 'static {
     /// same VM mean anything.
     fn io_bytes(&self, vm: &Self::Vm) -> Result<u64, EngineError>;
 
+    /// What the VM's processes have written through system calls since
+    /// they started: every write its VMM makes to the VM's drives counts
+    /// once the call returns, and every file page it dirties, also with no
+    /// write call (as a discard over part of a block does), counts as it is
+    /// dirtied, besides others an engine documents. Only differences
+    /// between readings of the same VM mean anything. Engines that cannot
+    /// tell report an error.
+    fn writes(&self, vm: &Self::Vm) -> Result<Writes, EngineError> {
+        let _ = vm;
+        Err(EngineError::new(
+            ErrorKind::Transient,
+            "writes",
+            "this engine does not count a VM's writes",
+        ))
+    }
+
+    /// Resolves once every write to the VM's drives that its VMM had
+    /// started when this is first polled has returned, so a
+    /// [`Engine::writes`] reading taken after it counts them all. The
+    /// future does not borrow the VM. Engines that cannot tell report an
+    /// error.
+    fn settle_writes(
+        &self,
+        vm: &Self::Vm,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send + 'static {
+        let _ = vm;
+        std::future::ready(Err(EngineError::new(
+            ErrorKind::Transient,
+            "settle_writes",
+            "this engine cannot tell when a VM's writes have returned",
+        )))
+    }
+
     /// The VM's zswap traffic and memory pressure so far. A running VM is
     /// never compressed, so its `zswpout` grows only while it is paused.
     /// Engines that cannot tell report an error.
@@ -283,6 +316,24 @@ pub trait Engine: Send + Sync + 'static {
             "set_memory_limit",
             "this engine cannot change a VM's memory limit",
         ))
+    }
+
+    /// Tells the guest of `vm`, started from `spec`, how long each of its
+    /// writable drives is now: their files grew since it last learned
+    /// that, at its boot or in the state it was restored from. A paused
+    /// guest learns it when it next runs. Engines whose drives cannot
+    /// change length report an error, and the VM keeps the drives it had.
+    fn resize_drives(
+        &self,
+        vm: &Self::Vm,
+        spec: &VmSpec,
+    ) -> impl Future<Output = Result<(), EngineError>> + Send {
+        let _ = (vm, spec);
+        std::future::ready(Err(EngineError::new(
+            ErrorKind::Transient,
+            "resize_drives",
+            "this engine cannot change a drive's length",
+        )))
     }
 
     /// Resolves once the VM process has ended for any reason, including

@@ -172,6 +172,7 @@ impl Sandbox {
     /// Inserts the sandbox's record and applies `change` to it.
     async fn record(&self, change: Change) -> Record {
         let config = SandboxConfig {
+            disk_mib: None,
             image: None,
             vcpus: 1,
             memory_mib: 256,
@@ -771,6 +772,51 @@ async fn a_checkpoint_cancelled_before_it_captured_anything_reports_it_wrote_not
         assert_eq!(ran.outcome, Outcome::Cancelled, "{step:?}");
         assert_eq!(ran.report.wrote, wrote, "{step:?}");
     }
+}
+
+/// A checkpoint cancelled once it asked its guest to write its disks out
+/// reports that it wrote: the guest trims its disks as it does, and may
+/// take what it freed again, so the core must keep what it booked until a
+/// reading measures the disk.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_checkpoint_cancelled_while_its_guest_syncs_reports_it_wrote() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let sandbox = Sandbox::new().await;
+    let record = sandbox.record(Change::new()).await;
+    let mut job = sandbox.job(NoStore, record, true);
+    job.restore_notice_port = Some(53);
+    let listener = tokio::net::UnixListener::bind(job.spec.vsock_path()).unwrap();
+    let (asked, synced) = tokio::sync::oneshot::channel();
+    let guest = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(lines.next_line().await.unwrap().unwrap(), "CONNECT 53");
+        write.write_all(b"OK 1073741824\n").await.unwrap();
+        assert_eq!(lines.next_line().await.unwrap().unwrap(), "sync");
+        // It trims and writes; the answer has not come when the step ends.
+        asked.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let cancel = job.cancel.clone();
+    let running = tokio::spawn(async move { job.run(Step::Checkpoint).await });
+    tokio::time::timeout(Duration::from_secs(5), synced)
+        .await
+        .expect("the checkpoint asked its guest to sync")
+        .unwrap();
+    cancel.cancel();
+    let ran = tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the cancelled checkpoint ends")
+        .unwrap();
+    guest.abort();
+    assert_eq!(ran.outcome, Outcome::Cancelled);
+    assert!(
+        ran.report.wrote,
+        "its guest may have trimmed and taken space again"
+    );
 }
 
 /// A failed disk check, or one an agent never finished, keeps every later

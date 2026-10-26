@@ -76,6 +76,11 @@
 //! boots the disk (see [`crate::protocol::Request::Adopt`]). A guest that
 //! does not know the request does not answer; the host waits a short
 //! while and saves anyway, so the disk is then as after a power cut.
+//! Before it answers, the guest also trims its root file system: the
+//! drive takes discards, so the host's file gives back what the guest's
+//! files freed, and the saved disk, its archive and its copies hold only
+//! what they use. A guest that does not trim keeps its disk's file as
+//! large as its guest ever filled it.
 //!
 //! Last, while a sandbox runs the host connects to the port every so often
 //! without sending a line, and closes the connection again: a guest reads

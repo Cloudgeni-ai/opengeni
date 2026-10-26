@@ -7,7 +7,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io;
 use std::net::Ipv4Addr;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::Duration;
 
 fn check(result: libc::c_int) -> io::Result<()> {
@@ -63,6 +63,116 @@ pub fn remount_root_read_only() -> io::Result<()> {
     })
 }
 
+/// The `statvfs` flags a remount must give again to keep them, each with
+/// its `mount(2)` flag.
+const KEPT_ON_REMOUNT: [(libc::c_ulong, libc::c_ulong); 8] = [
+    (libc::ST_RDONLY, libc::MS_RDONLY),
+    (libc::ST_NOSUID, libc::MS_NOSUID),
+    (libc::ST_NODEV, libc::MS_NODEV),
+    (libc::ST_NOEXEC, libc::MS_NOEXEC),
+    (libc::ST_SYNCHRONOUS, libc::MS_SYNCHRONOUS),
+    (libc::ST_NOATIME, libc::MS_NOATIME),
+    (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
+    (libc::ST_RELATIME, libc::MS_RELATIME),
+];
+
+/// Whether the root file system is mounted read-only.
+pub fn root_read_only() -> io::Result<bool> {
+    Ok(root_flags()? & libc::ST_RDONLY != 0)
+}
+
+/// The root file system's `statvfs` flags.
+fn root_flags() -> io::Result<libc::c_ulong> {
+    let root = c_string("/")?;
+    // SAFETY: statvfs is plain data, valid when zeroed.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid string and a statvfs that outlive the call.
+    check(unsafe { libc::statvfs(root.as_ptr(), &raw mut stat) })?;
+    Ok(stat.f_flag)
+}
+
+/// Remounts the root file system with its file system's options `data`
+/// changed, and everything else as it is.
+pub fn remount_root(data: &str) -> io::Result<()> {
+    let found = root_flags()?;
+    let flags = KEPT_ON_REMOUNT
+        .iter()
+        .filter(|(kept, _)| found & kept != 0)
+        .fold(libc::MS_REMOUNT, |flags, (_, flag)| flags | flag);
+    let (root, data) = (c_string("/")?, c_string(data)?);
+    // SAFETY: valid strings that outlive the call; null source and type are
+    // allowed for a remount.
+    check(unsafe {
+        libc::mount(
+            std::ptr::null(),
+            root.as_ptr(),
+            std::ptr::null(),
+            flags,
+            data.as_ptr().cast(),
+        )
+    })
+}
+
+/// `EXT4_IOC_RESIZE_FS`: `_IOW('f', 16, __u64)`.
+const EXT4_IOC_RESIZE_FS: libc::Ioctl = libc::_IOW::<u64>(0x66, 16);
+
+/// Grows the ext4 file system holding `path`, mounted, to `blocks` of its
+/// blocks. Any other file system fails with `ENOTTY`.
+pub fn resize_file_system(path: &str, blocks: u64) -> io::Result<()> {
+    let dir = File::open(path)?;
+    // SAFETY: an open descriptor and a u64 that outlives the call, which
+    // the kernel only reads.
+    check(unsafe { libc::ioctl(dir.as_raw_fd(), EXT4_IOC_RESIZE_FS, &raw const blocks) })
+}
+
+/// The kernel's device events, as it sends them to the group every
+/// listener of them joins.
+#[derive(Debug)]
+pub struct DeviceEvents(OwnedFd);
+
+impl DeviceEvents {
+    /// Starts taking device events; those sent before are not seen.
+    pub fn open() -> io::Result<Self> {
+        // SAFETY: no pointers; a returned descriptor is owned by the caller.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_NETLINK,
+                libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+                libc::NETLINK_KOBJECT_UEVENT,
+            )
+        };
+        check(fd)?;
+        // SAFETY: `fd` was just returned by socket(2) and nothing else owns it.
+        let socket: OwnedFd = unsafe { std::os::fd::FromRawFd::from_raw_fd(fd) };
+        // SAFETY: sockaddr_nl is plain data, valid when zeroed.
+        let mut address: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
+        address.nl_family = libc::sa_family_t::try_from(libc::AF_NETLINK).unwrap_or_default();
+        address.nl_groups = 1;
+        let length =
+            libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_nl>()).unwrap_or_default();
+        // SAFETY: an open descriptor and an address of `length` bytes that
+        // outlives the call.
+        check(unsafe { libc::bind(socket.as_raw_fd(), (&raw const address).cast(), length) })?;
+        Ok(Self(socket))
+    }
+
+    /// Waits for the next event and returns it, cut to `buffer`'s length.
+    pub fn next<'a>(&self, buffer: &'a mut [u8]) -> io::Result<&'a [u8]> {
+        // SAFETY: an open descriptor and a buffer of `len` bytes that
+        // outlives the call, which the kernel writes at most `len` of.
+        let read = unsafe {
+            libc::recv(
+                self.0.as_raw_fd(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                0,
+            )
+        };
+        let read = usize::try_from(read).map_err(|_| io::Error::last_os_error())?;
+        Ok(&buffer[..read.min(buffer.len())])
+    }
+}
+
 /// Makes ctrl-alt-del send SIGINT to this process instead of rebooting
 /// at once, so the host's request to shut down gets a clean shutdown.
 pub fn ctrl_alt_del_signals() -> io::Result<()> {
@@ -110,6 +220,33 @@ pub fn reseed_random(urandom: &File) -> io::Result<()> {
 pub fn sync() {
     // SAFETY: no arguments.
     unsafe { libc::sync() };
+}
+
+/// `struct fstrim_range` of `linux/fs.h`.
+#[repr(C)]
+struct TrimRange {
+    start: u64,
+    len: u64,
+    minlen: u64,
+}
+
+/// `FITRIM`: `_IOWR('X', 121, struct fstrim_range)`.
+const FITRIM: libc::Ioctl = libc::_IOWR::<TrimRange>(0x58, 121);
+
+/// Has the file system holding `path` discard its free space, in runs of
+/// at least `min_len` bytes (`FITRIM`), and returns the bytes it
+/// discarded. A device that takes no discards fails with `EOPNOTSUPP`.
+pub fn trim(path: &str, min_len: u64) -> io::Result<u64> {
+    let dir = File::open(path)?;
+    let mut range = TrimRange {
+        start: 0,
+        len: u64::MAX,
+        minlen: min_len,
+    };
+    // SAFETY: an open descriptor and a `fstrim_range` that outlives the
+    // call, which the kernel reads and then updates in place.
+    check(unsafe { libc::ioctl(dir.as_raw_fd(), FITRIM, &raw mut range) })?;
+    Ok(range.len)
 }
 
 /// Whether any process but this one (and kernel threads) is left.
@@ -371,5 +508,24 @@ pub fn add_default_route(gateway: Ipv4Addr) -> io::Result<()> {
     }) {
         Err(error) if error.raw_os_error() == Some(libc::EEXIST) => Ok(()),
         result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EXT4_IOC_RESIZE_FS, FITRIM, ioctl_number};
+
+    /// The number `linux/fs.h` gives `FITRIM` on every architecture the
+    /// guest is built for.
+    #[test]
+    fn trim_is_the_kernels_fitrim() {
+        assert_eq!(FITRIM, ioctl_number(0xC018_5879));
+    }
+
+    /// The number `linux/ext4.h` gives `EXT4_IOC_RESIZE_FS` on every
+    /// architecture the guest is built for.
+    #[test]
+    fn resize_is_ext4s_online_resize() {
+        assert_eq!(EXT4_IOC_RESIZE_FS, ioctl_number(0x4008_6610));
     }
 }

@@ -7,7 +7,9 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use compute_core::{Admission, DiskPolicy, HostPolicy, MemoryPolicy};
-use compute_host::protocol::{HostStatus, Id, LevelName, Reply, SandboxConfig, TemplateState};
+use compute_host::protocol::{
+    HostStatus, Id, LevelName, Reply, Request, SandboxConfig, TemplateState,
+};
 use compute_host::{Directory, HostConfig, PoolConfig, Shape};
 use tokio::time::{Instant, sleep};
 
@@ -121,6 +123,43 @@ async fn new_sandboxes_restore_the_template_and_learn_who_they_are() {
         ["ok", "mine"]
     );
     assert_eq!(lab.run(id(2), &["disk"]).await, ["base"]);
+    lab.assert_clean();
+}
+
+/// A new sandbox that asks for a longer disk still restores the template:
+/// its copy of the disk is made that long, and its restored VM is told
+/// while paused, before its guest first runs and learns which sandbox it
+/// is, so the guest grows its file system into it. Later wakes are not
+/// told again: the guest knows its disk's length from then on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_with_a_longer_disk_restores_the_template_and_its_vm_is_told() {
+    const LONG: u64 = 64 << 20;
+    let lab = warm_lab(Lab::root(), Arc::default(), Delays::default(), vec![SHAPE]).await;
+    wait_ready(&lab).await;
+    let sandbox = id(1);
+    let create = Request::Create {
+        id: sandbox,
+        config: SandboxConfig::new(SHAPE.vcpus, SHAPE.memory_mib, NEVER).with_disk_mib(64),
+    };
+    assert_eq!(lab.client.call(&create).await.unwrap(), Reply::Done);
+    assert!(memory_saved(&lab.status().await, sandbox), "a template's");
+    let disk = lab.sandbox_dir(sandbox).join("root/disk.ext4");
+    assert_eq!(std::fs::metadata(&disk).unwrap().len(), LONG);
+    assert_eq!(lab.record(sandbox)["allocation"]["disk_bytes"], LONG);
+    assert!(lab.world.drives_resized.lock().unwrap().is_empty());
+
+    assert_eq!(lab.run(sandbox, &["sandbox?"]).await, [sandbox.to_string()]);
+    assert_eq!(
+        *lab.world.drives_resized.lock().unwrap(),
+        [(vm_name(sandbox), vec![LONG], true)],
+        "told while paused, before its guest ran"
+    );
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1, "none booted");
+
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert_eq!(lab.run(sandbox, &["sandbox?"]).await, [sandbox.to_string()]);
+    assert_eq!(lab.world.drives_resized.lock().unwrap().len(), 1);
     lab.assert_clean();
 }
 
