@@ -1686,6 +1686,12 @@ function SessionsIndexRouteContent({
               gap={creditGap}
               message={refusedCreate?.message}
               workspaceId={workspaceId}
+              accountId={workspace?.accountId ?? null}
+              canReadBilling={hasAccountPermission(
+                context.accessContext,
+                workspace?.accountId ?? "",
+                "billing:read",
+              )}
               canBuyCredits={
                 context.clientConfig.billingMode === "stripe" &&
                 hasAccountPermission(
@@ -2046,7 +2052,13 @@ function SessionsIndexRouteContent({
         {starters ? (
           <NewSessionStarters
             workspaceId={workspaceId}
-            set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
+            set={signupStarterSet(
+              context.authSession?.user.email,
+              workspace?.accountId,
+              context.managedSelfContext?.memberships.find(
+                (membership) => membership.organizationId === workspace?.accountId,
+              )?.signupUseCase,
+            )}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
               setMessage(prompt);

@@ -114,9 +114,11 @@ export function tryParseJson(text: string): unknown {
 
 /**
  * The canonical credit-death sentence. Credit exhaustion is the one failure a
- * user can fix themselves — the copy must say what happened (the remaining
- * credit does not cover this model, though it may cover others), what to do
- * (choose a covered model or add credits), and what is safe (nothing was lost). Crucially it
+ * user can fix themselves — the copy must say what happened (there isn't
+ * enough credit for this model), what to do (add credits or choose another
+ * model), and what is safe (nothing was lost). It must stay true both with no
+ * credit at all and with credit that covers only other models, since the app's
+ * credit notice beside it names which one applies. Crucially it
  * must NOT say "send a message to revive": a revive turn burns credits the
  * workspace no longer has.
  */

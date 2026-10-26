@@ -7,6 +7,8 @@ import { analyticsAction } from "../../../ui/analytics-actions";
 import { apiErrorFacts } from "../../../ui/api-error";
 import { modelListSummary } from "../../lib/credit-coverage";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
+import { useAppContext } from "../../app-context";
+import { useCreditBalance } from "./use-credit-balance";
 
 /**
  * The API refused a Send or a new chat because no credit pays for its model.
@@ -14,13 +16,17 @@ import type { FreeCreditGap } from "../../lib/free-credit-gap";
  * not only a short line under a failed bubble: it names the model, the
  * server's reason, the models the remaining credit covers, and the next step.
  * When no credit covers any model, it says that plainly instead, in the same
- * words as the notice shown before the first Send.
+ * words as the notice shown before the first Send: with no credit at all, that
+ * there is none; with credit this model can't use (for example promotional
+ * credit for other models), that this model can't use it.
  */
 export function CreditRefusalNotice({
   gap,
   message,
   workspaceId,
+  accountId,
   canBuyCredits,
+  canReadBilling = false,
   canConnectModel,
   continuing = false,
   onChooseModel,
@@ -31,7 +37,10 @@ export function CreditRefusalNotice({
   /** The API's refusal text. */
   message?: string | null | undefined;
   workspaceId: string;
+  /** The organization whose balance tells "no credit" from "credit this model can't use". */
+  accountId?: string | null | undefined;
   canBuyCredits: boolean;
+  canReadBilling?: boolean | undefined;
   canConnectModel: boolean;
   /** The chat already has messages, so "keep chatting" reads true. */
   continuing?: boolean | undefined;
@@ -48,27 +57,51 @@ export function CreditRefusalNotice({
       ? `Your credits cover ${modelListSummary(gap.covered.map((model) => model.label))}.`
       : null;
   const connect = canConnectModel && gap.covered.length === 0 && !gap.selectionUsable;
-  // Nothing left to switch to: the person has no credit for any model, so the
-  // server's advice to pick a model covered by promotional credit doesn't apply.
-  const noCredit = gap.covered.length === 0 && !gap.selectionUsable;
+  // Nothing left to switch to, so the server's advice to pick a model covered
+  // by promotional credit doesn't apply. The balance says why: no credit at
+  // all, or credit this model can't use.
+  const uncovered = gap.covered.length === 0 && !gap.selectionUsable;
+  const client = useAppContext().client;
+  const { balance, settled } = useCreditBalance(
+    client,
+    uncovered ? accountId : null,
+    canReadBilling,
+  );
+  // Wait for the balance rather than show words it would contradict.
+  if (uncovered && !settled) return null;
+  const credit = !uncovered ? null : !balance ? "unknown" : balance.someCredit ? "some" : "none";
   // The server's sentence, without the SDK's "API 402:" prefix or the reference.
-  const reason = noCredit
-    ? canBuyCredits
-      ? "Chats here are paid with Opengeni credits, and you don't have any right now."
-      : "Chats here are paid with Opengeni credits, and there are none left. Ask an organization owner to add some."
-    : message
-      ? apiErrorFacts(message).serverMessage
-      : undefined;
-  const title = noCredit
-    ? canBuyCredits
-      ? continuing
-        ? "Add credits to keep chatting"
-        : "Add credits to start chatting"
-      : "No credits left"
-    : `Your credits don't cover ${gap.modelLabel}`;
+  const reason =
+    credit === "none"
+      ? canBuyCredits
+        ? "Chats here are paid with Opengeni credits, and you don't have any right now."
+        : "Chats here are paid with Opengeni credits, and there are none left. Ask an organization owner to add some."
+      : credit === "some"
+        ? canBuyCredits
+          ? "This model can't use the Opengeni credits you have right now. Add credits, or choose another model."
+          : "This model can't use your organization's Opengeni credits right now. Choose another model, or ask an organization owner to add credits."
+        : credit === "unknown"
+          ? canBuyCredits
+            ? "This model needs Opengeni credits. Add credits, or choose another model."
+            : "This model needs Opengeni credits. Choose another model, or ask an organization owner to add credits."
+          : message
+            ? apiErrorFacts(message).serverMessage
+            : undefined;
+  const title =
+    credit === "none"
+      ? canBuyCredits
+        ? continuing
+          ? "Add credits to keep chatting"
+          : "Add credits to start chatting"
+        : "No credits left"
+      : credit
+        ? canBuyCredits
+          ? "Add credits to use this model"
+          : "Credits needed for this model"
+        : `Your credits don't cover ${gap.modelLabel}`;
   return (
     <Notice
-      tone={noCredit ? "waiting" : "failed"}
+      tone={credit ? "waiting" : "failed"}
       live="assertive"
       title={title}
       {...(onDismiss ? { onDismiss } : {})}

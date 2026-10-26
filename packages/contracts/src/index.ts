@@ -1780,6 +1780,12 @@ export const ManagedOrganizationMembershipProjection = /* @__PURE__ */ defineSch
      * no longer sees or starts new work there. Absent means on.
      */
     personalWorkspacesEnabled: z.boolean().optional(),
+    /**
+     * The person's current answer to "How do you want to use Opengeni?" for
+     * this organization, so the new-chat page leads with matching suggestions
+     * on every device. Absent when the server keeps no answer for them.
+     */
+    signupUseCase: z.enum(["everyday", "embed", "cloud"]).optional(),
   }),
 );
 export type ManagedOrganizationMembershipProjection = z.infer<

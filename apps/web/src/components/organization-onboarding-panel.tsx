@@ -14,6 +14,7 @@ import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import {
+  changeSignupUseCase,
   completeSelfServiceOrganizationSetup,
   getSelfServiceOrganizationOnboardingStatus,
   type SelfServiceOrganizationOnboardingState,
@@ -141,6 +142,17 @@ export function OrganizationOnboardingPanel({
   const setUseCase = (choice: OnboardingUseCase | null) => {
     if (!previewState) storeOnboardingUseCase(choice);
     setUseCaseState(choice);
+  };
+  // A changed answer after the organization exists is saved on the server; the
+  // app's first load after onboarding waits for it so the new chat follows it.
+  const useCaseChange = useRef<Promise<unknown> | null>(null);
+  const finishOnboarding = (destination?: OnboardingDestination) => {
+    const pending = useCaseChange.current;
+    if (!pending) {
+      onComplete(destination);
+      return;
+    }
+    void pending.finally(() => onComplete(destination));
   };
   // "Add AI agents to my product" continues past the model step to developer setup.
   const [modelStepDone, setModelStepDone] = useState(false);
@@ -565,7 +577,7 @@ export function OrganizationOnboardingPanel({
           client={client}
           organizationId={createdSetup.organizationId}
           organizationName={organizationName.trim() || undefined}
-          onComplete={onComplete}
+          onComplete={finishOnboarding}
         />,
       );
     return frame(
@@ -600,7 +612,7 @@ export function OrganizationOnboardingPanel({
             </div>
           ) : undefined
         }
-        onComplete={developerSetup ? () => setModelStepDone(true) : () => onComplete()}
+        onComplete={developerSetup ? () => setModelStepDone(true) : () => finishOnboarding()}
       />,
     );
   }
@@ -628,24 +640,33 @@ export function OrganizationOnboardingPanel({
         onChoose={(choice) => {
           if (!previewState) onboardingJourney().completed("use_case", choice);
           // Back from the model step: the organization exists, so the new
-          // answer replaces the remembered one (the new-chat suggestions follow
-          // it), and the developer path skips its name and resumes after a
-          // reload like one that started there.
-          if (createdSetup && activeEmail && !previewState) {
-            rememberSignupUseCase({
-              account: activeEmail,
-              organizationId: createdSetup.organizationId,
-              useCase: choice,
-            });
-            if (choice === "embed") {
-              rememberPendingDeveloperSetup({
-                account: activeEmail,
-                organizationId: createdSetup.organizationId,
-                organizationName: organizationName.trim(),
-              });
-            } else {
-              clearPendingDeveloperSetup();
+          // answer becomes the person's current one on the server (the
+          // new-chat suggestions follow it on every device), and the developer
+          // path skips its name and resumes after a reload like one that
+          // started there. Nothing goes to this tab's pre-organization
+          // storage, which would otherwise outlive a sign-out.
+          if (createdSetup && !previewState) {
+            const organizationId = createdSetup.organizationId;
+            useCaseChange.current = changeSignupUseCase({ organizationId, useCase: choice }).catch(
+              () => {
+                // Only the new-chat suggestions depend on it; the browser copy
+                // below still covers this device.
+              },
+            );
+            if (activeEmail) {
+              rememberSignupUseCase({ account: activeEmail, organizationId, useCase: choice });
+              if (choice === "embed") {
+                rememberPendingDeveloperSetup({
+                  account: activeEmail,
+                  organizationId,
+                  organizationName: organizationName.trim(),
+                });
+              } else {
+                clearPendingDeveloperSetup();
+              }
             }
+            setUseCaseState(choice);
+            return;
           }
           setUseCase(choice);
         }}

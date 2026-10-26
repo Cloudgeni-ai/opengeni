@@ -20918,6 +20918,7 @@
         "$.organizationId": "string!",
         "$.personalWorkspaceId": "string!",
         "$.personalWorkspacesEnabled": "boolean?",
+        "$.signupUseCase": "enum?=[\"\\\"cloud\\\"\",\"\\\"embed\\\"\",\"\\\"everyday\\\"\"]",
         "$.status": "const!=[\"\\\"active\\\"\"]"
       }
     },

@@ -91,8 +91,15 @@ class TestAuthApiError extends Error {
   }
 }
 
+const changeSignupUseCase = mock(
+  async (input: { organizationId: string; useCase: "everyday" | "embed" | "cloud" }) => ({
+    useCase: input.useCase,
+  }),
+);
+
 mock.module("@/api", () => ({
   AuthApiError: TestAuthApiError,
+  changeSignupUseCase,
   apiBaseUrl: "",
   completeOrganizationUserSetup: completeSetup,
   createOpenGeniClient: () => setupClient,
@@ -1748,6 +1755,14 @@ describe("organization onboarding UI", () => {
         organizationId: string;
       };
       expect(signupStarterSet("anna@example.test", created.organizationId)).toBe("product");
+      // The server keeps the changed answer, so other devices follow it too,
+      // and this tab's pre-organization storage holds nothing that would
+      // skip the question for the next sign-up after a sign-out.
+      expect(changeSignupUseCase).toHaveBeenLastCalledWith({
+        organizationId: created.organizationId,
+        useCase: "embed",
+      });
+      expect(window.sessionStorage.getItem("opengeni.onboardingUseCase.v1")).toBeNull();
       expect(pendingDeveloperSetupFor("anna@example.test")?.organizationId).toBe(
         created.organizationId,
       );
@@ -1759,6 +1774,11 @@ describe("organization onboarding UI", () => {
       );
       await flush();
       expect(signupStarterSet("anna@example.test", created.organizationId)).toBe("general");
+      expect(changeSignupUseCase).toHaveBeenLastCalledWith({
+        organizationId: created.organizationId,
+        useCase: "cloud",
+      });
+      expect(window.sessionStorage.getItem("opengeni.onboardingUseCase.v1")).toBeNull();
       expect(pendingDeveloperSetupFor("anna@example.test")).toBeNull();
       await clickButton(container, "Back");
       await act(async () =>

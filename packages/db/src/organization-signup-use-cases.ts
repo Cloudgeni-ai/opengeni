@@ -28,3 +28,49 @@ export async function recordOrganizationSignupUseCase(
   if (!stored) throw new Error("Signup use case was not recorded");
   return stored;
 }
+
+/**
+ * Keep one person's current signup answer for one organization (migration
+ * 0982): at organization setup, and again when they go Back and choose
+ * another answer. The new-chat page follows it on every device; the first
+ * answer stays in `organization_signup_use_cases` for analytics. Call only for
+ * the authenticated managed human after proving their active membership in
+ * `organizationId`.
+ */
+export async function setOrganizationSignupUseCase(
+  db: Database,
+  input: { organizationId: string; subjectId: string; useCase: OrganizationSignupUseCase },
+): Promise<OrganizationSignupUseCase> {
+  const rows = await withRlsContext(db, { accountId: input.organizationId }, async (tx) =>
+    rawRows<{ use_case: OrganizationSignupUseCase }>(
+      tx,
+      sql`insert into opengeni_private.organization_signup_current_use_cases
+          (account_id, subject_id, use_case, updated_at)
+        values (${input.organizationId}::uuid, ${input.subjectId}, ${input.useCase}, now())
+        on conflict (account_id, subject_id) do update
+          set use_case = excluded.use_case, updated_at = excluded.updated_at
+        returning use_case`,
+    ),
+  );
+  const stored = rows[0]?.use_case;
+  if (!stored) throw new Error("Signup use case was not kept");
+  return stored;
+}
+
+/**
+ * The person's current signup answer for this organization, or null when the
+ * server has none (an organization set up before 0982, or without an answer).
+ */
+export async function readOrganizationSignupUseCase(
+  db: Database,
+  input: { organizationId: string; subjectId: string },
+): Promise<OrganizationSignupUseCase | null> {
+  const rows = await withRlsContext(db, { accountId: input.organizationId }, async (tx) =>
+    rawRows<{ use_case: OrganizationSignupUseCase }>(
+      tx,
+      sql`select use_case from opengeni_private.organization_signup_current_use_cases
+        where account_id = ${input.organizationId}::uuid and subject_id = ${input.subjectId}`,
+    ),
+  );
+  return rows[0]?.use_case ?? null;
+}
