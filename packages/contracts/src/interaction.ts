@@ -3344,10 +3344,11 @@ export const BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER = "receiptTargets";
 /** Something an action did that its completed state alone does not say. A
  * `network_busy` note is a network_idle wait on a page that loaded but whose
  * network never went quiet (it keeps polling or holds requests open): the wait
- * ended at its timeout and the action still completed. An
+ * ended at its timeout and the action still completed; or one that ended
+ * without waiting for requests still unanswered after a long-poll cutoff. An
  * `observation_unavailable` note is on a completed action after which the
  * page could not be read, so its receipt carries no observation although one
- * was asked for. `message` says so in plain words. */
+ * was asked for. `message` says which in plain words. */
 export const BrowserActionNote = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
