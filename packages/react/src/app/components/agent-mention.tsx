@@ -9,9 +9,10 @@ import { cn } from "../lib/utils";
    @mention a saved agent (Option C). Typing "@" at the end of the message
    offers the workspace's agents; picking one writes "@Name". When the message
    is sent, every mentioned agent's id rides along as message context, so the
-   chat's agent can hand the work to it as a child session started from that
-   agent (session_create with agentProfileId). The mention grants nothing: the
-   child still resolves inside this chat's own authority.
+   chat's agent can hand the work to it: to the agent's home chat
+   (session_send_message) when it has one, otherwise as a child session started
+   from that agent (session_create with agentProfileId). The mention grants
+   nothing: the receiving chat keeps its own authority.
    -------------------------------------------------------------------------- */
 
 const TRAILING_MENTION = /(^|\s)@([\p{L}\p{N}_.-]{0,40})$/u;
@@ -41,17 +42,25 @@ export function mentionedAgentProfiles(
 export function agentMentionContext(
   text: string,
   profiles: readonly AgentProfile[],
+  /** The chat the message is sent in: an agent's home chat never routes work to itself. */
+  currentSessionId?: string | undefined,
 ): string | undefined {
   const mentioned = mentionedAgentProfiles(text, profiles);
   if (mentioned.length === 0) return undefined;
   const lines = mentioned.map(
     (profile) =>
-      `- @${profile.name}: agentProfileId=${profile.id}${profile.role ? ` (${profile.role})` : ""}`,
+      `- @${profile.name}: agentProfileId=${profile.id}${
+        !profile.homeSessionId
+          ? ""
+          : profile.homeSessionId === currentSessionId
+            ? ", this chat is its home chat (do the work here)"
+            : `, home chat sessionId=${profile.homeSessionId}`
+      }${profile.role ? ` (${profile.role})` : ""}`,
   );
   return [
     "Saved agents mentioned in this message:",
     ...lines,
-    "When the message asks a mentioned agent to do something, hand that work to it with session_create and its agentProfileId, then follow its result. A mention that only refers to an agent needs no handoff.",
+    "When the message asks a mentioned agent to do something: if it has a home chat, send the request there with session_send_message (that chat keeps its context); otherwise, or when the user asks for a separate chat, hand the work over with session_create and its agentProfileId. Follow its result. A mention that only refers to an agent needs no handoff.",
   ].join("\n");
 }
 

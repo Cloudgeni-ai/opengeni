@@ -106,6 +106,8 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   },
   // Only proposes: a person accepts the card before anything is saved.
   agent_profile_suggest: { sessionRequired: true, allOf: ["sessions:read"] },
+  // Only proposes: a person accepts it as a new profile version.
+  agent_profile_propose_update: { sessionRequired: true, allOf: ["sessions:read"] },
   sandboxes_list: { sessionRequired: true, allOf: ["sessions:read"] },
   sandbox_attach: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_swap: { sessionRequired: true, allOf: ["sessions:control"] },

@@ -37,6 +37,11 @@ export function AgentsListPage({ workspaceId }: { workspaceId: string }) {
       to: "/workspaces/$workspaceId/agents/$profileId",
       params: { workspaceId, profileId: profile.id },
     });
+  const openSubpage = (profile: AgentProfile, page: "chats" | "updates") =>
+    void navigate({
+      to: `/workspaces/$workspaceId/agents/$profileId/${page}`,
+      params: { workspaceId, profileId: profile.id },
+    });
   const startChat = (profile: AgentProfile) =>
     void navigate({
       to: "/workspaces/$workspaceId/sessions",
@@ -106,7 +111,11 @@ export function AgentsListPage({ workspaceId }: { workspaceId: string }) {
               leading={<AgentMark avatar={profile.avatar} size={32} />}
               title={profile.name}
               description={profile.role ?? undefined}
-              meta={[profile.config.model ?? "Workspace default model", `v${profile.version}`]}
+              meta={[
+                profile.config.model ?? "Workspace default model",
+                `v${profile.version}`,
+                profile.homeSessionId ? "Home chat set" : null,
+              ].filter(Boolean)}
               onOpen={() => open(profile)}
               menu={
                 <>
@@ -115,7 +124,25 @@ export function AgentsListPage({ workspaceId }: { workspaceId: string }) {
                       Start chat
                     </DropdownMenuItem>
                   ) : null}
+                  {profile.status === "active" && profile.homeSessionId ? (
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        void navigate({
+                          to: "/workspaces/$workspaceId/sessions/$sessionId",
+                          params: { workspaceId, sessionId: profile.homeSessionId! },
+                        })
+                      }
+                    >
+                      Open home chat
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem onSelect={() => open(profile)}>Open</DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => openSubpage(profile, "chats")}>
+                    Chats
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => openSubpage(profile, "updates")}>
+                    Proposed updates
+                  </DropdownMenuItem>
                   {profile.status === "active" ? (
                     <DropdownMenuItem onSelect={() => void profiles.archive(profile.id)}>
                       Archive

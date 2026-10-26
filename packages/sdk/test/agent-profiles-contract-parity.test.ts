@@ -8,6 +8,8 @@ import type {
   SessionAgentProfile as ContractSessionAgentProfile,
   UpdateAgentProfileRequest as ContractUpdateRequest,
   UpdateSessionAgentIdentityRequest as ContractIdentityRequest,
+  AgentProfileProposal as ContractProposal,
+  AgentProfileSessionSummary as ContractSessionSummary,
 } from "@opengeni/contracts";
 import type {
   AgentAvatar,
@@ -18,6 +20,8 @@ import type {
   SessionAgentProfile,
   UpdateAgentProfileRequest,
   UpdateSessionAgentIdentityRequest,
+  AgentProfileProposal,
+  AgentProfileSessionSummary,
 } from "../src/types";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniAgentProfilesClient } from "../src/agent-profiles";
@@ -33,6 +37,9 @@ test("agent profile SDK mirrors match the contracts", () => {
     (value: ApplySessionAgentProfileRequest): ContractApplyRequest => value,
     (value: UpdateSessionAgentIdentityRequest): ContractIdentityRequest => value,
     (value: UpdateAgentProfileRequest): ContractUpdateRequest => value,
+    (value: ContractProposal): AgentProfileProposal => value,
+    (value: AgentProfileProposal): ContractProposal => value,
+    (value: ContractSessionSummary): AgentProfileSessionSummary => value,
     // `config` has a server-side default, so only the SDK -> wire direction holds.
     (value: CreateAgentProfileRequest): Omit<ContractCreateRequest, "config"> => value,
   ];

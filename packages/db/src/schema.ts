@@ -5082,6 +5082,8 @@ export const agentProfiles = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
+    // The agent's home chat (migration 0999). Routing metadata; no foreign key.
+    homeSessionId: uuid("home_session_id"),
   },
   (table) => ({
     // The migration owns the partial lower(name) uniqueness for active rows.
@@ -5113,6 +5115,28 @@ export const agentProfileVersions = pgTable(
     pk: primaryKey({ columns: [table.profileId, table.version] }),
   }),
 );
+
+// Instruction updates an agent's chats propose for its saved profile
+// (migration 0999). Never applied by the agent: a person accepts one, which
+// records an ordinary new profile version.
+export const agentProfileProposals = pgTable("agent_profile_proposals", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull(),
+  profileId: uuid("profile_id").notNull(),
+  baseVersion: integer("base_version").notNull(),
+  sessionId: uuid("session_id").notNull(),
+  proposedBy: text("proposed_by"),
+  instructions: text("instructions").notNull(),
+  reason: text("reason").notNull(),
+  status: text("status").$type<"pending" | "accepted" | "dismissed">().notNull().default("pending"),
+  acceptedVersion: integer("accepted_version"),
+  decidedBy: text("decided_by"),
+  decidedAt: timestamp("decided_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const sessions = pgTable(
   "sessions",

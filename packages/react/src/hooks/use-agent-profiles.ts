@@ -124,6 +124,17 @@ export type UseAgentProfilesResult = {
     sessionId: string,
     identity: UpdateSessionAgentIdentityRequest["identity"],
   ) => Promise<Session | null>;
+  /** Set (or clear) the agent's home chat. */
+  setHome: (profileId: string, sessionId: string | null) => Promise<AgentProfile | null>;
+  /** Accept a proposed instruction update as a new version of the agent. */
+  acceptProposal: (
+    profileId: string,
+    proposalId: string,
+    expectedVersion: number,
+  ) => Promise<AgentProfile | null>;
+  dismissProposal: (profileId: string, proposalId: string) => Promise<boolean>;
+  /** The opt-in profiles client for reads the list does not cover (chats, proposals). */
+  client: OpenGeniAgentProfilesClient | null;
   mutating: boolean;
   mutationError: Error | null;
   clearMutationError: () => void;
@@ -205,6 +216,33 @@ export function useAgentProfiles(options: UseAgentProfilesOptions = {}): UseAgen
     [profilesClient, run, workspaceId],
   );
 
+  const setHome = useCallback(
+    (profileId: string, sessionId: string | null) =>
+      withProfile((api) => api.setAgentProfileHome(workspaceId, profileId, { sessionId })),
+    [withProfile, workspaceId],
+  );
+  const acceptProposal = useCallback(
+    (profileId: string, proposalId: string, expectedVersion: number) =>
+      withProfile(
+        async (api) =>
+          (
+            await api.acceptAgentProfileProposal(workspaceId, profileId, proposalId, {
+              expectedVersion,
+            })
+          ).profile,
+      ),
+    [withProfile, workspaceId],
+  );
+  const dismissProposal = useCallback(
+    async (profileId: string, proposalId: string) =>
+      profilesClient
+        ? (await run(() =>
+            profilesClient.dismissAgentProfileProposal(workspaceId, profileId, proposalId),
+          )) !== null
+        : false,
+    [profilesClient, run, workspaceId],
+  );
+
   return {
     profiles: snapshot.profiles as AgentProfile[],
     available: profilesClient !== null,
@@ -218,6 +256,10 @@ export function useAgentProfiles(options: UseAgentProfilesOptions = {}): UseAgen
     restore,
     applyToSession,
     setSessionIdentity,
+    setHome,
+    acceptProposal,
+    dismissProposal,
+    client: profilesClient,
     mutating,
     mutationError,
     clearMutationError,

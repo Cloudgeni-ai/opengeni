@@ -10,6 +10,7 @@ import {
 import type { ApiRouteDeps } from "@opengeni/core";
 import { randomUUID } from "node:crypto";
 import {
+  createAgentProfileProposal,
   getAgentProfile,
   getSession,
   listAgentProfiles,
@@ -210,6 +211,105 @@ export function registerAgentProfileSuggestTool(input: {
         avatar,
         instructions: request.instructions ?? null,
         reason: request.reason,
+      });
+    },
+  );
+  registerAgentProfileProposeUpdateTool(input);
+}
+
+/** The receipt the chat renders as a review card for a proposed update. */
+export const AGENT_PROFILE_PROPOSAL_RECEIPT_TYPE = "agent_profile_proposal";
+
+/**
+ * `agent_profile_propose_update`: in a chat that wears a saved agent, propose
+ * new instructions for that agent so every later chat with it works the same
+ * way. Pulls what one chat learned back into the shared identity without the
+ * agent changing it: a person accepts or dismisses the proposal, and accepting
+ * records an ordinary new profile version. Parallel chats that learned
+ * different things show as separate proposals against the version each saw.
+ */
+function registerAgentProfileProposeUpdateTool(input: {
+  server: McpServer;
+  deps: Pick<ApiRouteDeps, "db" | "settings">;
+  grant: AccessGrant;
+  sessionId: string;
+  authorize: () => Promise<void>;
+  json: JsonResult;
+}): void {
+  const { server, deps, grant, sessionId, json } = input;
+  server.registerTool(
+    "agent_profile_propose_update",
+    {
+      description:
+        "Propose new instructions for the saved agent this chat uses, so every later chat with that agent keeps a lesson learned here. Use it when the user corrects how the agent should work in a way that should last (a standing preference, a step it must always take, a mistake to never repeat), not for one-off task details. " +
+        "Pass the complete new instructions: start from the instructions this chat began with and change only what the lesson needs. A person reviews a diff and accepts or dismisses it; nothing changes until they accept. Do not mention the review card in your reply. " +
+        "If the chat does not use a saved agent, this returns not_proposed; do not retry.",
+      inputSchema: {
+        instructions: z
+          .string()
+          .trim()
+          .min(1)
+          .max(AGENT_INSTRUCTIONS_MAX_CHARACTERS)
+          .describe("The complete proposed instructions for the saved agent."),
+        reason: z
+          .string()
+          .trim()
+          .min(1)
+          .max(400)
+          .describe("One sentence the reviewer sees: what was learned and why it should last."),
+      },
+    },
+    async (request) => {
+      await input.authorize();
+      if (!deps.settings.agentProfilesEnabled) {
+        return json({
+          status: "not_proposed",
+          code: "unavailable",
+          message: "Agent profiles are off.",
+        });
+      }
+      const session = await getSession(deps.db, grant.workspaceId, sessionId);
+      const profileId = session?.agentProfile?.profileId;
+      if (!profileId) {
+        return json({
+          status: "not_proposed",
+          code: "no_saved_agent",
+          message: "This chat does not use a saved agent, so there is nothing to update.",
+        });
+      }
+      const profile = await getAgentProfile(deps.db, grant.workspaceId, profileId);
+      if (!profile || profile.status !== "active") {
+        return json({
+          status: "not_proposed",
+          code: "agent_unavailable",
+          message: "The saved agent this chat uses is no longer active.",
+        });
+      }
+      if ((profile.config.agent?.instructions ?? "").trim() === request.instructions.trim()) {
+        return json({
+          status: "not_proposed",
+          code: "unchanged",
+          message: "These are already the agent's instructions.",
+        });
+      }
+      const proposal = await createAgentProfileProposal(deps.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        profileId: profile.id,
+        baseVersion: profile.version,
+        sessionId,
+        proposedBy: grant.subjectId,
+        instructions: request.instructions,
+        reason: request.reason,
+      });
+      return json({
+        type: AGENT_PROFILE_PROPOSAL_RECEIPT_TYPE,
+        status: "proposed",
+        proposalId: proposal.id,
+        profileId: profile.id,
+        profileName: profile.name,
+        baseVersion: profile.version,
+        note: `A person reviews this update to ${profile.name} and accepts or dismisses it. Nothing changes until they accept.`,
       });
     },
   );

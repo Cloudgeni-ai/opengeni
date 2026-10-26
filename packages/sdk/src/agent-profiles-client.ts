@@ -1,6 +1,12 @@
 import type { OpenGeniClient as OpenGeniCoreClient } from "./client";
 import type {
+  AcceptAgentProfileProposalRequest,
   AgentProfile,
+  AgentProfileProposal,
+  AgentProfileProposalListResponse,
+  AgentProfileProposalStatus,
+  AgentProfileSessionListResponse,
+  SetAgentProfileHomeRequest,
   AgentProfileListResponse,
   AgentProfileStatus,
   AgentProfileVersionListResponse,
@@ -112,6 +118,72 @@ export class OpenGeniAgentProfilesClient {
       "PUT",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/agent-profile`,
       request,
+    );
+  }
+
+  /** Chats that wear this agent and that the caller can see, newest first. */
+  async listAgentProfileSessions(
+    workspaceId: string,
+    profileId: string,
+  ): Promise<AgentProfileSessionListResponse> {
+    return await this.client.requestJson<AgentProfileSessionListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-profiles/${profileId}/sessions`,
+    );
+  }
+
+  /** Set (or clear, with null) the agent's home chat. The chat must wear the agent. */
+  async setAgentProfileHome(
+    workspaceId: string,
+    profileId: string,
+    request: SetAgentProfileHomeRequest,
+  ): Promise<AgentProfile> {
+    return await this.client.requestJson<AgentProfile>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/agent-profiles/${profileId}/home`,
+      request,
+    );
+  }
+
+  /** Instruction updates proposed by the agent's chats (pending by default). */
+  async listAgentProfileProposals(
+    workspaceId: string,
+    profileId: string,
+    options: { status?: AgentProfileProposalStatus | "all"; sessionId?: string } = {},
+  ): Promise<AgentProfileProposalListResponse> {
+    return await this.client.requestJson<AgentProfileProposalListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/agent-profiles/${profileId}/proposals`,
+      undefined,
+      {
+        ...(options.status ? { status: options.status } : {}),
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      },
+    );
+  }
+
+  /** Accept a proposal as a new profile version (409 when the profile changed since review). */
+  async acceptAgentProfileProposal(
+    workspaceId: string,
+    profileId: string,
+    proposalId: string,
+    request: AcceptAgentProfileProposalRequest,
+  ): Promise<{ profile: AgentProfile; proposal: AgentProfileProposal }> {
+    return await this.client.requestJson<{ profile: AgentProfile; proposal: AgentProfileProposal }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agent-profiles/${profileId}/proposals/${proposalId}/accept`,
+      request,
+    );
+  }
+
+  async dismissAgentProfileProposal(
+    workspaceId: string,
+    profileId: string,
+    proposalId: string,
+  ): Promise<AgentProfileProposal> {
+    return await this.client.requestJson<AgentProfileProposal>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/agent-profiles/${profileId}/proposals/${proposalId}/dismiss`,
     );
   }
 }

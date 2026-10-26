@@ -1700,6 +1700,7 @@ export const FORCE_RLS_TABLES = [
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
+  "agent_profile_proposals",
   "agent_profile_versions",
   "agent_profiles",
   "agent_run_states",
@@ -2637,6 +2638,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
 
 /** Durable operation journals are append/read plus claim/settle updates, never deletes. */
 export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
+  "agent_profile_proposals",
   "agent_profiles",
   "attached_browser_devices",
   "attached_browser_inventories",

@@ -107,11 +107,14 @@ kind of work. A permissive "may suggest" wording was never followed in local
 trials: the agent saved a Skill and moved on, so the sentence is a direct
 instruction that also applies when a Skill is saved. The suggestion is a card the person accepts or dismisses;
 nothing is saved by the agent. The sentence renders only while the tool can be
-available, so deployments with the feature off see no change. Only the modular
-composition gains it; legacy bytes are unchanged.
+available, so deployments with the feature off see no change. A second sentence lets a chat that wears a saved agent propose corrected
+instructions for that agent (`agent_profile_propose_update`), which a person
+accepts as a new version, so lessons from parallel chats reach the shared
+agent. Only the modular composition gains these; legacy bytes are unchanged.
 
 ```diff
 + When the user asks for the same kind of work two or more times in a chat, or says they will want it again, call `agent_profile_suggest` once in that chat, even if you also save a Skill for it: it offers them a reusable agent, preferring a saved agent that already does the work.
++ When this chat uses a saved agent and the user corrects how it should work in a way that should last, propose the corrected instructions with `agent_profile_propose_update` once for that correction, even if a saved Skill already covers it, so later chats with that agent keep the lesson; a person approves it.
 ```
 
 An answer the agent gives in a turn that ends on `wait_for_input` now goes in

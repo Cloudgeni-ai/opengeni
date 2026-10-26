@@ -176,6 +176,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   company_profile_propose: "proposeUpdate",
   company_profile_confirm: "confirmUpdate",
   agent_profile_suggest: "proposeUpdate",
+  agent_profile_propose_update: "proposeUpdate",
   instruction_policy_save: "updateInstructions",
   work_claim_upsert: "coordinateWork",
   work_claim_release: "coordinateWork",

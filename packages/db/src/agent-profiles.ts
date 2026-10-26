@@ -2,6 +2,8 @@ import type {
   AgentAvatar,
   AgentProfile,
   AgentProfileConfig,
+  AgentProfileProposal,
+  AgentProfileSessionSummary,
   AgentProfileStatus,
   AgentProfileVersion,
   SessionAgentProfile,
@@ -14,6 +16,7 @@ import {
   withRlsContext,
   withWorkspaceRls,
   withWorkspaceSessionActivityRls,
+  withWorkspaceSubjectRls,
 } from "./database";
 import { nestedPostgresSqlState, safeDatabaseErrorFacts } from "./persistence-errors";
 import * as schema from "./schema";
@@ -80,6 +83,7 @@ function mapAgentProfile(row: typeof schema.agentProfiles.$inferSelect): AgentPr
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     archivedAt: row.archivedAt?.toISOString() ?? null,
+    homeSessionId: row.homeSessionId ?? null,
   };
 }
 
@@ -423,4 +427,327 @@ function sortKeys(value: unknown): unknown {
     );
   }
   return value;
+}
+
+// --- Home chat and the agent's chats (migration 0999) ---------------------
+
+export class AgentProfileHomeSessionError extends Error {
+  constructor() {
+    super("the home chat must be a chat that uses this agent");
+    this.name = "AgentProfileHomeSessionError";
+  }
+}
+
+/**
+ * Sets (or clears) an agent's home chat. The chat must already wear this
+ * saved agent; the caller has checked that the person can see it.
+ */
+export async function setAgentProfileHome(
+  db: Database,
+  input: {
+    workspaceId: string;
+    profileId: string;
+    sessionId: string | null;
+    updatedBy?: string | null;
+  },
+): Promise<AgentProfile | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if (input.sessionId !== null) {
+      const [wearing] = await scopedDb
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+            sql`${schema.sessions.agentProfile} ->> 'profileId' = ${input.profileId}`,
+          ),
+        )
+        .limit(1);
+      if (!wearing) throw new AgentProfileHomeSessionError();
+    }
+    const [row] = await scopedDb
+      .update(schema.agentProfiles)
+      .set({ homeSessionId: input.sessionId, updatedBy: input.updatedBy ?? null })
+      .where(profileScope(input.workspaceId, input.profileId))
+      .returning();
+    return row ? mapAgentProfile(row) : null;
+  });
+}
+
+/** Chats that wear this saved agent and that `subjectId` can see, newest first. */
+export async function listAgentProfileSessions(
+  db: Database,
+  input: { workspaceId: string; subjectId: string; profileId: string; limit?: number },
+): Promise<AgentProfileSessionSummary[]> {
+  const limit = Math.min(Math.max(input.limit ?? 50, 1), 200);
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.sessions.id,
+        title: schema.sessions.title,
+        status: schema.sessions.status,
+        parentSessionId: schema.sessions.parentSessionId,
+        agentProfile: schema.sessions.agentProfile,
+        createdAt: schema.sessions.createdAt,
+        updatedAt: schema.sessions.updatedAt,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          sql`${schema.sessions.agentProfile} IS NOT NULL`,
+          sql`${schema.sessions.agentProfile} ->> 'profileId' = ${input.profileId}`,
+        ),
+      )
+      .orderBy(desc(schema.sessions.updatedAt), asc(schema.sessions.id))
+      .limit(limit);
+    return rows.map((row) => ({
+      id: row.id,
+      title: row.title ?? null,
+      status: String(row.status),
+      parentSessionId: row.parentSessionId ?? null,
+      profileVersion: row.agentProfile?.profileVersion ?? null,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    }));
+  });
+}
+
+// --- Proposed instruction updates (migration 0999) ------------------------
+
+/** Pending proposals per chat stay bounded: a newer one replaces older ones. */
+const PROPOSAL_SUPERSEDED_BY = "superseded";
+
+function mapProposal(row: typeof schema.agentProfileProposals.$inferSelect): AgentProfileProposal {
+  return {
+    id: row.id,
+    profileId: row.profileId,
+    baseVersion: row.baseVersion,
+    sessionId: row.sessionId,
+    proposedBy: row.proposedBy ?? null,
+    instructions: row.instructions,
+    reason: row.reason,
+    status: row.status,
+    acceptedVersion: row.acceptedVersion ?? null,
+    decidedBy: row.decidedBy ?? null,
+    decidedAt: row.decidedAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+export class AgentProfileProposalStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentProfileProposalStateError";
+  }
+}
+
+/**
+ * Records a proposed instruction update from a chat that wears the profile.
+ * Any earlier pending proposal from the same chat is dismissed as superseded.
+ */
+export async function createAgentProfileProposal(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    profileId: string;
+    baseVersion: number;
+    sessionId: string;
+    proposedBy?: string | null;
+    instructions: string;
+    reason: string;
+  },
+): Promise<AgentProfileProposal> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb
+        .update(schema.agentProfileProposals)
+        .set({ status: "dismissed", decidedAt: new Date(), decidedBy: PROPOSAL_SUPERSEDED_BY })
+        .where(
+          and(
+            eq(schema.agentProfileProposals.workspaceId, input.workspaceId),
+            eq(schema.agentProfileProposals.profileId, input.profileId),
+            eq(schema.agentProfileProposals.sessionId, input.sessionId),
+            eq(schema.agentProfileProposals.status, "pending"),
+          ),
+        );
+      const [row] = await scopedDb
+        .insert(schema.agentProfileProposals)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          profileId: input.profileId,
+          baseVersion: input.baseVersion,
+          sessionId: input.sessionId,
+          proposedBy: input.proposedBy ?? null,
+          instructions: input.instructions,
+          reason: input.reason,
+        })
+        .returning();
+      if (!row) throw new Error("Failed to record the agent profile proposal");
+      return mapProposal(row);
+    },
+  );
+}
+
+/** Proposals for one agent (or one chat) that `subjectId` can see, newest first. */
+export async function listAgentProfileProposals(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    profileId: string;
+    status?: AgentProfileProposal["status"] | "all";
+    sessionId?: string | undefined;
+  },
+): Promise<AgentProfileProposal[]> {
+  const status = input.status ?? "pending";
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.agentProfileProposals)
+      .where(
+        and(
+          eq(schema.agentProfileProposals.workspaceId, input.workspaceId),
+          eq(schema.agentProfileProposals.profileId, input.profileId),
+          ...(status === "all" ? [] : [eq(schema.agentProfileProposals.status, status)]),
+          ...(input.sessionId ? [eq(schema.agentProfileProposals.sessionId, input.sessionId)] : []),
+        ),
+      )
+      .orderBy(desc(schema.agentProfileProposals.createdAt))
+      .limit(100);
+    return rows.map(mapProposal);
+  });
+}
+
+/**
+ * Accepts a pending proposal: the profile's instructions become the proposed
+ * text as a new version, in one transaction with the proposal's decision.
+ * `expectedVersion` is the version the person reviewed; a newer profile
+ * raises AgentProfileVersionConflictError so nothing is silently overwritten.
+ */
+export async function acceptAgentProfileProposal(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    profileId: string;
+    proposalId: string;
+    expectedVersion: number;
+    decidedBy?: string | null;
+  },
+): Promise<{ profile: AgentProfile; proposal: AgentProfileProposal } | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const [proposal] = await scopedDb
+      .select()
+      .from(schema.agentProfileProposals)
+      .where(
+        and(
+          eq(schema.agentProfileProposals.workspaceId, input.workspaceId),
+          eq(schema.agentProfileProposals.profileId, input.profileId),
+          eq(schema.agentProfileProposals.id, input.proposalId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!proposal) return null;
+    if (proposal.status !== "pending") {
+      throw new AgentProfileProposalStateError(`this proposal was already ${proposal.status}`);
+    }
+    const [current] = await scopedDb
+      .select()
+      .from(schema.agentProfiles)
+      .where(profileScope(input.workspaceId, input.profileId))
+      .for("update")
+      .limit(1);
+    if (!current) return null;
+    if (current.status !== "active") throw new AgentProfileArchivedError(input.profileId);
+    if (current.version !== input.expectedVersion) {
+      throw new AgentProfileVersionConflictError(current.version);
+    }
+    const config: AgentProfileConfig = {
+      ...current.config,
+      agent: { ...current.config.agent, instructions: proposal.instructions },
+    };
+    const [row] = await scopedDb
+      .update(schema.agentProfiles)
+      .set({
+        config,
+        version: current.version + 1,
+        updatedBy: input.decidedBy ?? null,
+        updatedAt: new Date(),
+      })
+      .where(profileScope(input.workspaceId, input.profileId))
+      .returning();
+    if (!row) throw new Error("Failed to update agent profile");
+    await scopedDb.insert(schema.agentProfileVersions).values({
+      profileId: row.id,
+      version: row.version,
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      name: row.name,
+      role: row.role,
+      avatar: row.avatar,
+      config: row.config,
+      createdBy: input.decidedBy ?? null,
+    });
+    const [decided] = await scopedDb
+      .update(schema.agentProfileProposals)
+      .set({
+        status: "accepted",
+        acceptedVersion: row.version,
+        decidedBy: input.decidedBy ?? null,
+        decidedAt: new Date(),
+      })
+      .where(eq(schema.agentProfileProposals.id, proposal.id))
+      .returning();
+    return { profile: mapAgentProfile(row), proposal: mapProposal(decided!) };
+  });
+}
+
+/** Dismisses a pending proposal. Returns null when it does not exist; throws when already decided. */
+export async function dismissAgentProfileProposal(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    profileId: string;
+    proposalId: string;
+    decidedBy?: string | null;
+  },
+): Promise<AgentProfileProposal | null> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.agentProfileProposals)
+      .set({ status: "dismissed", decidedBy: input.decidedBy ?? null, decidedAt: new Date() })
+      .where(
+        and(
+          eq(schema.agentProfileProposals.workspaceId, input.workspaceId),
+          eq(schema.agentProfileProposals.profileId, input.profileId),
+          eq(schema.agentProfileProposals.id, input.proposalId),
+          eq(schema.agentProfileProposals.status, "pending"),
+        ),
+      )
+      .returning();
+    if (row) return mapProposal(row);
+    const [existing] = await scopedDb
+      .select({ status: schema.agentProfileProposals.status })
+      .from(schema.agentProfileProposals)
+      .where(
+        and(
+          eq(schema.agentProfileProposals.workspaceId, input.workspaceId),
+          eq(schema.agentProfileProposals.profileId, input.profileId),
+          eq(schema.agentProfileProposals.id, input.proposalId),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      throw new AgentProfileProposalStateError(`this proposal was already ${existing.status}`);
+    }
+    return null;
+  });
 }

@@ -305,6 +305,11 @@ const AgentProfileSuggestionCard = lazy(() =>
     default: module.AgentProfileSuggestionCard,
   })),
 );
+const AgentProfileProposalCard = lazy(() =>
+  import("../components/session/agent-profile-proposal-card").then((module) => ({
+    default: module.AgentProfileProposalCard,
+  })),
+);
 const SessionCommands = lazy(() =>
   import("../../session-ui").then((module) => ({ default: module.SessionCommands })),
 );
@@ -2688,7 +2693,7 @@ function SessionChatPane(props: {
     sendExtras: () => ({
       ...withMessageContexts(
         hostMessageContext?.(),
-        agentMentionContext(mentionTextRef.current, mentionProfilesRef.current),
+        agentMentionContext(mentionTextRef.current, mentionProfilesRef.current, props.session.id),
       ),
       resources: [...attachments.readyResources, ...repositories.pendingResources],
       connectionAccounts: [
@@ -3619,6 +3624,15 @@ function SessionChatPane(props: {
                             {context.clientConfig.agentProfiles?.enabled ? (
                               <Suspense fallback={null}>
                                 <AgentProfileSuggestionCard
+                                  session={props.session}
+                                  events={props.events}
+                                />
+                              </Suspense>
+                            ) : null}
+                            {context.clientConfig.agentProfiles?.enabled &&
+                            props.session.agentProfile?.profileId ? (
+                              <Suspense fallback={null}>
+                                <AgentProfileProposalCard
                                   session={props.session}
                                   events={props.events}
                                 />

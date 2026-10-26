@@ -1,9 +1,10 @@
 // Agents: the workspace's saved, reusable agents (agent profiles). The list,
-// one agent's page (edit, Start chat, archive), New agent, and "Save as agent"
-// from a chat (?fromSession). Every page needs the agent profiles flag; with it
+// one agent's page (edit, Start chat, archive), its chats (home chat) and its
+// proposed updates, New agent, and "Save as agent" from a chat (?fromSession). Every page needs the agent profiles flag; with it
 // off they send people to the chats.
 import { Navigate } from "@tanstack/react-router";
 
+import { AgentChatsPage, AgentUpdatesPage } from "@/components/agents/agent-activity-pages";
 import { AgentFormPage, type AgentFormMode } from "@/components/agents/agent-form-page";
 import { AgentsListPage } from "@/components/agents/agents-list-page";
 import { useAgentProfilesEnabled } from "@opengeni/react/app/lib/agent-profiles";
@@ -45,6 +46,38 @@ export function AgentFormRoute({
         workspaceId={workspaceId}
         mode={mode}
       />
+    </ContentPage>
+  );
+}
+
+export function AgentChatsRoute({
+  workspaceId,
+  profileId,
+}: {
+  workspaceId: string;
+  profileId: string;
+}) {
+  const gate = useGate(workspaceId);
+  if (gate) return gate;
+  return (
+    <ContentPage width="standard" className="pt-6">
+      <AgentChatsPage key={profileId} workspaceId={workspaceId} profileId={profileId} />
+    </ContentPage>
+  );
+}
+
+export function AgentUpdatesRoute({
+  workspaceId,
+  profileId,
+}: {
+  workspaceId: string;
+  profileId: string;
+}) {
+  const gate = useGate(workspaceId);
+  if (gate) return gate;
+  return (
+    <ContentPage width="standard" className="pt-6">
+      <AgentUpdatesPage key={profileId} workspaceId={workspaceId} profileId={profileId} />
     </ContentPage>
   );
 }

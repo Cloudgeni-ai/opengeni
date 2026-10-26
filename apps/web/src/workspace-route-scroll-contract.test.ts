@@ -12,6 +12,8 @@ const workspaceRouteContracts = {
   workspaceAgentsRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceAgentNewRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceAgentDetailRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentChatsRoute: { kind: "page", source: "routes/agents.tsx" },
+  workspaceAgentUpdatesRoute: { kind: "page", source: "routes/agents.tsx" },
   workspaceSessionsRoute: {
     kind: "self-managed",
     source: "../../../packages/react/src/app/routes/sessions-index.tsx",

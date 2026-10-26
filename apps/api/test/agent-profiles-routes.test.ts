@@ -7,7 +7,14 @@ import {
   type Permission,
   type Session,
 } from "@opengeni/contracts";
-import { createDb, createSession, type DbClient } from "@opengeni/db";
+import {
+  createAgentProfile,
+  createAgentProfileProposal,
+  createDb,
+  createSession,
+  sessionAgentProfileFromProfile,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
@@ -266,6 +273,124 @@ describe("agent profile routes", () => {
           body: JSON.stringify({ identity: null }),
         })
       ).status,
+    ).toBe(404);
+  });
+
+  test("home chat, the agent's chats, and reviewing proposed updates", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const writer = {
+      "content-type": "application/json",
+      authorization: await bearer(ws, "user:w", ["sessions:read", "sessions:create"]),
+    };
+    const reader = {
+      "content-type": "application/json",
+      authorization: await bearer(ws, "user:r", ["sessions:read"]),
+    };
+    const profile = await createAgentProfile(client.db, {
+      ...ws,
+      name: "Annie",
+      avatar: owl,
+      config: { agent: { instructions: "Review pull requests." } },
+    });
+    const session = await createSession(client.db, {
+      ...ws,
+      initialMessage: "review #12",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      agentProfile: sessionAgentProfileFromProfile(profile),
+    });
+    const other = await createSession(client.db, {
+      ...ws,
+      initialMessage: "unrelated",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+    });
+    const base = `/v1/workspaces/${ws.workspaceId}/agent-profiles/${profile.id}`;
+
+    const chats = (await (await app().request(`${base}/sessions`, { headers: reader })).json()) as {
+      sessions: Array<{ id: string; profileVersion: number | null }>;
+    };
+    expect(chats.sessions).toEqual([
+      expect.objectContaining({ id: session.id, profileVersion: 1 }),
+    ]);
+
+    const home = (body: unknown, headers = writer) =>
+      app().request(`${base}/home`, { method: "PUT", headers, body: JSON.stringify(body) });
+    expect((await home({ sessionId: session.id }, reader)).status).toBe(403);
+    expect((await home({ sessionId: other.id })).status).toBe(422);
+    const homed = await home({ sessionId: session.id });
+    expect(homed.status).toBe(200);
+    expect(((await homed.json()) as AgentProfile).homeSessionId).toBe(session.id);
+    expect(((await (await home({ sessionId: null })).json()) as AgentProfile).homeSessionId).toBe(
+      null,
+    );
+
+    const proposal = await createAgentProfileProposal(client.db, {
+      ...ws,
+      profileId: profile.id,
+      baseVersion: 1,
+      sessionId: session.id,
+      instructions: "Review pull requests. Link failing checks.",
+      reason: "The user wants failing checks linked.",
+    });
+    const pending = (await (
+      await app().request(`${base}/proposals?sessionId=${session.id}`, { headers: reader })
+    ).json()) as { proposals: Array<{ id: string }> };
+    expect(pending.proposals.map((entry) => entry.id)).toEqual([proposal.id]);
+    expect(
+      (await app().request(`${base}/proposals?status=bogus`, { headers: reader })).status,
+    ).toBe(422);
+
+    const accept = (expectedVersion: number, headers = writer) =>
+      app().request(`${base}/proposals/${proposal.id}/accept`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ expectedVersion }),
+      });
+    expect((await accept(1, reader)).status).toBe(403);
+    expect((await accept(5)).status).toBe(409);
+    const accepted = await accept(1);
+    expect(accepted.status).toBe(200);
+    const result = (await accepted.json()) as {
+      profile: AgentProfile;
+      proposal: { status: string; acceptedVersion: number; decidedBy: string };
+    };
+    expect(result.profile.version).toBe(2);
+    expect(result.profile.config.agent?.instructions).toBe(
+      "Review pull requests. Link failing checks.",
+    );
+    expect(result.proposal).toMatchObject({
+      status: "accepted",
+      acceptedVersion: 2,
+      decidedBy: "user:w",
+    });
+    expect(
+      (
+        await app().request(`${base}/proposals/${proposal.id}/dismiss`, {
+          method: "POST",
+          headers: writer,
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await app().request(`${base}/proposals/${crypto.randomUUID()}/dismiss`, {
+          method: "POST",
+          headers: writer,
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (await app(disabledSettings).request(`${base}/sessions`, { headers: reader })).status,
     ).toBe(404);
   });
 });

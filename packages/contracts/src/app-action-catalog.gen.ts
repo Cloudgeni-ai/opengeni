@@ -3,6 +3,19 @@ import type { ActionCatalogEntry } from "./app-action-catalog-types";
 
 export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
   {
+    "id": "acceptAgentProfileProposal",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/proposals/:proposalId/accept",
+    "request": [
+      "AcceptAgentProfileProposalRequest"
+    ],
+    "response": [
+      "AgentProfile",
+      "AgentProfileProposal"
+    ],
+    "permission": "sessions:create"
+  },
+  {
     "id": "acceptOrganizationInvitation",
     "method": "POST",
     "path": "/v1/organization-invitations/:invitationId/accept",
@@ -2155,6 +2168,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [],
     "permission": "workspace:read"
+  },
+  {
+    "id": "dismissAgentProfileProposal",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/proposals/:proposalId/dismiss",
+    "request": [],
+    "response": [
+      "AgentProfileProposal"
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "downloadEditableArtifactMaterialization",
@@ -4835,6 +4858,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listAgentProfileProposals",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/proposals",
+    "request": [
+      "AgentProfileProposalStatus"
+    ],
+    "query": [
+      "sessionId",
+      "status"
+    ],
+    "response": [
+      "AgentProfileProposalListResponse"
+    ],
+    "permission": "sessions:read"
+  },
+  {
     "id": "listAgentProfiles",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-profiles",
@@ -4846,6 +4885,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentProfileListResponse"
+    ],
+    "permission": "sessions:read"
+  },
+  {
+    "id": "listAgentProfileSessions",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/sessions",
+    "request": [],
+    "response": [
+      "AgentProfileSessionListResponse"
     ],
     "permission": "sessions:read"
   },
@@ -8588,6 +8637,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "SendTestEventResponse"
     ]
+  },
+  {
+    "id": "setAgentProfileHome",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/agent-profiles/:profileId/home",
+    "request": [
+      "SetAgentProfileHomeRequest"
+    ],
+    "response": [
+      "AgentProfile"
+    ],
+    "permission": "sessions:create"
   },
   {
     "id": "setAtlassianLifecycle",

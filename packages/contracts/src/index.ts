@@ -1047,6 +1047,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "company_profile_propose",
   "company_profile_confirm",
   "agent_profile_suggest",
+  "agent_profile_propose_update",
   "sandboxes_list",
   "sandbox_attach",
   "sandbox_swap",
@@ -12068,9 +12069,77 @@ export const AgentProfile = /* @__PURE__ */ defineSchema(() =>
     createdAt: z.string(),
     updatedAt: z.string(),
     archivedAt: z.string().nullable(),
+    /** The agent's home chat, if one is set: "go to this agent" opens it. */
+    homeSessionId: z.string().uuid().nullable().optional(),
   }),
 );
 export type AgentProfile = z.infer<typeof AgentProfile>;
+
+/** One chat that wears a saved agent, as the agent's page lists it. */
+export const AgentProfileSessionSummary = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    title: z.string().nullable(),
+    status: z.string(),
+    parentSessionId: z.string().uuid().nullable(),
+    profileVersion: z.number().int().positive().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }),
+);
+export type AgentProfileSessionSummary = z.infer<typeof AgentProfileSessionSummary>;
+
+export const AgentProfileSessionListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ sessions: z.array(AgentProfileSessionSummary) }),
+);
+export type AgentProfileSessionListResponse = z.infer<typeof AgentProfileSessionListResponse>;
+
+/** Sets (or clears) an agent's home chat. The chat must wear the agent. */
+export const SetAgentProfileHomeRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ sessionId: z.string().uuid().nullable() }).strict(),
+);
+export type SetAgentProfileHomeRequest = z.infer<typeof SetAgentProfileHomeRequest>;
+
+export const AgentProfileProposalStatus = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["pending", "accepted", "dismissed"]),
+);
+export type AgentProfileProposalStatus = z.infer<typeof AgentProfileProposalStatus>;
+
+/**
+ * New instructions a chat wearing a saved agent proposed for that agent.
+ * Never applied by the agent; accepting records a new profile version.
+ */
+export const AgentProfileProposal = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    id: z.string().uuid(),
+    profileId: z.string().uuid(),
+    baseVersion: z.number().int().positive(),
+    sessionId: z.string().uuid(),
+    proposedBy: z.string().nullable(),
+    instructions: z.string(),
+    reason: z.string(),
+    status: AgentProfileProposalStatus,
+    acceptedVersion: z.number().int().positive().nullable(),
+    decidedBy: z.string().nullable(),
+    decidedAt: z.string().nullable(),
+    createdAt: z.string(),
+  }),
+);
+export type AgentProfileProposal = z.infer<typeof AgentProfileProposal>;
+
+export const AgentProfileProposalListResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({ proposals: z.array(AgentProfileProposal) }),
+);
+export type AgentProfileProposalListResponse = z.infer<typeof AgentProfileProposalListResponse>;
+
+/**
+ * Accepts a proposal. `expectedVersion` is the profile version the person
+ * reviewed against; a newer profile answers 409 so nothing is overwritten.
+ */
+export const AcceptAgentProfileProposalRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ expectedVersion: z.number().int().positive() }).strict(),
+);
+export type AcceptAgentProfileProposalRequest = z.infer<typeof AcceptAgentProfileProposalRequest>;
 
 /** One immutable, append-only revision of a profile's content. */
 export const AgentProfileVersion = /* @__PURE__ */ defineSchema(() =>

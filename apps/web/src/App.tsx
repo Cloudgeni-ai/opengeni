@@ -7,6 +7,8 @@
 //   /workspaces/:id/agents                   → saved agents (agent profiles flag; else sessions)
 //   /workspaces/:id/agents/new               → new agent (?fromSession: save a chat; ?draft: a suggestion)
 //   /workspaces/:id/agents/:profileId        → one agent: edit, Start chat, archive
+//   /workspaces/:id/agents/:profileId/chats  → the agent's chats and its home chat
+//   /workspaces/:id/agents/:profileId/updates → instruction updates its chats proposed
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
 //   /sessions/:sessionId                     → authorized compatibility redirect
@@ -216,6 +218,11 @@ const LazySubscriptionPlansPreview = lazyRouteComponent(
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyAgentsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentsRoute");
 const LazyAgentFormRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentFormRoute");
+const LazyAgentChatsRoute = lazyRouteComponent(() => import("@/routes/agents"), "AgentChatsRoute");
+const LazyAgentUpdatesRoute = lazyRouteComponent(
+  () => import("@/routes/agents"),
+  "AgentUpdatesRoute",
+);
 const UUID_SEARCH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
   () => import("@/routes/read-only-chats"),
@@ -553,6 +560,16 @@ const workspaceAgentDetailRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "agents/$profileId",
   component: AgentDetail,
+});
+const workspaceAgentChatsRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$profileId/chats",
+  component: AgentChats,
+});
+const workspaceAgentUpdatesRoute = createRoute({
+  getParentRoute: () => workspaceRoute,
+  path: "agents/$profileId/updates",
+  component: AgentUpdates,
 });
 const workspaceSessionsRoute = createRoute({
   getParentRoute: () => workspaceRoute,
@@ -1072,6 +1089,8 @@ const routeTree = rootRoute.addChildren([
     workspaceAgentsRoute,
     workspaceAgentNewRoute,
     workspaceAgentDetailRoute,
+    workspaceAgentChatsRoute,
+    workspaceAgentUpdatesRoute,
     workspaceSessionsRoute,
     workspaceSessionRoute,
     workspaceSecretsRoute.addChildren([
@@ -1278,6 +1297,16 @@ function AgentNew() {
 function AgentDetail() {
   const { workspaceId, profileId } = workspaceAgentDetailRoute.useParams();
   return <LazyAgentFormRoute workspaceId={workspaceId} mode={{ kind: "edit", profileId }} />;
+}
+
+function AgentChats() {
+  const { workspaceId, profileId } = workspaceAgentChatsRoute.useParams();
+  return <LazyAgentChatsRoute workspaceId={workspaceId} profileId={profileId} />;
+}
+
+function AgentUpdates() {
+  const { workspaceId, profileId } = workspaceAgentUpdatesRoute.useParams();
+  return <LazyAgentUpdatesRoute workspaceId={workspaceId} profileId={profileId} />;
 }
 
 function Rigs() {

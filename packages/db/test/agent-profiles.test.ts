@@ -2,6 +2,18 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type postgres from "postgres";
 import {
+  acceptAgentProfileProposal,
+  AgentProfileHomeSessionError,
+  AgentProfileProposalStateError,
+  createAgentProfileProposal,
+  dismissAgentProfileProposal,
+  ensureManagedAccessForUser,
+  getOrganizationPrivateSessionSettings,
+  listAgentProfileProposals,
+  listAgentProfileSessions,
+  setAgentProfileHome,
+  transitionSessionVisibility,
+  updateOrganizationPrivateSessionSettings,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   initializeSessionStartAtomically,
@@ -342,5 +354,286 @@ describe("agent profiles (real PostgreSQL + FORCE RLS)", () => {
     expect(child.parentSessionId).toBe(parent.id);
     expect(child.agentProfile).toMatchObject({ profileId: profile.id, name: "Bugfixer" });
     expect((await getSession(db, workspaceId, child.id))?.agentProfile?.name).toBe("Bugfixer");
+  });
+
+  async function wornSession(
+    workspace: { accountId: string; workspaceId: string },
+    profile: Awaited<ReturnType<typeof createAgentProfile>>,
+    extra: Record<string, unknown> = {},
+  ) {
+    const session = await createSession(db, {
+      ...workspace,
+      initialMessage: "work",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+      agentProfile: sessionAgentProfileFromProfile(profile),
+      ...extra,
+    });
+    return session;
+  }
+
+  test("a home chat must wear the agent; it can be cleared", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const profile = await createAgentProfile(db, {
+      ...workspace,
+      name: "Annie",
+      avatar: owl,
+      config: {},
+    });
+    const worn = await wornSession(workspace, profile);
+    const plain = await createSession(db, {
+      ...workspace,
+      initialMessage: "other",
+      resources: [],
+      metadata: {},
+      model: "test-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none" as const,
+    });
+
+    await expect(
+      setAgentProfileHome(db, {
+        workspaceId: workspace.workspaceId,
+        profileId: profile.id,
+        sessionId: plain.id,
+      }),
+    ).rejects.toBeInstanceOf(AgentProfileHomeSessionError);
+
+    const homed = await setAgentProfileHome(db, {
+      workspaceId: workspace.workspaceId,
+      profileId: profile.id,
+      sessionId: worn.id,
+    });
+    expect(homed?.homeSessionId).toBe(worn.id);
+    // A home chat is a pointer, not a configuration change: no new version.
+    expect(homed?.version).toBe(1);
+    expect((await getAgentProfile(db, workspace.workspaceId, profile.id))?.homeSessionId).toBe(
+      worn.id,
+    );
+
+    const cleared = await setAgentProfileHome(db, {
+      workspaceId: workspace.workspaceId,
+      profileId: profile.id,
+      sessionId: null,
+    });
+    expect(cleared?.homeSessionId).toBeNull();
+  });
+
+  test("an agent's chats list only chats wearing it, newest first", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const annie = await createAgentProfile(db, {
+      ...workspace,
+      name: "Annie",
+      avatar: owl,
+      config: {},
+    });
+    const scout = await createAgentProfile(db, {
+      ...workspace,
+      name: "Scout",
+      avatar: owl,
+      config: {},
+    });
+    const first = await wornSession(workspace, annie);
+    const second = await wornSession(workspace, annie);
+    await wornSession(workspace, scout);
+    await admin`update sessions set updated_at = now() + interval '1 minute' where id = ${first.id}`;
+
+    const chats = await listAgentProfileSessions(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId: "user:someone",
+      profileId: annie.id,
+    });
+    expect(chats.map((chat) => chat.id)).toEqual([first.id, second.id]);
+    expect(chats[0]).toMatchObject({ profileVersion: 1, parentSessionId: null });
+  });
+
+  test("an agent's chats and proposals respect private chats", async () => {
+    if (!available) return;
+    const userId = `agent-profiles-${crypto.randomUUID()}`;
+    const owner = `user:${userId}`;
+    const context = await ensureManagedAccessForUser(db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Agent profile owner",
+    });
+    const grant = context.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== context.defaultWorkspaceId,
+    );
+    if (!grant?.workspaceId) throw new Error("managed human has no personal workspace");
+    const settings = await getOrganizationPrivateSessionSettings(db, {
+      organizationId: grant.accountId,
+      actorSubjectId: owner,
+    });
+    if (!settings.enabled) {
+      await updateOrganizationPrivateSessionSettings(db, {
+        organizationId: grant.accountId,
+        actorSubjectId: owner,
+        enabled: true,
+        expectedVersion: settings.version,
+        operationId: crypto.randomUUID(),
+      });
+    }
+    const workspace = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+    const profile = await createAgentProfile(db, {
+      ...workspace,
+      name: "Annie",
+      avatar: owl,
+      config: { agent: { instructions: "Be brief." } },
+    });
+    const session = await wornSession(workspace, profile, {
+      createdBy: { kind: "subject" as const, subjectId: owner },
+    });
+    await transitionSessionVisibility(db, {
+      workspaceId: workspace.workspaceId,
+      sessionId: session.id,
+      actorSubjectId: owner,
+      targetVisibility: "user_private",
+      expectedAuthorityEpoch: 1,
+      operationKey: `visibility-${crypto.randomUUID()}`,
+    });
+    await createAgentProfileProposal(db, {
+      ...workspace,
+      profileId: profile.id,
+      baseVersion: 1,
+      sessionId: session.id,
+      proposedBy: owner,
+      instructions: "Be brief. Cite the ticket.",
+      reason: "The user asked for ticket links.",
+    });
+
+    const read = (subjectId: string) =>
+      Promise.all([
+        listAgentProfileSessions(db, { ...workspace, subjectId, profileId: profile.id }),
+        listAgentProfileProposals(db, { ...workspace, subjectId, profileId: profile.id }),
+      ]);
+    const [ownerChats, ownerProposals] = await read(owner);
+    expect(ownerChats.map((chat) => chat.id)).toEqual([session.id]);
+    expect(ownerProposals).toHaveLength(1);
+    const [otherChats, otherProposals] = await read("user:someone-else");
+    expect(otherChats).toEqual([]);
+    expect(otherProposals).toEqual([]);
+  });
+
+  test("a proposal is accepted as a new version, against the version reviewed", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:reviewer";
+    const profile = await createAgentProfile(db, {
+      ...workspace,
+      name: "Annie",
+      avatar: owl,
+      config: { model: "gpt-test", agent: { instructions: "Review pull requests." } },
+    });
+    const session = await wornSession(workspace, profile);
+    const propose = (instructions: string) =>
+      createAgentProfileProposal(db, {
+        ...workspace,
+        profileId: profile.id,
+        baseVersion: 1,
+        sessionId: session.id,
+        proposedBy: "agent",
+        instructions,
+        reason: "The user corrected the review style.",
+      });
+
+    const older = await propose("Review pull requests. Be terse.");
+    const newer = await propose("Review pull requests. Be terse. Link failing checks.");
+    // The chat's newer proposal replaces its older pending one.
+    const pending = await listAgentProfileProposals(db, {
+      ...workspace,
+      subjectId,
+      profileId: profile.id,
+    });
+    expect(pending.map((proposal) => proposal.id)).toEqual([newer.id]);
+    const all = await listAgentProfileProposals(db, {
+      ...workspace,
+      subjectId,
+      profileId: profile.id,
+      status: "all",
+    });
+    expect(all.find((proposal) => proposal.id === older.id)).toMatchObject({
+      status: "dismissed",
+      decidedBy: "superseded",
+    });
+
+    await expect(
+      acceptAgentProfileProposal(db, {
+        ...workspace,
+        subjectId,
+        profileId: profile.id,
+        proposalId: newer.id,
+        expectedVersion: 7,
+      }),
+    ).rejects.toBeInstanceOf(AgentProfileVersionConflictError);
+
+    const accepted = await acceptAgentProfileProposal(db, {
+      ...workspace,
+      subjectId,
+      profileId: profile.id,
+      proposalId: newer.id,
+      expectedVersion: 1,
+      decidedBy: subjectId,
+    });
+    expect(accepted?.profile.version).toBe(2);
+    expect(accepted?.profile.config).toEqual({
+      model: "gpt-test",
+      agent: { instructions: "Review pull requests. Be terse. Link failing checks." },
+    });
+    expect(accepted?.proposal).toMatchObject({
+      status: "accepted",
+      acceptedVersion: 2,
+      decidedBy: subjectId,
+    });
+    const versions = await listAgentProfileVersions(db, workspace.workspaceId, profile.id);
+    expect(versions.map((version) => version.version)).toEqual([2, 1]);
+
+    // A decided proposal cannot be decided again.
+    await expect(
+      dismissAgentProfileProposal(db, {
+        ...workspace,
+        subjectId,
+        profileId: profile.id,
+        proposalId: newer.id,
+      }),
+    ).rejects.toBeInstanceOf(AgentProfileProposalStateError);
+  });
+
+  test("a dismissed proposal leaves the agent unchanged", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:reviewer";
+    const profile = await createAgentProfile(db, {
+      ...workspace,
+      name: "Annie",
+      avatar: owl,
+      config: { agent: { instructions: "Review pull requests." } },
+    });
+    const session = await wornSession(workspace, profile);
+    const proposal = await createAgentProfileProposal(db, {
+      ...workspace,
+      profileId: profile.id,
+      baseVersion: 1,
+      sessionId: session.id,
+      instructions: "Approve everything.",
+      reason: "Faster reviews.",
+    });
+    const dismissed = await dismissAgentProfileProposal(db, {
+      ...workspace,
+      subjectId,
+      profileId: profile.id,
+      proposalId: proposal.id,
+      decidedBy: subjectId,
+    });
+    expect(dismissed).toMatchObject({ status: "dismissed", decidedBy: subjectId });
+    const unchanged = await getAgentProfile(db, workspace.workspaceId, profile.id);
+    expect(unchanged?.version).toBe(1);
+    expect(unchanged?.config.agent?.instructions).toBe("Review pull requests.");
   });
 });

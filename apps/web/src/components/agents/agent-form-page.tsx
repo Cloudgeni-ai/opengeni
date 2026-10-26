@@ -8,7 +8,13 @@ import type {
   ToolRef,
 } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
-import { ArchiveIcon, MessageSquareIcon, RotateCcwIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  MessageSquareIcon,
+  MessagesSquareIcon,
+  RotateCcwIcon,
+  SparklesIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
@@ -262,6 +268,14 @@ export function AgentFormPage({ workspaceId, mode }: { workspaceId: string; mode
   };
 
   const archived = profile?.status === "archived";
+  const pendingUpdates = usePendingAgentUpdateCount(workspaceId, profile);
+  const toSubpage = (page: "chats" | "updates") =>
+    profile
+      ? void navigate({
+          to: `/workspaces/$workspaceId/agents/$profileId/${page}`,
+          params: { workspaceId, profileId: profile.id },
+        })
+      : undefined;
 
   return (
     <FormPage
@@ -275,7 +289,33 @@ export function AgentFormPage({ workspaceId, mode }: { workspaceId: string; mode
           title
         )
       }
-      description={description}
+      description={
+        mode.kind === "edit" && profile ? (
+          <>
+            {description}
+            <span className="mt-2 flex gap-4 text-sm">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 font-medium text-fg-muted hover:text-fg"
+                onClick={() => toSubpage("chats")}
+              >
+                <MessagesSquareIcon aria-hidden="true" className="size-4" />
+                Chats
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 font-medium text-fg-muted hover:text-fg"
+                onClick={() => toSubpage("updates")}
+              >
+                <SparklesIcon aria-hidden="true" className="size-4" />
+                Proposed updates
+              </button>
+            </span>
+          </>
+        ) : (
+          description
+        )
+      }
       back={back}
       loading={!draft && !loadError}
       loadingFields={5}
@@ -293,7 +333,20 @@ export function AgentFormPage({ workspaceId, mode }: { workspaceId: string; mode
       onCancel={back.onClick}
       headerAside={
         mode.kind === "edit" && profile ? (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {pendingUpdates > 0 ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => toSubpage("updates")}
+              >
+                <SparklesIcon aria-hidden="true" />
+                {pendingUpdates === 1
+                  ? "1 update to review"
+                  : `${pendingUpdates} updates to review`}
+              </Button>
+            ) : null}
             {archived ? (
               <Button
                 type="button"
@@ -564,4 +617,24 @@ function AgentFormFields({
       ) : null}
     </FieldStack>
   );
+}
+
+/** Pending instruction updates the agent's chats proposed, for the header button. */
+function usePendingAgentUpdateCount(workspaceId: string, profile: AgentProfile | null): number {
+  const { client } = useAppAgentProfiles();
+  const [count, setCount] = useState(0);
+  const profileId = profile?.id;
+  const version = profile?.version;
+  useEffect(() => {
+    if (!client || !profileId) return;
+    let live = true;
+    client
+      .listAgentProfileProposals(workspaceId, profileId)
+      .then((response) => live && setCount(response.proposals.length))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [client, profileId, version, workspaceId]);
+  return count;
 }

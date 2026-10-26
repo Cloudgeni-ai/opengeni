@@ -4080,6 +4080,7 @@ export type FirstPartyMcpToolName =
   | "company_profile_propose"
   | "company_profile_confirm"
   | "agent_profile_suggest"
+  | "agent_profile_propose_update"
   | "sandboxes_list"
   | "sandbox_attach"
   | "sandbox_swap"
@@ -8091,7 +8092,45 @@ export type AgentProfile = {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  /** The agent's home chat, if one is set. */
+  homeSessionId?: string | null | undefined;
 };
+
+/** One chat that wears a saved agent. */
+export type AgentProfileSessionSummary = {
+  id: string;
+  title: string | null;
+  status: string;
+  parentSessionId: string | null;
+  profileVersion: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type AgentProfileSessionListResponse = { sessions: AgentProfileSessionSummary[] };
+
+export type SetAgentProfileHomeRequest = { sessionId: string | null };
+
+export type AgentProfileProposalStatus = "pending" | "accepted" | "dismissed";
+
+/** New instructions a chat proposed for its saved agent; a person accepts or dismisses it. */
+export type AgentProfileProposal = {
+  id: string;
+  profileId: string;
+  baseVersion: number;
+  sessionId: string;
+  proposedBy: string | null;
+  instructions: string;
+  reason: string;
+  status: AgentProfileProposalStatus;
+  acceptedVersion: number | null;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+};
+export type AgentProfileProposalListResponse = { proposals: AgentProfileProposal[] };
+
+/** `expectedVersion` is the profile version the person reviewed against. */
+export type AcceptAgentProfileProposalRequest = { expectedVersion: number };
 
 /** One immutable revision of an agent profile. */
 export type AgentProfileVersion = {

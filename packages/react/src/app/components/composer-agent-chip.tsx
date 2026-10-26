@@ -3,6 +3,7 @@ import {
   BookmarkPlusIcon,
   CheckIcon,
   ChevronDownIcon,
+  HouseIcon,
   PlusIcon,
   Settings2Icon,
 } from "lucide-react";
@@ -44,6 +45,10 @@ export type ComposerAgentChipProps = {
   onNewAgent: () => void;
   /** Running chat only: save how this chat works as a reusable agent. */
   onSaveChatAsAgent?: (() => void) | undefined;
+  /** Running chat wearing a saved agent: make it that agent's home chat. */
+  onMakeHome?: (() => void) | undefined;
+  /** This chat is already the worn agent's home chat. */
+  isHome?: boolean | undefined;
   disabled?: boolean | undefined;
 };
 
@@ -107,6 +112,17 @@ export function ComposerAgentChip(props: ComposerAgentChipProps) {
           </p>
         ) : null}
         <DropdownMenuSeparator />
+        {props.isHome ? (
+          <p className="flex items-center gap-2 px-2 py-1.5 text-xs text-fg-subtle">
+            <HouseIcon aria-hidden="true" className="size-3.5" />
+            This is {props.wearing?.name ?? "the agent"}'s home chat
+          </p>
+        ) : props.onMakeHome ? (
+          <DropdownMenuItem onSelect={props.onMakeHome}>
+            <HouseIcon aria-hidden="true" />
+            Make this {props.wearing?.name ?? "the agent"}'s home chat
+          </DropdownMenuItem>
+        ) : null}
         {props.onSaveChatAsAgent ? (
           <DropdownMenuItem onSelect={props.onSaveChatAsAgent}>
             <BookmarkPlusIcon aria-hidden="true" />
@@ -163,6 +179,8 @@ function RunningChatAgentChipEnabled(props: { session: Session; disabled?: boole
   const profiles = useAppAgentProfiles();
   if (!profiles.enabled) return null;
   const { session } = props;
+  const wornProfile =
+    profiles.profiles.find((profile) => profile.id === session.agentProfile?.profileId) ?? null;
   const toAgents = (path: "" | "/new", search?: Record<string, string>) =>
     void navigate({
       to: `/workspaces/$workspaceId/agents${path}`,
@@ -199,6 +217,23 @@ function RunningChatAgentChipEnabled(props: { session: Session; disabled?: boole
       onManage={() => toAgents("")}
       onNewAgent={() => toAgents("/new")}
       onSaveChatAsAgent={() => toAgents("/new", { fromSession: session.id })}
+      isHome={Boolean(wornProfile && wornProfile.homeSessionId === session.id)}
+      onMakeHome={
+        wornProfile && wornProfile.homeSessionId !== session.id
+          ? () => {
+              void (async () => {
+                const updated = await profiles.setHome(wornProfile.id, session.id);
+                if (updated) {
+                  toast.success(`This is now ${wornProfile.name}'s home chat`, {
+                    description: `Mentions of ${wornProfile.name} in other chats are sent here.`,
+                  });
+                } else {
+                  toast.error(`Couldn't make this ${wornProfile.name}'s home chat`);
+                }
+              })();
+            }
+          : undefined
+      }
     />
   );
 }

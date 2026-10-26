@@ -6139,7 +6139,9 @@ export function deploymentUnavailableFirstPartyMcpTools(
     ...(settings.artifactMaterializerDeployed ? [] : EDITABLE_ARTIFACT_EXPORT_TOOLS),
     ...(settings.eventTriggersEnabled ? [] : EVENT_TRIGGER_TOOLS),
     // Suggesting a saved agent needs the agent profiles feature.
-    ...(settings.agentProfilesEnabled ? [] : (["agent_profile_suggest"] as const)),
+    ...(settings.agentProfilesEnabled
+      ? []
+      : (["agent_profile_suggest", "agent_profile_propose_update"] as const)),
   ]);
 }
 

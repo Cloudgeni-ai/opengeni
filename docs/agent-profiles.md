@@ -12,6 +12,13 @@ There is one ladder, and nobody has to configure anything to use the first rung:
 | 1. Name it | Give this chat's agent a name and an avatar. | `sessions.agent_profile` with null profile fields. |
 | 2. Save as agent | Turn a chat that worked into a reusable profile. | An `agent_profiles` row plus version 1. |
 | 3. Configure | Edit the profile on its own page. | A new immutable version per change. |
+| 4. Live with it | Give the agent a home chat; accept what its chats learn. | `agent_profiles.home_session_id`; `agent_profile_proposals`. |
+
+A saved agent is two things at once, and both are first-class. It can be **one
+long-running chat** (its home chat, where @mentions go and context accumulates)
+and a **template for parallel chats** that each start from its current version.
+Parallel chats diverge by design; what one of them learns comes back to the
+shared identity only through a proposal a person accepts.
 
 ## Authority
 
@@ -84,6 +91,10 @@ tells clients whether to show the UI.
 | `GET /v1/workspaces/:workspaceId/agent-profiles/:profileId/versions` | `sessions:read` |
 | `PATCH /v1/workspaces/:workspaceId/agent-profiles/:profileId` (`expectedVersion`) | `sessions:create` |
 | `POST .../agent-profiles/:profileId/archive` and `/restore` | `sessions:create` |
+| `GET .../agent-profiles/:profileId/sessions` | `sessions:read` |
+| `PUT .../agent-profiles/:profileId/home` (`{ sessionId \| null }`) | `sessions:create` |
+| `GET .../agent-profiles/:profileId/proposals?status=pending\|accepted\|dismissed\|all&sessionId=` | `sessions:read` |
+| `POST .../agent-profiles/:profileId/proposals/:proposalId/accept` (`expectedVersion`) and `/dismiss` | `sessions:create` |
 | `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/agent-identity` | `sessions:control` |
 | `PUT /v1/workspaces/:workspaceId/sessions/:sessionId/agent-profile` | `sessions:control` |
 
@@ -92,12 +103,14 @@ The SDK exposes them on the opt-in `OpenGeniAgentProfilesClient` from
 `new OpenGeniAgentProfilesClient(client)`), keeping them out of the eager core
 client and browser bundle: `listAgentProfiles`, `createAgentProfile`,
 `updateAgentProfile`, `archiveAgentProfile`, `restoreAgentProfile`,
-`listAgentProfileVersions`, `updateSessionAgentIdentity` and
-`applySessionAgentProfile`.
+`listAgentProfileVersions`, `updateSessionAgentIdentity`,
+`applySessionAgentProfile`, `listAgentProfileSessions`, `setAgentProfileHome`,
+`listAgentProfileProposals`, `acceptAgentProfileProposal` and
+`dismissAgentProfileProposal`.
 
 ## Rollout
 
-Apply migration 0997, deploy the API and web images that carry it, then set
+Apply migrations 0997-1000 (all rolling; 1000 is a concurrent index), deploy the API and web images that carry it, then set
 `OPENGENI_AGENT_PROFILES_ENABLED=true` on the API. Turning the flag off hides the
 routes and the UI and rejects `agentProfileId` on create; stored profiles and
 session identities are kept.
@@ -123,6 +136,10 @@ All of it is hidden while `ClientConfig.agentProfiles.enabled` is false.
   (list, archived view), `/agents/new` (new; `?fromSession=` prefills "Save as
   agent" from a chat and makes that chat the agent's first; `?draft=` carries a
   suggestion), and `/agents/:profileId` (edit, Start chat, Archive/Restore).
+  `/agents/:profileId/chats` lists the agent's chats with its home chat first
+  (make or clear the home chat there, or from the running chat's agent chip),
+  and `/agents/:profileId/updates` reviews proposed updates; the agent's page
+  links both and counts pending updates.
   The rail lists Agents only while the feature is on; the pages send people to
   the chats otherwise, as the retired Agents page did.
 
@@ -142,12 +159,49 @@ now" hides it for this chat. The tool is unavailable while the flag is off
 (`deploymentUnavailableFirstPartyMcpTools`), and the one sentence of prompt
 guidance renders only while it can be available.
 
+## Home chat and the agent's chats
+
+`agent_profiles.home_session_id` (migration `0999`, rolling) points at one chat
+that wears the agent. Setting it requires that chat's `agent_profile.profileId`
+to be the agent and the caller to see the chat; it is a pointer, not a
+configuration change, so it adds no version. No foreign key: a deleted chat
+leaves a stale pointer that readers treat as "no home chat" (the mention
+context only carries it, and `session_send_message` still checks access).
+
+`GET .../agent-profiles/:profileId/sessions` lists the chats that wear the agent,
+newest activity first (limit 200), with the profile version each one wears.
+It reads through the caller's subject RLS, so another person's private chats
+never appear. Migration `1000` adds the concurrent expression index
+`sessions_workspace_agent_profile_idx` that serves it.
+
+## Learning flows back: proposed updates
+
+`agent_profile_propose_update` (first-party tool, `knowledge` family,
+`sessions:read`) lets a chat that wears a saved agent propose complete new
+instructions for it after a person corrects how it should work in a lasting way.
+It never changes the agent. It records an `agent_profile_proposals` row
+(migration `0999`: FORCE RLS, runtime `SELECT, INSERT, UPDATE`, plus the
+restrictive `session_reference_visible` policy so a proposal from a private chat
+is visible only to people who can see that chat) against the version the chat
+saw, and supersedes that chat's older pending proposal. Declines are typed
+(`unavailable`, `no_saved_agent`, `agent_unavailable`, `unchanged`).
+
+A person reviews a diff against the agent's **current** instructions, in the
+chat (a card under the composer) or on `/agents/:profileId/updates`.
+Accepting (`POST .../proposals/:proposalId/accept` with the reviewed
+`expectedVersion`, CAS like `PATCH`) replaces only `config.agent.instructions`
+and records an ordinary new version; dismissing marks it decided. Proposals from
+parallel chats stay separate, and one written against an older version says so
+in the review. Decided proposals are kept as history.
+
 ## Mentioning an agent
 
 Typing `@` at the end of a message in a running chat lists the saved agents;
 picking one writes `@Name`. On Send, each mentioned agent's name, id and role
-travel as the message's `modelContext`, with a line telling the agent to hand
-requested work to it through `session_create` with `agentProfileId`. The child
+travel as the message's `modelContext`, with a line telling the agent where to
+send the work: to the agent's home chat through `session_send_message` when it
+has one (so that chat keeps its context), otherwise, or when the person asks for
+a separate chat, to a new child through `session_create` with `agentProfileId`. The child
 starts from that agent's current version, narrowed to the parent's own
 authority like any child, and shows the agent's identity. The agent-child
 creation seam (`create_agent_child_session`) keeps its fixed column allow-list;

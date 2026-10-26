@@ -1798,6 +1798,12 @@ describe("runtime database posture evaluator", () => {
             : tables === RUNTIME_READ_INSERT_UPDATE_TABLES || tables === RUNTIME_READ_INSERT_TABLES
               ? 1
               : 0) +
+          // 0999 agent profile proposals: FORCE RLS; read, insert and update.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_DML_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES
+            ? 1
+            : 0) +
           // 0909 session message search texts: read and insert, FORCE RLS; an
           // invoker-rights trigger mirrors message events into them.
           (tables === FORCE_RLS_TABLES ||
@@ -1923,7 +1929,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
-        2; // 0997 agent profiles and their versions: FORCE-RLS, no runtime DELETE.
+        2 + // 0997 agent profiles and their versions: FORCE-RLS, no runtime DELETE.
+        1; // 0999 agent profile proposals: FORCE-RLS, no runtime DELETE.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -1943,6 +1950,12 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_TABLE_PRIVILEGES.agent_profiles).toEqual(["SELECT", "INSERT", "UPDATE"]);
       expect(FORCE_RLS_TABLES).toContain("agent_profile_versions");
       expect(RUNTIME_TABLE_PRIVILEGES.agent_profile_versions).toEqual(["SELECT", "INSERT"]);
+      expect(FORCE_RLS_TABLES).toContain("agent_profile_proposals");
+      expect(RUNTIME_TABLE_PRIVILEGES.agent_profile_proposals).toEqual([
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+      ]);
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
       expect(RUNTIME_FULL_DML_TABLES).toContain("session_title_operations");
       expect(FORCE_RLS_TABLES).toContain("site_session_access");
