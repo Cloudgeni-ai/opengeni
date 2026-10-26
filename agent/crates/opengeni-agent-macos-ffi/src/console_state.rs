@@ -27,8 +27,11 @@ pub enum MacConsoleState {
 /// Whose session the IORegistry's `IOConsoleUsers` marks as on the console.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MacConsoleSession {
-    /// This user's session; `locked` is that entry's `CGSSessionScreenIsLocked`.
-    ThisUser { locked: bool },
+    /// This user's session.
+    ThisUser {
+        /// That entry's `CGSSessionScreenIsLocked`.
+        locked: bool,
+    },
     /// Another user's session.
     OtherUser,
     /// No session: the login window.
