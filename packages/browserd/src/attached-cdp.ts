@@ -442,6 +442,11 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
   private readonly tabDetachEpochs = new Map<string, number>();
   private readonly pendingInput = new Map<string, number>();
   private readonly uncertainTabs = new Set<string>();
+  // The debugger session of each tab on which Chrome last refused a command
+  // because of another extension's frame. Chrome also refuses that way just
+  // before it reports ending the attachment, so the first refusal ends the
+  // attachment; only a refusal on a later session is reported as lasting.
+  private readonly frameRefusedSessions = new Map<string, string>();
   // The extension's number for each tab's current debugger attachment, sent
   // with every command so the extension refuses one whose attachment ended.
   // Extensions that predate it report none.
@@ -628,7 +633,21 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
           // Refused because the tab holds another extension's page; nothing
           // of this command ran.
           const frameRefusal = commandFrameRefusal(error);
-          if (frameRefusal) throw frameRefusal;
+          if (frameRefusal) {
+            // Chrome's own refusal (an extension that does not remove the
+            // frames) may only mean Chrome is ending this attachment: end it
+            // and let the next use attach again, unless it already refused on
+            // an earlier attachment of this tab.
+            const refusedOn = this.frameRefusedSessions.get(tabId);
+            if (
+              chromeFrameRefusal(error) &&
+              (refusedOn === undefined || refusedOn === options.sessionId)
+            ) {
+              this.frameRefusedSessions.set(tabId, options.sessionId);
+              throw new EndedAttachmentRefusal();
+            }
+            throw frameRefusal;
+          }
           // Chrome ended the attachment while it handled this command, so
           // nothing of it is left to arrive later; whether it took effect is
           // unknown.
@@ -662,6 +681,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
         // not turn a late response into proof that the current tab was used.
         if (this.sessionTabs.get(options.sessionId) !== tabId)
           throw new CdpSessionDetachedError(method);
+        this.frameRefusedSessions.delete(tabId);
         return requireRecord(response.result, "debugger command result") as T;
       }
       return (await this.browserCommand(method, params)) as T;
@@ -806,6 +826,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.pendingInput.clear();
     this.uncertainTabs.clear();
     this.downloads.clear();
+    this.frameRefusedSessions.clear();
     this.listeners.clear();
     this.releaseFlushWaiters();
     this.bridge.close();
@@ -838,6 +859,7 @@ export class AttachedChromeCdpConnection implements BrowserCdpConnection {
     this.tabDetachEpochs.clear();
     this.pendingInput.clear();
     this.uncertainTabs.clear();
+    this.frameRefusedSessions.clear();
     this.listeners.clear();
     this.releaseFlushWaiters();
     this.bridge.close();
@@ -1499,9 +1521,18 @@ function commandFrameRefusal(error: unknown): InteractionControllerError | null 
       boundedReason(reason, 1_024),
       false,
     );
-  return reason.startsWith(`Cannot access a ${OTHER_EXTENSION_FRAME_REFUSAL}`)
-    ? otherExtensionFrameError()
-    : null;
+  return chromeFrameRefusal(error) ? otherExtensionFrameError() : null;
+}
+
+/** Chrome's own refusal of a command because of another extension's frame,
+ * as relayed by an extension that did not (or could not) remove it. */
+function chromeFrameRefusal(error: unknown): boolean {
+  return (
+    error instanceof AttachedBrowserBridgeError &&
+    error.code === "driver_rejected" &&
+    error.extensionCode !== "tab_unavailable" &&
+    error.message.trim().startsWith(`Cannot access a ${OTHER_EXTENSION_FRAME_REFUSAL}`)
+  );
 }
 
 /** At most `maxBytes` UTF-8 bytes of `text`, cut on a code point, with an

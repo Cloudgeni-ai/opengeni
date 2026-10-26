@@ -91,6 +91,13 @@ let lastAttachment = Math.floor(Math.random() * 2 ** 40);
 // recent removals started.
 const frameRemovals = new Map<number, Promise<readonly string[] | null>>();
 const frameRemovalTimes = new Map<number, number[]>();
+// How many removals of each tab have finished, and the last one's result: a
+// refusal of something sent before a removal finished is explained by the
+// frames that removal handled, so it does not spend another.
+const finishedFrameRemovals = new Map<
+  number,
+  { count: number; removed: readonly string[] | null }
+>();
 // Other extensions whose frames were last removed from each tab.
 const removedFrameExtensions = new Map<number, readonly string[]>();
 let updatePending = false;
@@ -426,15 +433,17 @@ async function executeBridgeCommand(command: BridgeCommand): Promise<unknown> {
         ...(command.sessionId ? { sessionId: command.sessionId } : {}),
       };
       const send = () => chrome.debugger.sendCommand(source, command.method, command.params);
+      const removalsBefore = finishedFrameRemovalCount(tabId);
       try {
         return { result: (await send()) ?? {} };
       } catch (error) {
         // Chrome can keep debugging a tab that holds another extension's page
         // as a frame (one it attached to while the frame was still loading)
         // but then refuses every command, without running it. Remove the
-        // frames and send the command again, once.
+        // frames (sharing one removal among commands refused together) and
+        // send the command again, once.
         if (!otherExtensionFrameRefusal(error)) throw error;
-        const removed = await removeOtherExtensionFrames(tabId);
+        const removed = await frameRemovalSince(tabId, removalsBefore);
         if (removed === null) throw otherExtensionFramesError(tabId);
         if (attachedDebuggerTabs.get(tabId) !== attachment) {
           throw new BridgeCommandError(
@@ -549,11 +558,12 @@ async function detachDebugger(tabId: number): Promise<void> {
 /** Attaches Chrome's debugger to a tab, first removing other extensions'
  * frames when Chrome refuses because of one. */
 async function attachDebugger(tabId: number): Promise<void> {
+  const removalsBefore = finishedFrameRemovalCount(tabId);
   try {
     await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
   } catch (error) {
     if (!otherExtensionFrameRefusal(error)) throw error;
-    const removed = await removeOtherExtensionFrames(tabId);
+    const removed = await frameRemovalSince(tabId, removalsBefore);
     if (removed === null) throw otherExtensionFramesError(tabId);
     try {
       await chrome.debugger.attach({ tabId }, DEBUGGER_PROTOCOL_VERSION);
@@ -567,9 +577,16 @@ async function attachDebugger(tabId: number): Promise<void> {
 }
 
 /** Chrome refuses to attach to a tab holding another extension's page with
- * "Cannot access a chrome-extension:// URL of different extension". */
+ * "Cannot access a chrome-extension:// URL of different extension", and
+ * refuses commands on such a tab the same way. Nothing else that mentions an
+ * extension address (a refused navigation to one, say) is about a frame. */
 function otherExtensionFrameRefusal(error: unknown): boolean {
-  return error instanceof Error && error.message.includes("chrome-extension://");
+  return (
+    error instanceof Error &&
+    error.message
+      .trim()
+      .startsWith("Cannot access a chrome-extension:// URL of different extension")
+  );
 }
 
 function otherExtensionFramesError(tabId: number): BridgeCommandError {
@@ -597,11 +614,37 @@ function unremovableFrameError(): BridgeCommandError {
 /** Starts removing other extensions' frames from a tab Chrome stopped
  * debugging; an attach of that tab waits for it. */
 function startFrameRemoval(tabId: number): void {
-  if (frameRemovals.has(tabId)) return;
-  frameRemovals.set(
-    tabId,
-    removeOtherExtensionFrames(tabId).finally(() => frameRemovals.delete(tabId)),
-  );
+  void frameRemoval(tabId);
+}
+
+/** The tab's running removal of other extensions' frames, or a new one. */
+function frameRemoval(tabId: number): Promise<readonly string[] | null> {
+  const running = frameRemovals.get(tabId);
+  if (running) return running;
+  const removal = removeOtherExtensionFrames(tabId)
+    .then((removed) => {
+      finishedFrameRemovals.set(tabId, { count: finishedFrameRemovalCount(tabId) + 1, removed });
+      return removed;
+    })
+    .finally(() => frameRemovals.delete(tabId));
+  frameRemovals.set(tabId, removal);
+  return removal;
+}
+
+function finishedFrameRemovalCount(tabId: number): number {
+  return finishedFrameRemovals.get(tabId)?.count ?? 0;
+}
+
+/** Removes the frames behind a refusal of something sent once
+ * `finishedBefore` removals of the tab had finished. A removal that finished
+ * since then already handled them; one still running is shared. */
+async function frameRemovalSince(
+  tabId: number,
+  finishedBefore: number,
+): Promise<readonly string[] | null> {
+  const finished = finishedFrameRemovals.get(tabId);
+  if (finished && finished.count !== finishedBefore) return finished.removed;
+  return await frameRemoval(tabId);
 }
 
 /** Removes frames showing other extensions' pages from every frame of a tab.
@@ -839,6 +882,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   frameRemovalTimes.delete(tabId);
+  finishedFrameRemovals.delete(tabId);
   removedFrameExtensions.delete(tabId);
   appendDebuggerEvent({
     tabId: String(tabId),

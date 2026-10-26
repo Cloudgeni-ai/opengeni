@@ -29,7 +29,9 @@ const FRAME_REFUSAL = "Cannot access a chrome-extension:// URL of different exte
 /** One attached tab whose page may hold a password manager's inline menu
  * frame. While it does, Chrome refuses every debugger command, as it does for
  * a tab it attached to while that frame was still loading. */
-function harness(options: { frameReturns?: boolean } = {}) {
+function harness(
+  options: { frameReturns?: boolean; refusal?: (method: string) => string | undefined } = {},
+) {
   const ports: any[] = [];
   const sent: string[] = [];
   let framePresent = false;
@@ -93,6 +95,8 @@ function harness(options: { frameReturns?: boolean } = {}) {
       detach: async () => {},
       sendCommand: async (_source: unknown, method: string) => {
         if (framePresent) throw new Error(FRAME_REFUSAL);
+        const refusal = options.refusal?.(method);
+        if (refusal) throw new Error(refusal);
         sent.push(method);
         return { ran: method };
       },
@@ -208,5 +212,60 @@ describe("another extension's frame in an attached tab", () => {
     expect(result).toMatchObject({ ok: false, error: { code: "tab_unavailable" } });
     expect(result.error.message).toStartWith("Bitwarden keeps adding its own frame to this page");
     expect(h.sent).toEqual([]);
+  });
+
+  test("commands refused together for one frame share a single removal", async () => {
+    // browserd sends several commands at once (the enables of a new
+    // attachment), and Chrome refuses each of them for the same frame.
+    const h = harness();
+    const command = await h.ready();
+    const attached = await command({ type: "debugger.attach", tabId: "7" });
+    const send = (method: string) =>
+      command({
+        type: "debugger.command",
+        tabId: "7",
+        attachment: attached.payload.attachment,
+        method,
+        params: {},
+      });
+    const methods = [
+      "Inspector.enable",
+      "Page.enable",
+      "DOM.enable",
+      "Accessibility.enable",
+      "Network.enable",
+      "Runtime.enable",
+    ];
+    h.addFrame();
+    const results = await Promise.all(methods.map(send));
+    for (const result of results) expect(result).toMatchObject({ ok: true });
+    expect(h.removals()).toBe(1);
+    expect([...h.sent].sort()).toEqual([...methods].sort());
+    // The menu appearing again on the next field is removed again, within
+    // the tab's budget.
+    h.addFrame();
+    expect(await send("Input.insertText")).toMatchObject({ ok: true });
+    expect(h.removals()).toBe(2);
+  });
+
+  test("a refusal that only mentions an extension address removes nothing", async () => {
+    const h = harness({
+      refusal: (method) =>
+        method === "Page.navigate"
+          ? "Cannot navigate to chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html"
+          : undefined,
+    });
+    const command = await h.ready();
+    const attached = await command({ type: "debugger.attach", tabId: "7" });
+    const result = await command({
+      type: "debugger.command",
+      tabId: "7",
+      attachment: attached.payload.attachment,
+      method: "Page.navigate",
+      params: { url: "chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html" },
+    });
+    expect(result).toMatchObject({ ok: false });
+    expect(result.error.message).toContain("Cannot navigate to chrome-extension://");
+    expect(h.removals()).toBe(0);
   });
 });
