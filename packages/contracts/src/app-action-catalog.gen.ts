@@ -2617,6 +2617,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:read"
   },
   {
+    "id": "GET /v1/workspaces/:workspaceId/credential-profile",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/credential-profile",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/workspaces/:workspaceId/enrollments",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/enrollments",
@@ -2795,6 +2802,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "query": [
       "status"
     ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/workspaces/:workspaceId/sessions/:sessionId/credential-profile",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/credential-profile",
+    "request": [],
     "response": []
   },
   {
@@ -7498,6 +7512,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "PUT /v1/workspaces/:workspaceId/credential-profile",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/credential-profile",
+    "request": [
+      "CredentialProfileInput"
+    ],
+    "response": []
+  },
+  {
     "id": "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/integrations/teams/bot",
@@ -7530,6 +7553,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:siteId/session-access/:sessionId",
     "request": [],
+    "response": []
+  },
+  {
+    "id": "PUT /v1/workspaces/:workspaceId/sessions/:sessionId/credential-profile",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/credential-profile",
+    "request": [
+      "CredentialProfileInput"
+    ],
     "response": []
   },
   {
