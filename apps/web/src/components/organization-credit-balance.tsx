@@ -1,6 +1,7 @@
 import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
 import type { BillingSummary } from "@opengeni/react/app/types";
 import { CreditScopeDetails } from "@/components/credits/credit-scope-details";
+import { PromotionReviewNotice } from "@/components/promotion-review-notice";
 
 /** The credit balance, large, with one line on what it means. */
 export function OrganizationCreditBalance({
@@ -10,6 +11,7 @@ export function OrganizationCreditBalance({
   loading,
   hasError,
   showPlanCredit = false,
+  supportEmail,
 }: {
   billing: BillingSummary | null;
   canReadBilling: boolean;
@@ -18,19 +20,24 @@ export function OrganizationCreditBalance({
   hasError: boolean;
   /** Only true after the enabled subscription catalog has been read. */
   showPlanCredit?: boolean;
+  supportEmail?: string | undefined;
 }) {
   const balance = billing?.balance;
   const holdNotice =
     balance?.promotionDecision && balance.promotionDecision !== "eligible" ? (
-      <p role="status" className="mt-2 text-sm leading-5 text-fg-muted">
-        {balance.promotionDecision === "denied"
-          ? "Free credit is unavailable for this organization."
-          : "Free credit is on hold pending verification or review."}{" "}
-        Purchased credit remains available. Contact support if you believe this is a mistake.
-        {(balance.heldCreditMicros ?? 0) > 0
-          ? ` ${formatMoneyMicros(balance.heldCreditMicros!, balance.currency)} of the balance is on hold.`
-          : ""}
-      </p>
+      <div className="mt-2">
+        <PromotionReviewNotice
+          decision={balance.promotionDecision}
+          accountId={balance.accountId}
+          supportEmail={supportEmail}
+        />
+        {(balance.heldCreditMicros ?? 0) > 0 ? (
+          <p className="mt-2 text-sm text-fg-muted">
+            {formatMoneyMicros(balance.heldCreditMicros!, balance.currency)} of the balance is on
+            hold.
+          </p>
+        ) : null}
+      </div>
     ) : null;
   const isNegative = balance !== undefined && balance.balanceMicros < 0;
   if (!balance) {

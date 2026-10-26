@@ -77,6 +77,36 @@ period funding are covered. The billing UI shows available funds and free credit
 on hold, with a support path; there is no automated appeal or phone/card verification
 flow. `verification_required` is an operator-review status.
 
+### Customer access and mistaken restrictions
+
+Suspected promotional abuse restricts free funding, not the customer's ability to
+sign in. Keep the canonical human identity active. Password and existing OAuth
+sign-in, organization access, purchased funding and customer-owned model
+credentials remain available under their ordinary permissions. The authenticated
+console explains the review and provides a **Request review** link to the
+deployment's configured support email, with the organization reference. The
+notice must not expose private detection evidence or label the person a bot.
+Review can restore eligibility with the revision-fenced operator command above.
+
+Correlated signup names, browser strings, shared networks and free-credit usage
+may justify investigation; they do not establish that every member of a cluster
+is abusive. Preserve the distinction between suspicion and verified linked
+claims. Prefer reversible review decisions over identity disable for credit
+abuse. Canonical identity disable remains an authentication security control and
+must not be bypassed globally to implement this customer experience.
+
+For an emergency incident that previously disabled identities, restoring login
+requires a separately reviewed transition. First deploy every funding reader,
+enable enforcement and write the exact reviewed account decisions. Verify direct
+model API admission as well as session admission before reactivating identities
+through their lifecycle with fresh revision and scope checks. Keep revoked keys
+and old sessions revoked. Review workspace controls independently; a workspace
+pause is user-resumable and is not a funding restriction. Never use ledger expiry
+or a customer-editable allowance as a substitute for an operator hold. A deliberate
+earlier restoration of login accepts exposure to remaining previously issued
+credit until enforcement is deployed; the global new-grant pause does not block
+that existing balance.
+
 Runtime roles can read their own minimal decision, not private evidence or other
 accounts. Decision writers, policy switches, and history are owner-only. Decisions
 use the same account credit lock as accounting and compare an expected revision,

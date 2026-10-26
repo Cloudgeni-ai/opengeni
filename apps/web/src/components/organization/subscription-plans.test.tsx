@@ -463,9 +463,11 @@ test("a funding hold explains unavailable free funds without erasing purchased c
     />,
   );
   expect(container.querySelector('[role="status"]')?.textContent).toContain(
-    "Free credit is on hold",
+    "Free credit restricted",
   );
-  expect(container.textContent).toContain("Purchased credit remains available");
+  expect(container.textContent).toContain(
+    "This review applies to Free credit; purchased credit is not part of the hold",
+  );
   expect(container.textContent).toContain("$10.00 of the balance is on hold");
   expect(container.textContent).toContain("$25.00");
   expect(container.textContent).not.toContain("Used first · Resets monthly");
