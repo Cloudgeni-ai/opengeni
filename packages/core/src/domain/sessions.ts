@@ -3357,11 +3357,15 @@ async function createSessionForRequestInFileScope(
           message: "object storage is not configured",
         });
       }
-      const ownerContext = authorization
-        ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
-        : grant.principalKind === "agent_attempt"
-          ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-          : undefined;
+      // The outer creation scope already established the caller's file actor.
+      // Only attached files need a second live ownership read at validation.
+      const ownerContext = !resources.some((resource) => resource.kind === "file")
+        ? undefined
+        : authorization
+          ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
+          : grant.principalKind === "agent_attempt"
+            ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
+            : undefined;
       await validateFileResources(
         db,
         grant.accountId,
