@@ -2471,6 +2471,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         },
         mainQueuedJobs: 0,
         preFanoutMainRuns: [],
+        attestedMainRuns: [],
       });
       // The wall-clock deadline holds mid-scan instead of admitting partial demand.
       let clock = 0;
@@ -2527,6 +2528,7 @@ describe("actual active executor with local bare Git and mocked GitHub", () => {
         // One queued job: the newly approved run has not instantiated its fan-out.
         mainQueuedJobs: 1,
         preFanoutMainRuns: [1],
+        attestedMainRuns: [],
       });
       // Completed runs listed between pages are not scanned; invalid identities hold.
       expect(

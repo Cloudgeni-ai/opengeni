@@ -89,6 +89,15 @@ admission. Queue green alone is **not** a release candidate. A missing full-gree
 receipt is an error, not permission to substitute the latest main head. Discovery
 requires the GitHub Actions bot's status linked to the exact successful run attempt.
 
+A merge-batcher landing whose exact tree already passed a trusted Batch CI attempt
+publishes the same status and receipt (`mode: "full"`) from an attested run. Its
+test lanes are skipped, while deployment artifacts, the artifact runtime, workload
+images and landed-content checks still run. The receipt's `attestation` object
+names the reused Batch run, attempt, tested head and tree. Version PR and
+control-plane landings, direct pushes, schedules and dispatches always run the full
+suite. See "Main-push Batch CI attestation" in [merge-batcher.md](merge-batcher.md)
+for the proof and the explicit coverage trade-off.
+
 Every push also runs `merge-content.yml`, independently of full-run coalescing.
 It recomputes each first-parent two-parent merge with `git merge-tree` and compares
 the complete tree, detecting dropped prior changes. Single-parent legacy squash

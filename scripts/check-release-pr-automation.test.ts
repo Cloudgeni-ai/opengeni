@@ -4831,7 +4831,7 @@ describe("workflow contracts", () => {
     for (const [name, job] of Object.entries(ci.jobs) as [string, { if: string }][]) {
       if (
         reports.has(name) ||
-        ["automation-admission", "merge-content", "full-green"].includes(name)
+        ["automation-admission", "batch-attestation", "merge-content", "full-green"].includes(name)
       )
         continue;
       // Execute the checked-in boolean predicate with GitHub's documented
@@ -5196,7 +5196,8 @@ describe("workflow contracts", () => {
   test("shards selected work while preserving current acceptance and full-mode safety gates", () => {
     const plan = ci.jobs.plan;
     expect(plan.name).toBe("Explain change impact");
-    expect(plan.needs).toBe("automation-admission");
+    // batch-attestation is push-to-main only; plan tolerates its skipped result.
+    expect(plan.needs).toEqual(["automation-admission", "batch-attestation"]);
     expect(plan.if).toBe(
       "${{ !cancelled() && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
     );

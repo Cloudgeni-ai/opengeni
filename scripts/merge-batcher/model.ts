@@ -237,6 +237,8 @@ export interface Headroom {
   approvalOnlyRuns?: number;
   /** Reused verified main approval tails; absent if the scan was incomplete. */
   cachedApprovalOnlyRuns?: number;
+  /** Active Batch-attested main push runs (no test fan-out); complete scans only. */
+  attestedMainRuns?: number[];
   /** Provider capacity fields; see `capacityDecision`. */
   capacity?: CapacityObservation;
   /** Slot one uses provider queueing; extra slots require clear capacity. */
@@ -368,18 +370,84 @@ export type RunnerScan =
        * planning phase), so their current demand understates what they will request.
        */
       preFanoutMainRuns: number[];
+      /**
+       * Active main push runs proven Batch-attested (`attestedMainRun`). Their
+       * runner-holding jobs still count in `mainDemand` (real occupancy inside
+       * the main reserve), but they never count as pre-fan-out, queued main or
+       * `latestMain`: they have no test fan-out to protect.
+       */
+      attestedMainRuns: number[];
     }
   | { ok: false; hold: RunnerScanHold; scannedRuns: number; approvalOnlyRuns: number };
 /**
  * Jobs `.github/workflows/ci.yml` instantiates before `plan` completes:
- * automation-admission, merge-content and plan. Every other job needs plan,
- * directly or transitively, and is created together with the fan-out (measured:
- * 3 early jobs, then about 55 more 77-92 seconds later). A job page listing
+ * automation-admission, batch-attestation, merge-content and plan. Every other
+ * job needs plan, directly or transitively, and is created together with the
+ * fan-out (measured before batch-attestation existed: 3 early jobs, then about
+ * 55 more 77-92 seconds later). A job page listing
  * more jobs (any status, `filter=latest`) proves the fan-out exists; a drained
  * tail still lists its completed jobs. capacity.test.ts checks this constant
  * against the workflow file.
  */
-export const MAIN_PRE_FANOUT_JOBS = 3;
+export const MAIN_PRE_FANOUT_JOBS = 4;
+/**
+ * ci.yml job and step a main push runs when its exact tree already passed a
+ * trusted Batch CI attempt (scripts/ci/batch-attestation.ts). The step runs and
+ * succeeds only after the persisted proof re-verifies.
+ */
+export const MAIN_ATTESTATION_JOB = "Batch CI attestation";
+export const MAIN_ATTESTATION_STEP = "Reuse identical-tree Batch CI";
+/**
+ * Display-name prefixes of every ci.yml test lane an attested main push skips.
+ * capacity.test.ts checks them against the jobs gated on `plan.outputs.attested`.
+ */
+export const ATTESTED_SKIPPED_LANES = [
+  "Source and type contracts",
+  "Unit tests (shard",
+  "Real-service shard",
+  "Impacted E2E shard",
+  "Real-service and recovery tests",
+  "Browser and visual acceptance",
+  "Package and bundle contracts",
+  "Real Chromium browser controller",
+] as const;
+/**
+ * Fail-closed proof, from one complete job listing, that a main push reused an
+ * identical-tree Batch CI verdict: exactly one successful attestation job whose
+ * verification step succeeded, and no test lane that is anything but skipped.
+ * Lanes are absent before the fan-out exists. Anything else is a full main run.
+ */
+export function attestedMainRun(jobs: readonly unknown[]): boolean {
+  let attested = 0;
+  for (const raw of jobs) {
+    if (raw === null || typeof raw !== "object") return false;
+    const job = raw as { name?: unknown; status?: unknown; conclusion?: unknown; steps?: unknown };
+    if (typeof job.name !== "string") return false;
+    const name = job.name;
+    if (name === MAIN_ATTESTATION_JOB) {
+      if (
+        job.status !== "completed" ||
+        job.conclusion !== "success" ||
+        !Array.isArray(job.steps) ||
+        job.steps.filter(
+          (step) =>
+            step !== null &&
+            typeof step === "object" &&
+            (step as { name?: unknown }).name === MAIN_ATTESTATION_STEP &&
+            (step as { status?: unknown }).status === "completed" &&
+            (step as { conclusion?: unknown }).conclusion === "success",
+        ).length !== 1
+      )
+        return false;
+      attested++;
+    } else if (
+      ATTESTED_SKIPPED_LANES.some((lane) => name.startsWith(lane)) &&
+      (job.status !== "completed" || job.conclusion !== "skipped")
+    )
+      return false;
+  }
+  return attested === 1;
+}
 /**
  * Runner waits observed on the newest active full-main landing run. Queue
  * times are measured from each job's `created_at`: `oldestQueuedSeconds` is the
@@ -561,6 +629,7 @@ export async function scanRunnerDemand(input: {
     runnerRelevantRuns = 0,
     mainQueuedJobs = 0;
   const preFanoutMainRuns: number[] = [];
+  const attestedMainRuns: number[] = [];
   let latestMain: { id: number; jobs: unknown[] } | null = null;
   // Bound independent read-only job observations without serializing provider
   // latency across the entire inventory. Pagination within each run remains
@@ -661,6 +730,14 @@ export async function scanRunnerDemand(input: {
       run.event === "push";
     if (isMain) {
       mainDemand += demand;
+      // A Batch-attested push only builds artifacts and images for a tree
+      // Batch CI already tested. Its jobs stay in mainDemand (inside the main
+      // reserve), but it has no test fan-out to protect: it never holds a
+      // candidate as pre-fan-out or queued main and is not `latestMain`.
+      if (attestedMainRun(jobs)) {
+        attestedMainRuns.push(id);
+        continue;
+      }
       mainQueuedJobs += jobs.filter((job) =>
         RUNNER_WAIT_JOB_STATUSES.has(String((job as { status?: unknown }).status)),
       ).length;
@@ -691,6 +768,7 @@ export async function scanRunnerDemand(input: {
     latestMain: latestMain ? observeMainQueue(latestMain.id, latestMain.jobs, finished) : null,
     mainQueuedJobs,
     preFanoutMainRuns: preFanoutMainRuns.sort((a, b) => a - b),
+    attestedMainRuns: attestedMainRuns.sort((a, b) => a - b),
   };
 }
 const RUNNER_WAIT_JOB_STATUSES = new Set(["queued", "requested"]);
@@ -766,8 +844,10 @@ export interface CapacityObservation {
  *    its imminent fan-out (up to 46 runner-holding jobs measured) would not fit
  *    beside a candidate.
  * 2. No active full-main run has a job waiting for a runner (`queued` or
- *    `requested`). Main CI is never gated, cancelled or skipped; only new
- *    candidates wait while main is short of runners.
+ *    `requested`). Main CI itself is never gated or cancelled; only new
+ *    candidates wait while main is short of runners. A Batch-attested main
+ *    push (`attestedMainRun`) is not a full-main run for rules 1 and 2; its
+ *    runner-holding jobs remain main demand for rules 3 and 4.
  * 3. The existing repository allocation: other + max(main reserve, main) +
  *    18 <= runner budget (52/30/18 in the qualified configuration).
  * 4. The provider pool: main + other + other-repository allowance + 18 <=
