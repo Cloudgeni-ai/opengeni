@@ -33,16 +33,25 @@ Skill was installed or explicitly checked out to the filesystem.
 ## Requested PowerPoint files
 
 When the user sends a PowerPoint file to be changed and returned, or asks for a
-new PowerPoint file while `opengeni__editable_artifact_export` is unavailable or
-does not list that format, the file itself is the deliverable:
+new PowerPoint file, the file itself is the deliverable. It is one reply of
+work: do not set a goal, look around the sandbox or search for other tools.
+Presentation artifacts are not exported to PPTX (unless an export tool already
+in your context lists that format), so do not load artifact tools just to check:
 
-1. Make or edit it in the sandbox with ordinary tools (`python-pptx`;
-   LibreOffice (`soffice --headless --convert-to pdf`) for a PDF copy). Managed
-   sandboxes already include python-pptx, so do not check for it first; run
-   `pip install <package>` only if an import fails.
+1. Make or edit it in the sandbox with `python-pptx`. Managed sandboxes already
+   include python-pptx and no slide renderer, so do not check for tools or
+   install one for a routine deck; run `pip install <package>` only if an
+   import fails. Keep the layout simple enough to trust without a render: 16:9,
+   a title and a few short lines per slide in boxes sized for them, and the
+   talking points in speaker notes.
 2. When editing a sent file, open the original and change only what was asked,
    keeping its other content, formatting and objects.
-3. Read the result back to check the content.
+3. Read the result back to check the content: each slide's text and notes, and
+   that no shape extends past the slide. Render only when the user asks how it
+   looks or the deck depends on hand-placed images or charts:
+   `apt-get install -y --no-install-recommends libreoffice-impress
+   poppler-utils` (about a minute), `soffice --headless --convert-to pdf`, then
+   `pdftoppm -png -r 50`.
 4. Publish the file and reply with a short summary and its link. Do not also
    build a native artifact of the same content.
 
@@ -84,6 +93,9 @@ does not list that format, the file itself is the deliverable:
 - For a read-only question, inspect and answer without mutating or exporting.
 
 ## Completion gate
+
+This gate applies to native deck work, not to a PowerPoint file made under the
+procedure above.
 
 - The requested result exists in the durable artifact, not merely a local file.
 - Every affected slide scene and its notes/inheritance were inspected after the
