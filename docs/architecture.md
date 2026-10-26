@@ -1699,6 +1699,11 @@ and validate epochs/authority.
 Nothing from a vault is injected into compute. `{{secret:…}}` references in
 tool arguments resolve per call at the execution boundary, so vault and policy
 changes apply to the next command without restarting a box.
+Opengeni's own hand-off tools (sessions, messages, goals, schedules, notes,
+Knowledge, artifacts, notifications and any new first-party tool) never resolve
+them: they store or forward reference text, and the receiving work resolves it
+at its own execution boundary. Only a short, justified list of first-party
+tools receives values (`packages/runtime/src/secret-argument-resolution.ts`).
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 The mirror encrypts the provider's optional username display hint separately
