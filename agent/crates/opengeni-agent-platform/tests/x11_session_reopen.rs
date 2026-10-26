@@ -290,6 +290,29 @@ mod linux {
             "{error}"
         );
         assert!(started.elapsed() >= Duration::from_millis(900));
+        // A chord whose key is a character waits the same way, while keys that
+        // are not characters do not depend on the layout and never wait, even
+        // when the display's keymap never takes the compositor's names.
+        let error = linux_named_key_chord_keys(Some(&display), &other, "Ctrl+a").unwrap_err();
+        assert!(error.retryable(), "{error}");
+        let started = Instant::now();
+        for (name, keysyms) in [
+            ("Return", &[0xff0d][..]),
+            ("Escape", &[0xff1b]),
+            ("Ctrl+Shift+ArrowLeft", &[0xffe3, 0xffe1, 0xff51]),
+            ("Alt+F2", &[0xffe9, 0xffbf]),
+            ("Super", &[0xffeb]),
+        ] {
+            let keys: Vec<_> = keysyms.iter().copied().map(CompositorKey::Keysym).collect();
+            assert_eq!(
+                linux_named_key_chord_keys(Some(&display), &other, name).unwrap(),
+                keys,
+                "{name}"
+            );
+        }
+        // F13 is still checked against the keymap the display has.
+        assert!(linux_named_key_chord_keys(Some(&display), &other, "F13").is_err());
+        assert!(started.elapsed() < Duration::from_millis(900));
     }
 
     /// The display's keymap names in the text form a compositor hands out.

@@ -386,6 +386,13 @@ impl LayoutWatch {
     }
 }
 
+impl Drop for LayoutWatch {
+    /// Ends the follower thread with the watch, however the session ends.
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 /// The keymap text a keyboard carries is at most this large.
 const MAX_KEYMAP_BYTES: u32 = 4 << 20;
 

@@ -2187,23 +2187,39 @@ pub fn validate_linux_named_key_chord(name: &str) -> PlatformResult<()> {
 /// keycode across groups. A key no group has at its base or Shift level is
 /// refused. Without the display the keysyms are returned unchecked.
 ///
+/// A chord of keys that are not characters (Enter, Escape, arrows, function
+/// keys, modifiers) does not depend on the layout, so it uses the display's
+/// keymap as it is, without waiting for the compositor's keymap names.
+///
 /// # Errors
 ///
 /// The same unsupported-input failures as [`validate_linux_named_key_chord`],
 /// one naming the first keysym the layout cannot give, and the timeout of
 /// [`linux_layout_text_keysyms`] while the display's keymap is not the
-/// compositor's yet.
+/// compositor's yet, for a chord whose key is a character.
 pub fn linux_named_key_chord_keys(
     layout_display: Option<&str>,
     layout: &CompositorLayout,
     name: &str,
 ) -> PlatformResult<Vec<CompositorKey>> {
     let keysyms = parse_named_key_chord(name)?;
+    let expected = if keysyms.iter().all(|&keysym| layout_independent(keysym)) {
+        None
+    } else {
+        layout.keymap.as_ref()
+    };
     let keymap = match layout_connection(layout_display) {
-        Some(conn) => synced_layout_keymap(&conn, layout.keymap.as_ref())?,
+        Some(conn) => synced_layout_keymap(&conn, expected)?,
         None => None,
     };
     layout_chord_keys(keymap.as_ref(), layout.active_group, &keysyms)
+}
+
+/// Whether a keysym names a key that is not a character: the function,
+/// cursor, editing and modifier keys (keysyms 0xff00-0xffff), which every
+/// layout keeps in the same place.
+fn layout_independent(keysym: u32) -> bool {
+    (0xff00..=0xffff).contains(&keysym)
 }
 
 fn layout_chord_keys(
