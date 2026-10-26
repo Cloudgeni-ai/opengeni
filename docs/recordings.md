@@ -213,6 +213,13 @@ about 18 percent, which is in the same range as pyannote 3.1. It uses about
 3 CPU minutes per hour of audio, so an hour of meeting takes about 30
 seconds on 8 cores.
 
+It runs on 4 threads unless the worker sets `threads` (fewer on a smaller
+machine). More threads finish little sooner but cost much more: a
+half-hour meeting takes 47 s and 128 CPU-seconds on 4 threads, and 21 s and
+304 CPU-seconds on all 32 threads of a 16-core desktop CPU. Transcription
+runs at the same time and takes about as long, so the extra speed rarely
+shows.
+
 Memory stays small and nearly flat with length: about 300 MB for a
 half-hour meeting on one thread, plus about 70 MB for each further thread,
 and about 900 MB for a two-hour meeting on four threads. Each thread embeds
