@@ -12,6 +12,7 @@ import {
   type SubmitHumanInputResponseRequest,
   type ToolActionReview,
 } from "@opengeni/sdk";
+import { mcpElicitationUrlHost } from "@opengeni/contracts/mcp-elicitation";
 import {
   HumanInputForm,
   McpElicitationRequest,
@@ -450,7 +451,13 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       });
       leave(item);
       toast.success(
-        decision === "reject" ? "Denied" : item.serverQuestion ? "Allowed" : "Approved",
+        decision === "reject"
+          ? "Denied"
+          : item.serverQuestion?.kind === "url"
+            ? "Continued"
+            : item.serverQuestion
+              ? "Allowed"
+              : "Approved",
         {
           description: item.sessionTitle ?? undefined,
         },
@@ -546,21 +553,39 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const control = (item: InboxItem): ReactNode => {
     const pending = busy[item.id];
     if (item.kind === "approval" && item.serverQuestion) {
-      // A plain confirmation is answered here; fields are filled in the dialog.
+      // A plain confirmation is answered here, and a page to open is opened
+      // from here before continuing; fields are filled in the dialog.
+      const pageHost =
+        item.serverQuestion.kind === "url" && item.serverQuestion.url
+          ? mcpElicitationUrlHost(item.serverQuestion.url)
+          : null;
       return (
         <>
           <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "reject")}>
             <XIcon />
             {pending === "reject" ? "Denying…" : "Deny"}
           </RowButton>
-          {item.serverQuestion.form ? (
-            <RowButton disabled={Boolean(pending)} onClick={() => setAnsweringServer(item)}>
-              Answer
-            </RowButton>
-          ) : (
+          {item.serverQuestion.kind === "confirm" ? (
             <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "approve")}>
               <CheckIcon />
               {pending === "approve" ? "Allowing…" : "Allow"}
+            </RowButton>
+          ) : pageHost && item.serverQuestion.url ? (
+            <>
+              <RowButton asChild>
+                <a href={item.serverQuestion.url} target="_blank" rel="noopener noreferrer">
+                  Open {pageHost}
+                  <ArrowUpRightIcon />
+                </a>
+              </RowButton>
+              <RowButton disabled={Boolean(pending)} onClick={() => decide(item, "approve")}>
+                <CheckIcon />
+                {pending === "approve" ? "Continuing…" : "Continue"}
+              </RowButton>
+            </>
+          ) : (
+            <RowButton disabled={Boolean(pending)} onClick={() => setAnsweringServer(item)}>
+              Answer
             </RowButton>
           )}
         </>

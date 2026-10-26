@@ -2,24 +2,31 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import {
   McpElicitationApprovalRequest,
   McpElicitationRequestedSchema,
+  isMcpElicitationUrlQuestion,
+  mcpElicitationUrlHost,
   type McpElicitationContent,
 } from "@opengeni/contracts";
 import { z } from "zod";
 
 /**
- * MCP form elicitation as a durable approval (protocol revision 2026-07-28,
- * multi round-trip pattern). A model's call to a third-party MCP tool declares
- * that it can answer form questions. When the server answers with
- * `input_required`, the call pauses as an approval of the same call: the
- * questions and the server's opaque `requestState` are kept with the paused
- * call, the person answers them in the approval, and the call is retried with
- * those answers. The model only ever sees the call's final result.
+ * MCP elicitation as a durable approval (protocol revision 2026-07-28, multi
+ * round-trip pattern). A model's call to a third-party MCP tool declares that
+ * it can ask the person to fill in a form or open a web page. When the server
+ * answers with `input_required`, the call pauses as an approval of the same
+ * call: the questions and the server's opaque `requestState` are kept with the
+ * paused call, the person answers or declines in the approval, and the call is
+ * retried with that answer. The model only ever sees the call's final result.
  */
 
 /** How many times one tool call may ask before it stops with an error result. */
 export const MCP_INPUT_REQUEST_MAX_ROUNDS = 10;
 /** `input_required` without questions is retried at once, at most this often in a row. */
 const MCP_INPUT_STATE_RETRY_LIMIT = 10;
+
+/** What a model call declares it can answer, in its per-request client capabilities. */
+export const MCP_INPUT_CLIENT_CAPABILITIES = {
+  elicitation: { form: {}, url: {} },
+} as const;
 
 /**
  * The agents SDK pauses a call whose invocation returns an object carrying
@@ -40,13 +47,22 @@ export const McpInputRequest = z.object({
 export type McpInputRequest = z.infer<typeof McpInputRequest>;
 
 /**
+ * The person's response to the question a paused call resumes from: an
+ * answer, or a decline the server is told about.
+ */
+export type McpInputAnswer =
+  | { request: McpInputRequest; action: "accept"; content: McpElicitationContent }
+  | { request: McpInputRequest; action: "decline" };
+
+/**
  * One model tool call's exchange with its server. The approval wrapper creates
- * it; the gateway executor reads the answer to send and records a new question.
+ * it; the gateway executor reads the response to send and records a new
+ * question.
  */
 export type McpInputExchange = {
   server: string;
-  /** The question this call is resuming from, with the person's answers. */
-  answered?: { request: McpInputRequest; content: McpElicitationContent };
+  /** The question this call is resuming from, with the person's response. */
+  answered?: McpInputAnswer;
   /** Set when the server asked (again); the call then pauses. */
   requested?: McpInputRequest;
 };
@@ -79,46 +95,54 @@ export function parseMcpInputRequest(value: unknown): McpInputRequest {
   return McpInputRequest.parse(value);
 }
 
-const resumedAnswers = new AsyncLocalStorage<{
-  callId: string;
-  request: McpInputRequest;
-  content: McpElicitationContent;
-}>();
+const resumedAnswers = new AsyncLocalStorage<{ callId: string; answer: McpInputAnswer }>();
 
-/** Run a resumed call with the person's answers to the question that paused it. */
+/** Run a resumed call with the person's response to the question that paused it. */
 export function runWithMcpInputAnswer<T>(
-  answer: { callId: string; request: McpInputRequest; content: McpElicitationContent },
+  resumed: { callId: string; answer: McpInputAnswer },
   execute: () => T,
 ): T {
-  return resumedAnswers.run(answer, execute);
+  return resumedAnswers.run(resumed, execute);
 }
 
-/** The answers a resumed call carries, if this call is the one being resumed. */
-export function resumedMcpInputAnswer(
-  callId: string,
-): { request: McpInputRequest; content: McpElicitationContent } | null {
-  const answer = resumedAnswers.getStore();
-  return answer?.callId === callId ? { request: answer.request, content: answer.content } : null;
+/** The response a resumed call carries, if this call is the one being resumed. */
+export function resumedMcpInputAnswer(callId: string): McpInputAnswer | null {
+  const resumed = resumedAnswers.getStore();
+  return resumed?.callId === callId ? resumed.answer : null;
 }
+
+/** One entry of `inputResponses` for an elicitation request. */
+export type McpElicitationInputResponse =
+  | { action: "accept"; content?: Record<string, unknown> }
+  | { action: "decline" };
 
 /** What the MCP client sends on one attempt of the call. */
 export type McpInputRequiredOption = {
-  inputResponses?: Record<string, { action: "accept"; content: Record<string, unknown> }>;
+  /** Declared on every attempt: what this call can ask the person. */
+  capabilities: typeof MCP_INPUT_CLIENT_CAPABILITIES;
+  inputResponses?: Record<string, McpElicitationInputResponse>;
   requestState?: string;
 };
 
-/** The first attempt of an exchange: declare, and answer a resumed question. */
+/**
+ * The first attempt of an exchange: declare, and send the person's response
+ * to a resumed question. An accepted form sends its content; an accepted URL
+ * question sends none; a decline is sent for every question.
+ */
 export function mcpInputRequiredOption(exchange: McpInputExchange): McpInputRequiredOption {
   const answered = exchange.answered;
-  if (!answered) return {};
-  const inputResponses: NonNullable<McpInputRequiredOption["inputResponses"]> = {};
+  if (!answered) return { capabilities: MCP_INPUT_CLIENT_CAPABILITIES };
+  const inputResponses: Record<string, McpElicitationInputResponse> = {};
   for (const request of answered.request.requests) {
-    inputResponses[request.id] = {
-      action: "accept",
-      content: answered.content[request.id] ?? {},
-    };
+    inputResponses[request.id] =
+      answered.action === "decline"
+        ? { action: "decline" }
+        : isMcpElicitationUrlQuestion(request)
+          ? { action: "accept" }
+          : { action: "accept", content: answered.content[request.id] ?? {} };
   }
   return {
+    capabilities: MCP_INPUT_CLIENT_CAPABILITIES,
     inputResponses,
     ...(answered.request.requestState !== undefined
       ? { requestState: answered.request.requestState }
@@ -140,13 +164,20 @@ export function isMcpInputRequiredResult(value: unknown): value is InputRequired
   );
 }
 
-const FormElicitation = z.object({
+const Elicitation = z.object({
   method: z.literal("elicitation/create"),
-  params: z.object({
-    mode: z.literal("form").optional(),
-    message: z.string().max(16_384),
-    requestedSchema: McpElicitationRequestedSchema,
-  }),
+  params: z.union([
+    z.object({
+      mode: z.literal("url"),
+      message: z.string().max(16_384),
+      url: z.string().max(8_192),
+    }),
+    z.object({
+      mode: z.literal("form").optional(),
+      message: z.string().max(16_384),
+      requestedSchema: McpElicitationRequestedSchema,
+    }),
+  ]),
 });
 
 export type McpInputRequiredStep =
@@ -162,9 +193,10 @@ function failed(text: string): Extract<McpInputRequiredStep, { kind: "fail" }> {
 }
 
 /**
- * What to do with an `input_required` result. Form questions pause the call;
- * a state-only result is retried at once; anything this client did not
- * declare (URL mode, sampling, roots, a malformed form) ends the call.
+ * What to do with an `input_required` result. Forms and https links pause the
+ * call; a state-only result is retried at once; anything this client did not
+ * declare (sampling, roots, a malformed form, a link that is not https) ends
+ * the call.
  */
 export function nextMcpInputRequiredStep(
   exchange: McpInputExchange,
@@ -182,25 +214,36 @@ export function nextMcpInputRequiredStep(
         "The MCP server kept answering that it needs more input without saying what, so the tool call did not finish.",
       );
     }
-    return { kind: "retry", option: { requestState } };
+    return { kind: "retry", option: { capabilities: MCP_INPUT_CLIENT_CAPABILITIES, requestState } };
   }
   const requests: McpInputRequest["requests"] = [];
   for (const [id, entry] of entries) {
-    const parsed = FormElicitation.safeParse(entry);
+    const parsed = Elicitation.safeParse(entry);
     if (!parsed.success) {
       const method =
         entry !== null && typeof entry === "object"
           ? String((entry as { method?: unknown }).method ?? "unknown")
           : "unknown";
       return failed(
-        `The MCP server asked for input this client cannot provide (${method === "elicitation/create" ? "a form it does not support" : method}), so the tool call did not finish.`,
+        `The MCP server asked for input this client cannot provide (${method === "elicitation/create" ? "a question it does not support" : method}), so the tool call did not finish.`,
       );
     }
-    requests.push({
-      id,
-      message: parsed.data.params.message,
-      requestedSchema: parsed.data.params.requestedSchema,
-    });
+    const params = parsed.data.params;
+    if ("url" in params) {
+      if (mcpElicitationUrlHost(params.url) === null) {
+        return failed(
+          "The MCP server asked the person to open a link that is not a plain https address, so the tool call did not finish.",
+        );
+      }
+      requests.push({ id, mode: "url", message: params.message, url: params.url });
+    } else {
+      requests.push({
+        id,
+        mode: "form",
+        message: params.message,
+        requestedSchema: params.requestedSchema,
+      });
+    }
   }
   const round = (exchange.answered?.request.round ?? 0) + 1;
   if (round > MCP_INPUT_REQUEST_MAX_ROUNDS) {

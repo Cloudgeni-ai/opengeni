@@ -54,7 +54,8 @@ describe("native push presentation", () => {
     expect(nativePushAlert(confirmation).body).toBe(
       "Messages asks: Send “On my way” to Design team?",
     );
-    expect(nativePushCategory({ ...confirmation, serverQuestionForm: true })).toBe(undefined);
+    expect(nativePushCategory({ ...confirmation, serverQuestionKind: "form" })).toBe(undefined);
+    expect(nativePushCategory({ ...confirmation, serverQuestionKind: "url" })).toBe(undefined);
   });
 
   test("a secret question push is title-only with no inline answer action (AC-5)", () => {

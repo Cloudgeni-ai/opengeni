@@ -12,11 +12,13 @@ import { KitSection, StateCell, StatesGrid, UsageNotes } from "../kit";
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-type Question = {
-  id: string;
-  message: string;
-  requestedSchema: { type: "object"; properties: Record<string, unknown>; required?: string[] };
-};
+type Question =
+  | {
+      id: string;
+      message: string;
+      requestedSchema: { type: "object"; properties: Record<string, unknown>; required?: string[] };
+    }
+  | { id: string; mode: "url"; message: string; url: string };
 
 function approvals(input: {
   name: string;
@@ -168,6 +170,21 @@ function Card({
   );
 }
 
+const SIGN_IN = approvals({
+  name: "drive__export_file",
+  title: "Export file",
+  args: { file: "Q3 plan", format: "pdf" },
+  server: "Drive",
+  requests: [
+    {
+      id: "sign-in",
+      mode: "url",
+      message: "Sign in to your work account so I can export “Q3 plan”.",
+      url: "https://accounts.example.com/sign-in?account=work&continue=export",
+    },
+  ],
+});
+
 export default function McpQuestionSection() {
   return (
     <KitSection sectionKey="mcp-question">
@@ -185,6 +202,13 @@ export default function McpQuestionSection() {
         <StateCell label="Many choices become a drop-down" align="stretch">
           <Card pending={TIMEZONE} />
         </StateCell>
+        <StateCell
+          label="A page to open"
+          align="stretch"
+          note="The link names the exact host and opens in a new tab. The server asks again if its step isn't done."
+        >
+          <Card pending={SIGN_IN} />
+        </StateCell>
         <StateCell label="Sending" align="stretch" note="Answer to see the busy state.">
           <Card pending={CONFIRM} mode="slow" />
         </StateCell>
@@ -194,7 +218,7 @@ export default function McpQuestionSection() {
       </StatesGrid>
       <UsageNotes
         use={[
-          "An MCP server asks the person something before a tool call can finish (MCP form elicitation).",
+          "An MCP server asks the person something before a tool call can finish (MCP elicitation): a confirmation, a form, or a page to open.",
         ]}
         avoid={[
           "Questions the agent itself asks: those use the human input form.",

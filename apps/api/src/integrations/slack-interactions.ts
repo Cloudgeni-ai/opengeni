@@ -1,4 +1,5 @@
 import {
+  isSlackServerQuestionPageAction,
   slackServerQuestion,
   slackToolReviewBlocks,
   slackToolReviewCanDecide,
@@ -660,7 +661,9 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
     const form = new URLSearchParams(signed.rawBody);
     const payload = parseJsonObject(form.get("payload") ?? "");
     if (payload.type === "block_actions") {
-      if (isSlackAppHomeLinkAction(payload)) return c.json({ ok: true });
+      if (isSlackAppHomeLinkAction(payload) || isSlackServerQuestionPageAction(payload)) {
+        return c.json({ ok: true });
+      }
       const entry = normalizedBlockActionInteraction(payload);
       const installation = await resolveSlackInstallationRoute(deps.db, entry.slackTeamId);
       if (!installation) {
@@ -5071,7 +5074,8 @@ async function slackApprovalCard(
     const review = reviewById.get(approval.id);
     if (approval.question) {
       // What the call does (when it can be shown), then the server's question
-      // right above its answer. Anything to fill in is answered in the session.
+      // right above its answer: a page to open is opened from its link button
+      // before Continue. Anything to fill in is answered in the session.
       if (review && slackToolReviewCanDecide(review)) {
         blocks.push(...slackToolReviewBlocks(review, privateAudience));
       }
@@ -5085,11 +5089,16 @@ async function slackApprovalCard(
       }
       const elements: Extract<SlackMessageBlock, { type: "actions" }>["elements"] = [];
       if (question.answerableInSlack && approve) {
+        elements.push(...question.pageButtons);
         elements.push({
           type: "button",
           action_id: SLACK_ACTION_ID_BY_KIND.approval_approve,
           value: approve.id,
-          text: { type: "plain_text", text: "Allow", emoji: true },
+          text: {
+            type: "plain_text",
+            text: question.kind === "url" ? "Continue" : "Allow",
+            emoji: true,
+          },
           style: "primary",
         });
       }

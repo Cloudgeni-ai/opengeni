@@ -6716,9 +6716,10 @@ export type InboxItem = {
   choices: InboxItemChoice[];
   /**
    * An approval whose tool's MCP server asks the person a question in the
-   * middle of the call: the title is then the server's question. With `form`,
-   * the question has fields to fill in, answered in its form (load it with
-   * `getToolActionReview`) rather than with one tap. Null or absent otherwise.
+   * middle of the call: the title is then the server's question. Only a
+   * `confirm` is answered in one tap; a `url` question asks the person to open
+   * `url` first, and a `form` has fields to fill in (load it with
+   * `getToolActionReview`). Null or absent otherwise.
    */
   serverQuestion?: InboxItemServerQuestion | null;
   urgency: "normal" | "time_sensitive";
@@ -6750,8 +6751,16 @@ export type InboxItemLink = { url: string; label: string };
 /** An option of the question behind an inbox item, answerable in one tap. */
 export type InboxItemChoice = { id: string; label: string };
 
-/** The MCP server asking about an approval in the inbox, and whether it needs a form. */
-export type InboxItemServerQuestion = { server: string; form: boolean };
+/**
+ * The MCP server asking about an approval in the inbox, and how the person
+ * answers: in one tap (`confirm`), after opening `url` (`url`), or in a form.
+ */
+export type InboxItemServerQuestion = {
+  server: string;
+  kind: "confirm" | "form" | "url";
+  /** The https page a `url` question asks the person to open. */
+  url?: string;
+};
 
 export type ListInboxResponse = {
   items: InboxItem[];

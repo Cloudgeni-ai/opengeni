@@ -11,16 +11,18 @@ import {
   listInboxItems,
   listSessionEvents,
   SessionApprovalAnswerError,
+  upsertConnectorActionPolicy,
 } from "@opengeni/db";
 import {
   createProductionAgentRuntime,
   prefixedMcpToolName,
+  sessionMcpApprovalConnectionId,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
+  FakeMcpElicitationServer,
   startFakeMcpElicitationServer,
-  type FakeMcpElicitationServer,
 } from "@opengeni/testing/mcp-elicitation-server";
 import { ScriptedModel, assistantMessage, functionCall } from "@opengeni/testing/scripted-model";
 import { testSettings } from "@opengeni/testing/settings";
@@ -30,11 +32,11 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { createActivityTestHarness } from "../src/activities";
 
-// An MCP server asks the person mid-call (MCP form elicitation, multi round
-// trip) through the real worker turn path: real PostgreSQL in the production
-// posture, the real SDK call flow over an offline ScriptedModel, and a real
-// MCP server over HTTP. Every answer comes in a later attempt, as it would
-// hours later in an unattended run.
+// An MCP server asks the person mid-call (MCP elicitation, multi round trip:
+// forms, confirmations and pages to open) through the real worker turn path:
+// real PostgreSQL in the production posture, the real SDK call flow over an
+// offline ScriptedModel, and a real MCP server over HTTP. Every answer comes
+// in a later attempt, as it would hours later in an unattended run.
 setDefaultTimeout(120_000);
 let shared: RestrictedRuntimeTestDatabase;
 let app: ReturnType<typeof createDb>;
@@ -56,6 +58,7 @@ afterAll(async () => {
 
 const SEND = prefixedMcpToolName("chat", "send_message");
 const BOOK = prefixedMcpToolName("chat", "book_meeting");
+const SIGN_IN = prefixedMcpToolName("chat", "sign_in");
 
 async function startSession(message: string) {
   const subjectId = `user:mcp-elicitation:${crypto.randomUUID()}`;
@@ -189,6 +192,38 @@ async function toolOutputs(ctx: Ctx, callId: string): Promise<unknown[]> {
     .map((event) => (event.payload as { output: unknown }).output);
 }
 
+/** An explicit rule for the chat server's tool, frozen into the next attempt's policy. */
+async function setPolicy(ctx: Ctx, toolName: string, policy: "allow" | "ask") {
+  await upsertConnectorActionPolicy(app.db, {
+    accountId: ctx.accountId,
+    workspaceId: ctx.workspaceId,
+    subjectId: ctx.subjectId,
+    connectionId: sessionMcpApprovalConnectionId("chat", fake.url),
+    serverId: "chat",
+    toolName,
+    actionName: toolName,
+    policy,
+  });
+}
+
+/** The call's execute-once ledger record and its audit trail. */
+async function ledger(ctx: Ctx, callId: string) {
+  const [row] = await shared.admin<
+    Array<{ id: string; status: string; decision: string | null; input_round: number }>
+  >`
+    select id, status, decision, input_round from connector_action_requests
+    where session_id = ${ctx.sessionId} and approval_id = ${callId}`;
+  if (!row) return { row: undefined, audit: [] as string[], metadata: "" };
+  const audit = await shared.admin<Array<{ action: string; metadata: string }>>`
+    select action, metadata::text as metadata from audit_events
+    where target_id = ${row.id} order by occurred_at, id`;
+  return {
+    row: { status: row.status, decision: row.decision, inputRound: row.input_round },
+    audit: audit.map((entry) => entry.action),
+    metadata: audit.map((entry) => entry.metadata).join("\n"),
+  };
+}
+
 /** What the inbox and the tool review (Slack, dialogs, embedders) show for a paused call. */
 async function surfaces(ctx: Ctx, callId: string) {
   const review = await getToolActionReview(app.db, {
@@ -267,7 +302,7 @@ test("a question pauses the call and a later answer sends it exactly once", asyn
   expect(waiting.item).toMatchObject({
     kind: "approval",
     title: `Send “${text}” to team?`,
-    serverQuestion: { server: "Chat", form: false },
+    serverQuestion: { server: "Chat", kind: "confirm" },
   });
 
   // A confirmation has no fields: a plain approval answers it.
@@ -305,7 +340,7 @@ test("a form is checked, then a second question in the same call is asked and an
   expect(form.question?.requests[0]?.requestedSchema.required).toEqual(["room", "attendees"]);
   expect(form.item).toMatchObject({
     title: `Who should come to “${topic}”, and when?`,
-    serverQuestion: { server: "Chat", form: true },
+    serverQuestion: { server: "Chat", kind: "form" },
   });
 
   // A required field without a default must be answered; nothing is recorded.
@@ -338,7 +373,7 @@ test("a form is checked, then a second question in the same call is asked and an
   expect(asked.question?.requests.map((request) => request.id)).toEqual(["confirm"]);
   expect(asked.item).toMatchObject({
     title: "Book small room for 3?",
-    serverQuestion: { server: "Chat", form: false },
+    serverQuestion: { server: "Chat", kind: "confirm" },
   });
   // The model was not asked anything in between.
   expect(scripted.calls).toBe(1);
@@ -359,7 +394,7 @@ test("a form is checked, then a second question in the same call is asked and an
   expect(scripted.calls).toBe(2);
 });
 
-test("declining the question ends the call without sending, and the server is not called again", async () => {
+test("declining tells the server, which finishes the call without sending", async () => {
   const ctx = await startSession("Tell the team bye");
   const callId = `call-${ctx.sessionId}`;
   const text = `bye ${ctx.sessionId}`;
@@ -377,10 +412,20 @@ test("declining the question ends the call without sending, and the server is no
   expect(decision.payload).not.toHaveProperty("content");
   expect((await runTurn(ctx, scripted, decision.id)).status).toBe("idle");
   expect(fake.sent.filter((message) => message.text === text)).toEqual([]);
-  expect(fake.calls.filter((call) => call.arguments.text === text)).toHaveLength(1);
-  expect(await expectPairedHistory(ctx)).toContain(
-    "The person declined to answer Chat's question, so this tool call did not finish.",
-  );
+  // The retry carries the decline, so the server can clean up and answer.
+  const calls = fake.calls.filter((call) => call.arguments.text === text);
+  expect(calls.map((call) => call.inputResponses)).toEqual([
+    undefined,
+    { confirm: { action: "decline" } },
+  ]);
+  // The model sees the server's own result, then that the person declined.
+  const outputs = await toolOutputs(ctx, callId);
+  expect(outputs).toHaveLength(1);
+  expect(outputs[0]).toEqual(expect.stringContaining("Not sent."));
+  expect(outputs[0]).toEqual(expect.stringMatching(/\n\nThe person declined Chat's question\.$/u));
+  expect(await expectPairedHistory(ctx)).toContain("The person declined Chat's question.");
+  // An unmanaged tool keeps no ledger record.
+  expect((await ledger(ctx, callId)).row).toBeUndefined();
 });
 
 test("declining with a message tells the model the person's words", async () => {
@@ -399,7 +444,157 @@ test("declining with a message tells the model the person's words", async () => 
   });
   expect((await runTurn(ctx, scripted, decision.id)).status).toBe("idle");
   expect(fake.sent.filter((message) => message.text === text)).toEqual([]);
-  expect(await expectPairedHistory(ctx)).toContain("Not to the team, send it to me.");
+  expect(await expectPairedHistory(ctx)).toContain(
+    "The person declined Chat's question and said: Not to the team, send it to me.",
+  );
+});
+
+test("a page to open is continued after the person finishes it there", async () => {
+  const ctx = await startSession("Connect my work account");
+  const callId = `call-${ctx.sessionId}`;
+  const account = `work-${ctx.sessionId}`;
+  const scripted = new ScriptedModel([
+    { output: [functionCall(SIGN_IN, { account }, callId)] },
+    { output: [assistantMessage("Connected.")] },
+  ]);
+  expect((await runTurn(ctx, scripted)).status).toBe("requires_action");
+  // The call declared it can send the person to a page.
+  expect(
+    fake.callsTo("sign_in").findLast((call) => call.arguments.account === account),
+  ).toMatchObject({
+    declaredElicitation: true,
+    declaredUrlElicitation: true,
+  });
+  const page = FakeMcpElicitationServer.signInUrl(account);
+  const [approval] = await latestApprovals(ctx);
+  expect(approval?.elicitation).toEqual({
+    server: "Chat",
+    requests: [
+      { id: "signIn", mode: "url", message: `Sign in to ${account} to continue.`, url: page },
+    ],
+  });
+  const waiting = await surfaces(ctx, callId);
+  expect(waiting.item).toMatchObject({
+    title: `Sign in to ${account} to continue.`,
+    serverQuestion: { server: "Chat", kind: "url", url: page },
+  });
+  // A page has nothing to fill in.
+  await expect(
+    decide(ctx, { approvalId: callId, decision: "approve", content: { signIn: { code: "1" } } }),
+  ).rejects.toThrow("Question signIn has nothing to fill in");
+
+  // Continuing before the page is done: the server asks again, the model is not woken.
+  const early = await decide(ctx, { approvalId: callId, decision: "approve" });
+  expect((await runTurn(ctx, scripted, early.id)).status).toBe("requires_action");
+  expect((await surfaces(ctx, callId)).item).toMatchObject({ serverQuestion: { kind: "url" } });
+  expect(scripted.calls).toBe(1);
+
+  fake.finishSignIn(account);
+  const done = await decide(ctx, { approvalId: callId, decision: "approve" });
+  expect((await runTurn(ctx, scripted, done.id)).status).toBe("idle");
+  const calls = fake.callsTo("sign_in").filter((call) => call.arguments.account === account);
+  expect(calls.map((call) => call.inputResponses)).toEqual([
+    undefined,
+    { signIn: { action: "accept" } },
+    { signIn: { action: "accept" } },
+  ]);
+  expect(await toolOutputs(ctx, callId)).toHaveLength(1);
+  expect(await expectPairedHistory(ctx)).toContain(`Signed in to ${account}.`);
+  expect(scripted.calls).toBe(2);
+});
+
+test("declining a page tells the server", async () => {
+  const ctx = await startSession("Connect my other account");
+  const callId = `call-${ctx.sessionId}`;
+  const account = `other-${ctx.sessionId}`;
+  const scripted = new ScriptedModel([
+    { output: [functionCall(SIGN_IN, { account }, callId)] },
+    { output: [assistantMessage("Okay.")] },
+  ]);
+  expect((await runTurn(ctx, scripted)).status).toBe("requires_action");
+  const decision = await decide(ctx, { approvalId: callId, decision: "reject" });
+  expect((await runTurn(ctx, scripted, decision.id)).status).toBe("idle");
+  expect(
+    fake.callsTo("sign_in").findLast((call) => call.arguments.account === account)?.inputResponses,
+  ).toEqual({ signIn: { action: "decline" } });
+  const [output] = await toolOutputs(ctx, callId);
+  expect(output).toEqual(expect.stringContaining("Not signed in."));
+  expect(output).toEqual(expect.stringMatching(/\n\nThe person declined Chat's question\.$/u));
+  await expectPairedHistory(ctx);
+});
+
+test("a tool set to Ask is approved, then its server's question is answered, and it runs once", async () => {
+  const ctx = await startSession("Tell the team we ship today");
+  await setPolicy(ctx, "send_message", "ask");
+  const callId = `call-${ctx.sessionId}`;
+  const text = `ship ${ctx.sessionId}`;
+  const scripted = new ScriptedModel([
+    { output: [functionCall(SEND, { chat: "team", text }, callId)] },
+    { output: [assistantMessage("Sent.")] },
+  ]);
+  // Opengeni's own approval comes first: the server is not called yet.
+  expect((await runTurn(ctx, scripted)).status).toBe("requires_action");
+  expect((await latestApprovals(ctx))[0]).not.toHaveProperty("elicitation");
+  expect(fake.calls.filter((call) => call.arguments.text === text)).toEqual([]);
+  const allowed = await decide(ctx, { approvalId: callId, decision: "approve" });
+
+  // Then the server asks its own question, as a new round of the same record.
+  expect((await runTurn(ctx, scripted, allowed.id)).status).toBe("requires_action");
+  expect((await latestApprovals(ctx))[0]?.elicitation?.requests[0]?.message).toBe(
+    `Send “${text}” to team?`,
+  );
+  expect((await ledger(ctx, callId)).row).toEqual({
+    status: "pending",
+    decision: null,
+    inputRound: 1,
+  });
+  const answered = await decide(ctx, { approvalId: callId, decision: "approve" });
+  expect((await runTurn(ctx, scripted, answered.id)).status).toBe("idle");
+
+  expect(fake.sent.filter((message) => message.text === text)).toEqual([{ chat: "team", text }]);
+  expect(await toolOutputs(ctx, callId)).toHaveLength(1);
+  expect(await expectPairedHistory(ctx)).toContain("Sent to team.");
+  const { row, audit } = await ledger(ctx, callId);
+  expect(row).toEqual({ status: "completed", decision: "approve", inputRound: 1 });
+  expect(audit).toEqual([
+    "connector.action.approval_requested",
+    "connector.action.approval_decided",
+    "connector.action.execution_started",
+    "connector.action.approval_requested",
+    "connector.action.approval_decided",
+    "connector.action.execution_started",
+    "connector.action.execution_completed",
+  ]);
+});
+
+test("a managed tool's declined question is delivered to the server exactly once", async () => {
+  const ctx = await startSession("Tell the team we slip");
+  await setPolicy(ctx, "send_message", "allow");
+  const callId = `call-${ctx.sessionId}`;
+  const text = `slip ${ctx.sessionId}`;
+  const scripted = new ScriptedModel([
+    { output: [functionCall(SEND, { chat: "team", text }, callId)] },
+    { output: [assistantMessage("Not sent.")] },
+  ]);
+  expect((await runTurn(ctx, scripted)).status).toBe("requires_action");
+  expect((await ledger(ctx, callId)).row).toEqual({
+    status: "pending",
+    decision: null,
+    inputRound: 1,
+  });
+  const declined = await decide(ctx, { approvalId: callId, decision: "reject" });
+  expect((await runTurn(ctx, scripted, declined.id)).status).toBe("idle");
+  const calls = fake.calls.filter((call) => call.arguments.text === text);
+  expect(calls.map((call) => call.inputResponses)).toEqual([
+    undefined,
+    { confirm: { action: "decline" } },
+  ]);
+  expect(fake.sent.filter((message) => message.text === text)).toEqual([]);
+  const { row, audit, metadata } = await ledger(ctx, callId);
+  // The call completed after the server was told no; the decision stays a rejection.
+  expect(row).toEqual({ status: "completed", decision: "reject", inputRound: 1 });
+  expect(audit.filter((action) => action === "connector.action.execution_started")).toHaveLength(2);
+  expect(metadata).toContain("decline_delivery");
 });
 
 test("an answer to a question the server did not ask is refused", async () => {

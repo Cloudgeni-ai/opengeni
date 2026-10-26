@@ -21,7 +21,7 @@ export type InboxItemRow = {
   eventSequence: number | null;
   choices: Array<{ id: string; label: string }>;
   /** An approval its tool's MCP server asks a question about (0982); null otherwise. */
-  serverQuestion: { server: string; form: boolean } | null;
+  serverQuestion: { server: string; kind: "confirm" | "form" | "url"; url?: string } | null;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
   unread: boolean;
@@ -79,8 +79,10 @@ function choicesOf(value: unknown): Array<{ id: string; label: string }> {
 function serverQuestionOf(value: unknown): InboxItemRow["serverQuestion"] {
   const parsed = jsonValue(value);
   if (typeof parsed !== "object" || parsed === null) return null;
-  const { server, form } = parsed as { server?: unknown; form?: unknown };
-  return typeof server === "string" && server ? { server, form: form === true } : null;
+  const { server, kind, url } = parsed as { server?: unknown; kind?: unknown; url?: unknown };
+  if (typeof server !== "string" || !server) return null;
+  if (kind === "url" && typeof url === "string") return { server, kind, url };
+  return { server, kind: kind === "confirm" ? "confirm" : "form" };
 }
 
 function jsonValue(value: unknown): unknown {

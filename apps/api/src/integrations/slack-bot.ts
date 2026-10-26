@@ -213,13 +213,22 @@ export type SlackMessageBlock =
   | {
       type: "actions";
       block_id: string;
-      elements: Array<{
-        type: "button";
-        action_id: string;
-        value: string;
-        text: { type: "plain_text"; text: string; emoji?: boolean };
-        style?: "primary" | "danger";
-      }>;
+      elements: Array<
+        | {
+            type: "button";
+            action_id: string;
+            value: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+            style?: "primary" | "danger";
+          }
+        | {
+            /** Opens `url` in the browser; Slack still reports the click, which is only acknowledged. */
+            type: "button";
+            action_id: string;
+            url: string;
+            text: { type: "plain_text"; text: string; emoji?: boolean };
+          }
+      >;
     }
   | {
       type: "context";

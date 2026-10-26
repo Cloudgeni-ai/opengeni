@@ -173,13 +173,13 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
 /**
  * The notification category the app registers actions for: an approval can be
  * approved (behind device unlock) or denied, a question answered inline. An
- * MCP server's question with fields to fill in opens the app on its form.
+ * MCP server's question with fields to fill in or a page to open opens the app.
  */
 export function nativePushCategory(
   payload: NativePushPayload,
 ): "og.approval" | "og.question" | undefined {
   if (payload.secretQuestion || payload.secretUseApproval) return undefined;
-  if (payload.serverQuestionForm) return undefined;
+  if (payload.serverQuestionKind) return undefined;
   if (payload.eventType === "session.requiresAction") return "og.approval";
   if (payload.eventType === "session.humanInput.requested") return "og.question";
   return undefined;

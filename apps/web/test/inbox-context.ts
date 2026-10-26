@@ -37,7 +37,7 @@ let items: InboxItem[] = [
     sourceKey: "a2",
     title: "Share “Q3 plan” with everyone in the Design team?",
     body: "Share document",
-    serverQuestion: { server: "Docs", form: false },
+    serverQuestion: { server: "Docs", kind: "confirm" },
   },
   {
     ...base,
@@ -47,7 +47,21 @@ let items: InboxItem[] = [
     sourceKey: "a3",
     title: "Which folder should the budget go in?",
     body: "Save document",
-    serverQuestion: { server: "Docs", form: true },
+    serverQuestion: { server: "Docs", kind: "form" },
+  },
+  {
+    ...base,
+    id: "server-page",
+    sessionId: "s6",
+    kind: "approval",
+    sourceKey: "a4",
+    title: "Sign in to your Docs work account to continue.",
+    body: "Export document",
+    serverQuestion: {
+      server: "Docs",
+      kind: "url",
+      url: "https://accounts.example.com/sign-in?account=work",
+    },
   },
   {
     ...base,

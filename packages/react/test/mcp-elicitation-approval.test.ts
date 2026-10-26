@@ -176,3 +176,48 @@ test("Decline rejects without an answer", async () => {
   await act(async () => button("Decline").click());
   expect(decisions).toEqual([{ decision: "reject" }]);
 });
+
+const signIn = {
+  server: "Accounts",
+  requests: [
+    {
+      id: "sign-in",
+      mode: "url",
+      message: "Sign in to your work account to continue.",
+      url: "https://accounts.example.com/sign-in?account=work",
+    },
+  ],
+};
+
+test("a page to open names its host, opens only in a new tab, and Continue sends no answer", async () => {
+  const decisions: Array<{ decision: string; content?: unknown }> = [];
+  mounted = await render(pending(signIn), decisions);
+  await act(async () => undefined);
+  const text = mounted.container.textContent ?? "";
+  expect(text).toContain("Accounts asks");
+  expect(text).toContain("Sign in to your work account to continue.");
+  const link = mounted.container.querySelector<HTMLAnchorElement>(
+    "[data-og-mcp-elicitation-page] a",
+  )!;
+  expect(link.textContent).toBe("Open accounts.example.com");
+  expect(link.getAttribute("href")).toBe("https://accounts.example.com/sign-in?account=work");
+  expect(link.getAttribute("target")).toBe("_blank");
+  expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+  const labels = buttons().map((candidate) => candidate.textContent);
+  expect(labels).toContain("Continue");
+  expect(labels).not.toContain("Allow");
+  await submit();
+  expect(decisions).toEqual([{ decision: "approve", content: {} }]);
+});
+
+test("a page that is not a plain https link is never offered", () => {
+  for (const url of [
+    "http://accounts.example.com",
+    "https://user:pw@accounts.example.com",
+    "javascript:alert(1)",
+  ]) {
+    expect(
+      pending({ ...signIn, requests: [{ ...signIn.requests[0], url }] })[0]?.elicitation,
+    ).toBeUndefined();
+  }
+});

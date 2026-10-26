@@ -2143,6 +2143,12 @@ export type ConnectorActionToolCall = {
   approvalMode?: "session_mcp" | "connector_write";
   defaultDecision?: "allow" | "ask";
   actionName?: string;
+  /**
+   * This execution only tells the provider that the person declined the
+   * question it asked mid-call (MCP elicitation); the ledger admits it once
+   * after that rejection.
+   */
+  deliversDecline?: true;
 };
 
 export type ConnectorActionPolicyPreparation =
@@ -6504,6 +6510,9 @@ function connectorActionGatewayLifecycle(input: {
       }
       const modelInvocation =
         call.caller.kind === "model" ? activeModelToolInvocation(input.modelName) : null;
+      // Telling the server the person declined its question runs the call once
+      // more under that rejection; the ledger admits exactly that delivery.
+      const deliversDecline = modelInvocation?.mcpInput?.answered?.action === "decline";
       let connectorCall: ConnectorActionToolCall;
       try {
         connectorCall = input.call(
@@ -6518,6 +6527,7 @@ function connectorActionGatewayLifecycle(input: {
           { cause: error },
         );
       }
+      if (deliversDecline) connectorCall = { ...connectorCall, deliversDecline: true };
       const preparation =
         modelInvocation?.preparation ??
         (call.caller.kind === "codemode" &&
@@ -6539,7 +6549,8 @@ function connectorActionGatewayLifecycle(input: {
         preparation.managed &&
         preparation.decision === "ask" &&
         modelInvocation?.approvalConfirmed !== true &&
-        preparation.approvalStatus !== "approved"
+        preparation.approvalStatus !== "approved" &&
+        !deliversDecline
       ) {
         if (
           call.caller.kind === "codemode" &&

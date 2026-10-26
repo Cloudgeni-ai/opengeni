@@ -1,11 +1,11 @@
 # MCP elicitation
 
 An MCP server can ask the person a question in the middle of a tool call:
-confirm this send, pick an account, fill in a missing field. Opengeni shows the
-question as an ordinary approval of that same call. The person answers it in
-the approval card, possibly hours later, and the call continues where it
-stopped. The model never sees the question; it only sees the call's final
-result.
+confirm this send, pick an account, fill in a missing field, or open a web page
+to sign in or pay. Opengeni shows the question as an ordinary approval of that
+same call. The person answers it in the approval card, possibly hours later,
+and the call continues where it stopped. The model never sees the question; it
+only sees the call's final result.
 
 This lets a server decide per call what needs a person. Opengeni's own approval
 settings work per tool and deliberately never choose an easier policy from
@@ -15,19 +15,20 @@ ask only about the rest.
 
 ## Protocol
 
-Opengeni implements form-mode elicitation from MCP revision 2026-07-28, using
-its multi round-trip pattern:
+Opengeni implements form-mode and URL-mode elicitation from MCP revision
+2026-07-28, using its multi round-trip pattern:
 
-1. A model's tool call declares `elicitation: { form: {} }` in that request's
-   `io.modelcontextprotocol/clientCapabilities` `_meta`.
+1. A model's tool call declares `elicitation: { form: {}, url: {} }` in that
+   request's `io.modelcontextprotocol/clientCapabilities` `_meta`.
 2. The server may answer with `resultType: "input_required"`, `inputRequests`
-   (one or more `elicitation/create` form requests) and an opaque
+   (one or more `elicitation/create` requests) and an opaque
    `requestState`.
 3. Opengeni pauses the call as an approval and stores the requests and
    `requestState` with the paused call, outside the session event log.
-4. When the person approves, Opengeni retries the same `tools/call` with a new
-   JSON-RPC id, `inputResponses` (`action: "accept"` and the form content for
-   each request) and the byte-exact `requestState`.
+4. When the person answers, Opengeni retries the same `tools/call` with a new
+   JSON-RPC id, `inputResponses` and the byte-exact `requestState`. Approving
+   sends `action: "accept"` for each request, with the form's content (a page
+   to open has none). Declining sends `action: "decline"`.
 5. The server returns the final result or asks again. Each new question is
    another approval of the same call. After 10 questions the call stops with
    an error result.
@@ -35,12 +36,32 @@ its multi round-trip pattern:
 An `input_required` result without `inputRequests` is retried immediately with
 its `requestState`, without asking anyone (at most 10 times in a row).
 
-Declining is a rejected approval: the call does not continue, and the model
-receives "The person declined to answer <server>'s question, so this tool call
-did not finish." A rejection with a message gives the model the person's words
-instead, as for any approval. Opengeni does not send `decline` back to the
-server; the specification lets a client never retry. Stopping or replacing the
-turn cancels the call the same way any open approval is cancelled.
+Declining is a rejected approval that the server is told about. The retry
+carries the decline, so the server can release whatever it was holding (a
+parked draft, a reserved slot) and finish the call its own way, typically with
+a result such as "Not sent." The model then receives that result followed by
+"The person declined <server>'s question." or, when the person wrote a message,
+"The person declined <server>'s question and said: <message>". A server may
+also answer a decline with another question; that pauses the call again,
+within the same 10-question limit. Stopping or replacing the turn cancels the
+call the same way any open approval is cancelled; the specification lets a
+client simply not retry, so the server is not called then.
+
+### Pages to open
+
+A URL-mode question asks the person to open a web page, for example to sign
+in to an account or confirm a payment. Nothing typed there passes through
+Opengeni. Opengeni only offers `https` links without embedded credentials;
+any other link ends the call with an error result the model can read ("The MCP
+server asked the person to open a link that is not a plain https address, so
+the tool call did not finish."). Every surface shows the page's exact host
+next to the link, and the link opens only when the person clicks it, in a new
+tab with no access back to Opengeni.
+
+When the person continues, Opengeni sends `accept` with no content. Revision
+2026-07-28 has no completion notification for this exchange, so the server
+checks its own state: if the step on the page is done it finishes the call,
+otherwise it asks again and the person sees the same page question.
 
 Approvals do not expire, so the answer can come hours or days later, from an
 unattended run as well as a chat. The server decides whether its
@@ -48,8 +69,8 @@ unattended run as well as a chat. The server decides whether its
 
 Only the 2026-07-28 exchange is supported. Connections that negotiate the 2025
 protocol never declare elicitation: their server-initiated `elicitation/create`
-request needs an open stream that cannot outlive a worker. URL mode, sampling
-and roots are not declared either. A compliant server refuses to ask for them
+request needs an open stream that cannot outlive a worker. Sampling and roots
+are not declared either. A compliant server refuses to ask for them
 (`MissingRequiredClientCapability`); a server that asks anyway gets no answer,
 and the call ends with an error result the model can read.
 
@@ -81,8 +102,19 @@ declare it either, because they must finish in one exchange.
 ```
 
 `requestedSchema` is the server's restricted form schema: flat string, number,
-integer, boolean, single-select and multi-select fields. Approve with the
-answers keyed by request id:
+integer, boolean, single-select and multi-select fields. A page to open has
+`mode: "url"` and a `url` instead of a schema:
+
+```json
+{
+  "id": "sign-in",
+  "mode": "url",
+  "message": "Sign in to your calendar account to continue.",
+  "url": "https://accounts.example.com/connect?session=abc"
+}
+```
+
+Approve with the answers keyed by request id:
 
 ```json
 {
@@ -98,34 +130,45 @@ answers keyed by request id:
 The API validates `content` against each schema (required fields, types,
 lengths, bounds and choices) and refuses an answer that does not match. A
 request without required fields can be approved without `content`, so a plain
-confirmation also works from surfaces that only approve or reject. Approval
-authority is unchanged: whoever may decide the session's approvals may answer.
-The recorded decision carries the complete answer, the form's defaults
-included. A rejection carries no answer.
+confirmation also works from surfaces that only approve or reject. A page to
+open takes no answer: `content` has no entry for it, and approving it means
+"continue". Approval authority is unchanged: whoever may decide the session's
+approvals may answer. The recorded decision carries the complete answer, the
+form's defaults included. A rejection carries no answer.
+
+`mcpElicitationKind(request)` in `@opengeni/contracts` sums up how a person
+answers: `confirm` (nothing to fill in), `url` (open a page, then continue) or
+`form` (fields to fill in; its card also shows any page in the same request).
 
 ## Where the person sees the question
 
 Every approval surface shows the server's question itself, not just the tool
 name. A question with nothing to fill in is a confirmation answered with Allow
-or Deny wherever approvals are decided; a question with fields is answered on
-its form.
+or Deny wherever approvals are decided; a page to open is shown with its host
+and answered with Continue wherever approvals are decided; a question with
+fields is answered on its form.
 
-| Surface              | Confirmation                                         | Form                                                    |
-| -------------------- | ---------------------------------------------------- | ------------------------------------------------------- |
-| Session (web, React) | Question, Allow, Decline                             | Question and form, Send answer, Decline                 |
-| Session (native)     | Question, Allow, Decline                             | Question and native form, Send answer, Decline          |
-| Web inbox            | Question as the title, "<server> asks", Allow, Deny  | Answer opens the same form in a dialog; Deny            |
-| Native inbox         | Question as the title, "<server> asks", Allow, Deny  | Answer opens the session on the form; Deny              |
-| Phone push           | "<server> asks: <question>", lock-screen Approve     | The same text; tapping opens the app on the form        |
-| Slack (private DM)   | Question in the card, Allow, Decline                 | Question in the card, Decline and "Answer in Opengeni"  |
+| Surface              | Confirmation                                        | Page to open                                          | Form                                                   |
+| -------------------- | --------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------ |
+| Session (web, React) | Question, Allow, Decline                            | Question, "Open <host>", Continue, Decline            | Question and form, Send answer, Decline                |
+| Session (native)     | Question, Allow, Decline                            | Question, "Open <host>", Continue, Decline            | Question and native form, Send answer, Decline         |
+| Web inbox            | Question as the title, "<server> asks", Allow, Deny | Question as the title, "Open <host>", Continue, Deny  | Answer opens the same form in a dialog; Deny           |
+| Native inbox         | Question as the title, "<server> asks", Allow, Deny | Question as the title, "Open <host>", Continue, Deny  | Answer opens the session on the form; Deny             |
+| Phone push           | "<server> asks: <question>", lock-screen Approve    | The same text; tapping opens the app on the question  | The same text; tapping opens the app on the form       |
+| Slack (private DM)   | Question in the card, Allow, Decline                | Question, "Open <host>" link button, Continue, Decline | Question in the card, Decline and "Answer in Opengeni" |
 
-Inbox items for such approvals carry `serverQuestion: { server, form }`, and
-`GET /tool-reviews/{approvalId}` returns the waiting `question`, so an
-embedder's own inbox can do the same. A server that asks again on the same
-call reopens its inbox item with the new question.
+Inbox items for such approvals carry `serverQuestion: { server, kind, url? }`,
+where `kind` is `confirm`, `form` or `url` and `url` is the page for the `url`
+kind. Phone push payloads carry `serverQuestionKind` (`form` or `url`) when
+the question is not a plain confirmation, so the lock screen offers no
+one-tap answer for it. `GET /tool-reviews/{approvalId}` returns the waiting
+`question`, so an embedder's own inbox can do the same. A server that asks
+again on the same call reopens its inbox item with the new question.
 
-Slack answers forms in Opengeni because a Slack form is a modal that has to
-be opened within three seconds of the click, while Slack decisions go through
+Slack answers confirmations and pages to open in the card. The page is a link
+button that opens in the browser and is not itself a decision; Continue is.
+Slack answers forms in Opengeni because a Slack form is a modal that has to be
+opened within three seconds of the click, while Slack decisions go through
 Opengeni's durable action queue. A Slack card is also posted once per event
 and replayed byte for byte, so it shows the question from the event, not live
 state. A question too long for one Slack section is answered in Opengeni too.
@@ -140,16 +183,27 @@ the answer as its second argument; an embedder with its own approval UI reads
 
 ## Ledger
 
-A connector action's execution record moves from `executing` back to `pending`
-when its server asks, so the person's answer is recorded as an approval
-decision and the retry executes once under that decision. An Allow call without
-a saved rule keeps having no record.
+A connector action with an execution record (an Ask tool, or one with a saved
+rule) moves from `executing` back to `pending` each time its server asks, and
+its `input_round` goes up by one. Each round gets its own decision, so a
+second question, or an answer that arrives in a later worker attempt, records
+a new decision instead of colliding with the first. The record keeps the
+decision of the current round only; the audit log keeps every round. An Allow
+call without a saved rule keeps having no record.
 
-A tool whose policy is Ask is approved before it runs and then answered for
-each question its server asks: two decisions for the same call.
+A rejected record moves to `executing` exactly once more, to deliver the
+decline to the server (audit outcome `decline_delivery`); the server's answer
+then settles it as usual. If the server asks again, the record opens a new
+round.
+
+Opengeni's tool policy and the server's questions are two layers. The policy
+decides whether the agent may use the tool at all; the server decides, per
+call, what needs the person. A tool set to Ask is approved before it runs and
+then answered for each question its server asks. Set the tool to Allow to
+leave every decision to the server.
 
 ## Not supported yet
 
-- URL-mode elicitation, sampling and roots inside `input_required`.
+- Sampling and roots inside `input_required`.
 - Elicitation on `prompts/get` and `resources/read`.
 - Elicitation for Codemode and other programmatic callers.

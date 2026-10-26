@@ -28569,6 +28569,12 @@ export type ConnectorActionInvocation = {
   actionName?: string;
   /** Legacy recommendation or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
+  /**
+   * This execution only tells the provider that the person declined the
+   * question it asked mid-call (MCP elicitation). It is admitted once, from
+   * the rejected round of a request that asked.
+   */
+  deliversDecline?: true;
 };
 
 export type PrepareConnectorActionApprovalResult =
@@ -29659,6 +29665,35 @@ export async function beginConnectorActionExecution(
           actionFingerprint: row.actionFingerprint,
         } as const;
       }
+      if (row.status === "rejected" && row.inputRound > 0 && invocation.deliversDecline) {
+        // The person declined the provider's question: the call runs once
+        // more under that rejection, only to tell the provider so.
+        const [executing] = await tx
+          .update(schema.connectorActionRequests)
+          .set({
+            status: "executing",
+            executionAttemptId: identity.attemptId,
+            executionAttemptGeneration: identity.executionGeneration,
+            executionStartedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.connectorActionRequests.id, row.id))
+          .returning();
+        if (!executing) throw new Error("Declined connector action request disappeared");
+        row = executing;
+        await insertConnectorActionAudit(tx, {
+          row,
+          action: "connector.action.execution_started",
+          subjectId: identity.initiator.subjectId,
+          extra: { outcome: "decline_delivery", inputRound: row.inputRound },
+        });
+        return {
+          allowed: true,
+          managed: true,
+          requestId: row.id,
+          actionFingerprint: row.actionFingerprint,
+        } as const;
+      }
       if (row.status === "executing") {
         if (inserted) {
           return {
@@ -29723,9 +29758,9 @@ export async function completeConnectorActionExecution(
     attemptId: string;
     /**
      * `input_required`: the provider stopped before finishing to ask the
-     * person a question (MCP elicitation). The request returns to `pending`,
-     * so the answer is an approval decision and the retry executes once
-     * under it.
+     * person a question (MCP elicitation). The request opens its next input
+     * round as an undecided `pending` request, so the answer is that round's
+     * approval decision and the retry executes once under it.
      */
     outcome: "completed" | "uncertain" | "not_executed" | "input_required";
   },
@@ -29747,11 +29782,22 @@ export async function completeConnectorActionExecution(
             and(
               eq(schema.connectorActionRequests.workspaceId, input.workspaceId),
               eq(schema.connectorActionRequests.id, input.requestId),
-              eq(schema.connectorActionRequests.executionAttemptId, input.attemptId),
             ),
           );
       const [located] = await request().limit(1);
-      if (!located) throw new Error("Connector action request not found for completion");
+      // Asking the person releases the executing attempt, so a repeated
+      // settlement of the same question finds an undecided round instead.
+      const settledQuestion = (row: typeof located) =>
+        input.outcome === "input_required" &&
+        row?.status === "pending" &&
+        row.inputRound > 0 &&
+        row.executionAttemptId === null;
+      if (
+        !located ||
+        (located.executionAttemptId !== input.attemptId && !settledQuestion(located))
+      ) {
+        throw new Error("Connector action request not found for completion");
+      }
       // Settlement is not admission: it takes the canonical prefix but never the
       // Pause/Steer write fence, so an interrupted attempt still settles.
       await lockPrefix({
@@ -29761,14 +29807,32 @@ export async function completeConnectorActionExecution(
       });
       const [existing] = await request().for("update").limit(1);
       if (!existing) throw new Error("Connector action request not found for completion");
+      if (settledQuestion(existing)) return;
+      if (existing.executionAttemptId !== input.attemptId) {
+        throw new Error("Connector action request not found for completion");
+      }
       if (input.outcome === "input_required") {
-        if (existing.status === "pending") return;
         if (existing.status !== "executing") {
           throw new Error(`Connector action request cannot ask from ${existing.status}`);
         }
         const [row] = await tx
           .update(schema.connectorActionRequests)
-          .set({ status: "pending", updatedAt: new Date() })
+          .set({
+            status: "pending",
+            inputRound: existing.inputRound + 1,
+            // The new question is decided and executed afresh; earlier
+            // rounds' decisions stay in the audit log.
+            decision: null,
+            decisionBySubjectId: null,
+            decisionByKind: null,
+            decisionBySignedInPerson: false,
+            decisionEventId: null,
+            decidedAt: null,
+            executionAttemptId: null,
+            executionAttemptGeneration: null,
+            executionStartedAt: null,
+            updatedAt: new Date(),
+          })
           .where(eq(schema.connectorActionRequests.id, existing.id))
           .returning();
         if (!row) throw new Error("Connector action request disappeared while asking");
@@ -29776,7 +29840,7 @@ export async function completeConnectorActionExecution(
           row,
           action: "connector.action.approval_requested",
           subjectId: row.initiatorSubjectId,
-          extra: { outcome: "input_required" },
+          extra: { outcome: "input_required", inputRound: row.inputRound },
         });
         return;
       }
@@ -88789,7 +88853,12 @@ export async function acceptSessionApprovalDecision(
               row: connectorRequest,
               action: "connector.action.approval_decided",
               subjectId: input.subjectId,
-              extra: { decision: approvalDecision },
+              extra: {
+                decision: approvalDecision,
+                ...(connectorRequest.inputRound > 0
+                  ? { inputRound: connectorRequest.inputRound }
+                  : {}),
+              },
             });
           }
         }

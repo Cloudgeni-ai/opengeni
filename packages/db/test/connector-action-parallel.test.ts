@@ -273,7 +273,7 @@ describe("parallel connector-backed tool calls", () => {
 });
 
 describe("a provider that asks the person mid-call", () => {
-  test("returns the request to pending, so only an answered approval executes it again", async () => {
+  test("each question opens a round that is decided and executed once", async () => {
     const { identity, connectionId, serverId } = await claimedAttempt();
     const call = {
       approvalId: "asked-mid-call",
@@ -293,14 +293,36 @@ describe("a provider that asks the person mid-call", () => {
         attemptId: identity.attemptId,
         outcome,
       });
-    const status = async () =>
+    const row = async () =>
       (
-        await shared.admin<Array<{ status: string }>>`
-          select status from connector_action_requests where id = ${admission.requestId}`
-      )[0]?.status;
+        await shared.admin<
+          Array<{
+            status: string;
+            input_round: number;
+            decision: string | null;
+            execution_attempt_id: string | null;
+          }>
+        >`
+          select status, input_round, decision, execution_attempt_id
+          from connector_action_requests where id = ${admission.requestId}`
+      )[0];
+    // What recording the person's decision does to the request.
+    const decide = async (decision: "approve" | "reject") => {
+      await shared.admin`
+        update connector_action_requests
+        set status = ${decision === "approve" ? "approved" : "rejected"}, decision = ${decision},
+          decision_by_subject_id = ${identity.initiator.subjectId},
+          decision_event_id = ${crypto.randomUUID()}, decided_at = now()
+        where id = ${admission.requestId}`;
+    };
 
     await complete("input_required");
-    expect(await status()).toBe("pending");
+    expect(await row()).toEqual({
+      status: "pending",
+      input_round: 1,
+      decision: null,
+      execution_attempt_id: null,
+    });
     // A repeated settlement of the same question is a no-op.
     await complete("input_required");
     const audit = await shared.admin<Array<{ action: string; metadata: string }>>`
@@ -317,17 +339,141 @@ describe("a provider that asks the person mid-call", () => {
       allowed: false,
       reason: "approval_required",
     });
-    // The answer approves the request; the retry executes once under it.
-    await shared.admin`
-      update connector_action_requests set status = 'approved' where id = ${admission.requestId}`;
+    // The answer approves this round; the retry executes once under it.
+    await decide("approve");
     expect(await beginConnectorActionExecution(client.db, identity, call)).toMatchObject({
       allowed: true,
       requestId: admission.requestId,
     });
+    // Within a round the decision is as immutable as any approval decision.
+    await expect(
+      shared.admin`
+        update connector_action_requests set decision = 'reject'
+        where id = ${admission.requestId}`,
+    ).rejects.toThrow("connector action approval decision is immutable");
+
+    // A second question opens round 2 with no decision or executing attempt,
+    // so its answer can come from any later attempt.
+    await complete("input_required");
+    expect(await row()).toEqual({
+      status: "pending",
+      input_round: 2,
+      decision: null,
+      execution_attempt_id: null,
+    });
+    // The person declines it: the call may run once more, only to tell the
+    // provider so.
+    await decide("reject");
+    expect(await beginConnectorActionExecution(client.db, identity, call)).toMatchObject({
+      allowed: false,
+      reason: "rejected",
+    });
+    expect(
+      await beginConnectorActionExecution(client.db, identity, { ...call, deliversDecline: true }),
+    ).toMatchObject({ allowed: true, requestId: admission.requestId });
+    expect(
+      await beginConnectorActionExecution(client.db, identity, { ...call, deliversDecline: true }),
+    ).toMatchObject({ allowed: false, reason: "uncertain_retry" });
+    expect((await row())?.decision).toBe("reject");
+    await expect(complete("completed")).rejects.toThrow(
+      "Connector action request cannot complete from uncertain",
+    );
+    await expect(complete("input_required")).rejects.toThrow(
+      "Connector action request cannot ask from uncertain",
+    );
+  });
+
+  test("a declined decision admits one delivery and then completes", async () => {
+    const { identity, connectionId, serverId } = await claimedAttempt();
+    const call = {
+      approvalId: "declined-mid-call",
+      connectionId,
+      serverId,
+      toolName: "send_message",
+      arguments: { chat: "team" },
+      defaultDecision: "allow" as const,
+    };
+    const admission = await beginConnectorActionExecution(client.db, identity, call);
+    if (!admission.allowed || !admission.managed) throw new Error("explicit Allow was denied");
+    const complete = (outcome: "input_required" | "completed") =>
+      completeConnectorActionExecution(client.db, {
+        accountId: identity.accountId,
+        workspaceId: identity.workspaceId,
+        requestId: admission.requestId,
+        attemptId: identity.attemptId,
+        outcome,
+      });
+    await complete("input_required");
+    await shared.admin`
+      update connector_action_requests
+      set status = 'rejected', decision = 'reject',
+        decision_by_subject_id = ${identity.initiator.subjectId},
+        decision_event_id = ${crypto.randomUUID()}, decided_at = now()
+      where id = ${admission.requestId}`;
+    expect(
+      await beginConnectorActionExecution(client.db, identity, { ...call, deliversDecline: true }),
+    ).toMatchObject({ allowed: true });
     await complete("completed");
-    expect(await status()).toBe("completed");
+    const [settled] = await shared.admin<Array<{ status: string; decision: string }>>`
+      select status, decision from connector_action_requests where id = ${admission.requestId}`;
+    // The call completed after the provider was told no; the decision stays a rejection.
+    expect(settled).toEqual({ status: "completed", decision: "reject" });
     await expect(complete("input_required")).rejects.toThrow(
       "Connector action request cannot ask from completed",
     );
+    const audit = await shared.admin<Array<{ action: string; metadata: string }>>`
+      select action, metadata::text as metadata from audit_events
+      where target_id = ${admission.requestId} order by occurred_at, id`;
+    expect(audit.map((entry) => entry.action)).toEqual([
+      "connector.action.execution_started",
+      "connector.action.approval_requested",
+      "connector.action.execution_started",
+      "connector.action.execution_completed",
+    ]);
+    expect(audit[2]?.metadata).toContain("decline_delivery");
+  });
+
+  test("a round only advances from an executing call to an undecided question", async () => {
+    const { identity, connectionId, serverId } = await claimedAttempt();
+    const admission = await beginConnectorActionExecution(client.db, identity, {
+      approvalId: "round-guard",
+      connectionId,
+      serverId,
+      toolName: "send_message",
+      arguments: { chat: "team" },
+      defaultDecision: "allow" as const,
+    });
+    if (!admission.allowed || !admission.managed) throw new Error("explicit Allow was denied");
+    const refused = "connector action input round advances only from executing";
+    await expect(
+      shared.admin`
+        update connector_action_requests set input_round = 2, status = 'pending',
+          execution_attempt_id = null, execution_attempt_generation = null
+        where id = ${admission.requestId}`,
+    ).rejects.toThrow(refused);
+    await expect(
+      shared.admin`
+        update connector_action_requests set input_round = 1
+        where id = ${admission.requestId}`,
+    ).rejects.toThrow(refused);
+    // A rejection of a call whose provider never asked admits no delivery.
+    const neverAsked = {
+      approvalId: "never-asked",
+      connectionId,
+      serverId,
+      toolName: "send_message",
+      arguments: { chat: "family" },
+      defaultDecision: "allow" as const,
+    };
+    const second = await beginConnectorActionExecution(client.db, identity, neverAsked);
+    if (!second.allowed || !second.managed) throw new Error("explicit Allow was denied");
+    await shared.admin`
+      update connector_action_requests set status = 'rejected' where id = ${second.requestId}`;
+    expect(
+      await beginConnectorActionExecution(client.db, identity, {
+        ...neverAsked,
+        deliversDecline: true,
+      }),
+    ).toMatchObject({ allowed: false, reason: "rejected" });
   });
 });

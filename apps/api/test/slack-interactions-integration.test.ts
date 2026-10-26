@@ -10684,7 +10684,7 @@ for (const audience of ["private", "shared"] as const) {
   }, 90_000);
 }
 
-test("an MCP server's question shows in private Slack; a confirmation is answered there and a form in the session", async () => {
+test("an MCP server's question shows in private Slack; a confirmation or a page to open is answered there and a form in the session", async () => {
   if (!available) throw new Error("Real database is required");
   const value = await fixture({ linkOther: true });
   const rootTimestamp = "1770000000.000001";
@@ -10715,6 +10715,7 @@ test("an MCP server's question shows in private Slack; a confirmation is answere
   if (claimed.action !== "claimed") throw new Error("Fixture claim unavailable");
   const confirmationId = crypto.randomUUID();
   const formId = crypto.randomUUID();
+  const pageId = crypto.randomUUID();
   const question = (message: string, properties: Record<string, unknown>) => ({
     server: "Docs",
     requests: [{ id: "q1", message, requestedSchema: { type: "object", properties } }],
@@ -10732,6 +10733,7 @@ test("an MCP server's question shows in private Slack; a confirmation is answere
       pendingApprovals: [
         { id: confirmationId, source: "codemode" },
         { id: formId, source: "codemode" },
+        { id: pageId, source: "codemode" },
       ],
       humanInputRequests: [],
     },
@@ -10754,6 +10756,22 @@ test("an MCP server's question shows in private Slack; a confirmation is answere
                 folder: { type: "string", title: "Folder" },
               }),
             },
+            {
+              id: pageId,
+              name: "docs__export",
+              arguments: { doc: "plan" },
+              elicitation: {
+                server: "Docs",
+                requests: [
+                  {
+                    id: "q1",
+                    mode: "url",
+                    message: "Sign in to Docs to export the plan.",
+                    url: "https://accounts.example.com/sign-in?account=work",
+                  },
+                ],
+              },
+            },
           ],
         },
       },
@@ -10768,7 +10786,16 @@ test("an MCP server's question shows in private Slack; a confirmation is answere
   expect(rendered).toContain(
     `<https://app.example.test/workspaces/${value.owner.workspaceId}/sessions/${route.session_id}|Answer in Opengeni>`,
   );
-  // Allow only for the confirmation; Decline for both.
+  // Allow for the confirmation, the page's link and Continue, and Decline for all three.
+  expect(rendered).toContain(JSON.stringify("Docs asks:\nSign in to Docs to export the plan."));
+  expect(rendered).toContain(
+    JSON.stringify({
+      type: "button",
+      action_id: "opengeni.approval.open_page.0",
+      url: "https://accounts.example.com/sign-in?account=work",
+      text: { type: "plain_text", text: "Open accounts.example.com" },
+    }),
+  );
   const handles = await shared!.admin<{ action_kind: string; target_id: string }[]>`
     select action_kind, target_id from slack_interaction_action_handles
     where message_operation_id = ${post.clientMessageId}::uuid order by action_kind, target_id`;
@@ -10777,15 +10804,36 @@ test("an MCP server's question shows in private Slack; a confirmation is answere
       `approval_approve:${confirmationId}`,
       `approval_reject:${confirmationId}`,
       `approval_reject:${formId}`,
+      `approval_approve:${pageId}`,
+      `approval_reject:${pageId}`,
     ].sort(),
   );
   expect(rendered.match(/"text":"Allow"/gu)?.length).toBe(1);
-  expect(rendered.match(/"text":"Decline"/gu)?.length).toBe(2);
+  expect(rendered.match(/"text":"Continue"/gu)?.length).toBe(1);
+  expect(rendered.match(/"text":"Decline"/gu)?.length).toBe(3);
+  // Opening the page is the browser's job: the click is acknowledged and ignored.
+  const inboxBefore = await shared!.admin<{ count: number }[]>`
+    select count(*)::int as count from slack_interaction_inbox`;
+  await pressSlackButton(value, {
+    post,
+    rootTimestamp,
+    actionId: "opengeni.approval.open_page.0",
+    handleId: "",
+    actionTs: "1770000000.090001",
+  });
+  expect(
+    await shared!.admin<{ count: number }[]>`
+      select count(*)::int as count from slack_interaction_inbox`,
+  ).toEqual(inboxBefore);
+  const [confirmationHandle] = await shared!.admin<{ id: string }[]>`
+    select id from slack_interaction_action_handles
+    where message_operation_id = ${post.clientMessageId}::uuid
+      and action_kind = 'approval_approve' and target_id = ${confirmationId}`;
   await pressSlackButton(value, {
     post,
     rootTimestamp,
     actionId: "opengeni.approval.approve",
-    handleId: await pendingHandle(post, "approval_approve"),
+    handleId: confirmationHandle!.id,
     actionTs: "1770000000.100001",
   });
   await drainAll(value.deps);

@@ -19,23 +19,25 @@ diff --git a/dist/mcp.d.ts b/dist/mcp.d.ts
 index aa0b62edaa91a10ab64d7daa6a736ae22a35fa0b..0a4a718c07cb570a2ef9f4854c9a52b74c34bd22 100644
 --- a/dist/mcp.d.ts
 +++ b/dist/mcp.d.ts
-@@ -14,6 +14,15 @@ export type MCPToolErrorFunction = (args: {
+@@ -14,6 +14,17 @@ export type MCPToolErrorFunction = (args: {
  }) => Promise<string> | string;
  export interface MCPCallToolOptions {
      signal?: AbortSignal;
 +    /**
-+     * Declare form elicitation for this one call on a 2026-07-28 connection and
-+     * return an `input_required` result as is instead of failing. Retries carry
-+     * the answers and the server's byte-exact `requestState`.
++     * Declare what this one call can ask the person (for example elicitation)
++     * on a 2026-07-28 connection and return an `input_required` result as is
++     * instead of failing. Retries carry the answers and the server's
++     * byte-exact `requestState`.
 +     */
 +    inputRequired?: {
++        capabilities: Record<string, unknown>;
 +        inputResponses?: Record<string, unknown>;
 +        requestState?: string;
 +    };
  }
  /**
   * Interface for MCP server implementations.
-@@ -294,6 +303,27 @@ export interface MCPServerStreamableHttpOptions {
+@@ -294,6 +305,27 @@ export interface MCPServerStreamableHttpOptions {
      fetch?: any;
      reconnectionOptions?: any;
      sessionId?: string;
@@ -3314,7 +3316,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..acc557238ed0e85c01ff40af252d19e3
      async callToolWithClient(client, toolName, args, meta, options) {
 -        const { CallToolResultSchema } = await Promise.resolve().then(() => __importStar(require('@modelcontextprotocol/sdk/types.js'))).catch(failedToImport);
 +        const { clientModule } = await this.loadStreamableHttpRuntime();
-+        // A caller that can answer input requests later (form elicitation in
++        // A caller that can answer input requests later (elicitation in
 +        // the 2026-07-28 multi round-trip pattern) declares that on this one
 +        // request, sends any answers and the server's echoed requestState, and
 +        // receives an `input_required` result as is. Legacy-era connections
@@ -3329,7 +3331,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..acc557238ed0e85c01ff40af252d19e3
 +            ...(inputRequired !== undefined
 +                ? {
 +                    _meta: {
-+                        [clientModule.CLIENT_CAPABILITIES_META_KEY]: clientModule.mergeCapabilities(client._capabilities ?? {}, { elicitation: { form: {} } }),
++                        [clientModule.CLIENT_CAPABILITIES_META_KEY]: clientModule.mergeCapabilities(client._capabilities ?? {}, inputRequired.capabilities),
 +                        ...(meta ?? {}),
 +                    },
 +                    ...(inputRequired.inputResponses !== undefined
@@ -4012,7 +4014,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..94393fb69ffade4eda2984119669c622
      async callToolWithClient(client, toolName, args, meta, options) {
 -        const { CallToolResultSchema } = await import('@modelcontextprotocol/sdk/types.js').catch(failedToImport);
 +        const { clientModule } = await this.loadStreamableHttpRuntime();
-+        // A caller that can answer input requests later (form elicitation in
++        // A caller that can answer input requests later (elicitation in
 +        // the 2026-07-28 multi round-trip pattern) declares that on this one
 +        // request, sends any answers and the server's echoed requestState, and
 +        // receives an `input_required` result as is. Legacy-era connections
@@ -4027,7 +4029,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..94393fb69ffade4eda2984119669c622
 +            ...(inputRequired !== undefined
 +                ? {
 +                    _meta: {
-+                        [clientModule.CLIENT_CAPABILITIES_META_KEY]: clientModule.mergeCapabilities(client._capabilities ?? {}, { elicitation: { form: {} } }),
++                        [clientModule.CLIENT_CAPABILITIES_META_KEY]: clientModule.mergeCapabilities(client._capabilities ?? {}, inputRequired.capabilities),
 +                        ...(meta ?? {}),
 +                    },
 +                    ...(inputRequired.inputResponses !== undefined

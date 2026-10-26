@@ -18430,8 +18430,9 @@
         "$.sender.label": "string!",
         "$.sender.subjectId": "string!",
         "$.serverQuestion": "object? null",
-        "$.serverQuestion.form": "boolean!",
+        "$.serverQuestion.kind": "enum!=[\"\\\"confirm\\\"\",\"\\\"form\\\"\",\"\\\"url\\\"\"]",
         "$.serverQuestion.server": "string!",
+        "$.serverQuestion.url": "string?",
         "$.sessionAvailable": "boolean?",
         "$.sessionId": "string!",
         "$.sessionTitle": "string! null",
@@ -20975,10 +20976,7 @@
       "shape": {
         "$": "object",
         "$.requests": "array!",
-        "$.requests[]": "object",
-        "$.requests[].id": "string!",
-        "$.requests[].message": "string!",
-        "$.requests[].requestedSchema": "ref(McpElicitationRequestedSchema)!",
+        "$.requests[]": "ref(McpElicitationQuestion)",
         "$.server": "string!"
       }
     },
@@ -21036,6 +21034,28 @@
         "$|type=array.type": "const!=[\"\\\"array\\\"\"]"
       }
     },
+    "McpElicitationFormQuestion": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "string!",
+        "$.message": "string!",
+        "$.mode": "const?=[\"\\\"form\\\"\"]",
+        "$.requestedSchema": "ref(McpElicitationRequestedSchema)!"
+      }
+    },
+    "McpElicitationQuestion": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "union=[\"mode=form\",\"mode=url\"]",
+        "$|mode=url": "ref(McpElicitationUrlQuestion)",
+        "$|mode=form": "ref(McpElicitationFormQuestion)"
+      }
+    },
     "McpElicitationRequestedSchema": {
       "io": [
         "output"
@@ -21047,6 +21067,18 @@
         "$.required": "array?",
         "$.required[]": "string",
         "$.type": "const!=[\"\\\"object\\\"\"]"
+      }
+    },
+    "McpElicitationUrlQuestion": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "string!",
+        "$.message": "string!",
+        "$.mode": "const!=[\"\\\"url\\\"\"]",
+        "$.url": "string!"
       }
     },
     "McpPersonalConnectionSummary": {

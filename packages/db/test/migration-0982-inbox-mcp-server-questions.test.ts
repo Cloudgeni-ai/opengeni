@@ -190,14 +190,14 @@ describe("0982 MCP server questions in the inbox and phone alerts", () => {
       sourceKey: "call_confirm",
       title: "Send “On my way” to Design team? It isn't on your list of chats.",
       body: "Send message",
-      serverQuestion: { server: "Messages", form: false },
+      serverQuestion: { server: "Messages", kind: "confirm" },
     });
     const [push] = await pushes(owner);
     expect(push!.payload).toMatchObject({
       eventType: "session.requiresAction",
       body: "Messages asks: Send “On my way” to Design team? It isn't on your list of chats.",
     });
-    expect(push!.payload).not.toHaveProperty("serverQuestionForm");
+    expect(push!.payload).not.toHaveProperty("serverQuestionKind");
   });
 
   test("a question with fields is marked for its form, with no lock-screen answer", async () => {
@@ -207,13 +207,63 @@ describe("0982 MCP server questions in the inbox and phone alerts", () => {
     const [item] = await items(owner);
     expect(item).toMatchObject({
       title: "Which room should I book?",
-      serverQuestion: { server: "Calendar", form: true },
+      serverQuestion: { server: "Calendar", kind: "form" },
     });
     const [push] = await pushes(owner);
     expect(push!.payload).toMatchObject({
       body: "Calendar asks: Which room should I book?",
-      serverQuestionForm: true,
+      serverQuestionKind: "form",
     });
+  });
+
+  test("a page to open is marked with its address, with no lock-screen answer", async () => {
+    if (!client) return;
+    const owner = await person("url");
+    await ask(owner, [
+      approval("call_url", {
+        server: "Accounts",
+        requests: [
+          {
+            id: "confirm",
+            message: "Sign in first?",
+            requestedSchema: confirm.requests[0]!.requestedSchema,
+          },
+          {
+            id: "sign-in",
+            mode: "url",
+            message: "Sign in to your work account to continue.",
+            url: "https://accounts.example.com/sign-in?account=work",
+          },
+        ],
+      }),
+    ]);
+    const [item] = await items(owner);
+    expect(item).toMatchObject({
+      title: "Sign in first?",
+      serverQuestion: {
+        server: "Accounts",
+        kind: "url",
+        url: "https://accounts.example.com/sign-in?account=work",
+      },
+    });
+    const [push] = await pushes(owner);
+    expect(push!.payload).toMatchObject({
+      body: "Accounts asks: Sign in first?",
+      serverQuestionKind: "url",
+    });
+    // Fields to fill in outrank a page: the form shows both.
+    const mixed = await person("mixed");
+    await ask(mixed, [
+      approval("call_mixed", {
+        server: "Calendar",
+        requests: [
+          { id: "sign-in", mode: "url", message: "Sign in.", url: "https://cal.example.com/in" },
+          form.requests[0],
+        ],
+      }),
+    ]);
+    expect((await items(mixed))[0]?.serverQuestion).toEqual({ server: "Calendar", kind: "form" });
+    expect((await pushes(mixed))[0]?.payload).toMatchObject({ serverQuestionKind: "form" });
   });
 
   test("an ordinary approval is unchanged", async () => {
@@ -228,7 +278,7 @@ describe("0982 MCP server questions in the inbox and phone alerts", () => {
     });
     const [push] = await pushes(owner);
     expect(push!.payload).toMatchObject({ body: "Approve send_message?" });
-    expect(push!.payload).not.toHaveProperty("serverQuestionForm");
+    expect(push!.payload).not.toHaveProperty("serverQuestionKind");
   });
 
   test("the server's next question about the same call reopens the item with it", async () => {
@@ -244,7 +294,7 @@ describe("0982 MCP server questions in the inbox and phone alerts", () => {
     expect(item).toMatchObject({
       sourceKey: "call_again",
       title: "Which room should I book?",
-      serverQuestion: { server: "Calendar", form: true },
+      serverQuestion: { server: "Calendar", kind: "form" },
       unread: true,
     });
   });

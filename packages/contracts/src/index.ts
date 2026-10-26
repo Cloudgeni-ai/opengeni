@@ -17544,12 +17544,17 @@ export const InboxItem = /* @__PURE__ */ defineSchema(() =>
     choices: z.array(z.object({ id: primitives.string, label: primitives.string })).max(4),
     /**
      * An approval whose tool's MCP server asks the person a question in the
-     * middle of the call: which server asks, and whether the question has
-     * fields to fill in (answered in its form rather than with one tap). The
-     * item's title is then the server's question. Null otherwise.
+     * middle of the call: which server asks and how the person answers. A
+     * `confirm` is answered in one tap; `url` asks them to open `url` first
+     * and then continue; `form` has fields, answered in its form. The item's
+     * title is then the server's question. Null otherwise.
      */
     serverQuestion: z
-      .object({ server: primitives.string, form: primitives.boolean })
+      .object({
+        server: primitives.string,
+        kind: z.enum(["confirm", "form", "url"]),
+        url: primitives.string.optional(),
+      })
       .nullable()
       .default(null),
     urgency: NotificationUrgency,

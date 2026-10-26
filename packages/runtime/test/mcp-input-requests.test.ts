@@ -17,6 +17,7 @@ import {
 import { z } from "zod";
 import { mcpStreamableHttpClientOptions } from "../src/mcp-client";
 import {
+  MCP_INPUT_CLIENT_CAPABILITIES,
   MCP_INPUT_PENDING_RESULT,
   MCP_INPUT_REQUEST_MAX_ROUNDS,
   PrefixedMcpServer,
@@ -42,7 +43,7 @@ function asked(round = 1, requestState?: string): McpInputRequest {
   return {
     server: "Chat",
     round,
-    requests: [{ id: "confirm", message: "Send it?", requestedSchema: confirmForm }],
+    requests: [{ id: "confirm", mode: "form", message: "Send it?", requestedSchema: confirmForm }],
     ...(requestState !== undefined ? { requestState } : {}),
   };
 }
@@ -67,7 +68,7 @@ describe("nextMcpInputRequiredStep", () => {
   test("a later question counts the rounds of the call it resumes", () => {
     const resumed: McpInputExchange = {
       server: "Chat",
-      answered: { request: asked(3), content: { confirm: {} } },
+      answered: { request: asked(3), action: "accept", content: { confirm: {} } },
     };
     const step = nextMcpInputRequiredStep(
       resumed,
@@ -77,7 +78,11 @@ describe("nextMcpInputRequiredStep", () => {
     expect(step).toEqual({ kind: "ask", request: asked(4) });
     const last: McpInputExchange = {
       server: "Chat",
-      answered: { request: asked(MCP_INPUT_REQUEST_MAX_ROUNDS), content: { confirm: {} } },
+      answered: {
+        request: asked(MCP_INPUT_REQUEST_MAX_ROUNDS),
+        action: "accept",
+        content: { confirm: {} },
+      },
     };
     expect(
       nextMcpInputRequiredStep(
@@ -102,7 +107,10 @@ describe("nextMcpInputRequiredStep", () => {
   test("state without questions is retried at once, but not forever", () => {
     expect(
       nextMcpInputRequiredStep(fresh, { resultType: "input_required", requestState: "s2" }, 0),
-    ).toEqual({ kind: "retry", option: { requestState: "s2" } });
+    ).toEqual({
+      kind: "retry",
+      option: { capabilities: MCP_INPUT_CLIENT_CAPABILITIES, requestState: "s2" },
+    });
     const stuck =
       "The MCP server kept answering that it needs more input without saying what, so the tool call did not finish.";
     expect(
@@ -114,19 +122,72 @@ describe("nextMcpInputRequiredStep", () => {
     });
   });
 
-  test("requests this client never declared end the call", () => {
-    const url = {
+  test("a page to open pauses the call with its https link", () => {
+    const url = (link: string) => ({
       method: "elicitation/create",
-      params: { mode: "url", message: "Sign in", url: "https://example.com", elicitationId: "e1" },
+      params: { mode: "url", message: "Sign in to continue.", url: link },
+    });
+    expect(
+      nextMcpInputRequiredStep(
+        fresh,
+        {
+          resultType: "input_required",
+          inputRequests: { signIn: url("https://accounts.example.com/sign-in?x=1") },
+          requestState: "s3",
+        },
+        0,
+      ),
+    ).toEqual({
+      kind: "ask",
+      request: {
+        server: "Chat",
+        round: 1,
+        requests: [
+          {
+            id: "signIn",
+            mode: "url",
+            message: "Sign in to continue.",
+            url: "https://accounts.example.com/sign-in?x=1",
+          },
+        ],
+        requestState: "s3",
+      },
+    });
+    const unsafe =
+      "The MCP server asked the person to open a link that is not a plain https address, so the tool call did not finish.";
+    for (const link of [
+      "http://accounts.example.com/sign-in",
+      "javascript:alert(1)",
+      "https://user:secret@accounts.example.com/",
+      "not a url",
+    ]) {
+      expect(
+        nextMcpInputRequiredStep(
+          fresh,
+          { resultType: "input_required", inputRequests: { signIn: url(link) } },
+          0,
+        ),
+      ).toMatchObject({ kind: "fail", result: { content: [{ text: unsafe }] } });
+    }
+  });
+
+  test("requests this client never declared end the call", () => {
+    const malformed = {
+      method: "elicitation/create",
+      params: { message: "Pick", requestedSchema: { type: "object", properties: { x: {} } } },
     };
     expect(
-      nextMcpInputRequiredStep(fresh, { resultType: "input_required", inputRequests: { url } }, 0),
+      nextMcpInputRequiredStep(
+        fresh,
+        { resultType: "input_required", inputRequests: { malformed } },
+        0,
+      ),
     ).toMatchObject({
       kind: "fail",
       result: {
         content: [
           {
-            text: "The MCP server asked for input this client cannot provide (a form it does not support), so the tool call did not finish.",
+            text: "The MCP server asked for input this client cannot provide (a question it does not support), so the tool call did not finish.",
           },
         ],
       },
@@ -168,27 +229,51 @@ describe("nextMcpInputRequiredStep", () => {
   });
 
   test("a resumed call answers every question it was asked and echoes the state", () => {
-    expect(mcpInputRequiredOption(fresh)).toEqual({});
+    expect(mcpInputRequiredOption(fresh)).toEqual({ capabilities: MCP_INPUT_CLIENT_CAPABILITIES });
+    expect(MCP_INPUT_CLIENT_CAPABILITIES).toEqual({ elicitation: { form: {}, url: {} } });
     const request: McpInputRequest = {
       server: "Chat",
       round: 1,
       requests: [
-        { id: "a", message: "A?", requestedSchema: confirmForm },
-        { id: "b", message: "B?", requestedSchema: confirmForm },
+        { id: "a", mode: "form", message: "A?", requestedSchema: confirmForm },
+        { id: "b", mode: "form", message: "B?", requestedSchema: confirmForm },
+        { id: "c", mode: "url", message: "Open", url: "https://example.com/c" },
       ],
       requestState: '{"step":1}',
     };
     expect(
       mcpInputRequiredOption({
         server: "Chat",
-        answered: { request, content: { a: { ok: true } } },
+        answered: { request, action: "accept", content: { a: { ok: true } } },
       }),
     ).toEqual({
+      capabilities: MCP_INPUT_CLIENT_CAPABILITIES,
       inputResponses: {
         a: { action: "accept", content: { ok: true } },
         b: { action: "accept", content: {} },
+        // A page the person agreed to open is accepted without content.
+        c: { action: "accept" },
       },
       requestState: '{"step":1}',
+    });
+  });
+
+  test("a decline is sent for every question, with the server's state", () => {
+    const request: McpInputRequest = {
+      server: "Chat",
+      round: 2,
+      requests: [
+        { id: "a", mode: "form", message: "A?", requestedSchema: confirmForm },
+        { id: "c", mode: "url", message: "Open", url: "https://example.com/c" },
+      ],
+      requestState: "s9",
+    };
+    expect(
+      mcpInputRequiredOption({ server: "Chat", answered: { request, action: "decline" } }),
+    ).toEqual({
+      capabilities: MCP_INPUT_CLIENT_CAPABILITIES,
+      inputResponses: { a: { action: "decline" }, c: { action: "decline" } },
+      requestState: "s9",
     });
   });
 });
@@ -216,20 +301,29 @@ async function connect(options: { trustedChats?: string[]; legacy?: boolean } = 
 }
 
 describe("the MCP client's input_required exchange", () => {
-  test("declares form elicitation only on calls that can answer, and passes questions through", async () => {
+  const declare = { capabilities: MCP_INPUT_CLIENT_CAPABILITIES };
+
+  test("declares elicitation only on calls that can answer, and passes questions through", async () => {
     const { fake, client } = await connect();
     const refused = await client.callToolResult("send_message", { chat: "team", text: "hi" });
     expect(refused.isError).toBe(true);
-    expect(fake.calls[0]).toMatchObject({ name: "send_message", declaredElicitation: false });
+    expect(fake.calls[0]).toMatchObject({
+      name: "send_message",
+      declaredElicitation: false,
+      declaredUrlElicitation: false,
+    });
 
     // send_message has an output schema; the question itself is not checked against it.
     const question = (await client.callToolResult(
       "send_message",
       { chat: "team", text: "hi" },
       null,
-      { inputRequired: {} },
+      { inputRequired: declare },
     )) as unknown as Record<string, unknown>;
-    expect(fake.calls[1]).toMatchObject({ declaredElicitation: true });
+    expect(fake.calls[1]).toMatchObject({
+      declaredElicitation: true,
+      declaredUrlElicitation: true,
+    });
     expect(question).toMatchObject({
       resultType: "input_required",
       inputRequests: {
@@ -239,7 +333,7 @@ describe("the MCP client's input_required exchange", () => {
     expect(fake.sent).toEqual([]);
 
     const sent = await client.callToolResult("send_message", { chat: "team", text: "hi" }, null, {
-      inputRequired: { inputResponses: { confirm: { action: "accept", content: {} } } },
+      inputRequired: { ...declare, inputResponses: { confirm: { action: "accept", content: {} } } },
     });
     expect(sent.structuredContent).toEqual({ sent: true, chat: "team" });
     expect(fake.calls[2]?.inputResponses).toEqual({ confirm: { action: "accept", content: {} } });
@@ -249,10 +343,11 @@ describe("the MCP client's input_required exchange", () => {
   test("echoes the server's request state byte for byte", async () => {
     const { fake, client } = await connect();
     const first = (await client.callToolResult("book_meeting", { topic: "Plan" }, null, {
-      inputRequired: {},
+      inputRequired: declare,
     })) as unknown as { requestState: string };
     await client.callToolResult("book_meeting", { topic: "Plan" }, null, {
       inputRequired: {
+        ...declare,
         inputResponses: { details: { action: "accept", content: { room: "large", attendees: 4 } } },
         requestState: first.requestState,
       },
@@ -263,7 +358,7 @@ describe("the MCP client's input_required exchange", () => {
   test("a 2025-era connection never declares elicitation", async () => {
     const { fake, client } = await connect({ legacy: true });
     const result = await client.callToolResult("send_message", { chat: "team", text: "hi" }, null, {
-      inputRequired: {},
+      inputRequired: declare,
     });
     expect(result.isError).toBe(true);
     expect(fake.calls[0]).toMatchObject({ declaredElicitation: false });
@@ -312,7 +407,7 @@ describe("a tool call's exchange with its server", () => {
 
     const resumed: McpInputExchange = {
       server: "Chat",
-      answered: { request: exchange.requested!, content: { confirm: {} } },
+      answered: { request: exchange.requested!, action: "accept", content: { confirm: {} } },
     };
     const result = await server.executeCatalogTool(
       "send_message",
@@ -325,6 +420,28 @@ describe("a tool call's exchange with its server", () => {
     expect(fake.sent).toEqual([{ chat: "team", text: "hi" }]);
   });
 
+  test("a decline is sent to the server, which finishes the call its own way", async () => {
+    const { fake, server } = await prefixed();
+    const exchange: McpInputExchange = { server: "Chat" };
+    await server.executeCatalogTool("send_message", { chat: "team", text: "hi" }, null, {
+      mcpInput: exchange,
+    });
+    const declined: McpInputExchange = {
+      server: "Chat",
+      answered: { request: exchange.requested!, action: "decline" },
+    };
+    const result = await server.executeCatalogTool(
+      "send_message",
+      { chat: "team", text: "hi" },
+      null,
+      { mcpInput: declined },
+    );
+    expect(result.structuredContent).toEqual({ sent: false, chat: "team" });
+    expect(declined.requested).toBeUndefined();
+    expect(fake.calls.at(-1)?.inputResponses).toEqual({ confirm: { action: "decline" } });
+    expect(fake.sent).toEqual([]);
+  });
+
   test("state-only answers are retried before the question is asked", async () => {
     const { fake, server } = await prefixed();
     const exchange: McpInputExchange = { server: "Chat" };
@@ -333,23 +450,56 @@ describe("a tool call's exchange with its server", () => {
     expect(exchange.requested).toMatchObject({ requestState: "asked", requests: [{ id: "go" }] });
   });
 
-  test("a server cannot ask in URL mode, which this client never declares", async () => {
-    const { server } = await prefixed();
-    const exchange: McpInputExchange = { server: "Chat" };
-    // The server's SDK refuses with MissingRequiredClientCapability; a server
-    // that sends one anyway gets the error result tested above.
-    const failure = await server
-      .executeCatalogTool("open_link", {}, null, { mcpInput: exchange })
-      .catch((error: unknown) => error);
-    expect((failure as { code?: unknown }).code).toBe(-32021);
-    expect(exchange.requested).toBeUndefined();
+  test("a page to open is asked again until the person finished it there", async () => {
+    const { fake, server } = await prefixed();
+    const signIn = async (mcpInput: McpInputExchange) =>
+      await server.executeCatalogTool("sign_in", { account: "work" }, null, { mcpInput });
+    const first: McpInputExchange = { server: "Chat" };
+    expect(await signIn(first)).toEqual(MCP_INPUT_PENDING_RESULT);
+    expect(first.requested).toMatchObject({
+      round: 1,
+      requests: [
+        {
+          id: "signIn",
+          mode: "url",
+          message: "Sign in to work to continue.",
+          url: "https://accounts.example.com/sign-in?account=work",
+        },
+      ],
+    });
+    // Continuing before finishing the page: the server asks again.
+    const early: McpInputExchange = {
+      server: "Chat",
+      answered: { request: first.requested!, action: "accept", content: {} },
+    };
+    expect(await signIn(early)).toEqual(MCP_INPUT_PENDING_RESULT);
+    expect(early.requested).toMatchObject({ round: 2, requests: [{ mode: "url" }] });
+    expect(fake.calls.at(-1)?.inputResponses).toEqual({ signIn: { action: "accept" } });
+
+    fake.finishSignIn("work");
+    const done: McpInputExchange = {
+      server: "Chat",
+      answered: { request: early.requested!, action: "accept", content: {} },
+    };
+    expect(await signIn(done)).toMatchObject({
+      content: [{ type: "text", text: "Signed in to work." }],
+    });
+    expect(done.requested).toBeUndefined();
   });
 
   test("without an exchange the call never declares elicitation", async () => {
     const { fake, server } = await prefixed();
     const result = await server.executeCatalogTool("send_message", { chat: "team", text: "hi" });
     expect(result.isError).toBe(true);
-    expect(fake.calls.at(-1)).toMatchObject({ declaredElicitation: false });
+    expect(fake.calls.at(-1)).toMatchObject({
+      declaredElicitation: false,
+      declaredUrlElicitation: false,
+    });
+    // The server's SDK refuses to ask for a page it was not told the client can open.
+    const failure = await server
+      .executeCatalogTool("sign_in", { account: "work" })
+      .catch((error: unknown) => error);
+    expect((failure as { code?: unknown }).code).toBe(-32021);
   });
 });
 

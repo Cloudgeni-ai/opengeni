@@ -5,7 +5,10 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import type { PendingApproval } from "@opengeni/react/session";
-import type { McpElicitationContent } from "@opengeni/contracts/mcp-elicitation";
+import {
+  mcpElicitationKind,
+  type McpElicitationContent,
+} from "@opengeni/contracts/mcp-elicitation";
 import {
   approvalAnswerLabels,
   approvalArgumentsText,
@@ -55,7 +58,6 @@ import { useNativeTimelineMessages } from "./messages";
 import {
   initialMcpQuestionDraft,
   mcpQuestionAnswer,
-  mcpQuestionHasFields,
   McpQuestionFields,
   type McpQuestionDraft,
 } from "./mcp-question";
@@ -808,7 +810,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                 return {
                   elicitation,
                   ...current,
-                  hasFields: mcpQuestionHasFields(elicitation),
+                  kind: mcpElicitationKind(elicitation),
                   update: (draft: McpQuestionDraft, problem: string | null = null) =>
                     setAnswers((all) => ({ ...all, [approval.id]: { question, draft, problem } })),
                 };
@@ -991,9 +993,11 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                       settled[key] === "approve"
                         ? messages.approved
                         : answering
-                          ? answering.hasFields
+                          ? answering.kind === "form"
                             ? t("approvalSurface.sendAnswer")
-                            : t("approvalSurface.allow")
+                            : answering.kind === "url"
+                              ? t("approvalSurface.continue")
+                              : t("approvalSurface.allow")
                           : approveLabel
                     }
                     busy={pending[key] === "approve"}

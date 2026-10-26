@@ -1,47 +1,53 @@
 import {
+  isMcpElicitationUrlQuestion,
   mcpElicitationChoices,
   mcpElicitationDefaults,
+  mcpElicitationUrlHost,
   resolveMcpElicitationContent,
   type McpElicitationApprovalRequest,
   type McpElicitationContent,
   type McpElicitationField,
+  type McpElicitationUrlQuestion,
   type McpElicitationValue,
 } from "@opengeni/contracts/mcp-elicitation";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { Pressable, Text, TextInput, View } from "react-native";
+import { useOpenNativeLink } from "../links";
+import { Button } from "./controls";
 import { Selector } from "./selector";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 
 /*
  * An MCP server's question in the middle of a tool call, as native fields: the
  * same form the web approval card shows, answered with the approval. Numbers
- * and dates are typed as text and checked against the server's form on send.
+ * and dates are typed as text and checked against the server's form on send. A
+ * question that asks the person to open a web page shows a button naming the
+ * page's host, which opens it in the browser.
  */
 
 type DraftValue = string | boolean | string[] | undefined;
 /** What the person has entered, per question id and field. */
 export type McpQuestionDraft = Record<string, Record<string, DraftValue>>;
 
-export function mcpQuestionHasFields(elicitation: McpElicitationApprovalRequest): boolean {
-  return elicitation.requests.some(
-    (request) => Object.keys(request.requestedSchema.properties).length > 0,
-  );
-}
-
 /** The server's own defaults, as the starting answer. */
 export function initialMcpQuestionDraft(
   elicitation: McpElicitationApprovalRequest,
 ): McpQuestionDraft {
   return Object.fromEntries(
-    elicitation.requests.map((request) => [
-      request.id,
-      Object.fromEntries(
-        Object.entries(mcpElicitationDefaults(request.requestedSchema)).map(([name, value]) => [
-          name,
-          typeof value === "number" ? String(value) : value,
-        ]),
-      ),
-    ]),
+    elicitation.requests.flatMap((request) =>
+      isMcpElicitationUrlQuestion(request)
+        ? []
+        : [
+            [
+              request.id,
+              Object.fromEntries(
+                Object.entries(mcpElicitationDefaults(request.requestedSchema)).map(
+                  ([name, value]) => [name, typeof value === "number" ? String(value) : value],
+                ),
+              ),
+            ],
+          ],
+    ),
   );
 }
 
@@ -55,6 +61,7 @@ export function mcpQuestionAnswer(
 ): { ok: true; content: McpElicitationContent } | { ok: false; problem: string } {
   const content: McpElicitationContent = {};
   for (const request of elicitation.requests) {
+    if (isMcpElicitationUrlQuestion(request)) continue;
     const values: Record<string, McpElicitationValue> = {};
     for (const [name, raw] of Object.entries(draft[request.id] ?? {})) {
       if (raw === undefined || raw === "") continue;
@@ -102,19 +109,60 @@ export function McpQuestionFields({
               {request.message}
             </Text>
           ) : null}
-          {Object.entries(request.requestedSchema.properties).map(([name, field]) => (
-            <McpQuestionField
-              key={name}
-              name={name}
-              field={field}
-              required={(request.requestedSchema.required ?? []).includes(name)}
-              value={draft[request.id]?.[name]}
-              disabled={disabled}
-              onChange={(value) => onChange(request.id, name, value)}
-            />
-          ))}
+          {isMcpElicitationUrlQuestion(request) ? (
+            <PageToOpen request={request} disabled={disabled} />
+          ) : (
+            Object.entries(request.requestedSchema.properties).map(([name, field]) => (
+              <McpQuestionField
+                key={name}
+                name={name}
+                field={field}
+                required={(request.requestedSchema.required ?? []).includes(name)}
+                value={draft[request.id]?.[name]}
+                disabled={disabled}
+                onChange={(value) => onChange(request.id, name, value)}
+              />
+            ))
+          )}
         </View>
       ))}
+    </View>
+  );
+}
+
+/** Opens the page a server asks the person to visit, naming its exact host. */
+function PageToOpen({
+  request,
+  disabled,
+}: {
+  request: McpElicitationUrlQuestion;
+  disabled: boolean;
+}) {
+  const t = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const openLink = useOpenNativeLink();
+  const host = mcpElicitationUrlHost(request.url);
+  if (!host) return null;
+  return (
+    <View style={{ gap: 6, alignItems: "flex-start" }}>
+      <Button
+        icon="external-link"
+        variant="secondary"
+        size="form"
+        label={t("approvalSurface.openPage", { host })}
+        disabled={disabled}
+        onPress={() => openLink(request.url)}
+      />
+      <Text
+        style={{
+          ...fontStyle(theme),
+          fontSize: theme.size.xs,
+          lineHeight: 16,
+          color: theme.colors["fg-muted"],
+        }}
+      >
+        {t("approvalSurface.openPageHint")}
+      </Text>
     </View>
   );
 }

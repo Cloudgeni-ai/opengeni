@@ -17,6 +17,9 @@ export const englishMessages = {
   "approvalSurface.cancel": "Cancel",
   /** The empty choice of an MCP server's drop-down question. */
   "approvalSurface.choose": "Choose…",
+  /** Answers an MCP server's question that asked the person to open a web page first. */
+  "approvalSurface.continue": "Continue",
+  "approvalSurface.continuing": "Continuing…",
   "approvalSurface.couldnTLoadThisAction":
     "Couldn't load this action, so it can't be approved yet. You can still decline it.",
   "approvalSurface.decline": "Decline",
@@ -25,6 +28,10 @@ export const englishMessages = {
   "approvalSurface.loadingActionDetails": "Loading action details…",
   "approvalSurface.nextAction": "Next action",
   "approvalSurface.ofLength": "of {length}",
+  /** Opens the web page an MCP server asks the person to visit, e.g. "Open accounts.example.com". */
+  "approvalSurface.openPage": "Open {host}",
+  /** Under the link to the web page an MCP server asks the person to visit. */
+  "approvalSurface.openPageHint": "Opens in a new tab. Continue here when you're done there.",
   /** Marks a field an MCP server's question does not require. */
   "approvalSurface.optional": "Optional",
   "approvalSurface.previousAction": "Previous action",
@@ -3276,6 +3283,8 @@ export const englishMessages = {
   "native.timeline.inbox.checkYourConnectionOrThis":
     "Check your connection, or this server may not have the inbox yet.",
   "native.timeline.inbox.closeActions": "Close actions",
+  /** Confirms the person continued after opening the page an MCP server asked them to visit. */
+  "native.timeline.inbox.continued": "Continued",
   "native.timeline.inbox.couldnTLoadYourInbox": "Couldn't load your inbox",
   "native.timeline.inbox.daysDaysAgo": "{days} days ago",
   "native.timeline.inbox.denied": "Denied",

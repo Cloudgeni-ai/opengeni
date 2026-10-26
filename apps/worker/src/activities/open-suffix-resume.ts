@@ -25,6 +25,7 @@ import {
   mcpInputRequestOf,
   parseMcpInputRequest,
   sanitizeHistoryItemsForModel,
+  type McpInputAnswer,
   type McpInputRequest,
 } from "@opengeni/runtime";
 
@@ -182,6 +183,25 @@ export type OpenSuffixMemberOutcome =
   | { resultItem: Record<string, unknown>; eventOutput: unknown }
   | { asked: McpInputRequest };
 
+/**
+ * What the model reads after the person declined an MCP server's question:
+ * the server's own result for the declined call, then who declined and, if
+ * they wrote one, their message.
+ */
+export function declinedMcpQuestionOutput(input: {
+  output: unknown;
+  server: string;
+  message?: string | undefined;
+}): string {
+  const result =
+    typeof input.output === "string" ? input.output : JSON.stringify(input.output ?? null);
+  const message = input.message?.trim();
+  const note = message
+    ? `The person declined ${input.server}'s question and said: ${message}`
+    : `The person declined ${input.server}'s question.`;
+  return result.trim().length > 0 ? `${result}\n\n${note}` : note;
+}
+
 export async function resultItemForOpenSuffixMember(input: {
   agent: Agent<any, any>;
   row: OpenSuffixPendingToolCall;
@@ -194,21 +214,17 @@ export async function resultItemForOpenSuffixMember(input: {
 }): Promise<OpenSuffixMemberOutcome> {
   const name = toolNameFromCallItem(input.row.callItem);
   const asked = input.row.mcpInputRequest ? parseMcpInputRequest(input.row.mcpInputRequest) : null;
+  const payload = input.trigger.payload as {
+    decision?: unknown;
+    message?: unknown;
+    content?: McpElicitationContent;
+  };
+  const message =
+    typeof payload.message === "string" && payload.message.trim().length > 0
+      ? payload.message
+      : undefined;
   const rejected = (): { resultItem: Record<string, unknown>; eventOutput: unknown } => {
-    const payload = input.trigger.payload as { message?: unknown; decision?: unknown };
-    if (
-      input.row.interruptionKind === "approval" &&
-      payload.decision === "reject" &&
-      !(typeof payload.message === "string" && payload.message.trim().length > 0)
-    ) {
-      if (asked) {
-        // The server received the call and stopped to ask; it never finished.
-        return memberResult({
-          callId: input.row.callId,
-          name,
-          output: `The person declined to answer ${asked.server}'s question, so this tool call did not finish.`,
-        });
-      }
+    if (input.row.interruptionKind === "approval" && payload.decision === "reject" && !message) {
       // This approval was rejected before invocation, not interrupted during execution.
       return memberResult({
         callId: input.row.callId,
@@ -216,20 +232,17 @@ export async function resultItemForOpenSuffixMember(input: {
         output: "Tool approval was rejected. This proposed tool call was not executed.",
       });
     }
-    const message =
-      typeof payload.message === "string" && payload.message.trim().length > 0
-        ? payload.message
-        : "Tool approval was rejected.";
+    const reason = message ?? "Tool approval was rejected.";
     const interrupted = interruptedToolCallResult({
       callType: input.row.callType,
       callId: input.row.callId,
       callItem: input.row.callItem,
-      reason: message,
+      reason,
     });
     return memberResult({
       callId: input.row.callId,
       name,
-      output: message,
+      output: reason,
       ...(interrupted ? { resultItem: interrupted } : {}),
     });
   };
@@ -247,40 +260,42 @@ export async function resultItemForOpenSuffixMember(input: {
       output,
     });
   }
-  const payload = input.trigger.payload as { decision?: unknown };
-  if (payload.decision !== "approve") {
-    return rejected();
+  const invoke = async (
+    mcpInputAnswer?: McpInputAnswer,
+  ): Promise<{ output: unknown } | { asked: McpInputRequest }> => {
+    try {
+      const output = await invokePreparedAgentTool({
+        agent: input.agent,
+        toolName: name,
+        argumentsJson: argumentsJsonFromCallItem(input.row.callItem),
+        callId: input.row.callId,
+        ...(mcpInputAnswer ? { mcpInputAnswer } : {}),
+      });
+      const askedAgain = mcpInputRequestOf(output);
+      return askedAgain ? { asked: askedAgain } : { output };
+    } catch (error) {
+      return { output: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  if (payload.decision === "approve") {
+    const outcome = await invoke(
+      asked ? { request: asked, action: "accept", content: payload.content ?? {} } : undefined,
+    );
+    if ("asked" in outcome) return outcome;
+    return memberResult({ callId: input.row.callId, name, output: outcome.output });
   }
-  try {
-    const output = await invokePreparedAgentTool({
-      agent: input.agent,
-      toolName: name,
-      argumentsJson: argumentsJsonFromCallItem(input.row.callItem),
-      callId: input.row.callId,
-      ...(asked
-        ? {
-            mcpInputAnswer: {
-              request: asked,
-              content: (input.trigger.payload as { content?: McpElicitationContent }).content ?? {},
-            },
-          }
-        : {}),
-    });
-    const askedAgain = mcpInputRequestOf(output);
-    if (askedAgain) return { asked: askedAgain };
+  if (asked && input.row.interruptionKind === "approval" && payload.decision === "reject") {
+    // The server stopped mid-call to ask: it is told the person declined and
+    // finishes the call its own way, or asks something else.
+    const outcome = await invoke({ request: asked, action: "decline" });
+    if ("asked" in outcome) return outcome;
     return memberResult({
       callId: input.row.callId,
       name,
-      output,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return memberResult({
-      callId: input.row.callId,
-      name,
-      output: message,
+      output: declinedMcpQuestionOutput({ output: outcome.output, server: asked.server, message }),
     });
   }
+  return rejected();
 }
 
 export async function settleOpenSuffixResumeIfNeeded(input: {
