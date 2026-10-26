@@ -65,11 +65,15 @@ test("everyday help gets a plain heading and placeholder; the other answers keep
   expect(newChatWording("everyday")).toEqual({
     heading: "What can I help with?",
     placeholder: "Ask anything, or describe what you need…",
+    composerMessages: { inputLabel: "Ask anything" },
   });
   for (const set of ["general", "product"] as const) {
     expect(newChatWording(set)).toEqual({
       heading: "What should the agent do?",
       placeholder: "Describe a task for the agent…",
+      composerMessages: undefined,
     });
   }
+  // The same objects every time, so the composer doesn't see new copy each render.
+  expect(newChatWording("everyday")).toBe(newChatWording("everyday"));
 });

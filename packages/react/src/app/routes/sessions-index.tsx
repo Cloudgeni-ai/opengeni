@@ -1750,6 +1750,7 @@ function SessionsIndexRouteContent({
             disabled={newSessionDraft.loading || submitting}
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder={wording.placeholder}
+            messages={wording.composerMessages}
             controlsLeading={
               <>
                 <ComposerMobilePlus
@@ -2060,6 +2061,7 @@ function SessionsIndexRouteContent({
           <NewSessionStarters
             workspaceId={workspaceId}
             set={starterSet}
+            fileUploads={context.clientConfig.fileUploads.enabled === true}
             disabled={busy || newSessionDraft.loading}
             onSelect={(prompt) => {
               setMessage(prompt);

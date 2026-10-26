@@ -88,6 +88,9 @@ export const EVERYDAY_SESSION_STARTERS = [
     title: "Explain something",
     description: "A letter, a bill or a topic, in plain words.",
     prompt:
+      "Explain something to me in plain words. First ask what it is, so I can paste or type it in. Then tell me simply what it means and whether I need to do anything.",
+    /** Offered only where this deployment accepts file uploads. */
+    promptWithPhoto:
       "Explain something to me in plain words. First ask what it is: I can paste the text or attach a photo. Then tell me simply what it means and whether I need to do anything.",
     Icon: Lightbulb,
   },
@@ -154,28 +157,37 @@ export function NewSessionStarters({
   disabled = false,
   set = "general",
   workspaceId,
+  fileUploads = false,
 }: {
   onSelect: (prompt: string) => void;
   disabled?: boolean | undefined;
   set?: StarterSet | undefined;
+  /** The deployment accepts attachments, so an everyday ask may offer a photo. */
+  fileUploads?: boolean | undefined;
   /** Where the playground demo opens (product set). */
   workspaceId?: string | undefined;
 }) {
   if (set === "everyday") {
     return (
       <StarterSection>
-        {EVERYDAY_SESSION_STARTERS.map(({ id, title, description, prompt, Icon }) => (
+        {EVERYDAY_SESSION_STARTERS.map((starter) => (
           <Button
-            key={id}
+            key={starter.id}
             type="button"
             variant="outline"
             disabled={disabled}
             className={STARTER_CLASS}
-            data-starter={id}
-            onClick={() => onSelect(prompt)}
+            data-starter={starter.id}
+            onClick={() =>
+              onSelect(
+                fileUploads && "promptWithPhoto" in starter
+                  ? starter.promptWithPhoto
+                  : starter.prompt,
+              )
+            }
           >
-            <Icon aria-hidden="true" className="size-5 shrink-0 text-fg-subtle" />
-            <StarterText title={title} description={description} />
+            <starter.Icon aria-hidden="true" className="size-5 shrink-0 text-fg-subtle" />
+            <StarterText title={starter.title} description={starter.description} />
           </Button>
         ))}
       </StarterSection>

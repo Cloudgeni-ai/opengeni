@@ -122,6 +122,17 @@ test("help with everyday things gets six plain everyday asks, with no services t
       root.render(<NewSessionStarters set="everyday" onSelect={onSelect} disabled />),
     );
     expect(container.querySelectorAll("button:disabled")).toHaveLength(6);
+
+    // Without uploads nothing promises a photo; with them, "Explain something" offers one.
+    expect(EVERYDAY_SESSION_STARTERS.some((starter) => /photo/i.test(starter.prompt))).toBe(false);
+    onSelect.mockClear();
+    await act(async () =>
+      root.render(<NewSessionStarters set="everyday" fileUploads onSelect={onSelect} />),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[data-starter="explain"]')!.click(),
+    );
+    expect(onSelect.mock.calls[0]?.[0]).toContain("attach a photo");
   } finally {
     await act(async () => root.unmount());
     container.remove();

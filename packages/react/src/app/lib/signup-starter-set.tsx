@@ -73,16 +73,31 @@ export function signupStarterSet(
   return answer === "embed" ? "product" : answer === "everyday" ? "everyday" : "general";
 }
 
-/**
- * The new-chat heading and composer placeholder for a starter set. People who
- * came for everyday help get plain words about asking; the other answers keep
- * the agent wording.
- */
-export function newChatWording(set: ReturnType<typeof signupStarterSet>): {
+type NewChatWording = {
   heading: string;
   placeholder: string;
-} {
-  return set === "everyday"
-    ? { heading: "What can I help with?", placeholder: "Ask anything, or describe what you need…" }
-    : { heading: "What should the agent do?", placeholder: "Describe a task for the agent…" };
+  /** Composer copy overrides, such as the text box's screen-reader label. */
+  composerMessages: { inputLabel: string } | undefined;
+};
+
+const EVERYDAY_WORDING: NewChatWording = {
+  heading: "What can I help with?",
+  placeholder: "Ask anything, or describe what you need…",
+  composerMessages: { inputLabel: "Ask anything" },
+};
+
+const AGENT_WORDING: NewChatWording = {
+  heading: "What should the agent do?",
+  placeholder: "Describe a task for the agent…",
+  composerMessages: undefined,
+};
+
+/**
+ * The new-chat heading, composer placeholder and composer label for a starter
+ * set. People who came for everyday help get plain words about asking; the
+ * other answers keep the agent wording and the composer's own label. The
+ * objects are constants, so passing them on doesn't change on every render.
+ */
+export function newChatWording(set: ReturnType<typeof signupStarterSet>): NewChatWording {
+  return set === "everyday" ? EVERYDAY_WORDING : AGENT_WORDING;
 }
