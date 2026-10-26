@@ -3,6 +3,28 @@
   "roots": [
     "BrowserActionRequest"
   ],
+  "envelope": {
+    "$": "object",
+    "$.action": "union!=[\"0\",\"type=batch\"]",
+    "$.actor": "object!",
+    "$.actor.attemptId": "string?",
+    "$.actor.executionGeneration": "integer?",
+    "$.actor.kind": "enum!=[\"\\\"agent\\\"\",\"\\\"human\\\"\",\"\\\"system\\\"\"]",
+    "$.actor.sessionId": "string?",
+    "$.actor.subjectId": "string!",
+    "$.actor.turnId": "string?",
+    "$.browserSessionId": "string!",
+    "$.controllerGeneration": "string!",
+    "$.expectedDocumentGeneration": "string! null",
+    "$.expectedFrameId": "string! null",
+    "$.expectedTargetGeneration": "string!",
+    "$.observationMode": "enum?=[\"\\\"full\\\"\",\"\\\"input\\\"\",\"\\\"none\\\"\"]",
+    "$.operationId": "string!",
+    "$.protocolVersion": "const!=[\"1\"]",
+    "$.secretValues": "object?",
+    "$.secretValues{}": "string",
+    "$.targetId": "string!"
+  },
   "schemas": {
     "BrowserAction": {
       "$": "union=[\"type=activate\",\"type=check\",\"type=click\",\"type=clipboard\",\"type=double_click\",\"type=drag\",\"type=fill\",\"type=handle_dialog\",\"type=history\",\"type=hover\",\"type=navigate\",\"type=permission\",\"type=pointer\",\"type=press\",\"type=scroll\",\"type=select\",\"type=type\",\"type=upload\",\"type=viewport\",\"type=wait\"]",
