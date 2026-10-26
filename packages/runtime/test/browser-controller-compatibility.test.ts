@@ -102,6 +102,15 @@ describe("browser actions an older controller rejects", () => {
     expect(unlisted).toEqual([]);
   });
 
+  test("no command envelope field the baseline agent expects is gone", () => {
+    const envelope = currentEnvelope();
+    const missing = Object.keys(baseline.envelope).filter((path) => envelope[path] === undefined);
+    // An older controller still parses the baseline envelope: a field it
+    // requires that the server no longer sends makes it reject every command.
+    // Keep sending it to controllers that predate the removal.
+    expect(missing).toEqual([]);
+  });
+
   test("names exact on a text locator inside a batch and its alternative", () => {
     const action = sentAction({
       type: "batch",
