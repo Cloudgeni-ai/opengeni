@@ -179,6 +179,8 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
       recordingId,
       trackNumber: 0,
       ...(options.liveWebSocket ? { WebSocket: options.liveWebSocket } : {}),
+      // React Native's WebSocket takes headers, which OpenAI Realtime signs in with.
+      webSocketHeaders: true,
       onChange: (track) => {
         if (live === transcriber) emit({ live: [track] });
       },

@@ -666,7 +666,10 @@ minutes, and consumes it once. Issuance opportunistically removes bounded
 expired/consumed rows. Existing database readiness therefore covers this path.
 Site calls do not use this approval store: their active immutable version's
 requested identities are intersected with the current viewer's live gateway and
-revalidated by the API on every direct call.
+revalidated by the API on every direct call. A saved Allow makes a connection
+tool callable from a Site, even when its provider recommends Ask. A saved Ask
+on a tool the provider allows keeps it listed and the call returns approval
+required; a tool that is still Ask by default stays hidden from Sites.
 
 Migrations `0404_mcp_oauth_authorization_server.sql` and
 `0405_tool_gateway_approval_capabilities.sql` are one drained maintenance
@@ -3914,14 +3917,15 @@ service in the ingress.
 ### Enrolling a machine
 
 Enrollment binds a machine to a workspace and requires the enable flag. Two paths
-are supported:
+are supported. A signed-in member with `enrollments:read` connects an Only me
+machine for themselves; a machine for the whole workspace needs
+`enrollments:manage` (see [Connected Machines](connected-machines.md#connect-a-machine)).
 
 - **Device flow**: the agent starts an enrollment
-  (`/v1/enrollments/device/start`) and a workspace member holding
-  `enrollments:manage` approves it at the consent page
+  (`/v1/enrollments/device/start`) and a workspace member approves it at the
+  consent page
   (`/v1/workspaces/:workspaceId/enrollments/device/approve`).
-- **Zero-click enroll token**: a workspace member holding `enrollments:manage`
-  mints a short-TTL enroll token
+- **Zero-click enroll token**: a workspace member mints a short-TTL enroll token
   (`/v1/workspaces/:workspaceId/enrollments/token`) that the agent redeems
   headlessly (`/v1/enrollments/token/exchange`) with no human approval — suited
   to fleet or headless provisioning.
@@ -4278,7 +4282,7 @@ Minimum production dashboards should cover:
   - `opengeni_agent_tool_calls_total{family,outcome}` and `opengeni_agent_tool_call_duration_seconds{family}` count every completed model-dispatched tool call by closed family (`shell`, `browser`, `computer`, `human_handoff`, `integration`, `custom_mcp`, ...) and structural outcome (`ok`, `error`, `rejected`, `cancelled`).
   - `opengeni_machine_connect_total{outcome,reason}` (NATS auth-callout decisions), `opengeni_machine_enrollment_total{flow,outcome}` (device/token/renew decisions that are not HTTP errors), and `opengeni_attached_browser_unavailable_total{reason}`.
   - Alerts: `OpenGeniApiRouteRejectionsAbnormal`, `OpenGeniApiMissingPermissionSpike`, `OpenGeniHandoffAttachRefused`, `OpenGeniHandoffsExpiringUnanswered`, `OpenGeniInteractionOperationFailureRatio`, `OpenGeniConnectFailureRatio`, `OpenGeniIntegrationOAuthCallbackFailures`, `OpenGeniAgentToolErrorRatio`, `OpenGeniMachineConnectRejected`, `OpenGeniAttachedBrowserUnavailable` (see `docs/launch-monitoring.md`).
-- Queue, admission, and billing: `opengeni_turns_queued`, `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, `opengeni_verified_signup_trial_credits_runtime_enabled`, `opengeni_verified_signup_trial_credits_deployment_enabled`, and `opengeni_build_info{version,revision}`.
+- Queue, admission, and billing: `opengeni_turns_queued` (every durable queued prompt), `opengeni_turns_queued_by_hold{hold}` and `opengeni_turns_queued_oldest_age_seconds{hold}` (that total split into `ready`, `behind_active_turn`, `paused`, `failed`, `requires_action`, `waiting_capacity` and `cancelled`; only `ready` waits for dispatch; published once the runtime grant deferred by 0988 lands), `opengeni_turn_eligible_backlog`, `opengeni_turn_eligible_backlog_oldest_age_seconds`, `opengeni_turn_slot_saturation_ratio`, `opengeni_credit_balance_micros{account_id}`, `opengeni_credit_micros_total{kind}`, `opengeni_verified_signup_trial_credits_runtime_enabled`, `opengeni_verified_signup_trial_credits_deployment_enabled`, and `opengeni_build_info{version,revision}`.
 - Model usage and money (turn worker, process-local counters: aggregate with `sum` and use `increase()`/`rate()`): `opengeni_model_responses_total{provider,model,priced}` counts authoritative model responses that reported usage (`priced="false"` when no provider cost estimate exists); `opengeni_model_tokens_total{provider,model,type}` counts their tokens, where `type` is `input` (every prompt token, including cached and cache-write tokens), `cached_input` and `cache_write` (subsets of `input`), `output`, or `reasoning` (a subset of `output`), so the cache hit rate is `cached_input / input`; `opengeni_model_provider_cost_micros_total{provider,model,payer,pricing_source}` is the estimated upstream provider cost in USD micros at the provider rate of the configured model pricing (`OPENGENI_MODEL_PRICING_JSON`, keyed by catalog product id) or the AI Gateway's reported cost (`pricing_source="gateway_reported"`), where `payer="external"` marks a customer-paid subscription or key whose cost Opengeni does not pay; `opengeni_model_web_search_requests_total{provider,model,payer}` counts provider-run web searches the provider reports billing with a response (Claude's server-side search; each search is billed per request by the provider, separately from tokens); and `opengeni_model_credits_charged_micros_total{provider,model,funding}` is the credit actually debited for model usage, split by `funding="promotional"` (scoped promotional grants: the verified-signup trial and scoped coupon offers) and `funding="general"` (general credit: purchased credit plus any unscoped grant; the ledger does not track which dollar of the general pool was purchased). Usage and cost are recorded behind the same durable usage-event fence as the Insights model-call fact, so a duplicate or late response is not counted; charged credits are recorded once when the debit ledger row is inserted. `model` is the deployment catalog product id, `custom` for a workspace gateway or customer-key model and for any id the deployment catalog does not list, and `other` after 64 distinct values in one process; account, workspace, user and session ids are never labels. Sandbox, voice, web-search and knowledge debits are not split by funding here; `opengeni_credit_micros_total{kind="usage"}` remains the worker's total of model and sandbox debits. Paid credit purchases (Stripe checkout top-ups, API) are `opengeni_credit_purchases_total{mode}`, `opengeni_credit_purchased_micros_total{mode}` (credits added) and `opengeni_credit_purchase_paid_usd_micros_total{mode}` (USD paid after discounts), with `mode` `live` or `test`; each is counted once by the request that inserted the ledger row. A fully discounted coupon checkout is a grant (`grant_class="coupon"`), not a purchase.
 - Sandbox rollout state: `opengeni_sandbox_rollout_config{feature,state}` across API, control-worker, and turn-worker revisions; alert on disagreement before advancing a staged rollout.
 - Dependency health: Postgres connection health, Temporal worker poll health, NATS connectivity, object-storage write/read conformance, and sandbox backend readiness.
@@ -4444,6 +4448,8 @@ The AWS Terraform root lives at `deploy/terraform/aws`.
 
 It supports EKS, ECR, S3, AWS Secrets Manager, optional RDS PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.aws-managed.example.yaml` as the non-secret Helm values shape.
 
+With `postgres.mode = "managed"`, the RDS security group admits PostgreSQL from the created VPC CIDR, or from the EKS cluster security group when the root runs in an existing VPC (`network.create_vpc = false`). Declare any other client, including pods on Karpenter or self-managed nodes and Security Groups for Pods, with `postgres.allowed_client_cidrs` and/or `postgres.allowed_security_group_ids`. Existing-VPC deployments upgrading from the old `10.0.0.0/8` rule should read the upgrade note in `deploy/terraform/aws/README.md` first.
+
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed S3 URLs without per-application registration.
 
@@ -4465,7 +4471,7 @@ After apply, save exact resource names and cleanup commands outside the reposito
 
 The GCP Terraform root lives at `deploy/terraform/gcp`.
 
-It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape.
+It supports GKE, Artifact Registry, GCS, Secret Manager, workload identity, optional Cloud SQL PostgreSQL, and existing Postgres/Temporal endpoints. Use `deploy/helm/opengeni/values.gcp-managed.example.yaml` as the non-secret Helm values shape. The runtime service account's Secret Manager access is scoped to the created runtime secret (plus any IDs listed in `runtime_readable_secret_ids`), not the project; see the upgrade note in `deploy/terraform/gcp/README.md`.
 
 Set `object_storage.cors_allowed_origins` to `["*"]` so browser SDK hosts can
 upload files to signed GCS URLs without per-application registration.

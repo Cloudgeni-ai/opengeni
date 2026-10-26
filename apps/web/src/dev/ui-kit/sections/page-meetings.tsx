@@ -14,6 +14,7 @@ import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { KitBlock, KitCanvas, KitSection } from "../kit";
 import {
   createMeetingsFixture,
+  FAILED_RECORDING_ID,
   LIVE_LINES,
   LIVE_RECORDING_ID,
 } from "@opengeni/react/testing/meetings";
@@ -150,7 +151,20 @@ export default function PageMeetingsSection() {
   );
   // ?models=pinned previews a deployment that pins one speech-to-text model.
   const pinned = initial.get("models") === "pinned";
-  const fixture = useMemo(() => createMeetingsFixture({ state: data, pinned }), [data, pinned]);
+  // ?failure=missing_provider_key makes the failed meeting's transcript fail
+  // for a provider that isn't connected, instead of a used-up provider account.
+  const failure = initial.get("failure");
+  const fixture = useMemo(() => {
+    const base = createMeetingsFixture({ state: data, pinned });
+    if (!failure) return base;
+    const getRecording: typeof base.client.getRecording = async (workspaceId, id) => {
+      const recording = await base.client.getRecording(workspaceId, id);
+      return recording.transcript && id === FAILED_RECORDING_ID
+        ? { ...recording, transcript: { ...recording.transcript, errorCode: failure } }
+        : recording;
+    };
+    return { ...base, client: { ...base.client, getRecording } };
+  }, [data, pinned, failure]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.
@@ -165,9 +179,14 @@ export default function PageMeetingsSection() {
     return () => window.clearInterval(timer);
   }, [mode, startedAt, store, audio, preview]);
   // ?open=live opens the meeting in progress: recorded here while the recorder
-  // records, or elsewhere while it is idle.
+  // records, or elsewhere while it is idle. ?open=failed opens the one whose
+  // transcript failed.
   const [openId, setOpenId] = useState(
-    initial.get("open") === "live" ? LIVE_RECORDING_ID : fixture.readyId,
+    initial.get("open") === "live"
+      ? LIVE_RECORDING_ID
+      : initial.get("open") === "failed"
+        ? FAILED_RECORDING_ID
+        : fixture.readyId,
   );
 
   return (
@@ -250,6 +269,7 @@ export default function PageMeetingsSection() {
                 recordings={fixture.client}
                 liveTranscriptDefault={settings.liveTranscript === true}
                 defaultLanguage={settings.language ?? null}
+                viewerName="Ingrid Solberg"
                 meetingHref={(id) => `#meeting-${id}`}
                 onOpen={(id) => {
                   setOpenId(id);

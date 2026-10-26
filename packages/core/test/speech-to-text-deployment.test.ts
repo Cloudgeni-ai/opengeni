@@ -178,6 +178,102 @@ describe("speech-to-text deployment", () => {
       }),
     ).toThrow(/does not offer/u);
   });
+
+  test("the live transcript defaults to ElevenLabs, else a pinned provider's own live model, else none", () => {
+    expect(createSpeechToTextDeployment({ settings: testSettings({}) }).liveDefault).toEqual({
+      providerId: "elevenlabs",
+      model: "scribe_v2_realtime",
+    });
+    expect(
+      createSpeechToTextDeployment({
+        settings: testSettings({ speechToTextPinned: "elevenlabs/scribe_v2" }),
+      }).liveDefault,
+    ).toEqual({ providerId: "elevenlabs", model: "scribe_v2_realtime" });
+    expect(
+      createSpeechToTextDeployment({
+        settings: testSettings({ ...azure, speechToTextPinned: "azure-speech/MAI-Transcribe-2" }),
+      }).liveDefault,
+    ).toBeNull();
+    // The named model must stream.
+    expect(() =>
+      createSpeechToTextDeployment({
+        settings: testSettings({ recordingLiveTranscription: "openai/gpt-transcribe" }),
+      }),
+    ).toThrow(/live transcript/u);
+  });
+
+  test("a pinned deployment can stream the live transcript to its Azure OpenAI deployment, signed in with its identity", async () => {
+    const minted: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+    const deployment = createSpeechToTextDeployment(
+      {
+        settings: testSettings({
+          ...azure,
+          speechToTextPinned: "azure-speech/MAI-Transcribe-2",
+          recordingLiveTranscription: "azure-openai/gpt-4o-transcribe",
+          voiceInputProviderOrder: "azure-openai",
+          voiceInputAzureEndpoint: "https://ai.example.cognitiveservices.azure.com/",
+          voiceInputAzureDeployment: "gpt-4o-transcribe",
+          azureTenantId: "tenant",
+          azureClientId: "client",
+          azureClientSecret: "secret",
+        }),
+      },
+      {
+        fetch: (async (url: string, init?: RequestInit) => {
+          if (String(url).includes("/oauth2/")) {
+            return Response.json({ access_token: "entra", expires_in: 3_600 });
+          }
+          minted.push({
+            url: String(url),
+            authorization: new Headers(init?.headers).get("authorization"),
+            body: JSON.parse(String(init?.body)),
+          });
+          return Response.json({ value: "ek_live", expires_at: 1_900_000_000 });
+        }) as unknown as typeof fetch,
+      },
+    );
+    expect(deployment.liveDefault).toEqual({
+      providerId: "azure-openai",
+      model: "gpt-4o-transcribe",
+    });
+    // Meetings and dictation stay on the pin.
+    expect(speechToTextModelFor(deployment, "dictation", null)).toEqual(deployment.pinned);
+    expect(
+      await deployment.credentials("azure-openai", { accountId: "a", workspaceId: "w" }),
+    ).toEqual({ credentials: null });
+    const grant = await deployment.registry.get("azure-openai")!.createLiveSession!(
+      { model: "gpt-4o-transcribe", language: "nb-NO" },
+      null,
+    );
+    expect(grant).toEqual({
+      protocol: "openai.realtime",
+      url: "wss://ai.example.cognitiveservices.azure.com/openai/v1/realtime?intent=transcription",
+      token: "ek_live",
+      webrtcUrl: "https://ai.example.cognitiveservices.azure.com/openai/v1/realtime/calls",
+      audio: { encoding: "pcm_s16le", sampleRate: 24_000 },
+      expiresAt: new Date(1_900_000_000_000),
+    });
+    expect(minted).toEqual([
+      {
+        url: "https://ai.example.cognitiveservices.azure.com/openai/v1/realtime/client_secrets",
+        authorization: "Bearer entra",
+        body: {
+          expires_after: { anchor: "created_at", seconds: 600 },
+          session: {
+            type: "transcription",
+            audio: {
+              input: {
+                format: { type: "audio/pcm", rate: 24_000 },
+                // Bokmål is transcribed as Norwegian.
+                transcription: { model: "gpt-4o-transcribe", language: "no" },
+                turn_detection: { type: "server_vad", silence_duration_ms: 500 },
+              },
+            },
+          },
+        },
+      },
+    ]);
+  });
 });
 
 describe("the model a workspace's meetings run", () => {

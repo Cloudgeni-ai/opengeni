@@ -12,8 +12,14 @@
  * {@link createLiveTranscriber} is platform-neutral: feed it 16-bit mono PCM
  * with {@link LiveTranscriber.push}. The browser recorder does this for you
  * with `liveTranscript: true`.
+ *
+ * Providers speak one of the {@link RecordingLiveProtocol}s. ElevenLabs takes
+ * the PCM over a WebSocket. OpenAI Realtime (OpenAI and Azure OpenAI) takes
+ * the track itself over WebRTC in a browser, where the pushed PCM only keeps
+ * the clock, or the PCM over a WebSocket where the WebSocket can carry a
+ * header (React Native).
  */
-import type { RecordingLiveSession } from "@opengeni/contracts";
+import type { RecordingLiveProtocol, RecordingLiveSession } from "@opengeni/contracts";
 import type { OpenGeniRecordingsClient } from "./recordings";
 
 /** The client calls a live transcript needs. */
@@ -57,6 +63,11 @@ export type LiveTranscriber = {
    * `recordedMilliseconds` into the recording (excluding pauses).
    */
   push(samples: Int16Array, sampleRate: number, recordedMilliseconds: number): void;
+  /**
+   * The recording paused or resumed. Paused audio is not transcribed: a
+   * track streamed over WebRTC is muted at once; pushed PCM simply stops.
+   */
+  setPaused(paused: boolean): void;
   /** Finish what was heard, save it, and close. */
   close(): Promise<void>;
   /** Close at once without saving anything more, for a discarded recording. */
@@ -70,8 +81,30 @@ export type LiveTranscriberOptions = {
   trackNumber: number;
   /** Defaults to the global WebSocket. */
   WebSocket?: LiveWebSocketConstructor;
+  /**
+   * The WebSocket takes headers as its third argument, as React Native's
+   * does, so it can stream to providers that sign in with a header.
+   */
+  webSocketHeaders?: boolean;
+  /**
+   * The track's own audio, for providers a browser reaches over WebRTC. The
+   * transcriber sends a copy and leaves this one alone.
+   */
+  mediaTrack?: LiveMediaTrack | null;
+  /** Defaults to the global RTCPeerConnection. */
+  RTCPeerConnection?: LivePeerConnectionConstructor;
+  /** Defaults to the global fetch; posts the WebRTC offer. */
+  fetch?: LiveFetch;
+  /** A monotonic clock in milliseconds. Defaults to `performance.now()`. */
+  now?: () => number;
   onChange?: (snapshot: LiveTranscriptTrackSnapshot) => void;
 };
+
+/** The part of `fetch` a WebRTC session uses to post its offer. */
+export type LiveFetch = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string },
+) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
 /** The part of the WebSocket API a live transcript uses. */
 export type LiveWebSocket = {
@@ -83,9 +116,43 @@ export type LiveWebSocket = {
   onclose: ((event: { code?: number; reason?: string }) => void) | null;
   onerror: ((event: unknown) => void) | null;
 };
-export type LiveWebSocketConstructor = new (url: string) => LiveWebSocket;
+export type LiveWebSocketConstructor = new (
+  url: string,
+  protocols?: string | string[],
+  options?: { headers?: Record<string, string> },
+) => LiveWebSocket;
+
+/** The part of a `MediaStreamTrack` a live transcript uses. */
+export type LiveMediaTrack = {
+  enabled: boolean;
+  clone(): LiveMediaTrack;
+  stop(): void;
+};
+
+type LiveDataChannel = {
+  readonly readyState: string;
+  send(data: string): void;
+  close(): void;
+  onopen: ((event: unknown) => void) | null;
+  onmessage: ((event: { data: unknown }) => void) | null;
+  onclose: ((event: unknown) => void) | null;
+};
+
+/** The part of an `RTCPeerConnection` a live transcript uses. */
+export type LivePeerConnection = {
+  readonly connectionState: string;
+  addTrack(track: LiveMediaTrack): unknown;
+  createDataChannel(label: string): LiveDataChannel;
+  createOffer(): Promise<{ type: string; sdp?: string }>;
+  setLocalDescription(description: { type: string; sdp?: string }): Promise<void>;
+  setRemoteDescription(description: { type: "answer"; sdp: string }): Promise<void>;
+  onconnectionstatechange: ((event: unknown) => void) | null;
+  close(): void;
+};
+export type LivePeerConnectionConstructor = new () => LivePeerConnection;
 
 const OPEN = 1;
+const CLOSED = 3;
 /** Send audio in tenths of a second, as the provider recommends. */
 const SEND_MILLISECONDS = 100;
 /** Audio held while reconnecting; older audio is dropped from the preview only. */
@@ -99,6 +166,8 @@ const PROVEN_SESSION_MILLISECONDS = 30_000;
 const CLOSE_WAIT_MILLISECONDS = 3_000;
 /** A plain commit not followed by its timed copy within this long is kept as is. */
 const UNTIMED_COMMIT_MILLISECONDS = 1_500;
+/** How far back the clock remembers where pushed audio sat in the recording. */
+const ANCHOR_MILLISECONDS = 120_000;
 
 /** Provider errors that will not go away by reconnecting. */
 const FATAL_PROVIDER_ERRORS = new Set([
@@ -108,6 +177,14 @@ const FATAL_PROVIDER_ERRORS = new Set([
   "invalid_request",
   "chunk_size_exceeded",
   "unaccepted_terms",
+]);
+
+/** OpenAI Realtime errors that will not go away by reconnecting. */
+const FATAL_OPENAI_ERRORS = new Set([
+  "invalid_api_key",
+  "insufficient_quota",
+  "authentication_error",
+  "model_not_found",
 ]);
 
 type Pending = { samples: Int16Array; recordedMilliseconds: number };
@@ -161,6 +238,36 @@ type ProviderMessage = {
   message?: unknown;
 };
 
+type OpenAiMessage = {
+  type?: unknown;
+  item_id?: unknown;
+  delta?: unknown;
+  transcript?: unknown;
+  audio_start_ms?: unknown;
+  audio_end_ms?: unknown;
+  error?: unknown;
+};
+
+/** One stretch of speech an OpenAI Realtime session is transcribing. */
+type OpenAiItem = { start: number | null; end: number | null; text: string };
+
+const asText = (value: unknown) => (typeof value === "string" ? value : "");
+const asMilliseconds = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+function openAiError(value: unknown): { code: string; message: string } {
+  const error = (value && typeof value === "object" ? value : {}) as {
+    code?: unknown;
+    type?: unknown;
+    message?: unknown;
+  };
+  const code = asText(error.code) || asText(error.type) || "provider_error";
+  return { code, message: asText(error.message) || code };
+}
+
+/** Statuses a WebRTC offer gets that reconnecting won't change. */
+const REFUSED_OFFER_STATUSES = new Set([400, 401, 403, 404]);
+
 /**
  * Stream one track to a live model, holding audio through short outages and
  * saving finished text. Errors never reach the recording itself.
@@ -168,12 +275,20 @@ type ProviderMessage = {
 export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTranscriber {
   const Socket =
     options.WebSocket ?? (globalThis as { WebSocket?: LiveWebSocketConstructor }).WebSocket ?? null;
+  const Peer =
+    options.RTCPeerConnection ??
+    (globalThis as { RTCPeerConnection?: LivePeerConnectionConstructor }).RTCPeerConnection ??
+    null;
+  const post: LiveFetch =
+    options.fetch ?? ((url, init) => (globalThis.fetch as unknown as LiveFetch)(url, init));
+  const clock = options.now ?? (() => globalThis.performance?.now() ?? Date.now());
+  const canStream = Boolean(Socket) || Boolean(Peer && options.mediaTrack);
   let snapshot: LiveTranscriptTrackSnapshot = {
     trackNumber: options.trackNumber,
-    state: Socket ? "connecting" : "unavailable",
+    state: canStream ? "connecting" : "unavailable",
     partial: "",
     segments: [],
-    error: Socket ? null : { code: "unsupported", message: "This device can't stream audio." },
+    error: canStream ? null : { code: "unsupported", message: "This device can't stream audio." },
   };
   const emit = (patch: Partial<LiveTranscriptTrackSnapshot>) => {
     snapshot = { ...snapshot, ...patch };
@@ -207,11 +322,26 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
   let saving: Promise<void> = Promise.resolve();
   let untimed: { text: string; timer: ReturnType<typeof setTimeout> } | null = null;
   let finished: (() => void) | null = null;
+  /** The current session's protocol. */
+  let protocol: RecordingLiveProtocol = "elevenlabs.scribe_realtime";
+  /** The current session carries the track itself over WebRTC, not pushed PCM. */
+  let viaWebRtc = false;
+  /** The copy of the track sent over WebRTC. */
+  let sentTrack: LiveMediaTrack | null = null;
+  let paused = false;
+  /** When the WebRTC session's audio began, on `clock`. */
+  let audioStartedAt = 0;
+  /** Where pushed audio sat in the recording, on `clock`; it times WebRTC text. */
+  const anchors: { at: number; start: number; end: number }[] = [];
+  /** OpenAI Realtime speech being transcribed, by item. */
+  const items = new Map<string, OpenAiItem>();
+  let latestItem: string | null = null;
 
   const unavailable = (code: string, message: string) => {
     closed = true;
     pending = [];
     pendingSamples = 0;
+    items.clear();
     socket?.close();
     socket = null;
     emit({ state: "unavailable", partial: "", error: { code, message } });
@@ -265,6 +395,90 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
 
   /** Where the session's audio has reached, in recording time. */
   const sessionNow = () => (sessionOffset ?? 0) + (sessionSamples / sampleRate) * 1_000;
+
+  /**
+   * Where a moment on `clock` sat in the recording, from the pushed audio
+   * around it. A paused stretch maps to the moment the recording paused.
+   */
+  const recordedAt = (at: number) => {
+    let before: (typeof anchors)[number] | null = null;
+    let after: (typeof anchors)[number] | null = null;
+    for (const anchor of anchors) {
+      if (anchor.at <= at) before = anchor;
+      else {
+        after = anchor;
+        break;
+      }
+    }
+    const fromAfter = after ? Math.max(after.start, after.end - (after.at - at)) : null;
+    if (!before) return fromAfter ?? sessionNow();
+    const fromBefore = before.end + (at - before.at);
+    return fromAfter === null ? fromBefore : Math.min(fromBefore, fromAfter);
+  };
+
+  /** An OpenAI Realtime audio time, in the recording. */
+  const openAiTime = (milliseconds: number) =>
+    viaWebRtc ? recordedAt(audioStartedAt + milliseconds) : (sessionOffset ?? 0) + milliseconds;
+
+  const onOpenAiMessage = (raw: unknown) => {
+    let message: OpenAiMessage;
+    try {
+      message = JSON.parse(String(raw)) as OpenAiMessage;
+    } catch {
+      return;
+    }
+    const type = asText(message.type);
+    const id = asText(message.item_id);
+    const item = () => {
+      let entry = items.get(id);
+      if (!entry) {
+        entry = { start: null, end: null, text: "" };
+        items.set(id, entry);
+      }
+      return entry;
+    };
+    if (type === "input_audio_buffer.speech_started") {
+      item().start = asMilliseconds(message.audio_start_ms);
+      latestItem = id;
+    } else if (type === "input_audio_buffer.speech_stopped") {
+      item().end = asMilliseconds(message.audio_end_ms);
+    } else if (type === "input_audio_buffer.committed") {
+      item();
+    } else if (type === "conversation.item.input_audio_transcription.delta") {
+      proven();
+      const entry = item();
+      entry.text += asText(message.delta);
+      latestItem = id;
+      emit({ partial: entry.text.trim() });
+    } else if (type === "conversation.item.input_audio_transcription.completed") {
+      proven();
+      const entry = items.get(id);
+      items.delete(id);
+      const start = entry?.start != null ? openAiTime(entry.start) : lastCommitEnd;
+      const end =
+        entry?.end != null ? openAiTime(entry.end) : viaWebRtc ? recordedAt(clock()) : sessionNow();
+      addSegment(asText(message.transcript), start, Math.max(start, end));
+      // Speech after this stretch may already be coming in.
+      const partial = (latestItem ? items.get(latestItem)?.text.trim() : "") ?? "";
+      if (partial !== snapshot.partial) emit({ partial });
+      finished?.();
+    } else if (type === "conversation.item.input_audio_transcription.failed") {
+      items.delete(id);
+      const { message: detail } = openAiError(message.error);
+      emit({ error: { code: "transcription_failed", message: detail } });
+      finished?.();
+    } else if (type === "error") {
+      const { code, message: detail } = openAiError(message.error);
+      // Asked to finish with nothing left to transcribe.
+      if (code === "input_audio_buffer_commit_empty") {
+        finished?.();
+      } else if (FATAL_OPENAI_ERRORS.has(code)) {
+        unavailable(code, `The live transcript stopped: ${detail}`);
+      } else {
+        emit({ error: { code, message: detail } });
+      }
+    }
+  };
 
   const onMessage = (raw: unknown) => {
     let message: ProviderMessage;
@@ -346,6 +560,9 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
     session = null;
     sessionOffset = null;
     sessionSamples = 0;
+    viaWebRtc = false;
+    items.clear();
+    latestItem = null;
     if (provingSince !== null && Date.now() - provingSince >= PROVEN_SESSION_MILLISECONDS) {
       proven();
     }
@@ -356,8 +573,77 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
     emit({ state: "reconnecting", partial: "" });
   };
 
+  /**
+   * A WebRTC session in the shape of a WebSocket: events travel on a data
+   * channel, and a copy of the track is the audio.
+   */
+  const openWebRtc = (
+    PeerConnection: LivePeerConnectionConstructor,
+    track: LiveMediaTrack,
+    url: string,
+    token: string,
+  ): LiveWebSocket => {
+    const peer = new PeerConnection();
+    const copy = track.clone();
+    copy.enabled = !paused;
+    sentTrack = copy;
+    let readyState = 0;
+    const channel = peer.createDataChannel("oai-events");
+    const adapter: LiveWebSocket = {
+      get readyState() {
+        return readyState;
+      },
+      send(data) {
+        if (channel.readyState === "open") channel.send(data);
+      },
+      close() {
+        if (readyState === CLOSED) return;
+        readyState = CLOSED;
+        channel.close();
+        peer.close();
+        copy.stop();
+        if (sentTrack === copy) sentTrack = null;
+      },
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+    };
+    const fail = (status?: number) => {
+      if (readyState === CLOSED) return;
+      if (status !== undefined) adapter.onerror?.({ status });
+      adapter.close();
+      adapter.onclose?.({});
+    };
+    channel.onopen = () => {
+      if (readyState !== 0) return;
+      readyState = OPEN;
+      adapter.onopen?.({});
+    };
+    channel.onmessage = (event) => adapter.onmessage?.(event);
+    channel.onclose = () => fail();
+    peer.onconnectionstatechange = () => {
+      if (peer.connectionState === "failed" || peer.connectionState === "closed") fail();
+    };
+    peer.addTrack(copy);
+    void (async () => {
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      const response = await post(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/sdp" },
+        body: offer.sdp ?? "",
+      });
+      if (!response.ok) return fail(response.status);
+      const sdp = await response.text();
+      if (readyState === CLOSED) return;
+      await peer.setRemoteDescription({ type: "answer", sdp });
+    })().catch(() => fail());
+    return adapter;
+  };
+
   const connect = async () => {
-    if (connecting || closed || !Socket || Date.now() < retryAt) return;
+    if (connecting || closed || !canStream || Date.now() < retryAt) return;
     connecting = true;
     try {
       session = await options.client.createRecordingLiveSession(
@@ -384,17 +670,62 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
       connecting = false;
       return;
     }
+    // Audio held until now was kept at the last session's rate.
+    const rate = session.audio.sampleRate;
+    if (rate !== sampleRate) {
+      pending = pending.map((held) => ({
+        samples: resamplePcm16(held.samples, sampleRate, rate),
+        recordedMilliseconds: held.recordedMilliseconds,
+      }));
+      pendingSamples = pending.reduce((sum, held) => sum + held.samples.length, 0);
+    }
     sampleRate = session.audio.sampleRate;
-    const opened = new Socket(session.url);
+    protocol = session.protocol;
+    let opened: LiveWebSocket;
+    if (session.protocol === "openai.realtime") {
+      const track = options.mediaTrack;
+      if (Peer && track && session.webrtcUrl && session.token) {
+        viaWebRtc = true;
+        opened = openWebRtc(Peer, track, session.webrtcUrl, session.token);
+      } else if (Socket && options.webSocketHeaders && session.token) {
+        opened = new Socket(session.url, undefined, {
+          headers: { Authorization: `Bearer ${session.token}` },
+        });
+      } else {
+        connecting = false;
+        unavailable("unsupported", "This device can't stream audio to the live model.");
+        return;
+      }
+    } else if (Socket) {
+      opened = new Socket(session.url);
+    } else {
+      connecting = false;
+      unavailable("unsupported", "This device can't stream audio.");
+      return;
+    }
     socket = opened;
     opened.onopen = () => {
       connecting = false;
+      if (socket !== opened) return;
+      if (protocol === "openai.realtime") {
+        // The provider checked the secret on connecting, so the session is up.
+        provingSince = Date.now();
+        emit({ state: "live", error: null });
+        if (viaWebRtc) audioStartedAt = clock();
+      }
       flush();
     };
     opened.onmessage = (event) => {
-      if (socket === opened) onMessage(event.data);
+      if (socket !== opened) return;
+      if (protocol === "openai.realtime") onOpenAiMessage(event.data);
+      else onMessage(event.data);
     };
-    opened.onerror = () => undefined;
+    opened.onerror = (event) => {
+      const status = (event as { status?: unknown } | null)?.status;
+      if (socket === opened && typeof status === "number" && REFUSED_OFFER_STATUSES.has(status)) {
+        unavailable("unavailable", `The live transcript couldn't connect (HTTP ${status}).`);
+      }
+    };
     opened.onclose = () => {
       connecting = false;
       if (socket !== opened) return;
@@ -407,6 +738,12 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
   const flush = (force = false) => {
     if (!socket || socket.readyState !== OPEN) {
       void connect();
+      return;
+    }
+    if (viaWebRtc) {
+      // The track carries the audio itself; audio held while connecting is dropped.
+      pending = [];
+      pendingSamples = 0;
       return;
     }
     const chunk = Math.round((sampleRate * SEND_MILLISECONDS) / 1_000);
@@ -436,12 +773,16 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
         lastCommitEnd = Math.max(lastCommitEnd, sessionOffset);
       }
       socket.send(
-        JSON.stringify({
-          message_type: "input_audio_chunk",
-          audio_base_64: base64(pcmBytes(out)),
-          commit: false,
-          sample_rate: sampleRate,
-        }),
+        JSON.stringify(
+          protocol === "openai.realtime"
+            ? { type: "input_audio_buffer.append", audio: base64(pcmBytes(out)) }
+            : {
+                message_type: "input_audio_chunk",
+                audio_base_64: base64(pcmBytes(out)),
+                commit: false,
+                sample_rate: sampleRate,
+              },
+        ),
       );
       sessionSamples += filled;
       streamedSamples += filled;
@@ -455,6 +796,17 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
 
     push(samples, rate, recordedMilliseconds) {
       if (closed || samples.length === 0) return;
+      const at = clock();
+      const duration = (samples.length / rate) * 1_000;
+      anchors.push({ at, start: recordedMilliseconds, end: recordedMilliseconds + duration });
+      while (anchors.length > 1 && at - anchors[0]!.at > ANCHOR_MILLISECONDS) anchors.shift();
+      if (viaWebRtc) {
+        // The track is already on its way; this audio only keeps the clock.
+        if (socket?.readyState === OPEN) {
+          streamedSamples += Math.round((duration * sampleRate) / 1_000);
+        }
+        return;
+      }
       const converted = resamplePcm16(samples, rate, session?.audio.sampleRate ?? sampleRate);
       // A gap in recording time (a pause) starts a new session, so the
       // provider's clock stays in step with the recording's.
@@ -493,19 +845,28 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
       if (socket && socket.readyState === OPEN) {
         flush(true);
         const open = socket;
+        const openAi = protocol === "openai.realtime";
+        // Nothing said after Stop belongs in the recording.
+        if (sentTrack) sentTrack.enabled = false;
         await new Promise<void>((done) => {
           const timer = setTimeout(done, CLOSE_WAIT_MILLISECONDS);
           finished = () => {
+            // OpenAI Realtime finishes each stretch of speech on its own.
+            if (openAi && items.size > 0) return;
             clearTimeout(timer);
             done();
           };
           open.send(
-            JSON.stringify({
-              message_type: "input_audio_chunk",
-              audio_base_64: "",
-              commit: true,
-              sample_rate: sampleRate,
-            }),
+            JSON.stringify(
+              openAi
+                ? { type: "input_audio_buffer.commit" }
+                : {
+                    message_type: "input_audio_chunk",
+                    audio_base_64: "",
+                    commit: true,
+                    sample_rate: sampleRate,
+                  },
+            ),
           );
         });
         finished = null;
@@ -519,6 +880,7 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
       closed = true;
       const open = socket;
       socket = null;
+      items.clear();
       open?.close();
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = null;
@@ -539,10 +901,16 @@ export function createLiveTranscriber(options: LiveTranscriberOptions): LiveTran
       unsaved = [];
       pending = [];
       pendingSamples = 0;
+      items.clear();
       const open = socket;
       socket = null;
       open?.close();
       emit({ state: "closed", partial: "" });
+    },
+
+    setPaused(value) {
+      paused = value;
+      if (sentTrack) sentTrack.enabled = !value;
     },
   };
 }

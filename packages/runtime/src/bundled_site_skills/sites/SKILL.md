@@ -16,37 +16,64 @@ Site on the web is built in (see "Publish to the web").
 
 ## Pick the path first
 
-- **Simple page**: something to read or look at, such as recipes, an event
-  page, a menu, a CV, a short report or a static landing page. Plain HTML and
-  CSS, with at most a little script for display (tabs, a toggle, a timer).
-  No Site Data, no workspace tools, no AI, no forms that save anything.
-  Follow "Simple page" below; nothing else in this Skill is needed.
-- **App**: anything that saves data, calls workspace tools, uses AI or chat,
-  has several views with state, or needs a build. Follow "Apps" below and
-  read only the reference files the app needs.
+- **Single-file Site**: one HTML page with inline CSS and plain script, no
+  build. A page to read or look at (recipes, an event page, a menu, a CV, a
+  short report), or a small personal tool that keeps the viewer's own entries
+  (a blood-pressure or habit log, a reading list, a form that collects
+  answers). No workspace tools, no AI, no data that several people edit
+  together. Follow "Single-file Site" below; nothing else in this Skill is
+  needed.
+- **App**: needs React or a build, workspace tools, AI or chat, data several
+  people share or edit, Site SQL, or several views with their own state.
+  Follow "Apps" below and read only the reference files the app needs.
 
-## Simple page
+Build what the person asked for. Offer likely extras (export, notes, editing,
+filters, more charts) in one sentence of the reply instead of building them.
+A Site you can finish in this turn needs no goal.
 
-The person should have a link in well under a minute, after a handful of tool
-calls.
+## Single-file Site
+
+The person should have a working link in a minute or two, after a handful of
+tool calls.
 
 1. Do not set a goal, start workers, install packages, or set up React, Bun,
-   tests or a browser build for it.
-2. Write one `index.html` with inline CSS (and inline script only if the page
-   needs it). Include
+   tests, a preview server or a browser build for it.
+2. Write one `index.html` with inline CSS and script. Include
    `<meta name="viewport" content="width=device-width, initial-scale=1">`,
    follow the readable defaults below and let content reflow into one column
    on a phone. Use system fonts, text, inline SVG or data-URL images, so
-   nothing has to load beside the file.
-3. At most one quick look at phone width (about 390 px), and only when the
+   nothing has to load beside the file (draw a chart as inline SVG).
+3. To keep entries, load the host client with this exact tag before your own
+   script, and use Site Data:
+
+   ```html
+   <script src="/__opengeni/site-tools/client.js"></script>
+   <script>
+     const entries = createOpenGeniSiteClient().data.collection("entries");
+     // await entries.insert({ systolic: 128, diastolic: 82, date: "2026-10-26" });
+    // const { records, nextCursor } = await entries.list({ sort: [{ field: "$createdAt", direction: "desc" }], limit: 200 });
+    // pass { cursor: nextCursor } to load older entries (a "Show more" button).
+     // each record is { id, data, ... }; render record.data with textContent.
+   </script>
+   ```
+
+   Catch errors and show one friendly line instead of crashing; Site Data only
+   works on the saved Site, so a local copy shows that line.
+4. At most one quick look at phone width (about 390 px), and only when the
    layout is unusual. Skip desktop sweeps, 200% text passes, screenshots at
-   several widths and scripted structure tests; those are for apps.
-4. Save it as in "Publish one immutable version", with `requestedTools: []`
-   and no source upload: its HTML is the editable source.
-5. Reply with the Site link. The link opens for workspace members only. When
-   the person wants others to open it (family, customers, "on their phones"),
-   offer to put it on the web and ask before making it public, then follow
-   "Publish to the web".
+   several widths, preview servers and test harnesses; those are for apps.
+5. Save it as in "Publish one immutable version", with `requestedTools: []`
+   and no source upload: its HTML is the editable source. If it keeps
+   entries, then call `opengeni__site_data_define_collection` with the Site
+  id, the same collection name and `accessMode`: `per_viewer` for each
+  person's own entries (add `privateRecords: true` for health or other
+  personal data), `append_only` for a form that collects answers. Skip
+  `jsonSchema`; check values in the page.
+6. Reply with the link as soon as it is saved, in the person's words: what
+   it does and how to use it. The link opens for workspace members only.
+   When the person wants others to open it (family, customers, "on their
+   phones"), offer to put it on the web and ask before making it public,
+   then follow "Publish to the web".
 
 ## Make new Sites readable by default
 
@@ -81,8 +108,8 @@ The sizes below assume the usual 16px browser default and scale with it.
 .site-meta { font-size: 0.8125rem; line-height: 1.5; }
 ```
 
-A simple page that follows these defaults needs no more checking than its one
-optional phone-width look. For an app, before publishing, inspect actual
+A single-file Site that follows these defaults needs no more checking than its
+one optional phone-width look. For an app, before publishing, inspect actual
 paragraphs, labels, inputs, buttons, table cells and empty/error states at
 desktop and narrow mobile widths, then with text enlarged to 200%. Check
 computed sizes and look for clipped or overlapping text; fix layout pressure
@@ -99,7 +126,7 @@ scale, but does not prove every generated Site follows it.
   optimistic-concurrency fence for the next publish.
 - Treat retained source as the editable truth and the compiled HTML as the
   runtime projection. Never edit only the generated HTML when source exists.
-- Keep the path the Site already has: a simple page stays a simple page unless
+- Keep the path the Site already has: a single-file Site stays one file unless
   the requested change makes it an app.
 
 Keep secrets, Opengeni access keys, OAuth tokens, workspace ids, API base
@@ -108,7 +135,7 @@ URLs, and signed URLs out of every Site's source and HTML.
 ## Publish one immutable version
 
 1. Call `opengeni__artifacts_prepare_upload` (no hashes or sizes required).
-2. Upload the HTML (`index.html` for a simple page, `dist/index.html` for a
+2. Upload the HTML (`index.html` for a single-file Site, `dist/index.html` for a
    built app) to `html.putUrl` with HTTP PUT using curl or Bun. Send the
    returned `requiredHeaders` exactly.
 3. If editable source exists, save JSON `{entrypoint, files: [{path, content}]}`
@@ -138,7 +165,8 @@ and `artifact.id` to give the user a standard Markdown link to the durable Site:
 
 Include that link in the completion reply instead of making the user search for
 the Site. Never present a sandbox URL, API content URL, or object-storage URL as
-the finished destination.
+the finished destination. Mention source files, tests or tool names only to
+someone who asked about them.
 
 Archive with `opengeni__artifacts_archive` and restore with
 `opengeni__artifacts_restore`. Archiving unpublishes the Site but preserves its
@@ -170,8 +198,8 @@ that is its setting, not a broken link, so tell the person their visitors
 sign in first instead of reporting sharing as broken.
 
 A published Site is a public web page. Never put secrets, tokens or private
-data in its HTML. An invited or public app that uses Site Data, Site SQL,
-workspace tools or an embedded agent also needs
+data in its HTML. An invited or public Site that keeps entries in Site Data,
+or an app that uses Site SQL, workspace tools or an embedded agent, also needs
 `references/publish-to-web.md`.
 
 ## Apps

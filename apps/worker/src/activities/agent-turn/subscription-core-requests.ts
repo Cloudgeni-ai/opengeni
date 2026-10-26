@@ -55,9 +55,17 @@ export type CoreSubscriptionRequestsDeps = {
   continuesAfterResponse?: boolean;
 };
 
+/** How long failure settlement waits for a lane's started settlements to record. */
+export const SETTLEMENT_RECORDING_WAIT_MS = 10_000;
+
 /** One attempt's bounded request custody; no tokens or response bodies live here. */
 export function createCoreSubscriptionRequests(deps: CoreSubscriptionRequestsDeps) {
   const requests = new Map<string, { operationId: string; responseReceived: boolean }>();
+  // Settlements still recording their outcome. A response settles when its
+  // body ends or its reader cancels it, and a stream reader that stops on an
+  // error event cancels without waiting, so the error can reach failure
+  // settlement before this attempt's own outcome is recorded.
+  const recording = new Set<Promise<void>>();
   let uncertain = false;
   // Which custody produced the uncertainty. "own" means this attempt's own
   // physical request ended without a definite answer (dropped stream, stall,
@@ -108,8 +116,35 @@ export function createCoreSubscriptionRequests(deps: CoreSubscriptionRequestsDep
         uncertain = true;
         ownUnknown = true;
       }
-      await deps.settle({ operationId: pending.operationId, outcome: request.outcome });
-      requests.delete(id);
+      // A failed settlement keeps the request pending, so it never reads as
+      // settled.
+      const settled = deps
+        .settle({ operationId: pending.operationId, outcome: request.outcome })
+        .then(() => {
+          requests.delete(id);
+        });
+      recording.add(settled);
+      try {
+        await settled;
+      } finally {
+        recording.delete(settled);
+      }
+    },
+    /**
+     * Wait, at most `timeoutMs`, for settlements this attempt already started
+     * to finish recording, so a recovery decision reads their outcome. One
+     * that fails or outlasts the wait leaves its request pending, which stays
+     * unrecoverable.
+     */
+    async settlementsRecorded(timeoutMs = SETTLEMENT_RECORDING_WAIT_MS): Promise<void> {
+      if (recording.size === 0) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.allSettled([...recording]),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, timeoutMs);
+        }),
+      ]).finally(() => clearTimeout(timer));
     },
     /** Call only AFTER the response/history writer has committed durably. */
     async checkpoint(): Promise<void> {
