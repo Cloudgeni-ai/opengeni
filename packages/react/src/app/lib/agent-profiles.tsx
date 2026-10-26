@@ -10,7 +10,8 @@ import { useAppContext } from "../app-context";
 
 /** Whether the deployment has agent profiles on (`OPENGENI_AGENT_PROFILES_ENABLED`). */
 export function useAgentProfilesEnabled(): boolean {
-  return useAppContext().clientConfig.agentProfiles?.enabled === true;
+  // Optional chaining: embedded hosts and test contexts may omit the client config.
+  return useAppContext().clientConfig?.agentProfiles?.enabled === true;
 }
 
 /** The identity a chat's agent wears, shown only while the feature is on. */
