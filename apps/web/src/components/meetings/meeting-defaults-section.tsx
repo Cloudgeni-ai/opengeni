@@ -3,6 +3,7 @@
 import { resolveWorkspaceRecordingSettings } from "@opengeni/contracts";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { MeetingDefaultsView } from "@opengeni/react/meetings";
+import { meetingViewerName } from "./viewer-name";
 
 export function MeetingDefaultsSection({
   workspaceId,
@@ -26,7 +27,7 @@ export function MeetingDefaultsSection({
       settings={resolveWorkspaceRecordingSettings(workspace?.settings)}
       personal={personal}
       canManage={canManage}
-      viewer={{ subjectId: viewer.subjectId, name: viewer.subjectLabel?.trim() || "Me" }}
+      viewer={{ subjectId: viewer.subjectId, name: meetingViewerName(context) ?? "Me" }}
       onConnectModels={onConnectModels}
       onSave={async (next) => {
         const accepted = context.captureWorkspaceInvocation(workspaceId);

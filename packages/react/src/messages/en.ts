@@ -2439,9 +2439,11 @@ export const englishMessages = {
   "meetings.liveTranscript.liveTranscript": "Live transcript",
   "meetings.liveTranscript.liveTranscriptText": "Live transcript text",
   "meetings.liveTranscript.now": "now",
+  "meetings.liveTranscript.others": "Others",
   "meetings.liveTranscript.preview": "· preview",
   "meetings.liveTranscript.reconnectingTheLiveTextThe":
     "Reconnecting live text. Recording continues.",
+  "meetings.liveTranscript.you": "You",
   "meetings.notes.cancel": "Cancel",
   "meetings.notes.changedMeanwhile":
     "Someone else changed these notes while you were editing. Saving replaces their changes.",

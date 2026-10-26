@@ -53,6 +53,7 @@ export {
   meetingPhase,
   meetingStatusLabel,
   meetingTitle,
+  ownerLiveLaneName,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,

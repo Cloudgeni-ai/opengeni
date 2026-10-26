@@ -19,6 +19,7 @@ import {
   finalizeRecording,
   getRecording,
   getRecordingTranscriptPage,
+  listRecordingPeople,
   listRecordingTranscriptVersions,
   markRecordingChunksUploaded,
   markRecordingDeleting,
@@ -105,6 +106,7 @@ async function capturedRecording(
     model: "scribe_v2",
     options: { language: "en" },
   },
+  sources: ReadonlyArray<"microphone" | "system"> = ["microphone", "system"],
 ) {
   const db = client!.db;
   const suffix = crypto.randomUUID();
@@ -116,6 +118,7 @@ async function capturedRecording(
     workspaceExternalId: suffix,
     workspaceName: "Recording activities",
     subjectId: `subject-${suffix}`,
+    subjectLabel: "Ingrid Solberg",
   });
   const grant = access.workspaceGrants[0]!;
   const actor = { workspaceId: grant.workspaceId!, subjectId: grant.subjectId };
@@ -126,12 +129,13 @@ async function capturedRecording(
     recordingId,
     title: "Planning",
     visibility: "private",
-    tracks: [
-      { trackNumber: 0, source: "microphone", mimeType: "audio/webm;codecs=opus" },
-      { trackNumber: 1, source: "system", mimeType: "audio/webm;codecs=opus" },
-    ],
+    tracks: sources.map((source, trackNumber) => ({
+      trackNumber,
+      source,
+      mimeType: "audio/webm;codecs=opus",
+    })),
   });
-  for (const trackNumber of [0, 1]) {
+  for (const trackNumber of sources.keys()) {
     const audio = opusWebm(2, trackNumber === 0 ? 440 : 660);
     const half = Math.ceil(audio.length / 2);
     const parts = [audio.slice(0, half), audio.slice(half)];
@@ -166,10 +170,7 @@ async function capturedRecording(
     ...actor,
     recordingId,
     versionId,
-    tracks: [
-      { trackNumber: 0, chunkCount: 2 },
-      { trackNumber: 1, chunkCount: 2 },
-    ],
+    tracks: sources.map((_, trackNumber) => ({ trackNumber, chunkCount: 2 })),
     transcription,
   });
   return {
@@ -291,6 +292,18 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       ["speaker_0", "Hi"],
       ["speaker_1", "Yes"],
     ]);
+    // Beside the computer audio, the microphone is the person recording.
+    const [me] = await listRecordingPeople(client.db, recording.actor);
+    expect(me).toMatchObject({
+      displayName: "Ingrid Solberg",
+      memberSubjectId: recording.actor.subjectId,
+      voice: null,
+    });
+    expect(page.speakers.find((speaker) => speaker.label === "track-0")).toMatchObject({
+      name: "Ingrid Solberg",
+      personId: me!.id,
+      source: "track",
+    });
 
     // A re-run reuses the prepared audio rather than rebuilding it.
     const second = crypto.randomUUID();
@@ -311,6 +324,44 @@ describe.skipIf(!hasFfmpeg)("recording transcription activity", () => {
       }),
     ).toEqual({ outcome: "complete" });
     expect(calls).toHaveLength(4);
+  });
+
+  test("a microphone alone may be a whole room, so its speakers are told apart and nobody is assumed", async () => {
+    if (!client) return;
+    const storage = memoryStorage();
+    const recording = await capturedRecording(storage, undefined, ["microphone"]);
+    const provider = fakeProvider(async () => ({
+      languages: ["eng"],
+      audioMilliseconds: 2_000,
+      diarized: true,
+      words: [
+        {
+          text: "Hi",
+          startMilliseconds: 100,
+          endMilliseconds: 400,
+          speaker: "a",
+          spaceBefore: false,
+        },
+        {
+          text: "Yes",
+          startMilliseconds: 900,
+          endMilliseconds: 1_200,
+          speaker: "b",
+          spaceBefore: true,
+        },
+      ],
+    }));
+    const { activities: run } = activities(storage, provider);
+    expect(await run.transcribeRecordingVersion(recording.input)).toEqual({ outcome: "complete" });
+    const page = await getRecordingTranscriptPage(client.db, {
+      ...recording.actor,
+      recordingId: recording.input.recordingId,
+    });
+    expect(page.speakers.map((speaker) => [speaker.label, speaker.name, speaker.source])).toEqual([
+      ["speaker_0", "Speaker 1", null],
+      ["speaker_1", "Speaker 2", null],
+    ]);
+    expect(await listRecordingPeople(client.db, recording.actor)).toEqual([]);
   });
 
   test("our diarizer names the speakers when asked, and the model's stay if it fails", async () => {

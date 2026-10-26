@@ -230,7 +230,8 @@ export function createMeetingsFixture(
       label: "track-0",
       name: "Ingrid Solberg",
       personId: people[0]!.id,
-      source: "confirmed",
+      // Beside the computer audio, the microphone is the person recording.
+      source: "track",
       confidence: null,
     },
     {
