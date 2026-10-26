@@ -945,7 +945,7 @@ function ScopedConnectSetup({
               onPress={flow.refresh}
             />
             <Button
-              variant="ghost"
+              variant="secondary"
               label={t("connectSetup.cancelSetup")}
               disabled={disabled}
               onPress={flow.cancel}
@@ -1016,7 +1016,9 @@ export function NativeIntegrationCapabilityCard({
         <Line icon="circle-alert">{availability.reason}</Line>
       ) : availability.kind === "error" ? (
         <View style={{ gap: 8 }}>
-          <Line icon="circle-alert">{t("sessionIntegrationCapabilityCard.couldNotLoad")}</Line>
+          <Line icon="circle-alert" role="status">
+            {t("native.timeline.inChatConnect.couldNotLoad")}
+          </Line>
           <Button
             icon="rotate-ccw"
             label={t("sessionIntegrationCapabilityCard.retry")}

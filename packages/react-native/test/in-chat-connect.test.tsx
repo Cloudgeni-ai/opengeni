@@ -569,6 +569,51 @@ describe("native in-chat connect requests", () => {
   });
 });
 
+describe("native saved sign-in attempts", () => {
+  test("a cancelled or failed attempt is forgotten, so the next setup starts fresh", async () => {
+    for (const state of ["cancelled", "failed"] as const) {
+      const key =
+        "opengeni:session-integration-connect:workspace:session:api:integration:example-calendar";
+      const stored = new Map([[key, "attempt-old"]]);
+      const settled = attempt({
+        id: "attempt-old",
+        revision: 4,
+        state,
+        completionRequirement: "integration",
+        nextAction: { type: "none" },
+      });
+      const { transport } = fakeTransport({ get: () => settled });
+      const client = {
+        connectTransport: () => transport,
+        listApiIntegrations: async () => ({ integrations: [] }),
+      };
+      mounted = await renderComponent(
+        <NativeIntegrationCapabilityCard
+          client={client as never}
+          workspaceId="workspace"
+          sessionId="session"
+          capabilityId="api:integration:example-calendar"
+          name="Example Calendar"
+          rationale="To read your calendar."
+          options={{
+            browser: { openAuthSession: async () => undefined },
+            returnUrl: "https://console.example/return",
+            attemptHints: {
+              read: (entry) => stored.get(entry) ?? null,
+              remember: (entry, id) => void stored.set(entry, id),
+              forget: (entry) => void stored.delete(entry),
+            },
+          }}
+        />,
+      );
+      for (let pass = 0; pass < 4; pass += 1) await flush();
+      expect({ state, saved: stored.size }).toEqual({ state, saved: 0 });
+      await mounted.unmount();
+      mounted = null;
+    }
+  });
+});
+
 describe("native approval without recorded arguments", () => {
   test("keeps Approve, as before", async () => {
     const decided: string[] = [];

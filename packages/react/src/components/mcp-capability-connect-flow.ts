@@ -13,6 +13,7 @@ import {
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
+import { ConnectCardMessage } from "../connect-card-message";
 import { attemptHint, type ConnectWindowHost } from "../connect-window-host";
 import { useConnect, type ConnectView } from "../hooks/use-connect";
 import { matchingActiveMcpConnections } from "../mcp-connection-status";
@@ -128,6 +129,13 @@ export function useMcpCapabilityConnect({
     : `opengeni:workspace-connect:${workspaceId}:${capabilityId}`;
   const current = () => !!lifetime.current && !lifetime.current.signal.aborted;
 
+  // A cancelled, failed or expired attempt has nothing left to pick up after a
+  // reload or app restart; forget it so the next setup starts fresh.
+  const attemptState = view.attempt?.state;
+  useEffect(() => {
+    if (attemptState && RESTART_STATES.includes(attemptState)) hints.forget(storageKey);
+  }, [attemptState, hints, storageKey]);
+
   async function load(active: () => boolean = current) {
     const invocation = lifetime.current;
     const [catalog, session] = await Promise.all([
@@ -146,13 +154,12 @@ export function useMcpCapabilityConnect({
         if (invocation.signal.aborted || lifetime.current !== invocation || !active()) return null;
         if (inspected.kind === "oauth2") resolved = { ...resolved, authKind: "oauth2" };
         else if (inspected.kind === "unknown")
-          throw new Error(
-            inspected.message ?? t("sessionMcpCapabilityCard.couldNotDetermineHowTo"),
-          );
+          // The server's own explanation is for operators; the card says it plainly.
+          throw new ConnectCardMessage(t("sessionMcpCapabilityCard.couldNotDetermineHowTo"));
       }
     }
     if (!resolved || resolved.kind !== "mcp" || resolved.authKind !== "oauth2")
-      throw new Error(t("sessionMcpCapabilityCard.thisRecommendationIsNotAn"));
+      throw new ConnectCardMessage(t("sessionMcpCapabilityCard.thisRecommendationIsNotAn"));
     setItem(resolved);
     if (resolved.connectionRef)
       setOwnership(resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace");
@@ -202,7 +209,7 @@ export function useMcpCapabilityConnect({
       .catch((failure) => {
         if (!abort.signal.aborted)
           setError(
-            failure instanceof Error
+            failure instanceof ConnectCardMessage
               ? failure.message
               : t("sessionMcpCapabilityCard.couldnTLoadConnectionDetails"),
           );
@@ -238,7 +245,7 @@ export function useMcpCapabilityConnect({
           setError(
             // This flow's own steps explain themselves; a server or network
             // failure gets the card's plain line instead of its raw text.
-            failure instanceof Error && failure.constructor === Error
+            failure instanceof ConnectCardMessage
               ? failure.message
               : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
           );
@@ -267,7 +274,7 @@ export function useMcpCapabilityConnect({
       connection.metadata.mcpUrl !== (resolved.mcpUrl ?? resolved.endpointUrl) ||
       (connection.subjectId !== null) !== (attempt.ownership === "personal")
     )
-      throw new Error(t("sessionMcpCapabilityCard.theAuthorizedAccountDoesNot"));
+      throw new ConnectCardMessage(t("sessionMcpCapabilityCard.theAuthorizedAccountDoesNot"));
     const previous = resolved.connectionRef;
     if (
       resolved.enabled &&
@@ -275,7 +282,7 @@ export function useMcpCapabilityConnect({
       previous?.connectionId &&
       previous.connectionId !== connection.id
     )
-      throw new Error(t("sessionMcpCapabilityCard.thisIntegrationSSelectedAccount"));
+      throw new ConnectCardMessage(t("sessionMcpCapabilityCard.thisIntegrationSSelectedAccount"));
     // Enabling is a workspace installation change. When the capability is
     // already enabled with exactly this binding (each person's own account,
     // or this shared account), connecting an account needs no installation
@@ -338,7 +345,17 @@ export function useMcpCapabilityConnect({
         startKey.current = crypto.randomUUID();
         advanceKey.current = crypto.randomUUID();
       }
-      const reserved = windowHost.current.reserve();
+      let reserved: ReturnType<ConnectWindowHost["reserve"]>;
+      try {
+        reserved = windowHost.current.reserve();
+      } catch (failure) {
+        // Opening the sign-in window explains itself (for example, allow popups).
+        throw new ConnectCardMessage(
+          failure instanceof Error
+            ? failure.message
+            : t("sessionMcpCapabilityCard.connectionSetupCouldNotFinish"),
+        );
+      }
       reservedPopup.current = reserved.close;
       try {
         const resolved = await load(active);
@@ -348,9 +365,12 @@ export function useMcpCapabilityConnect({
           ownership !==
             (resolved.connectionRef.subjectScope === "subject" ? "personal" : "workspace")
         )
-          throw new Error(t("sessionMcpCapabilityCard.theConnectionOwnershipChangedReview"));
+          throw new ConnectCardMessage(
+            t("sessionMcpCapabilityCard.theConnectionOwnershipChangedReview"),
+          );
         const mcpUrl = resolved.mcpUrl ?? resolved.endpointUrl;
-        if (!mcpUrl) throw new Error(t("sessionMcpCapabilityCard.theCurrentCatalogHasNo"));
+        if (!mcpUrl)
+          throw new ConnectCardMessage(t("sessionMcpCapabilityCard.theCurrentCatalogHasNo"));
         // Never silently replace an already selected account. Reauthorization
         // stays on its exact native connection ID.
         let reconnectAccountId = resolved.connectionRef?.connectionId ?? undefined;
@@ -363,7 +383,7 @@ export function useMcpCapabilityConnect({
           );
           if (!active()) return;
           if (connections.length > 1)
-            throw new Error(t("sessionMcpCapabilityCard.moreThanOnePersonalAccount"));
+            throw new ConnectCardMessage(t("sessionMcpCapabilityCard.moreThanOnePersonalAccount"));
           reconnectAccountId = connections[0]?.id;
         }
         // A closed request can still have reached the server. Keep its key for
@@ -431,7 +451,7 @@ export function useMcpCapabilityConnect({
       }
       if (result.state !== "complete") {
         if (["failed", "expired"].includes(result.state)) setRetryFresh(true);
-        throw new Error(t("sessionMcpCapabilityCard.signInDidNotFinish"));
+        throw new ConnectCardMessage(t("sessionMcpCapabilityCard.signInDidNotFinish"));
       }
     } finally {
       lifetime.current?.signal.removeEventListener("abort", abortOnUnmount);
@@ -467,13 +487,17 @@ export function useMcpCapabilityConnect({
       );
       if (!active()) return;
       if (!selected || selected.status !== "active")
-        throw new Error(t("sessionMcpCapabilityCard.thisAccountNeedsReconnectionBefore"));
+        throw new ConnectCardMessage(
+          t("sessionMcpCapabilityCard.thisAccountNeedsReconnectionBefore"),
+        );
     }
     if (capability.connectionRef?.subjectScope === "subject") {
       const accounts = await client.listOwnConnectionAccounts(workspaceId);
       if (!active()) return;
       if (matchingActiveMcpConnections(capability, accounts).length === 0)
-        throw new Error(t("sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore"));
+        throw new ConnectCardMessage(
+          t("sessionMcpCapabilityCard.yourAccountNeedsReconnectionBefore"),
+        );
     }
     if (!active()) return;
     await attachSessionCapability(t, client, workspaceId, sessionId, capability, active);

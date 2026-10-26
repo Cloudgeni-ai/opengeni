@@ -204,6 +204,13 @@ export function useIntegrationCapabilityConnect({
 
   useEffect(() => () => controller.dispose(), [controller]);
 
+  // A cancelled, failed or expired attempt has nothing left to pick up after a
+  // reload or app restart; forget it so the next setup starts fresh.
+  const attemptState = attempt?.state;
+  useEffect(() => {
+    if (attemptState && RESTARTABLE.has(attemptState)) hints.forget(storageKey);
+  }, [attemptState, hints, storageKey]);
+
   // Setup installs the reviewed tools by itself; once it is complete, select
   // them for this chat (default-mode chats pick them up on their own).
   useEffect(() => {
