@@ -11,9 +11,10 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use opengeni_agent_platform::{
-        linux_layout_text_keysyms, linux_named_key_chord_keysyms, DesktopBackend as _,
-        LinuxDesktop, ReopeningDesktop, X11Display, XServerCheck,
+        linux_layout_text_keysyms, linux_named_key_chord_keysyms, CompositorLayout,
+        DesktopBackend as _, KeymapNames, LinuxDesktop, ReopeningDesktop, X11Display, XServerCheck,
     };
+    use x11rb::protocol::xproto::ConnectionExt as _;
 
     fn xvfb() -> Option<PathBuf> {
         if let Some(path) = std::env::var_os("OPENGENI_XVFB") {
@@ -166,12 +167,15 @@ mod linux {
         // The layout has Latin letters and no Cyrillic, which can only be
         // known once its keymap was read.
         assert_eq!(
-            linux_layout_text_keysyms(Some(&display), "a").unwrap(),
+            linux_layout_text_keysyms(Some(&display), &CompositorLayout::default(), "a").unwrap(),
             vec![0x61]
         );
-        assert!(linux_layout_text_keysyms(Some(&display), "\u{416}").is_err());
+        assert!(
+            linux_layout_text_keysyms(Some(&display), &CompositorLayout::default(), "\u{416}")
+                .is_err()
+        );
         // Without a layout display every character maps unchecked.
-        assert!(linux_layout_text_keysyms(None, "\u{416}").is_ok());
+        assert!(linux_layout_text_keysyms(None, &CompositorLayout::default(), "\u{416}").is_ok());
         // Named keys are checked against the same layout: F2 is on it, F13
         // is not, and the compositor would drop it while reporting success.
         assert_eq!(
@@ -186,5 +190,100 @@ mod linux {
             "{missing}"
         );
         assert!(linux_named_key_chord_keysyms(None, "F13").is_ok());
+        // Text is checked per layout group and shift level, the way the
+        // compositor resolves keysyms. `¦` is only on the fourth level of the
+        // extra key, which the compositor would send unshifted as `<`.
+        assert!(
+            linux_layout_text_keysyms(Some(&display), &CompositorLayout::default(), "\u{a6}")
+                .is_err()
+        );
+        assert_eq!(
+            linux_layout_text_keysyms(Some(&display), &CompositorLayout::default(), "|").unwrap(),
+            vec![0x7c]
+        );
+        // A second group: a spare key with `ж` in the first and `é` in the
+        // second. Each types only while its group is active, and neither when
+        // the active group is unknown; keys with one group serve both.
+        let (conn, _) = checked.connect().unwrap();
+        conn.change_keyboard_mapping(1, 200, 4, &[0x6d6, 0x6f6, 0xe9, 0xc9])
+            .unwrap()
+            .check()
+            .unwrap();
+        let text = |active: Option<u32>, text: &str| {
+            let layout = CompositorLayout {
+                active_group: active,
+                keymap: None,
+            };
+            linux_layout_text_keysyms(Some(&display), &layout, text).map_err(|e| e.to_string())
+        };
+        assert_eq!(text(Some(1), "aé"), Ok(vec![0x61, 0xe9]));
+        assert_eq!(text(Some(0), "aж"), Ok(vec![0x61, 0x6d6]));
+        for (active, refused) in [(Some(1), "ж"), (Some(0), "é"), (None, "ж"), (None, "é")] {
+            let error = text(active, refused).unwrap_err();
+            assert!(
+                error.contains("the active keyboard layout cannot type"),
+                "{active:?} {refused}: {error}"
+            );
+        }
+        assert_eq!(text(None, "a"), Ok(vec![0x61]));
+        // The display's keymap stands in for the compositor's only once it
+        // carries the compositor's keymap names; until then typing waits, and
+        // then fails as retryable rather than checking a stale layout.
+        let names = display_keymap_names(&conn);
+        let synced = CompositorLayout {
+            active_group: Some(1),
+            keymap: Some(names),
+        };
+        assert_eq!(
+            linux_layout_text_keysyms(Some(&display), &synced, "é").unwrap(),
+            vec![0xe9]
+        );
+        let other = CompositorLayout {
+            active_group: Some(1),
+            keymap: Some(KeymapNames::from_keymap_text(
+                "xkb_symbols \"pc+ru+us:2\" {\n\tname[1]=\"Russian\";\n\tname[2]=\"English (US)\";\n};",
+            )),
+        };
+        let started = Instant::now();
+        let error = linux_layout_text_keysyms(Some(&display), &other, "é").unwrap_err();
+        assert!(error.retryable(), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("the keyboard layout is not ready yet; retry, or use clipboard paste"),
+            "{error}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(900));
+    }
+
+    /// The display's keymap names in the text form a compositor hands out.
+    fn display_keymap_names(conn: &impl x11rb::connection::Connection) -> KeymapNames {
+        use std::fmt::Write as _;
+        use x11rb::protocol::xkb::{self, ConnectionExt as _};
+        conn.xkb_use_extension(1, 0).unwrap().reply().unwrap();
+        let reply = conn
+            .xkb_get_names(
+                xkb::ID::USE_CORE_KBD.into(),
+                xkb::NameDetail::SYMBOLS | xkb::NameDetail::GROUP_NAMES,
+            )
+            .unwrap()
+            .reply()
+            .unwrap();
+        let atom = |atom: u32| {
+            String::from_utf8(conn.get_atom_name(atom).unwrap().reply().unwrap().name).unwrap()
+        };
+        let mut text = format!(
+            "xkb_symbols \"{}\" {{\n",
+            atom(reply.value_list.symbols_name.unwrap())
+        );
+        for (index, group) in reply.value_list.groups.unwrap().into_iter().enumerate() {
+            if group != 0 {
+                writeln!(text, "\tname[{}]=\"{}\";", index + 1, atom(group)).unwrap();
+            }
+        }
+        text.push_str("};\n");
+        let names = KeymapNames::from_keymap_text(&text);
+        assert!(!names.is_empty(), "{text}");
+        names
     }
 }

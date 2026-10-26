@@ -43,8 +43,12 @@ use crate::error::{PlatformError, PlatformResult};
 
 #[path = "linux_input_route.rs"]
 mod input_route;
+#[path = "linux_keysym_layout.rs"]
+mod keysym_layout;
 #[path = "linux_keysyms.rs"]
 mod keysyms;
+
+pub use keysym_layout::{CompositorLayout, KeymapNames};
 
 /// The OS family this build targets.
 #[must_use]
@@ -2218,18 +2222,23 @@ fn layout_named_keysyms(
 /// The keymap of a layout display (Xwayland), or `None` when it is absent or
 /// unreachable.
 fn layout_mapping(layout_display: Option<&str>) -> Option<X11KeyboardMapping> {
-    layout_display
-        .and_then(|display| {
-            // Xwayland runs as the user; its socket file and server are
-            // checked like any other display before the cookie is sent.
-            X11Display {
-                server: XServerCheck::AgentUser,
-                ..X11Display::named(display)
-            }
-            .connect()
-            .ok()
-        })
-        .and_then(|(conn, _)| keyboard_mapping(&conn))
+    layout_connection(layout_display).and_then(|conn| keyboard_mapping(&conn))
+}
+
+fn layout_connection(
+    layout_display: Option<&str>,
+) -> Option<x11rb::rust_connection::RustConnection> {
+    layout_display.and_then(|display| {
+        // Xwayland runs as the user; its socket file and server are checked
+        // like any other display before the cookie is sent.
+        X11Display {
+            server: XServerCheck::AgentUser,
+            ..X11Display::named(display)
+        }
+        .connect()
+        .ok()
+        .map(|(conn, _)| conn)
+    })
 }
 
 /// The keysym that types each character of `text` in the active keyboard
@@ -2237,25 +2246,71 @@ fn layout_mapping(layout_display: Option<&str>) -> Option<X11KeyboardMapping> {
 /// keysyms the layout lacks.
 ///
 /// `layout_display` names an X display that mirrors the compositor's layout
-/// (Xwayland). When it is reachable every character is checked against that
-/// layout; otherwise each character maps to its canonical keysym unchecked.
+/// (Xwayland). When it is reachable every character is checked the way the
+/// compositor resolves it (see [`keysym_layout`]): in the compositor's active
+/// layout group, or in every group when that is unknown. Otherwise each
+/// character maps to its canonical keysym unchecked. When `layout` names the
+/// compositor's keymap, the display's keymap is used only once it carries
+/// those names.
 ///
 /// # Errors
 ///
 /// Returns an unsupported-input failure naming the first character the layout
-/// cannot type.
+/// cannot type, or a timeout when the display has not taken the compositor's
+/// keymap within [`LAYOUT_SYNC_WAIT`].
 pub fn linux_layout_text_keysyms(
     layout_display: Option<&str>,
+    layout: &CompositorLayout,
     text: &str,
 ) -> PlatformResult<Vec<u32>> {
-    let mapping = layout_mapping(layout_display);
+    let keymap = match layout_connection(layout_display) {
+        Some(conn) => synced_layout_keymap(&conn, layout.keymap.as_ref())?,
+        None => None,
+    };
+    layout_text_keysyms(keymap.as_ref(), layout.active_group, text)
+}
+
+/// How long a layout display may take to show the compositor's keymap.
+/// Xwayland started on demand has a default keymap for its first moments.
+const LAYOUT_SYNC_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+const LAYOUT_SYNC_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The layout display's keymap once it carries `expected` names. `None` when
+/// the display has no XKB keymap to read.
+fn synced_layout_keymap(
+    conn: &x11rb::rust_connection::RustConnection,
+    expected: Option<&KeymapNames>,
+) -> PlatformResult<Option<keysym_layout::LayoutKeymap>> {
+    let deadline = std::time::Instant::now() + LAYOUT_SYNC_WAIT;
+    loop {
+        let Some(keymap) = keysym_layout::LayoutKeymap::read(conn) else {
+            return Ok(None);
+        };
+        match expected {
+            Some(expected) if !expected.is_empty() && keymap.names() != expected => {}
+            _ => return Ok(Some(keymap)),
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(PlatformError::Timeout(
+                "the keyboard layout is not ready yet; retry, or use clipboard paste".to_string(),
+            ));
+        }
+        std::thread::sleep(LAYOUT_SYNC_POLL);
+    }
+}
+
+fn layout_text_keysyms(
+    keymap: Option<&keysym_layout::LayoutKeymap>,
+    active_layout: Option<u32>,
+    text: &str,
+) -> PlatformResult<Vec<u32>> {
     text.chars()
-        .map(|character| match &mapping {
+        .map(|character| match keymap {
             None => Ok(keysyms::text_keysym(character)),
-            Some(mapping) => match character {
+            Some(keymap) => match character {
                 '\n' | '\r' | '\t' => Ok(keysyms::text_keysym(character)),
                 _ => keysyms::character_keysyms(character)
-                    .find(|&keysym| mapping.resolve(keysym).is_some())
+                    .find(|&keysym| keymap.types(keysym, active_layout))
                     .ok_or_else(|| {
                         PlatformError::Unsupported(format!(
                             "the active keyboard layout cannot type U+{:04X}; use clipboard paste",
@@ -3197,6 +3252,79 @@ mod tests {
         // Two modifiers still need a key, and a repeat is still refused.
         assert!(parse_named_key_chord("Ctrl+Alt").is_err());
         assert!(parse_named_key_chord("Super+Super").is_err());
+    }
+
+    const SHIFT_KEY: (u8, &[&[u32]]) = (50, &[&[0xffe1]]);
+    const ALTGR_KEY: (u8, &[&[u32]]) = (92, &[&[0xfe03]]);
+
+    fn layout_text(
+        keymap: &keysym_layout::LayoutKeymap,
+        active: Option<u32>,
+        text: &str,
+    ) -> Result<Vec<u32>, String> {
+        layout_text_keysyms(Some(keymap), active, text).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn layout_text_types_altgr_characters() {
+        // de: `@` is AltGr+q, `¿` is AltGr+Shift+ß (a fourth level, which the
+        // compositor would send unshifted as `ß`).
+        let de = keysym_layout::tests::keymap(&[
+            (24, &[&[0x71, 0x51, 0x40, 0x7d9]]),
+            (20, &[&[0xdf, 0x3f, 0x5c, 0xbf]]),
+            (38, &[&[0x61, 0x41, 0xe6, 0xc6]]),
+            (56, &[&[0x62, 0x42]]),
+            SHIFT_KEY,
+            ALTGR_KEY,
+        ]);
+        assert_eq!(layout_text(&de, None, "a@b"), Ok(vec![0x61, 0x40, 0x62]));
+        assert_eq!(layout_text(&de, Some(0), "A\\"), Ok(vec![0x41, 0x5c]));
+        let error = layout_text(&de, None, "¿").unwrap_err();
+        assert!(
+            error.contains("the active keyboard layout cannot type U+00BF; use clipboard paste"),
+            "{error}"
+        );
+        // Without an AltGr key in the layout the third level is out of reach.
+        let no_altgr = keysym_layout::tests::keymap(&[(24, &[&[0x71, 0x51, 0x40]]), SHIFT_KEY]);
+        assert!(layout_text(&no_altgr, None, "@").is_err());
+        assert_eq!(layout_text(&no_altgr, None, "Q"), Ok(vec![0x51]));
+    }
+
+    #[test]
+    fn layout_text_follows_the_active_group() {
+        // ru,us: Latin letters only in the second group; digits and space in
+        // both.
+        let ru_us = keysym_layout::tests::keymap(&[
+            (43, &[&[0x6d2, 0x6f2], &[0x68, 0x48]]), // Cyrillic_er / h
+            (26, &[&[0x6d5, 0x6f5], &[0x65, 0x45]]), // Cyrillic_u / e
+            (46, &[&[0x6c4, 0x6e4], &[0x6c, 0x4c]]), // Cyrillic_de / l
+            (32, &[&[0x6dd, 0x6fd], &[0x6f, 0x4f]]), // Cyrillic_shcha / o
+            (10, &[&[0x31, 0x21], &[0x31, 0x21]]),
+            (65, &[&[0x20]]),
+            (50, &[&[0xffe1], &[0xffe1]]),
+        ]);
+        assert_eq!(
+            layout_text(&ru_us, Some(1), "Hello 1"),
+            Ok(vec![0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x31])
+        );
+        // In the Russian group Latin would be dropped, and when the active
+        // group is unknown only what every group types is accepted.
+        for active in [Some(0), None, Some(7)] {
+            let error = layout_text(&ru_us, active, "hello").unwrap_err();
+            assert!(error.contains("cannot type U+0068"), "{active:?}: {error}");
+            assert_eq!(
+                layout_text(&ru_us, active, "1 !"),
+                Ok(vec![0x31, 0x20, 0x21])
+            );
+        }
+        assert_eq!(layout_text(&ru_us, Some(0), "ру"), Ok(vec![0x6d2, 0x6d5]));
+        // Line breaks and tabs are keys, not text.
+        assert_eq!(layout_text(&ru_us, None, "\n"), Ok(vec![0xff0d]));
+        // No layout display: unchecked.
+        assert_eq!(
+            layout_text_keysyms(None, None, "hé").unwrap(),
+            vec![0x68, 0xe9]
+        );
     }
 
     #[test]

@@ -79,7 +79,8 @@ pub use desktop::{
 #[cfg(target_os = "linux")]
 pub use desktop::{
     linux_layout_text_keysyms, linux_named_key_chord_keysyms, validate_linux_named_key_chord,
-    LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect, X11Display, XServerCheck,
+    CompositorLayout, KeymapNames, LinuxDesktop, LinuxRgbaFrame, LinuxWindow, LinuxWindowRect,
+    X11Display, XServerCheck,
 };
 pub use error::{PlatformError, PlatformResult};
 #[cfg(unix)]
