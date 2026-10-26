@@ -218,7 +218,7 @@ describe("credit required prompt", () => {
     ).not.toBeNull();
   });
 
-  test("buys a $10 credit package from the prompt and offers a coupon code", async () => {
+  test("workspace top-up accepts a $10 gift package without requiring a model", async () => {
     createBillingCheckout.mockImplementationOnce(async () => {
       throw new Error("checkout test");
     });
@@ -229,6 +229,7 @@ describe("credit required prompt", () => {
       root!.render(
         <CreditRequiredPromptView
           client={client as never}
+          purpose="topup"
           open
           workspaceId="workspace-a"
           accountId="account-a"
@@ -237,15 +238,16 @@ describe("credit required prompt", () => {
         />,
       ),
     );
-    expect(container.textContent).toContain("Add Opengeni credits to continue");
+    expect(container.textContent).toContain("Add Opengeni credits");
     expect(container.textContent).toContain("Have a code?");
+    expect(container.textContent).not.toContain("Connect a model");
     const preset = container.querySelector<HTMLSelectElement>("#credit-preset")!;
     await act(async () => {
       preset.value = "10.00";
       preset.dispatchEvent(new Event("change", { bubbles: true }));
     });
     const checkout = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Buy credits",
+      (button) => button.textContent?.trim() === "Continue to Stripe",
     )!;
     await act(async () => checkout.click());
     expect(createBillingCheckout).toHaveBeenCalledWith({
