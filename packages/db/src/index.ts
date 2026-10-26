@@ -6525,6 +6525,7 @@ export async function applyCreditDebitUpToBalance(
         input.accountId,
         input.creditPolicyRevision,
         settledAt,
+        true,
       );
       const plan = planCreditDebit(before, input.requestedAmountMicros, input.modelId);
       const candidateDebitMicros = plan.debitedMicros;
@@ -6614,7 +6615,7 @@ export async function applyCreditDebitAfterUse(
       let allocations: { grantEntryId: string; amountMicros: number }[] = [];
       if (input.usage) {
         allocations = planPostUseCreditAllocations(
-          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt),
+          await getBillingBalance(scopedDb, input.accountId, undefined, settledAt, true),
           input.amountMicros,
           input.usage,
         );
@@ -91846,3 +91847,5 @@ export * from "./boot-connect";
 export * from "./teams-conversations";
 
 export * from "./teams-private-session";
+
+export { recordMachinePromotionProof } from "./promotion-abuse";

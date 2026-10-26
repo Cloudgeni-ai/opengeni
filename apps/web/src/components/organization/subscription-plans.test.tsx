@@ -428,3 +428,45 @@ test("status-only seat fallback needs a full finite plan and never masks another
     ),
   ).toBe(false);
 });
+
+test("a funding hold explains unavailable free funds without erasing purchased credit", async () => {
+  const container = await mount(
+    <OrganizationCreditBalance
+      canReadBilling
+      hasAccount
+      loading={false}
+      hasError={false}
+      showPlanCredit
+      billing={{
+        mode: "stripe",
+        balance: {
+          accountId: "org-a",
+          balanceMicros: 35_000_000,
+          generalBalanceMicros: 25_000_000,
+          currency: "usd",
+          updatedAt: new Date().toISOString(),
+          plan: previewPlan("free"),
+          promotionDecision: "held",
+          heldCreditMicros: 10_000_000,
+          promotionalCredits: [
+            {
+              grantId: "00000000-0000-4000-8000-000000000002",
+              label: "Monthly plan credit",
+              remainingMicros: 10_000_000,
+              eligibleModelIds: ["gpt-6-luna"],
+              planCredit: true,
+              held: true,
+            },
+          ],
+        },
+      }}
+    />,
+  );
+  expect(container.querySelector('[role="status"]')?.textContent).toContain(
+    "Free credit is on hold",
+  );
+  expect(container.textContent).toContain("Purchased credit remains available");
+  expect(container.textContent).toContain("$10.00 of the balance is on hold");
+  expect(container.textContent).toContain("$25.00");
+  expect(container.textContent).not.toContain("Used first · Resets monthly");
+});

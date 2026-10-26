@@ -20,6 +20,18 @@ export function OrganizationCreditBalance({
   showPlanCredit?: boolean;
 }) {
   const balance = billing?.balance;
+  const holdNotice =
+    balance?.promotionDecision && balance.promotionDecision !== "eligible" ? (
+      <p role="status" className="mt-2 text-sm leading-5 text-fg-muted">
+        {balance.promotionDecision === "denied"
+          ? "Free credit is unavailable for this organization."
+          : "Free credit is on hold pending verification or review."}{" "}
+        Purchased credit remains available. Contact support if you believe this is a mistake.
+        {(balance.heldCreditMicros ?? 0) > 0
+          ? ` ${formatMoneyMicros(balance.heldCreditMicros!, balance.currency)} of the balance is on hold.`
+          : ""}
+      </p>
+    ) : null;
   const isNegative = balance !== undefined && balance.balanceMicros < 0;
   if (!balance) {
     return (
@@ -50,6 +62,7 @@ export function OrganizationCreditBalance({
           {formatMoneyMicros(balance.balanceMicros, balance.currency)}
         </p>
         <p className="mt-1 text-xs leading-[18px] text-fg-muted">Total balance</p>
+        {holdNotice}
         <div className="mt-4 -mx-2 divide-y divide-border">
           {plan && !scopedPlan ? (
             <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
@@ -74,7 +87,11 @@ export function OrganizationCreditBalance({
               eligibleModelIds={grant.eligibleModelIds}
               coversVoice={grant.coversVoice}
               description={
-                grant.planCredit ? "Used first · Resets monthly · View models" : undefined
+                grant.held
+                  ? "On hold · Not available to spend"
+                  : grant.planCredit
+                    ? "Used first · Resets monthly · View models"
+                    : undefined
               }
             />
           ))}
@@ -111,6 +128,7 @@ export function OrganizationCreditBalance({
           ? "Future credit purchases cover prior usage first. Your card is not charged automatically."
           : "Total balance"}
       </p>
+      {holdNotice}
     </div>
   );
 }

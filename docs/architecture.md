@@ -22,6 +22,12 @@ funding. Migration 0845 retains the canonical signup issuer and one-human/one-or
 receipt but issues zero money; monthly Free funding replaces new signup bonuses.
 Legacy positive receipts remain eligible and retain their balances; no backfill.
 
+Signup challenge verification is owned by `apps/api/src/auth/signup-challenge.ts`.
+Promotional funding decisions and proven-machine correlation are separate from
+identity/access, with private operator evidence and default-off enforcement.
+See [signup abuse protection](signup-abuse-protection.md) for the rolling activation
+boundary and accounting semantics.
+
 ## 1. Startup
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.

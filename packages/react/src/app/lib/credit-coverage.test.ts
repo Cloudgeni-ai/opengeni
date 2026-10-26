@@ -81,3 +81,24 @@ test("balances without remaining scoped credit keep their single total", () => {
     ),
   ).toBeNull();
 });
+
+test("held free credit is not advertised as available coverage", () => {
+  const held = balance({
+    balanceMicros: 35_000_000,
+    generalBalanceMicros: 25_000_000,
+    heldCreditMicros: 10_000_000,
+    promotionDecision: "held",
+    promotionalCredits: [
+      {
+        grantId: "00000000-0000-4000-8000-000000000002",
+        label: "Free plan",
+        remainingMicros: 10_000_000,
+        eligibleModelIds: ["gpt-6-luna"],
+        held: true,
+        planCredit: true,
+      },
+    ],
+  });
+  expect(creditBalanceSplit(held)).toBeNull();
+  expect(creditBalanceSplitLabel(held)).toBe("$25.00 available · $10.00 free credit on hold");
+});

@@ -15715,3 +15715,16 @@ export const feedbackSubmissions = pgTable(
     ),
   }),
 );
+
+/** Promotion eligibility is separate from account access and paid funding. */
+export const promotionDecisions = pgTable("promotion_decisions", {
+  accountId: uuid("account_id").primaryKey(),
+  decision: text("decision").notNull(),
+  revision: bigint("revision", { mode: "number" }).notNull(),
+  actor: text("actor").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const promotionEnforcement = pgTable("promotion_enforcement", {
+  singleton: boolean("singleton").primaryKey().default(true),
+  enabled: boolean("enabled").notNull().default(false),
+});

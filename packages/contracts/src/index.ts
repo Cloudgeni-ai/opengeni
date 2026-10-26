@@ -6390,6 +6390,8 @@ export const PromotionalCreditBalance = /* @__PURE__ */ defineSchema(() =>
     coversVoice: primitives.optionalBoolean,
     /** Monthly scoped allowance; allocated before other promotions. */
     planCredit: primitives.optionalBoolean,
+    /** Free funding excluded from new admission while an abuse hold is active. */
+    held: primitives.optionalBoolean,
   }),
 );
 export type PromotionalCreditBalance = z.infer<typeof PromotionalCreditBalance>;
@@ -6418,6 +6420,9 @@ export const BillingBalance = /* @__PURE__ */ defineSchema(() =>
     /** General credits, including unrestricted legacy grants. May be negative after use. */
     generalBalanceMicros: z.number().int().optional(),
     promotionalCredits: z.array(PromotionalCreditBalance).optional(),
+    heldCreditMicros: primitives.nonnegativeInteger.optional(),
+    heldGeneralCreditMicros: primitives.nonnegativeInteger.optional(),
+    promotionDecision: z.enum(["eligible", "verification_required", "held", "denied"]).optional(),
     /** Absent/null until an operator or subscription worker activates this organization. */
     plan: BillingPlanBalance.nullable().optional(),
   }),
@@ -20822,6 +20827,7 @@ export const ClientAuthConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       // False while the deployment has paused new account creation (launch-load
       // safety switch). Sign-in for existing accounts stays available.
       newSignupsEnabled: primitives.boolean.default(true),
+      signupChallengeSiteKey: z.string().optional(),
     }),
   ]),
 );

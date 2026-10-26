@@ -881,6 +881,7 @@ export async function fetchAuthSession(): Promise<AuthSession | null> {
 }
 
 export async function signUpEmail(input: {
+  signupChallengeToken?: string;
   name: string;
   email: string;
   password: string;
@@ -994,7 +995,10 @@ function authReturnBase(): string {
     : "/";
 }
 
-export async function startManagedSocialSignIn(provider: "google" | "github"): Promise<void> {
+export async function startManagedSocialSignIn(
+  provider: "google" | "github",
+  signupChallengeToken?: string,
+): Promise<void> {
   const reauthentication = window.location.pathname === "/settings/security";
   const returnUrl = (path: string) => new URL(path, window.location.origin).toString();
   const callbackURL = returnUrl(
@@ -1007,6 +1011,7 @@ export async function startManagedSocialSignIn(provider: "google" | "github"): P
     method: "POST",
     body: JSON.stringify({
       provider,
+      ...(signupChallengeToken ? { signupChallengeToken } : {}),
       callbackURL,
       errorCallbackURL: reauthentication
         ? callbackURL

@@ -48,3 +48,9 @@ test("a refused social sign-up while new accounts are paused says so and points 
   expect(message).toContain("We're at capacity for new accounts right now.");
   expect(message).toContain("sign in with the method you used before");
 });
+
+test("unchallenged OAuth signup directs the human through signup verification", () => {
+  expect(readSignInCallbackError("?error=signup_challenge_required")).toContain(
+    "complete verification",
+  );
+});

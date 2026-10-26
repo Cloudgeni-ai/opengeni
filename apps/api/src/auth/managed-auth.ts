@@ -1,3 +1,4 @@
+import { requireSignupChallenge } from "./signup-challenge";
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
 import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
 import {
@@ -612,6 +613,7 @@ export function createManagedAuth(
       user: {
         create: {
           before: async (user) => {
+            requireSignupChallenge(settings);
             const admission = managedAuthUserCreateAdmission(
               settings,
               user,
