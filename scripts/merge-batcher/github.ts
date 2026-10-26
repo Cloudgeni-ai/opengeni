@@ -27,6 +27,7 @@ import {
   type CapacityHold,
   digest,
   scanRunnerDemand,
+  selfHostedJob,
   type RunnerScanHold,
 } from "./model";
 
@@ -751,7 +752,7 @@ export class GitHubReader {
               Number.isSafeInteger(j.runner_id) &&
               j.runner_id > 0 &&
               Array.isArray(j.labels) &&
-              !j.labels.includes("self-hosted") &&
+              !selfHostedJob(j) &&
               j.labels.some((l: string) => /^(ubuntu|windows|macos)-/.test(l)),
           ) &&
         !!exactJob &&

@@ -240,7 +240,7 @@ settings are explicit; the cache should remain a batcher-owned bare repository.
 | `BATCHER_MAX_INFLIGHT` | `1` hosted candidate CI |
 | `BATCHER_RUNNER_BUDGET` | No default; explicitly allocated repository runner/job budget, not an assumed organization quota |
 | `BATCHER_MAIN_RESERVE` | No default; conservative slots reserved for full-main CI |
-| `BATCHER_PROVIDER_JOB_LIMIT` | `60`, GitHub's documented Team concurrent-job default for the whole organization's hosted pool |
+| `BATCHER_PROVIDER_JOB_LIMIT` | `60`, GitHub's documented Team concurrent-job default for the whole organization's hosted pool; self-hosted jobs are not counted against it |
 | `BATCHER_OTHER_REPOSITORY_ALLOWANCE` | `28`, assumed runner-holding jobs in other organization repositories (measured maximum; see headroom) |
 | `BATCHER_SPECULATION_DEPTH` | `2`, including current candidate |
 | `BATCHER_GIT_DIR` | `/data/objects.git`, disposable bare object cache |
@@ -550,6 +550,29 @@ budget/reserve or any unrecognized or missing job status holds
 rather than inventing capacity. Waiting, pending and job-less runs can start
 requesting runners after observation.
 
+**Only GitHub-hosted jobs are hosted-pool demand.** A job whose `labels` array
+contains `self-hosted` (compared case-insensitively, as GitHub matches runner
+labels) can only run on a self-hosted runner, for example main CI on
+`[self-hosted, linux, x64, opengeni-main-gcp]` or a later Batch label such as
+`opengeni-batch-gcp`. Such jobs never hold or request a runner from the 60-job
+pool, so they are excluded from main demand, other demand, observed Batch demand
+(and therefore Batch reservations), the main-queued hold and the `latestMain`
+queue and start-wait measurements. Their status is still validated: an unknown or
+missing status on any job, self-hosted or not, holds as before. A job whose
+`labels` field is missing or not an array is counted as GitHub-hosted demand,
+which is conservative. The pre-fan-out hold stays label-agnostic: the labels of
+fan-out jobs that do not exist yet are unknown, so a self-hosted plan phase is
+not proof that the fan-out will stay off the hosted pool. It ends as soon as the
+fan-out is listed. The 18-slot candidate floor, `BATCHER_MAIN_RESERVE` and
+`BATCHER_RUNNER_BUDGET` are configured reservations, not observations, and are
+unchanged; with main CI self-hosted, lowering the main reserve is a separate
+configuration decision, and moving Batch CI to self-hosted runners requires a
+separate split of the candidate floor. PR admission proof is unaffected: required
+PR checks still need exact-head runs whose non-skipped jobs all ran on
+GitHub-hosted runners (runner group `GitHub Actions`, no `self-hosted` label), and
+`ci.yml` never supplies that evidence: `PR CI` must come from `pr-ci.yml`, so a
+self-hosted main CI run can only mark its own checks as not hosted.
+
 PR CI uses per-PR concurrency with cancellation enabled: a newer run supersedes
 the same PR, not an unrelated PR, main or Batch run. Explicit dispatch uses its
 PR-number input for the same group. Planning, one fast-check job and the final
@@ -624,11 +647,12 @@ comparisons across this policy change are therefore not like-for-like.
   A run proven approval-only (an old rerun waiting for environment approval) is
   idle; once approved, a later observation sees its demand. A job-less waiting
   or pending main run is reported as pre-fan-out. A test checks the 3-job constant
-  against `ci.yml`.
-- **Main jobs waiting for runners.** If any active full-main push CI run, newest
-  or an older rerun, has a `queued` or `requested` job, its count and oldest wait
-  are retained. Main CI itself is never gated, cancelled or skipped.
-- **Provider pool fit.** Observed repository demand (main + other) plus
+  against `ci.yml`. This check does not look at labels (see above).
+- **Main jobs waiting for hosted runners.** If any active full-main push CI run,
+  newest or an older rerun, has a GitHub-hosted `queued` or `requested` job, its
+  count and oldest wait are retained. Self-hosted main jobs waiting for their own
+  runners do not hold. Main CI itself is never gated, cancelled or skipped.
+- **Provider pool fit.** Observed GitHub-hosted repository demand (main + other) plus
   `BATCHER_OTHER_REPOSITORY_ALLOWANCE` plus the 18 candidate slots is compared with
   `BATCHER_PROVIDER_JOB_LIMIT`. With the defaults, 60 - 28 - 18 = 14 observed
   repository jobs at most. Combined with 52/30/18 (other + max(30, main) + 18 <= 52,
@@ -667,16 +691,18 @@ dispatch-ref workflow edits. These bursts are queued by GitHub rather than withh
 solely because PR jobs occupy runners. This is not a provider capacity guarantee:
 the Batch may wait for runners. Active Batch reservations, complete-inventory
 checks, unknown workflow/status handling and non-PR/main capacity holds remain.
-The traffic-shadow reader keeps its original all-workflow accounting. Observe
+The traffic-shadow reader keeps its original all-workflow accounting, likewise
+counting GitHub-hosted jobs only. Observe
 actual run/job creation and start timestamps to measure provider queue delay.
 
 `stage.json` headroom now also records `capacity`: the configured limit and
-allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (queued or
-requested jobs across all active main runs), `preFanoutMainRuns` (their run IDs),
-and `latestMain` (newest main run ID, jobs
-waiting for runners, oldest current queue age, and the largest `started_at -
-created_at` among started jobs, all measured from the job timestamps). These are
-measured main queue waits, not predicted candidate latency.
+allowance, `providerRequired`, the hold reason, `mainQueuedJobs` (GitHub-hosted
+queued or requested jobs across all active main runs), `preFanoutMainRuns` (their
+run IDs), and `latestMain` (newest main run ID, GitHub-hosted jobs waiting for
+runners, oldest current hosted queue age, and the largest `started_at -
+created_at` among started hosted jobs, all measured from the job timestamps).
+Self-hosted jobs are not measured there. These are measured hosted main queue
+waits, not predicted candidate latency.
 stage.json exposes the measured occupied/reserved slots, configured budget and
 decision. These are explicit repository allocations, not a claim that GitHub
 granted a custom quota or that other repositories are idle. Jobs can expand or
