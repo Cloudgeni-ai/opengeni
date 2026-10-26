@@ -19,10 +19,10 @@ const stripeEnv = {
 };
 
 describe("credits default model settings", () => {
-  test("default to GPT-6 Luna at extra high reasoning", () => {
+  test("default to GPT-6 Luna at medium reasoning", () => {
     const settings = getSettings({});
     expect(settings.creditsDefaultModel).toBe("gpt-6-luna");
-    expect(settings.creditsDefaultReasoningEffort).toBe("xhigh");
+    expect(settings.creditsDefaultReasoningEffort).toBe("medium");
   });
 
   test("are deployment-configurable", () => {

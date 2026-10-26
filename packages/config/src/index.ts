@@ -1265,8 +1265,10 @@ const SettingsSchema = z.object({
     })
     .default("gpt-6-luna"),
   // Preferred effort for the credits default. Clamped to the highest effort
-  // the selected model supports at or below this value.
-  creditsDefaultReasoningEffort: ReasoningEffort.default("xhigh"),
+  // the selected model supports at or below this value. Medium, the model's
+  // own default: most first chats are everyday questions that should answer
+  // quickly; anyone can raise it per chat or save a higher workspace default.
+  creditsDefaultReasoningEffort: ReasoningEffort.default("medium"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
   // Provider-assigned item ids (rs_/msg_/fc_…) in Responses API input are
   // resolved against the provider's server-side response store. That store is

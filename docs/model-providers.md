@@ -1809,7 +1809,7 @@ first match wins:
    on a covered model. With no funded selectable model, new work falls back
    to the next step. See [promotional coverage](scoped-promotional-credits.md).
    `OPENGENI_CREDITS_DEFAULT_MODEL` (default `gpt-6-luna`) and
-   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `xhigh`, clamped to the
+   `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (default `medium`, clamped to the
    highest effort the model supports at or below it) configure it. An explicit
    `OPENGENI_CREDITS_DEFAULT_MODEL` must name a credits-billed model in the code
    catalog or boot fails. The unset built-in value, and any value checked
@@ -1820,8 +1820,8 @@ first match wins:
    already a funded selectable credits-billed model, it keeps the deployment effort,
    except that it uses `OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT` (source
    `credits`) when it is the credits default model itself, so a deployment
-   whose default is `gpt-6-luna` still starts credit holders on extra high
-   reasoning.
+   whose default is `gpt-6-luna` still starts credit holders on the credits
+   default effort.
 4. `deployment`: the deployment default with `OPENGENI_OPENAI_REASONING_EFFORT`.
 
 An explicit choice always wins and never passes through this resolver: a

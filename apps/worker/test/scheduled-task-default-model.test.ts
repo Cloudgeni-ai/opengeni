@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import * as codex from "@opengeni/codex";
-import { DEFAULT_OPENROUTER_MODEL_ID, type Settings } from "@opengeni/config";
+import { DEFAULT_OPENROUTER_MODEL_ID, getSettings, type Settings } from "@opengeni/config";
 import { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { resolveScheduledTaskPreflightModel } from "@opengeni/core";
 import {
@@ -250,5 +250,23 @@ describe("scheduled occurrences without a model use the resolved default", () =>
     );
     // The pre-check agrees with the occurrence the worker then resolves.
     expect(await occurrence(grant, report!.id)).toMatchObject({ model: "gpt-6-luna" });
+  }, 120_000);
+
+  test("a schedule with no saved model follows the shipped credits effort at each run", async () => {
+    if (!available) return;
+    // The shared test settings pin xhigh; use what a deployment gets when it
+    // sets no OPENGENI_CREDITS_DEFAULT_REASONING_EFFORT.
+    const shipped = getSettings({}).creditsDefaultReasoningEffort;
+    expect(shipped).toBe("medium");
+    const grant = await workspace();
+    const report = await dailyReport(grant);
+    await addCredits(grant);
+    const run = await occurrence(grant, report, {
+      settings: { creditsDefaultReasoningEffort: shipped },
+    });
+    expect(run).toMatchObject({ model: "gpt-6-luna", reasoningEffort: "medium" });
+    const [session] = await shared!.admin<{ reasoning_effort: string }[]>`
+      select reasoning_effort from sessions where id = ${run.sessionId}`;
+    expect(session?.reasoning_effort).toBe("medium");
   }, 120_000);
 });
