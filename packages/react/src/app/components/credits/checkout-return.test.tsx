@@ -9,10 +9,13 @@ afterAll(() => GlobalRegistrator.unregister());
 
 // Every toast the return shows, in order, as "kind: title | description".
 const toasts: string[] = [];
+// The id each toast was shown with, so a repeat replaces it instead of stacking.
+const toastIds: (string | undefined)[] = [];
 const record =
   (kind: string) =>
-  (title: string, options?: { description?: string | undefined }): string => {
+  (title: string, options?: { id?: string; description?: string | undefined }): string => {
     toasts.push(`${kind}: ${title}${options?.description ? ` | ${options.description}` : ""}`);
+    toastIds.push(options?.id);
     return title;
   };
 mock.module("../../lib/toast", () => ({
@@ -66,6 +69,7 @@ async function settle(ms = 30): Promise<void> {
 
 beforeEach(() => {
   toasts.length = 0;
+  toastIds.length = 0;
   replaced.length = 0;
   getBillingCheckout.mockClear();
 });
@@ -99,6 +103,7 @@ describe("back from checkout on the page it started from", () => {
 
   test("cancelled, expired and still-processing checkouts each say so without claiming credits", async () => {
     followCheckoutPageReturn({ getBillingCheckout }, { outcome: "cancelled" });
+    expect(toastIds).toEqual(["checkout-cancelled"]);
     getBillingCheckout.mockImplementationOnce(async () => status("pending", "expired"));
     followCheckoutPageReturn(
       { getBillingCheckout },
