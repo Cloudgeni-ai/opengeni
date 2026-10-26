@@ -872,9 +872,21 @@ export type ListRecordingModelsResponse = z.infer<typeof ListRecordingModelsResp
  * `{"message_type":"input_audio_chunk","audio_base_64":…,"commit":false,"sample_rate":…}`
  * with little-endian 16-bit mono PCM; the provider answers with
  * `partial_transcript` and `committed_transcript_with_timestamps` messages.
+ *
+ * `openai.realtime`: an OpenAI Realtime transcription session (OpenAI or
+ * Azure OpenAI), already configured. `token` is a short-lived client secret,
+ * sent as `Authorization: Bearer <token>`. A browser posts its WebRTC offer
+ * (`application/sdp`) to `webrtcUrl`, sends the track's audio as media and
+ * reads events on a data channel named `oai-events`. A client that can set
+ * headers on a WebSocket (React Native) opens `url` instead and sends
+ * `{"type":"input_audio_buffer.append","audio":…}` with base64 PCM at
+ * `audio.sampleRate`. Either way the provider answers with
+ * `input_audio_buffer.speech_started`/`speech_stopped` (with `audio_start_ms`
+ * and `audio_end_ms`) and
+ * `conversation.item.input_audio_transcription.delta`/`completed` events.
  */
 export const RecordingLiveProtocol = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["elevenlabs.scribe_realtime"]),
+  z.enum(["elevenlabs.scribe_realtime", "openai.realtime"]),
 );
 export type RecordingLiveProtocol = z.infer<typeof RecordingLiveProtocol>;
 
@@ -896,9 +908,10 @@ export const CreateRecordingLiveSessionRequest = /* @__PURE__ */ defineSchema(()
 export type CreateRecordingLiveSessionRequest = z.infer<typeof CreateRecordingLiveSessionRequest>;
 
 /**
- * A grant to stream one track to a live model. `url` already carries the
- * single-use credential and the audio format; open it as a WebSocket before
- * `expiresAt`, and ask for a new session to reconnect.
+ * A grant to stream one track to a live model. Connect before `expiresAt`,
+ * and ask for a new session to reconnect. For `elevenlabs.scribe_realtime`,
+ * `url` carries the single-use credential and the audio format; for
+ * `openai.realtime`, the credential is `token` (see {@link RecordingLiveProtocol}).
  */
 export const RecordingLiveSession = /* @__PURE__ */ defineSchema(() =>
   z.object({
@@ -906,6 +919,10 @@ export const RecordingLiveSession = /* @__PURE__ */ defineSchema(() =>
     model: z.string(),
     protocol: RecordingLiveProtocol,
     url: z.string(),
+    /** A short-lived client secret, for protocols that take it in a header. */
+    token: z.string().optional(),
+    /** Where a browser posts its WebRTC offer, for protocols that offer WebRTC. */
+    webrtcUrl: z.string().optional(),
     audio: z.object({ encoding: z.literal("pcm_s16le"), sampleRate: z.number().int() }),
     expiresAt: z.string(),
   }),

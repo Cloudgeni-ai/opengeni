@@ -200,21 +200,35 @@ capture and upload carry on unchanged.
 `settings.recordings.liveTranscript: true` turns it on by default for the
 workspace's recorders; the person recording can still turn it off. It needs a
 model with the `live` capability (`GET …/recording-models` lists them; today
-ElevenLabs Scribe v2 Realtime at $0.39 an hour of streamed audio, billed by
-the provider on top of the transcript itself).
+ElevenLabs Scribe v2 Realtime at $0.39 an hour of streamed audio, and
+gpt-4o-transcribe or gpt-4o-mini-transcribe on OpenAI or Azure OpenAI, billed
+by the provider on top of the transcript itself).
+
+A recorder that names no model streams to the deployment's live model:
+`OPENGENI_RECORDING_LIVE_TRANSCRIPTION` (`provider/model`, such as
+`azure-openai/gpt-4o-transcribe`), else ElevenLabs Scribe v2 Realtime. Boot
+fails if the named model is not configured or can't stream. OpenAI Realtime
+sends text a stretch at a time, when the speaker pauses, rather than word by
+word.
 
 The audio goes straight from the device to the provider, never through
 Opengeni, and the workspace's provider key never reaches the device:
 
 1. `POST …/recordings/:id/live-session` with `{ trackNumber }` returns a
-   short-lived grant for one track: a `url` holding a single-use token, the
-   `protocol` (`elevenlabs.scribe_realtime`), the audio format to send
-   (16-bit mono PCM at `audio.sampleRate`) and `expiresAt`. Only the person
-   recording can ask, and only while the recording is `capturing`. It answers
-   409 `credential_unavailable` when the workspace has no key for the model.
-2. The device opens the WebSocket and sends audio in tenths of a second. A
-   dropped connection asks for a new grant; up to 15 seconds of audio is held
-   meanwhile and sent once it is back.
+   short-lived grant for one track: the `protocol`, where to connect, the
+   audio format to send (16-bit mono PCM at `audio.sampleRate`) and
+   `expiresAt`. Only the person recording can ask, and only while the
+   recording is `capturing`. It answers 409 `credential_unavailable` when the
+   workspace has no key for the model; a deployment's own account needs none.
+   - `elevenlabs.scribe_realtime`: `url` holds a single-use token.
+   - `openai.realtime`: a transcription session already set up, with `token`,
+     a client secret sent as `Authorization: Bearer`. A browser posts its
+     WebRTC offer to `webrtcUrl` and sends the track itself; a client whose
+     WebSocket takes headers (React Native) opens `url` and sends PCM.
+2. The device connects and sends audio in tenths of a second. A dropped
+   connection asks for a new grant; up to 15 seconds of audio is held
+   meanwhile and sent once it is back (not over WebRTC, which streams the
+   track live).
 3. Finished stretches of text are saved with `POST …/live-segments`
    (`{ trackNumber, streamedMilliseconds, segments }`, at most 100 per call).
    A segment number sent again keeps its first copy, and the streamed time
@@ -358,9 +372,10 @@ anchored, spread over a stretch it could not align exactly, or untimed
 `OPENGENI_SPEECH_TO_TEXT_PINNED` (`provider/model`, such as
 `azure-speech/MAI-Transcribe-2`) makes one model the only one for every use.
 Workspaces cannot pick another, dictation does not fall back to another
-provider and the live preview is offered only if that provider has one. Use
-it when a deployment must guarantee where audio goes. Boot fails if the
-pinned model is not configured.
+provider and the live preview goes only to that provider's live model or the
+one `OPENGENI_RECORDING_LIVE_TRANSCRIPTION` names, such as an Azure OpenAI
+deployment in the same region. Use it when a deployment must guarantee where
+audio goes. Boot fails if the pinned model is not configured.
 
 The recording providers:
 

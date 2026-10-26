@@ -101,8 +101,12 @@ export type RecordingTranscriptionCredentials = { apiKey: string } | { accessTok
 /** A live session a client opens itself, straight to the provider. */
 export type RecordingLiveSessionGrant = {
   protocol: RecordingLiveProtocol;
-  /** WebSocket URL carrying a single-use credential; never the provider key. */
+  /** WebSocket URL; it carries the single-use credential unless `token` does. Never the provider key. */
   url: string;
+  /** A short-lived client secret the client sends in a header. Never the provider key. */
+  token?: string;
+  /** Where a browser posts its WebRTC offer, for protocols that offer WebRTC. */
+  webrtcUrl?: string;
   audio: { encoding: "pcm_s16le"; sampleRate: number };
   expiresAt: Date;
 };
@@ -145,11 +149,12 @@ export type RecordingTranscriptionProvider = {
   ): Promise<RecordingTranscriptionResult>;
   /**
    * Grant a client one live session. Present when some model has
-   * `capabilities.live`; only called for those models.
+   * `capabilities.live`; only called for those models. `credentials` is null
+   * for providers that hold their own (the deployment's account).
    */
   createLiveSession?(
     request: RecordingLiveSessionRequest,
-    credentials: RecordingTranscriptionCredentials,
+    credentials: RecordingTranscriptionCredentials | null,
   ): Promise<RecordingLiveSessionGrant>;
 };
 
