@@ -20027,6 +20027,7 @@
         "$.excerpts[].text": "string!",
         "$.id": "string!",
         "$.indexStatus": "ref(KnowledgeIndexStatus)?",
+        "$.lastChangedAt": "string?",
         "$.latestRevisionId": "string!",
         "$.publishedRevisionId": "string! null",
         "$.revision": "object!",

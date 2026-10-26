@@ -10,7 +10,7 @@ import {
   BrainCircuitIcon,
   Building2Icon,
   FileTextIcon,
-  FolderTreeIcon,
+  FolderIcon,
   LinkIcon,
   ListIcon,
   LockIcon,
@@ -28,7 +28,6 @@ import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
 import { LogoTile } from "@opengeni/react/ui/logo-tile";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
-import { Notice } from "@opengeni/react/ui/notice";
 import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
@@ -44,7 +43,7 @@ import {
   type ToolbarFilterValue,
 } from "@opengeni/react/ui/toolbar";
 
-import { errorText, scopeFilterValue, useKnowledgeList } from "./knowledge-data";
+import { scopeFilterValue, useKnowledgeList } from "./knowledge-data";
 import { KnowledgeSearchFallback, knowledgeIndexLabel } from "./knowledge-index-status";
 import {
   KNOWLEDGE_KIND_LABEL,
@@ -54,9 +53,11 @@ import {
 } from "./knowledge-labels";
 
 /* ----------------------------------------------------------------------------
-   Library: every entry agents can look up. One toolbar that keeps its shape,
-   rows that open the entry's own page, archived and rejected entries behind
-   the Status filter, and files as a Type filter.
+   Library: every entry agents can look up, newest change first. One toolbar
+   that keeps its shape, rows that open the entry's own page, archived and
+   rejected entries behind the Status filter, and files as a Type filter.
+   Entries | Collections switches the list to the top-level collections, each
+   as recent as the newest change inside it.
    -------------------------------------------------------------------------- */
 
 export type LibraryScope = KnowledgeEntryScope | "all";
@@ -80,28 +81,29 @@ const TYPE_FILTERS: KnowledgeEntryKind[] = [
   "requirement",
   "incident",
   "note",
-  "group",
 ];
 
-const FILTER_GROUPS: ToolbarFilterGroup[] = [
-  {
-    id: "added",
-    label: "Added",
-    options: [
-      { id: "day", label: "Last 24 hours" },
-      { id: "week", label: "Last 7 days" },
-      { id: "month", label: "Last 30 days" },
-    ],
-  },
-  {
-    id: "type",
-    label: "Type",
-    options: TYPE_FILTERS.map((kind) => ({
-      id: kind,
-      label:
-        kind === "source" ? "Files" : kind === "group" ? "Collections" : KNOWLEDGE_KIND_LABEL[kind],
-    })),
-  },
+const ADDED_GROUP: ToolbarFilterGroup = {
+  id: "added",
+  label: "Added",
+  options: [
+    { id: "day", label: "Last 24 hours" },
+    { id: "week", label: "Last 7 days" },
+    { id: "month", label: "Last 30 days" },
+  ],
+};
+
+/** Collections have their own view, so Type lists only entry kinds. */
+const TYPE_GROUP: ToolbarFilterGroup = {
+  id: "type",
+  label: "Type",
+  options: TYPE_FILTERS.map((kind) => ({
+    id: kind,
+    label: kind === "source" ? "Files" : KNOWLEDGE_KIND_LABEL[kind],
+  })),
+};
+
+const STATUS_GROUPS: ToolbarFilterGroup[] = [
   {
     id: "status",
     label: "Status",
@@ -116,6 +118,31 @@ const FILTER_GROUPS: ToolbarFilterGroup[] = [
     options: [{ id: "evidence", label: "Supporting sources" }],
   },
 ];
+
+function filterGroups(layout: LibraryLayout): ToolbarFilterGroup[] {
+  return layout === "collections"
+    ? [ADDED_GROUP, STATUS_GROUPS[0]!]
+    : [ADDED_GROUP, TYPE_GROUP, ...STATUS_GROUPS];
+}
+
+/** Filters that apply to what the layout shows: Collections has no Type or supporting sources. */
+function layoutFilters(view: LibraryView): ToolbarFilterValue {
+  if (view.layout !== "collections") return view.filters;
+  const { type: _type, show: _show, ...filters } = view.filters;
+  return filters;
+}
+
+/** Entries-only filters that wait, hidden, while Collections shows. */
+function hiddenFilters(view: LibraryView): ToolbarFilterValue {
+  if (view.layout !== "collections") return {};
+  return { type: view.filters.type ?? [], show: view.filters.show ?? [] };
+}
+
+/** The Library showing files (after an upload, or from an old Files link):
+ *  files are entries, so this leaves Collections. */
+export function libraryFilesView(view: LibraryView): LibraryView {
+  return { ...view, layout: "list", filters: { type: ["source"] } };
+}
 
 /** Added, Type and Status each take one value; supporting sources is independent. */
 function singleChoice(previous: ToolbarFilterValue, next: ToolbarFilterValue): ToolbarFilterValue {
@@ -146,15 +173,22 @@ function libraryRequest(
   fileId: string | undefined,
   createdSince: string | undefined,
 ): KnowledgeEntryListRequest {
-  const kind = view.filters.type?.[0] as KnowledgeEntryKind | undefined;
-  const status = view.filters.status?.[0] as "archived" | "rejected" | undefined;
-  const evidence = (view.filters.show ?? []).includes("evidence");
+  const filters = layoutFilters(view);
+  const collections = view.layout === "collections";
+  const kind = collections ? "group" : (filters.type?.[0] as KnowledgeEntryKind | undefined);
+  const status = filters.status?.[0] as "archived" | "rejected" | undefined;
+  const evidence = (filters.show ?? []).includes("evidence");
   const scope = scopeFilterValue(view.scope);
+  // Collections start at the top level; nested ones open from their parent.
+  // Search, filters and a file show every matching collection.
+  const rootOnly =
+    collections && !search && !fileId && Object.values(filters).every((ids) => !ids.length);
   return {
     view: status ?? "published",
     limit: 50,
     ...(scope ? { scope } : {}),
     ...(kind ? { kind } : {}),
+    ...(rootOnly ? { rootOnly: true } : {}),
     ...(evidence || kind === "source" || fileId ? { includeEvidence: true } : {}),
     ...(fileId ? { fileId } : {}),
     ...(search ? { query: search } : {}),
@@ -213,7 +247,7 @@ export function KindTile({ kind }: { kind: KnowledgeEntryKind }) {
   return <LogoTile icon={<Icon />} name={KNOWLEDGE_KIND_LABEL[kind]} />;
 }
 
-/** The date column every knowledge list ends with, before the ⋯ menu. */
+/** The date column every knowledge list ends with, before the ⋯ menu: what the list is ordered by. */
 export const ENTRY_COLUMNS: RowListColumn[] = [
   { id: "updated", label: "Updated", width: 112, align: "end", hideLabel: true },
 ];
@@ -284,8 +318,13 @@ export function EntryRow({
       cells={{
         updated: (
           <RelativeTime
-            date={added ? entry.createdAt : entry.updatedAt}
-            prefix={!added && entry.revision.kind === "group" ? "Edited" : undefined}
+            date={added ? entry.createdAt : (entry.lastChangedAt ?? entry.updatedAt)}
+            // Without its latest change inside, a collection's date is its own edit.
+            prefix={
+              !added && entry.revision.kind === "group" && !entry.lastChangedAt
+                ? "Edited"
+                : undefined
+            }
           />
         ),
       }}
@@ -383,6 +422,8 @@ export interface LibraryTabProps {
   canUpload: boolean;
   onAdd: () => void;
   onUpload: () => void;
+  /** Creates a collection, from the empty Collections view. */
+  onNewCollection?: () => void;
   /** The Library has nothing at all: the page hides its Add menu, the empty state has it. */
   onEmptyChange?: (empty: boolean) => void;
   /** A Personal workspace starts on "Only me"; that is not a filter the person chose. */
@@ -401,15 +442,17 @@ export function LibraryTab({
   canUpload,
   onAdd,
   onUpload,
+  onNewCollection,
   onEmptyChange,
   personal = false,
 }: LibraryTabProps) {
   const search = useDebounced(view.query.trim(), 450);
   const searching = search.length > 0;
-  const status = view.filters.status?.[0] as "archived" | "rejected" | undefined;
-  const narrowed = Object.values(view.filters).some((ids) => ids.length > 0) || Boolean(fileId);
-  const collections = view.layout === "collections" && !searching && !narrowed;
-  const addedPeriod = view.filters.added?.[0];
+  const collections = view.layout === "collections";
+  const activeFilters = layoutFilters(view);
+  const status = activeFilters.status?.[0] as "archived" | "rejected" | undefined;
+  const narrowed = Object.values(activeFilters).some((ids) => ids.length > 0) || Boolean(fileId);
+  const addedPeriod = activeFilters.added?.[0];
   // Freeze the cutoff across search, other filters and Load more. A page refresh
   // intentionally starts a fresh window and resets the list's cursor.
   const createdSince = useMemo(
@@ -418,22 +461,23 @@ export function LibraryTab({
     [addedPeriod, refresh],
   );
   const request = useMemo(
-    () => (collections ? null : libraryRequest(view, search, fileId, createdSince)),
+    () => libraryRequest(view, search, fileId, createdSince),
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- the query is debounced into `search`
-    [collections, view.scope, view.filters, search, fileId, createdSince],
+    [view.layout, view.scope, view.filters, search, fileId, createdSince],
   );
   const list = useKnowledgeList(workspaceId, request, refresh);
   const set = (patch: Partial<LibraryView>) => onViewChange({ ...view, ...patch });
   const narrow = useNarrow();
-  const groups = narrow ? [SCOPE_GROUP, ...FILTER_GROUPS] : FILTER_GROUPS;
+  const groups = narrow ? [SCOPE_GROUP, ...filterGroups(view.layout)] : filterGroups(view.layout);
   const filterValue: ToolbarFilterValue = narrow
-    ? { ...view.filters, scope: view.scope === "all" ? [] : [view.scope] }
-    : view.filters;
+    ? { ...activeFilters, scope: view.scope === "all" ? [] : [view.scope] }
+    : activeFilters;
   const setFilters = (next: ToolbarFilterValue) => {
     const picked = singleChoice(filterValue, next);
     const { scope, ...filters } = picked;
     set({
-      filters,
+      // Type and supporting sources wait, hidden, while Collections shows.
+      filters: { ...filters, ...hiddenFilters(view) },
       ...(narrow ? { scope: (scope?.[0] as LibraryScope | undefined) ?? "all" } : {}),
     });
   };
@@ -441,21 +485,11 @@ export function LibraryTab({
   const nothingAtAll =
     !collections && !list.loading && !list.error && list.entries.length === 0 && !filtered;
   useEffect(() => onEmptyChange?.(nothingAtAll), [nothingAtAll, onEmptyChange]);
+  const noun = (count: number) =>
+    collections ? (count === 1 ? "collection" : "collections") : count === 1 ? "entry" : "entries";
 
   let body: ReactNode;
-  if (collections) {
-    body = (
-      <CollectionsLayout
-        workspaceId={workspaceId}
-        scope={view.scope}
-        refresh={refresh}
-        actions={actions}
-        empty={
-          <LibraryEmpty canAdd={canAdd} canUpload={canUpload} onAdd={onAdd} onUpload={onUpload} />
-        }
-      />
-    );
-  } else if (list.loading && list.entries.length === 0) {
+  if (list.loading && list.entries.length === 0) {
     body = (
       <RowList label="Knowledge" columns={ENTRY_COLUMNS} flush busy>
         <ListRowSkeleton count={5} />
@@ -477,6 +511,18 @@ export function LibraryTab({
     );
   } else if (nothingAtAll) {
     body = <LibraryEmpty canAdd={canAdd} canUpload={canUpload} onAdd={onAdd} onUpload={onUpload} />;
+  } else if (collections && list.entries.length === 0 && !filtered) {
+    body = (
+      <EmptyState
+        variant="inline"
+        title="No collections yet."
+        action={
+          onNewCollection ? (
+            <EmptyStateLink onClick={onNewCollection}>New collection</EmptyStateLink>
+          ) : undefined
+        }
+      />
+    );
   } else if (list.entries.length === 0) {
     body = (
       <EmptyState
@@ -497,7 +543,7 @@ export function LibraryTab({
               onViewChange(
                 searching
                   ? { ...view, query: "" }
-                  : { ...view, query: "", filters: {}, scope: view.scope },
+                  : { ...view, query: "", filters: hiddenFilters(view), scope: view.scope },
               );
             }}
           >
@@ -510,7 +556,7 @@ export function LibraryTab({
     body = (
       <div className="flex min-w-0 flex-col gap-4">
         <EntryList
-          label={searching ? "Search results" : "Knowledge"}
+          label={searching ? "Search results" : collections ? "Collections" : "Knowledge"}
           entries={list.entries}
           actions={actions}
           searching={searching}
@@ -539,7 +585,7 @@ export function LibraryTab({
   }
 
   const summary =
-    !collections && !list.loading && filtered && list.entries.length > 0 ? (
+    !list.loading && filtered && list.entries.length > 0 ? (
       searching ? (
         <>
           {list.entries.length}
@@ -548,7 +594,7 @@ export function LibraryTab({
       ) : (
         <>
           {list.entries.length}
-          {list.cursor ? "+" : ""} {list.entries.length === 1 ? "entry" : "entries"}
+          {list.cursor ? "+" : ""} {noun(list.entries.length)}
         </>
       )
     ) : null;
@@ -580,12 +626,12 @@ export function LibraryTab({
             <SegmentedControl<LibraryLayout>
               aria-label="Show"
               options={[
-                { value: "list", label: "List", icon: <ListIcon />, iconOnly: true },
+                { value: "list", label: "Entries", icon: <ListIcon />, iconOnly: narrow },
                 {
                   value: "collections",
-                  label: "By collection",
-                  icon: <FolderTreeIcon />,
-                  iconOnly: true,
+                  label: "Collections",
+                  icon: <FolderIcon />,
+                  iconOnly: narrow,
                 },
               ]}
               value={view.layout}
@@ -669,229 +715,6 @@ function LibraryEmpty({
         ) : undefined
       }
     />
-  );
-}
-
-/* ----------------------------------------------------------------------------
-   By collection: each top-level collection with its sub-collections (rows that
-   open their own page) and then its entries, and finally everything that
-   isn't in a collection. A nested collection appears once, inside its parent.
-   -------------------------------------------------------------------------- */
-
-function CollectionsLayout({
-  workspaceId,
-  scope,
-  refresh,
-  actions,
-  empty,
-}: {
-  workspaceId: string;
-  scope: LibraryScope;
-  refresh: number;
-  actions: EntryRowActions;
-  empty: ReactNode;
-}) {
-  const scoped = scopeFilterValue(scope);
-  // Only collections without a visible parent in this scope get a section.
-  const groups = useKnowledgeList(
-    workspaceId,
-    {
-      kind: "group",
-      rootOnly: true,
-      view: "published",
-      limit: 50,
-      ...(scoped ? { scope: scoped } : {}),
-    },
-    refresh,
-  );
-  const roots = useKnowledgeList(
-    workspaceId,
-    { rootOnly: true, view: "published", limit: 50, ...(scoped ? { scope: scoped } : {}) },
-    refresh,
-  );
-  const loose = roots.entries.filter((entry) => entry.revision.kind !== "group");
-  if ((groups.loading && !groups.entries.length) || (roots.loading && !roots.entries.length)) {
-    return (
-      <RowList label="Knowledge" columns={ENTRY_COLUMNS} flush busy>
-        <ListRowSkeleton count={5} />
-      </RowList>
-    );
-  }
-  const error = groups.error ?? roots.error;
-  if (error && !groups.entries.length && !roots.entries.length) {
-    return (
-      <Notice
-        tone="failed"
-        title="Couldn't load the Library"
-        action={
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              groups.reload();
-              roots.reload();
-            }}
-          >
-            Try again
-          </Button>
-        }
-        actionLayout="responsive"
-      >
-        {error}
-      </Notice>
-    );
-  }
-  if (!groups.entries.length && !loose.length) return <>{empty}</>;
-  return (
-    <div className="flex min-w-0 flex-col gap-6">
-      {groups.entries.map((group) => (
-        <CollectionSection
-          key={group.id}
-          workspaceId={workspaceId}
-          group={group}
-          scope={scoped}
-          refresh={refresh}
-          actions={actions}
-        />
-      ))}
-      {groups.cursor ? (
-        <Button
-          type="button"
-          variant="outline"
-          className="self-start"
-          disabled={groups.loading}
-          onClick={() => void groups.loadMore()}
-        >
-          More collections
-        </Button>
-      ) : null}
-      {loose.length ? (
-        <section aria-label="Not in a collection" className="min-w-0">
-          <GroupHeading
-            name="Not in a collection"
-            count={loose.length}
-            more={Boolean(roots.cursor)}
-          />
-          <EntryList label="Not in a collection" entries={loose} actions={actions} />
-          {roots.cursor ? (
-            <Button
-              type="button"
-              variant="outline"
-              className="mt-3"
-              disabled={roots.loading}
-              onClick={() => void roots.loadMore()}
-            >
-              Load more
-            </Button>
-          ) : null}
-        </section>
-      ) : null}
-    </div>
-  );
-}
-
-function GroupHeading({
-  name,
-  count,
-  more,
-  onOpen,
-}: {
-  name: string;
-  count: number | null;
-  more?: boolean;
-  onOpen?: () => void;
-}) {
-  const label = (
-    <>
-      <span className="min-w-0 truncate">{name}</span>
-      {count !== null ? (
-        <span className="font-normal text-fg-subtle tabular-nums">
-          {count}
-          {more ? "+" : ""}
-        </span>
-      ) : null}
-    </>
-  );
-  const className =
-    "flex min-w-0 items-center gap-2 pb-1 text-left text-sm leading-5 font-medium text-fg";
-  return onOpen ? (
-    <button
-      type="button"
-      onClick={onOpen}
-      className={`${className} rounded-[6px] underline-offset-4 hover:underline pointer-coarse:min-h-11`}
-    >
-      {label}
-    </button>
-  ) : (
-    <h3 className={className}>{label}</h3>
-  );
-}
-
-function CollectionSection({
-  workspaceId,
-  group,
-  scope,
-  refresh,
-  actions,
-}: {
-  workspaceId: string;
-  group: KnowledgeEntrySummary;
-  scope: KnowledgeEntryScope | undefined;
-  refresh: number;
-  actions: EntryRowActions;
-}) {
-  const members = useCollectionMembers(workspaceId, group.id, scope, refresh);
-  const rows = [...members.subCollections, ...members.entries];
-  return (
-    <section aria-label={group.revision.title} className="min-w-0">
-      <GroupHeading
-        name={group.revision.title}
-        count={members.loading && !rows.length ? null : rows.length}
-        more={Boolean(members.cursor || members.subCursor)}
-        onOpen={() => actions.onOpen(group)}
-      />
-      {members.loading && !rows.length ? (
-        <RowList label={group.revision.title} columns={ENTRY_COLUMNS} flush busy>
-          <ListRowSkeleton count={1} />
-        </RowList>
-      ) : members.error && !rows.length ? (
-        <p role="alert" className="py-3 text-sm text-danger">
-          Couldn't load this collection. {errorText(members.error)}{" "}
-          <button type="button" className="underline" onClick={members.reload}>
-            Try again
-          </button>
-        </p>
-      ) : rows.length ? (
-        <EntryList label={group.revision.title} entries={rows} actions={actions} />
-      ) : (
-        <p className="py-3 text-sm text-fg-muted">Empty. Add entries to it from their Edit page.</p>
-      )}
-      {members.subCursor || members.cursor ? (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {members.subCursor ? (
-            <Button
-              type="button"
-              variant="outline"
-              disabled={members.loading}
-              onClick={() => void members.loadMoreSubs()}
-            >
-              More collections
-            </Button>
-          ) : null}
-          {members.cursor ? (
-            <Button
-              type="button"
-              variant="outline"
-              disabled={members.loading}
-              onClick={() => void members.loadMore()}
-            >
-              Load more
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-    </section>
   );
 }
 

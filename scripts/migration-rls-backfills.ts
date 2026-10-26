@@ -289,6 +289,17 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
         let end = match.index + match[0].length;
         for (; end < statement.length; end += 1) {
           const char = statement[end]!;
+          if (!quoted && char === "$") {
+            // A dollar-quoted literal is opaque text: its parentheses, quotes
+            // and semicolons are routine source, not this call's syntax.
+            const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(statement.slice(end))?.[0];
+            if (tag) {
+              const close = statement.indexOf(tag, end + tag.length);
+              if (close === -1) break;
+              end = close + tag.length - 1;
+              continue;
+            }
+          }
           if (char === "'") {
             if (quoted && statement[end + 1] === "'") {
               end += 1;

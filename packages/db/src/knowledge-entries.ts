@@ -508,12 +508,29 @@ export async function getKnowledgeEntries(
 
 const Cursor = z
   .object({
-    v: z.literal(2),
+    v: z.literal(3),
     afterId: z.uuid(),
     afterScore: z.number().finite(),
+    /** The order key of the last row: latest change, or creation. A function
+     *  from before the order key returns none; its pages continue in id order. */
+    afterOrderedAt: z.iso.datetime({ offset: true }).optional(),
     queryHash: z.string().length(64),
   })
   .strict();
+
+/** The order key a list read returns beside each row; not part of the projection. */
+const OrderedRow = z
+  .object({ orderedAt: z.iso.datetime({ offset: true }).optional() })
+  .passthrough();
+function splitOrderedRow(row: unknown): { orderedAt: string | undefined; row: unknown } {
+  const { orderedAt, ...rest } = OrderedRow.parse(row);
+  return { orderedAt, row: rest };
+}
+
+function encodeCursor(cursor: z.infer<typeof Cursor>): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
 export async function listKnowledgeEntries(
   db: Database,
   context: KnowledgeContext,
@@ -521,8 +538,11 @@ export async function listKnowledgeEntries(
   embedding?: { model: string; values: number[] } | undefined,
 ) {
   const { cursor, ...request } = KnowledgeEntryListRequest.parse(input);
+  // Newest first: by latest change, or by creation inside an Added window. A
+  // query still ranks by relevance first; the order only breaks ties.
+  const order = request.createdSince ? "created" : "updated";
   const queryHash = createHash("sha256")
-    .update(JSON.stringify({ context, request, embeddingModel: embedding?.model ?? null }))
+    .update(JSON.stringify({ context, request, order, embeddingModel: embedding?.model ?? null }))
     .digest("hex");
   let position: z.infer<typeof Cursor> | null = null;
   try {
@@ -539,10 +559,19 @@ export async function listKnowledgeEntries(
       },
     ]);
   }
+  // A page that began without an order key continues in its original order.
+  const ordered = !position || position.afterOrderedAt !== undefined;
   const rows = await read(db, context, {
     ...request,
     operation: "list",
-    ...(position ? { afterId: position.afterId, afterScore: position.afterScore } : {}),
+    ...(ordered ? { order } : {}),
+    ...(position
+      ? {
+          afterId: position.afterId,
+          afterScore: position.afterScore,
+          ...(position.afterOrderedAt ? { afterOrderedAt: position.afterOrderedAt } : {}),
+        }
+      : {}),
     ...(embedding
       ? {
           embedding: z.array(z.number().finite()).min(1).max(4096).parse(embedding.values),
@@ -550,24 +579,28 @@ export async function listKnowledgeEntries(
         }
       : {}),
   });
+  const page = rows.slice(0, request.limit).map(splitOrderedRow);
   const entries = await withIndexStatus(
     db,
     context,
-    rows.slice(0, request.limit).map((row) => decodeProjection(row, false)),
+    page.map(({ orderedAt, row }) => {
+      const entry = decodeProjection(row, false);
+      return order === "updated" && orderedAt ? { ...entry, lastChangedAt: orderedAt } : entry;
+    }),
     request.view,
   );
+  const last = page.at(-1);
   return {
     entries,
     nextCursor:
-      rows.length > request.limit && entries.length
-        ? Buffer.from(
-            JSON.stringify({
-              v: 2,
-              afterId: entries.at(-1)!.id,
-              afterScore: entries.at(-1)!.score ?? 0,
-              queryHash,
-            }),
-          ).toString("base64url")
+      rows.length > request.limit && entries.length && last
+        ? encodeCursor({
+            v: 3,
+            afterId: entries.at(-1)!.id,
+            afterScore: entries.at(-1)!.score ?? 0,
+            ...(last.orderedAt ? { afterOrderedAt: last.orderedAt } : {}),
+            queryHash,
+          })
         : null,
   };
 }
@@ -579,7 +612,7 @@ export async function listKnowledgeReviewBatches(
 ) {
   const { cursor, ...request } = KnowledgeReviewBatchListRequest.parse(input);
   const queryHash = createHash("sha256")
-    .update(JSON.stringify({ context, request, operation: "review_batches" }))
+    .update(JSON.stringify({ context, request, operation: "review_batches", order: "updated" }))
     .digest("hex");
   let position: z.infer<typeof Cursor> | null = null;
   try {
@@ -592,21 +625,34 @@ export async function listKnowledgeReviewBatches(
       { code: "custom", path: ["cursor"], message: "Review groups changed. Refresh to continue." },
     ]);
   }
-  const rows = z.array(KnowledgeReviewBatch).parse(
+  // The newest pending change first.
+  const rows = (
     await read(db, context, {
       ...request,
       operation: "review_batches",
-      ...(position ? { afterId: position.afterId } : {}),
-    }),
-  );
-  const batches = rows.slice(0, request.limit);
+      ...(!position || position.afterOrderedAt ? { order: "updated" } : {}),
+      ...(position
+        ? {
+            afterId: position.afterId,
+            ...(position.afterOrderedAt ? { afterOrderedAt: position.afterOrderedAt } : {}),
+          }
+        : {}),
+    })
+  ).map(splitOrderedRow);
+  const page = rows.slice(0, request.limit);
+  const batches = page.map(({ row }) => KnowledgeReviewBatch.parse(row));
+  const last = page.at(-1);
   return {
     batches,
     nextCursor:
-      rows.length > request.limit && batches.length
-        ? Buffer.from(
-            JSON.stringify({ v: 2, afterId: batches.at(-1)!.id, afterScore: 0, queryHash }),
-          ).toString("base64url")
+      rows.length > request.limit && batches.length && last
+        ? encodeCursor({
+            v: 3,
+            afterId: batches.at(-1)!.id,
+            afterScore: 0,
+            ...(last.orderedAt ? { afterOrderedAt: last.orderedAt } : {}),
+            queryHash,
+          })
         : null,
   };
 }

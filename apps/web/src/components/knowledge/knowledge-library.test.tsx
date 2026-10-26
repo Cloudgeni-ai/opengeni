@@ -46,7 +46,11 @@ function treeEntries(request: KnowledgeEntryListRequest) {
   if (request.groupId === RUNBOOKS)
     return request.kind === "group" ? [payments] : [rollback, payments];
   if (request.groupId === PAYMENTS) return [];
-  if (request.rootOnly) return request.kind === "group" ? [runbooks] : [runbooks, loose];
+  // A collection listed by latest change carries its newest change inside.
+  if (request.rootOnly)
+    return request.kind === "group"
+      ? [{ ...runbooks, lastChangedAt: "2026-10-24T00:00:00.000Z" }]
+      : [runbooks, loose];
   return [runbooks, payments, rollback, loose];
 }
 
@@ -86,7 +90,8 @@ const context = {
   ownsWorkspaceInvocation: () => true,
 };
 mock.module("@opengeni/react/app/app-context", () => ({ useAppContext: () => context }));
-const { LibraryTab, initialLibraryView, knowledgeAddedSince } = await import("./knowledge-library");
+const { LibraryTab, initialLibraryView, knowledgeAddedSince, libraryFilesView } =
+  await import("./knowledge-library");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -98,19 +103,23 @@ afterAll(() => {
 });
 
 const opened: string[] = [];
+let newCollection = 0;
 function Harness({
   fileId,
   collections,
   added,
+  filters,
 }: {
   fileId?: string;
   collections?: boolean;
   added?: string;
+  filters?: Record<string, string[]>;
 }) {
   const [view, setView] = useState({
     ...initialLibraryView(false),
     ...(collections ? { layout: "collections" as const } : {}),
     ...(added ? { filters: { added: [added] } } : {}),
+    ...(filters ? { filters } : {}),
   });
   return (
     <LibraryTab
@@ -131,6 +140,7 @@ function Harness({
       canUpload
       onAdd={() => undefined}
       onUpload={() => undefined}
+      onNewCollection={() => (newCollection += 1)}
     />
   );
 }
@@ -164,6 +174,8 @@ test("Added is server-side, survives pagination and scope changes, and can be re
     const first = listKnowledgeEntries.mock.calls.at(-1)![1];
     expect(first.view).toBe("published");
     expect(first.limit).toBe(50);
+    // Filtered collections include nested ones.
+    expect(first.kind).toBe("group");
     expect(first.rootOnly).toBeUndefined();
     expect(first.createdSince).toBeDefined();
     const cutoff = Date.parse(first.createdSince!);
@@ -191,8 +203,14 @@ test("Added is server-side, survives pagination and scope changes, and can be re
     )!;
     await act(async () => remove.click());
     await settle();
-    // Removing the only filter restores the requested collection layout.
-    expect(listKnowledgeEntries.mock.calls.at(-1)![1].createdSince).toBeUndefined();
+    // Removing the only filter lists the top-level collections again, in the chosen scope.
+    expect(listKnowledgeEntries.mock.calls.at(-1)![1]).toEqual({
+      view: "published",
+      limit: 50,
+      kind: "group",
+      rootOnly: true,
+      scope: "workspace",
+    });
     expect(container.textContent).not.toContain("Added:Last 7 days");
   } finally {
     await act(async () => root.unmount());
@@ -283,47 +301,151 @@ test("an empty Library explains itself with the add actions instead of a toolbar
   }
 });
 
-test("By collection shows only top-level collections, sub-collections first as rows", async () => {
+test("uploads and old Files links show files even from Collections", () => {
+  const fromCollections = { ...initialLibraryView(false), layout: "collections" as const };
+  expect(libraryFilesView(fromCollections)).toEqual({
+    ...fromCollections,
+    layout: "list",
+    filters: { type: ["source"] },
+  });
+});
+
+test("Clear filters in Collections keeps the Entries filters for later", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    rows = false;
+    await act(async () =>
+      root.render(<Harness collections filters={{ type: ["decision"], added: ["week"] }} />),
+    );
+    await settle();
+    expect(container.textContent).toContain("Nothing matches these filters.");
+    const button = (text: string) =>
+      [...container.querySelectorAll<HTMLElement>("button")].find(
+        (node) => node.textContent === text,
+      )!;
+    await act(async () => button("Clear filters").click());
+    await settle();
+    expect(listKnowledgeEntries.mock.calls.at(-1)![1]).toEqual({
+      view: "published",
+      limit: 50,
+      kind: "group",
+      rootOnly: true,
+    });
+    // Back on Entries, its Type filter is still there; Added was cleared.
+    await act(async () => button("Entries").click());
+    await settle();
+    const request = listKnowledgeEntries.mock.calls.at(-1)![1];
+    expect(request.kind).toBe("decision");
+    expect(request.createdSince).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    rows = true;
+  }
+});
+
+test("Collections is one labeled click away and lists top-level collections by latest change", async () => {
   tree = true;
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   try {
-    await act(async () => root.render(<Harness collections />));
+    await act(async () => root.render(<Harness />));
     await settle();
-    const sections = [...container.querySelectorAll("section")].map((section) =>
-      section.getAttribute("aria-label"),
-    );
-    // Payments nests in Runbooks, so it is a row there and never its own section.
-    expect(sections).toEqual(["Runbooks", "Not in a collection"]);
-    const runbooks = container.querySelector("section[aria-label=Runbooks]")!;
-    const titles = [...runbooks.querySelectorAll("[data-slot=list-row] [data-row-action]")].map(
-      (row) => row.textContent,
-    );
-    expect(titles).toEqual(["Payments", "Rolling back a bad deploy"]);
-    const rowsInRunbooks = [...runbooks.querySelectorAll("[data-slot=list-row]")];
+    const show = container.querySelector("[aria-label=Show]")!;
+    expect(show.textContent).toBe("EntriesCollections");
+    const titles = () =>
+      [...container.querySelectorAll("[data-slot=list-row] [data-row-action]")].map(
+        (row) => row.textContent,
+      );
+    // Entries lists everything, in the server's newest-first order.
+    expect(titles()).toEqual(["Runbooks", "Payments", "Rolling back a bad deploy", "Loose fact"]);
+    const listRows = [...container.querySelectorAll("[data-slot=list-row]")];
     // Every row has a tile for its kind of object (a collection, an entry);
     // the decision says its type in words and ends with its date.
     const tile = (row: Element) => row.querySelector("[data-slot=logo-tile]")?.innerHTML;
-    expect(rowsInRunbooks[0]!.querySelector("[data-slot=logo-tile]")).not.toBeNull();
-    expect(rowsInRunbooks[1]!.querySelector("[data-slot=logo-tile]")).not.toBeNull();
-    expect(tile(rowsInRunbooks[1]!)).not.toBe(tile(rowsInRunbooks[0]!));
-    expect(rowsInRunbooks[1]!.textContent).toContain("Decision");
-    expect(rowsInRunbooks[1]!.querySelector("[data-slot=relative-time]")).not.toBeNull();
-    expect(rowsInRunbooks[0]!.querySelector("[data-slot=relative-time]")?.textContent).toStartWith(
+    expect(tile(listRows[2]!)).not.toBe(tile(listRows[0]!));
+    expect(listRows[2]!.textContent).toContain("Decision");
+    expect(listRows[2]!.querySelector("[data-slot=relative-time]")).not.toBeNull();
+    // Without its latest change inside, a collection's date says it is its own edit.
+    expect(listRows[0]!.querySelector("[data-slot=relative-time]")?.textContent).toStartWith(
       "Edited ",
     );
-    expect(
-      rowsInRunbooks[1]!.querySelector("[data-slot=relative-time]")?.textContent,
-    ).not.toStartWith("Edited ");
-    expect(
-      listKnowledgeEntries.mock.calls.some(
-        ([, request]) => request.kind === "group" && request.rootOnly === true,
-      ),
-    ).toBe(true);
+    expect(listRows[2]!.querySelector("[data-slot=relative-time]")?.textContent).not.toStartWith(
+      "Edited ",
+    );
+
+    const collections = [...show.querySelectorAll("button")].find(
+      (button) => button.textContent === "Collections",
+    )!;
+    await act(async () => collections.click());
+    await settle();
+    expect(listKnowledgeEntries.mock.calls.at(-1)![1]).toEqual({
+      view: "published",
+      limit: 50,
+      kind: "group",
+      rootOnly: true,
+    });
+    // Payments nests in Runbooks, so it opens from there.
+    expect(titles()).toEqual(["Runbooks"]);
+    expect(container.querySelector("[aria-label=Collections]")).not.toBeNull();
+    // Its date is its newest change inside, with no Edited label.
+    const date = container.querySelector("[data-slot=relative-time]")!;
+    expect(date.getAttribute("datetime")).toBe("2026-10-24T00:00:00.000Z");
+    expect(date.textContent).not.toStartWith("Edited ");
+    await act(async () =>
+      container.querySelector<HTMLElement>("[data-slot=list-row] [data-row-action]")!.click(),
+    );
+    expect(opened.at(-1)).toBe(RUNBOOKS);
   } finally {
     await act(async () => root.unmount());
     container.remove();
     tree = false;
+  }
+});
+
+test("Collections keeps search, without Type, and offers New collection when there are none", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    rows = false;
+    await act(async () => root.render(<Harness collections />));
+    await settle();
+    expect(container.textContent).toContain("No collections yet.");
+    const create = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "New collection",
+    )!;
+    await act(async () => create.click());
+    expect(newCollection).toBe(1);
+    rows = true;
+    const search = container.querySelector<HTMLInputElement>("input[type=search]")!;
+    await act(async () => {
+      search.value = "runbooks";
+      const props = Object.keys(search).find((key) => key.startsWith("__reactProps$"))!;
+      (
+        search as unknown as Record<
+          string,
+          { onChange: (event: { target: HTMLInputElement }) => void }
+        >
+      )[props]!.onChange({ target: search });
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    });
+    await settle();
+    // Search finds nested collections too, ranked by relevance on the server.
+    expect(listKnowledgeEntries.mock.calls.at(-1)![1]).toEqual({
+      view: "published",
+      limit: 50,
+      kind: "group",
+      query: "runbooks",
+    });
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    rows = true;
   }
 });

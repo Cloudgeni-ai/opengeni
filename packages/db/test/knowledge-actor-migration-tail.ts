@@ -10,4 +10,5 @@ export const knowledgeActorMigrationTail = [
   "0902_batched_knowledge_visibility.sql",
   "0914_knowledge_group_summary_projection.sql",
   "0936_knowledge_visibility_statement_reuse.sql",
+  "0999_knowledge_recent_first.sql",
 ] as const;

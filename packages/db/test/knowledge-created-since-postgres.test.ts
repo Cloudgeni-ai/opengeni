@@ -58,11 +58,21 @@ test("original creation filters before ranked take+one pages, including matches 
     FROM knowledge_entry_revisions r JOIN knowledge_index_jobs j ON j.revision_id=r.id
     WHERE r.account_id=${f.accountId}`;
   const embedding = { model: "creation-test", values: [1, 0, 0] };
+  // Without a query or window a collection lists its newest published change
+  // first: the latest decision on the published revision.
+  const newestFirst = (
+    await shared.admin<{ id: string }[]>`SELECT e.id FROM knowledge_entries e
+      JOIN knowledge_entry_revisions r ON r.account_id=e.account_id AND r.id=e.published_revision_id
+      WHERE e.account_id=${f.accountId} AND e.id NOT IN (${f.groupId},${f.sourceId})
+      ORDER BY coalesce((SELECT d.created_at FROM knowledge_entry_decisions d WHERE d.account_id=e.account_id
+        AND d.entry_id=e.id AND d.revision_id=r.id ORDER BY d.version DESC LIMIT 1),r.created_at) DESC,e.id
+      LIMIT 50`
+  ).map((row) => row.id);
   expect(
     (
       await listKnowledgeEntries(client.db, context(f), { groupId: f.groupId, limit: 50 })
     ).entries.map((entry) => entry.id),
-  ).toEqual(ids.slice(0, 50));
+  ).toEqual(newestFirst);
   for (const mode of ["keyword", "hybrid", "vector"] as const) {
     const found: string[] = [];
     let cursor: string | undefined;

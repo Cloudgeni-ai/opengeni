@@ -67,7 +67,8 @@ test("Knowledge preparation retains the current collection map with bounded cata
     });
     expected.push({ id: receipt.entryId, title, description: content });
   }
-  expected.sort((a, b) => a.id.localeCompare(b.id));
+  // The catalog lists the most recently updated collection first.
+  expected.reverse();
   const secret = "knowledge-preparation-batch-secret";
   const app = new Hono();
   registerKnowledgeRoutes(app, {

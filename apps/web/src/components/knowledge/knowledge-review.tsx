@@ -133,6 +133,14 @@ function batchOrigin(batch: KnowledgeReviewBatch): Origin {
   return { kind: "none", name: batch.title ?? "Earlier changes" };
 }
 
+/** Newest first; changes without a date (Skills) keep their order after them. */
+export function newestReviewItemsFirst<Item extends { createdAt: string | null }>(
+  items: readonly Item[],
+): Item[] {
+  const time = (item: Item) => (item.createdAt ? Date.parse(item.createdAt) : -Infinity);
+  return [...items].sort((left, right) => time(right) - time(left));
+}
+
 /* ------------------------------------------------------------------ queue */
 
 export interface ReviewQueue {
@@ -298,7 +306,10 @@ export function useReviewQueue(workspaceId: string, refresh: number): ReviewQueu
     }
     return result;
   }, [currentState]);
-  const items = useMemo(() => groups.flatMap((group) => group.items), [groups]);
+  const items = useMemo(
+    () => newestReviewItemsFirst(groups.flatMap((group) => group.items)),
+    [groups],
+  );
 
   return {
     items,
