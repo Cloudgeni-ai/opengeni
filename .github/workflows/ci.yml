@@ -223,6 +223,7 @@ jobs:
       contents: read
       actions: read # exact successful Batch attempt and immutable proof archives
     outputs:
+      runner_pool: ${{ steps.runner_pool.outputs.pool }}
       unit_reuse: ${{ steps.unit_reuse.outputs.reuse }}
       mode: ${{ steps.plan.outputs.mode }}
       unit_count: ${{ steps.plan.outputs.unit_count }}
@@ -238,6 +239,39 @@ jobs:
       e2e_matrix: ${{ steps.plan.outputs.e2e_matrix }}
       browser_lane_matrix: ${{ steps.plan.outputs.browser_lane_matrix }}
     steps:
+      # Temporary catch-up aid (docs/gcp-main-ci-runners.md): trusted main-path
+      # runs use GCP ephemeral runners only while MAIN_CI_RUNNER is gcp and the
+      # runner controller's heartbeat is fresh; otherwise every job stays on
+      # GitHub-hosted runners, so a dead pool never leaves main CI queued.
+      - name: Select runner pool
+        id: runner_pool
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAIN_CI_RUNNER: ${{ vars.MAIN_CI_RUNNER }}
+          GCP_RUNNER_HEARTBEAT: ${{ vars.GCP_RUNNER_HEARTBEAT }}
+          TRUSTED_MAIN_PATH: ${{ github.repository == 'Cloudgeni-ai/opengeni' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        run: |
+          set -euo pipefail
+          pool=hosted
+          if [ "$TRUSTED_MAIN_PATH" = true ] && [ "$MAIN_CI_RUNNER" = gcp ]; then
+            # vars are captured when the run attempt is created, so judge the heartbeat
+            # against the attempt's start rather than this (possibly long-queued) job.
+            reference="$(date +%s)"
+            started="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" --jq .run_started_at 2>/dev/null || true)"
+            if [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+              started_epoch="$(date -u -d "$started" +%s)"
+              if [ "$started_epoch" -lt "$reference" ]; then reference="$started_epoch"; fi
+            fi
+            if [[ "$GCP_RUNNER_HEARTBEAT" =~ ^[0-9]{1,12}$ ]] && [ $((reference - GCP_RUNNER_HEARTBEAT)) -le 300 ]; then
+              pool=gcp
+            else
+              echo "::warning::GCP runner heartbeat is stale; main CI uses GitHub-hosted runners"
+            fi
+          fi
+          echo "Runner pool: $pool"
+          echo "pool=$pool" >> "$GITHUB_OUTPUT"
+
       - name: Check out exact candidate
         uses: actions/checkout@v6
         with:
@@ -415,7 +449,7 @@ jobs:
     name: Source and type contracts
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 35
     steps:
       - name: Check out repository
@@ -614,7 +648,7 @@ jobs:
     name: Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
       # Finish independent shards so one failure cannot hide other regressions.
@@ -734,7 +768,7 @@ jobs:
     name: Real-service shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 40
     strategy:
       fail-fast: true
@@ -786,7 +820,7 @@ jobs:
     name: Impacted E2E shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 35
     strategy:
       fail-fast: true
@@ -876,7 +910,7 @@ jobs:
     name: Real-service and recovery tests
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Check out repository
@@ -982,7 +1016,7 @@ jobs:
     name: Browser and visual acceptance (${{ matrix.lane }})
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 71
     strategy:
       fail-fast: false
@@ -1360,7 +1394,7 @@ jobs:
     name: Package and bundle contracts
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 55
     steps:
       - name: Check out repository
@@ -1631,7 +1665,7 @@ jobs:
     name: Real Chromium browser controller
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     # 17m browser installation + 2m recovery + 6m headless + 5m headed,
     # with 3m for checkout, dependencies and cleanup.
     timeout-minutes: 33
@@ -1754,7 +1788,7 @@ jobs:
     # Every image-producing source needs the deployment receipt, including a
     # docs-only main push. Staging validates it before importing these images.
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.mode != 'docs' || needs.plan.outputs.bake_images == 'true') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -2008,7 +2042,7 @@ jobs:
     # skipped lane fails this job.
     needs: [automation-admission, plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -2063,6 +2097,7 @@ jobs:
     environment: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'public-release' || 'ci-build' }}
     needs: [automation-admission, plan, artifact-runtime, release-image-validation]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}
+    # Main pushes sign the agent with public-release credentials: keep them on GitHub-hosted runners.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -2158,7 +2193,7 @@ jobs:
     name: Build worker workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 40
     permissions:
       contents: read
@@ -2207,7 +2242,7 @@ jobs:
     name: Build web workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 40
     permissions:
       contents: read
@@ -2254,7 +2289,7 @@ jobs:
     name: Build artifact materializer workload image
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -2309,7 +2344,7 @@ jobs:
     name: Build artifact outbox dispatcher workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -2358,7 +2393,7 @@ jobs:
     name: Build relay workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -2403,7 +2438,7 @@ jobs:
     name: Build headless sandbox workload image
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -2457,7 +2492,7 @@ jobs:
     name: Build desktop sandbox workload image
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -2527,7 +2562,7 @@ jobs:
       - sandbox-image
       - desktop-image
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ needs.plan.outputs.runner_pool == 'gcp' && fromJSON('["self-hosted","linux","x64","opengeni-main-gcp"]') || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
