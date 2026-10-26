@@ -43,7 +43,7 @@ use crate::cgroup::{Cgroup, MemoryStats};
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
-use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
+use crate::spec::{Drive, MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
 use crate::{CancellationToken, Completion, Engine, Found};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
@@ -129,6 +129,28 @@ fn huge_pages(pages: PageSize) -> &'static str {
         PageSize::Base => "None",
         PageSize::Huge => "2M",
     }
+}
+
+/// `/drives/{id}` for a fresh boot, with the drive's file at `path` as the
+/// VMM sees it.
+///
+/// No `cache_type`: Firecracker's default, `Unsafe`, offers the guest no
+/// flush, so the VMM syncs a drive only while it takes a snapshot. Callers
+/// that check a disk for lost writes around each snapshot rely on that.
+///
+/// A writable drive takes the guest's discards (the default `Sync` engine
+/// punches a hole in the file for each), so the host gets back what the
+/// guest's file system frees once the guest trims it. The device's
+/// snapshot state keeps the feature, so a restore needs no request; an
+/// image whose VM booted without it restores without it.
+fn drive_config(drive: &Drive, path: &Path) -> Value {
+    json!({
+        "drive_id": drive.id,
+        "path_on_host": path,
+        "is_root_device": drive.root,
+        "is_read_only": drive.read_only,
+        "discard": !drive.read_only,
+    })
 }
 
 /// The memory part of `/machine-config` for a fresh boot.
@@ -888,21 +910,12 @@ impl Engine for Firecracker {
             )
             .await?;
             for drive in &spec.drives {
-                // No `cache_type`: Firecracker's default, `Unsafe`, offers
-                // the guest no flush, so the VMM syncs a drive only while
-                // it takes a snapshot. Callers that check a disk for lost
-                // writes around each snapshot rely on that.
                 vm.call(
                     OP,
                     ErrorKind::Fatal,
                     "PUT",
                     &format!("/drives/{}", drive.id),
-                    &json!({
-                        "drive_id": drive.id,
-                        "path_on_host": vm.inside(OP, &drive.path)?,
-                        "is_root_device": drive.root,
-                        "is_read_only": drive.read_only,
-                    }),
+                    &drive_config(drive, &vm.inside(OP, &drive.path)?),
                 )
                 .await?;
             }

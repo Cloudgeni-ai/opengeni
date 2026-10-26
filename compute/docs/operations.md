@@ -675,6 +675,11 @@ before users move to compute from Modal:
   than its free space suggests. Writes outside the agent (logs, other
   programs on the volume) are not booked: keep `--disk-reserve-mib` above
   them and alert on free space early, for example below 20 %.
+  A sleeping sandbox's disk holds only what its files use: the guest trims
+  its file system before every pause, so space it freed comes back to the
+  volume ([ADR 6](adr/0006-memory-images-and-disks.md)). Sandboxes whose VM
+  booted before a host had discards, or whose image's guest is older, keep
+  what they freed until their next fresh boot.
 - **Encryption is the volume's and the store's.** Chunks are stored raw or
   compressed, not encrypted by us, and a host's state volume holds disks and
   memory images. Check that every state volume and the bucket are encrypted

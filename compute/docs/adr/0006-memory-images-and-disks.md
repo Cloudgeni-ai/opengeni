@@ -56,3 +56,17 @@ restore depend on every earlier link.
   names, which a power loss ends.
 - Reflinks make the copy nearly free on file systems that support them (XFS,
   Btrfs); elsewhere the copy costs real disk writes.
+- A disk's file gives back what its guest frees. Writable drives take the
+  guest's discards, which punch holes in the file, and before every pause
+  (the `sync` request, so also before every save and checkpoint) the guest
+  trims its root file system's free runs of 1 MiB or more. A sleeping
+  sandbox's disk, its archive and its next wake then hold only what its
+  files use, not the most they ever held. Discarded blocks read as zeros,
+  which a memory image never needs back: the guest's file system had freed
+  them. The device's snapshot state keeps the feature, so a VM keeps the
+  drive it booted with across every save and wake: one booted before
+  discards were turned on, or whose image has an older guest that does not
+  trim, keeps holding what it freed until it boots fresh. Templates are
+  rebuilt with the feature, so clones have it. A running VM's disk books
+  its whole length less what it holds alone either way, so trimming changes
+  admission only for disks at rest.
