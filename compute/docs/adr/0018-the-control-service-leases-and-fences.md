@@ -170,7 +170,10 @@ can be built and tested.
   on their deadline, guard and watchdog alone.
 - **A host that comes back is fenced until it has caught up.** It
   registers again only once its last registration lapsed (the store
-  refuses while that one is live, since its VMs may still run), and lists
+  refuses while that one is live, since its VMs may still run), or at
+  once if the machine restarted since that registration (both name the
+  kernel's boot they came from, and the boots differ: a restart ends
+  every VM, so nothing of the old one runs), and lists
   what it still has. The answer says, for each sandbox, to keep it, get it
   back, fetch it again from its archive, or drop it (`reconcile`: only a
   copy nobody took since it last ran is the newest). The host drops and

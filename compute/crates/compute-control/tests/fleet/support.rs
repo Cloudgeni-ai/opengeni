@@ -800,6 +800,7 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
             memory_mib: 64 * 1024,
             cpu_millis: 64_000,
             disk_mib: 1 << 20,
+            boot: None,
         },
         capacity: inner.capacity.lock().unwrap().clone(),
         held,

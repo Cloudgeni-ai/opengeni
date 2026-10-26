@@ -412,6 +412,18 @@ authority alone for agent links.
   service would treat it as lost and recover them from their latest
   archive, which loses their programs and what they wrote since; drain
   with `{"awake": true}` first.
+- **A host that restarts** (its watchdog reset it, its kernel panicked,
+  or someone rebooted it) has lost every VM's programs; their files stay
+  on its state volume. Its agent registers again as soon as it is up,
+  and the service takes that at once, as the same host under a new
+  epoch, because the host's description names the kernel's boot
+  (`boot`) and it differs from the live registration's: nothing of that
+  one can still run, so there is nothing to wait for or fence. Its
+  sandboxes wake from their files there. A host from before `boot`, or
+  an agent that registers again on the same boot (its VMs may still
+  run; an agent that merely restarts renews the lease it holds instead),
+  waits for its live registration to lapse as before, and is fenced if it
+  holds sandboxes.
 - **A lost host.** A host whose lease renewals stop is given up on after
   its term and margin if it holds no sandboxes, or its instance is found
   stopped or gone. One that holds sandboxes is waited for first, up to

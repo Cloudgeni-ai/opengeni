@@ -116,6 +116,7 @@ impl FleetArgs {
                 memory_mib: host.memory_bytes >> 20,
                 cpu_millis: host.cpu_millis,
                 disk_mib: stat.f_blocks.saturating_mul(stat.f_frsize) >> 20,
+                boot: compute_host::fleet::this_boot(),
             },
             image: self.image.clone(),
             listen: self.listen,

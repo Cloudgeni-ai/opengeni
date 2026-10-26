@@ -64,6 +64,18 @@ use crate::agent::{Handle, HostError};
 /// down until the host's lease ran out.
 pub const GUARD_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// The machine's current boot as its kernel names it, which a restart
+/// changes: the host tells the service in its description, so a
+/// registration after a restart is taken at once (see
+/// [`HostInfo::boot`](compute_protocol::fleet::HostInfo::boot)). `None`
+/// where the kernel does not say.
+#[must_use]
+pub fn this_boot() -> Option<String> {
+    let read = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let boot = read.trim();
+    (!boot.is_empty()).then(|| boot.to_owned())
+}
+
 /// Waits until a guard whose lock is `lock` is ready, up to `within`, and
 /// says whether it is.
 ///
@@ -331,6 +343,16 @@ impl FleetConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boot a host names is the kernel's, the same however often it
+    /// is read while the machine runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_host_names_the_kernels_boot() {
+        let boot = this_boot().expect("Linux names its boot");
+        assert_eq!(boot.len(), 36, "a UUID: {boot}");
+        assert_eq!(this_boot().as_deref(), Some(boot.as_str()));
+    }
 
     /// The agent waits for a guard that gets ready a moment after it
     /// starts, and gives up on one that does not.

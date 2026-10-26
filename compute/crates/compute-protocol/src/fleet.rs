@@ -87,6 +87,15 @@ pub struct HostInfo {
     pub cpu_millis: u64,
     /// Disk it gives sandboxes, in MiB.
     pub disk_mib: u64,
+    /// The machine's current boot, as its kernel names it (Linux
+    /// `/proc/sys/kernel/random/boot_id`). A restart ends every VM on the
+    /// machine, so a host that registers from another boot than its live
+    /// registration's leaves nothing of that registration running, and
+    /// the service takes the new attempt at once instead of waiting for
+    /// the old one to lapse. `None` from a host that does not tell, which
+    /// then waits as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot: Option<String>,
 }
 
 /// Ready clones a host holds of one image and shape (see the host's ready
@@ -413,6 +422,24 @@ pub struct HostCertificate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A host from before the boot was named describes itself without it,
+    /// and one that knows its boot sends it under `boot`.
+    #[test]
+    fn a_host_names_its_boot_only_when_it_knows_it() {
+        let older = r#"{"name":"h","address":"h:1","zone":"z","profile":"nested",
+            "cpu_template":"none","memory_mib":1,"cpu_millis":1,"disk_mib":1}"#;
+        let info: HostInfo = serde_json::from_str(older).unwrap();
+        assert_eq!(info.boot, None);
+        assert!(!serde_json::to_string(&info).unwrap().contains("boot"));
+        let named = HostInfo {
+            boot: Some("8c5f0e9e-4f4b-4b5e-9a49-1c0b7d0b6a11".into()),
+            ..info
+        };
+        let wire = serde_json::to_value(&named).unwrap();
+        assert_eq!(wire["boot"], "8c5f0e9e-4f4b-4b5e-9a49-1c0b7d0b6a11");
+        assert_eq!(serde_json::from_value::<HostInfo>(wire).unwrap(), named);
+    }
 
     #[test]
     fn a_certificate_request_names_its_proof() {

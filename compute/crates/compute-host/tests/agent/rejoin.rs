@@ -285,6 +285,7 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
             memory_mib: 4096,
             cpu_millis: 4000,
             disk_mib: 4096,
+            boot: None,
         },
         image: "base".into(),
         listen,

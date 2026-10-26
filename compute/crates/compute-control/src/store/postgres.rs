@@ -16,8 +16,8 @@ use tokio_postgres::Row;
 use tokio_postgres::types::{Json, ToSql};
 
 use super::{
-    Admission, Admits, AgentRef, HostRow, LifecycleRow, Linked, RequestRow, Result, SandboxRow,
-    Spec, Store, StoreError, Write, admits, rule,
+    Admission, Admits, AgentRef, HostRow, Known, LifecycleRow, Linked, RequestRow, Result,
+    SandboxRow, Spec, Store, StoreError, Write, admits, rule,
 };
 use crate::e2b::lifecycle::Record;
 
@@ -492,8 +492,8 @@ impl Store for PostgresStore {
         let tx = client.transaction().await.map_err(database)?;
         let found = tx
             .query_opt(
-                "select id, state, attempt, epoch, answer from compute_hosts \
-                 where name = $1 for update",
+                "select id, state, attempt, epoch, answer, info ->> 'boot' as boot \
+                 from compute_hosts where name = $1 for update",
                 &[&register.info.name],
             )
             .await
@@ -501,14 +501,18 @@ impl Store for PostgresStore {
         let known = match &found {
             Some(row) => Some((
                 row.get::<_, i64>("id"),
-                state_of(row.get("state"))?,
-                nonce_of(row.get("attempt")),
+                Known {
+                    state: state_of(row.get("state"))?,
+                    answered: nonce_of(row.get("attempt")),
+                    boot: row.get("boot"),
+                },
             )),
             None => None,
         };
         match admits(
-            known.map(|(_, state, attempt)| (state, attempt)),
+            known.map(|(_, known)| known),
             register.attempt,
+            register.info.boot.as_deref(),
         ) {
             Admits::Again => {
                 let row = found.expect("a row");
