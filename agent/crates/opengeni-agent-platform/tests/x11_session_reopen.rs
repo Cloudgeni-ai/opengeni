@@ -11,8 +11,8 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use opengeni_agent_platform::{
-        linux_layout_text_keysyms, DesktopBackend as _, LinuxDesktop, ReopeningDesktop, X11Display,
-        XServerCheck,
+        linux_layout_text_keysyms, linux_named_key_chord_keysyms, DesktopBackend as _,
+        LinuxDesktop, ReopeningDesktop, X11Display, XServerCheck,
     };
 
     fn xvfb() -> Option<PathBuf> {
@@ -172,5 +172,19 @@ mod linux {
         assert!(linux_layout_text_keysyms(Some(&display), "\u{416}").is_err());
         // Without a layout display every character maps unchecked.
         assert!(linux_layout_text_keysyms(None, "\u{416}").is_ok());
+        // Named keys are checked against the same layout: F2 is on it, F13
+        // is not, and the compositor would drop it while reporting success.
+        assert_eq!(
+            linux_named_key_chord_keysyms(Some(&display), "Alt+F2").unwrap(),
+            vec![0xffe9, 0xffbf]
+        );
+        let missing = linux_named_key_chord_keysyms(Some(&display), "F13").unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("X11 keymap does not expose named key/chord component 0xffca"),
+            "{missing}"
+        );
+        assert!(linux_named_key_chord_keysyms(None, "F13").is_ok());
     }
 }

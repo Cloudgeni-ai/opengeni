@@ -1625,4 +1625,78 @@ describe("personal connect commands: mint scope user -> exchange -> machine owne
     // The refused command was not used up: another machine can still use it.
     expect((await exchange(elsewhere, "ed25519:OTHER")).status).toBe(201);
   }, 120_000);
+
+  test("a removed personal machine connects again from any of its owner's workspaces", async () => {
+    if (!available) throw new Error("personal connect commands require PostgreSQL");
+    const { accountId, workspaceId } = await personalWorkspace();
+    const [second] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${accountId}, 'second') returning id`;
+    const otherWorkspaceId = second!.id;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${otherWorkspaceId}, ${accountId})`;
+    await admin`insert into workspace_memberships (account_id, workspace_id, subject_id, permissions)
+      values (${accountId}, ${otherWorkspaceId}, ${OWNER}, '["enrollments:manage"]'::jsonb)`;
+    const app = appFor();
+    const connectFrom = async (inWorkspace: string) => {
+      const minted = await app.request(`/v1/workspaces/${inWorkspace}/enrollments/token`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: await principalBearer(accountId, inWorkspace, "human_session"),
+        },
+        body: JSON.stringify({ scope: "user" }),
+      });
+      expect(minted.status).toBe(201);
+      const { token } = (await minted.json()) as { token: string };
+      return await app.request("/v1/enrollments/token/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: exchangeBody(token, "ed25519:MOVED"),
+      });
+    };
+    const machine = async () =>
+      await admin<{ id: string; workspace_id: string; status: string }[]>`
+        select id, workspace_id, status from enrollments
+        where pubkey = 'ed25519:MOVED' order by created_at`;
+    const sandboxesOf = async (enrollmentId: string) =>
+      await admin<{ workspace_id: string }[]>`
+        select workspace_id from sandboxes where enrollment_id = ${enrollmentId}`;
+    const remove = async (enrollmentId: string) =>
+      await admin`update enrollments set status = 'revoked', revoked_at = now()
+        where id = ${enrollmentId}`;
+
+    expect((await connectFrom(workspaceId)).status).toBe(201);
+    const [first] = await machine();
+    await remove(first!.id);
+
+    // Removed in the first workspace: it connects from the second one.
+    const moved = await connectFrom(otherWorkspaceId);
+    expect(moved.status).toBe(201);
+    const { credentials } = (await moved.json()) as { credentials: { agentId: string } };
+    const afterMove = await machine();
+    expect(afterMove).toEqual([
+      { id: first!.id, workspace_id: workspaceId, status: "revoked" },
+      { id: credentials.agentId, workspace_id: otherWorkspaceId, status: "active" },
+    ]);
+    // The first workspace keeps its history; the second gets its own sandbox.
+    expect(await sandboxesOf(first!.id)).toEqual([{ workspace_id: workspaceId }]);
+    expect(await sandboxesOf(credentials.agentId)).toEqual([{ workspace_id: otherWorkspaceId }]);
+
+    // While it is live there, the first workspace is refused, as before.
+    const refused = await connectFrom(workspaceId);
+    expect(refused.status).toBe(409);
+    expect(await machine()).toEqual(afterMove);
+
+    // Removed again, the first workspace reactivates its own enrollment.
+    await remove(credentials.agentId);
+    const back = await connectFrom(workspaceId);
+    expect(back.status).toBe(201);
+    expect(((await back.json()) as { credentials: { agentId: string } }).credentials.agentId).toBe(
+      first!.id,
+    );
+    expect(await machine()).toEqual([
+      { id: first!.id, workspace_id: workspaceId, status: "active" },
+      { id: credentials.agentId, workspace_id: otherWorkspaceId, status: "revoked" },
+    ]);
+  }, 120_000);
 });

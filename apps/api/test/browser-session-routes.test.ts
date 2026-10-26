@@ -747,6 +747,46 @@ describe("BrowserSession route discipline", () => {
     expect(browserTabDiagnosisError(transient)).toBe(transient);
   });
 
+  test("a controller conflict worth retrying keeps its retry advice in the API envelope", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const debugged = new BrowserControlRequestError(409, {
+      code: "operation_conflict",
+      message:
+        "Another debugger is attached to this tab, so the Opengeni Browser extension cannot control it right now. Try again in a moment; if it keeps happening, close DevTools for this tab or use another tab",
+      retryable: true,
+    });
+    // Read routes (observe, tab state, screenshot) all end in browserRouteError.
+    app.get("/v1/test/debugged", () => {
+      throw browserRouteError(debugged);
+    });
+    const response = await app.request("http://localhost/v1/test/debugged", {
+      headers: { "x-opengeni-correlation-id": "debugged-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: debugged.error.message,
+        retryable: true,
+        requestId: "debugged-request",
+      },
+    });
+    // A final conflict stays final.
+    const final = new BrowserControlRequestError(409, {
+      code: "operation_conflict",
+      message: "another operation holds this tab",
+      retryable: false,
+    });
+    expect(browserTabDiagnosisError(final)).toBe(final);
+  });
+
   test("a controller change of unknown outcome stays unknown in the API envelope", async () => {
     const app = createApp({
       settings: testSettings(),

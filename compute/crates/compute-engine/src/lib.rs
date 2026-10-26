@@ -243,9 +243,11 @@ pub trait Engine: Send + Sync + 'static {
 
     /// What the VM's processes have written through system calls since
     /// they started: every write its VMM makes to the VM's drives counts
-    /// once the call returns, besides others an engine documents. Only
-    /// differences between readings of the same VM mean anything. Engines
-    /// that cannot tell report an error.
+    /// once the call returns, and every file page it dirties, also with no
+    /// write call (as a discard over part of a block does), counts as it is
+    /// dirtied, besides others an engine documents. Only differences
+    /// between readings of the same VM mean anything. Engines that cannot
+    /// tell report an error.
     fn writes(&self, vm: &Self::Vm) -> Result<Writes, EngineError> {
         let _ = vm;
         Err(EngineError::new(
@@ -345,7 +347,10 @@ pub trait Engine: Send + Sync + 'static {
     /// balloon rather than run out of memory. Every pause lets the balloon
     /// go first, and a request that comes once the VM is paused or ended
     /// does nothing and fails, so a VM never sleeps with its balloon set
-    /// and a request not made is never taken for done. For 0, resolves
+    /// and a request not made is never taken for done. Requests take
+    /// effect in the order this is called: one that reaches the VM after a
+    /// later request, or a later pause or resume, does nothing and fails,
+    /// so the setting asked last is the one that holds. For 0, resolves
     /// once the guest has taken back every page it gave. The future does
     /// not borrow the VM. Engines without balloons do nothing.
     fn set_balloon(

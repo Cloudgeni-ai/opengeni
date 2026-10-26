@@ -27,7 +27,7 @@ use compute_storage::store::ChunkStore;
 use crate::hosts::{Answered, Hosts};
 use crate::link::Links;
 use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
-use crate::view::{Target, View, shape_key};
+use crate::view::{Target, Unplaced, View, shape_key};
 
 pub use holds::Depth;
 pub use moves::Drained;
@@ -96,6 +96,21 @@ fn host_failure(answered: &Answered) -> Failure {
             _ => Failure::Host(message.clone()),
         },
         other => Failure::Host(format!("unexpected answer {other:?}")),
+    }
+}
+
+/// What placing nothing means to a caller: a fleet without room, or a
+/// replica that cannot read its hosts and so cannot tell.
+fn unplaced(unplaced: Unplaced) -> Failure {
+    match unplaced {
+        Unplaced::NoRoom => Failure::NoCapacity,
+        Unplaced::Blind(None) => {
+            Failure::Unavailable("this replica has not read its hosts from the store yet".into())
+        }
+        Unplaced::Blind(Some(since)) => Failure::Unavailable(format!(
+            "this replica has not read its hosts from the store for {} s",
+            since.as_secs()
+        )),
     }
 }
 
@@ -287,10 +302,7 @@ impl<S: Store> Service<S> {
 
     /// Places `demand` on a host not in `exclude`.
     fn place(&self, demand: &Demand, exclude: &HashSet<HostId>) -> Result<Target, Failure> {
-        let placement = self
-            .view
-            .place(demand, exclude)
-            .ok_or(Failure::NoCapacity)?;
+        let placement = self.view.place(demand, exclude).map_err(unplaced)?;
         self.view.target(placement.host).ok_or(Failure::NoCapacity)
     }
 
@@ -659,5 +671,24 @@ impl<S: Store> Service<S> {
             .store
             .delete_retiring(row.id, row.version, now_ms())
             .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_blind_replica_is_unavailable_and_a_full_fleet_has_no_capacity() {
+        assert!(matches!(unplaced(Unplaced::NoRoom), Failure::NoCapacity));
+        let blind = unplaced(Unplaced::Blind(Some(Duration::from_secs(12))));
+        assert!(
+            matches!(&blind, Failure::Unavailable(why) if why.contains("for 12 s")),
+            "{blind}"
+        );
+        assert!(matches!(
+            unplaced(Unplaced::Blind(None)),
+            Failure::Unavailable(_)
+        ));
     }
 }

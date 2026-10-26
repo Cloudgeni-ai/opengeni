@@ -223,6 +223,13 @@ Opengeni, and the workspace's provider key never reaches the device:
    returns the new segments, the `after` to pass next time, and `ended` once
    the transcript is ready. The saved live text is deleted then.
 
+With a `system` track, the microphone's live text is under the recording
+owner's name (the person recording sees their own; others see the owner's
+person in the speaker directory, which starting such a recording adds them
+to, or "Microphone" while no name is known) and the system track's text is
+under "Others". A microphone alone is
+named by its source, as are tracks of a recording without a `system` track.
+
 `createBrowserRecorder({ liveTranscript: true })` and
 `useRecorder({ liveTranscript: true })` do all of this and expose the text as
 it arrives in `snapshot.live`: per track, its `state` (`connecting`, `live`,
@@ -237,8 +244,11 @@ All processing runs in the background worker. It joins each track's chunks
 into one seekable file (kept for playback and re-runs), transcribes each
 track and stores transcript version 1.
 
-On a desktop recording, the microphone track is the person recording and the
-system track is everyone else, so only the system track needs diarization.
+When a recording has computer or tab audio (a `system` track), the
+microphone track is the person recording and the system track is everyone
+else, so only the system track needs diarization. A microphone alone (a
+phone, or the web without tab audio) may hear a whole room, so it is
+diarized like any other track.
 When the chosen model can tell speakers apart, its diarization is used.
 Otherwise, or when the request or `settings.recordings.diarizer` says
 `ours`, Opengeni tells the speakers apart itself, on the worker's CPU.
@@ -473,6 +483,15 @@ memory and storage at rates you set to your cloud's prices.
 - `GET` and `POST /v1/workspaces/:workspaceId/recording-people` read and add
   people in the directory.
 
+With a `system` track, every new version names the microphone's speaker
+(`track-N`) after the recording's owner, as "It's me" would: their person in
+the directory, added for them if they have none, named from their profile
+(else their membership label or email). It has `source: "track"` and no
+`confidence`, so it reads as known rather than as a voice suggestion. A name
+a person gave that speaker always carries over instead, through every later
+version; clearing it leaves the speaker to the owner again in the next
+version. A microphone alone keeps diarized `Speaker 1`, `Speaker 2`, ….
+
 ## Notes
 
 A meeting has two Markdown documents beside its transcript. The `notepad` is
@@ -526,6 +545,14 @@ speech skipped. Renaming a speaker to someone else takes its voice back out.
 Voiceprints are kept apart by kind of audio (microphone, call audio from the
 computer, and room or uploaded audio) and by speaker model, because vectors
 from different models don't compare.
+
+Naming the microphone after the person recording enrolls nobody: adding
+them to the directory gives no agreement, a `track` speaker is not one
+"named as them" (only confirmed and carried-over speakers teach a
+voiceprint, so agreeing later learns nothing from it), and the microphone
+isn't diarized beside a system track, so it has no voice vector anyway.
+Since the owner is the microphone, they aren't suggested for a speaker on
+the system track, and the microphone itself is never offered a suggestion.
 
 When a transcript finishes, each unnamed speaker is compared with the
 remembered voices. A cosine similarity of 0.6 or more names the closest

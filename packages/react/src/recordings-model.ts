@@ -4,6 +4,7 @@
  * No React here, so each rule is tested on its own.
  */
 import {
+  recordingMicrophoneIsOwner,
   recordingSpeakerDefault,
   type Recording,
   type RecordingSpeaker,
@@ -188,6 +189,25 @@ export function defaultSpeakerName(
     case "label":
       return named.label;
   }
+}
+
+/**
+ * A live preview lane's name when the microphone is the person recording
+ * (computer or tab audio beside it): `ownerName` for the microphone and
+ * "Others" for the computer or tab audio. Null otherwise, when lanes are
+ * named by their source.
+ */
+export function ownerLiveLaneName(
+  tracks: readonly { trackNumber: number; source: RecordingTrack["source"] }[],
+  trackNumber: number,
+  ownerName: string,
+  msg: OpenGeniText = defaultText,
+): string | null {
+  if (!recordingMicrophoneIsOwner(tracks)) return null;
+  const source = tracks.find((track) => track.trackNumber === trackNumber)?.source;
+  if (source === "microphone") return ownerName;
+  if (source === "system") return msg("meetings.liveTranscript.others");
+  return null;
 }
 
 /** True when the label has a name of its own: a person, a plain name, or a suggestion. */

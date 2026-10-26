@@ -1181,6 +1181,74 @@ describe("CUA desktop boundary", () => {
     }
   });
 
+  test("reads an app that did not answer in time as an incomplete observation, keeping its refs", async () => {
+    const fixture = new Fixture();
+    const original = fixture.callTool.bind(fixture);
+    let busy = false;
+    fixture.callTool = async (name, argumentsJson) => {
+      const response = await original(name, argumentsJson);
+      const args = JSON.parse(argumentsJson) as Record<string, unknown>;
+      if (name === "get_window_state" && args.include_accessibility_tree && busy) {
+        // An app tracking an open menu answers no accessibility request:
+        // CUA reads nothing, keeps the last snapshot and says why.
+        const state = JSON.parse(response.structuredJson!);
+        delete state.snapshot_id;
+        Object.assign(state, {
+          elements: [],
+          tree_markdown: "",
+          truncated: true,
+          truncation_reason: "timeout",
+          nodes_pending: 1,
+          degraded: true,
+          degraded_reason: "ax_app_unresponsive: pid 42 did not answer accessibility",
+        });
+        response.structuredJson = JSON.stringify(state);
+      }
+      return response;
+    };
+    const backend = await CuaComputerBackend.open(fixture, "macos");
+    try {
+      const target = (await backend.targets())[0]!;
+      const first = await backend.observe(target.id);
+      busy = true;
+      const unanswered = await backend.observe(target.id);
+      expect(unanswered.roots).toEqual([]);
+      expect(unanswered.incomplete).toEqual({ reason: "time_budget", unreadCount: 1 });
+      expect(unanswered.observationId).not.toBe(first.observationId);
+      // It shows no focused element, so keys sent on it are refused rather
+      // than sent to the last reading's focused element.
+      for (const keys of [
+        { type: "keyboard", action: "press", value: "Enter" },
+        { type: "keyboard", action: "type", value: "Hello" },
+      ] as const)
+        await expect(
+          backend.dispatch({
+            ...command(first),
+            expectedObservationId: unanswered.observationId,
+            action: keys,
+          }),
+        ).rejects.toMatchObject({
+          code: "invalid_action",
+          dispatched: false,
+          message:
+            "The app did not answer the latest reading of this window, so it shows no focused element and no keys were sent: observe the window again, then send them",
+        });
+      expect(
+        fixture.calls.filter((call) => call.name === "press_key" || call.name === "type_text"),
+      ).toEqual([]);
+      // A ref of the last reading still acts, naming the unanswered reading.
+      await backend.dispatch({
+        ...command(first),
+        expectedObservationId: unanswered.observationId,
+      });
+      expect(fixture.calls.filter((call) => call.name === "click").at(-1)?.args).toMatchObject({
+        element_token: "s1:0",
+      });
+    } finally {
+      await backend.close();
+    }
+  });
+
   test("invokes controls and opens their menu through the native button contract", async () => {
     const fixture = new Fixture();
     const original = fixture.callTool.bind(fixture);
@@ -4168,6 +4236,22 @@ describe("CUA desktop boundary", () => {
             dispatched: true,
             message:
               "CUA stopped the batch at action 2: That element is in a bubble or popover shown over this window, which takes only invoke and set_value on its ref; pointer and key input would land on the window under it, so none was sent",
+          },
+          details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
+        },
+        // Pointer or key input to an item of a menu the app has open over the
+        // window was refused before anything was sent: say what reaches it.
+        {
+          reply: step(1, {
+            phase: "action",
+            code: "element_in_open_menu",
+            message: "CUA's own reason, naming its own tools",
+          }),
+          expected: {
+            code: "invalid_action",
+            dispatched: true,
+            message:
+              "CUA stopped the batch at action 2: That element is in a menu this app has open over this window, which takes only invoke on its ref, or set_value on the control that opened it; pointer and key input would not reach the menu, so none was sent",
           },
           details: { batchActionsCompleted: 1, batchStoppedActionState: "failed" },
         },

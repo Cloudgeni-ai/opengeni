@@ -1625,7 +1625,8 @@ fn inject_pointer(
 
 /// Prepares key events from one complete immutable delivery keymap.
 /// Text the layout cannot type is bound to spare keycodes in `remap` (complete
-/// presses only: a held key must not outlive its temporary binding).
+/// presses only: a held key must not outlive its temporary binding). So is a
+/// function key the layout lacks (F13 to F24 on most layouts).
 fn prepare_key(
     mapping: &X11KeyboardMapping,
     key: &v1::KeyEvent,
@@ -1692,12 +1693,21 @@ fn prepare_key(
         }
         return Ok(events);
     }
+    let complete = matches!(
+        key.action(),
+        v1::KeyAction::Press | v1::KeyAction::Unspecified
+    );
     let keycodes = parse_named_key_chord(&key.key)?
         .into_iter()
         .map(|keysym| {
             mapping
                 .resolve(keysym)
                 .map(|stroke| stroke.keycode)
+                .or_else(|| {
+                    (complete && is_function_keysym(keysym))
+                        .then(|| remap.bind_keysym(mapping, keysym))
+                        .flatten()
+                })
                 .ok_or_else(|| {
                     PlatformError::Unsupported(format!(
                         "X11 keymap does not expose named key/chord component {keysym:#x}"
@@ -1719,6 +1729,12 @@ fn prepare_key(
         }
     }
     Ok(events)
+}
+
+/// F1 to F24. These have no modifier or lock action, so a layout that lacks one
+/// can take it on a spare keycode for one complete press.
+fn is_function_keysym(keysym: u32) -> bool {
+    (0xffbe..=0xffd5).contains(&keysym)
 }
 
 /// The maximum number of synthetic wheel clicks one scroll event may emit per
@@ -1848,6 +1864,14 @@ impl X11KeyboardMapping {
         keysyms::character_keysyms(character).find_map(|keysym| self.resolve(keysym))
     }
 
+    /// Whether any group and level of any keycode carries `keysym`. Unlike
+    /// [`Self::resolve`] (the first group's two shift levels, which XTEST can
+    /// press), this is what a compositor resolving keysyms itself across
+    /// groups and levels could deliver.
+    fn contains(&self, keysym: u32) -> bool {
+        keysym != 0 && self.keysyms.contains(&keysym)
+    }
+
     fn row(&self, keycode: u8) -> Option<&[u32]> {
         let start = usize::from(keycode.checked_sub(self.min_keycode)?) * self.keysyms_per_keycode;
         self.keysyms.get(start..start + self.keysyms_per_keycode)
@@ -1888,8 +1912,9 @@ fn keyboard_mapping(conn: &x11rb::rust_connection::RustConnection) -> Option<X11
     })
 }
 
-/// Characters bound to spare keycodes for one delivery batch. Planning has no
-/// X11 side effect; [`KeymapRemap::apply`] performs the bindings.
+/// Characters and function keys bound to spare keycodes for one delivery
+/// batch. Planning has no X11 side effect; [`KeymapRemap::apply`] performs the
+/// bindings.
 #[derive(Debug, Default)]
 struct KeymapRemapPlan {
     /// (keycode, keysym, original row) in binding order.
@@ -1904,7 +1929,12 @@ impl KeymapRemapPlan {
         if !keysyms::remappable(character) {
             return None;
         }
-        let keysym = keysyms::text_keysym(character);
+        self.bind_keysym(mapping, keysyms::text_keysym(character))
+    }
+
+    /// Returns the spare keycode bound to `keysym`, reusing a binding for a
+    /// repeated keysym. `None` when no spare is left.
+    fn bind_keysym(&mut self, mapping: &X11KeyboardMapping, keysym: u32) -> Option<u8> {
         if let Some((keycode, ..)) = self.bindings.iter().find(|binding| binding.1 == keysym) {
             return Some(*keycode);
         }
@@ -2083,18 +2113,19 @@ fn resolve_keysym(
     None
 }
 
-/// Maps a small set of named keys to X11 keysyms (the keys the computer-use tool
-/// commonly emits). Printable single characters fall through to their ASCII
-/// codepoint, which equals the Latin-1 keysym for the printable range.
+/// Maps the named keys the computer-use tool accepts on every platform to X11
+/// keysyms. Printable single characters fall through to their ASCII codepoint,
+/// which equals the Latin-1 keysym for the printable range.
 fn named_key_to_keysym(name: &str) -> Option<u32> {
-    // X11 keysym constants (from keysymdef.h). Only the common control keys are
-    // named; everything else is treated as literal text by the caller.
-    let sym = match name.to_ascii_lowercase().as_str() {
+    // X11 keysym constants (from keysymdef.h).
+    let lower = name.to_ascii_lowercase();
+    let sym = match lower.as_str() {
         "enter" | "return" => 0xff0d,
         "tab" => 0xff09,
         "escape" | "esc" => 0xff1b,
         "backspace" => 0xff08,
-        "delete" => 0xffff,
+        "delete" | "del" => 0xffff,
+        "insert" => 0xff63,
         "space" | " " => 0x0020,
         "arrowleft" | "left" => 0xff51,
         "arrowup" | "up" => 0xff52,
@@ -2104,7 +2135,21 @@ fn named_key_to_keysym(name: &str) -> Option<u32> {
         "end" => 0xff57,
         "pageup" => 0xff55,
         "pagedown" => 0xff56,
+        "printscreen" | "print" => 0xff61,
+        "contextmenu" | "menu" | "apps" => 0xff67,
+        // CapsLock and NumLock are refused: a lock left on silently changes
+        // later typed text, and the window route refuses a locked keyboard.
+        "scrolllock" => 0xff14,
+        "pause" => 0xff13,
         _ => {
+            // F1 to F24 are consecutive keysyms from F1 (0xffbe).
+            if let Some(number) = lower
+                .strip_prefix('f')
+                .filter(|digits| !digits.starts_with('0'))
+                .and_then(|digits| digits.parse::<u32>().ok())
+            {
+                return (1..=24).contains(&number).then(|| 0xffbe + number - 1);
+            }
             // A single printable char maps to its codepoint (Latin-1 keysym range).
             // Use the original spelling here: `A` intentionally resolves to the
             // shifted glyph, while named controls are case-insensitive.
@@ -2133,13 +2178,58 @@ pub fn validate_linux_named_key_chord(name: &str) -> PlatformResult<()> {
 }
 
 /// The keysyms of one named key or chord, modifiers first, for compositors
-/// that accept keysym input directly (GNOME Wayland remote desktop).
+/// that accept keysym input directly but silently drop keysyms the layout
+/// lacks (GNOME Wayland remote desktop).
+///
+/// `layout_display` names an X display that mirrors the compositor's layout
+/// (Xwayland). When it is reachable, a keysym that no group and no level of
+/// that keymap carries is refused, since it can never be delivered. Anything
+/// some group or level carries is passed on: the compositor picks the keycode
+/// in its active group and applies the level modifier itself (a Latin
+/// shortcut on a non-Latin first layout, an AltGr character). Without the
+/// display the keysyms are returned unchecked.
 ///
 /// # Errors
 ///
-/// The same unsupported-input failures as [`validate_linux_named_key_chord`].
-pub fn linux_named_key_chord_keysyms(name: &str) -> PlatformResult<Vec<u32>> {
-    parse_named_key_chord(name)
+/// The same unsupported-input failures as [`validate_linux_named_key_chord`],
+/// and one naming the first keysym the layout lacks.
+pub fn linux_named_key_chord_keysyms(
+    layout_display: Option<&str>,
+    name: &str,
+) -> PlatformResult<Vec<u32>> {
+    let keysyms = parse_named_key_chord(name)?;
+    layout_named_keysyms(layout_mapping(layout_display).as_ref(), keysyms)
+}
+
+fn layout_named_keysyms(
+    mapping: Option<&X11KeyboardMapping>,
+    keysyms: Vec<u32>,
+) -> PlatformResult<Vec<u32>> {
+    if let Some(missing) =
+        mapping.and_then(|mapping| keysyms.iter().find(|&&keysym| !mapping.contains(keysym)))
+    {
+        return Err(PlatformError::Unsupported(format!(
+            "X11 keymap does not expose named key/chord component {missing:#x}"
+        )));
+    }
+    Ok(keysyms)
+}
+
+/// The keymap of a layout display (Xwayland), or `None` when it is absent or
+/// unreachable.
+fn layout_mapping(layout_display: Option<&str>) -> Option<X11KeyboardMapping> {
+    layout_display
+        .and_then(|display| {
+            // Xwayland runs as the user; its socket file and server are
+            // checked like any other display before the cookie is sent.
+            X11Display {
+                server: XServerCheck::AgentUser,
+                ..X11Display::named(display)
+            }
+            .connect()
+            .ok()
+        })
+        .and_then(|(conn, _)| keyboard_mapping(&conn))
 }
 
 /// The keysym that types each character of `text` in the active keyboard
@@ -2158,18 +2248,7 @@ pub fn linux_layout_text_keysyms(
     layout_display: Option<&str>,
     text: &str,
 ) -> PlatformResult<Vec<u32>> {
-    let mapping = layout_display
-        .and_then(|display| {
-            // Xwayland runs as the user; its socket file and server are
-            // checked like any other display before the cookie is sent.
-            X11Display {
-                server: XServerCheck::AgentUser,
-                ..X11Display::named(display)
-            }
-            .connect()
-            .ok()
-        })
-        .and_then(|(conn, _)| keyboard_mapping(&conn));
+    let mapping = layout_mapping(layout_display);
     text.chars()
         .map(|character| match &mapping {
             None => Ok(keysyms::text_keysym(character)),
@@ -2195,6 +2274,13 @@ fn parse_named_key_chord(name: &str) -> PlatformResult<Vec<u32>> {
             "X11 named key/chord contains an empty component".to_string(),
         ));
     }
+    // A modifier pressed on its own is a key too: a lone Super opens the
+    // application menu on most desktops.
+    if let [single] = parts.as_slice() {
+        if let Some(modifier) = modifier_keysym(single) {
+            return Ok(vec![modifier]);
+        }
+    }
     let mut result = Vec::with_capacity(parts.len());
     let mut seen_modifiers = BTreeSet::new();
     for (index, part) in parts.iter().enumerate() {
@@ -2213,7 +2299,9 @@ fn parse_named_key_chord(name: &str) -> PlatformResult<Vec<u32>> {
             )));
         }
         result.push(named_key_to_keysym(part).ok_or_else(|| {
-            PlatformError::Unsupported(format!("unknown X11 named key `{part}`"))
+            PlatformError::Unsupported(format!(
+                "unknown key `{part}`; use one character or a key name: Enter, Tab, Escape, Backspace, Delete, Insert, Home, End, PageUp, PageDown, ArrowUp/Down/Left/Right, Space, F1-F24, PrintScreen, ContextMenu, ScrollLock, Pause, or a modifier (Ctrl, Shift, Alt, Super) alone or with one key"
+            ))
         })?);
     }
     if result.is_empty() || result.len() == seen_modifiers.len() {
@@ -2677,6 +2765,72 @@ mod tests {
         assert_eq!(remap.bindings, []);
     }
 
+    fn named(key: &str, action: v1::KeyAction) -> v1::KeyEvent {
+        v1::KeyEvent {
+            key: key.into(),
+            is_text: false,
+            action: action.into(),
+        }
+    }
+
+    #[test]
+    fn function_keys_the_layout_lacks_are_bound_for_one_complete_press() {
+        let mapping = spare_keymap();
+        let mut remap = KeymapRemapPlan::default();
+        assert_eq!(
+            prepare_key(&mapping, &named("F13", v1::KeyAction::Press), &mut remap).unwrap(),
+            [(KEY_PRESS, 13), (KEY_RELEASE, 13)]
+        );
+        // A chord binds only the missing key; a repeat reuses its binding.
+        assert_eq!(
+            prepare_key(
+                &mapping,
+                &named("Shift+F20", v1::KeyAction::Unspecified),
+                &mut remap
+            )
+            .unwrap(),
+            [
+                (KEY_PRESS, 9),
+                (KEY_PRESS, 10),
+                (KEY_RELEASE, 10),
+                (KEY_RELEASE, 9)
+            ]
+        );
+        assert_eq!(
+            prepare_key(&mapping, &named("f13", v1::KeyAction::Press), &mut remap).unwrap(),
+            [(KEY_PRESS, 13), (KEY_RELEASE, 13)]
+        );
+        assert_eq!(
+            remap.bindings,
+            [(13, 0xffca, vec![0, 0]), (10, 0xffd1, vec![0, 0])]
+        );
+        // No spare left, a held key, or a missing key that is not a function
+        // key stays refused.
+        for (key, action) in [
+            ("F24", v1::KeyAction::Press),
+            ("F13", v1::KeyAction::Down),
+            ("F13", v1::KeyAction::Up),
+            ("Pause", v1::KeyAction::Press),
+        ] {
+            let Err(PlatformError::Unsupported(message)) =
+                prepare_key(&mapping, &named(key, action), &mut remap)
+            else {
+                panic!("{key} {action:?} must be unsupported");
+            };
+            assert!(
+                message.starts_with("X11 keymap does not expose named key/chord component"),
+                "{message}"
+            );
+        }
+        assert_eq!(remap.bindings.len(), 2);
+        let mut fresh = KeymapRemapPlan::default();
+        assert_eq!(
+            prepare_key(&mapping, &named("F24", v1::KeyAction::Press), &mut fresh).unwrap(),
+            [(KEY_PRESS, 13), (KEY_RELEASE, 13)]
+        );
+        assert_eq!(fresh.bindings, [(13, 0xffd5, vec![0, 0])]);
+    }
+
     #[test]
     fn restore_writes_back_only_bindings_no_other_client_changed() {
         let applied = vec![
@@ -2905,6 +3059,152 @@ mod tests {
         assert!(validate_linux_named_key_chord("NotARealKey").is_err());
         assert!(parse_named_key_chord("Control+Control+c").is_err());
         assert!(parse_named_key_chord("Control+").is_err());
+    }
+
+    #[test]
+    fn linux_named_keys_resolve() {
+        // keysymdef.h values.
+        for (name, keysym) in [
+            ("F1", 0xffbe),
+            ("f2", 0xffbf),
+            ("F12", 0xffc9),
+            ("F24", 0xffd5),
+            ("Insert", 0xff63),
+            ("Del", 0xffff),
+            ("PrintScreen", 0xff61),
+            ("ContextMenu", 0xff67),
+            ("Menu", 0xff67),
+            ("ScrollLock", 0xff14),
+            ("Pause", 0xff13),
+        ] {
+            assert_eq!(named_key_to_keysym(name), Some(keysym), "{name}");
+        }
+        for name in ["F0", "F25", "F01", "Fx"] {
+            assert_eq!(named_key_to_keysym(name), None, "{name}");
+        }
+        // Single characters keep their meaning.
+        assert_eq!(named_key_to_keysym("f"), Some(0x66));
+        assert_eq!(named_key_to_keysym("F"), Some(0x46));
+        assert_eq!(
+            parse_named_key_chord("ALT+F2").unwrap(),
+            vec![0xffe9, 0xffbf]
+        );
+        assert_eq!(
+            linux_named_key_chord_keysyms(None, "Shift+F10").unwrap(),
+            vec![0xffe1, 0xffc7]
+        );
+    }
+
+    #[test]
+    fn lock_keys_that_change_later_typing_are_refused() {
+        for chord in ["CapsLock", "numlock", "Ctrl+CapsLock", "Shift+NumLock"] {
+            let error = parse_named_key_chord(chord).unwrap_err().to_string();
+            assert!(error.contains("unknown key"), "{error}");
+            // The accepted-names list must not offer them either.
+            let (_, accepted) = error.split_once("; ").expect("accepted names");
+            assert!(!accepted.contains("CapsLock"), "{error}");
+            assert!(!accepted.contains("NumLock"), "{error}");
+            assert!(accepted.contains("ScrollLock"), "{error}");
+            assert!(
+                linux_named_key_chord_keysyms(None, chord).is_err(),
+                "{chord}"
+            );
+            assert!(validate_linux_named_key_chord(chord).is_err(), "{chord}");
+        }
+    }
+
+    #[test]
+    fn keysym_input_refuses_named_keys_the_layout_lacks() {
+        // A compositor taking keysyms drops one its layout lacks while
+        // reporting success, so a chord is checked as a whole first.
+        let mapping = spare_keymap();
+        assert_eq!(
+            layout_named_keysyms(Some(&mapping), vec![0xffe1, 0xff0d]).unwrap(),
+            [0xffe1, 0xff0d]
+        );
+        for keysyms in [vec![0xffca], vec![0xffe1, 0xffd1], vec![0xffe3, 0x61]] {
+            let error = layout_named_keysyms(Some(&mapping), keysyms.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("X11 keymap does not expose named key/chord component"),
+                "{keysyms:?}: {error}"
+            );
+        }
+        // No layout display: unchecked, as for text.
+        assert_eq!(layout_named_keysyms(None, vec![0xffca]).unwrap(), [0xffca]);
+    }
+
+    /// A core keymap as an XKB server reports it: per keycode, group 1 levels
+    /// 1-2, group 2 levels 1-2, then group 1 levels 3-4.
+    fn core_keymap(rows: &[[u32; 6]]) -> X11KeyboardMapping {
+        X11KeyboardMapping {
+            min_keycode: 8,
+            keysyms_per_keycode: 6,
+            keysyms: rows.iter().flatten().copied().collect(),
+            modifier_keycodes: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn keysym_input_accepts_keys_on_any_group_or_level() {
+        let chord = |mapping: &X11KeyboardMapping, name: &str| {
+            layout_named_keysyms(Some(mapping), parse_named_key_chord(name).unwrap())
+        };
+        let control = [0xffe3, 0, 0xffe3, 0, 0, 0];
+        let shift = [0xffe1, 0, 0xffe1, 0, 0, 0];
+        // ru,us: Latin letters are only in the second group.
+        let ru_us = core_keymap(&[
+            control,
+            shift,
+            [0x6d3, 0x6f3, 0x63, 0x43, 0, 0], // Cyrillic_es / c
+            [0x6c5, 0x6e5, 0x74, 0x54, 0, 0], // Cyrillic_ie / t
+            [0x6cd, 0x6ed, 0x76, 0x56, 0, 0], // Cyrillic_em / v
+        ]);
+        for name in ["Ctrl+c", "Ctrl+v", "Ctrl+Shift+t", "c"] {
+            assert!(chord(&ru_us, name).is_ok(), "ru,us {name}");
+        }
+        // de: `@` is AltGr+q, the first group's third level.
+        let de = core_keymap(&[control, [0x71, 0x51, 0x71, 0x51, 0x40, 0x7d9]]);
+        assert_eq!(chord(&de, "@").unwrap(), [0x40]);
+        // us: F13 is on no group or level, so it could never be delivered.
+        let us = core_keymap(&[
+            control,
+            [0x63, 0x43, 0x63, 0x43, 0, 0],
+            [0xffbf, 0xffbf, 0xffbf, 0xffbf, 0xffbf, 0xffbf],
+        ]);
+        assert!(chord(&us, "Ctrl+c").is_ok());
+        assert!(chord(&us, "F2").is_ok());
+        let error = chord(&us, "F13").unwrap_err().to_string();
+        assert!(
+            error.contains("X11 keymap does not expose named key/chord component 0xffca"),
+            "{error}"
+        );
+        // NoSymbol is never a key.
+        assert!(!us.contains(0));
+    }
+
+    #[test]
+    fn a_lone_modifier_is_a_key() {
+        for name in ["Super", "meta", "Ctrl", "Alt", "Shift"] {
+            assert!(validate_linux_named_key_chord(name).is_ok(), "{name}");
+        }
+        assert_eq!(parse_named_key_chord("Super").unwrap(), vec![0xffeb]);
+        assert_eq!(
+            linux_named_key_chord_keysyms(None, "Meta").unwrap(),
+            vec![0xffeb]
+        );
+        // Two modifiers still need a key, and a repeat is still refused.
+        assert!(parse_named_key_chord("Ctrl+Alt").is_err());
+        assert!(parse_named_key_chord("Super+Super").is_err());
+    }
+
+    #[test]
+    fn unknown_keys_are_refused_with_the_accepted_names() {
+        let error = parse_named_key_chord("Ctrl+Hyper").unwrap_err().to_string();
+        assert!(error.contains("unknown key `Hyper`"), "{error}");
+        assert!(error.contains("F1-F24"), "{error}");
+        assert!(parse_named_key_chord("NotARealKey").is_err());
     }
 
     #[test]
