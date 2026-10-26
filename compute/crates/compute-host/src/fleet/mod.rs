@@ -18,9 +18,9 @@
 //!   second before the deadline in that file and kills them if they are
 //!   not frozen by then, and holds the kernel watchdog, so the VMs stop
 //!   whatever happens to the agent.
-//! - The host names the boot of its machine it runs under, to the service
-//!   and to its cloud ([`boot`]), so that a restart, which ends every VM,
-//!   is seen as one.
+//! - The host tells its cloud of the boot of its machine it runs under,
+//!   and names it to the service once the cloud took it ([`boot`]), so
+//!   that a restart, which ends every VM, is seen as one.
 
 mod boot;
 mod gate;
@@ -36,7 +36,7 @@ mod tls;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Context as _;
 use compute_fleet::{HostLease, LeaseTerms};
@@ -47,7 +47,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
-pub use boot::this_boot;
+pub use boot::{METADATA, Telling, boot_id};
 pub use gate::Admission;
 pub use gate::{LeaseGate, boot_now, slept};
 pub use guard::{
@@ -116,7 +116,8 @@ pub async fn prepare_guarded(fleet: Option<&FleetConfig>) -> anyhow::Result<Opti
 pub struct FleetConfig {
     /// The service's base URL, such as `https://control.example:8443`.
     pub control: String,
-    /// What the host tells the service it is.
+    /// What the host tells the service it is; the boot it names is the
+    /// one its cloud took ([`Self::boot`]), whatever this says.
     pub info: HostInfo,
     /// The name the fleet gives the image this host's sandboxes start
     /// from, which its ready-clone reports carry.
@@ -134,6 +135,9 @@ pub struct FleetConfig {
     /// The only authority trusted for agent-link gateways; `None` trusts
     /// the system's.
     pub agent_link_ca: Option<PathBuf>,
+    /// The boot of its machine the host tells its cloud of as it starts,
+    /// before it first registers; `None` tells none, and names none.
+    pub boot: Option<Telling>,
 }
 
 /// What the agent starts with in a fleet.
@@ -299,8 +303,19 @@ impl FleetConfig {
             .await
             .with_context(|| format!("listening on {}", self.listen))?;
         tracing::info!(listen = %self.listen, control = %self.control, "joining the fleet");
-        if let Some(boot) = self.info.boot.clone() {
-            tokio::spawn(async move { boot::tell_cloud(boot::METADATA, &boot).await });
+        // Whether the cloud took the machine's boot, once known: the host
+        // names one only then, and registers only once it is known.
+        let told = Arc::new(OnceLock::new());
+        match self.boot.clone() {
+            Some(telling) => {
+                let told = Arc::clone(&told);
+                tokio::spawn(async move {
+                    let _ = told.set(boot::tell_cloud(&telling).await);
+                });
+            }
+            None => {
+                let _ = told.set(None);
+            }
         }
         let listening = listen::Listening {
             acceptor: TlsAcceptor::from(Arc::clone(&tls.server)),
@@ -327,6 +342,7 @@ impl FleetConfig {
             gate,
             agent,
             info: self.info,
+            told,
             image: self.image,
         };
         tokio::select! {

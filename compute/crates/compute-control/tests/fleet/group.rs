@@ -15,10 +15,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use compute_control::group::{Credentials, GcpGroup, ServiceAccountKey};
-use compute_control::leader::Scaling;
-use compute_control::store::Store as _;
+use compute_control::leader::{Leading, Scaling};
+use compute_control::store::{Admission, Counted, MemoryStore, Store as _};
+use compute_control::view::View;
 use compute_fleet::{HostId, ScalePolicy};
-use compute_protocol::fleet::{Boot, Capacity, Registered};
+use compute_protocol::fleet::{Boot, Capacity, HostInfo, Register, Registered};
 use serde_json::{Value, json};
 
 use super::support::{FakeHost, Fleet, OPERATOR_KEY, roomy, until};
@@ -289,7 +290,7 @@ async fn counted(fleet: &Fleet, host: &FakeHost) -> bool {
         .await
         .unwrap()
         .iter()
-        .any(|(id, _)| *id == HostId(host.id()))
+        .any(|counted| counted.host == HostId(host.id()))
 }
 
 /// Longer than a lapse takes to be noticed: the term and margin, and a few
@@ -881,9 +882,9 @@ async fn a_lapsed_host_whose_machine_restarted_is_given_up_on_without_a_reset() 
     assert!(!acted(&compute), "{:?}", compute.asked());
 }
 
-/// An instance naming an earlier boot than its host registered from, such
-/// as one written before, its host's own write having failed, proves no
-/// restart: the lapsed host is reset as any.
+/// An instance naming another boot counted no later than the one its host
+/// registered from, such as one written before, proves no restart: the
+/// lapsed host is reset as any.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lapsed_host_whose_instance_names_an_earlier_boot_is_reset() {
     let (fleet, compute) = fleet(&[("hosts-a1b2", "RUNNING")]).await;
@@ -891,7 +892,7 @@ async fn a_lapsed_host_whose_instance_names_an_earlier_boot_is_reset() {
     let registered = host.boot();
     let earlier = Boot {
         id: "boot-before".into(),
-        at: registered.at - 600,
+        nth: registered.nth,
     };
     compute.booted("hosts-a1b2", &earlier);
     host.renewing(false);
@@ -900,6 +901,86 @@ async fn a_lapsed_host_whose_instance_names_an_earlier_boot_is_reset() {
     })
     .await;
     assert!(reset(&compute, "hosts-a1b2"), "{:?}", compute.asked());
+}
+
+/// A registration from `boot` of the host named `name`, under `attempt`,
+/// holding nothing.
+fn registration(name: &str, attempt: u64, boot: Boot) -> Register {
+    Register {
+        host: None,
+        attempt,
+        info: HostInfo {
+            name: name.to_owned(),
+            address: "127.0.0.1:1".into(),
+            zone: "z".into(),
+            profile: "nested".into(),
+            cpu_template: "none".into(),
+            memory_mib: 4096,
+            cpu_millis: 4000,
+            disk_mib: 4096,
+            boot: Some(boot),
+        },
+        capacity: roomy(),
+        held: Vec::new(),
+    }
+}
+
+/// What decides a fence is the boot named by the registration given up
+/// on, not an earlier registration's, which a view behind the store may
+/// still show: a host given up on, which registered again from a later
+/// boot that its instance names, still runs what it registered then, and
+/// is reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_view_of_an_earlier_registration_spares_the_current_one_no_reset() {
+    let compute = Arc::new(Compute::default());
+    compute.target_size.store(1, Ordering::SeqCst);
+    compute
+        .instances
+        .lock()
+        .unwrap()
+        .insert("hosts-a1b2".into(), "RUNNING".into());
+    let api = serve(Arc::clone(&compute)).await;
+    let group = Arc::new(GcpGroup::new(GROUP, &api, Credentials::Metadata(api.clone())).unwrap());
+    let store = Arc::new(MemoryStore::new());
+    let terms = super::support::terms();
+    let boot = |id: &str, nth| Boot { id: id.into(), nth };
+
+    let first = registration("hosts-a1b2", 1, boot("boot-a", 1));
+    let Admission::Registered { host, .. } = store.register(&first).await.unwrap() else {
+        panic!("the first registration is refused");
+    };
+    // The view sees the first registration, and nothing after it.
+    let view = View::new(1, terms.term);
+    view.apply(&store.hosts_changed(0).await.unwrap());
+    let count = |counted: Vec<Counted>| {
+        counted
+            .into_iter()
+            .find(|counted| counted.host == host)
+            .map(|counted| counted.renewals)
+    };
+    let renewals = count(store.renewals().await.unwrap()).unwrap();
+    assert!(store.give_up(host, renewals, 1).await.unwrap().is_some());
+    // The machine restarted: its host registers again from the next boot,
+    // which its instance names, and then stops renewing.
+    let second = registration("hosts-a1b2", 2, boot("boot-b", 2));
+    assert!(matches!(
+        store.register(&second).await.unwrap(),
+        Admission::Registered { host: again, .. } if again == host
+    ));
+    compute.booted("hosts-a1b2", &boot("boot-b", 2));
+
+    let mut leading = Leading::new(Arc::clone(&store), terms, Some(group));
+    let within = tokio::time::Instant::now() + Duration::from_secs(15);
+    while !reset(&compute, "hosts-a1b2") {
+        assert!(
+            tokio::time::Instant::now() < within,
+            "never reset: {:?}, counted {:?}",
+            compute.asked(),
+            count(store.renewals().await.unwrap())
+        );
+        leading.tick(&view).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// A host cut off only by the network still holds its sandboxes, frozen,

@@ -12,11 +12,13 @@ use std::time::Duration;
 use bytes::Bytes;
 use compute_core::HostPolicy;
 use compute_fleet::LeaseTerms;
-use compute_host::fleet::{FleetConfig, Joined, Tls, TlsFiles, hold_lock, ready_lock, wire_terms};
+use compute_host::fleet::{
+    FleetConfig, Joined, Telling, Tls, TlsFiles, hold_lock, ready_lock, wire_terms,
+};
 use compute_host::protocol::{ErrorCode, Reply, Request};
 use compute_host::{HostAgent, NoStore};
 use compute_protocol::fleet::{
-    Answer, Envelope, HostInfo, REGISTER_PATH, RENEW_PATH, REPORT_PATH, Register, Registered,
+    Answer, Boot, Envelope, HostInfo, REGISTER_PATH, RENEW_PATH, REPORT_PATH, Register, Registered,
     Renew, Renewed, Report, Ruling, Sent, Verdict,
 };
 use http_body_util::{BodyExt as _, Full};
@@ -294,6 +296,7 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
         guard_lock: root.join("guard.lock"),
         terms,
         agent_link_ca: None,
+        boot: None,
     };
     // A guard holds the VMs to the lease file.
     let _guard = hold_lock(&ready_lock(&fleet.guard_lock)).unwrap();
@@ -491,5 +494,115 @@ async fn a_restarted_agent_keeps_its_lease_while_it_takes_back_its_sandboxes() {
         "nothing rebooted"
     );
     joined.abort();
+    drop(handle);
+}
+
+/// A metadata server whose guest attribute names `named`, answering
+/// every request `delay` late; returns its URL and the attribute.
+async fn metadata(named: &str, delay: Duration) -> (String, Arc<Mutex<String>>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let value = Arc::new(Mutex::new(named.to_owned()));
+    let attribute = Arc::clone(&value);
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                continue;
+            };
+            let value = Arc::clone(&value);
+            tokio::spawn(async move {
+                let answer = hyper::service::service_fn(
+                    move |request: hyper::Request<hyper::body::Incoming>| {
+                        let value = Arc::clone(&value);
+                        async move {
+                            sleep(delay).await;
+                            let put = request.method() == hyper::Method::PUT;
+                            let body = request.into_body().collect().await.unwrap().to_bytes();
+                            let mut value = value.lock().unwrap();
+                            let answer = if put {
+                                *value = String::from_utf8(body.to_vec()).unwrap();
+                                Bytes::new()
+                            } else {
+                                Bytes::from(value.clone())
+                            };
+                            Ok::<_, std::convert::Infallible>(hyper::Response::new(Full::new(
+                                answer,
+                            )))
+                        }
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(tcp), answer)
+                    .await;
+            });
+        }
+    });
+    (url, attribute)
+}
+
+/// A host that tells its cloud of its machine's boot first registers once
+/// the cloud took it, however slow the metadata server, and names the
+/// boot as it was written: counted one past the boot named before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_registers_naming_the_boot_its_cloud_took() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let (root, world) = lab.stop().await;
+    let terms = terms();
+    let authority = Authority::new();
+    let service_tls = Tls::load(&authority.issue(&root, "service")).unwrap();
+    let (service, port) = Service::start(&service_tls, terms).await;
+    let (url, attribute) =
+        metadata(r#"{"id":"boot-before","nth":4}"#, Duration::from_secs(1)).await;
+    let listen = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let fleet = FleetConfig {
+        control: format!("https://localhost:{port}"),
+        info: HostInfo {
+            name: "host-a.example".into(),
+            address: listen.to_string(),
+            zone: "zone-a".into(),
+            profile: "nested".into(),
+            cpu_template: "test".into(),
+            memory_mib: 4096,
+            cpu_millis: 4000,
+            disk_mib: 4096,
+            boot: None,
+        },
+        image: "base".into(),
+        listen,
+        tls: authority.issue(&root, "host"),
+        lease_file: root.join("run/lease"),
+        guard_lock: root.join("guard.lock"),
+        terms,
+        agent_link_ca: None,
+        boot: Some(Telling {
+            id: "boot-now".into(),
+            metadata: url,
+        }),
+    };
+    let _guard = hold_lock(&ready_lock(&fleet.guard_lock)).unwrap();
+    let (handle, _agent, mut joined) = join(&fleet, &root, &world).await;
+    let within = Instant::now() + Duration::from_secs(15);
+    let registered = async {
+        while service.heard.lock().unwrap().registers.is_empty() {
+            assert!(Instant::now() < within, "it never registered");
+            sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        result = joined.run() => panic!("left the fleet: {result:?}"),
+        () = registered => {}
+    }
+    let told = Boot {
+        id: "boot-now".into(),
+        nth: 5,
+    };
+    let heard = service.heard.lock().unwrap();
+    assert_eq!(heard.registers[0].info.boot, Some(told.clone()));
+    let written: Boot = serde_json::from_str(&attribute.lock().unwrap()).unwrap();
+    assert_eq!(written, told);
+    drop(heard);
     drop(handle);
 }

@@ -41,7 +41,7 @@ use tokio::time::Instant;
 
 use crate::group::{Fenced, GcpGroup, Member, Started};
 use crate::metrics::{GaveUp, GroupSeen, Metrics};
-use crate::store::{self, Store};
+use crate::store::{self, Counted, Store};
 use crate::view::{GroupHost, View};
 
 /// How often the leader looks at renewal counts.
@@ -72,8 +72,9 @@ pub struct Scaling {
 
 /// What the leader needs of the store.
 pub trait Leases: Send + Sync + 'static {
-    /// The renewal count of every host not given up on.
-    fn renewals(&self) -> impl Future<Output = store::Result<Vec<(HostId, u64)>>> + Send;
+    /// The renewal count of every host not given up on, with the boot its
+    /// registration named; see [`Store::renewals`].
+    fn renewals(&self) -> impl Future<Output = store::Result<Vec<Counted>>> + Send;
 
     /// Gives up on `host` if its count is still `renewals`; see
     /// [`Store::give_up`].
@@ -85,7 +86,7 @@ pub trait Leases: Send + Sync + 'static {
 }
 
 impl<S: Store> Leases for S {
-    fn renewals(&self) -> impl Future<Output = store::Result<Vec<(HostId, u64)>>> + Send {
+    fn renewals(&self) -> impl Future<Output = store::Result<Vec<Counted>>> + Send {
         Store::renewals(self)
     }
 
@@ -289,8 +290,8 @@ impl<L: Leases> Leading<L> {
     /// whose count stood still too long.
     pub async fn tick(&mut self, view: &View) {
         self.reap();
-        let renewals = match self.leases.renewals().await {
-            Ok(renewals) => renewals,
+        let counted = match self.leases.renewals().await {
+            Ok(counted) => counted,
             Err(error) => {
                 // Seen nothing new: a host is given up on only once the
                 // store shows again that its count stood still.
@@ -303,7 +304,12 @@ impl<L: Leases> Leading<L> {
         // given up on (perhaps without this leadership seeing the outcome)
         // and perhaps since forgotten, so nothing is left to watch or try
         // again for it.
-        self.expiry.observe_all(renewals, now);
+        self.expiry.observe_all(
+            counted
+                .iter()
+                .map(|counted| (counted.host, counted.renewals)),
+            now,
+        );
         self.again_at.retain(|host, _| self.expiry.watches(*host));
         let lapsed: Vec<_> = self.expiry.expired(now).collect();
         let still: HashMap<HostId, Duration> = if lapsed.is_empty() {
@@ -318,7 +324,15 @@ impl<L: Leases> Leading<L> {
         for (host, renewals) in lapsed {
             let draining = view.draining(host);
             let still = still.get(&host).copied().unwrap_or(Duration::MAX);
-            match self.lapse(host, view, still).await {
+            // The boot named by the registration this count is under, read
+            // with the count: the view may still show an earlier
+            // registration of the host, whose boot ended when this one's
+            // began.
+            let boot = counted
+                .iter()
+                .find(|counted| counted.host == host && counted.renewals == renewals)
+                .and_then(|counted| counted.boot.clone());
+            match self.lapse(host, view, still, boot).await {
                 Lapse::GiveUp => {
                     let result = self.leases.give_up(host, renewals).await;
                     self.given_up(host, draining, result.map_err(|error| error.to_string()));
@@ -335,9 +349,16 @@ impl<L: Leases> Leading<L> {
         }
     }
 
-    /// Whether `host`, silent for `still`, is fenced first, given up on
-    /// now, or decided later.
-    async fn lapse(&mut self, host: HostId, view: &View, still: Duration) -> Lapse {
+    /// Whether `host`, silent for `still` under a registration that named
+    /// the machine's boot `boot` if it named one, is fenced first, given
+    /// up on now, or decided later.
+    async fn lapse(
+        &mut self,
+        host: HostId,
+        view: &View,
+        still: Duration,
+        boot: Option<MachineBoot>,
+    ) -> Lapse {
         if self.fencing.values().any(|(fenced, _)| *fenced == host)
             || self
                 .again_at
@@ -359,7 +380,7 @@ impl<L: Leases> Leading<L> {
         let Some(group) = self.group.clone() else {
             return if waits { Lapse::Later } else { Lapse::GiveUp };
         };
-        let Some((name, boot)) = view.name_and_boot(host) else {
+        let Some(name) = view.name(host) else {
             // The view has not caught up with the store yet.
             return Lapse::Later;
         };
@@ -745,6 +766,15 @@ mod tests {
 
     const HOST: HostId = HostId(1);
 
+    /// [`HOST`] at `renewals`, its registration naming no boot.
+    fn counted(renewals: u64) -> Counted {
+        Counted {
+            host: HOST,
+            renewals,
+            boot: None,
+        }
+    }
+
     fn terms() -> LeaseTerms {
         let mut terms = LeaseTerms {
             term: Duration::from_secs(2),
@@ -769,7 +799,7 @@ mod tests {
     }
 
     impl Leases for Slow {
-        async fn renewals(&self) -> store::Result<Vec<(HostId, u64)>> {
+        async fn renewals(&self) -> store::Result<Vec<Counted>> {
             let delay = {
                 let mut delays = self.delays.lock().unwrap();
                 if delays.is_empty() {
@@ -779,7 +809,7 @@ mod tests {
                 }
             };
             tokio::time::sleep(delay).await;
-            Ok(vec![(HOST, self.count.load(Ordering::SeqCst))])
+            Ok(vec![counted(self.count.load(Ordering::SeqCst))])
         }
 
         fn give_up(
@@ -849,11 +879,11 @@ mod tests {
     }
 
     impl Leases for AnswerLost {
-        fn renewals(&self) -> impl Future<Output = store::Result<Vec<(HostId, u64)>>> + Send {
+        fn renewals(&self) -> impl Future<Output = store::Result<Vec<Counted>>> + Send {
             std::future::ready(Ok(if self.given_up.load(Ordering::SeqCst) {
                 Vec::new()
             } else {
-                vec![(HOST, 1)]
+                vec![counted(1)]
             }))
         }
 

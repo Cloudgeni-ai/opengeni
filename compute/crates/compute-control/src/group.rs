@@ -403,13 +403,14 @@ impl GcpGroup {
     }
 
     /// Whether instance `name`'s machine has restarted since boot `boot`:
-    /// its guest attribute names a later boot ([`Boot::follows`]). Only
-    /// software on the machine writes it, its host's agent as it starts,
-    /// so a later boot there means the one named has ended, and every VM
-    /// with it. An earlier boot there may be one written before the
-    /// registration, the host's own write failing, so it proves nothing;
-    /// nor does a boot to compare missing, or an attribute that cannot be
-    /// read.
+    /// its guest attribute names a boot counted later ([`Boot::follows`]).
+    /// Only software on the machine writes it, its host's agent as it
+    /// starts, which names a boot only once the attribute took it and
+    /// counts each boot on from the one there, so a boot counted later
+    /// there means the one named has ended, and every VM with it. One
+    /// counted earlier may be one written before the registration, so it
+    /// proves nothing; nor does a boot to compare missing, or an attribute
+    /// that cannot be read.
     pub async fn restarted_since(&self, name: &str, boot: Option<&Boot>) -> bool {
         let Some(boot) = boot else {
             return false;

@@ -147,18 +147,27 @@ can be built and tested.
   with its memory kept, so neither is taken as fenced); a suspended one is
   stopped. One whose machine restarted since its host registered is
   fenced already, since a restart ends every VM, and is left as it is,
-  without the wait for a host holding sandboxes either: a host names its
-  machine's boot (the kernel's boot id and when it began) when it
-  registers, and as it starts it writes that boot to its instance's guest
-  attributes, which only software on the machine can write (the guest
-  network closes the metadata server to sandboxes) and the leader reads
-  through the cloud's API. Only a later boot there than the registration
-  named counts: an earlier one may have been written before the
-  registration, with the host's own write failing, so it proves nothing,
-  and neither does no attribute or one that cannot be read; the instance
-  is reset as before. Without this, a machine its watchdog reset, or that
-  crashed, was reset a second time once its old registration lapsed,
-  just as its new host came up. A
+  without the wait for a host holding sandboxes either. As it starts, a
+  host writes its machine's boot to its instance's guest attributes,
+  which only software on the machine can write (the guest network closes
+  the metadata server to sandboxes) and the leader reads through the
+  cloud's API: the kernel's boot id, and the boot's number, counted one
+  past the boot the attribute named before (an agent started again
+  under the same boot keeps it). It names that boot when it registers
+  only once the cloud took it, and its first registration waits until
+  it knows. So while a boot runs, its instance names no other boot
+  numbered higher, and a higher one there proves the registration's boot
+  ended. The order is counted rather than timed, so that no clock set
+  back across a restart can make an earlier boot look later. An earlier
+  or equal number there may have been written before the registration,
+  so it proves nothing, nor does no attribute, one that cannot be read,
+  or a registration that named no boot: the instance is reset as before.
+  The boot compared is the one named by the registration whose renewal
+  count the leader saw stand still, read with that count from the same
+  row, since the give-up applies only at that count: not one from a view
+  that may still show the host's earlier registration. Without this, a
+  machine its watchdog reset, or that crashed, was reset a second time
+  once its old registration lapsed, just as its new host came up. A
   fence the cloud does not confirm in two minutes, or that fails, keeps
   the host live and is tried again five seconds later, so nothing is
   handed on from a host whose VMs might still run. Once given up on, a

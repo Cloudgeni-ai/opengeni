@@ -230,7 +230,7 @@ pub async fn counted(fleet: &Fleet, host: &FakeHost) -> bool {
         .await
         .unwrap()
         .iter()
-        .any(|(counted, _)| *counted == compute_fleet::HostId(host.id()))
+        .any(|counted| counted.host == compute_fleet::HostId(host.id()))
 }
 
 /// Waits until the service gives up on `host`, and returns when it did.
@@ -580,7 +580,7 @@ impl FakeHost {
             attempt: AtomicU64::new(u64::from_le_bytes(random) >> 1),
             boot: Mutex::new(Boot {
                 id: format!("boot-{:016x}", u64::from_le_bytes(random)),
-                at: 1_761_480_000,
+                nth: 3,
             }),
         });
         let acceptor = TlsAcceptor::from(Arc::new(fleet.pki.host_server(name)));
@@ -615,12 +615,12 @@ impl FakeHost {
     }
 
     /// Has its machine restart, as far as the boot it names goes: it
-    /// names another, begun a minute later, from its next registration,
-    /// which it returns.
+    /// names another, counted next, from its next registration, which it
+    /// returns.
     pub fn restart(&self) -> Boot {
         let mut boot = self.inner.boot.lock().unwrap();
         boot.id.push_str("-again");
-        boot.at += 60;
+        boot.nth += 1;
         boot.clone()
     }
 

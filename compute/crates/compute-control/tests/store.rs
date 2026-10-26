@@ -113,7 +113,7 @@ async fn renewals<S: Store>(store: &S, host: HostId) -> Option<u64> {
         .await
         .unwrap()
         .into_iter()
-        .find_map(|(counted, renewals)| (counted == host).then_some(renewals))
+        .find_map(|counted| (counted.host == host).then_some(counted.renewals))
 }
 
 /// Runs a check against every store at hand: `memory` and `postgres` are

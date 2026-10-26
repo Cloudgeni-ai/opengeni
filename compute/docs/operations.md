@@ -435,8 +435,11 @@ authority alone for agent links.
   A GCP host whose machine restarted (its watchdog reset it, or it
   crashed) is given up on as soon as its lease lapses, with no second
   reset and no wait: its agent writes the machine's boot to the
-  instance's `compute/boot` guest attribute as it starts, and the
-  service sees a later boot there than the old registration named. The
+  instance's `compute/boot` guest attribute as it starts, numbered one
+  past the boot named there before, and the service sees a boot numbered
+  higher there than the old registration named. The agent registers
+  only once it has written the boot (or given up, within ten seconds),
+  and names it only if the write was taken. The
   host template turns guest attributes on (`enable-guest-attributes`) and
   the service's role may read them
   (`compute.instances.getGuestAttributes`); without either, the agent
