@@ -6158,21 +6158,21 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
 
   /**
    * Closes the list a native dropdown shows while it is open. The browser
-   * draws that list itself and gives it the keyboard, so Escape closes it
-   * without reaching the page, as a person's choice does: no blur or focus
-   * on the select, which keeps its focus. Best effort: a list that stays open
+   * draws that list itself and gives it the keyboard, so an Escape key press
+   * closes it and the list consumes it. Only the press is sent: the release
+   * would arrive after the list closed and reach the page, and a person's
+   * choice makes no key events at all. Nor is there a blur or focus on the
+   * select, which keeps its focus. Best effort: a list that stays open
    * changes nothing about the choice already made.
    */
   private async closeDropdownList(state: TargetState): Promise<void> {
-    for (const type of ["rawKeyDown", "keyUp"] as const) {
-      await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
-        type,
-        key: "Escape",
-        code: "Escape",
-        windowsVirtualKeyCode: 27,
-        nativeVirtualKeyCode: 27,
-      });
-    }
+    await this.sendActionTarget(state, "Input.dispatchKeyEvent", {
+      type: "rawKeyDown",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+      nativeVirtualKeyCode: 27,
+    });
   }
 
   private async clickNode(
@@ -9318,6 +9318,10 @@ const SELECT_OPTIONS_FUNCTION = `function(values) {
   return true;
 }`;
 
+// Whether the option (this) is hidden from a dropdown's list, which never
+// shows it: hidden itself or by its group, by attribute or by style.
+const HIDDEN_OPTION_SOURCE = `[this, this.parentElement instanceof HTMLOptGroupElement ? this.parentElement : null].some((element) => element !== null && (element.hidden || getComputedStyle(element).display === "none"))`;
+
 // What a click on an option of a native dropdown (whose options are never
 // laid out on the page) does, read without changing anything: kind
 // "choosable", "selected" when it is already chosen, "unavailable" when it is
@@ -9329,7 +9333,7 @@ const DROPDOWN_OPTION_FUNCTION = `function() {
   if (!(select instanceof HTMLSelectElement) || select.multiple || select.getClientRects().length === 0) return { kind: "other" };
   let open = false;
   try { open = select.matches(":open"); } catch {}
-  if (select.matches(":disabled") || this.matches(":disabled") || this.hidden) return { kind: "unavailable", open };
+  if (select.matches(":disabled") || this.matches(":disabled") || ${HIDDEN_OPTION_SOURCE}) return { kind: "unavailable", open };
   return { kind: this.selected ? "selected" : "choosable", open };
 }`;
 
@@ -9337,7 +9341,7 @@ const DROPDOWN_OPTION_FUNCTION = `function() {
 // list; false, before any change, when it cannot be chosen.
 const CHOOSE_DROPDOWN_OPTION_FUNCTION = `function() {
   const select = this instanceof HTMLOptionElement ? this.closest("select") : null;
-  if (!(select instanceof HTMLSelectElement) || select.matches(":disabled") || this.matches(":disabled") || this.hidden) return false;
+  if (!(select instanceof HTMLSelectElement) || select.matches(":disabled") || this.matches(":disabled") || ${HIDDEN_OPTION_SOURCE}) return false;
   if (this.selected) return true;
   this.selected = true;
   select.dispatchEvent(new Event("input", { bubbles: true }));
